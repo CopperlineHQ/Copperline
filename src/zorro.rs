@@ -849,6 +849,9 @@ struct RawBoardMeta {
     dma: Option<bool>,
     int2: Option<bool>,
     int6: Option<bool>,
+    /// Grants the `resolve` capability (the resolve_start/resolve_poll
+    /// imports): host-OS-resolver DNS lookups on a background thread.
+    resolve: Option<bool>,
     /// Host network backend ("none"/"loopback"/"nat"/"bridge"); presence grants the
     /// `net` capability (the net_send/net_recv imports).
     net: Option<String>,
@@ -1044,6 +1047,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                     int2: raw.int2.unwrap_or(false),
                     int6: raw.int6.unwrap_or(false),
                     net: raw.net.is_some(),
+                    resolve: raw.resolve.unwrap_or(false),
                 },
                 net,
                 // The merge with the user's per-board overrides happens at

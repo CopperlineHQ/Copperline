@@ -286,6 +286,14 @@ slow = "512K"
 #                             # would for any other device on that network.
 # gateway = "192.168.1.1"     # default gateway; net = "bridge" only, same
 #                             # reasoning as address above
+# resolver = "host"           # gethostbyname() via Copperline's own process
+#                             # asking the host OS resolver, instead of a real
+#                             # DNS query to dns_server -- the practical way
+#                             # to get working lookups under net = "bridge"
+#                             # with no dns_server hand-configured to match
+#                             # the LAN. Needs net = "nat" or "bridge"
+#                             # (rejected under "loopback": it would defeat
+#                             # that backend's whole point).
 
 
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.

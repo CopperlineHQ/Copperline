@@ -22,12 +22,26 @@
 //!
 //! Imports the host provides in module `env` (capability-gated):
 //! - `log(ptr: i32, len: i32)`                      always available
+//! - `config_get`/`resource_len`/`resource_read`    always available
 //! - `dma_read(addr: i32, ptr: i32, len: i32)`      requires the `dma` capability
 //! - `dma_write(addr: i32, ptr: i32, len: i32)`     requires the `dma` capability
+//! - `net_send(ptr: i32, len: i32)`                 requires the `net` capability
+//! - `net_recv(ptr: i32, cap: i32) -> i32`          requires the `net` capability
+//! - `resolve_start(name_ptr: i32, name_len: i32) -> i32`        requires `resolve`
+//! - `resolve_poll(id: i32, out_ptr: i32) -> i32`                requires `resolve`
 //!
 //! `dma_read` copies `len` bytes from Amiga address `addr` into the plugin's
 //! linear memory at `ptr`; `dma_write` copies the other way. Both use the
 //! shared 24-bit chip/slow/Zorro decode in [`crate::zorro_device`].
+//! `net_send`/`net_recv` move whole Ethernet frames between the plugin's
+//! linear memory and the manifest's configured [`NetConfig`] backend.
+//! `resolve_start`/`resolve_poll` ask the host to resolve a hostname via
+//! its own OS resolver on a background thread (`getaddrinfo` blocks, and
+//! this store runs synchronously on the main emulation thread) --
+//! `resolve_start` returns a request id, `resolve_poll` is a non-blocking
+//! poll of it (-2 pending, -1 failed, or 0 with the resolved IPv4 address
+//! written into the plugin's own linear memory at `out_ptr`). Like `net`,
+//! using either makes a board non-deterministic.
 //!
 //! ## Determinism
 //!
@@ -45,7 +59,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use wasmtime::{
     Caller, Config, Engine, Extern, Linker, Memory as WasmMemory, Module, Store, TypedFunc,
 };
@@ -70,6 +86,19 @@ struct HostCtx {
     config: BTreeMap<String, String>,
     /// Loaded file resources, read by the `resource_*` imports.
     resources: HashMap<String, Vec<u8>>,
+    /// In-flight host-resolver DNS lookups (the `resolve` capability),
+    /// keyed by the id `resolve_start` handed back to the plugin. Each
+    /// lookup runs on its own short-lived background thread (`getaddrinfo`
+    /// blocks; this store's main emulation thread cannot) and reports back
+    /// over this channel -- `resolve_poll` is a plain non-blocking
+    /// `try_recv()`. A host resource, not serialized: a lookup in flight
+    /// when a save state is taken does not survive the restore (the
+    /// module's own `host_resolve_jobs` record of it does, in its linear
+    /// memory, but polling a stale id here just finds nothing -- see
+    /// `resolve_poll`'s own comment).
+    resolve_jobs: HashMap<i32, mpsc::Receiver<Option<Ipv4Addr>>>,
+    /// The next id `resolve_start` will hand out.
+    next_resolve_id: i32,
 }
 
 /// The typed entry points a plugin may export.
@@ -126,6 +155,8 @@ impl WasmRuntime {
                     .with_context(|| format!("opening network backend for {}", manifest.name))?,
                 config: manifest.config.clone(),
                 resources: resources.clone(),
+                resolve_jobs: HashMap::new(),
+                next_resolve_id: 0,
             },
         );
         let mut linker = Linker::new(engine);
@@ -400,8 +431,80 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             },
         )?;
     }
+
+    if caps.resolve {
+        // resolve_start(name_ptr, name_len) -> i32: kick off a hostname
+        // lookup via the host's own OS resolver (getaddrinfo) on a
+        // short-lived background thread -- it blocks, and this store runs
+        // synchronously on the main emulation thread (see CLAUDE.md), so it
+        // cannot run inline. Returns a request id to poll with
+        // `resolve_poll`, or -1 if the thread couldn't be spawned.
+        // MAX_OUTSTANDING_RESOLVES bounds concurrent threads the same way
+        // the NAT DNS forwarder's own `MAX_OUTSTANDING` does (a plugin bug
+        // or a hostile module retrying `resolve_start` in a loop should
+        // exhaust a small, fixed budget, not fork unboundedly).
+        linker.func_wrap(
+            "env",
+            "resolve_start",
+            |mut caller: Caller<'_, HostCtx>, name_ptr: i32, name_len: i32| -> Result<i32> {
+                if caller.data().resolve_jobs.len() >= MAX_OUTSTANDING_RESOLVES {
+                    return Ok(-1);
+                }
+                let name = read_wasm_bytes(&mut caller, name_ptr, name_len)?;
+                let name = String::from_utf8_lossy(&name).into_owned();
+                let (tx, rx) = mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("wasm-plugin-resolve".into())
+                    .spawn(move || {
+                        let _ = tx.send(crate::net::nat::dns::resolve_a(&name));
+                    });
+                if spawned.is_err() {
+                    return Ok(-1);
+                }
+                let ctx = caller.data_mut();
+                let id = ctx.next_resolve_id;
+                ctx.next_resolve_id = ctx.next_resolve_id.wrapping_add(1);
+                ctx.resolve_jobs.insert(id, rx);
+                Ok(id)
+            },
+        )?;
+
+        // resolve_poll(id, out_ptr) -> i32: -2 while still pending, -1 on
+        // failure (not found, an unrecognized/already-consumed id, or a
+        // lookup that never survived a save-state restore -- see
+        // `resolve_jobs`'s own comment), or 0 with `out_ptr`'s 4 bytes (in
+        // the plugin's own linear memory, not Amiga memory -- this has
+        // nothing to do with `dma_read`/`dma_write`) holding the resolved
+        // address in the same big-endian byte order every other address
+        // this ABI hands a plugin already uses.
+        linker.func_wrap(
+            "env",
+            "resolve_poll",
+            |mut caller: Caller<'_, HostCtx>, id: i32, out_ptr: i32| -> Result<i32> {
+                let Some(rx) = caller.data().resolve_jobs.get(&id) else {
+                    return Ok(-1);
+                };
+                match rx.try_recv() {
+                    Ok(Some(addr)) => {
+                        caller.data_mut().resolve_jobs.remove(&id);
+                        write_wasm_bytes(&mut caller, out_ptr, &addr.octets())?;
+                        Ok(0)
+                    }
+                    Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                        caller.data_mut().resolve_jobs.remove(&id);
+                        Ok(-1)
+                    }
+                    Err(mpsc::TryRecvError::Empty) => Ok(-2),
+                }
+            },
+        )?;
+    }
     Ok(())
 }
+
+/// Caps concurrent background resolver threads a single plugin instance can
+/// have in flight (see `resolve_start`'s own comment).
+const MAX_OUTSTANDING_RESOLVES: usize = 8;
 
 /// Run `f` with the live Amiga memory the store currently points at. No-op when
 /// the pointer is unset (a plugin should only DMA from within a host call).
@@ -697,6 +800,7 @@ mod tests {
                 int2: true,
                 int6: false,
                 net: false,
+                resolve: false,
             },
             net: NetConfig::None,
             config: BTreeMap::new(),
@@ -712,8 +816,25 @@ mod tests {
                 int2: false,
                 int6: false,
                 net: true,
+                resolve: false,
             },
             net: NetConfig::Loopback,
+            config: BTreeMap::new(),
+            file_keys: Vec::new(),
+        }
+    }
+
+    fn resolve_manifest(name: &str) -> WasmManifest {
+        WasmManifest {
+            name: name.into(),
+            caps: WasmCaps {
+                dma: false,
+                int2: false,
+                int6: false,
+                net: false,
+                resolve: true,
+            },
+            net: NetConfig::None,
             config: BTreeMap::new(),
             file_keys: Vec::new(),
         }
@@ -891,6 +1012,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
         let mut mem = empty_memory();
@@ -1012,6 +1134,63 @@ mod tests {
         assert_eq!(board.read(0, 0, &mut host), (4 << 16) | 0x5E);
         // No more frames waiting -> length 0 in the high half.
         assert_eq!(board.read(0, 0, &mut host) >> 16, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A plugin that resolves the fixed name "localhost" (offline-safe: no
+    /// real network access needed, same as `net/nat/dns.rs`'s own
+    /// `a_query_for_localhost_resolves_offline` test): `write` kicks off
+    /// the lookup and stashes the request id at mem[0]; `read` polls it,
+    /// returning the raw `resolve_poll` result, with the resolved address
+    /// landing at mem[64..68] on success.
+    const RESOLVE_WAT: &str = r#"
+        (module
+          (import "env" "resolve_start" (func $resolve_start (param i32 i32) (result i32)))
+          (import "env" "resolve_poll" (func $resolve_poll (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 32) "localhost")
+          (func (export "write") (param $off i32) (param $size i32) (param $val i32)
+            (i32.store (i32.const 0) (call $resolve_start (i32.const 32) (i32.const 9))))
+          (func (export "read") (param $off i32) (param $size i32) (result i32)
+            (call $resolve_poll (i32.load (i32.const 0)) (i32.const 64)))
+        )
+    "#;
+
+    #[test]
+    fn resolve_start_and_poll_round_trip_a_real_background_lookup() {
+        let path = write_wasm("resolve", RESOLVE_WAT);
+        let mut board = WasmBoard::from_file(&path, resolve_manifest("resolve")).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(0, 0, 0, &mut host); // kicks off resolve_start("localhost")
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let result = loop {
+            // board.read() returns the raw register value as u32; resolve_poll's
+            // i32 sentinels round-trip through it bit-for-bit, so compare against
+            // the same bit pattern rather than sign-extending back to i32.
+            let r = board.read(0, 0, &mut host);
+            if r != (-2i32) as u32 {
+                break r;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resolve_poll never left pending"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(result, 0, "localhost must resolve");
+
+        // The address landed in the plugin's own linear memory (not Amiga
+        // memory), which `read()`'s own return value doesn't expose -- a
+        // save-state snapshot is the simplest way this test harness has to
+        // inspect it directly, same as `memory_grow_round_trips_through_a_
+        // snapshot` above does for its own marker value.
+        let blob = bincode::serialize(&board).unwrap();
+        let snap: WasmBoardState = bincode::deserialize(&blob).unwrap();
+        assert_eq!(&snap.bytes[64..68], &[127, 0, 0, 1]);
 
         let _ = std::fs::remove_file(&path);
     }

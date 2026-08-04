@@ -1463,6 +1463,8 @@ net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
 # hostname = "amiga"      # gethostname() return value (cosmetic)
 # address = "192.168.1.50/24" # interface address; only for "bridge" (see below)
 # gateway = "192.168.1.1"     # default gateway; only for "bridge" (see below)
+# resolver = "host"           # gethostbyname() via the host's own resolver
+#                             # instead of dns_server; only for "nat"/"bridge"
 ```
 
 Fits the bundled HostSocket board: `bsdsocket.library` for the guest, backed
@@ -1499,6 +1501,23 @@ both to match the LAN `interface` is bridged to (e.g. `address =
 so the address is always static, picked the same way you would pick one for
 any other statically-configured device on that network. Leave both unset
 for `"nat"` and `"loopback"`.
+
+`resolver` picks how `gethostbyname()` itself works, independent of the
+addressing above. The default, `"dns"`, is what's described two paragraphs
+up: the board's own smoltcp stack sends a real DNS query to `dns_server`
+over whichever backend is fitted. `"host"` instead asks Copperline's own
+process to resolve via the host OS's resolver on a background thread --
+the same mechanism `[a2065]`'s NAT backend already uses internally for its
+own DNS forwarding, now available directly to this board. This is the
+practical way to get working `gethostbyname()` under `"bridge"` without
+hand-configuring a `dns_server` that matches whatever resolver the LAN
+actually offers (it also works under `"nat"`, though NAT's own DNS
+forwarder already gives equivalent behavior there for free). Rejected
+under `"loopback"`/`"none"`: routing through a real host resolver would
+silently defeat loopback's whole reason for existing, byte-identical
+deterministic replay. Reverse lookups (`gethostbyaddr()`) are unaffected by
+this setting -- they always use the `"dns"` path's PTR query against
+`dns_server`.
 
 Do not fit this board and also boot a real guest TCP/IP stack (AmiTCP,
 Roadshow, ...) in the same session -- both would add a `bsdsocket.library`,

@@ -75,6 +75,17 @@ extern "C" {
     fn net_send(ptr: i32, len: i32);
     fn net_recv(ptr: i32, cap: i32) -> i32;
 
+    // Host-OS-resolver DNS lookup (the `resolve` capability): asks
+    // Copperline's own process to resolve a hostname via `getaddrinfo` on a
+    // background thread instead of this plugin having to speak DNS wire
+    // format itself over `net`. `resolve_start` returns a request id (or
+    // -1 if the host couldn't even start it); `resolve_poll` is a
+    // non-blocking poll of that id (-2 pending, -1 failed, or 0 with the
+    // resolved IPv4 address written into `out_ptr`, 4 bytes, in this
+    // module's own linear memory).
+    fn resolve_start(name_ptr: i32, name_len: i32) -> i32;
+    fn resolve_poll(id: i32, out_ptr: i32) -> i32;
+
     fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32;
     fn resource_len(key_ptr: i32, key_len: i32) -> i32;
     // Matches the host's real signature (src/wasmboard.rs, docs/zorro.md):
@@ -101,6 +112,12 @@ mod native_host_stubs {
     pub unsafe fn net_send(ptr: i32, len: i32) {}
     pub unsafe fn net_recv(ptr: i32, cap: i32) -> i32 {
         0
+    }
+    pub unsafe fn resolve_start(name_ptr: i32, name_len: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn resolve_poll(id: i32, out_ptr: i32) -> i32 {
+        -1
     }
     pub unsafe fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
         -1
@@ -996,6 +1013,14 @@ enum WaitKind {
     // comment for why this needs to be exactly this shape, not the
     // simpler "always ready" version an earlier draft used).
     Dns,
+    // gethostbyname() under `resolver = "host"`: the same one-shot-consume
+    // shape as WaitKind::Dns (resolve_poll's own -2/-1/0 states are exactly
+    // as consuming -- calling it again after 0 or -1 finds no job left, see
+    // resolve_poll's own comment), so process_waiters does the one real
+    // poll here too and stashes the outcome in the SAME `Board::dns_results`
+    // cache Dns uses -- do_gethostbyname's success/failure handling doesn't
+    // need to know which resolver strategy actually produced the answer.
+    HostResolve,
     // gethostbyaddr(): unlike WaitKind::Dns, a plain `udp::Socket`'s own
     // `can_recv()` is safely re-checkable any number of times (it isn't
     // consuming the way `dns::Socket::get_query_result()` is), so there's
@@ -1133,6 +1158,18 @@ struct Board {
     // WaitKind::Dns's own comment for why do_gethostbyname itself never
     // calls dns::Socket::get_query_result directly).
     dns_results: HashMap<u32, DnsOutcome>,
+    // Whether gethostbyname() should route through the host's own OS
+    // resolver (the `resolve` capability) instead of this project's own
+    // DNS-over-`net` query -- `[config] resolver = "host"` (see
+    // src/hostsocket.rs), cached at init() time. Defaults to false (the
+    // existing `dns_socket`/`dns_queries` path, unchanged).
+    resolver_host: bool,
+    // In-flight host-resolver request id per calling task, mirroring
+    // `dns_queries`'s own shape -- funnels into the same `dns_results`
+    // cache via process_waiters's WaitKind::HostResolve arm, so
+    // do_gethostbyname's own success/failure handling is shared between
+    // both resolver strategies.
+    host_resolve_jobs: HashMap<u32, i32>,
     // Per-task queue of (fd, event_mask) pairs GetSocketEvents() hasn't
     // drained yet, filled in by `process_socket_events`. FIFO, coalesced by
     // fd (a second event on an fd already queued just ORs its bits into
@@ -1217,6 +1254,9 @@ impl Board {
             dns_socket: None,
             dns_queries: HashMap::new(),
             dns_results: HashMap::new(),
+            // Overwritten by init() with the real configured value.
+            resolver_host: false,
+            host_resolve_jobs: HashMap::new(),
             event_queues: HashMap::new(),
             reported_dtablesize: MAX_FDS as i32,
             ptr_socket: None,
@@ -1322,6 +1362,15 @@ impl Board {
         let dns_socket = dns::Socket::new(&[IpAddress::Ipv4(dns_server)], Vec::new());
         self.dns_socket = Some(sockets.add(dns_socket));
         self.dns_server_addr = dns_server;
+
+        // Resolver strategy: `[config] resolver = "host"` (see
+        // src/hostsocket.rs and its own net = "nat"/"bridge"-only
+        // validation) routes gethostbyname() through the `resolve`
+        // capability's host-OS-resolver imports instead of the dns_socket
+        // just built above. Absent or anything other than exactly "host"
+        // keeps the existing behavior.
+        self.resolver_host =
+            config_get_string("resolver").is_some_and(|s| s.eq_ignore_ascii_case("host"));
 
         // gethostbyaddr()'s own reverse-DNS socket (see `ptr_socket`'s own
         // comment for why this is a plain UDP socket, not another
@@ -3407,6 +3456,7 @@ impl Board {
         // that cache, never the query handle directly.
         if let Some(outcome) = self.dns_results.remove(&task) {
             self.dns_queries.remove(&task);
+            self.host_resolve_jobs.remove(&task);
             return match outcome {
                 DnsOutcome::Failed => {
                     self.set_herrno(task, HOST_NOT_FOUND);
@@ -3421,7 +3471,7 @@ impl Board {
                 }
             };
         }
-        if self.dns_queries.contains_key(&task) {
+        if self.dns_queries.contains_key(&task) || self.host_resolve_jobs.contains_key(&task) {
             // Still in flight -- process_waiters hasn't seen it complete
             // yet. No last_pending here: the guest won't call
             // CALL_REGISTER_WAIT again for this cycle (see above), and
@@ -3442,7 +3492,9 @@ impl Board {
         // actually know "localhost" either, so without this,
         // gethostbyname("localhost") always failed -- found running
         // bsdsocktest's own test for exactly this. Case-insensitive to
-        // match real resolvers (DNS names are case-insensitive).
+        // match real resolvers (DNS names are case-insensitive). Applies
+        // regardless of resolver strategy: real host resolvers special-case
+        // it too, so there's no reason to spend a background thread on it.
         if name.eq_ignore_ascii_case("localhost") {
             self.set_herrno(task, 0);
             return self.write_hostent(
@@ -3451,6 +3503,26 @@ impl Board {
                 &[IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1))],
             );
         }
+
+        if self.resolver_host {
+            // `resolver = "host"` (see init()'s own comment): ask
+            // Copperline's own process to resolve via its OS resolver
+            // instead of this project's own DNS-over-`net` query below.
+            let id = unsafe { resolve_start(name.as_ptr() as i32, name.len() as i32) };
+            return if id >= 0 {
+                self.host_resolve_jobs.insert(task, id);
+                self.last_pending.insert(task, WaitKind::HostResolve);
+                RES_PENDING
+            } else {
+                // The host couldn't even start the lookup (e.g. its own
+                // outstanding-request budget is exhausted) -- a resolver-
+                // level "couldn't ask", matching the smoltcp branch's own
+                // TRY_AGAIN below for the equivalent failure there.
+                self.set_herrno(task, TRY_AGAIN);
+                -1
+            };
+        }
+
         let dns_handle = self.dns_socket.expect("init() has run");
         let iface = self.iface.as_mut().expect("init() has run");
         let cx = iface.context();
@@ -4592,6 +4664,34 @@ impl Board {
                                     w.task,
                                     DnsOutcome::Ok(addrs.iter().copied().collect()),
                                 );
+                                true
+                            }
+                        }
+                    }
+                },
+                // Host-resolver counterpart of the arm above -- same
+                // one-shot-consume shape, `resolve_poll` in place of
+                // `dns::Socket::get_query_result`.
+                WaitKind::HostResolve => match self.host_resolve_jobs.get(&w.task).copied() {
+                    None => true, // no request on record -- don't hang on it forever
+                    Some(id) => {
+                        let mut addr = [0u8; 4];
+                        let rc = unsafe { resolve_poll(id, addr.as_mut_ptr() as i32) };
+                        match rc {
+                            -2 => false,
+                            0 => {
+                                self.host_resolve_jobs.remove(&w.task);
+                                let ip = Ipv4Address::from_octets(addr);
+                                self.dns_results
+                                    .insert(w.task, DnsOutcome::Ok(vec![IpAddress::Ipv4(ip)]));
+                                true
+                            }
+                            // -1 (failed) and anything else unexpected both
+                            // resolve as a plain failure -- there is no
+                            // finer-grained error the host import reports.
+                            _ => {
+                                self.host_resolve_jobs.remove(&w.task);
+                                self.dns_results.insert(w.task, DnsOutcome::Failed);
                                 true
                             }
                         }
@@ -6096,6 +6196,31 @@ mod tests {
         assert_eq!(SBTC_BREAKMASK_GET, 0x8000_8002);
         assert_eq!(SBTC_DTABLESIZE_SET, 0x8000_0011);
         assert_eq!(SBTC_DTABLESIZE_GET, 0x8000_8010);
+    }
+
+    #[test]
+    fn gethostbyname_under_resolver_host_fails_cleanly_when_the_host_cant_start_it() {
+        // The native dma/resolve stubs (see native_host_stubs's own module
+        // doc comment) can't exercise a real background lookup -- resolve_
+        // start always reports failure to start one at all -- but this
+        // still proves the resolver_host branch is wired: it must return
+        // -1 without leaving a dangling host_resolve_jobs/dns_results
+        // entry behind (a leftover entry there would wedge every later
+        // gethostbyname() for the same task on the "still in flight"
+        // check). The real request/poll/success path is exercised for
+        // real in wasmboard.rs's own resolve_start_and_poll_round_trip_a_
+        // real_background_lookup test, which runs the actual host side of
+        // this ABI, not this crate's own native stand-ins.
+        let mut board = Board::new();
+        board.init();
+        board.resolver_host = true;
+        // name_addr/buf_addr are unread Amiga addresses under the no-op
+        // dma_read stub (reads back an empty string, not "localhost"), so
+        // this exercises the resolver_host branch, not the localhost
+        // short-circuit above it.
+        assert_eq!(board.do_gethostbyname(1, 0, 0), -1);
+        assert!(!board.host_resolve_jobs.contains_key(&1));
+        assert!(!board.dns_results.contains_key(&1));
     }
 
     #[test]

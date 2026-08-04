@@ -1305,13 +1305,14 @@ pub struct MachineSetup {
     /// The bundled HostSocket bsdsocket.library board, edited in the same
     /// Ethernet section: `None` = not fitted, `Some(backend)` fits it.
     hostsocket_net: Option<NetConfig>,
-    /// `[hostsocket]` keys the launcher does not edit (DNS resolver, guest
-    /// hostname, and the bridge-only interface address/gateway), carried
-    /// through so saving a config keeps them.
+    /// `[hostsocket]` keys the launcher does not edit (DNS resolver
+    /// address/strategy, guest hostname, and the bridge-only interface
+    /// address/gateway), carried through so saving a config keeps them.
     hostsocket_dns_server: Option<String>,
     hostsocket_hostname: Option<String>,
     hostsocket_address: Option<String>,
     hostsocket_gateway: Option<String>,
+    hostsocket_resolver: Option<String>,
     /// Currently visible host bridge adapters: stable identifier + label.
     bridge_interfaces: Vec<(String, String)>,
     /// Input device names for the sampler picker: filled when the screen opens
@@ -1498,6 +1499,7 @@ impl MachineSetup {
             hostsocket_hostname: raw.hostsocket.hostname.clone(),
             hostsocket_address: raw.hostsocket.address.clone(),
             hostsocket_gateway: raw.hostsocket.gateway.clone(),
+            hostsocket_resolver: raw.hostsocket.resolver.clone(),
             bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
             sampler_input_devices: Vec::new(),
@@ -1966,6 +1968,7 @@ impl MachineSetup {
         raw.hostsocket.hostname = self.hostsocket_hostname.clone();
         raw.hostsocket.address = self.hostsocket_address.clone();
         raw.hostsocket.gateway = self.hostsocket_gateway.clone();
+        raw.hostsocket.resolver = self.hostsocket_resolver.clone();
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -5518,14 +5521,15 @@ mod tests {
 
     #[test]
     fn hostsocket_keeps_uneditable_keys_across_a_launcher_save() {
-        // dns_server/hostname/address/gateway have no launcher row; a
-        // load-edit-save cycle must carry them through untouched.
+        // dns_server/hostname/address/gateway/resolver have no launcher
+        // row; a load-edit-save cycle must carry them through untouched.
         let mut raw = RawConfig::default();
         raw.hostsocket.net = Some("nat".to_string());
         raw.hostsocket.dns_server = Some("192.0.2.53".to_string());
         raw.hostsocket.hostname = Some("boing".to_string());
         raw.hostsocket.address = Some("192.168.1.50/24".to_string());
         raw.hostsocket.gateway = Some("192.168.1.1".to_string());
+        raw.hostsocket.resolver = Some("host".to_string());
         let s = MachineSetup::from_raw(&raw).unwrap();
         let saved = s.to_raw();
         assert_eq!(saved.hostsocket.net.as_deref(), Some("nat"));
@@ -5533,6 +5537,7 @@ mod tests {
         assert_eq!(saved.hostsocket.hostname.as_deref(), Some("boing"));
         assert_eq!(saved.hostsocket.address.as_deref(), Some("192.168.1.50/24"));
         assert_eq!(saved.hostsocket.gateway.as_deref(), Some("192.168.1.1"));
+        assert_eq!(saved.hostsocket.resolver.as_deref(), Some("host"));
     }
 
     #[test]

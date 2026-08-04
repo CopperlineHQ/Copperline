@@ -83,6 +83,7 @@ pub fn board_config(
     hostname: Option<&str>,
     address: Option<&str>,
     gateway: Option<&str>,
+    resolver: Option<&str>,
 ) -> WasmBoardConfig {
     let mut config = BTreeMap::new();
     config.insert("rom".to_string(), BUNDLED_HOSTSOCKET_ROM.to_string());
@@ -100,6 +101,12 @@ pub fn board_config(
     if let Some(gateway) = gateway {
         config.insert("gateway".to_string(), gateway.to_string());
     }
+    // Absent means "dns" (the plugin's own default when config_get_string
+    // returns None) -- src/config.rs already validated "host" against the
+    // resolved net backend before this is ever called.
+    if let Some(resolver) = resolver {
+        config.insert("resolver".to_string(), resolver.to_string());
+    }
     let spec = BoardSpec::hostsocket();
     WasmBoardConfig {
         manifest: WasmManifest {
@@ -114,6 +121,13 @@ pub fn board_config(
                 int2: true,
                 int6: false,
                 net: true,
+                // The plugin module always imports resolve_start/
+                // resolve_poll (used only when `[hostsocket] resolver =
+                // "host"` -- see board_config's own doc comment), so this
+                // is granted unconditionally, the same as dma/int2 above:
+                // an ungranted-but-imported host function would fail
+                // instantiation outright, not just go unused.
+                resolve: true,
             },
             net,
             config,

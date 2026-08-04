@@ -97,6 +97,7 @@ int6 = false            #   int2 -> may assert INT2 (PORTS)
 # A NIC plugin may also request the shared host networking capability:
 # net = "bridge"         # none / loopback / nat / bridge
 # net_interface = "en0" # required for bridge
+# resolve = true         # host-OS-resolver DNS lookups (resolve_start/resolve_poll)
 ```
 
 WASM is chosen because a module's entire mutable state lives in its linear
@@ -127,13 +128,31 @@ manifest capabilities; importing one that was not granted fails to load):
 | Import | Signature | Capability |
 |--------|-----------|------------|
 | `log` | `(ptr i32, len i32)` | always available |
+| `config_get` / `resource_len` / `resource_read` | see below | always available |
 | `dma_read` | `(addr i32, ptr i32, len i32)` | `dma`: Amiga `addr` -> plugin memory `ptr` |
 | `dma_write` | `(addr i32, ptr i32, len i32)` | `dma`: plugin memory `ptr` -> Amiga `addr` |
+| `net_send` | `(ptr i32, len i32)` | `net`: transmit the Ethernet frame at plugin memory `ptr` |
+| `net_recv` | `(ptr i32, cap i32) -> i32` | `net`: copy the next inbound frame into `ptr` (truncated to `cap`), or 0 |
+| `resolve_start` | `(name_ptr i32, name_len i32) -> i32` | `resolve`: start a host-OS-resolver lookup, returns a request id or -1 |
+| `resolve_poll` | `(id i32, out_ptr i32) -> i32` | `resolve`: poll it -- -2 pending, -1 failed, or 0 with the address at `out_ptr` |
 
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
 the bus applies the interrupt-delivery pipeline automatically -- the
 plugin never pulses INTREQ.
+
+`resolve_start`/`resolve_poll` ask Copperline's own process to resolve a
+hostname via its OS resolver (`getaddrinfo`) on a short-lived background
+thread, rather than the plugin having to speak DNS wire format itself over
+its own `net` traffic -- the only way a plugin can get "whatever the host's
+resolver is configured for" name resolution under a backend (like a direct
+LAN bridge) with no virtual DNS forwarder of its own. `resolve_start` reads
+the name from the plugin's own linear memory and returns a request id;
+`resolve_poll` is a non-blocking poll of that id, writing the resolved IPv4
+address (4 bytes, big-endian) into the plugin's own linear memory at
+`out_ptr` on success (0). Like `net`, using it makes a board
+non-deterministic -- see [](guide/configuration)'s `[hostsocket]` section for
+the concrete example (its `resolver = "host"` key).
 
 Plugins can be written in any language that targets `wasm32` (Rust, C, Zig,
 ...). An inert example module and its manifest can be generated with the

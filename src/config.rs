@@ -2782,6 +2782,16 @@ pub(crate) struct RawHostSocket {
     /// reasoning as `address` above.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gateway: Option<String>,
+    /// `gethostbyname()`'s resolver strategy: "dns" (default) queries
+    /// `dns_server` directly over the board's own network backend; "host"
+    /// asks Copperline's own process to resolve via the host OS resolver
+    /// on a background thread instead, ignoring `dns_server` entirely --
+    /// the only way forward DNS works under `net = "bridge"` without a
+    /// real DNS server reachable on that LAN. Requires `net = "nat"` or
+    /// `"bridge"` (rejected under `"loopback"`/`"none"`, where it would
+    /// silently break the backend's own determinism guarantee).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolver: Option<String>,
 }
 
 /// `[rtg]` graphics card: an RTG board on the Zorro chain.
@@ -3648,6 +3658,30 @@ impl TryFrom<RawConfig> for Config {
                 Some(config)
             }
         };
+        let hostsocket_resolver = match raw.hostsocket.resolver.as_deref() {
+            None => None,
+            Some(s) => {
+                let normalized = s.trim().to_ascii_lowercase();
+                if normalized != "dns" && normalized != "host" {
+                    return Err(anyhow!(
+                        "[hostsocket] resolver {s:?} is not one of \"dns\", \"host\""
+                    ));
+                }
+                if normalized == "host"
+                    && !matches!(
+                        &hostsocket_net,
+                        Some(crate::net::NetConfig::Nat)
+                            | Some(crate::net::NetConfig::Bridge { .. })
+                    )
+                {
+                    return Err(anyhow!(
+                        "[hostsocket] resolver = \"host\" needs net = \"nat\" or \"bridge\" \
+                         (it would silently defeat \"loopback\"'s own determinism guarantee)"
+                    ));
+                }
+                Some(normalized)
+            }
+        };
         if let Some(net) = &hostsocket_net {
             wasm_boards.push(crate::hostsocket::board_config(
                 net.clone(),
@@ -3655,6 +3689,7 @@ impl TryFrom<RawConfig> for Config {
                 raw.hostsocket.hostname.as_deref(),
                 raw.hostsocket.address.as_deref(),
                 raw.hostsocket.gateway.as_deref(),
+                hostsocket_resolver.as_deref(),
             ));
         }
 
@@ -8599,6 +8634,71 @@ mod tests {
             Some("192.168.1.1")
         );
         Ok(())
+    }
+
+    #[test]
+    fn hostsocket_resolver_host_reaches_the_manifest_under_nat_or_bridge() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [hostsocket]
+            net = "nat"
+            resolver = "host"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("host")
+        );
+
+        let cfg = parse_config(
+            r#"
+            [hostsocket]
+            net = "bridge"
+            interface = "en0"
+            resolver = "HOST"
+            "#,
+        )?;
+        // Normalized to lowercase on the way into the manifest.
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("host")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostsocket_resolver_host_rejected_under_loopback_or_bad_value() {
+        let err = parse_config(
+            r#"
+            [hostsocket]
+            net = "loopback"
+            resolver = "host"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("needs net = \"nat\" or \"bridge\""),
+            "{err:#}"
+        );
+
+        let err = parse_config(
+            r#"
+            [hostsocket]
+            net = "nat"
+            resolver = "carrier-pigeon"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not one of"), "{err:#}");
     }
 
     #[test]

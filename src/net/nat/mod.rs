@@ -29,7 +29,10 @@
 //! the backend up fresh (flows die, guest TCP retries).
 
 mod dhcp;
-mod dns;
+// pub(crate): src/wasmboard.rs reuses resolve_a for the WASM plugin ABI's
+// `resolve` capability (host-OS-resolver lookups for a plugin, not just
+// this NAT engine's own DNS forwarding).
+pub(crate) mod dns;
 mod engine;
 mod frames;
 mod tcp;
