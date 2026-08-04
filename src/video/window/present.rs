@@ -745,7 +745,14 @@ pub(super) fn copy_window_present_frame(
     // the classic canvas width.
     match tv_aperture_rows {
         Some(aperture_rows) if overscan == Overscan::Tv && src_width == FB_WIDTH => {
-            copy_tv_aperture_to_window(src_fb, src_rows, frame, texture_scale, aperture_rows)
+            copy_tv_aperture_to_window(
+                src_fb,
+                src_rows,
+                frame,
+                texture_scale,
+                aperture_rows,
+                present_height(),
+            )
         }
         _ => copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale),
     }
@@ -754,36 +761,40 @@ pub(super) fn copy_window_present_frame(
 /// The live-window TV copy presents the captured aperture
 /// (`TV_CAPTURED_*`): the standard window plus the symmetric overscan
 /// margin the framebuffer actually captures, ending exactly on the
-/// framebuffer's edges. Every aperture column is a real pixel and the
-/// visible raster sits exactly centred in the texture -- the wider
-/// reference aperture the PNG paths keep would show its black-padded
-/// right margin as a lopsided band beside the picture (conspicuous
-/// inside the monitor bezel). The symmetric side pads are off-capture
-/// bezel and stay black rather than replicating the edge columns, which
-/// carry picture when a display fetches or parks sprites in the deepest
-/// overscan (the Gen-X logo slide-in streaks).
+/// framebuffer's edges. On the 4:3 canvas -- the glass itself -- the
+/// aperture's columns resample onto the full texture width
+/// (`tv_glass_sample`), the way a real set's raster fills its glass:
+/// every glass pixel derives from real captured pixels and nothing is
+/// padded black. The square-pixel canvas keeps unit columns instead, so
+/// there the aperture sits centred between off-capture black side pads,
+/// the horizontal counterpart of its vertical bands; the pads stay black
+/// rather than replicating the edge columns, which carry picture when a
+/// display fetches or parks sprites in the deepest overscan (the Gen-X
+/// logo slide-in streaks).
 pub(super) fn copy_tv_aperture_to_window(
     src_fb: &[u32],
     src_rows: usize,
     frame: &mut [u8],
     texture_scale: usize,
     aperture_rows: usize,
+    present_rows: usize,
 ) {
     debug_assert!(src_fb.len() >= src_rows * FB_WIDTH);
-    debug_assert_eq!(
-        frame.len(),
-        texture_width(texture_scale) * texture_height(texture_scale) * 4
-    );
     let dst_stride = texture_width(texture_scale) * 4;
-    let present_rows = present_height();
     let out_rows = present_rows * texture_scale;
+    debug_assert!(frame.len() >= dst_stride * out_rows);
     let black_px = rgba(0, 0, 0);
     let black = black_px.to_le_bytes();
+    let square = present_rows == crate::video::PRESENT_HEIGHT_SQUARE;
     let pixel_at = |row: &[u32], out_x: usize| -> u32 {
-        if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH).contains(&out_x) {
-            row[TV_CAPTURED_SOURCE_X + (out_x - TV_LIVE_PAD_X)]
+        if square {
+            if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH).contains(&out_x) {
+                row[TV_CAPTURED_SOURCE_X + (out_x - TV_LIVE_PAD_X)]
+            } else {
+                black_px
+            }
         } else {
-            black_px
+            tv_glass_sample(row, out_x)
         }
     };
     for y in 0..out_rows {
@@ -861,6 +872,13 @@ pub(super) fn tv_aperture_source_row(
 /// shown while the machine is powered off. SMPTE-style colour bars over
 /// a grayscale step wedge: instantly readable as "no signal", and handy
 /// for setting up video capture levels before the machine boots.
+///
+/// The layout is calibrated to the TV glass -- the captured aperture the
+/// presentation shows -- so the bars, wedge and logo sit centred on
+/// screen; the outermost bars and steps extend to the capture edges the
+/// way a signal generator fills the active line around its calibrated
+/// area, so the full-overscan view shows the same card with slightly
+/// wider outer bars.
 pub(super) fn paint_test_screen(fb: &mut [u32]) {
     debug_assert!(fb.len() >= FB_PIXELS);
     const BARS: [u32; 7] = [
@@ -873,29 +891,40 @@ pub(super) fn paint_test_screen(fb: &mut [u32]) {
         rgba(0, 0, 192),     // blue
     ];
     const STEPS: usize = 8;
-    let bars_h = FB_HEIGHT * 4 / 5;
+    // The glass box in field coordinates: the captured aperture's
+    // columns, and its woven row window halved back to field rows.
+    let x0 = TV_CAPTURED_SOURCE_X;
+    let glass_w = TV_CAPTURED_WIDTH;
+    let glass_top = TV_PRESENT_SOURCE_Y / 2;
+    let glass_h = TV_PAL_PRESENT_HEIGHT / 2;
+    let bars_h = glass_top + glass_h * 4 / 5;
     for y in 0..FB_HEIGHT {
         let row = &mut fb[y * FB_WIDTH..(y + 1) * FB_WIDTH];
         if y < bars_h {
             for (x, px) in row.iter_mut().enumerate() {
-                *px = BARS[x * BARS.len() / FB_WIDTH];
+                let xa = x.clamp(x0, x0 + glass_w - 1) - x0;
+                *px = BARS[xa * BARS.len() / glass_w];
             }
         } else {
             for (x, px) in row.iter_mut().enumerate() {
-                let level = (x * STEPS / FB_WIDTH) as u32 * 255 / (STEPS as u32 - 1);
+                let xa = x.clamp(x0, x0 + glass_w - 1) - x0;
+                let level = (xa * STEPS / glass_w) as u32 * 255 / (STEPS as u32 - 1);
                 *px = rgba(level, level, level);
             }
         }
     }
-    draw_test_screen_logo(fb, bars_h);
+    draw_test_screen_logo(fb, glass_top, bars_h);
 }
 
-pub(super) fn draw_test_screen_logo(fb: &mut [u32], bars_h: usize) {
+pub(super) fn draw_test_screen_logo(fb: &mut [u32], glass_top: usize, bars_h: usize) {
     let Some(image) = copperline_logo_image() else {
         return;
     };
-    let x = FB_WIDTH.saturating_sub(image.width) / 2;
-    let y = bars_h.saturating_sub(image.height) / 2;
+    // Centred on the glass, not the capture: the aperture the
+    // presentation shows starts TV_CAPTURED_SOURCE_X columns in and
+    // TV_PRESENT_SOURCE_Y woven rows down.
+    let x = TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH.saturating_sub(image.width) / 2;
+    let y = glass_top + (bars_h - glass_top).saturating_sub(image.height) / 2;
     alpha_blit_rgba(fb, FB_WIDTH, FB_HEIGHT, x, y, image);
 }
 
@@ -1161,19 +1190,22 @@ pub(super) fn save_present_frame(
     if let Some(aperture_rows) = tv_aperture_rows {
         if overscan == Overscan::Tv && src_width == FB_WIDTH {
             // Both standards' apertures fill the same 4:3 glass, so the
-            // saved picture keeps one shape: a 60 Hz crop's rows scale onto
-            // the 50 Hz aperture's native row count.
-            return screenshot::save_cropped_black_padded(
-                path,
-                present_fb,
-                FB_WIDTH,
-                src_rows,
-                TV_PRESENT_SOURCE_X,
-                TV_PRESENT_SOURCE_Y,
-                TV_PRESENT_WIDTH,
-                aperture_rows,
-                TV_GLASS_PRESENT_ROWS,
-            );
+            // saved picture keeps one shape: the captured aperture's
+            // columns resample onto the glass width, exactly like the
+            // live window (`tv_glass_sample`), and a 60 Hz crop's rows
+            // scale onto the 50 Hz aperture's native row count.
+            let mut glass = vec![0u32; FB_WIDTH * TV_GLASS_PRESENT_ROWS];
+            for out_y in 0..TV_GLASS_PRESENT_ROWS {
+                let crop_y =
+                    screenshot::scaled_source_row(out_y, aperture_rows, TV_GLASS_PRESENT_ROWS);
+                let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows.saturating_sub(1));
+                let row = &present_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
+                let dst = &mut glass[out_y * FB_WIDTH..(out_y + 1) * FB_WIDTH];
+                for (out_x, px) in dst.iter_mut().enumerate() {
+                    *px = tv_glass_sample(row, out_x);
+                }
+            }
+            return screenshot::save(path, &glass, FB_WIDTH as u32, TV_GLASS_PRESENT_ROWS as u32);
         }
     }
 

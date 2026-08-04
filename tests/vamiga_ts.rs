@@ -182,13 +182,14 @@ fn run_case(
     }
 
     // A screenshot of any other size means the presentation path changed
-    // shape: 692x540 is the TV-aspect picture area, and COPPERLINE_SHOT_RAW
-    // saves the woven native framebuffer instead (716x570 = the vAmiga
-    // regression cutout with line doubling).
+    // shape: 716x540 is the TV-glass picture (the captured aperture
+    // resampled onto the 4:3 glass), and COPPERLINE_SHOT_RAW saves the
+    // woven native framebuffer instead (716x570 = the vAmiga regression
+    // cutout with line doubling).
     if envcfg::flag("COPPERLINE_SHOT_RAW") {
         assert_png_dimensions(&png_path, 716, 570)?;
     } else {
-        assert_png_dimensions(&png_path, 692, 540)?;
+        assert_png_dimensions(&png_path, 716, 540)?;
     }
     if let Some(baseline_root) = baseline_root {
         let mut expected = baseline_root.join(&case.rel_path);

@@ -59,18 +59,16 @@ pub const TV_HORIZONTAL_OVERSCAN_MARGIN: usize = 24 * 2;
 // window.
 pub const TV_VERTICAL_OVERSCAN_MARGIN: usize = 7;
 
-// The reference TV aperture for standard 15 kHz displays, cropped from the
-// woven presentation buffer. Horizontally the two video standards agree --
-// both place the standard 640-wide window at the same colour clocks -- so one
-// cutout (the standard window plus a symmetric 26-column overscan margin)
-// serves 50 Hz and 60 Hz scans alike; its right margin reaches 12 columns
-// past the framebuffer's right edge, which the presentation paths pad with
-// black bezel. Vertically the aperture follows the field line count: a
-// 312/313-line (50 Hz) scan carries the 256-line standard window, a
-// 262/263-line (60 Hz) scan the 200-line one, each cropped with the same
-// symmetric overscan margin.
-pub const TV_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
-pub const TV_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
+// The TV aperture for standard 15 kHz displays, cropped from the woven
+// presentation buffer. Horizontally both presentation paths (live window
+// and PNG) show the captured aperture (`TV_CAPTURED_*` below) resampled
+// onto the framebuffer-wide 4:3 glass by `tv_glass_sample`; the two video
+// standards agree -- both place the standard 640-wide window at the same
+// colour clocks -- so one cutout serves 50 Hz and 60 Hz scans alike.
+// Vertically the aperture follows the field line count: a 312/313-line
+// (50 Hz) scan carries the 256-line standard window, a 262/263-line
+// (60 Hz) scan the 200-line one, each cropped with the same symmetric
+// overscan margin.
 pub const TV_PRESENT_SOURCE_Y: usize = 18;
 pub const TV_PAL_PRESENT_HEIGHT: usize =
     (STANDARD_PAL_VISIBLE_LINES + 2 * TV_VERTICAL_OVERSCAN_MARGIN) * 2;
@@ -107,10 +105,28 @@ const _: () = {
             - (bitplane::STANDARD_VISIBLE_X0 + STANDARD_PAL_VISIBLE_WIDTH)
             == TV_CAPTURED_MARGIN_X
     );
-    assert!(TV_CAPTURED_SOURCE_X >= TV_PRESENT_SOURCE_X);
     assert!(TV_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
     assert!(TV_NTSC_PRESENT_HEIGHT < TV_PAL_PRESENT_HEIGHT);
 };
+
+/// One glass pixel of the 4:3 TV presentation: the captured aperture's
+/// `TV_CAPTURED_WIDTH` real columns fill the `FB_WIDTH`-wide glass through
+/// a fractional resample (`blend_rgba`, the programmable-scan idiom), the
+/// way a real set's raster fills its glass. Every glass pixel derives from
+/// real captured pixels -- nothing is padded black -- and the standard
+/// window stays exactly centred because the captured margins are symmetric
+/// by construction. 8.8 fixed point, sampling between texel centres.
+#[inline]
+pub fn tv_glass_sample(row: &[u32], out_x: usize) -> u32 {
+    debug_assert!(row.len() >= FB_WIDTH);
+    let s = (TV_CAPTURED_SOURCE_X as i64) * 256
+        + ((2 * out_x as i64 + 1) * (TV_CAPTURED_WIDTH as i64) * 256) / (2 * FB_WIDTH as i64)
+        - 128;
+    let s = s.clamp(0, (FB_WIDTH as i64 - 1) * 256);
+    let i = (s >> 8) as usize;
+    let frac = (s & 255) as u32;
+    crate::video::blend_rgba(row[i], row[(i + 1).min(FB_WIDTH - 1)], frac)
+}
 
 pub fn post_process_rendered_field(
     fb: &mut [u32],
@@ -419,8 +435,14 @@ pub fn standard_tv_aperture_frame(
         TV_NTSC_PRESENT_HEIGHT
     };
     match bitplane::horizontal_content_class(snapshot) {
-        bitplane::HorizontalContentClass::Standard { .. } => TvApertureFrame::Standard(rows),
-        bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Full,
+        // The glass does not move for the content: a display fetching
+        // into the overscan extends past the aperture and the monitor
+        // crops it, exactly as a real set does (overscan = "full" is the
+        // mode for seeing all of it). Only the scan's shape -- the
+        // programmable geometry and native-height fields handled above --
+        // changes what the presentation shows.
+        bitplane::HorizontalContentClass::Standard { .. }
+        | bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Standard(rows),
         bitplane::HorizontalContentClass::Neutral => TvApertureFrame::Neutral(rows),
     }
 }
@@ -434,8 +456,41 @@ mod tests {
         // The const block by the TV_CAPTURED_* definitions pins the
         // aperture geometry at compile time; the mask bounds come from a
         // runtime helper, so check here that a captured-aperture crop never
-        // shows masked black columns.
-        assert!(TV_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
+        // shows masked black columns. The glass resample blends one column
+        // left of the aperture start (its first sample centre sits half an
+        // output pixel before the first source centre), so that column must
+        // clear the mask too: the aperture must start strictly inside it.
+        assert!(TV_CAPTURED_SOURCE_X > tv_source_h_bounds().0);
+    }
+
+    #[test]
+    fn tv_glass_resample_spans_the_captured_aperture() {
+        // A row with a marker at each end of the captured aperture: the
+        // glass's first and last pixels must derive from them (the edges
+        // reach the glass), and a marker just outside the aperture must
+        // not appear anywhere.
+        let mut row = vec![0xFF00_0000u32; FB_WIDTH];
+        let first = 0xFF20_4060;
+        let last = 0xFF60_4020;
+        for x in TV_CAPTURED_SOURCE_X..FB_WIDTH {
+            row[x] = 0xFF7F_7F7F;
+        }
+        row[TV_CAPTURED_SOURCE_X] = first;
+        row[FB_WIDTH - 1] = last;
+
+        let g0 = tv_glass_sample(&row, 0);
+        let g_last = tv_glass_sample(&row, FB_WIDTH - 1);
+        // The first glass pixel blends the first captured column with its
+        // left neighbour; the marker must dominate or match.
+        assert_ne!(g0, 0xFF7F_7F7F, "left aperture edge missing from glass");
+        assert_eq!(g_last, last, "right aperture edge missing from glass");
+
+        // The standard window's centre column maps to the glass centre.
+        let mut centre_row = vec![0xFF00_0000u32; FB_WIDTH];
+        let centre_src = TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH / 2;
+        centre_row[centre_src - 1] = 0xFFFF_FFFF;
+        centre_row[centre_src] = 0xFFFF_FFFF;
+        assert_eq!(tv_glass_sample(&centre_row, FB_WIDTH / 2), 0xFFFF_FFFF);
     }
 
     /// A standard full-width display (stock Kickstart screen).
@@ -501,6 +556,35 @@ mod tests {
         assert_eq!(
             standard_tv_aperture_frame(pal, OUT_HEIGHT, &blank_snapshot()),
             TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn overscan_content_keeps_the_glass_aperture() {
+        // A display fetching into the overscan (the CD32 boot screen, demo
+        // loaders) extends past the aperture; the monitor's glass crops it
+        // rather than zooming out to show it -- the glass does not move
+        // for the content. Falling back to the full framebuffer here used
+        // to expose the unpainted capture margins as black bands beside
+        // the picture.
+        let overscan = RenderRegisterSnapshot {
+            agnus_revision: crate::chipset::agnus::AgnusRevision::AgaAlice,
+            bplcon0: 0x8214,
+            diwstrt: 0x1D61,
+            diwstop: 0x37C7,
+            ddfstrt: 0x0028,
+            ddfstop: 0x00D8,
+            ..RenderRegisterSnapshot::default()
+        };
+        assert_eq!(
+            bitplane::horizontal_content_class(&overscan),
+            bitplane::HorizontalContentClass::Overscan,
+            "snapshot must classify as overscan for the assertion to bite"
+        );
+        let pal = FrameGeometry::standard(0x1C, 313, false);
+        assert_eq!(
+            standard_tv_aperture_frame(pal, OUT_HEIGHT, &overscan),
+            TvApertureFrame::Standard(TV_PAL_PRESENT_HEIGHT)
         );
     }
 
