@@ -669,9 +669,11 @@ mod tests {
 
         // The badge rect as the shader lays it out: left-aligned with the
         // opening, vertically centred in the bottom band, 59x8 font pixels
-        // at 0.34 of the band height.
+        // at 0.34 of the band height. The recess replica is the shader's
+        // insert chamfer, which is where the case face (and the band)
+        // takes over now that no seat ring sits inside it.
         let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
-        let recess = (0.016 * ow.min(oh)).max(2.0);
+        let recess = (0.030 * ow.min(oh)).max(4.0);
         let band_top = oy + oh + recess;
         let badge_h = 0.34 * (rows as f32 - band_top);
         assert!(
@@ -759,7 +761,11 @@ mod tests {
     /// must blend toward the preset's off-face black, not the raw
     /// picture: a bright source used to smear a picture-coloured
     /// hairline around the opening, over the preset output the pass
-    /// discards its interior for.
+    /// discards its interior for. With the insert chamfer meeting the
+    /// picture directly (no unlit seat ring), "no leak" is exactly
+    /// source-independence: everything past the join's half-pixel blend
+    /// must render identically whatever the picture holds, so the frame
+    /// is compared between an all-white and an all-black source.
     #[test]
     fn the_frame_only_join_does_not_leak_the_picture() {
         let Some(gpu) = gpu() else {
@@ -767,8 +773,13 @@ mod tests {
         };
         let (device, queue) = (gpu.device(), gpu.queue());
         let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let black = |_x: u32, _y: u32| [0, 0, 0, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &white);
         let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Crt));
+        let dark = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &black);
+        let (px_dark, dim_dark, rows_dark) =
+            render_bezel(device, queue, &dark, Some(ShaderKind::Crt));
+        assert_eq!((dim, rows), (dim_dark, rows_dark));
 
         // The shader's glass-contour distance at a pixel centre: the same
         // warp and rounded rectangle the preset's face uses, driven by
@@ -803,33 +814,32 @@ mod tests {
             (outside + qx.max(qy).min(0.0) - rc) * hx
         };
 
-        // The ring of frame pixels hugging the opening edge is the glass
-        // seat: unlit shadow, always dark (the insert chamfer beyond it
-        // is lit plastic, so the scan stops inside the seat). Any bright
-        // pixel there is the source leaking through the join, which lives
-        // in the first half pixel outside the opening. Whether a straight
-        // edge drops a pixel centre inside that fraction-of-a-pixel band
-        // depends on the window size, but along the corner arcs the
-        // centres sweep every alignment, so the ring as a whole always
-        // catches it.
-        let seat = (0.007 * ow.min(oh)).max(1.5);
+        // The picture may only reach the output through the join's
+        // half-pixel antialias band (the mix weight hits exactly 1.0 past
+        // d = aa / 2, about half a pixel out). Everything beyond it -- the
+        // chamfer's innermost run included -- must not change with the
+        // source; any difference is the picture leaking into the frame.
+        // The margin of 0.6 px keeps legitimately-blended boundary pixels
+        // out of the comparison whatever their sub-pixel alignment.
         let mut checked = 0;
         for y in 0..rows {
             for x in 0..dim {
-                let d = opening_d(x, y);
-                if (0.0..=(seat - 1.0).max(0.6)).contains(&d) {
+                if opening_d(x, y) >= 0.6 {
                     checked += 1;
                     let p = at(&px, dim, x, y);
-                    assert!(
-                        p[0] < 90 && p[1] < 90 && p[2] < 90,
-                        "picture hairline at the opening edge ({x}, {y}), d = {d:.2}: {p:?}"
-                    );
+                    let q = at(&px_dark, dim, x, y);
+                    for c in 0..3 {
+                        assert!(
+                            p[c].abs_diff(q[c]) <= 1,
+                            "frame pixel follows the picture at ({x}, {y}): white {p:?} vs black {q:?}"
+                        );
+                    }
                 }
             }
         }
         assert!(
             checked > 100,
-            "opening ring barely sampled: {checked} pixels"
+            "frame region barely sampled: {checked} pixels"
         );
     }
 

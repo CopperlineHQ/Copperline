@@ -1709,6 +1709,9 @@ function exitCssFullscreen() {
   setStyles(canvas, CSS_FS_CANVAS, false);
   document.documentElement.style.overflow = '';
   updateFsUi();
+  // Clearing the border shorthand above also cleared the monitor path's
+  // border hiding; put the windowed chrome back the way the mode wants.
+  syncShellChrome();
 }
 
 function exitFullscreen() {
@@ -1726,10 +1729,13 @@ $('fullscreen').addEventListener('click', () => {
 
 // Real fullscreen carries the same canvas letterbox as the CSS fallback,
 // applied on the state change so it also covers Esc and any other
-// browser-initiated exit.
+// browser-initiated exit. Leaving fullscreen re-syncs the windowed shell
+// chrome (the monitor path's border hiding); entering it is a no-op
+// there, since fullscreen owns the shell's styles.
 document.addEventListener('fullscreenchange', () => {
   setStyles(canvas, CSS_FS_CANVAS, document.fullscreenElement !== null);
   updateFsUi();
+  syncShellChrome();
 });
 
 // --- on-screen keyboard ----------------------------------------------------
@@ -4359,9 +4365,8 @@ void main() {
   vec2 centre = o_org + o_half;
   vec2 p = px - centre;
   float unit = min(o_size.x, o_size.y);
-  float seat = max(0.007 * unit, 1.5);
   float chamfer = max(0.030 * unit, 4.0);
-  float recess = seat + chamfer;
+  float recess = chamfer;
   float bevel = max(0.022 * unit, 2.0);
 
   float k = u_params.y;
@@ -4383,9 +4388,7 @@ void main() {
                       0.0, 1.0);
   vec3 picture = sample_display(pic_uv);
 
-  vec3 seat_col = vec3(0.012) * (1.0 + 0.8 * dir_y) + vec3(0.004);
-
-  float slope = clamp((d - seat) / chamfer, 0.0, 1.0);
+  float slope = clamp(d / chamfer, 0.0, 1.0);
   vec3 insert =
     PLASTIC * 0.88 * (0.45 + 0.40 * slope) * (1.0 + 0.30 * dir_y * (1.0 - 0.5 * slope));
   insert *= 1.0 + 0.03 * grain(floor(px));
@@ -4422,8 +4425,7 @@ void main() {
   }
 
   vec3 inner = u_params.x > 0.5 ? vec3(0.0) : picture;
-  vec3 ring = mix(seat_col, insert, smoothstep(seat - aa, seat + aa, d));
-  vec3 col = mix(inner, ring, clamp(d / aa + 0.5, 0.0, 1.0));
+  vec3 col = mix(inner, insert, clamp(d / aa + 0.5, 0.0, 1.0));
   col = mix(col, plastic, smoothstep(recess - aa, recess + aa, d));
   col = mix(col, vec3(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
   fragColor = vec4(srgb_encode(col), 1.0);
@@ -4495,29 +4497,18 @@ void main() {
     // The restore starts from a cleared drawing buffer, and a paused page
     // has no ticking loop to repaint it; a running one would also show a
     // blank canvas until its next tick. The rebuild reset the cached
-    // texture size, so this re-uploads the frame it re-presents.
+    // texture size, so this re-uploads the frame it re-presents. With no
+    // machine, the powered-off monitor comes back instead.
     if (emu && running) presentFrame();
+    else if (!emu) presentMonitorOff();
   });
   return renderer;
 }
 
-// Present one frame through the monitor renderer. The backing store
-// follows the element (physical pixels), not the emulated buffer: the CRT
-// pass's scanlines and grille are keyed to output pixels, and at the
-// emulated resolution - two rows per scanline - the raised-cosine beam
-// profile would cancel entirely (its Nyquist point, see the desktop's
-// scanline tests).
+// Present one frame through the monitor renderer: upload the emulator's
+// presentation buffer and draw it as the selected monitor.
 function presentFrameMonitor(width, rows) {
   const gl = monitorGl.gl;
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-  if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-
   // The view must be rebuilt every frame (wasm memory may grow); the
   // texture reallocates only when the presentation size changes.
   const view = new Uint8Array(wasm.memory.buffer, emu.present_ptr(), width * rows * 4);
@@ -4529,13 +4520,59 @@ function presentFrameMonitor(width, rows) {
   } else {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, rows, gl.RGBA, gl.UNSIGNED_BYTE, view);
   }
-
   // The CRT pass suspends when the scan has no 15 kHz line structure to
   // draw (a programmable scan; 0 from the getter), like the desktop's
   // preset, leaving the bezel - which frames any scan - or the plain
   // blit. An older wasm bundle has no getter; half the presented rows is
   // the standard-scan line count.
-  const crtLines = emu.present_crt_lines?.() ?? rows / 2;
+  monitorDraw(width, rows, emu.present_crt_lines?.() ?? rows / 2);
+}
+
+// Draw the selected monitor with a dark, unlit screen: what the page
+// shows before anything boots, so the chosen face fronts the powered-off
+// state too instead of a bare black rectangle. The source is a small
+// black texture through the ordinary passes - a powered-off tube is
+// exactly the glass with no raster, which is what the CRT shader
+// produces from a black picture. Any real frame reallocates the texture,
+// since the stand-in size matches no presentation.
+function presentMonitorOff() {
+  if (!monitorGl) return;
+  const gl = monitorGl.gl;
+  const size = 16;
+  gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
+  // The frame path's skip-when-unchanged upload: no real presentation is
+  // ever 16x16, so a cached 16x16 texture is this stand-in already and
+  // repeated calls (a pre-boot window drag resizing every event) redraw
+  // without re-uploading. A context restore resets the cached size, so
+  // the stand-in comes back after a GPU reset.
+  if (monitorGl.texW !== size || monitorGl.texH !== size) {
+    const dark = new Uint8Array(size * size * 4);
+    for (let i = 3; i < dark.length; i += 4) dark[i] = 255;
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, dark);
+    monitorGl.texW = size;
+    monitorGl.texH = size;
+  }
+  // The line count only shapes a raster the black screen does not show;
+  // the standard PAL count keeps the uniforms honest.
+  monitorDraw(size, size, 270);
+}
+
+// Draw whatever is in the source texture as the selected monitor. The
+// backing store follows the element (physical pixels), not the emulated
+// buffer: the CRT pass's scanlines and grille are keyed to output
+// pixels, and at the emulated resolution - two rows per scanline - the
+// raised-cosine beam profile would cancel entirely (its Nyquist point,
+// see the desktop's scanline tests).
+function monitorDraw(width, rows, crtLines) {
+  const gl = monitorGl.gl;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
   const crtOn = (monitorMode === '1084' || monitorMode === 'crt') && crtLines > 0;
   const bezelOn = monitorMode === '1084' || monitorMode === 'bezel';
   // The effect passes resample through a linear filter like the desktop's
@@ -4609,11 +4646,43 @@ function setMonitorMode(mode, remember) {
   monitorMode = mode;
   monitorSel.value = mode;
   if (remember) storePref(MONITOR_STORAGE_KEY, mode);
+  syncShellChrome();
   // A running page picks the mode up next tick; a paused one has no
-  // ticking loop to repaint, so repaint here.
+  // ticking loop to repaint, so repaint here, and with no machine at all
+  // the choice previews on the powered-off monitor.
   if (emu && running && paused) presentFrame();
+  else if (!emu) presentMonitorOff();
 }
 monitorSel.addEventListener('change', () => setMonitorMode(monitorSel.value, true));
+
+// The page shell draws its own thin border around the canvas; under a
+// bezel mode the monitor's moulded case IS the frame, and a second frame
+// around the plastic reads wrong, so the border hides (kept transparent
+// rather than removed, which would shift the layout). Fullscreen owns
+// the shell's styles while it is up - it strips the border itself - so
+// this only steers the windowed state; the fullscreen exit paths call it
+// to reapply.
+function syncShellChrome() {
+  if (!monitorGl || isFullscreen()) return;
+  const bezelOn = monitorMode === '1084' || monitorMode === 'bezel';
+  shell.style.borderColor = bezelOn ? 'transparent' : '';
+}
+
+// The powered-off monitor fronts the page from the start: drawn now (the
+// module runs with the DOM ready), again on load in case the stylesheet
+// laid the canvas out late, and on resizes while no machine exists. A
+// paused machine repaints on resize too - its loop is not ticking, and
+// the stretched backing store would otherwise blur the frozen picture.
+syncShellChrome();
+presentMonitorOff();
+window.addEventListener('load', () => {
+  if (!emu) presentMonitorOff();
+});
+window.addEventListener('resize', () => {
+  if (!monitorGl) return;
+  if (!emu) presentMonitorOff();
+  else if (running && paused) presentFrame();
+});
 
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:

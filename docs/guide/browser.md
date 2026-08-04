@@ -53,7 +53,11 @@ select either half alone, and *Plain* is the undecorated blit the page
 always had -- also what a browser without WebGL2 falls back to (the
 select hides there). As on the desktop, the CRT pass suspends itself on
 programmable scans, which have no 15 kHz line structure to draw; the
-bezel stays.
+bezel stays. The selected monitor fronts the page before anything boots
+too -- the powered-off tube, dark glass in the moulded frame, rather
+than a bare black rectangle -- and while a bezel mode is up the page
+shell's own thin border around the canvas hides, since the moulded case
+is the frame.
 **View** is the desktop's `[display] overscan` knob: *TV* (the
 default) masks the deep horizontal overscan like a CRT bezel and crops
 standard screens (PAL and NTSC alike) to a TV aperture, *Full overscan*
@@ -567,8 +571,12 @@ elements, and pages without them are untouched:
   and `plain`): the monitor presentation (**Monitor** on the hosted
   page), the desktop window's CRT shader preset and 1084 bezel rendered
   through WebGL2. Defaults to `1084` (both together), self-inserting,
-  applied live including to a paused machine, and remembered in the
-  browser like `#overscan`. It hides itself -- and the page keeps its
+  applied live including to a paused machine -- and to the powered-off
+  monitor a page shows before boot -- and remembered in the browser like
+  `#overscan`. While a bezel mode is up the glue makes the shell's
+  border transparent (the moulded case is the frame), restoring it on
+  the other modes; a shell that wants no part of that can simply not
+  style a border. It hides itself -- and the page keeps its
   plain 2D blit -- in a browser without WebGL2.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
