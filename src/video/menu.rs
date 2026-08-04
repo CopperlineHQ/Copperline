@@ -54,8 +54,9 @@ pub enum MenuAction {
     SetAutofire(u8),
 
     // Serial / parallel, present only when something is on the port.
-    SetMidiInput(String),
-    SetMidiOutput(String),
+    /// `None` unplugs the cable: a MIDI interface with nothing connected.
+    SetMidiInput(Option<String>),
+    SetMidiOutput(Option<String>),
     SetSamplerInput(String),
     /// Show or hide the MT-32's front panel.
     ToggleMt32Panel,
@@ -479,8 +480,9 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
     ];
 
     // A port with nothing on it has nothing to set, so it contributes no
-    // category rather than one that opens onto an empty list.
-    if !s.midi_inputs.is_empty() || !s.midi_outputs.is_empty() {
+    // category rather than one that opens onto an empty list. The MT-32
+    // counts: a machine with no host MIDI devices can still play to it.
+    if !s.midi_inputs.is_empty() || !s.midi_outputs.is_empty() || s.mt32_available {
         rows.push(MenuRow::submenu("Serial Port", serial_rows(s)));
     }
     if !s.sampler_inputs.is_empty() {
@@ -654,15 +656,20 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
     // no keyboard, and what it sends is an answer to what it was sent. That
     // is also the wiring an editor or librarian on the Amiga needs.
     if !s.midi_inputs.is_empty() || s.mt32_attached {
-        let mut inputs: Vec<MenuRow> = s
-            .midi_inputs
-            .iter()
-            .map(|n| MenuRow::choice(n, MenuAction::SetMidiInput(n.clone()), s.midi_in == n))
-            .collect();
+        // None heads the list: an interface with nothing plugged into that
+        // socket, which is how a real one spends most of its life.
+        let mut inputs = vec![MenuRow::choice(
+            "None",
+            MenuAction::SetMidiInput(None),
+            s.midi_in == "None",
+        )];
+        inputs.extend(s.midi_inputs.iter().map(|n| {
+            MenuRow::choice(n, MenuAction::SetMidiInput(Some(n.clone())), s.midi_in == n)
+        }));
         if s.mt32_attached {
             inputs.push(MenuRow::choice(
                 MT32_LABEL,
-                MenuAction::SetMidiInput(MT32_ENDPOINT.to_string()),
+                MenuAction::SetMidiInput(Some(MT32_ENDPOINT.to_string())),
                 s.mt32_input,
             ));
         }
@@ -672,15 +679,22 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
     // configured -- a machine with no host MIDI devices at all can still
     // play to it.
     if !s.midi_outputs.is_empty() || s.mt32_available {
-        let mut outputs: Vec<MenuRow> = s
-            .midi_outputs
-            .iter()
-            .map(|n| MenuRow::choice(n, MenuAction::SetMidiOutput(n.clone()), s.midi_out == n))
-            .collect();
+        let mut outputs = vec![MenuRow::choice(
+            "None",
+            MenuAction::SetMidiOutput(None),
+            s.midi_out == "None",
+        )];
+        outputs.extend(s.midi_outputs.iter().map(|n| {
+            MenuRow::choice(
+                n,
+                MenuAction::SetMidiOutput(Some(n.clone())),
+                s.midi_out == n,
+            )
+        }));
         if s.mt32_available {
             outputs.push(MenuRow::choice(
                 MT32_LABEL,
-                MenuAction::SetMidiOutput(MT32_ENDPOINT.to_string()),
+                MenuAction::SetMidiOutput(Some(MT32_ENDPOINT.to_string())),
                 s.mt32_attached,
             ));
         }
