@@ -11,7 +11,7 @@
 //! machine still runs; it simply has nothing on the far end of the cable.
 
 use anyhow::{anyhow, bail, Result};
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
 
 pub mod demo;
@@ -65,15 +65,34 @@ pub unsafe extern "C" fn copperline_mt32_log(text: *const c_char) {
     log::debug!("mt32: {}", line.trim_end());
 }
 
-/// The handler the engine reports through. Only `print_debug` is taken:
-/// everything else Copperline wants to know it asks for directly, and a
-/// callback left null keeps the engine's own default.
+/// What a program wrote to the module's display.
+///
+/// The engine's own handler prints this to the console, where it arrives
+/// unstamped and unprefixed among Copperline's log lines. Taking the
+/// callback puts it in the log instead, so everything the module says
+/// reads the same way.
+///
+/// # Safety
+/// Called by the engine with a null-terminated string.
+unsafe extern "C" fn show_lcd_message(_instance: *mut c_void, text: *const c_char) {
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: null-checked, and the engine passes a terminated buffer.
+    let line = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+    log::info!("mt32: display {:?}", line.trim());
+}
+
+/// The handler the engine reports through. Only the display and
+/// `print_debug` are taken: everything else Copperline wants to know it
+/// asks for directly, and a callback left null keeps the engine's own
+/// default.
 static REPORT_HANDLER_V0: ffi::ReportHandlerV0 = ffi::ReportHandlerV0 {
     get_version_id: Some(get_version_id),
     print_debug: Some(ffi::copperline_mt32_print_debug),
     on_error_control_rom: None,
     on_error_pcm_rom: None,
-    show_lcd_message: None,
+    show_lcd_message: Some(show_lcd_message),
     on_midi_message_played: None,
     on_midi_queue_overflow: None,
     on_midi_system_realtime: None,
