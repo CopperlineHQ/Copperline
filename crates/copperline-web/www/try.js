@@ -4539,12 +4539,19 @@ function presentMonitorOff() {
   if (!monitorGl) return;
   const gl = monitorGl.gl;
   const size = 16;
-  const dark = new Uint8Array(size * size * 4);
-  for (let i = 3; i < dark.length; i += 4) dark[i] = 255;
   gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, dark);
-  monitorGl.texW = size;
-  monitorGl.texH = size;
+  // The frame path's skip-when-unchanged upload: no real presentation is
+  // ever 16x16, so a cached 16x16 texture is this stand-in already and
+  // repeated calls (a pre-boot window drag resizing every event) redraw
+  // without re-uploading. A context restore resets the cached size, so
+  // the stand-in comes back after a GPU reset.
+  if (monitorGl.texW !== size || monitorGl.texH !== size) {
+    const dark = new Uint8Array(size * size * 4);
+    for (let i = 3; i < dark.length; i += 4) dark[i] = 255;
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, dark);
+    monitorGl.texW = size;
+    monitorGl.texH = size;
+  }
   // The line count only shapes a raster the black screen does not show;
   // the standard PAL count keeps the uniforms honest.
   monitorDraw(size, size, 270);
