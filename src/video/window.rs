@@ -7010,7 +7010,17 @@ impl App {
         #[cfg(feature = "mt32")]
         {
             crate::video::set_mt32_lcd(cfg.serial.mt32_lcd);
-            self.set_mt32_panel_shown(cfg.serial.mt32_panel);
+            // The panel belongs to a module that is both fitted and asked
+            // for: a machine built without one would otherwise keep the
+            // last one's strip, dead and taking up room.
+            let fitted = self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.mt32_selected());
+            self.set_mt32_panel_shown(fitted && cfg.serial.mt32_panel);
+            self.mt32_panel.reset();
+            self.tell_panel_the_rom_version();
             self.report_mt32_fault();
         }
         self.ui.menu_open = false;
