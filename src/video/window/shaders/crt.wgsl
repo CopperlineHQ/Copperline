@@ -100,14 +100,21 @@ const GLASS_GLOW: f32 = 0.01;
 // sides. Depth on the face grows with *physical* distance from the
 // centre, so in display-normalised coordinates the y term is weighted by
 // the viewport aspect squared; the top/bottom edges then bow roughly
-// (w/h)^2 as far as the sides, as the datasheet arcs do. With this
-// weighting k = 0.30 reproduces the arcs: the edge midpoints clear the
-// corners by 5.1% of the half-height (top/bottom) and 2.7% of the
-// half-width (sides).
+// (w/h)^2 as far as the sides, as the datasheet arcs do, and k = 0.30
+// reproduces the arcs' curvature.
+//
+// The raster overscans the face, as on the real monitor: the per-axis
+// normalisation rescales the bowed field so the source edge lands exactly
+// on the face's mid-edges. The picture therefore fills the whole face --
+// no black ring between picture and face edge -- and the bow shows as the
+// crop deepening toward the corners, where the source content falls into
+// the rounded-corner clip instead of the visible glass.
 fn warp(uv: vec2<f32>, k: f32, aspect: f32) -> vec2<f32> {
     let c = uv * 2.0 - vec2<f32>(1.0);
     let r2 = c.x * c.x + c.y * c.y * aspect * aspect;
-    return (c * (1.0 + k * r2 * 0.25)) * 0.5 + vec2<f32>(0.5);
+    let bowed = c * (1.0 + k * r2 * 0.25);
+    let m = vec2<f32>(1.0 + k * 0.25, 1.0 + k * 0.25 * aspect * aspect);
+    return (bowed / m) * 0.5 + vec2<f32>(0.5);
 }
 
 @fragment

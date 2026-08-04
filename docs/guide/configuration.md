@@ -492,17 +492,16 @@ status_bar = true     # show the status bar at start (default true)
 ```
 
 The emulated framebuffer always carries the full overscan field Denise
-produces. `"tv"` masks the deep horizontal overscan margins in black like a
-CRT bezel, presenting the standard window plus 24 lo-res pixels per side
-of TV-style overscan while preserving vertical border colour changes. PNG
-screenshots and `--dump-frames` crop standard TV output to a 692x540
-aperture for reference-emulator comparison; PAL and NTSC scans share the
-one shape because both apertures fill the same 4:3 glass -- an NTSC scan's
-shorter crop (the 200-line standard window plus the same overscan margin)
-is scaled onto the same output rows. The live window shows a slightly
-narrower cut of the same aperture, clipped to the columns the framebuffer
-actually captures, so the picture sits exactly centred on screen with no
-one-sided black margin. `"full"` shows everything, which
+produces. `"tv"` presents what the monitor's glass shows: the captured
+aperture -- the standard window plus the symmetric overscan margin the
+framebuffer captures on its right edge -- fills the whole 4:3 glass, the
+way a real set's raster overscans its screen, so the picture (border
+colour included) reaches every edge with no black bezel columns. The
+live window and PNG screenshots / `--dump-frames` present the same
+716x540 glass; PAL and NTSC scans share the one shape because both
+apertures fill the same glass -- an NTSC scan's shorter crop (the
+200-line standard window plus the same overscan margin) is scaled onto
+the same output rows. `"full"` shows everything, which
 is useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv`
 overrides this for a single run. In both modes the presentation geometry
 holds steady across the blank frames a screen change produces: a frame
@@ -592,9 +591,11 @@ look a phosphor trail on its own cannot give. Three presets are built in:
   bow reproduces its published screen-edge arcs -- the top and bottom
   edges bow about twice as far as the sides, as they do on the real
   screen -- and the corners are rounded at the scale of its 11.6 mm
-  corner arcs. On-face black is lifted by a faint glass glow, the room
-  light a real tube reflects, so the face keeps its silhouette even when
-  the picture is dark.
+  corner arcs. The picture overscans the face like the real raster
+  overscans the glass, filling it to the edges with the bow deepening the
+  crop toward the rounded corners, and on-face black is lifted by a faint
+  glass glow, the room light a real tube reflects, so the face keeps its
+  silhouette even when the picture is dark.
 
 `"none"` (the default; `"off"` is accepted for the same thing) presents the
 picture untouched, and any value ending in `.wgsl` is the path of a shader

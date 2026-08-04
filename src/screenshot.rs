@@ -82,75 +82,6 @@ pub fn save_scaled_y(
     save(path, &scaled, width, out_height)
 }
 
-/// Save a rectangular viewport from `fb`, rendering viewport pixels that fall
-/// outside the source as opaque black. A presentation aperture may extend
-/// slightly beyond the emulated capture buffer; the uncaptured margin is
-/// bezel, not picture, so replicating edge pixels there would fabricate
-/// content whenever the display fetches into the deepest overscan.
-///
-/// The crop's `height` rows are resampled onto `out_height` output rows
-/// (centre-aligned whole-row selection, no blending; a no-op when equal).
-/// The TV-aperture screenshot path relies on this: both video standards'
-/// apertures fill the same 4:3 glass, so a 60 Hz crop's rows scale onto the
-/// 50 Hz aperture's native row count.
-pub fn save_cropped_black_padded(
-    path: &Path,
-    fb: &[u32],
-    src_width: usize,
-    src_height: usize,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-    out_height: usize,
-) -> Result<()> {
-    let cropped = crop_black_padded(fb, src_width, src_height, x, y, width, height)?;
-    if out_height == height {
-        return save(path, &cropped, width as u32, height as u32);
-    }
-    let mut scaled = Vec::new();
-    scale_y_into(&cropped, width, height, out_height, &mut scaled);
-    save(path, &scaled, width as u32, out_height as u32)
-}
-
-fn crop_black_padded(
-    fb: &[u32],
-    src_width: usize,
-    src_height: usize,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-) -> Result<Vec<u32>> {
-    let expected = src_width * src_height;
-    if fb.len() < expected {
-        anyhow::bail!(
-            "framebuffer size mismatch: got {} pixels, expected at least {}x{}={}",
-            fb.len(),
-            src_width,
-            src_height,
-            expected
-        );
-    }
-    if src_width == 0 || src_height == 0 || width == 0 || height == 0 {
-        anyhow::bail!("invalid crop dimensions");
-    }
-
-    // Opaque black in the fb's R,G,B,A memory order.
-    const BLACK: u32 = 0xFF00_0000;
-    let mut cropped = vec![BLACK; width * height];
-    let copy_w = width.min(src_width.saturating_sub(x));
-    for dst_y in 0..height {
-        let src_y = y + dst_y;
-        if src_y >= src_height {
-            break;
-        }
-        let src_row = &fb[src_y * src_width..src_y * src_width + x + copy_w];
-        cropped[dst_y * width..dst_y * width + copy_w].copy_from_slice(&src_row[x..]);
-    }
-    Ok(cropped)
-}
-
 /// Centre-aligned source row for presentation row `y`.
 #[inline]
 pub fn scaled_source_row(y: usize, src_rows: usize, dst_rows: usize) -> usize {
@@ -319,19 +250,5 @@ mod tests {
         let fb = [0x0000_0003, 0x0000_0006, 0x0000_0009];
         downsample_x_into(&fb, 3, 1, 1, &mut out);
         assert_eq!(out, vec![0x0000_0006]);
-    }
-
-    #[test]
-    fn cropped_view_black_pads_outside_source() -> Result<()> {
-        let fb = vec![1, 2, 3, 4, 5, 6];
-        const BLACK: u32 = 0xFF00_0000;
-
-        let cropped = crop_black_padded(&fb, 3, 2, 1, 0, 4, 3)?;
-
-        assert_eq!(
-            cropped,
-            vec![2, 3, BLACK, BLACK, 5, 6, BLACK, BLACK, BLACK, BLACK, BLACK, BLACK]
-        );
-        Ok(())
     }
 }
