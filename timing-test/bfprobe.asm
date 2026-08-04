@@ -10,7 +10,8 @@
 ; measurement of the bit-field class exists in any emulator's calibration
 ; that we know of. These rows isolate: the register-form internal cost,
 ; the memory RMW cost by span (1 / 2 / 4 / 5 bytes), the dynamic-offset
-; form, the read-only forms, and the demo's exact nine-instruction inner
+; form, the read-only forms (row 10 supplying the three-byte span the
+; RMW rows do not cover), and the demo's exact nine-instruction inner
 ; loop, all with the DBcc alignment controlled (a taken DBcc at pc%4==0
 ; costs one clock more than at %4==2, see fwdprobe).
 ;

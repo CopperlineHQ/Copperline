@@ -35,7 +35,8 @@ its header records the real-A1200 column and the rule derived from it.
 `./build.sh bfprobe` builds `bfprobe.adf`, a 14-row probe for the 68020
 bit-field instructions (the SANITY Roots II AGA "DIE" dissolve class,
 issue #371): register vs memory forms, the memory RMW cost by field span
-(1/2/3/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
+(1/2/4/5 bytes), dynamic offsets, the read-only forms (whose `bfextu` row
+supplies the three-byte span the RMW rows do not cover), and the demo's
 exact nine-instruction plot loop at both DBcc alignments. The header
 records a real-A1200 column - the first hardware measurement of the
 bit-field class we know of - alongside the Copperline and FS-UAE
