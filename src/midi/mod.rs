@@ -566,6 +566,38 @@ impl MidiSerialSink {
         self.mt32_version.as_deref()
     }
 
+    /// Stop whatever song is playing.
+    #[cfg(feature = "mt32")]
+    pub fn stop_mt32_demo(&mut self) {
+        if let Some(mt32) = self.mt32.as_mut() {
+            mt32.play_demo(None);
+        }
+    }
+
+    /// Whether a demo song is still running.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_demo_playing(&self) -> bool {
+        self.mt32
+            .as_ref()
+            .is_some_and(crate::mt32::Mt32Device::demo_playing)
+    }
+
+    /// Start one of the control ROM's own songs, and say what it is called.
+    /// The image is read here rather than kept: a demo is a rare thing to
+    /// ask for, and the songs are a good deal larger than the answer.
+    #[cfg(feature = "mt32")]
+    pub fn play_mt32_demo(&mut self, track: usize) -> Option<String> {
+        let image = std::fs::read(self.mt32_roms.control.as_deref()?).ok()?;
+        let mut songs = crate::mt32::demo::songs(&image);
+        if songs.is_empty() {
+            return None;
+        }
+        let song = songs.swap_remove(track % songs.len());
+        let title = song.title.clone();
+        self.mt32.as_mut()?.play_demo(Some(song));
+        Some(title)
+    }
+
     /// Point the input at a named host endpoint, at the MT-32's own MIDI
     /// OUT, or at nothing.
     pub fn set_input_endpoint(&mut self, endpoint: Option<&str>) {

@@ -24,6 +24,8 @@ pub struct Mt32Device {
     /// them in order and copes with running status and split messages, so
     /// they are handed over whole rather than framed here.
     pending: Vec<u8>,
+    /// A song out of the control ROM, playing itself into the engine.
+    demo: Option<super::demo::Player>,
 }
 
 impl Mt32Device {
@@ -40,6 +42,7 @@ impl Mt32Device {
             block: vec![(0.0, 0.0); BLOCK_FRAMES],
             played: BLOCK_FRAMES,
             pending: Vec::new(),
+            demo: None,
         })
     }
 
@@ -57,6 +60,13 @@ impl Mt32Device {
     /// bytes land on the same sample.
     pub fn next_frame(&mut self) -> (f32, f32) {
         if self.played == self.block.len() {
+            // A demo plays by rendered frame, so it keeps emulated time.
+            if let Some(demo) = &mut self.demo {
+                demo.advance(BLOCK_FRAMES, &mut self.pending);
+                if demo.finished() {
+                    self.demo = None;
+                }
+            }
             if !self.pending.is_empty() {
                 let Self { synth, pending, .. } = self;
                 synth.parse(pending);
@@ -68,6 +78,16 @@ impl Mt32Device {
         let frame = self.block[self.played];
         self.played += 1;
         frame
+    }
+
+    /// Play one of the ROM's own songs, or stop.
+    pub fn play_demo(&mut self, song: Option<super::demo::Song>) {
+        self.demo = song.map(|s| super::demo::Player::new(s, self.synth.sample_rate()));
+    }
+
+    /// Whether a song is still running, so the chain knows to move on.
+    pub fn demo_playing(&self) -> bool {
+        self.demo.is_some()
     }
 
     /// The synth, for the front panel and the display.

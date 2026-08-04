@@ -442,3 +442,129 @@ fn the_lamp_lights_for_exclusive_messages() {
     }
     assert!(!synth.display().1, "out again afterwards");
 }
+
+/// Render a demo song through the engine and write it out, so it can be
+/// listened to rather than only counted.
+///
+/// The songs are Roland's, so this is not a check that runs anywhere: it is
+/// how the reading of them was confirmed by ear. `COPPERLINE_MT32_DEMO_WAV`
+/// says where to put the audio, and `COPPERLINE_MT32_DEMO` which song.
+#[test]
+#[ignore = "writes audio; needs a v2.xx ROM pair and COPPERLINE_MT32_DEMO_WAV"]
+fn a_demo_song_renders_to_audio() {
+    let (Some(dir), Some(out)) = (
+        std::env::var_os("COPPERLINE_MT32_ROMS").map(std::path::PathBuf::from),
+        std::env::var_os("COPPERLINE_MT32_DEMO_WAV").map(std::path::PathBuf::from),
+    ) else {
+        return;
+    };
+    let control = std::env::var("COPPERLINE_MT32_CONTROL")
+        .unwrap_or_else(|_| "mt32_ctrl_2_07.rom".to_string());
+    let pcm = std::env::var("COPPERLINE_MT32_PCM").unwrap_or_else(|_| "mt32_pcm.rom".to_string());
+    let which: usize = std::env::var("COPPERLINE_MT32_DEMO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let seconds: f32 = std::env::var("COPPERLINE_MT32_DEMO_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0);
+
+    let image = std::fs::read(dir.join(&control)).expect("the control ROM reads");
+    let mut songs = crate::mt32::demo::songs(&image);
+    assert!(!songs.is_empty(), "{control} carries no demo songs");
+    assert!(which < songs.len(), "only {} songs", songs.len());
+    let song = songs.remove(which);
+    println!("rendering {:?} ({:.0}s of it)", song.title, seconds);
+
+    let rate = crate::audio::MIX_SAMPLE_RATE;
+    let mut synth =
+        Mt32Synth::open(&dir.join(&control), &dir.join(&pcm), rate).expect("the pair opens");
+    let mut player = crate::mt32::demo::Player::new(song, rate);
+
+    const BLOCK: usize = 256;
+    let mut block = vec![(0.0f32, 0.0f32); BLOCK];
+    let mut pcm_out: Vec<i16> = Vec::new();
+    let blocks = (seconds * rate as f32 / BLOCK as f32) as usize;
+    let mut due = Vec::new();
+    for _ in 0..blocks {
+        player.advance(BLOCK, &mut due);
+        synth.parse(&due);
+        due.clear();
+        synth.render(&mut block);
+        for &(l, r) in &block {
+            pcm_out.push((l.clamp(-1.0, 1.0) * 32767.0) as i16);
+            pcm_out.push((r.clamp(-1.0, 1.0) * 32767.0) as i16);
+        }
+    }
+    write_wav(&out, rate, &pcm_out).expect("the audio writes");
+    let loud = pcm_out.iter().filter(|s| s.abs() > 600).count();
+    println!(
+        "wrote {} ({} frames, {loud} of them audible)",
+        out.display(),
+        pcm_out.len() / 2
+    );
+    assert!(
+        loud > pcm_out.len() / 20,
+        "it made sound: only {loud} audible samples"
+    );
+}
+
+/// A plain 16-bit stereo WAV, which is all the check above needs.
+#[cfg(test)]
+fn write_wav(path: &std::path::Path, rate: u32, samples: &[i16]) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = samples.len() as u32 * 2;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + bytes).to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&2u16.to_le_bytes())?;
+    f.write_all(&rate.to_le_bytes())?;
+    f.write_all(&(rate * 4).to_le_bytes())?;
+    f.write_all(&4u16.to_le_bytes())?;
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&bytes.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// The demo reaches the mixer: asking the sink for a song makes the frames
+/// Paula pulls carry it.
+#[test]
+#[ignore = "needs a v2.xx ROM pair in COPPERLINE_MT32_ROMS"]
+fn a_demo_plays_out_through_the_mixer() {
+    let Some(dir) = rom_dir() else {
+        return;
+    };
+    let control = dir.join("mt32_ctrl_2_07.rom");
+    if !control.exists() {
+        return;
+    }
+    let mut sink = crate::midi::MidiSerialSink::open(None, None).expect("a sink opens");
+    sink.set_mt32_roms(crate::mt32::Mt32Roms {
+        control: Some(control),
+        pcm: Some(dir.join("mt32_pcm.rom")),
+    });
+    sink.set_output_endpoint(Some(crate::config::MIDI_OUT_MT32));
+    assert!(sink.mt32().is_some(), "the module is fitted");
+
+    let title = sink.play_mt32_demo(2).expect("a song starts");
+    assert_eq!(title, "Short Demo", "the dial's third song");
+
+    // Pull frames the way the mixer does, and listen for it.
+    use crate::serial::SerialSink;
+    let mut peak = 0.0f32;
+    for _ in 0..crate::audio::MIX_SAMPLE_RATE * 4 {
+        if let Some((l, r)) = sink.next_audio_frame() {
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+    }
+    assert!(peak > 0.01, "the demo is audible: peak {peak}");
+    println!("Short Demo reached the mixer, peak {peak:.3}");
+}
