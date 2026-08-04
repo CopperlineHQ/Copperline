@@ -3055,14 +3055,13 @@ impl MachineSetup {
             F::MidiOut => {
                 // Munt MT-32 rides at the end of the output list: it is
                 // always there to be chosen, whatever the host offers.
-                let mut names: Vec<String> = self
+                let names: Vec<String> = self
                     .midi_endpoints
                     .outputs
                     .iter()
                     .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(true))
                     .collect();
-                #[cfg(feature = "mt32")]
-                names.push(crate::config::MIDI_OUT_MT32.to_string());
                 self.midi_out =
                     crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
                 // The MT-32 is only a source while it is the destination,
@@ -3076,20 +3075,17 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::MidiIn => {
-                let mut names: Vec<String> = self
-                    .midi_endpoints
-                    .inputs
-                    .iter()
-                    .map(|e| e.name.clone())
-                    .collect();
                 // The module is a sound module: it has no keyboard, and
                 // what it sends is an answer to what it was sent. So it is
                 // offered as a source only while it is the destination,
                 // which is also the wiring a patch editor needs.
-                #[cfg(feature = "mt32")]
-                if self.midi_out_is_mt32() {
-                    names.push(crate::config::MIDI_OUT_MT32.to_string());
-                }
+                let names: Vec<String> = self
+                    .midi_endpoints
+                    .inputs
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(self.midi_out_is_mt32()))
+                    .collect();
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
             }
             F::ParallelDevice => {
@@ -4114,6 +4110,14 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
+}
+
+/// The tail a MIDI picker's list carries when the built-in module belongs
+/// on it: the module is not a host endpoint, so it is added rather than
+/// enumerated. Nothing to add on a build without it.
+#[cfg(feature = "midi")]
+fn mt32_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
