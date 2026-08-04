@@ -228,8 +228,13 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     // Compose by signed distance: picture, recess gap, then plastic, each
-    // join antialiased over about a pixel.
-    var col = mix(picture, gap, clamp(d / aa + 0.5, 0.0, 1.0));
+    // join antialiased over about a pixel. In the frame-only pass the
+    // inner side of the opening join belongs to the preset underneath,
+    // whose face edge there is its off-face black: blending from the raw
+    // picture instead smears a picture-coloured hairline around the
+    // opening, on top of the preset the pass discarded for.
+    let inner = select(picture, vec3<f32>(0.0), u.params.x > 0.5);
+    var col = mix(inner, gap, clamp(d / aa + 0.5, 0.0, 1.0));
     col = mix(col, plastic, smoothstep(recess - aa, recess + aa, d));
     col = mix(col, vec3<f32>(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
     return vec4<f32>(col, 1.0);

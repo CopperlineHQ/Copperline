@@ -750,6 +750,60 @@ mod tests {
         );
     }
 
+    /// The antialiased join at the opening edge in the frame-only pass
+    /// must blend toward the preset's off-face black, not the raw
+    /// picture: a bright source used to smear a picture-coloured
+    /// hairline around the opening, over the preset output the pass
+    /// discards its interior for.
+    #[test]
+    fn the_frame_only_join_does_not_leak_the_picture() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (device, queue) = (gpu.device(), gpu.queue());
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &white);
+        let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Crt));
+
+        // The shader's rounded-rect distance to the opening, at a pixel
+        // centre.
+        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
+        let r_open = 0.055 * ow.min(oh);
+        let opening_d = |x: u32, y: u32| {
+            let qx = (x as f32 + 0.5 - ox - ow * 0.5).abs() - ow * 0.5 + r_open;
+            let qy = (y as f32 + 0.5 - oy - oh * 0.5).abs() - oh * 0.5 + r_open;
+            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+            outside + qx.max(qy).min(0.0) - r_open
+        };
+
+        // The face's bow keeps the preset's own picture well inside the
+        // opening, so the ring of frame pixels hugging the opening edge
+        // holds only recess gap and off-face black -- all dark. Any
+        // bright pixel is the source leaking through the join. Whether a
+        // straight edge drops a pixel centre inside the leaking
+        // fraction-of-a-pixel band depends on the window size, but along
+        // the corner arcs the centres sweep every alignment, so the ring
+        // as a whole always catches it.
+        let mut checked = 0;
+        for y in 0..rows {
+            for x in 0..dim {
+                let d = opening_d(x, y);
+                if (0.0..=2.0).contains(&d) {
+                    checked += 1;
+                    let p = at(&px, dim, x, y);
+                    assert!(
+                        p[0] < 90 && p[1] < 90 && p[2] < 90,
+                        "picture hairline at the opening edge ({x}, {y}), d = {d:.2}: {p:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 100,
+            "opening ring barely sampled: {checked} pixels"
+        );
+    }
+
     /// Not a check: renders the bezel (optionally with the CRT preset the
     /// window would pair it with) over a source image and writes a PNG for
     /// eyeballing look changes. Runs only when
@@ -757,7 +811,9 @@ mod tests {
     /// COPPERLINE_BEZEL_PREVIEW_SRC set, that PNG becomes the picture
     /// (its full height, no status bar), otherwise a test card is used.
     /// Setting COPPERLINE_BEZEL_PREVIEW_SHADER (to any value) adds the
-    /// preset pass.
+    /// preset pass; COPPERLINE_BEZEL_PREVIEW_BARE instead renders the
+    /// preset alone over the full frame, no bezel, for eyeballing the
+    /// preset's own face geometry.
     #[test]
     #[ignore = "preview dump; set COPPERLINE_BEZEL_PREVIEW_OUT"]
     fn dump_bezel_preview_png() {
@@ -770,6 +826,7 @@ mod tests {
         };
         let (device, queue) = (gpu.device(), gpu.queue());
         let with_crt = std::env::var("COPPERLINE_BEZEL_PREVIEW_SHADER").is_ok();
+        let bare = std::env::var("COPPERLINE_BEZEL_PREVIEW_BARE").is_ok();
         let (src, w, h) = match std::env::var("COPPERLINE_BEZEL_PREVIEW_SRC") {
             Ok(path) => {
                 let decoder = png::Decoder::new(std::fs::File::open(&path).expect("open src"));
@@ -827,7 +884,7 @@ mod tests {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let (crt_uniforms, viewport) = crt_shader::uniforms_for(
-            if with_crt {
+            if with_crt || bare {
                 ShaderKind::Crt
             } else {
                 ShaderKind::None
@@ -840,7 +897,7 @@ mod tests {
             (h / 2) as f32,
         );
         let opening = opening_rect(viewport);
-        if with_crt {
+        if bare {
             let mut crt = crt_shader::CrtShader::new(device, FORMAT);
             crt.render(
                 device,
@@ -848,21 +905,35 @@ mod tests {
                 &src,
                 &mut encoder,
                 &view,
-                opening,
+                viewport,
                 ShaderKind::Crt,
-                crt_uniforms.with_viewport(opening),
+                crt_uniforms,
+            );
+        } else {
+            if with_crt {
+                let mut crt = crt_shader::CrtShader::new(device, FORMAT);
+                crt.render(
+                    device,
+                    queue,
+                    &src,
+                    &mut encoder,
+                    &view,
+                    opening,
+                    ShaderKind::Crt,
+                    crt_uniforms.with_viewport(opening),
+                );
+            }
+            let mut shader = BezelShader::new(device, FORMAT);
+            shader.render(
+                device,
+                queue,
+                &src,
+                &mut encoder,
+                &view,
+                viewport,
+                uniforms_from(&crt_uniforms, viewport, opening, with_crt),
             );
         }
-        let mut shader = BezelShader::new(device, FORMAT);
-        shader.render(
-            device,
-            queue,
-            &src,
-            &mut encoder,
-            &view,
-            viewport,
-            uniforms_from(&crt_uniforms, viewport, opening, with_crt),
-        );
         let px = read_back(device, queue, encoder, &target, (w, h));
         let file = std::fs::File::create(&out).expect("create preview");
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
