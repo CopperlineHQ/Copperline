@@ -39,7 +39,7 @@ const LCD_SURROUND_SHEEN: u32 = rgba(26, 26, 30);
 /// What the glass and its characters look like, per style.
 ///
 /// Unlit is its own colour: the MT-32's backlight simply goes out, while a
-/// JV-1080 keeps its blue a shade darker.
+/// Super JV keeps its blue a shade darker.
 struct LcdColours {
     glass: u32,
     dark_glass: u32,
@@ -48,6 +48,14 @@ struct LcdColours {
     /// one. A shade off the field around it, which is what makes the cells
     /// countable without competing with the writing over them.
     cell: Option<u32>,
+    /// The matrix with the backlight out. Most glass shows nothing at all
+    /// then; the samplers' keeps its dots faintly, being dark ones on a
+    /// screen rather than lit ones behind it.
+    dark_cell: Option<u32>,
+    /// What the MIDI MESSAGE lamp lights in. It is a lamp behind tinted
+    /// plastic rather than part of the display, so it comes with the panel
+    /// whose glass is being worn.
+    lamp: u32,
 }
 
 fn lcd_colours() -> LcdColours {
@@ -61,6 +69,8 @@ fn lcd_colours() -> LcdColours {
             dark_glass: rgba(4, 5, 4),
             text: super::TRACK_SEGMENT_ON,
             cell: None,
+            dark_cell: None,
+            lamp: LAMP_GREEN,
         },
         // Lighter green characters over a lit green backlight; black once
         // that backlight is out.
@@ -74,10 +84,27 @@ fn lcd_colours() -> LcdColours {
             // The cells sit a shade above the field they are masked out of,
             // which is what makes them countable at a glance.
             cell: Some(rgba(38, 68, 22)),
+            dark_cell: None,
+            lamp: LAMP_GREEN,
+        },
+        // A sky-blue lamp with the characters nearly black on it, which is
+        // the other way round from the rest: dark dots on a lit screen
+        // rather than lit dots on a dark one.
+        Mt32Lcd::SSeries => LcdColours {
+            glass: rgba(96, 170, 220),
+            // Out, the lamp is off but the glass keeps its tint, which on
+            // this one is still plainly blue.
+            dark_glass: rgba(34, 52, 68),
+            text: rgba(24, 28, 34),
+            // The matrix sits under the lamp rather than over it, being
+            // unlit dots on a lit screen.
+            cell: Some(rgba(84, 156, 208)),
+            dark_cell: Some(rgba(30, 46, 60)),
+            lamp: LAMP_RED,
         },
         // Deep blue, pale green characters, and the blue stays when it is
         // off.
-        Mt32Lcd::Jv1080 => LcdColours {
+        Mt32Lcd::SuperJv => LcdColours {
             glass: rgba(10, 26, 74),
             dark_glass: rgba(6, 15, 44),
             // A little brighter than it would otherwise want to be: the
@@ -87,14 +114,19 @@ fn lcd_colours() -> LcdColours {
             // There on the unit too, but only just: a shade off the glass,
             // where the MT-32's own can be counted at a glance.
             cell: Some(rgba(16, 34, 86)),
+            dark_cell: None,
+            lamp: LAMP_GREEN,
         },
     }
 }
-/// The MIDI MESSAGE lamp, dark and lit. It is a lamp behind tinted plastic
-/// rather than part of the display, so it keeps its own green whichever
-/// glass the panel is wearing; unlit it is barely green at all.
+/// The MIDI MESSAGE lamp when it is dark: barely anything at all, the way
+/// an unlit LED behind tinted plastic sits.
 const LED_DARK: u32 = rgba(9, 20, 11);
-const LED_LIT: u32 = rgba(52, 206, 74);
+/// What it lights in. The MT-32's is green; the samplers put a red one in
+/// the same corner of the fascia, so a panel wearing their glass wears
+/// their lamp with it.
+const LAMP_GREEN: u32 = rgba(52, 206, 74);
+const LAMP_RED: u32 = rgba(226, 44, 30);
 /// A button being held down: darker than its own face, near enough the
 /// fascia that it reads as having gone into the panel rather than changed
 /// colour. Unlit buttons are the status bar's, and so is the dial -- the
@@ -620,15 +652,15 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
     // top-left edge over a dark surround, with the glass inset inside it.
     let colours = lcd_colours();
     let lcd = lcd_rect(panel);
-    let glass = if view.powered {
-        colours.glass
+    let (glass, matrix) = if view.powered {
+        (colours.glass, colours.cell)
     } else {
-        colours.dark_glass
+        (colours.dark_glass, colours.dark_cell)
     };
     raised_display(frame, lcd, glass, scale);
-    // With the backlight out there is nothing behind the glass to see, not
-    // even the matrix.
-    if !view.powered {
+    // With the backlight out there is nothing written, though some glass
+    // still shows the matrix it is written on.
+    if !view.powered && matrix.is_none() {
         return;
     }
     // Centred on the glass rather than on the bezel around it, and on the
@@ -657,7 +689,7 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
         // Every position shows its own matrix whether anything is lit in it
         // or not, with the row the controller keeps for a cursor sitting
         // under it -- which is what gives an LCD its grid of faint blocks.
-        if let Some(unlit) = colours.cell {
+        if let Some(unlit) = matrix {
             let foot = Rect {
                 y: cell.y + cell.h + CELL_FOOT_GAP,
                 h: CELL_FOOT_H,
@@ -702,6 +734,10 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
                 }
             }
         }
+        // Nothing is written with the backlight out.
+        if !view.powered {
+            continue;
+        }
         let solid = ch == crate::mt32::ACTIVE_PART;
         if solid {
             // A part with something sounding on it: every dot in the cell
@@ -721,7 +757,7 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
         // The characters are made of the same dots as the matrix behind
         // them, so rule them the same way -- but more faintly. The grid
         // belongs to the glass; in the writing it should only be felt.
-        if colours.cell.is_some() {
+        if matrix.is_some() {
             let ink_grain = mix(colours.text, glass, TEXT_GRAIN);
             let glyph = font::glyph(ch);
             for row in 0..CELL_ROWS {
@@ -756,7 +792,12 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
 
 fn draw_led(frame: &mut [u8], panel: Rect, lit: bool, scale: usize) {
     let led = led_rect(panel);
-    raised_display(frame, led, if lit { LED_LIT } else { LED_DARK }, scale);
+    raised_display(
+        frame,
+        led,
+        if lit { lcd_colours().lamp } else { LED_DARK },
+        scale,
+    );
     // Printed above the lamp as it is on the fascia, at the head of the
     // column; the lamp is centred under its ink (see led_rect).
     text(
@@ -1115,7 +1156,8 @@ mod tests {
         for (style, name) in [
             (crate::config::Mt32Lcd::Oled, "oled"),
             (crate::config::Mt32Lcd::Mt32, "mt32"),
-            (crate::config::Mt32Lcd::Jv1080, "jv1080"),
+            (crate::config::Mt32Lcd::SuperJv, "superjv"),
+            (crate::config::Mt32Lcd::SSeries, "sseries"),
         ] {
             crate::video::set_mt32_lcd(style);
             // Once lit, once not: the styles differ in how they go dark.
@@ -1450,13 +1492,14 @@ pub enum PanelAction {
     Recycle,
 }
 
-/// What the panel is standing on.
+/// What the panel is showing.
 ///
-/// The unit's buttons carry no lamps, so nothing is lit at rest; a mode
-/// lights exactly the buttons that reached it, which is one, two or three.
+/// Nothing on the panel says which of these it is on: the unit's buttons
+/// are momentary and carry no lamps, so its display is the only thing that
+/// tells you where you have got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// The main screen. The engine owns the display and nothing is lit.
+    /// The main screen, which the engine owns.
     Home,
     /// One button: it edits the value it names, for the shown part.
     Function(Function),
@@ -1663,8 +1706,8 @@ impl Mt32Panel {
         self.track_title = title;
     }
 
-    /// Whether the unit came up playing its own songs.
-    pub fn playing_demo(&self) -> bool {
+    /// Whether the unit came up into ROM Play.
+    fn playing_demo(&self) -> bool {
         matches!(self.mode, Mode::Started(StartMode::Demo))
     }
 

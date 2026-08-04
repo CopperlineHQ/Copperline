@@ -731,9 +731,13 @@ pub enum Mt32Lcd {
     /// bare glass, a shade off the surround around it.
     #[default]
     Mt32,
-    /// A JV-1080's: deep blue under pale green characters. Unlit the blue
-    /// stays, a shade darker, as that panel does.
-    Jv1080,
+    /// A Super JV's: deep blue under pale green characters. Unlit the
+    /// blue stays, a shade darker, as that panel does.
+    SuperJv,
+    /// An S Series sampler's: a sky-blue backlight with the characters
+    /// almost black on it. Unlit it keeps a paler blue, plainly a lamp
+    /// gone out rather than a dark screen.
+    SSeries,
     /// Black glass under the green the status bar's track counter uses, as
     /// one of the OLED panels sold to replace a tired original looks.
     Oled,
@@ -741,14 +745,20 @@ pub enum Mt32Lcd {
 
 impl Mt32Lcd {
     /// Every style, in the order a picker offers them.
-    pub const MENU_ORDER: [Mt32Lcd; 3] = [Mt32Lcd::Mt32, Mt32Lcd::Jv1080, Mt32Lcd::Oled];
+    pub const MENU_ORDER: [Mt32Lcd; 4] = [
+        Mt32Lcd::Mt32,
+        Mt32Lcd::SuperJv,
+        Mt32Lcd::SSeries,
+        Mt32Lcd::Oled,
+    ];
 
     /// Config name, which round-trips through [`parse_mt32_lcd`].
     pub fn label(self) -> &'static str {
         match self {
             Mt32Lcd::Oled => "oled",
             Mt32Lcd::Mt32 => "mt32",
-            Mt32Lcd::Jv1080 => "jv1080",
+            Mt32Lcd::SuperJv => "superjv",
+            Mt32Lcd::SSeries => "sseries",
         }
     }
 
@@ -757,7 +767,8 @@ impl Mt32Lcd {
         match self {
             Mt32Lcd::Oled => "OLED",
             Mt32Lcd::Mt32 => "MT-32",
-            Mt32Lcd::Jv1080 => "JV-1080",
+            Mt32Lcd::SuperJv => "Super JV",
+            Mt32Lcd::SSeries => "S Series",
         }
     }
 }
@@ -767,11 +778,12 @@ impl Mt32Lcd {
 pub(crate) fn parse_mt32_lcd(s: &str) -> Result<Mt32Lcd> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mt32" | "mt-32" | "1" => Ok(Mt32Lcd::Mt32),
-        "jv1080" | "jv-1080" | "2" => Ok(Mt32Lcd::Jv1080),
-        "oled" | "3" => Ok(Mt32Lcd::Oled),
+        "superjv" | "super-jv" | "2" => Ok(Mt32Lcd::SuperJv),
+        "sseries" | "s-series" | "3" => Ok(Mt32Lcd::SSeries),
+        "oled" | "4" => Ok(Mt32Lcd::Oled),
         other => bail!(
-            "[serial] mt32_lcd must be \"mt32\", \"jv1080\" or \"oled\" \
-             (or 1, 2, 3), got \"{other}\""
+            "[serial] mt32_lcd must be \"mt32\", \"superjv\", \"sseries\" \
+             or \"oled\" (or 1, 2, 3, 4), got \"{other}\""
         ),
     }
 }
@@ -2656,7 +2668,7 @@ pub(crate) struct RawSerial {
     /// Show the MT-32's front panel under the status bar (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mt32_panel: Option<bool>,
-    /// Its display: "mt32" (default), "jv1080", or "oled".
+    /// Its display: "mt32" (default), "superjv", "sseries", or "oled".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mt32_lcd: Option<String>,
     /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
