@@ -424,6 +424,15 @@ probe_tests! {
     // Poker Pro HAM-photo/EHB-scoreboard split-line regression class).
     // vAmiga-verified: byte-identical over the whole frame.
     golden_hamprobe_select => probe("hamprobe-select", "hamprobe-select.bin", 16.0);
+    // The HAM hold colour accumulates across the DIW left edge: with DDFSTRT
+    // one fetch period before the window, the hidden border-masked samples
+    // seed the hold colour the first visible pixel modifies. Two bands whose
+    // visible fetch words are identical differ only in a hidden set-palette
+    // pixel; both collapse to the same blue if the history is truncated at
+    // the window edge (the Lemmings 2 FES demo DMA Design logo regression
+    // class). vAmiga-verified band colours; the hidden span itself renders
+    // as border per the vAmigaTS DIW-edge photos (see the probe header).
+    golden_hamprobe_prediw => probe("hamprobe-prediw", "hamprobe-prediw.bin", 16.0);
     // Manual BPL1DAT writes (bitplane DMA off) load the serialiser on its
     // free-running word cadence, not at the write position: WAIT-sweep bars
     // snap to the word grid and DIW-clip to a straight edge, a re-arm before

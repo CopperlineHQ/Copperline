@@ -1465,18 +1465,6 @@ impl ControlState {
             .max(0) as usize
     }
 
-    fn ham_history_start_native_x(
-        &self,
-        diw_h_start: u16,
-        pixel_repeat: usize,
-        native_x_offset: usize,
-    ) -> usize {
-        let display_phase_native =
-            ((diw_h_start as i32 - self.fetch_reference()) * 2) / pixel_repeat as i32;
-        let visible_phase = display_phase_native.max(0) as usize;
-        native_x_offset.saturating_sub(visible_phase.min(native_x_offset))
-    }
-
     fn holds_final_lowres_fetch_sample_at_diwstop(&self) -> bool {
         if self.hires() || self.shres() || self.fetch_quantum() != 1 {
             return false;
@@ -5452,16 +5440,6 @@ fn render_planned_playfield_line(
         } else {
             Some(indexed_output_cache.outputs(output_control, &palette))
         };
-        let ham_history_start_native_x = if ham_mode {
-            pixel_control.ham_history_start_native_x(
-                pixel_diw_h_start,
-                pixel_repeat,
-                native_x_offset,
-            )
-        } else {
-            0
-        };
-
         let collision_dual = pixel_control.dual_playfield();
         let collision_table =
             collision_lookup.table(pixel_control.clxcon, pixel_control.clxcon2, collision_dual);
@@ -5487,8 +5465,10 @@ fn render_planned_playfield_line(
             // only; `sample.idx` stays true for collisions and priority.
             let plane_mask = active_debug_plane_mask();
             if ham_mode {
-                next_ham_native_x =
-                    next_ham_native_x.max(ham_history_start_native_x.min(plan.fetched_pixels));
+                // Denise's HAM accumulator advances on every shifted sample;
+                // DIW only gates which colour reaches the output. Fetched
+                // samples ahead of the window (an early DDFSTRT) must feed the
+                // hold colour the first visible pixel modifies.
                 let preroll_stop = native_x.min(plan.fetched_pixels);
                 while next_ham_native_x < preroll_stop {
                     let skipped =
@@ -5596,7 +5576,13 @@ fn render_planned_playfield_line(
                 (sample, output, None)
             };
             if ham_mode || !shres {
-                next_ham_native_x = next_ham_native_x.max(native_x + 1);
+                // The SHRES pair path consumes native_per_pixel samples and
+                // advances the hold colour for each; tracking fewer would
+                // make the next preroll re-process the pair's right half.
+                // Reachable with ham_mode only through the colour/pixel
+                // domain split on a mid-line HAM-to-SHRES BPLCON0 write --
+                // steady-state SHRES decodes HAM off.
+                next_ham_native_x = next_ham_native_x.max(native_x + native_per_pixel);
             }
             // Collision classification is identical for every framebuffer
             // pixel of this native sample, so look it up once. CLXDAT only
