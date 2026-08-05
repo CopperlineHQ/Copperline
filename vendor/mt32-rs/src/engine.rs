@@ -42,6 +42,12 @@ impl crate::midi::Sink for Engine {
     }
 }
 
+/// One message waiting its turn between the host and the parts.
+enum Queued {
+    Short(u32),
+    Sysex(Vec<u8>),
+}
+
 /// The chip's voice count, and the poly pool that matches it.
 pub const PARTIAL_COUNT: usize = 32;
 
@@ -72,6 +78,11 @@ pub struct Engine {
     /// Which part each MIDI channel drives, 0xFF ending the list.
     chantable: [[u8; PART_COUNT]; 16],
     reverb: Option<Reverb>,
+    /// Messages accepted and not yet fully played. A short message that
+    /// starts a voice abort stays at the head and is retried as the
+    /// abort renders out, exactly as the reference's event queue does;
+    /// everything behind it waits its turn.
+    queue: std::collections::VecDeque<Queued>,
     /// The OUT jack: what the module has to say back, drained by the
     /// host. Only read requests put anything here.
     midi_out: Vec<u8>,
@@ -123,6 +134,7 @@ impl Engine {
             reserved: [0; PART_COUNT],
             chantable: [[0xFF; PART_COUNT]; 16],
             reverb: None,
+            queue: std::collections::VecDeque::new(),
             midi_out: Vec::new(),
             activated: false,
             aborting_poly: None,
@@ -178,6 +190,12 @@ impl Engine {
         std::mem::take(&mut self.midi_out)
     }
 
+    /// How many of the chip's thirty-two voices are sounding, for a host
+    /// showing voice usage.
+    pub fn active_partial_count(&self) -> usize {
+        PARTIAL_COUNT - self.inactive_partials.len()
+    }
+
     fn refresh_reserve(&mut self) {
         let mut reserved = [0u32; PART_COUNT];
         for (i, slot) in reserved.iter_mut().enumerate() {
@@ -211,8 +229,18 @@ impl Engine {
     // ------------------------------------------------------------------
     // MIDI in.
 
-    /// One short message, played immediately: the low byte is the status.
+    /// One short message, the low byte the status. Played now if the
+    /// module is free; a message that runs into a voice abort finishes
+    /// as the abort renders out, and anything sent meanwhile queues
+    /// behind it in order.
     pub fn play_msg(&mut self, msg: u32) {
+        self.activated = true;
+        self.queue.push_back(Queued::Short(msg));
+    }
+
+    /// The head-of-queue walk: plays as much of the message as the
+    /// voices allow, leaving the abort books set if it must pause.
+    fn process_msg(&mut self, msg: u32) {
         let command = ((msg & 0xF0) >> 4) as u8;
         if command == 0x0F || command < 8 {
             return;
@@ -323,8 +351,43 @@ impl Engine {
     }
 
     /// A SysEx message: through the memory model, with every consequence
-    /// the firmware runs -- refreshes, resets, the display.
+    /// the firmware runs -- refreshes, resets, the display. Queued in
+    /// order behind any short message still finishing its abort.
     pub fn play_sysex(&mut self, message: &[u8]) {
+        self.activated = true;
+        self.queue.push_back(Queued::Sysex(message.to_vec()));
+    }
+
+    /// A SysEx message applied at once, ahead of anything queued: the
+    /// path a host's own controls use, as the reference's immediate
+    /// entry. Does not wake the module -- a panel edit is not traffic.
+    pub fn play_sysex_now(&mut self, message: &[u8]) {
+        self.process_sysex(message);
+    }
+
+    /// One queued message played, if one is waiting: a short message
+    /// that starts a voice abort stays at the head, to be walked again
+    /// -- from its resume point -- once rendering completes the abort.
+    fn play_one_queued(&mut self) {
+        match self.queue.front() {
+            None => {}
+            Some(Queued::Short(msg)) => {
+                let msg = *msg;
+                self.process_msg(msg);
+                if !self.is_aborting_poly() {
+                    self.queue.pop_front();
+                }
+            }
+            Some(Queued::Sysex(_)) => {
+                let Some(Queued::Sysex(frame)) = self.queue.pop_front() else {
+                    unreachable!("the head was just a SysEx");
+                };
+                self.process_sysex(&frame);
+            }
+        }
+    }
+
+    fn process_sysex(&mut self, message: &[u8]) {
         let outcome = sysex::play(&mut self.memory, message);
         match outcome {
             sysex::Outcome::Written(touched) => {
@@ -998,12 +1061,18 @@ impl Engine {
         }
         let mut done = 0;
         while done < stream.len() {
-            let remaining = stream.len() - done;
-            let chunk = if self.is_aborting_poly() {
-                1
-            } else {
-                remaining.min(MAX_SAMPLES_PER_RUN)
-            };
+            // The reference's own pacing: while a poly aborts, one frame
+            // at a time and the queue waits; a waiting message plays and
+            // is followed by exactly one frame, so zero-duration notes
+            // still sound; otherwise the run goes through whole.
+            let mut chunk = 1;
+            if !self.is_aborting_poly() {
+                if self.queue.is_empty() {
+                    chunk = (stream.len() - done).min(MAX_SAMPLES_PER_RUN);
+                } else {
+                    self.play_one_queued();
+                }
+            }
             self.produce_chunk(&mut stream[done..done + chunk]);
             done += chunk;
         }

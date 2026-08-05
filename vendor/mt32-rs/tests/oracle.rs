@@ -26,6 +26,7 @@ extern "C" {
     fn mt32_oracle_sample_rate(handle: *const std::ffi::c_void) -> c_uint;
     fn mt32_oracle_play_msg(handle: *mut std::ffi::c_void, msg: c_uint);
     fn mt32_oracle_play_sysex(handle: *mut std::ffi::c_void, sysex: *const u8, len: c_uint);
+    fn mt32_oracle_play_sysex_now(handle: *mut std::ffi::c_void, sysex: *const u8, len: c_uint);
     fn mt32_oracle_render(handle: *mut std::ffi::c_void, stream: *mut i16, frames: c_uint);
     fn mt32_oracle_display(handle: *const std::ffi::c_void, buffer21: *mut c_char) -> c_int;
     fn mt32_oracle_read_memory(
@@ -438,7 +439,7 @@ fn sysex_writes_match_the_reference_engine() {
         ),
     ];
     for (what, message) in &steps {
-        unsafe { mt32_oracle_play_sysex(oracle.0, message.as_ptr(), message.len() as c_uint) };
+        unsafe { mt32_oracle_play_sysex_now(oracle.0, message.as_ptr(), message.len() as c_uint) };
         let outcome = mt32_rs::sysex::play(&mut ours, message);
         assert!(
             matches!(outcome, mt32_rs::sysex::Outcome::Written(_)),
@@ -451,7 +452,7 @@ fn sysex_writes_match_the_reference_engine() {
     let mut bad = mt32_rs::sysex::dt1(0x10_0001, &[3]);
     let at = bad.len() - 2;
     bad[at] ^= 1;
-    unsafe { mt32_oracle_play_sysex(oracle.0, bad.as_ptr(), bad.len() as c_uint) };
+    unsafe { mt32_oracle_play_sysex_now(oracle.0, bad.as_ptr(), bad.len() as c_uint) };
     assert_eq!(
         mt32_rs::sysex::play(&mut ours, &bad),
         mt32_rs::sysex::Outcome::ChecksumError
@@ -460,7 +461,7 @@ fn sysex_writes_match_the_reference_engine() {
 
     // The reset address puts both back to power-on.
     let reset = mt32_rs::sysex::dt1(0x7F_0000, &[]);
-    unsafe { mt32_oracle_play_sysex(oracle.0, reset.as_ptr(), reset.len() as c_uint) };
+    unsafe { mt32_oracle_play_sysex_now(oracle.0, reset.as_ptr(), reset.len() as c_uint) };
     assert_eq!(
         mt32_rs::sysex::play(&mut ours, &reset),
         mt32_rs::sysex::Outcome::Reset
@@ -520,7 +521,9 @@ fn the_display_matches_the_reference_engine() {
                     display: &mut mt32_rs::display::Display,
                     now: u32,
                     message: &[u8]| {
-            unsafe { mt32_oracle_play_sysex(oracle.0, message.as_ptr(), message.len() as c_uint) };
+            unsafe {
+                mt32_oracle_play_sysex_now(oracle.0, message.as_ptr(), message.len() as c_uint)
+            };
             match mt32_rs::sysex::play(memory, message) {
                 mt32_rs::sysex::Outcome::Written(touched) => {
                     display.midi_message_played(now);

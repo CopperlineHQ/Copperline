@@ -36,8 +36,9 @@ pub const ACTIVE_PART: char = '\u{1}';
 pub const LCD_WIDTH: usize = mt32_rs::LCD_WIDTH;
 
 /// How many native frames the engine is asked for at a time on the way
-/// into the resampler: 4 ms, so a message lands within that of its frame.
-const NATIVE_BLOCK: usize = 128;
+/// into the resampler: a millisecond, so queued guest traffic lands
+/// within that of the frame the mixer is pulling.
+const NATIVE_BLOCK: usize = 32;
 
 /// Whether to log everything the MT-32 does (`COPPERLINE_MT32_DEBUG=1`).
 ///
@@ -96,7 +97,10 @@ impl Mt32Synth {
             return;
         }
         if debug_enabled() {
-            log::debug!("mt32: in {bytes:02X?}");
+            log::debug!(
+                "mt32: in@{} {bytes:02X?}",
+                self.engine.rendered_sample_count()
+            );
         }
         let mut sink = EngineSink {
             engine: &mut self.engine,
@@ -165,7 +169,9 @@ impl Mt32Synth {
         if debug_enabled() {
             log::debug!("mt32: write {addr:06X} <- {data:02X?}");
         }
-        self.engine.play_sysex(&dt1(addr, data));
+        // The immediate entry: a panel edit lands now, ahead of whatever
+        // guest traffic is queued for the next rendered block.
+        self.engine.play_sysex_now(&dt1(addr, data));
     }
 
     /// Read the synth's memory back. False means no memory lives there and

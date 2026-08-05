@@ -68,6 +68,8 @@ void *mt32_oracle_open(const unsigned char *control, size_t control_len,
         delete o;
         return NULL;
     }
+    /* The host paces the wire; the queue must not pace it again. */
+    o->synth->setMIDIDelayMode(MIDIDelayMode_IMMEDIATE);
     return o;
 }
 
@@ -87,13 +89,21 @@ unsigned int mt32_oracle_sample_rate(const void *handle) {
     return static_cast<const Oracle *>(handle)->synth->getStereoOutputSampleRate();
 }
 
-/* One short MIDI message, low byte first, played immediately. */
+/* One short MIDI message, low byte first, through the event queue the
+ * applications use: a message a voice abort pauses is retried as the
+ * abort renders out rather than lost. */
 void mt32_oracle_play_msg(void *handle, unsigned int msg) {
-    static_cast<Oracle *>(handle)->synth->playMsgNow(msg);
+    static_cast<Oracle *>(handle)->synth->playMsg(msg);
 }
 
-/* One SysEx message, F0..F7 inclusive, played immediately. */
+/* One SysEx message, F0..F7 inclusive, through the same queue. */
 void mt32_oracle_play_sysex(void *handle, const unsigned char *sysex, unsigned int len) {
+    static_cast<Oracle *>(handle)->synth->playSysex(sysex, len);
+}
+
+/* One SysEx applied at once, ahead of the queue: the immediate entry
+ * the memory- and display-layer fixtures drive. */
+void mt32_oracle_play_sysex_now(void *handle, const unsigned char *sysex, unsigned int len) {
     static_cast<Oracle *>(handle)->synth->playSysexNow(sysex, len);
 }
 

@@ -10,10 +10,16 @@
 //! Nyquist, so raising the rate adds no images; the phase advances by an
 //! exact integer counter, so a run never drifts.
 
-/// Taps each side of the output instant. Thirty-two in all puts the
-/// stopband floor well under the module's own DAC.
-const HALF: usize = 16;
+/// Taps each side of the output instant. Sixty-four in all keeps the
+/// passband flat to the top of what the module produces and the
+/// stopband floor well under its own DAC.
+const HALF: usize = 32;
 const TAPS: usize = 2 * HALF;
+
+/// The cutoff as a fraction of the source's Nyquist: just inside it, so
+/// the transition band straddles the edge rather than eating the top of
+/// the passband.
+const CUTOFF: f64 = 0.985;
 
 pub struct Resampler {
     /// Interpolation and decimation counts: the output runs `l` frames to
@@ -41,7 +47,7 @@ impl Resampler {
             let mut sum = 0.0;
             for (j, tap) in kernel.iter_mut().enumerate() {
                 let x = frac - (j as f64 - (HALF as f64 - 1.0));
-                *tap = sinc(x) * blackman(x / HALF as f64);
+                *tap = CUTOFF * sinc(CUTOFF * x) * blackman(x / HALF as f64);
                 sum += *tap;
             }
             // Unity gain at DC exactly, so the window's ripple cannot

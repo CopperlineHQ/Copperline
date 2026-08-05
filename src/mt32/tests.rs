@@ -340,6 +340,9 @@ fn the_module_answers_a_request_for_its_memory() {
     };
 
     synth.parse(&request);
+    // The module answers as it renders, like the hardware does.
+    let mut frames = vec![(0.0f32, 0.0f32); 64];
+    synth.render(&mut frames);
     let reply = synth.take_midi_out();
     assert!(!reply.is_empty(), "the request was recognised");
 
@@ -382,6 +385,8 @@ fn a_long_dump_comes_back_in_blocks() {
     assert_eq!(want, 128, "the size bytes above ask for 0x80");
 
     synth.parse(&request);
+    let mut frames = vec![(0.0f32, 0.0f32); 64];
+    synth.render(&mut frames);
     let reply = synth.take_midi_out();
     assert!(!reply.is_empty(), "the area answered");
     // Every message is well formed and every data byte fits in seven bits,
