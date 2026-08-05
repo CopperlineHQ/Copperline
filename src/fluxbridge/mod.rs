@@ -78,7 +78,6 @@ const MAX_CYLINDER: u8 = 82;
 /// Copperline's own bitmask, so the UI can ask "does this driver take a port
 /// name?" without every caller learning FluxBridge's capability type.
 pub mod config_option {
-    pub const AUTO_CACHE: u32 = 0x01;
     pub const COM_PORT: u32 = 0x02;
     pub const AUTO_DETECT_COMPORT: u32 = 0x04;
     pub const DRIVE_AB_CABLE: u32 = 0x08;
@@ -233,7 +232,6 @@ pub struct BridgeConfig {
     /// FluxBridge find the device itself; name one to pin it, which matters
     /// when two interfaces are plugged in at once.
     pub port: Option<String>,
-    pub auto_cache: bool,
 }
 
 /// One open real drive.

@@ -534,7 +534,7 @@ where
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
             #[cfg(feature = "fluxbridge")]
-            "--floppy-bridge-speed" => {
+            "--floppy-replay-speed" | "--floppy-bridge-speed" => {
                 const USAGE: &str =
                     "--floppy-bridge-speed requires DFN PERCENT (100, 125, 150, 175, or 200)";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -543,12 +543,6 @@ where
                 overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
             #[cfg(feature = "fluxbridge")]
-            "--floppy-bridge-auto-cache" => {
-                const USAGE: &str = "--floppy-bridge-auto-cache requires DFN";
-                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-auto-cache")?;
-                overrides.floppy_bridge_auto_cache[idx] = true;
-            }
             #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-writable" => {
                 const USAGE: &str = "--floppy-bridge-writable requires DFN";
@@ -1140,7 +1134,6 @@ fn print_help() {
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-bridge-speed DFN PCT  serve captured tracks at 100, 125, 150, 175, or 200%\n  \
-         --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
     #[cfg(not(feature = "fluxbridge"))]
@@ -2730,8 +2723,6 @@ mod tests {
             "--floppy-bridge-speed",
             "df1",
             "125",
-            "--floppy-bridge-auto-cache",
-            "df1",
         ])?;
 
         let raw = Config::load_raw(None, &args.overrides)?;
@@ -2747,7 +2738,6 @@ mod tests {
         assert_eq!(bridge.mode, copperline::config::BridgeSpeedMode::Compatible);
         assert_eq!(bridge.density, copperline::config::BridgeDensity::Dd);
         assert_eq!(bridge.speed, 125);
-        assert!(bridge.auto_cache);
         // Untouched bays stay as they were.
         assert!(cfg.floppy.bridges[0].is_none());
         Ok(())

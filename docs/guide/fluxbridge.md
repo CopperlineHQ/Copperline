@@ -53,8 +53,7 @@ write_protected = true       # emulator-level protection; default true
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "normal"         # normal/compatible/stalling
-# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent
-# bridge_auto_cache = false
+# replay_speed = 125             # 100, 125, 150, 175, or 200 percent
 ```
 
 A bay cannot have both a bridge and an image -- the disk in the drive is its
@@ -75,8 +74,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` |
 | `--floppy-bridge-density DFN D` | `bridge_density` |
-| `--floppy-bridge-speed DFN PCT` | `bridge_speed = PCT` |
-| `--floppy-bridge-auto-cache DFN` | `bridge_auto_cache = true` |
+| `--floppy-replay-speed DFN PCT` | `replay_speed = PCT` |
 | `--floppy-bridge-writable DFN` | `write_protected = false` |
 
 These layer on top of a config file as every other flag does, so
@@ -84,7 +82,7 @@ These layer on top of a config file as every other flag does, so
 the file gives it an image -- the flag says the bay *is* a physical drive, so the
 image it displaces is not a conflict. There is deliberately no flag for
 protecting a drive, because that is already the default. The remaining
-options -- density, read mode, bridge speed, auto-cache, and profiles -- are
+options -- density, read mode, replay speed, and profiles -- are
 config-file only; they describe a rig rather than a run.
 
 If a bay asks for a physical drive and it cannot be opened, Copperline
@@ -141,27 +139,18 @@ if a disk reads badly without the index to anchor it.
 until a track is ready instead of answering "not yet". The wait lands on the
 emulated machine, which stops -- pointer and all -- for as long as it takes.
 
-### Bridge speed and auto-cache
+### Replay speed
 
-`bridge_speed` serves captured tracks at `100`, `125` (the default), `150`,
+`replay_speed` serves captured tracks at `100`, `125` (the default), `150`,
 `175`, or `200` percent of real speed. Capturing still takes a full
 revolution; only the serving is faster, so the gain lands on tracks already
 in hand. As with `[floppy] speed`, software that times its own loading can
 notice.
 
-`bridge_auto_cache` caches disk data in the background while the drive is
-idle. It is off by default: during a boot the drive is never idle, so there 
-is little for it to do, and it moves the real head about on its own.
-
-Every track the guest reads is kept in memory regardless -- re-reads never
-touch the platter twice. What auto-cache adds is the tracks the guest has
-*not* asked for: once the guest goes quiet, the drive carries on for up to a
-minute or so, reading the rest of the disk once, then spins down. Later
-reads of anything it reached are served instantly.
-
-While the guest is actively loading, the cacher contends with it for the
-head, so loading is audibly busier and somewhat slower than with auto-cache
-off.
+A track's *first* read is not affected by this setting at all: the capture is
+served as it arrives, at the platter's own pace, exactly as the real machine
+reads. Every track the guest reads is kept in memory, so re-reads never touch
+the platter twice -- those replays are what the speed applies to.
 
 ## Write protection
 
@@ -216,7 +205,7 @@ eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga
 same machine running an ADF still sounds as it should when enabled.
 
 **The `[floppy] speed` option does not apply.** A physical drive is served
-at the disk's own rate; `bridge_speed` is its speed option.
+at the disk's own rate; `replay_speed` is its speed option.
 
 **Powering off releases the drive.** A real drive takes its power from the
 machine, and a bridged one behaves the same way: the power button hands the
@@ -242,7 +231,7 @@ Reading a track means waiting for the drive to capture a whole revolution,
 which takes as long as a revolution takes -- about 200 ms. A faithful
 recording -- index-aligned, or verified clean -- is kept and served from
 Copperline's own copy with no drive involvement at all, so software that
-re-reads such a track pays nothing, and `bridge_speed` can serve the
+re-reads such a track pays nothing, and `replay_speed` can serve the
 recovered cells faster than the platter turns.
 
 The head follows the emulated stepper, so the driver starts capturing while

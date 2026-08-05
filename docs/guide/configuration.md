@@ -53,8 +53,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (IBM PC cable) or `0`-`3` (Shugart) |
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
-| `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
-| `--floppy-bridge-auto-cache DFN` | `[floppy.dfN] bridge_auto_cache = true` | cache disk data while the drive is idle |
+| `--floppy-replay-speed DFN PCT` | `[floppy.dfN] replay_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
@@ -1138,7 +1137,7 @@ emulators: the operating system and most loaders tolerate them, but
 software that times its own loading against the beam, CIA timers, or music
 playback can break. The setting can be changed live from the runtime menu
 ("Floppy Speed") without restarting the machine. It applies to image-backed
-bays only; a physical drive has its own `bridge_speed`.
+bays only; a physical drive has its own `replay_speed`.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
@@ -1178,8 +1177,7 @@ write_protected = true       # emulator-level protection, on top of the tab
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "compatible"     # compatible/stalling
-# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
-# bridge_auto_cache = false      # read tracks ahead while the drive is idle
+# replay_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
 ```
 
 A bay takes either a bridge or an image, never both: the disk in the drive

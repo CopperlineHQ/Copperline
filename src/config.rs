@@ -1253,7 +1253,7 @@ impl Default for AudioConfig {
     }
 }
 
-/// Which FloppyBridge driver backs a bridged drive.
+/// Which FluxBridge driver backs a bridged drive.
 ///
 /// Named rather than indexed so a config file does not depend on the order the
 /// installed library happens to enumerate its drivers in; the name is resolved
@@ -1370,11 +1370,6 @@ pub struct FloppyBridgeConfig {
     /// As with `[floppy] speed`, software that times its own loading can
     /// notice.
     pub speed: u16,
-    /// Read tracks ahead in the background while the drive is otherwise idle.
-    /// Off by default, as the driver has it. It buys little during
-    /// a boot -- the drive is never idle then -- and moves the real head about
-    /// on its own.
-    pub auto_cache: bool,
 }
 
 impl Default for FloppyBridgeConfig {
@@ -1390,7 +1385,6 @@ impl Default for FloppyBridgeConfig {
             density: BridgeDensity::default(),
             cable: BridgeCable::default(),
             speed: DEFAULT_BRIDGE_SPEED_PERCENT,
-            auto_cache: false,
         }
     }
 }
@@ -2162,9 +2156,6 @@ pub struct ConfigOverrides {
     /// (`--floppy-bridge-speed DFN PERCENT`). Same as `[floppy.dfN]
     /// bridge_speed`.
     pub floppy_bridge_speed: [Option<u16>; 4],
-    /// Cache disk data while the drive is idle (`--floppy-bridge-auto-cache
-    /// DFN`). Same as `[floppy.dfN] bridge_auto_cache = true`.
-    pub floppy_bridge_auto_cache: [bool; 4],
 }
 
 impl ConfigOverrides {
@@ -2189,7 +2180,6 @@ impl ConfigOverrides {
             && self.floppy_bridge_mode.iter().all(Option::is_none)
             && self.floppy_bridge_density.iter().all(Option::is_none)
             && self.floppy_bridge_speed.iter().all(Option::is_none)
-            && !self.floppy_bridge_auto_cache.iter().any(|v| *v)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
@@ -2273,7 +2263,6 @@ impl ConfigOverrides {
                 && self.floppy_bridge_mode[idx].is_none()
                 && self.floppy_bridge_density[idx].is_none()
                 && self.floppy_bridge_speed[idx].is_none()
-                && !self.floppy_bridge_auto_cache[idx]
             {
                 continue;
             }
@@ -2316,9 +2305,6 @@ impl ConfigOverrides {
             }
             if let Some(speed) = self.floppy_bridge_speed[idx] {
                 drive.bridge_speed = Some(speed);
-            }
-            if self.floppy_bridge_auto_cache[idx] {
-                drive.bridge_auto_cache = Some(true);
             }
         }
         if let Some(joystick) = &self.joystick {
@@ -3227,12 +3213,12 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) bridge_cable: Option<String>,
     /// Serve captured tracks at this percentage of real speed: 100,
     /// 125 (the default), 150, 175, or 200.
-    #[serde(skip_serializing_if = "Option::is_none", alias = "replay_speed")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "bridge_speed",
+        rename = "replay_speed"
+    )]
     pub(crate) bridge_speed: Option<u16>,
-    /// Let the driver cache other cylinders while the disk is
-    /// idle. Off by default: it keeps the real drive working continuously.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) bridge_auto_cache: Option<bool>,
 }
 
 /// Convert a parsed `[ide]`/`[scsi]` drive entry into a `DriveImage`,
@@ -5063,7 +5049,6 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         density,
         cable,
         speed,
-        auto_cache: raw.bridge_auto_cache.unwrap_or(false),
     })
 }
 
@@ -7543,18 +7528,17 @@ mod tests {
             bridge_mode = "stalling"
             bridge_density = "hd"
             bridge_cable = "b"
-            bridge_speed = 125
+            replay_speed = 125
         "#,
         )?;
         let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
         assert_eq!(df0.driver, BridgeDriver::Greaseweazle);
         // Unset options take the defaults: auto-detect the interface, read
-        // without waiting for the index, sense the density, no auto-cache.
+        // without waiting for the index, and sense the density.
         assert_eq!(df0.port, None);
         assert_eq!(df0.mode, BridgeSpeedMode::Normal);
         assert_eq!(df0.density, BridgeDensity::Auto);
         assert_eq!(df0.speed, DEFAULT_BRIDGE_SPEED_PERCENT);
-        assert!(!df0.auto_cache);
 
         let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
         assert_eq!(df1.driver, BridgeDriver::DrawBridge);

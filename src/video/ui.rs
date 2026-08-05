@@ -4880,8 +4880,7 @@ fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> Gre
         | F::BridgeCable
         | F::BridgeDensity
         | F::BridgeSpeed
-        | F::BridgeServeSpeed
-        | F::BridgeAutoCache => GreyedAs::Blank,
+        | F::BridgeServeSpeed => GreyedAs::Blank,
         _ => GreyedAs::Reason,
     }
 }

@@ -2099,7 +2099,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
         // future upstream that drops a driver Copperline still offers.
         if fluxbridge::drivers().is_empty() {
             anyhow::bail!(
-                "floppy.df{idx} asks for a physical drive, but the built-in FloppyBridge \
+                "floppy.df{idx} asks for a physical drive, but the built-in FluxBridge \
                  reports no interfaces at all. This build is broken rather than \
                  misconfigured; please report it."
             );
@@ -2117,7 +2117,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             })
             .ok_or_else(|| {
                 anyhow!(
-                    "floppy.df{idx}: the built-in FloppyBridge has no {} driver",
+                    "floppy.df{idx}: the built-in FluxBridge has no {} driver",
                     bridge_cfg.driver.label()
                 )
             })?;
@@ -2142,7 +2142,6 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
                 BridgeCable::Shugart3 => DriveSelection::Drive3,
             },
             port: bridge_cfg.port.clone(),
-            auto_cache: bridge_cfg.auto_cache,
         };
         let bridge = Bridge::open(&open)
             .map_err(|e| anyhow!("floppy.df{idx}: could not open the physical drive: {e}"))?;
@@ -2166,8 +2165,8 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             fluxbridge::DriveType::Sd525 => "5.25\" SD",
         };
         let version = match fluxbridge::version() {
-            Some((major, minor)) => format!("FloppyDriveBridge v{major}.{minor}"),
-            None => "FloppyDriveBridge".to_string(),
+            Some((major, minor)) => format!("FluxBridge v{major}.{minor}"),
+            None => "FluxBridge".to_string(),
         };
         log::info!(
             "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, {version}",

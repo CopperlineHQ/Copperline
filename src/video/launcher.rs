@@ -350,7 +350,6 @@ pub enum LauncherField {
     BridgeDensity,
     BridgeSpeed,
     BridgeServeSpeed,
-    BridgeAutoCache,
     // Hard disk
     IdeMaster,
     IdeSlave,
@@ -613,7 +612,7 @@ const FLOPPY_ROWS: [Row; 14] = [
 ];
 /// The FloppyBridge settings page, shown for whichever bay was configured.
 #[cfg(feature = "fluxbridge")]
-const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
+const FLOPPY_BRIDGE_ROWS: [Row; 7] = [
     // Inert: the label is built from the loaded library's version (see
     // `bridge_library_heading`), so the text here is never drawn.
     row(F::BridgeLibrary, "", RowKind::SectionHeader),
@@ -622,8 +621,7 @@ const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
     row(F::BridgeCable, "Drive select", Cycle),
     row(F::BridgeDensity, "Density", Cycle),
     row(F::BridgeSpeed, "Read mode", Cycle),
-    row(F::BridgeServeSpeed, "Bridge speed", Cycle),
-    row(F::BridgeAutoCache, "Auto-cache", Toggle),
+    row(F::BridgeServeSpeed, "Replay speed", Cycle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -2083,7 +2081,6 @@ impl MachineSetup {
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
                 bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT)
                     .then_some(bridge.speed),
-                bridge_auto_cache: bridge.auto_cache.then_some(true),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.
                 write_protected: (!self.df_write_protected[idx]).then_some(false),
@@ -2389,11 +2386,7 @@ impl MachineSetup {
             #[cfg(feature = "fluxbridge")]
             F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
             #[cfg(feature = "fluxbridge")]
-            F::BridgeCable
-            | F::BridgeDensity
-            | F::BridgeSpeed
-            | F::BridgeServeSpeed
-            | F::BridgeAutoCache
+            F::BridgeCable | F::BridgeDensity | F::BridgeSpeed | F::BridgeServeSpeed
                 if self.bridge_edit().is_none()
                     || self.df_bridge_none[self.bridge_edit_drive]
                     || self.bridge_status == BridgeStatus::NoInterface =>
@@ -2423,11 +2416,6 @@ impl MachineSetup {
                 self.bridge_driver_supports(crate::fluxbridge::config_option::DRIVE_AB_CABLE)
                     || self
                         .bridge_driver_supports(crate::fluxbridge::config_option::SUPPORTS_SHUGART),
-                "not on this interface",
-            ),
-            #[cfg(feature = "fluxbridge")]
-            F::BridgeAutoCache => reason(
-                self.bridge_driver_supports(crate::fluxbridge::config_option::AUTO_CACHE),
                 "not on this interface",
             ),
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
@@ -2462,7 +2450,6 @@ impl MachineSetup {
             F::Df3WriteProtect => self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
-            F::BridgeAutoCache => self.bridge_edit().is_some_and(|c| c.auto_cache),
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
             F::Bezel => self.bezel,
@@ -3267,11 +3254,6 @@ impl MachineSetup {
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
-            F::BridgeAutoCache => {
-                if let Some(c) = self.bridge_edit_mut() {
-                    c.auto_cache = !c.auto_cache;
-                }
-            }
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
         }
@@ -4438,9 +4420,8 @@ mod tests {
                 cable_greyed,
                 "drive select on {driver:?}"
             );
-            // Every interface here talks over a serial port and can auto-cache.
+            // Every interface here talks over a serial port.
             assert!(setup.disabled_reason(F::BridgePort).is_none());
-            assert!(setup.disabled_reason(F::BridgeAutoCache).is_none());
         }
     }
 
@@ -4494,7 +4475,6 @@ mod tests {
             F::BridgeDensity,
             F::BridgeSpeed,
             F::BridgeServeSpeed,
-            F::BridgeAutoCache,
         ];
 
         setup.df_bridge_none[0] = false;
