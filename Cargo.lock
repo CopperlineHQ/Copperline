@@ -1222,7 +1222,7 @@ dependencies = [
 [[package]]
 name = "fluxbridge"
 version = "0.3.0"
-source = "git+https://github.com/CopperlineHQ/FluxBridge?rev=78134964752ff4276526531871b0e833f75648b0#78134964752ff4276526531871b0e833f75648b0"
+source = "git+https://github.com/CopperlineHQ/FluxBridge?rev=070ac06a6326f05ced65453ab84f15676877831f#070ac06a6326f05ced65453ab84f15676877831f"
 dependencies = [
  "bitflags 2.13.0",
  "crossbeam-channel",
