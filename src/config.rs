@@ -4891,7 +4891,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         None => [true, false, false, false],
     };
     let mut playlists: [Vec<PathBuf>; 4] = std::array::from_fn(|_| Vec::new());
-    #[cfg_attr(not(feature = "floppybridge"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "fluxbridge"), allow(unused_mut))]
     let mut bridges: [Option<FloppyBridgeConfig>; 4] = std::array::from_fn(|_| None);
     for (idx, raw_drive) in raws.into_iter().enumerate() {
         let Some(raw_drive) = raw_drive else {
@@ -4902,9 +4902,9 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         // the feature has no way to drive one, so the keys are read and
         // ignored rather than rejected: a config file shared between builds
         // stays valid, it just does nothing here.
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         let _ = &raw_drive.bridge;
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if let Some(spec) = raw_drive.bridge.as_deref() {
             let spec = spec.trim();
             if !spec.eq_ignore_ascii_case("off") && !spec.is_empty() {
@@ -4985,7 +4985,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
 }
 
 /// Parse one bay's `bridge = ...` plus its `bridge_*` settings.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<FloppyBridgeConfig> {
     let driver = match spec
         .to_ascii_lowercase()
@@ -7530,7 +7530,7 @@ mod tests {
 
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_parses_and_defaults() -> Result<()> {
         let cfg = parse_config(
@@ -7572,7 +7572,7 @@ mod tests {
 
     /// Only the listed serving speeds are accepted, by name in the error so
     /// a typo explains itself. A value between two of them is still refused.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_speed_rejects_unsupported_values() {
         for bad in [120, 160, 250] {
@@ -7591,7 +7591,7 @@ mod tests {
     }
 
     /// Every listed speed parses back as itself, the fastest included.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_speed_accepts_every_listed_value() -> Result<()> {
         for want in SUPPORTED_BRIDGE_SPEED_PERCENTS {
@@ -7610,7 +7610,7 @@ mod tests {
 
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_rejects_conflicts_and_typos() {
         // A real drive brings its own disk, so an image alongside it is a

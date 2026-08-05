@@ -25,11 +25,11 @@
 //! - `PROBE_SEEK`: `pulse` (default; one-cylinder seeks 3 ms apart, as the
 //!   emulated stepper drives the bridge) or `direct` (one seek to the target)
 
-#![cfg(feature = "floppybridge")]
+#![cfg(feature = "fluxbridge")]
 
 use std::time::{Duration, Instant};
 
-use copperline::floppybridge::{drivers, Bridge, BridgeConfig, BridgeMode};
+use copperline::fluxbridge::{drivers, Bridge, BridgeConfig, BridgeMode};
 
 const MASK: u32 = 0x5555_5555;
 

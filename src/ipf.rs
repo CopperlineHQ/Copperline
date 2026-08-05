@@ -55,7 +55,7 @@
 //! The reference decoder is SPS's closed-source `capsimg` shared library.
 //! Copperline decodes IPF itself so that a build which says it reads IPF
 //! actually does, on every platform, with nothing to download -- the same
-//! reasoning that vendors FloppyBridge in [`crate::floppybridge`] rather than
+//! reasoning that vendors FloppyBridge in [`crate::fluxbridge`] rather than
 //! dlopen-ing it.
 //!
 //! # What comes out

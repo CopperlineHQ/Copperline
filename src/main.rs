@@ -489,7 +489,7 @@ where
             }
             // Absent from a build without the feature, so an unknown-argument
             // error names it rather than the flag quietly doing nothing.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge" => {
                 const USAGE: &str = "--floppy-bridge requires DFN INTERFACE \
                                      (drawbridge, greaseweazle, supercardpro, or off)";
@@ -498,7 +498,7 @@ where
                 let interface = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 overrides.floppy_bridge[idx] = Some(interface);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-port" => {
                 const USAGE: &str = "--floppy-bridge-port requires DFN PORT";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -506,7 +506,7 @@ where
                 overrides.floppy_bridge_port[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-cable" => {
                 const USAGE: &str = "--floppy-bridge-cable requires DFN CABLE \
                                      (a or b for a PC cable, 0-3 for Shugart)";
@@ -515,7 +515,7 @@ where
                 overrides.floppy_bridge_cable[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-mode" => {
                 const USAGE: &str = "--floppy-bridge-mode requires DFN MODE \
                                      (normal, compatible, or stalling)";
@@ -524,7 +524,7 @@ where
                 overrides.floppy_bridge_mode[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-density" => {
                 const USAGE: &str = "--floppy-bridge-density requires DFN DENSITY \
                                      (auto, dd, or hd)";
@@ -533,7 +533,7 @@ where
                 overrides.floppy_bridge_density[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-speed" => {
                 const USAGE: &str =
                     "--floppy-bridge-speed requires DFN PERCENT (100, 125, 150, 175, or 200)";
@@ -542,14 +542,14 @@ where
                 let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-speed")?;
                 overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-auto-cache" => {
                 const USAGE: &str = "--floppy-bridge-auto-cache requires DFN";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-auto-cache")?;
                 overrides.floppy_bridge_auto_cache[idx] = true;
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-writable" => {
                 const USAGE: &str = "--floppy-bridge-writable requires DFN";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -1131,7 +1131,7 @@ fn print_help() {
     let midi = "";
     // A build without the feature cannot attach a physical drive at all, so
     // the flags are not listed and not accepted.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     let floppy_bridge =
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
@@ -1143,7 +1143,7 @@ fn print_help() {
          --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
-    #[cfg(not(feature = "floppybridge"))]
+    #[cfg(not(feature = "fluxbridge"))]
     let floppy_bridge = "";
     eprintln!(
         "copperline - Amiga emulator\n\
@@ -1323,7 +1323,7 @@ fn parse_floppy_speed(s: &str) -> Result<u16> {
     Ok(speed)
 }
 
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn parse_floppy_bridge_speed(s: &str) -> Result<u16> {
     const MSG: &str = "--floppy-bridge-speed PERCENT must be 100, 125, 150, 175, or 200";
     let speed: u16 = s.trim().parse().map_err(|_| anyhow!(MSG))?;
@@ -2690,7 +2690,7 @@ mod tests {
 
     /// An unsupported serving speed is refused where it is typed, naming
     /// the values that work, rather than surfacing later from config parsing.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_speed_flag_refuses_an_unsupported_percentage() {
         let err = parse(&["--floppy-bridge-speed", "df0", "120"])
@@ -2706,7 +2706,7 @@ mod tests {
     /// config file: the flags have to create the bay's table, not just fill
     /// one in.
     // The flags only exist in a build that can attach a physical drive.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_flags_configure_a_bay_with_no_config_file() -> Result<()> {
         let args = parse(&[
@@ -2757,7 +2757,7 @@ mod tests {
     /// config file put there rather than colliding with it -- a bay cannot
     /// hold both, and the command line wins.
     // The flags only exist in a build that can attach a physical drive.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_flag_replaces_a_configured_image() -> Result<()> {
         let path = std::env::temp_dir().join(format!(

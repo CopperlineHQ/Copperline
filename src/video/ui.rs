@@ -4316,8 +4316,8 @@ const BOOTABLE_LABEL: &str = "Bootable";
 /// says which build is in use, and it is the first thing worth knowing when a
 /// drive misbehaves.
 fn bridge_library_heading() -> String {
-    #[cfg(feature = "floppybridge")]
-    if let Some((major, minor)) = crate::floppybridge::version() {
+    #[cfg(feature = "fluxbridge")]
+    if let Some((major, minor)) = crate::fluxbridge::version() {
         return format!("FloppyDriveBridge v{major}.{minor}:");
     }
     "FloppyDriveBridge:".to_string()
@@ -4677,7 +4677,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     }
                     // A build without the feature has no physical-drive box to
                     // hit: the whole thing is absent rather than inert.
-                    #[cfg(feature = "floppybridge")]
+                    #[cfg(feature = "fluxbridge")]
                     if _bridge.contains(pos) {
                         if let Some(bay) = launcher::MachineSetup::drive_protect_bay(r.field) {
                             return Some(UiControl::LauncherDriveBridgeToggle(bay));
@@ -5185,9 +5185,9 @@ fn draw_launcher_row(
             }
         }
         RowKind::FloppyFlags => {
-            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let bay = launcher::MachineSetup::drive_protect_bay(r.field);
-            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let (protect_cell, bridge_cell) = launcher_floppy_flag_rects(rect, row_y);
             let mut tick = |cell: Rect, label: &str, on: bool, hot: bool| {
                 draw_panel_text(frame, cell.x, cell.y + 6, label, PANEL_TEXT, 1, scale);
@@ -5225,7 +5225,7 @@ fn draw_launcher_row(
             // Only drawn where a physical drive can actually be attached; a
             // build without the feature leaves the write-protect box alone on
             // the row rather than offering a switch that does nothing.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             if let Some(bay) = bay {
                 tick(
                     bridge_cell,
@@ -8357,7 +8357,7 @@ mod tests {
         // column stays empty rather than explaining itself. Only exists in a
         // build with the feature -- without it no bay can be bridged, so there
         // is no such page to draw.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         {
             let mut frame = vec![0u8; w * h * 4];
             let mut setup = launcher::MachineSetup::default();
@@ -8383,7 +8383,7 @@ mod tests {
                 ..Default::default()
             };
             draw(&mut frame, scale, &ui, None, None);
-            save(&frame, "launcher-floppybridge-page");
+            save(&frame, "launcher-fluxbridge-page");
         }
     }
 }

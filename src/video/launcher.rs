@@ -612,7 +612,7 @@ const FLOPPY_ROWS: [Row; 14] = [
     row(F::Df3WriteProtect, "", RowKind::FloppyFlags),
 ];
 /// The FloppyBridge settings page, shown for whichever bay was configured.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
     // Inert: the label is built from the loaded library's version (see
     // `bridge_library_heading`), so the text here is never drawn.
@@ -776,9 +776,9 @@ pub fn rows(
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
         // Unreachable without the feature: nothing offers a way in, since the
         // tick box that turns a bay over is not drawn either.
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         LauncherTab::FloppyBridge => Cow::Borrowed(&[]),
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         LauncherTab::FloppyBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
         // The Storage tab shows the IDE/SCSI options (the common case). Its
         // sub-page links are a fixed nav row at the top (see the panel code),
@@ -992,7 +992,7 @@ pub enum BridgeStatus {
 /// filter misses (an Arduino clone on a CH340 mounts as `tty.wchusbserial*`).
 /// Linux: the USB serial classes. Windows: nothing extra -- the library
 /// already walks every COM port through SetupAPI.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn host_serial_ports() -> Vec<String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -1045,11 +1045,11 @@ fn merge_port_lists(library: Vec<String>, host: Vec<String>) -> Vec<Option<Strin
 
 /// The combined port list, or the bare "Automatic" without the feature.
 fn sample_bridge_ports() -> Vec<Option<String>> {
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     {
-        merge_port_lists(crate::floppybridge::com_ports(), host_serial_ports())
+        merge_port_lists(crate::fluxbridge::com_ports(), host_serial_ports())
     }
-    #[cfg(not(feature = "floppybridge"))]
+    #[cfg(not(feature = "fluxbridge"))]
     {
         vec![None]
     }
@@ -1057,8 +1057,8 @@ fn sample_bridge_ports() -> Vec<Option<String>> {
 
 /// What the bridge can see of the host right now.
 fn bridge_status() -> BridgeStatus {
-    #[cfg(feature = "floppybridge")]
-    if crate::floppybridge::interface_connected() {
+    #[cfg(feature = "fluxbridge")]
+    if crate::fluxbridge::interface_connected() {
         return BridgeStatus::Attached;
     }
     BridgeStatus::NoInterface
@@ -2386,9 +2386,9 @@ impl MachineSetup {
             // Interface one included. With the bay bridged but no interface
             // attached or selected, only the Interface row stays live -- the
             // rest describe hardware that is not present.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeCable
             | F::BridgeDensity
             | F::BridgeSpeed
@@ -2405,7 +2405,7 @@ impl MachineSetup {
             // chip the scan does not name is selected by hand. It greys with
             // the interface set to None, and with nothing to pick (a list of
             // just "Automatic").
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgePort => {
                 if self.bridge_edit().is_none() || self.df_bridge_none[self.bridge_edit_drive] {
                     Some("no interface")
@@ -2413,22 +2413,21 @@ impl MachineSetup {
                     Some("no ports")
                 } else {
                     reason(
-                        self.bridge_driver_supports(crate::floppybridge::config_option::COM_PORT),
+                        self.bridge_driver_supports(crate::fluxbridge::config_option::COM_PORT),
                         "not on this interface",
                     )
                 }
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeCable => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::DRIVE_AB_CABLE)
-                    || self.bridge_driver_supports(
-                        crate::floppybridge::config_option::SUPPORTS_SHUGART,
-                    ),
+                self.bridge_driver_supports(crate::fluxbridge::config_option::DRIVE_AB_CABLE)
+                    || self
+                        .bridge_driver_supports(crate::fluxbridge::config_option::SUPPORTS_SHUGART),
                 "not on this interface",
             ),
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeAutoCache => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::AUTO_CACHE),
+                self.bridge_driver_supports(crate::fluxbridge::config_option::AUTO_CACHE),
                 "not on this interface",
             ),
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
@@ -2969,7 +2968,7 @@ impl MachineSetup {
                 // physical drive open: the row is gone from the page, so
                 // nothing would say why the interface was busy the next time
                 // it was asked for.
-                #[cfg(feature = "floppybridge")]
+                #[cfg(feature = "fluxbridge")]
                 for bay in self.df_bridge.iter_mut().skip(self.floppy_drives as usize) {
                     *bay = None;
                 }
@@ -3566,7 +3565,7 @@ impl MachineSetup {
     /// Without the feature there is no such thing as a bridged bay -- no tick
     /// box offers one, the config file's keys are ignored -- and this refuses
     /// as well, so no path can leave a bay in a state the build cannot honour.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn set_drive_bridged(&mut self, idx: usize, on: bool) {
         if idx >= self.df_bridge.len() || self.drive_bridged(idx) == on {
             return;
@@ -3589,7 +3588,7 @@ impl MachineSetup {
         }
     }
 
-    #[cfg(not(feature = "floppybridge"))]
+    #[cfg(not(feature = "fluxbridge"))]
     pub fn set_drive_bridged(&mut self, _idx: usize, _on: bool) {}
 
     /// The interface a bridged bay is set to use, for its media row. Naming one
@@ -3650,7 +3649,7 @@ impl MachineSetup {
     /// Offering a switch the hardware ignores is how a user ends up believing
     /// they changed something, so the ones it does not honour are greyed with
     /// the interface's name against them.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     fn bridge_driver_supports(&self, option: u32) -> bool {
         let Some(cfg) = self.bridge_edit() else {
             return false;
@@ -3659,7 +3658,7 @@ impl MachineSetup {
         // The bridge is linked in, so it always has drivers to describe. If it
         // ever answers with none there is nothing to ask, and leaving every row
         // live is better than greying out a page the user cannot then fix.
-        let drivers = crate::floppybridge::drivers();
+        let drivers = crate::fluxbridge::drivers();
         if drivers.is_empty() {
             return true;
         }
@@ -3682,11 +3681,11 @@ impl MachineSetup {
     /// names are the host's own: `/dev/cu.usbmodem101` on macOS,
     /// `/dev/ttyACM0` on Linux, `COM3` on Windows.
     fn bridge_port_options(&self) -> Vec<Option<String>> {
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         {
             self.bridge_ports.clone()
         }
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         {
             vec![None]
         }
@@ -4411,10 +4410,10 @@ mod tests {
     /// so: a DrawBridge has no drive-select line on its cable, a Greaseweazle
     /// does. Only meaningful with the library installed -- without it there is
     /// nothing to ask, and every row deliberately stays live.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn bridge_rows_grey_what_the_interface_does_not_support() {
-        if crate::floppybridge::drivers().is_empty() {
+        if crate::fluxbridge::drivers().is_empty() {
             return;
         }
         let mut setup = MachineSetup::default();
@@ -4447,7 +4446,7 @@ mod tests {
 
     /// Drive speed acts on image bays only, so the row greys exactly when
     /// every fitted bay is physical: one image bay anywhere keeps it live.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn drive_speed_greys_when_every_fitted_bay_is_physical() {
         let mut setup = MachineSetup {
@@ -4482,7 +4481,7 @@ mod tests {
     /// Interface row stays live, and with the bay pulled out from under the
     /// page (a loaded config can do that) every row greys, Interface included.
     /// With an interface attached the rows answer to the driver as before.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn bridge_page_greys_without_an_interface() {
         let mut setup = MachineSetup::default();
@@ -4547,7 +4546,7 @@ mod tests {
     /// when there is one: attached and chosen. That is what separates a row
     /// greyed with its steppers (this interface has no drive-select line)
     /// from one blanked entirely (there is no interface to ask).
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn drive_select_answers_to_an_interface_only_when_there_is_one() {
         let mut setup = MachineSetup::default();
@@ -4574,7 +4573,7 @@ mod tests {
     /// configured for.
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn a_bridged_bay_names_its_interface_only_when_one_is_attached() {
         let mut setup = MachineSetup::default();
@@ -4603,7 +4602,7 @@ mod tests {
     /// An interface of "None" keeps the tick box and the page, but the built
     /// config -- what a run uses and what a save writes -- carries no bridge:
     /// the bay is effectively unbridged until an interface is chosen.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn a_none_interface_builds_an_unbridged_bay() {
         let mut setup = MachineSetup::default();
@@ -4647,7 +4646,7 @@ mod tests {
     /// The write-protect box governs a real drive as well as an image, and it
     /// starts ticked: a bay handed a physical disk must not come up writable
     /// because nobody said otherwise.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn dropping_a_drive_releases_the_physical_one_it_was_holding() {
         let mut setup = MachineSetup {
@@ -4673,7 +4672,7 @@ mod tests {
 
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn write_protect_governs_a_bridged_bay_and_survives_a_round_trip() {
         let mut setup = MachineSetup::default();

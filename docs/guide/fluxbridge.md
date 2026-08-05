@@ -286,9 +286,9 @@ commentary: every head move, every track handed over with how long it took and
 how many attempts it cost, and the drive's state whenever a track is not ready.
 
 ```text
-floppybridge.df0 head to cylinder 40 side 0 (drive at 39)
-floppybridge.df0 waiting for track 80 (cyl 40 side 0) [ready=false disk=true motor=true at_cyl=40]
-floppybridge.df0 track 80 (cyl 40 side 0) read: 99933 bits, 6246 words, 622ms over 137 attempts, 113 cck/word
+fluxbridge.df0 head to cylinder 40 side 0 (drive at 39)
+fluxbridge.df0 waiting for track 80 (cyl 40 side 0) [ready=false disk=true motor=true at_cyl=40]
+fluxbridge.df0 track 80 (cyl 40 side 0) read: 99933 bits, 6246 words, 622ms over 137 attempts, 113 cck/word
 ```
 
 A healthy track is one revolution, so around 200ms plus whatever the seek
