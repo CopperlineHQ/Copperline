@@ -2,8 +2,8 @@
     {
         "type": "git",
         "url": "https://github.com/copperlinehq/fluxbridge",
-        "commit": "0288fa13053867d26f7589ef2d5367a989706098",
-        "dest": "flatpak-cargo/git/fluxbridge-0288fa1"
+        "commit": "38766e2ee8a92c2a9fa35d075e7a5e28d7001b26",
+        "dest": "flatpak-cargo/git/fluxbridge-38766e2"
     },
     {
         "type": "archive",
@@ -1633,12 +1633,12 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/fluxbridge-0288fa1/.\" \"cargo/vendor/fluxbridge\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/fluxbridge-38766e2/.\" \"cargo/vendor/fluxbridge\""
         ]
     },
     {
         "type": "inline",
-        "contents": "[package]\nname = \"fluxbridge\"\nversion = \"0.1.1\"\nedition = \"2024\"\nrust-version = \"1.93\"\nauthors = [\"Copperline contributors\"]\ndescription = \"Safe Rust access to DrawBridge, Greaseweazle, and SuperCard Pro floppy interfaces\"\nlicense = \"LGPL-3.0-or-later AND MPL-2.0\"\nrepository = \"https://github.com/CopperlineHQ/FluxBridge\"\nreadme = \"README.md\"\nkeywords = [\"amiga\", \"floppy\", \"flux\", \"greaseweazle\", \"drawbridge\"]\ncategories = [\"hardware-support\", \"encoding\"]\npublish = false\n\n[features]\ndefault = [\"drawbridge\", \"greaseweazle\", \"supercard-pro\", \"direct-ftdi\"]\ndrawbridge = []\ngreaseweazle = []\nsupercard-pro = []\ndirect-ftdi = [\"dep:ftdi-nusb\"]\nhardware-tests = []\n\n[dependencies]\nbitflags = \"2.9\"\ncrossbeam-channel = \"0.5.16\"\nthiserror = \"2.0.19\"\n\n[dependencies.ftdi-nusb]\nversion = \"0.2.0\"\noptional = true\n\n[dependencies.serialport]\nversion = \"4.9.0\"\ndefault-features = false\n\n[dev-dependencies]\nhex = \"0.4\"\n\n[lints.rust]\nmissing_docs = \"deny\"\nunsafe_code = \"forbid\"\n\n[lints.clippy]\ncast_possible_truncation = \"allow\"\ndoc_markdown = \"allow\"\nmatch_same_arms = \"allow\"\nmissing_errors_doc = \"allow\"\nmodule_name_repetitions = \"allow\"\nmust_use_candidate = \"allow\"\nneedless_pass_by_value = \"allow\"\nsingle_match_else = \"allow\"\nstruct_excessive_bools = \"allow\"\ntoo_many_lines = \"allow\"\nwildcard_imports = \"allow\"\n\n[lints.clippy.all]\nlevel = \"deny\"\npriority = -1\n\n[lints.clippy.pedantic]\nlevel = \"deny\"\npriority = -1\n",
+        "contents": "[package]\nname = \"fluxbridge\"\nversion = \"0.1.2\"\nedition = \"2024\"\nrust-version = \"1.93\"\nauthors = [\"Copperline contributors\"]\ndescription = \"Safe Rust access to DrawBridge, Greaseweazle, and SuperCard Pro floppy interfaces\"\nlicense = \"LGPL-3.0-or-later AND MPL-2.0\"\nrepository = \"https://github.com/CopperlineHQ/FluxBridge\"\nreadme = \"README.md\"\nkeywords = [\"amiga\", \"floppy\", \"flux\", \"greaseweazle\", \"drawbridge\"]\ncategories = [\"hardware-support\", \"encoding\"]\npublish = false\n\n[features]\ndefault = [\"drawbridge\", \"greaseweazle\", \"supercard-pro\", \"direct-ftdi\"]\ndrawbridge = []\ngreaseweazle = []\nsupercard-pro = []\ndirect-ftdi = [\"dep:ftdi-nusb\"]\nhardware-tests = []\n\n[dependencies]\nbitflags = \"2.9\"\ncrossbeam-channel = \"0.5.16\"\nthiserror = \"2.0.19\"\n\n[dependencies.ftdi-nusb]\nversion = \"0.2.0\"\noptional = true\n\n[dependencies.serialport]\nversion = \"4.9.0\"\ndefault-features = false\n\n[dev-dependencies]\nhex = \"0.4\"\n\n[lints.rust]\nmissing_docs = \"deny\"\nunsafe_code = \"forbid\"\n\n[lints.clippy]\ncast_possible_truncation = \"allow\"\ndoc_markdown = \"allow\"\nmatch_same_arms = \"allow\"\nmissing_errors_doc = \"allow\"\nmodule_name_repetitions = \"allow\"\nmust_use_candidate = \"allow\"\nneedless_pass_by_value = \"allow\"\nsingle_match_else = \"allow\"\nstruct_excessive_bools = \"allow\"\ntoo_many_lines = \"allow\"\nwildcard_imports = \"allow\"\n\n[lints.clippy.all]\nlevel = \"deny\"\npriority = -1\n\n[lints.clippy.pedantic]\nlevel = \"deny\"\npriority = -1\n",
         "dest": "cargo/vendor/fluxbridge",
         "dest-filename": "Cargo.toml"
     },
@@ -6265,7 +6265,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/copperlinehq/fluxbridge\"]\ngit = \"https://github.com/copperlinehq/fluxbridge\"\nreplace-with = \"vendored-sources\"\nrev = \"0288fa13053867d26f7589ef2d5367a989706098\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/copperlinehq/fluxbridge\"]\ngit = \"https://github.com/copperlinehq/fluxbridge\"\nreplace-with = \"vendored-sources\"\nrev = \"38766e2ee8a92c2a9fa35d075e7a5e28d7001b26\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }

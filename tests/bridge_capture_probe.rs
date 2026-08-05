@@ -24,13 +24,17 @@
 //! - `PROBE_AWAY`: how many cylinders to seek away between captures (default 20)
 //! - `PROBE_SEEK`: `pulse` (default; one-cylinder seeks 3 ms apart, as the
 //!   emulated stepper drives the bridge) or `direct` (one seek to the target)
+//! - `FLUXBRIDGE_TEST_PORT`: exact port identifier (default: automatic)
+//! - `FLUXBRIDGE_TEST_DRIVE`: `pc-a`, `pc-b`, or `shugart-0` through
+//!   `shugart-3` (default: `pc-a`)
 
 #![cfg(feature = "floppybridge")]
 
 use std::time::{Duration, Instant};
 
 use copperline::floppybridge::{
-    drivers, Bridge, BridgeConfig, DriverKind, ReadMode, Side, TrackAddress,
+    drivers, Bridge, BridgeConfig, DriveSelect, DriverKind, PortId, PortSelection, ReadMode, Side,
+    TrackAddress,
 };
 
 const MASK: u32 = 0x5555_5555;
@@ -172,9 +176,27 @@ fn open_bridge(mode: ReadMode) -> Bridge {
         .iter()
         .find(|driver| driver.kind == DriverKind::Greaseweazle)
         .expect("no greaseweazle driver in this build");
+    let drive = match env_or("FLUXBRIDGE_TEST_DRIVE", "pc-a").as_str() {
+        "pc-a" => DriveSelect::PcA,
+        "pc-b" => DriveSelect::PcB,
+        "shugart-0" => DriveSelect::Shugart0,
+        "shugart-1" => DriveSelect::Shugart1,
+        "shugart-2" => DriveSelect::Shugart2,
+        "shugart-3" => DriveSelect::Shugart3,
+        value => panic!("invalid FLUXBRIDGE_TEST_DRIVE {value:?}"),
+    };
+    let port = std::env::var("FLUXBRIDGE_TEST_PORT")
+        .map(|port| {
+            PortId::new(port)
+                .map(PortSelection::Exact)
+                .expect("valid FLUXBRIDGE_TEST_PORT")
+        })
+        .unwrap_or_default();
     Bridge::open(&BridgeConfig {
         driver: driver.kind,
         mode,
+        drive,
+        port,
         ..Default::default()
     })
     .expect("open the drive")

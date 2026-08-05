@@ -87,8 +87,8 @@ ctl-bin = ["dep:serde_json"]
 floppybridge = ["dep:fluxbridge"]
 
 [dependencies]
-# FluxBridge v0.1.1, pinned to the tag's immutable commit.
-fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge.git", rev = "0288fa13053867d26f7589ef2d5367a989706098", optional = true }
+# FluxBridge v0.1.2, pinned to the tag's immutable commit.
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge.git", rev = "38766e2ee8a92c2a9fa35d075e7a5e28d7001b26", optional = true }
 m68k = { version = "0.7.1", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
