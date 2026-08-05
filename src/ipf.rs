@@ -325,11 +325,22 @@ impl Info {
         })
     }
 
-    /// Block flags and the gap streams they point at exist only in a file the
-    /// SPS encoder wrote. A CAPS-encoded file spends the same two descriptor
-    /// words on the block and gap byte counts, so there is no gap-stream
-    /// offset to follow and the flags field is defined to read as zero -- as
-    /// it is for encoder release 1.
+    /// Whether a block descriptor's flags word can be believed. Reading gap
+    /// streams out of it needs two separate fields to be defined, and each
+    /// condition here guards one of them:
+    ///
+    /// - the encoder *type* fixes the descriptor's union: a CAPS-encoded file
+    ///   spends the word an SPS one uses for the gap-stream offset on the
+    ///   block's byte count instead, so there is no offset to follow even if
+    ///   the flags asked for one;
+    /// - the encoder *release* fixes the flags word itself, which release 1
+    ///   leaves undefined and which is therefore read as zero.
+    ///
+    /// So the flags are only acted on when both hold. Erring this way costs at
+    /// most the gap fill -- a gap whose streams are skipped is still laid down
+    /// at its declared length from the descriptor's gap byte -- whereas
+    /// trusting the word too readily would send the parser chasing a
+    /// gap-stream offset that is really a byte count.
     fn block_flags_meaningful(&self) -> bool {
         self.encoder_type != ENCODER_CAPS && self.encoder_rev != 1
     }
@@ -788,8 +799,8 @@ fn emit_slice(out: &mut Vec<bool>, prev: &mut bool, bits: &[bool], budget: usize
         &bits[..budget]
     };
     out.extend_from_slice(slice);
-    // Cells alternate clock and data, so the last data bit is the last
-    // even-indexed one written.
+    // A cell is a clock bit then a data bit, so the data bits are the odd
+    // indices and the last one is the end of the last whole cell.
     if let Some(last) = slice
         .len()
         .checked_sub(if slice.len() % 2 == 0 { 1 } else { 2 })
@@ -888,8 +899,10 @@ fn push_raw(out: &mut Vec<bool>, prev: &mut bool, sample: &[u8], bits: usize) {
     for i in 0..bits {
         let bit = sample[i / 8] & (0x80 >> (i % 8)) != 0;
         out.push(bit);
-        // Cells alternate clock and data; the run is a whole number of bytes,
-        // so it ends on a data bit.
+        // A cell is a clock bit then a data bit, so every odd index is a data
+        // bit and the last one to land is what the next encoded sample follows
+        // on from. A bit-counted sample may stop part way through a cell, which
+        // simply leaves the preceding data bit standing.
         if i % 2 == 1 {
             *prev = bit;
         }
