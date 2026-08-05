@@ -58,12 +58,12 @@ const DMACON_DISK: u16 = 1 << 4;
 const DMACON_DMAEN: u16 = 1 << 9;
 
 const MOTOR_READY_CCK: u32 = PAULA_CLOCK_HZ / 4;
-/// Whether `COPPERLINE_DIAG_FLOPPYBRIDGE` asked for the physical drive's own
+/// Whether `COPPERLINE_DIAG_FLUXBRIDGE` asked for the physical drive's own
 /// running commentary. Snapshotted, like every other diagnostic switch.
 #[cfg(feature = "fluxbridge")]
 fn bridge_diag() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_FLOPPYBRIDGE"))
+    *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_FLUXBRIDGE"))
 }
 
 /// How long to leave a bridged drive alone after it says a track is not ready
@@ -277,6 +277,13 @@ pub struct FloppyController {
     /// save states loadable: the default `false` just costs one settling tick.
     #[serde(default)]
     idle_cache: bool,
+    /// Media changes bridged bays have noticed since the frontend last asked:
+    /// `(bay, present)`. The log line has already said it in full; this feeds
+    /// the same on-screen message an image insert or eject raises. Host-side
+    /// and transient, so never serialized.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_media_events: Vec<(usize, bool)>,
 }
 
 impl Default for FloppyController {
@@ -318,6 +325,8 @@ impl Default for FloppyController {
             read_shifter: PaulaDiskReadDpllFifo::new(),
             // Idle at power-on; the first tick confirms it.
             idle_cache: true,
+            #[cfg(feature = "fluxbridge")]
+            bridge_media_events: Vec::new(),
         }
     }
 }
@@ -798,6 +807,12 @@ impl FloppyController {
                     }
                 } else {
                     info!("floppy.df{idx} disk ejected (physical drive)");
+                }
+                // Bounded in case nothing ever drains it (a headless run):
+                // these are hand-speed events, and the frontend takes them
+                // every frame, so the cap is never met in a windowed session.
+                if self.bridge_media_events.len() < 64 {
+                    self.bridge_media_events.push((idx, drive.bridge_media));
                 }
             }
             if changed {
@@ -1582,6 +1597,14 @@ impl FloppyController {
         std::mem::take(&mut self.sound_steps)
     }
 
+    /// Drains the media changes bridged bays have noticed: `(bay, present)`,
+    /// oldest first. The frontend raises the same on-screen message an image
+    /// insert or eject shows; the log line has already said it in full.
+    #[cfg(feature = "fluxbridge")]
+    pub fn take_bridge_media_events(&mut self) -> Vec<(usize, bool)> {
+        std::mem::take(&mut self.bridge_media_events)
+    }
+
     /// Per-drive platter spin level for the drive sound effects: 0.0
     /// stopped to 1.0 at full speed. Rides the motor spin-up/spin-down
     /// accumulator, so the audible motor glides over the real ~0.5 s
@@ -2084,25 +2107,18 @@ impl FloppyController {
                 // in proportionally less time.
                 let word_cck =
                     (Self::word_cck_for_track_words(words.len()) * 100 / serve_percent).max(1);
-                // Whether this recording can be trusted beyond a single pass.
-                // An index-aligned capture can by construction. An index-less
-                // one is assembled by pattern-matching where the revolution
-                // repeats, and on a small fraction of captures that match is
-                // ambiguous and splices duplicated flux mid-track -- damage
-                // that is the capture's, not the disk's. A capture that
-                // decodes as a complete AmigaDOS track with every checksum
-                // passing (read as the ring it will be served as) is proven
-                // faithful, join included; anything else is served once and
+                // Whether this recording can be trusted beyond a single pass
+                // is FluxBridge's own verdict: index-aligned captures close
+                // on themselves by construction, and an index-less one is
+                // kept only when the library proved it -- the join by pattern
+                // matching, the decode as a complete AmigaDOS track with
+                // every checksum passing. Anything less is served once and
                 // fetched afresh next time, so a retry always reaches new
-                // flux. Formats the scan does not recognise are simply never
+                // flux; formats the library cannot verify are simply never
                 // kept in index-less mode, which costs a re-read on revisit
                 // and never costs correctness.
-                let scan = crate::fluxbridge::scan::scan_revolution(&words, bits);
-                let keep = bridge.index_aligned()
-                    || matches!(
-                        scan,
-                        crate::fluxbridge::scan::RevolutionScan::CleanAmigaDos { .. }
-                    );
+                let quality = bridge.last_quality();
+                let keep = quality.reusable();
                 // How long the drive took, and how many times it had to be
                 // asked, is what separates a disk the head cannot read from an
                 // interface that is slow: a healthy DD track is one revolution,
@@ -2121,7 +2137,7 @@ impl FloppyController {
                     },
                     "fluxbridge.df{idx} track {track} (cyl {cylinder} side {}) read: \
                      {bits} bits, {} words, {waited_ms}ms over {} attempt{}, \
-                     {word_cck} cck/word, {scan:?}{}",
+                     {word_cck} cck/word, {quality:?}{}",
                     u8::from(side),
                     words.len(),
                     drive.bridge_attempts,
@@ -2879,7 +2895,7 @@ impl TrackRev {
     /// arrived at a track the interface has not finished capturing.
     ///
     /// Solid ones, which is what the hardware reads off unwritten media and
-    /// what the FloppyBridge library itself hands back before a buffer is
+    /// what the FluxBridge library itself hands back before a buffer is
     /// ready. It cannot match a sync word, so nothing is recovered from it --
     /// the point is only that the platter keeps turning while the capture
     /// completes, so the guest's own rotational wait overlaps it rather than

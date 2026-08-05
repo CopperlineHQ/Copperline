@@ -3654,6 +3654,18 @@ impl ApplicationHandler for App {
                 }
             }
             self.refresh_tool_windows_paced(event_loop);
+            // A disk swapped by hand in a bridged bay is the one media change
+            // no menu or drop initiated, so its message is raised here from
+            // the drive's own report -- the same style an image insert or
+            // eject shows. The log already carries the detail.
+            #[cfg(feature = "fluxbridge")]
+            for (bay, present) in self.emu.bus_mut().floppy.take_bridge_media_events() {
+                self.show_osd(if present {
+                    format!("DF{bay}: disk inserted")
+                } else {
+                    format!("DF{bay}: ejected")
+                });
+            }
         }
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
@@ -5622,7 +5634,7 @@ impl App {
             UiControl::LauncherBridgeConfigure(bay) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.set_bridge_edit_drive(bay);
-                    state.tab = crate::video::launcher::LauncherTab::FloppyBridge;
+                    state.tab = crate::video::launcher::LauncherTab::FluxBridge;
                     state.status = None;
                 }
             }

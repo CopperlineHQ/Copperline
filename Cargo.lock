@@ -636,7 +636,7 @@ dependencies = [
  "jni 0.21.1",
  "js-sys",
  "libc",
- "mach2 0.4.3",
+ "mach2",
  "ndk 0.8.0",
  "ndk-context",
  "oboe",
@@ -1221,12 +1221,11 @@ dependencies = [
 
 [[package]]
 name = "fluxbridge"
-version = "0.1.2"
-source = "git+https://github.com/CopperlineHQ/FluxBridge?rev=602d44d0cfae5f56dc48499b0ebbc535ebd59fe6#602d44d0cfae5f56dc48499b0ebbc535ebd59fe6"
+version = "0.2.0"
+source = "git+https://github.com/CopperlineHQ/FluxBridge?rev=c1f13b32b4c1a625b8c1646aa56812561cf38e1c#c1f13b32b4c1a625b8c1646aa56812561cf38e1c"
 dependencies = [
  "bitflags 2.13.0",
  "crossbeam-channel",
- "ftdi-nusb",
  "serialport",
  "thiserror 2.0.19",
 ]
@@ -1275,18 +1274,6 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
-
-[[package]]
-name = "ftdi-nusb"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76e3391b248c458fce989a635a3afdd2297764e17645172c1d5fabc1779231de"
-dependencies = [
- "log",
- "maybe-async",
- "nusb",
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "futures-core"
@@ -1587,17 +1574,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "617ee6cf8e3f66f3b4ea67a4058564628cde41901316e19f559e14c7c72c5e7b"
 dependencies = [
  "core-foundation-sys",
- "mach2 0.4.3",
-]
-
-[[package]]
-name = "io-kit-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06d3a048d09fbb6597dbf7c69f40d14df4a49487db1487191618c893fc3b1c26"
-dependencies = [
- "core-foundation-sys",
- "mach2 0.5.0",
+ "mach2",
 ]
 
 [[package]]
@@ -1883,30 +1860,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mach2"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
-
-[[package]]
-name = "maybe-async"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "746873a384ad60adc5db74471dfaba74bd278afbdcfd81db93fafcdfc8b5ca0c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
 
 [[package]]
 name = "memchr"
@@ -2124,28 +2081,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "nusb"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18ef13beb3b3a8fc16fd7aea912ebd3d45dde00a9a5b968d0742297468065845"
-dependencies = [
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "futures-core",
- "io-kit-sys 0.5.0",
- "js-sys",
- "linux-raw-sys 0.12.1",
- "log",
- "once_cell",
- "rustix 1.1.4",
- "slab",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2900,7 +2835,7 @@ checksum = "e6b6ebd13bc009aef9cd476c1310d49ac354d36e240cf1bd753290f3dc7199a7"
 dependencies = [
  "bitflags 1.3.2",
  "libc",
- "mach2 0.4.3",
+ "mach2",
  "windows-sys 0.52.0",
 ]
 
@@ -3130,8 +3065,8 @@ dependencies = [
  "cfg-if",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "io-kit-sys 0.4.1",
- "mach2 0.4.3",
+ "io-kit-sys",
+ "mach2",
  "nix 0.26.4",
  "scopeguard",
  "unescaper",
@@ -3712,7 +3647,7 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
- "mach2 0.4.3",
+ "mach2",
  "memfd",
  "object",
  "once_cell",

@@ -145,8 +145,10 @@ libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
 # Physical floppy drives: CopperlineHQ/FluxBridge, pinned by revision. Pure
 # Rust -- the interfaces sit behind one typed API with no C or C++ ABI, so
-# nothing has to be installed and nothing is vendored.
-fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", rev = "602d44d0cfae5f56dc48499b0ebbc535ebd59fe6", optional = true }
+# nothing has to be installed and nothing is vendored. Only the drivers named
+# here are compiled in, and the launcher's interface list follows this line:
+# adding a driver Copperline supports means adding its feature, nothing else.
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", rev = "c1f13b32b4c1a625b8c1646aa56812561cf38e1c", default-features = false, features = ["greaseweazle"], optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"

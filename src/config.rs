@@ -1270,12 +1270,13 @@ pub enum BridgeDriver {
 }
 
 impl BridgeDriver {
-    /// The substring that identifies this driver in the library's own list.
+    /// The library's own configuration token for this driver, which is what
+    /// `fluxbridge::driver_named` resolves.
     pub fn match_token(self) -> &'static str {
         match self {
             BridgeDriver::DrawBridge => "drawbridge",
             BridgeDriver::Greaseweazle => "greaseweazle",
-            BridgeDriver::SupercardPro => "supercard",
+            BridgeDriver::SupercardPro => "supercardpro",
         }
     }
 
@@ -1290,14 +1291,15 @@ impl BridgeDriver {
 
 /// How hard the driver works to reproduce the disk's real timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BridgeSpeedMode {
+pub enum BridgeReadMode {
     /// Captures wherever the head happens to be, saving the wait for the index
-    /// -- most of a revolution per track. A revolution that begins mid-track
-    /// has its two ends a revolution apart in time, so it cannot be turned
-    /// under the head twice: once round, Copperline fetches the recording that
-    /// followed it, as the head itself would have carried on into. Reads the
-    /// same disks as `Compatible` and reaches a Workbench 1.3 desktop
-    /// appreciably sooner.
+    /// -- most of a revolution per track -- and serves the capture while the
+    /// platter is still turning it, exactly as a real head does. The
+    /// revolution's two ends are joined where the recording repeats; a join
+    /// the library can prove, or a capture verified as a whole AmigaDOS
+    /// track, replays indefinitely, and one it cannot prove is served once
+    /// and re-read fresh. Reads the same disks as `Compatible` and reaches a
+    /// Workbench desktop appreciably sooner.
     /// The default.
     #[default]
     Normal,
@@ -1337,20 +1339,24 @@ pub enum BridgeCable {
     Shugart3,
 }
 
-/// Serving speeds a bridged bay accepts, as percentages of the platter's
+/// Replay speeds a bridged bay accepts, as percentages of the platter's
 /// real speed. Shared by the config parser, the CLI, and the launcher's
 /// cycle row so all three offer the same set.
 pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 2] = [100, 200];
 
-/// The serving speed a bridged bay uses unless told otherwise.
-pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 100;
+/// The replay speed a bridged bay uses unless told otherwise: fast. A
+/// track's first read always arrives at the platter's own pace, so this only
+/// decides how re-reads are served -- and waiting out a full rotation to
+/// replay bits already in hand helps nobody. `normal` is the opt-in for
+/// software that times its own drive.
+pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 200;
 
 /// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
 ///
 /// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
 /// path: whichever of the two is present for a bay supplies its media.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FloppyBridgeConfig {
+pub struct FluxBridgeConfig {
     pub driver: BridgeDriver,
     /// Emulator-level write protection, on top of the disk's own tab.
     /// Defaults to true, exactly as it does for an image, so writing to a real
@@ -1360,19 +1366,19 @@ pub struct FloppyBridgeConfig {
     pub write_protected: bool,
     /// `None` auto-detects the interface, which every current driver supports.
     pub port: Option<String>,
-    pub mode: BridgeSpeedMode,
+    pub mode: BridgeReadMode,
     pub density: BridgeDensity,
     pub cable: BridgeCable,
-    /// How fast a captured revolution is served to the guest, as a
-    /// percentage of the platter's real speed: `100`, `125` (the default),
-    /// `150`, `175`, or `200`. Serving faster shortens rotational waits on
-    /// tracks already in hand; capturing one still takes a full revolution.
-    /// As with `[floppy] speed`, software that times its own loading can
-    /// notice.
+    /// How fast replays of already-captured revolutions are served to the
+    /// guest, as a percentage of the platter's real speed: `200` ("fast",
+    /// the default) or `100` ("normal"). A track's first read always streams
+    /// at the platter's own pace; this only compresses the wait when the
+    /// guest asks for a track already in hand. As with `[floppy] speed`,
+    /// software that times its own loading can notice.
     pub speed: u16,
 }
 
-impl Default for FloppyBridgeConfig {
+impl Default for FluxBridgeConfig {
     fn default() -> Self {
         Self {
             driver: BridgeDriver::default(),
@@ -1381,7 +1387,7 @@ impl Default for FloppyBridgeConfig {
             // quietly hand out a writable real disk.
             write_protected: true,
             port: None,
-            mode: BridgeSpeedMode::default(),
+            mode: BridgeReadMode::default(),
             density: BridgeDensity::default(),
             cable: BridgeCable::default(),
             speed: DEFAULT_BRIDGE_SPEED_PERCENT,
@@ -1394,7 +1400,7 @@ pub struct FloppyConfig {
     pub drives: [Option<FloppyDriveConfig>; 4],
     /// Real drives, by bay. A bay with a bridge here has no entry in
     /// `drives`: the physical disk is its media.
-    pub bridges: [Option<FloppyBridgeConfig>; 4],
+    pub bridges: [Option<FluxBridgeConfig>; 4],
     /// Emulated drive speed as a data-rate percentage: 100 (real speed),
     /// 200/400/800 (that many times faster), or 0 for turbo, where DMA
     /// transfers complete almost instantly. Values above 100 keep the full
@@ -4887,7 +4893,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
     };
     let mut playlists: [Vec<PathBuf>; 4] = std::array::from_fn(|_| Vec::new());
     #[cfg_attr(not(feature = "fluxbridge"), allow(unused_mut))]
-    let mut bridges: [Option<FloppyBridgeConfig>; 4] = std::array::from_fn(|_| None);
+    let mut bridges: [Option<FluxBridgeConfig>; 4] = std::array::from_fn(|_| None);
     for (idx, raw_drive) in raws.into_iter().enumerate() {
         let Some(raw_drive) = raw_drive else {
             continue;
@@ -4981,7 +4987,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
 
 /// Parse one bay's `bridge = ...` plus its `bridge_*` settings.
 #[cfg(feature = "fluxbridge")]
-fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<FloppyBridgeConfig> {
+fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<FluxBridgeConfig> {
     let driver = match spec
         .to_ascii_lowercase()
         .replace([' ', '-', '_'], "")
@@ -4997,13 +5003,13 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
     };
 
     let mode = match raw.bridge_mode.as_deref().map(str::trim) {
-        None => BridgeSpeedMode::default(),
-        Some(s) if s.eq_ignore_ascii_case("compatible") => BridgeSpeedMode::Compatible,
-        Some(s) if s.eq_ignore_ascii_case("stalling") => BridgeSpeedMode::Stalling,
+        None => BridgeReadMode::default(),
+        Some(s) if s.eq_ignore_ascii_case("compatible") => BridgeReadMode::Compatible,
+        Some(s) if s.eq_ignore_ascii_case("stalling") => BridgeReadMode::Stalling,
         // The driver's own enum calls this one Fast. Copperline calls it
         // normal; both spellings are accepted.
         Some(s) if s.eq_ignore_ascii_case("normal") || s.eq_ignore_ascii_case("fast") => {
-            BridgeSpeedMode::Normal
+            BridgeReadMode::Normal
         }
         // "turbo" is not a read mode: it intercepts AmigaDOS calls rather
         // than reading the disk, which is not something an emulator modelling
@@ -5056,7 +5062,7 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         ),
     };
 
-    Ok(FloppyBridgeConfig {
+    Ok(FluxBridgeConfig {
         driver,
         write_protected: raw.write_protected.unwrap_or(true),
         port,
@@ -7551,14 +7557,14 @@ mod tests {
         // Unset options take the defaults: auto-detect the interface, read
         // without waiting for the index, and sense the density.
         assert_eq!(df0.port, None);
-        assert_eq!(df0.mode, BridgeSpeedMode::Normal);
+        assert_eq!(df0.mode, BridgeReadMode::Normal);
         assert_eq!(df0.density, BridgeDensity::Auto);
         assert_eq!(df0.speed, DEFAULT_BRIDGE_SPEED_PERCENT);
 
         let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
         assert_eq!(df1.driver, BridgeDriver::DrawBridge);
         assert_eq!(df1.port.as_deref(), Some("/dev/tty.usbmodem1111301"));
-        assert_eq!(df1.mode, BridgeSpeedMode::Stalling);
+        assert_eq!(df1.mode, BridgeReadMode::Stalling);
         assert_eq!(df1.density, BridgeDensity::Hd);
         assert_eq!(df1.cable, BridgeCable::DriveB);
         assert_eq!(df1.speed, 200);
@@ -7672,7 +7678,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .mode,
-            BridgeSpeedMode::Normal
+            BridgeReadMode::Normal
         );
         let err = parse_config(
             r#"

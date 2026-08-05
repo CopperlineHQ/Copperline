@@ -24,9 +24,9 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
-    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
-    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd,
-    Overscan, PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
+    BridgeDriver, BridgeReadMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
+    FluxBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd, Overscan,
+    PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
     RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
     WarpSpeed, BOOT_PRI_NEVER,
 };
@@ -172,8 +172,8 @@ pub enum LauncherTab {
     Rom,
     Floppy,
     Storage,
-    /// FloppyBridge settings for one bay, reached from its Configure button.
-    FloppyBridge,
+    /// FluxBridge settings for one bay, reached from its Configure button.
+    FluxBridge,
     BootPriority,
     HostFs,
     Cd,
@@ -215,7 +215,7 @@ impl LauncherTab {
             LauncherTab::Memory => "Memory",
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
-            LauncherTab::FloppyBridge => "FloppyBridge",
+            LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
@@ -237,7 +237,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 LauncherTab::Storage
             }
-            LauncherTab::FloppyBridge => LauncherTab::Floppy,
+            LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
         }
@@ -251,7 +251,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 Some(LauncherTab::Storage)
             }
-            LauncherTab::FloppyBridge => Some(LauncherTab::Floppy),
+            LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
     }
@@ -348,8 +348,8 @@ pub enum LauncherField {
     BridgePort,
     BridgeCable,
     BridgeDensity,
-    BridgeSpeed,
-    BridgeServeSpeed,
+    BridgeReadMode,
+    BridgeReplaySpeed,
     // Hard disk
     IdeMaster,
     IdeSlave,
@@ -592,7 +592,7 @@ const ROM_ROWS: [Row; 2] = [
 // with the drive's rows when the drive is not wired in.
 // Each wired drive is a greyed "DFn:" heading, its media row, then the two
 // tick boxes that share a line beneath. The media row shows an image path with
-// Browse/Clear, or -- once FloppyBridge is ticked -- the real interface in use
+// Browse/Clear, or -- once FluxBridge is ticked -- the real interface in use
 // with a Configure button onto its settings.
 const FLOPPY_ROWS: [Row; 14] = [
     row(F::FloppyDrives, "Drives", Cycle),
@@ -610,7 +610,7 @@ const FLOPPY_ROWS: [Row; 14] = [
     row(F::Df3Image, "  Disk image", RowKind::FloppyMedia),
     row(F::Df3WriteProtect, "", RowKind::FloppyFlags),
 ];
-/// The FloppyBridge settings page, shown for whichever bay was configured.
+/// The FluxBridge settings page, shown for whichever bay was configured.
 #[cfg(feature = "fluxbridge")]
 const FLOPPY_BRIDGE_ROWS: [Row; 7] = [
     // Inert: the label is built from the loaded library's version (see
@@ -620,8 +620,8 @@ const FLOPPY_BRIDGE_ROWS: [Row; 7] = [
     row(F::BridgePort, "Serial port", Cycle),
     row(F::BridgeCable, "Drive select", Cycle),
     row(F::BridgeDensity, "Density", Cycle),
-    row(F::BridgeSpeed, "Read mode", Cycle),
-    row(F::BridgeServeSpeed, "Replay speed", Cycle),
+    row(F::BridgeReadMode, "Read mode", Cycle),
+    row(F::BridgeReplaySpeed, "Replay speed", Cycle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -775,9 +775,9 @@ pub fn rows(
         // Unreachable without the feature: nothing offers a way in, since the
         // tick box that turns a bay over is not drawn either.
         #[cfg(not(feature = "fluxbridge"))]
-        LauncherTab::FloppyBridge => Cow::Borrowed(&[]),
+        LauncherTab::FluxBridge => Cow::Borrowed(&[]),
         #[cfg(feature = "fluxbridge")]
-        LauncherTab::FloppyBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
+        LauncherTab::FluxBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
         // The Storage tab shows the IDE/SCSI options (the common case). Its
         // sub-page links are a fixed nav row at the top (see the panel code),
         // in the same place as each sub-page's Back button, so they are not part
@@ -971,9 +971,8 @@ const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
 /// How close a bay is to actually having a physical drive behind it.
 ///
-/// The two ways it can fail look identical from the outside but need opposite
-/// fixes -- install the library, or plug the interface in -- so the launcher
-/// keeps them apart rather than saying "None" to both.
+/// The library is compiled in, so the only thing that can be missing is the
+/// hardware itself; the launcher says so plainly rather than "None".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeStatus {
     /// Nothing the bridge recognises is plugged in. The bridge itself is
@@ -1091,19 +1090,39 @@ fn bridge_density_name(d: BridgeDensity) -> &'static str {
     }
 }
 
-fn bridge_mode_name(m: BridgeSpeedMode) -> &'static str {
+fn bridge_mode_name(m: BridgeReadMode) -> &'static str {
     match m {
-        BridgeSpeedMode::Compatible => "compatible",
-        BridgeSpeedMode::Normal => "normal",
-        BridgeSpeedMode::Stalling => "stalling",
+        BridgeReadMode::Compatible => "compatible",
+        BridgeReadMode::Normal => "normal",
+        BridgeReadMode::Stalling => "stalling",
     }
 }
 
-const BRIDGE_DRIVERS: [BridgeDriver; 3] = [
-    BridgeDriver::DrawBridge,
-    BridgeDriver::Greaseweazle,
-    BridgeDriver::SupercardPro,
-];
+/// The interfaces the Interface row offers, straight from the FluxBridge
+/// build: the library's own driver table decides what exists, in its own
+/// order, so compiling a driver in is the whole job of adding it here.
+#[cfg(feature = "fluxbridge")]
+fn bridge_drivers() -> Vec<BridgeDriver> {
+    crate::fluxbridge::drivers()
+        .iter()
+        .filter_map(|driver| {
+            [
+                BridgeDriver::DrawBridge,
+                BridgeDriver::Greaseweazle,
+                BridgeDriver::SupercardPro,
+            ]
+            .into_iter()
+            .find(|kind| kind.match_token() == driver.token)
+        })
+        .collect()
+}
+
+/// Without the bridge the page is unreachable, but the row still needs a
+/// value to show.
+#[cfg(not(feature = "fluxbridge"))]
+fn bridge_drivers() -> Vec<BridgeDriver> {
+    vec![BridgeDriver::default()]
+}
 const BRIDGE_CABLES: [BridgeCable; 6] = [
     BridgeCable::DriveA,
     BridgeCable::DriveB,
@@ -1117,10 +1136,10 @@ const BRIDGE_DENSITIES: [BridgeDensity; 3] =
 // The driver's fourth mode, Turbo, is absent: it answers AmigaDOS calls
 // instead of reading the disk, so there is nothing for a drive model to do
 // with it.
-const BRIDGE_SPEEDS: [BridgeSpeedMode; 3] = [
-    BridgeSpeedMode::Normal,
-    BridgeSpeedMode::Compatible,
-    BridgeSpeedMode::Stalling,
+const BRIDGE_READ_MODES: [BridgeReadMode; 3] = [
+    BridgeReadMode::Normal,
+    BridgeReadMode::Compatible,
+    BridgeReadMode::Stalling,
 ];
 const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Auto,
@@ -1129,7 +1148,7 @@ const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
 ];
 const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
 // The bridge speed row cycles the same set the config and CLI accept.
-use crate::config::SUPPORTED_BRIDGE_SPEED_PERCENTS as BRIDGE_SERVE_SPEEDS;
+use crate::config::SUPPORTED_BRIDGE_SPEED_PERCENTS as BRIDGE_REPLAY_SPEEDS;
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
     WarpSpeed::X2,
@@ -1245,13 +1264,13 @@ pub struct MachineSetup {
     df_write_protected: [bool; 4],
     /// A real drive on this bay instead of an image. `None` is the ordinary
     /// image-backed drive.
-    df_bridge: [Option<FloppyBridgeConfig>; 4],
+    df_bridge: [Option<FluxBridgeConfig>; 4],
     /// The bay's interface is set to "None": still a physical-drive bay in
     /// the launcher, but with no interface to drive it -- the run and the
     /// written config treat it as unbridged. Selected automatically when a
     /// bay is bridged with nothing attached.
     df_bridge_none: [bool; 4],
-    /// Which bay the FloppyBridge settings page is showing. The page itself is
+    /// Which bay the FluxBridge settings page is showing. The page itself is
     /// one set of rows; this says whose values they are.
     bridge_edit_drive: usize,
     /// What the library could see the last time we looked. Sampled when the
@@ -2069,7 +2088,7 @@ impl MachineSetup {
             .as_ref()
             .filter(|_| !self.df_bridge_none[idx])
         {
-            let default = FloppyBridgeConfig::default();
+            let default = FluxBridgeConfig::default();
             return Some(RawFloppyDrive {
                 bridge: Some(bridge_driver_name(bridge.driver).to_string()),
                 bridge_port: bridge.port.clone(),
@@ -2079,8 +2098,18 @@ impl MachineSetup {
                     .then(|| bridge_density_name(bridge.density).to_string()),
                 bridge_mode: (bridge.mode != default.mode)
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
-                bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT)
-                    .then(|| crate::config::RawReplaySpeed::Word("fast".into())),
+                bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT).then(
+                    || {
+                        crate::config::RawReplaySpeed::Word(
+                            if bridge.speed == 200 {
+                                "fast"
+                            } else {
+                                "normal"
+                            }
+                            .into(),
+                        )
+                    },
+                ),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.
                 write_protected: (!self.df_write_protected[idx]).then_some(false),
@@ -2101,7 +2130,7 @@ impl MachineSetup {
             // write_protected defaults to true; only an unprotected drive is
             // written explicitly.
             write_protected: (!self.df_write_protected[idx]).then_some(false),
-            // Bridges are emitted by the FloppyBridge page, not the image rows.
+            // Bridges are emitted by the FluxBridge page, not the image rows.
             ..RawFloppyDrive::default()
         })
     }
@@ -2386,7 +2415,7 @@ impl MachineSetup {
             #[cfg(feature = "fluxbridge")]
             F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
             #[cfg(feature = "fluxbridge")]
-            F::BridgeCable | F::BridgeDensity | F::BridgeSpeed | F::BridgeServeSpeed
+            F::BridgeCable | F::BridgeDensity | F::BridgeReadMode | F::BridgeReplaySpeed
                 if self.bridge_edit().is_none()
                     || self.df_bridge_none[self.bridge_edit_drive]
                     || self.bridge_status == BridgeStatus::NoInterface =>
@@ -2684,13 +2713,13 @@ impl MachineSetup {
                 Some(BridgeDensity::Hd) => "HD only".to_string(),
                 None => "(none)".to_string(),
             },
-            F::BridgeSpeed => match self.bridge_edit().map(|c| c.mode) {
-                Some(BridgeSpeedMode::Compatible) => "Compatible".to_string(),
-                Some(BridgeSpeedMode::Normal) => "Normal".to_string(),
-                Some(BridgeSpeedMode::Stalling) => "Stalling".to_string(),
+            F::BridgeReadMode => match self.bridge_edit().map(|c| c.mode) {
+                Some(BridgeReadMode::Compatible) => "Compatible".to_string(),
+                Some(BridgeReadMode::Normal) => "Normal".to_string(),
+                Some(BridgeReadMode::Stalling) => "Stalling".to_string(),
                 None => "(none)".to_string(),
             },
-            F::BridgeServeSpeed => match self.bridge_edit().map_or(100, |c| c.speed) {
+            F::BridgeReplaySpeed => match self.bridge_edit().map_or(100, |c| c.speed) {
                 200 => "Fast".to_string(),
                 _ => "Normal".to_string(),
             },
@@ -3130,28 +3159,28 @@ impl MachineSetup {
             F::BridgeDevice => {
                 // "None" sits before the first driver in the cycle: from it,
                 // forward reaches the first interface, backward the last.
+                let drivers = bridge_drivers();
                 let bay = self.bridge_edit_drive;
-                if self.bridge_edit().is_some() {
+                if self.bridge_edit().is_some() && !drivers.is_empty() {
                     if self.df_bridge_none[bay] {
                         self.df_bridge_none[bay] = false;
                         let end = if forward {
-                            BRIDGE_DRIVERS[0]
+                            drivers[0]
                         } else {
-                            BRIDGE_DRIVERS[BRIDGE_DRIVERS.len() - 1]
+                            drivers[drivers.len() - 1]
                         };
                         if let Some(c) = self.bridge_edit_mut() {
                             c.driver = end;
                         }
                     } else {
-                        let (first, last) =
-                            (BRIDGE_DRIVERS[0], BRIDGE_DRIVERS[BRIDGE_DRIVERS.len() - 1]);
+                        let (first, last) = (drivers[0], drivers[drivers.len() - 1]);
                         let at_edge = self
                             .bridge_edit()
                             .is_some_and(|c| c.driver == if forward { last } else { first });
                         if at_edge {
                             self.df_bridge_none[bay] = true;
                         } else if let Some(c) = self.bridge_edit_mut() {
-                            c.driver = cycle_slice(&BRIDGE_DRIVERS, c.driver, forward);
+                            c.driver = cycle_slice(&drivers, c.driver, forward);
                         }
                     }
                 }
@@ -3179,14 +3208,14 @@ impl MachineSetup {
                     c.density = cycle_slice(&BRIDGE_DENSITIES, c.density, forward);
                 }
             }
-            F::BridgeSpeed => {
+            F::BridgeReadMode => {
                 if let Some(c) = self.bridge_edit_mut() {
-                    c.mode = cycle_slice(&BRIDGE_SPEEDS, c.mode, forward);
+                    c.mode = cycle_slice(&BRIDGE_READ_MODES, c.mode, forward);
                 }
             }
-            F::BridgeServeSpeed => {
+            F::BridgeReplaySpeed => {
                 if let Some(c) = self.bridge_edit_mut() {
-                    c.speed = cycle_slice(&BRIDGE_SERVE_SPEEDS, c.speed, forward);
+                    c.speed = cycle_slice(&BRIDGE_REPLAY_SPEEDS, c.speed, forward);
                 }
             }
             F::AudioStereoSeparation => {
@@ -3555,7 +3584,7 @@ impl MachineSetup {
         }
         if on {
             self.df_playlists[idx].clear();
-            self.df_bridge[idx] = Some(FloppyBridgeConfig::default());
+            self.df_bridge[idx] = Some(FluxBridgeConfig::default());
             // Look again now: this is the moment the user expects to be told
             // whether there is anything on the other end.
             self.bridge_status = bridge_status();
@@ -3591,7 +3620,7 @@ impl MachineSetup {
         }
     }
 
-    /// What the library can see, for the FloppyBridge page's heading.
+    /// What the library can see, for the FluxBridge page's heading.
     pub fn bridge_status(&self) -> BridgeStatus {
         self.bridge_status
     }
@@ -3615,12 +3644,12 @@ impl MachineSetup {
             && self.bridge_status == BridgeStatus::Attached
     }
 
-    /// The settings being shown on the FloppyBridge page.
-    fn bridge_edit(&self) -> Option<&FloppyBridgeConfig> {
+    /// The settings being shown on the FluxBridge page.
+    fn bridge_edit(&self) -> Option<&FluxBridgeConfig> {
         self.df_bridge[self.bridge_edit_drive].as_ref()
     }
 
-    fn bridge_edit_mut(&mut self) -> Option<&mut FloppyBridgeConfig> {
+    fn bridge_edit_mut(&mut self) -> Option<&mut FluxBridgeConfig> {
         self.df_bridge[self.bridge_edit_drive].as_mut()
     }
 
@@ -3637,23 +3666,11 @@ impl MachineSetup {
         let Some(cfg) = self.bridge_edit() else {
             return false;
         };
-        let token = cfg.driver.match_token();
-        // The bridge is linked in, so it always has drivers to describe. If it
-        // ever answers with none there is nothing to ask, and leaving every row
-        // live is better than greying out a page the user cannot then fix.
-        let drivers = crate::fluxbridge::drivers();
-        if drivers.is_empty() {
-            return true;
-        }
-        drivers
-            .iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .is_none_or(|d| d.supports(option))
+        // A driver this build does not carry (a config written for another
+        // build) cannot be asked, and leaving its rows live is better than
+        // greying out a page the user cannot then fix.
+        crate::fluxbridge::driver_named(cfg.driver.match_token())
+            .is_none_or(|driver| driver.supports(option))
     }
 
     /// Serial ports to offer, "Automatic" first -- the default, and what
@@ -4389,16 +4406,15 @@ fn pacing_name(pacing: PacingBudget) -> &'static str {
 mod tests {
     use super::*;
 
-    /// The interfaces genuinely differ in what they honour, and the page says
-    /// so: a DrawBridge has no drive-select line on its cable, a Greaseweazle
-    /// does. Only meaningful with the library installed -- without it there is
-    /// nothing to ask, and every row deliberately stays live.
+    /// The page greys what an interface does not honour, exactly as the
+    /// library's own driver table reports it: the launcher carries no driver
+    /// knowledge of its own, so the expectation here is derived from the same
+    /// table and covers whichever drivers this build compiled in. A driver
+    /// the build does not carry deliberately greys nothing -- there is
+    /// nothing to ask, and a dead page cannot be fixed from the page.
     #[cfg(feature = "fluxbridge")]
     #[test]
     fn bridge_rows_grey_what_the_interface_does_not_support() {
-        if crate::fluxbridge::drivers().is_empty() {
-            return;
-        }
         let mut setup = MachineSetup::default();
         setup.set_drive_bridged(0, true);
         setup.set_bridge_edit_drive(0);
@@ -4411,14 +4427,17 @@ mod tests {
         setup.df_bridge_none[0] = false;
         setup.bridge_ports = vec![None, Some("/dev/ttyACM0".to_string())];
 
-        for (driver, cable_greyed) in [
-            (crate::config::BridgeDriver::Greaseweazle, false),
-            (crate::config::BridgeDriver::DrawBridge, true),
-        ] {
+        let offered = bridge_drivers();
+        assert!(!offered.is_empty(), "the bridge offers its drivers");
+        for driver in offered {
+            let info = crate::fluxbridge::driver_named(driver.match_token())
+                .expect("offered drivers come from the library's table");
+            let has_select = info.supports(crate::fluxbridge::config_option::DRIVE_AB_CABLE)
+                || info.supports(crate::fluxbridge::config_option::SUPPORTS_SHUGART);
             setup.df_bridge[0].as_mut().expect("bridged").driver = driver;
             assert_eq!(
-                setup.disabled_reason(F::BridgeCable).is_some(),
-                cable_greyed,
+                setup.disabled_reason(F::BridgeCable).is_none(),
+                has_select,
                 "drive select on {driver:?}"
             );
             // Every interface here talks over a serial port.
@@ -4474,8 +4493,8 @@ mod tests {
         let all = [
             F::BridgeCable,
             F::BridgeDensity,
-            F::BridgeSpeed,
-            F::BridgeServeSpeed,
+            F::BridgeReadMode,
+            F::BridgeReplaySpeed,
         ];
 
         setup.df_bridge_none[0] = false;
@@ -4490,7 +4509,7 @@ mod tests {
 
         setup.bridge_status = BridgeStatus::Attached;
         assert_eq!(setup.disabled_reason(F::BridgeDevice), None);
-        for f in [F::BridgeDensity, F::BridgeSpeed, F::BridgeServeSpeed] {
+        for f in [F::BridgeDensity, F::BridgeReadMode, F::BridgeReplaySpeed] {
             assert_eq!(setup.disabled_reason(f), None, "{f:?} greyed with one");
         }
 

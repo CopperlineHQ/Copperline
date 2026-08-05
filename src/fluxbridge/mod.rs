@@ -3,10 +3,13 @@
 //! Real floppy drives, through the FluxBridge library.
 //!
 //! A *bridge* replaces one Amiga drive's disk image with a physical 3.5" drive
-//! attached over a DrawBridge, a Greaseweazle, or a Supercard Pro. The emulated
-//! machine is unchanged: the bridge only supplies the MFM the head would be
-//! passing over, so Paula, the disk DMA, and trackdisk.device all behave
-//! exactly as they do with an image.
+//! attached over a Greaseweazle. The emulated machine is unchanged: the bridge
+//! only supplies the MFM the head would be passing over, so Paula, the disk
+//! DMA, and trackdisk.device all behave exactly as they do with an image.
+//! FluxBridge itself also carries DrawBridge and SuperCard Pro protocols;
+//! Copperline compiles in the drivers it supports, and [`drivers`] reports
+//! exactly those, so enabling another later is a Cargo feature, not a UI
+//! change.
 //!
 //! # How it attaches
 //!
@@ -25,11 +28,12 @@
 //!
 //! Because a revolution is served whole, its two ends matter. A capture taken
 //! from one index pulse to the next has its ends meeting in the gap between
-//! sectors, so it can turn under the head indefinitely. An index-less capture is
-//! joined where the recording repeats -- a join that is not always perfect,
-//! which is why FluxBridge reports what it could prove about each capture, and
-//! [`scan`] checks the ones it could not vouch for before the emulator trusts
-//! them beyond a single pass.
+//! sectors, so it can turn under the head indefinitely. An index-less capture
+//! is joined where the recording repeats -- a join that is not always perfect,
+//! which is why FluxBridge proves each capture itself (the join by pattern
+//! matching, the decode by AmigaDOS structure and checksums) and reports the
+//! verdict as its [`CaptureQuality`]; the emulator serves unproven captures
+//! once and re-reads rather than trusting them beyond a single pass.
 //!
 //! Writing goes the same way round: [`Bridge::write_track`] hands the MFM to
 //! FluxBridge, which lays it down on its own thread as the disk turns, without
@@ -42,7 +46,7 @@
 //! build, nothing vendored, and nothing for a user to install: a build that
 //! says it supports a physical drive can drive one.
 //!
-//! FluxBridge is itself a Rust port of the runtime parts of Rob Smith's
+//! FluxBridge grew from a Rust port of the runtime parts of Rob Smith's
 //! [FloppyDriveBridge](https://github.com/RobSmithDev/FloppyDriveBridge), and
 //! carries that provenance in its own `NOTICE.md`.
 //!
@@ -57,11 +61,13 @@
 //! the emulated drive-speed setting apply to one, since the data rate is the
 //! disk's own.
 
-pub mod scan;
-
 use std::time::Duration;
 
 use fluxbridge as fb;
+/// FluxBridge's verdict on a captured revolution: index-aligned, verified
+/// AmigaDOS, or unverified. Re-exported because the emulator's serve-once
+/// policy and its diagnostics are built on it.
+pub use fluxbridge::CaptureQuality;
 use log::warn;
 
 /// How long a stalling read may hold the emulated machine up.
@@ -72,8 +78,8 @@ const STALL_TIMEOUT: Duration = Duration::from_millis(450);
 /// stop.
 const MAX_CYLINDER: u8 = 82;
 
-/// Capability bits a driver may honour, as the launcher and config validation
-/// ask about them.
+/// Capability bits a driver may honour, as the launcher's greying and the
+/// attach path ask about them.
 ///
 /// Copperline's own bitmask, so the UI can ask "does this driver take a port
 /// name?" without every caller learning FluxBridge's capability type.
@@ -136,6 +142,9 @@ pub struct DriverInfo {
     pub name: String,
     pub manufacturer: String,
     pub url: String,
+    /// The library's own stable configuration token for this driver, the
+    /// spelling config files and [`driver_named`] resolve by.
+    pub token: &'static str,
     /// Bitmask of [`config_option`] flags this driver honours.
     pub config_options: u32,
 }
@@ -146,13 +155,11 @@ impl DriverInfo {
     }
 }
 
-/// FluxBridge's version as `major.minor`, for anything naming what is driving
-/// the hardware.
-pub fn version() -> Option<(u32, u32)> {
-    let mut parts = fb::VERSION.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
+/// FluxBridge's own version, for anything naming what is driving the
+/// hardware. Comes from the library itself, so it can never drift from what
+/// is actually linked in.
+pub fn version() -> &'static str {
+    fb::VERSION
 }
 
 /// Every driver FluxBridge offers. Never empty: the library is linked in, not
@@ -166,9 +173,22 @@ pub fn drivers() -> Vec<DriverInfo> {
             name: driver.name.to_string(),
             manufacturer: driver.manufacturer.to_string(),
             url: driver.url.to_string(),
+            token: driver.kind.as_str(),
             config_options: capability_options(driver.capabilities),
         })
         .collect()
+}
+
+/// The compiled driver a configuration token names, if this build has it.
+///
+/// Resolution is FluxBridge's own token parsing -- the library that defines
+/// the drivers decides what their names are -- so config spellings can never
+/// drift from what the library answers to.
+pub fn driver_named(token: &str) -> Option<DriverInfo> {
+    let kind: fb::DriverKind = token.parse().ok()?;
+    drivers()
+        .into_iter()
+        .find(|driver| driver.token == kind.as_str())
 }
 
 fn capability_options(capabilities: fb::Capabilities) -> u32 {
@@ -243,11 +263,11 @@ pub struct Bridge {
     side: fb::Side,
     cylinder: u8,
     max_cylinder: u8,
-    /// Whether the revolution last handed over closes on itself. When it does,
-    /// its two ends meet in the sector gap and it can be turned under the head
-    /// over and over, as an image's track is. When it does not, the join falls
-    /// mid-track and the capture is good for a single pass.
-    index_aligned: bool,
+    /// What FluxBridge proved about the revolution last handed over. A
+    /// reusable one closes on itself -- its two ends meet, by index alignment
+    /// or by a proven join -- and can be turned under the head over and over,
+    /// as an image's track is. An unverified one is good for a single pass.
+    quality: fb::CaptureQuality,
     /// Set when the interface reports a disk arriving or leaving, and consumed
     /// by [`Bridge::take_disk_changed`]. FluxBridge reports presence rather
     /// than a latch, so the edge is noticed here.
@@ -309,7 +329,11 @@ impl Bridge {
             } else {
                 status.max_cylinders
             },
-            index_aligned: !matches!(config.mode, BridgeMode::Fast),
+            quality: if matches!(config.mode, BridgeMode::Fast) {
+                fb::CaptureQuality::Unverified
+            } else {
+                fb::CaptureQuality::IndexAligned
+            },
             disk_changed: false,
             disk_present: status.disk_present,
         })
@@ -398,10 +422,10 @@ impl Bridge {
         }
     }
 
-    /// Whether a captured revolution can be turned under the head more than
-    /// once.
-    pub const fn index_aligned(&self) -> bool {
-        self.index_aligned
+    /// FluxBridge's verdict on the revolution last handed over: whether it
+    /// can be turned under the head more than once, and why.
+    pub const fn last_quality(&self) -> CaptureQuality {
+        self.quality
     }
 
     /// The capture in flight for `cylinder`/`side`, as far as it has got.
@@ -455,7 +479,7 @@ impl Bridge {
         // What the library could prove about this revolution beats the
         // configured mode: an index-less capture it has shown to be a whole
         // AmigaDOS track is as replayable as an index-aligned one.
-        self.index_aligned = capture.quality().reusable();
+        self.quality = capture.quality();
         let bit_len = capture.bit_len();
         Some((capture.into_words(), bit_len))
     }
@@ -556,7 +580,7 @@ mod tests {
     fn queries_are_safe_with_no_hardware() {
         // The bridge is linked in, so it always answers.
         assert!(!drivers().is_empty(), "the bridge offers its drivers");
-        assert!(version().is_some(), "and reports its version");
+        assert!(!version().is_empty(), "and reports its version");
         // These simply describe a host with nothing attached.
         let _ = com_ports();
         let _ = interface_connected();
@@ -568,10 +592,7 @@ mod tests {
     #[test]
     #[ignore = "lists what the built-in bridge offers; run it to see the drivers"]
     fn fluxbridge_inventory() {
-        println!("bridge: compiled in from vendor/floppybridge");
-        if let Some((major, minor)) = version() {
-            println!("version: {major}.{minor}");
-        }
+        println!("bridge: FluxBridge v{}", version());
         for d in drivers() {
             println!(
                 "driver {}: {} by {} (options {:#04x})",
@@ -581,22 +602,16 @@ mod tests {
         println!("ports: {:?}", com_ports());
     }
 
-    /// Read cylinder 0 off a real disk and report what the MFM looks like:
-    /// how many AmigaDOS sync marks are in it and how they are spaced. That
-    /// separates "the stream is good, the emulator's timing is wrong" from
-    /// "the bytes crossing the FFI are not what we think they are".
-    ///
-    ///     cargo test --release floppybridge_track_probe -- --ignored --nocapture
     /// Watch the drive's status lines with the motor stopped and running, to
     /// see what the driver actually reports rather than what it is assumed to.
     /// Write protection is the one that matters: Copperline gates real writes
     /// on it, and a reading taken at the wrong moment either refuses a disk
     /// that is writable or, worse, allows one that is not.
     ///
-    ///     cargo test --release floppybridge_status_probe -- --ignored --nocapture
+    ///     cargo test --release fluxbridge_status_probe -- --ignored --nocapture
     #[test]
-    #[ignore = "needs a FloppyBridge device attached"]
-    fn floppybridge_status_probe() {
+    #[ignore = "needs a FluxBridge interface attached"]
+    fn fluxbridge_status_probe() {
         let driver = drivers()
             .into_iter()
             .find(|d| d.name.to_ascii_lowercase().contains(INTERFACE))
@@ -629,9 +644,15 @@ mod tests {
         sample(&mut bridge, "stopped");
     }
 
+    /// Read cylinder 0 off a real disk and report what the MFM looks like:
+    /// how many AmigaDOS sync marks are in it and how they are spaced. That
+    /// separates "the stream is good, the emulator's timing is wrong" from
+    /// "the bytes crossing the library boundary are not what we think".
+    ///
+    ///     cargo test --release fluxbridge_track_probe -- --ignored --nocapture
     #[test]
-    #[ignore = "needs a FloppyBridge device with a disk in the drive"]
-    fn floppybridge_track_probe() {
+    #[ignore = "needs a FluxBridge interface with a disk in the drive"]
+    fn fluxbridge_track_probe() {
         let driver = drivers()
             .into_iter()
             .find(|d| d.name.to_ascii_lowercase().contains(INTERFACE))
@@ -782,10 +803,9 @@ mod tests {
         drop(second);
     }
 
-    /// The library keeps its `BRIDGE_*` state process-wide -- one shared port
-    /// vector, one profile cache -- so the queries have to be serialised on
-    /// this side. Without that, this does not fail: it aborts the process,
-    /// which is how the problem was found.
+    /// The queries walk the host's serial bus and the library's driver table
+    /// concurrently from the launcher and from config validation, so they
+    /// must be safe to ask from several threads at once.
     #[test]
     fn library_queries_survive_being_asked_from_several_threads() {
         let threads: Vec<_> = (0..4)

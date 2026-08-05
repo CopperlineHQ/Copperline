@@ -36,9 +36,9 @@ pub mod emulator;
 pub mod envcfg;
 pub mod filesys;
 pub mod floppy;
-// Physical floppy drives over a DrawBridge/Greaseweazle/Supercard Pro, through
-// the vendored FloppyBridge. Gated because it compiles C++ and talks to a
-// serial port, neither of which a wasm32 browser build can do.
+// Physical floppy drives over a Greaseweazle, through the pure-Rust
+// FluxBridge library. Gated because it talks to a serial port, which a
+// wasm32 browser build cannot do.
 #[cfg(feature = "fluxbridge")]
 pub mod fluxbridge;
 #[cfg(feature = "frontend")]

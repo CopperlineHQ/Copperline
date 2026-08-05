@@ -2084,7 +2084,7 @@ fn open_scsi_target(
 /// a machine with an empty drive where the user asked for their disk.
 #[cfg(feature = "fluxbridge")]
 pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config) -> Result<()> {
-    use crate::config::{BridgeCable, BridgeDensity, BridgeSpeedMode};
+    use crate::config::{BridgeCable, BridgeDensity, BridgeReadMode};
     use crate::fluxbridge::{
         self, Bridge, BridgeConfig, BridgeDensityMode, BridgeMode, DriveSelection,
     };
@@ -2094,39 +2094,31 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             continue;
         };
         // The bridge is compiled into this binary, so it cannot be missing --
-        // the link would have failed. This is a failsafe against it being
-        // present but not working: a vendored build that produced stubs, or a
-        // future upstream that drops a driver Copperline still offers.
+        // the link would have failed. This is a failsafe against a build with
+        // every FluxBridge driver feature turned off, which would leave the
+        // library linked in but offering nothing.
         if fluxbridge::drivers().is_empty() {
             anyhow::bail!(
-                "floppy.df{idx} asks for a physical drive, but the built-in FluxBridge \
-                 reports no interfaces at all. This build is broken rather than \
-                 misconfigured; please report it."
+                "floppy.df{idx} asks for a physical drive, but this build of Copperline \
+                 compiled no FluxBridge drivers in"
             );
         }
-        // Resolve the driver by name against what the bridge actually
-        // offers, so the config does not depend on enumeration order.
-        let token = bridge_cfg.driver.match_token();
-        let driver = fluxbridge::drivers()
-            .into_iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .ok_or_else(|| {
+        // Resolve the driver by the library's own token, so the config does
+        // not depend on enumeration order or on name spellings kept in step
+        // by hand.
+        let driver =
+            fluxbridge::driver_named(bridge_cfg.driver.match_token()).ok_or_else(|| {
                 anyhow!(
-                    "floppy.df{idx}: the built-in FluxBridge has no {} driver",
+                    "floppy.df{idx}: this build of Copperline has no {} driver",
                     bridge_cfg.driver.label()
                 )
             })?;
         let open = BridgeConfig {
             driver: driver.index,
             mode: match bridge_cfg.mode {
-                BridgeSpeedMode::Compatible => BridgeMode::Compatible,
-                BridgeSpeedMode::Normal => BridgeMode::Fast,
-                BridgeSpeedMode::Stalling => BridgeMode::Stalling,
+                BridgeReadMode::Compatible => BridgeMode::Compatible,
+                BridgeReadMode::Normal => BridgeMode::Fast,
+                BridgeReadMode::Stalling => BridgeMode::Stalling,
             },
             density: match bridge_cfg.density {
                 BridgeDensity::Auto => BridgeDensityMode::Auto,
@@ -2164,13 +2156,10 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             fluxbridge::DriveType::Dd35Hd => "3.5\" HD",
             fluxbridge::DriveType::Sd525 => "5.25\" SD",
         };
-        let version = match fluxbridge::version() {
-            Some((major, minor)) => format!("FluxBridge v{major}.{minor}"),
-            None => "FluxBridge".to_string(),
-        };
         log::info!(
-            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, {version}",
+            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, FluxBridge v{}",
             bridge_cfg.driver.label(),
+            fluxbridge::version(),
         );
         // Whether there is anything in it is the next thing anyone wants to
         // know, and unlike an image nobody told us either way.

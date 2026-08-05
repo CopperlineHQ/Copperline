@@ -542,7 +542,6 @@ where
                 overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
             #[cfg(feature = "fluxbridge")]
-            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-writable" => {
                 const USAGE: &str = "--floppy-bridge-writable requires DFN";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -1132,7 +1131,7 @@ fn print_help() {
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
-         --floppy-replay-speed DFN SPEED  replay captured tracks at normal or fast\n  \
+         --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
     #[cfg(not(feature = "fluxbridge"))]
@@ -2733,9 +2732,9 @@ mod tests {
         assert_eq!(bridge.port.as_deref(), Some("/dev/ttyACM0"));
         assert_eq!(bridge.cable, copperline::config::BridgeCable::DriveB);
         assert!(!bridge.write_protected);
-        assert_eq!(bridge.mode, copperline::config::BridgeSpeedMode::Compatible);
+        assert_eq!(bridge.mode, copperline::config::BridgeReadMode::Compatible);
         assert_eq!(bridge.density, copperline::config::BridgeDensity::Dd);
-        assert_eq!(bridge.speed, 125);
+        assert_eq!(bridge.speed, 200);
         // Untouched bays stay as they were.
         assert!(cfg.floppy.bridges[0].is_none());
         Ok(())
