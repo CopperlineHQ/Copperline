@@ -488,6 +488,14 @@ async function boot() {
       audioCtx.close().catch(() => {});
       audioNode = null;
     }
+    // The queue/underrun readouts belong to the worklet that reports them.
+    // Carried across a rebuild, a stale queuedMs over the pacing threshold
+    // would gate the fresh machine's stepping until the new worklet's first
+    // report - which never comes while autoplay policy holds the context
+    // suspended - and old underruns would sit in the stat line as if the
+    // new stack had already stuttered.
+    queuedMs = 0;
+    audioUnderruns = 0;
     audioCtx = new AudioContext({ sampleRate: 44100 });
     await audioCtx.audioWorklet.addModule('./audio-worklet.js');
     audioNode = new AudioWorkletNode(audioCtx, 'copperline-audio', {
