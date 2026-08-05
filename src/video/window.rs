@@ -4330,7 +4330,7 @@ impl App {
                 .bus_mut()
                 .midi_serial_mut()
                 .and_then(crate::midi::MidiSerialSink::mt32_mut)
-                .map(|mt32| mt32.synth_mut().display())
+                .map(|mt32| mt32.synth_mut().display_raw())
                 .hash(&mut h);
             h.finish()
         } else {

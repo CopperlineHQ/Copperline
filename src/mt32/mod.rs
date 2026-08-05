@@ -148,11 +148,7 @@ impl Mt32Synth {
     /// program change, whatever a program puts there over SysEx, and its
     /// own checksum errors.
     pub fn display(&mut self) -> (String, bool) {
-        let mut volume = [0u8; 1];
-        self.engine
-            .memory()
-            .read(mt32_rs::memory::flat(addr::MASTER_VOLUME), &mut volume);
-        let (text, lamp) = self.engine.display().state(volume[0]);
+        let (text, lamp) = self.display_raw();
         let text = text
             .iter()
             .map(|&b| if b == 1 { ACTIVE_PART } else { b as char })
@@ -160,6 +156,17 @@ impl Mt32Synth {
             .trim_end()
             .to_string();
         (text, lamp)
+    }
+
+    /// The glass and the lamp as the engine holds them, character cells
+    /// and all: what [`Self::display`] reads, without the string. The
+    /// redraw check asks every frame, so it asks for this.
+    pub fn display_raw(&mut self) -> ([u8; LCD_WIDTH], bool) {
+        let mut volume = [0u8; 1];
+        self.engine
+            .memory()
+            .read(mt32_rs::memory::flat(addr::MASTER_VOLUME), &mut volume);
+        self.engine.display().state(volume[0])
     }
 
     /// Write into the synth's memory the way the front panel does, as a

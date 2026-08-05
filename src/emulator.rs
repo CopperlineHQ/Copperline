@@ -1984,10 +1984,12 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
                 .then_some(cfg.serial.midi_out.as_deref())
                 .flatten();
             // Likewise on the way in: "mt32" is the module's own MIDI OUT,
-            // and it only has one while it is also the output.
-            let wants_mt32_in =
-                wants_mt32 && crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref());
-            let host_in = (!wants_mt32_in)
+            // and it only has one while it is also the output. Either way
+            // the name is a sentinel, never a host endpoint's, so it does
+            // not reach the backend even when the module is not driving it.
+            let names_mt32_in = crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref());
+            let wants_mt32_in = wants_mt32 && names_mt32_in;
+            let host_in = (!names_mt32_in)
                 .then_some(cfg.serial.midi_in.as_deref())
                 .flatten();
             #[allow(unused_mut)]
@@ -2014,7 +2016,7 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
                      the MIDI output is unset"
                 );
             }
-            if crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref()) && !wants_mt32_in {
+            if names_mt32_in && !wants_mt32_in {
                 log::warn!(
                     "[serial] midi_in = \"mt32\" needs midi_out = \"mt32\" as well: \
                      the module answers what it is sent, so with nothing going \
