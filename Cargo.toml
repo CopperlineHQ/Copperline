@@ -143,10 +143,10 @@ smoltcp = { version = "0.12", default-features = false, features = [
 # optional realtime-priority feature (see src/priority.rs).
 libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
-# Physical floppy drives through CopperlineHQ/FluxBridge, pinned by revision.
-# Pure Rust: the interfaces sit behind one typed API with no C or C++ ABI, so
+# Physical floppy drives: CopperlineHQ/FluxBridge, pinned by revision. Pure
+# Rust -- the interfaces sit behind one typed API with no C or C++ ABI, so
 # nothing has to be installed and nothing is vendored.
-fluxbridge = { path = "../fluxbridge-dev", optional = true }
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", rev = "045dce20e1afd255891513aef9af61e4efecba4f", optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
