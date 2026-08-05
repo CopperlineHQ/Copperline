@@ -47,10 +47,16 @@
 ; disk and fwdprobe exactly, validating the run. Copperline = with the
 ; m68k crate's bit-field operand and timing model calibrated to this
 ; column (m68k-rs PR #60; an unfixed crate reads far off on the memory
-; rows). FS-UAE 3.2.35 for reference. Row 10 is the one row Copperline
-; misses on the high side: AddressBus has no three-byte transfer, so the
-; crate composes that span from a word and a byte and the host bills the
-; extra access. Every other row is within 0.3%.
+; rows). FS-UAE 3.2.35 for reference. Every row is within 0.3%.
+;
+; Row 10 read 2D11 (28.17) until m68k 0.7.0: AddressBus had no
+; three-byte transfer, so the crate composed that span from a word and a
+; byte and the host billed the extra access. The crate now carries a
+; three-byte operand transfer, and the host sizes it by the addressed
+; port the way dynamic bus sizing does -- one access to the 32-bit chip
+; RAM these rows target, still a word plus a byte to any 16-bit port. So
+; the three-byte span costs what the one-, two- and four-byte spans do,
+; which is what the real column says it should.
 ;
 ;              REAL A1200           Copperline           FS-UAE
 ;   row  0     0E6B  9.01 clk       0E6C  9.02 clk       1006 10.02 clk
@@ -63,7 +69,7 @@
 ;   row  7     46E4 44.32           4677 44.05           3A22 36.35
 ;   row  8     2CF3 28.10           2CD1 28.02           204C 20.19
 ;   row  9     2696 24.12           266A 24.02           1337 12.01
-;   row 10     2CF2 28.10           2D11 28.17           204C 20.19
+;   row 10     2CF2 28.10           2CD1 28.02           204C 20.19
 ;   row 11     2CF2 28.10           2CD1 28.02           204C 20.19
 ;   row 12     872A 84.51           86D1 84.29           6D42 68.31
 ;   row 13     872C 84.51           86D3 84.29           6D43 68.31
