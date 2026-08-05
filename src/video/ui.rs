@@ -4311,16 +4311,16 @@ fn launcher_bootable_box(cell: Rect) -> Rect {
 
 const BOOTABLE_LABEL: &str = "Bootable";
 
-/// The heading above the FloppyBridge settings: upstream's own name for the
-/// library, and which version of it is installed. Nothing else in the launcher
-/// says which build is in use, and it is the first thing worth knowing when a
-/// drive misbehaves.
+/// The heading above the physical-drive settings and the linked crate version.
 fn bridge_library_heading() -> String {
     #[cfg(feature = "floppybridge")]
-    if let Some((major, minor)) = crate::floppybridge::version() {
-        return format!("FloppyDriveBridge v{major}.{minor}:");
+    {
+        format!("FluxBridge v{}:", crate::floppybridge::VERSION)
     }
-    "FloppyDriveBridge:".to_string()
+    #[cfg(not(feature = "floppybridge"))]
+    {
+        "FluxBridge:".to_string()
+    }
 }
 
 const WRITE_PROTECT_LABEL: &str = "Write protect:";
@@ -4944,10 +4944,10 @@ fn draw_launcher_row(
             .is_some_and(|bay| setup.drive_bridged(bay))
     {
         // Matches the tick box that turned it on, and fits the label column
-        // where the full "FloppyDriveBridge" would run into the value. Which
-        // version of the library is installed is named on the Configure page,
+        // where a longer explanation would run into the value. Which version
+        // of the crate is linked is named on the Configure page,
         // where there is room for it.
-        "  FloppyBridge"
+        "  FluxBridge"
     } else {
         r.label
     };

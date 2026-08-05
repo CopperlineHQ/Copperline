@@ -2,7 +2,7 @@
 
 //! Hardware probes for the floppy-bridge capture path.
 //!
-//! All `#[ignore]`d: they need a FloppyBridge interface (a Greaseweazle in
+//! All `#[ignore]`d: they need a FluxBridge interface (a Greaseweazle in
 //! practice) with an AmigaDOS disk in the drive. There is one drive, so run
 //! one test at a time:
 //!
@@ -29,7 +29,9 @@
 
 use std::time::{Duration, Instant};
 
-use copperline::floppybridge::{drivers, Bridge, BridgeConfig, BridgeMode};
+use copperline::floppybridge::{
+    drivers, Bridge, BridgeConfig, DriverKind, ReadMode, Side, TrackAddress,
+};
 
 const MASK: u32 = 0x5555_5555;
 
@@ -165,13 +167,13 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn open_bridge(mode: BridgeMode) -> Bridge {
+fn open_bridge(mode: ReadMode) -> Bridge {
     let driver = drivers()
-        .into_iter()
-        .find(|d| d.name.to_ascii_lowercase().contains("greaseweazle"))
+        .iter()
+        .find(|driver| driver.kind == DriverKind::Greaseweazle)
         .expect("no greaseweazle driver in this build");
     Bridge::open(&BridgeConfig {
-        driver: driver.index,
+        driver: driver.kind,
         mode,
         ..Default::default()
     })
@@ -179,9 +181,11 @@ fn open_bridge(mode: BridgeMode) -> Bridge {
 }
 
 fn spin_up(bridge: &mut Bridge) {
-    bridge.set_motor(false, true);
+    bridge
+        .set_motor(Side::Lower, true)
+        .expect("start physical drive motor");
     let deadline = Instant::now() + Duration::from_secs(4);
-    while !bridge.is_ready() {
+    while !bridge.status().ready {
         assert!(Instant::now() < deadline, "drive never became ready");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -193,7 +197,12 @@ fn seek_pulsed(bridge: &mut Bridge, from: u8, to: u8, side: bool) {
     let mut at = from;
     while at != to {
         at = if to > at { at + 1 } else { at - 1 };
-        bridge.seek(at, side);
+        bridge
+            .seek(TrackAddress {
+                cylinder: at,
+                side: side.into(),
+            })
+            .expect("seek physical drive");
         std::thread::sleep(Duration::from_millis(3));
     }
 }
@@ -201,9 +210,14 @@ fn seek_pulsed(bridge: &mut Bridge, from: u8, to: u8, side: bool) {
 fn poll_track(bridge: &mut Bridge, cyl: u8, side: bool) -> Option<(Vec<u16>, usize, u128)> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(4);
+    let address = TrackAddress {
+        cylinder: cyl,
+        side: side.into(),
+    };
     loop {
-        if let Some((words, bits)) = bridge.read_track(cyl, side) {
-            return Some((words, bits, started.elapsed().as_millis()));
+        if let Some(capture) = bridge.read_track(address).expect("poll physical capture") {
+            let bits = capture.bit_len();
+            return Some((capture.into_words(), bits, started.elapsed().as_millis()));
         }
         if Instant::now() >= deadline {
             return None;
@@ -218,7 +232,7 @@ fn poll_track(bridge: &mut Bridge, cyl: u8, side: bool) -> Option<(Vec<u16>, usi
 #[test]
 #[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
 fn bridge_decoder_smoke() {
-    let mut bridge = open_bridge(BridgeMode::Compatible);
+    let mut bridge = open_bridge(ReadMode::Compatible);
     spin_up(&mut bridge);
     let (words, bits, waited) = poll_track(&mut bridge, 0, false).expect("no capture");
     let scan = decode(&words, bits);
@@ -244,8 +258,8 @@ fn bridge_decoder_smoke() {
 #[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
 fn bridge_seek_capture_soak() {
     let mode = match env_or("PROBE_MODE", "normal").as_str() {
-        "compatible" => BridgeMode::Compatible,
-        _ => BridgeMode::Fast,
+        "compatible" => ReadMode::Compatible,
+        _ => ReadMode::Fast,
     };
     let captures: usize = env_or("PROBE_CAPTURES", "120").parse().unwrap();
     let away: u8 = env_or("PROBE_AWAY", "20").parse().unwrap();
@@ -277,7 +291,12 @@ fn bridge_seek_capture_soak() {
         if pulse {
             seek_pulsed(&mut bridge, at, park, side);
         } else {
-            bridge.seek(park, side);
+            bridge
+                .seek(TrackAddress {
+                    cylinder: park,
+                    side: side.into(),
+                })
+                .expect("park physical drive");
         }
         // Let the driver begin (and then abandon) a capture there, as it
         // does between a boot's seeks.
@@ -285,14 +304,24 @@ fn bridge_seek_capture_soak() {
         if pulse {
             seek_pulsed(&mut bridge, park, cyl, side);
         } else {
-            bridge.seek(cyl, side);
+            bridge
+                .seek(TrackAddress {
+                    cylinder: cyl,
+                    side: side.into(),
+                })
+                .expect("seek physical drive");
         }
         at = cyl;
         // Give the background thread time to land a capture that began just
         // after the seek -- the case under test -- then retire whatever was
         // current so the fresh one is served.
         std::thread::sleep(Duration::from_millis(700));
-        bridge.switch_buffer(side);
+        bridge
+            .advance_revolution(TrackAddress {
+                cylinder: cyl,
+                side: side.into(),
+            })
+            .expect("advance physical capture");
 
         let Some((words, bits, waited)) = poll_track(&mut bridge, cyl, side) else {
             timeouts += 1;

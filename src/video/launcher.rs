@@ -215,7 +215,7 @@ impl LauncherTab {
             LauncherTab::Memory => "Memory",
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
-            LauncherTab::FloppyBridge => "FloppyBridge",
+            LauncherTab::FloppyBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
@@ -945,8 +945,8 @@ const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::
 /// How close a bay is to actually having a physical drive behind it.
 ///
 /// The two ways it can fail look identical from the outside but need opposite
-/// fixes -- install the library, or plug the interface in -- so the launcher
-/// keeps them apart rather than saying "None" to both.
+/// fixes -- use a build with the feature, or plug the interface in -- so the
+/// launcher keeps them apart rather than saying "None" to both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeStatus {
     /// Nothing the bridge recognises is plugged in. The bridge itself is
@@ -2349,22 +2349,24 @@ impl MachineSetup {
                     Some("no ports")
                 } else {
                     reason(
-                        self.bridge_driver_supports(crate::floppybridge::config_option::COM_PORT),
+                        self.bridge_driver_supports(
+                            crate::floppybridge::Capabilities::AUTO_DETECT_PORT,
+                        ),
                         "not on this interface",
                     )
                 }
             }
             #[cfg(feature = "floppybridge")]
             F::BridgeCable => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::DRIVE_AB_CABLE)
+                self.bridge_driver_supports(crate::floppybridge::Capabilities::PC_DRIVE_SELECT)
                     || self.bridge_driver_supports(
-                        crate::floppybridge::config_option::SUPPORTS_SHUGART,
+                        crate::floppybridge::Capabilities::SHUGART_DRIVE_SELECT,
                     ),
                 "not on this interface",
             ),
             #[cfg(feature = "floppybridge")]
             F::BridgeAutoCache => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::AUTO_CACHE),
+                self.bridge_driver_supports(crate::floppybridge::Capabilities::AUTO_CACHE),
                 "not on this interface",
             ),
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
@@ -3531,11 +3533,15 @@ impl MachineSetup {
     /// they changed something, so the ones it does not honour are greyed with
     /// the interface's name against them.
     #[cfg(feature = "floppybridge")]
-    fn bridge_driver_supports(&self, option: u32) -> bool {
+    fn bridge_driver_supports(&self, capability: crate::floppybridge::Capabilities) -> bool {
         let Some(cfg) = self.bridge_edit() else {
             return false;
         };
-        let token = cfg.driver.match_token();
+        let kind = match cfg.driver {
+            BridgeDriver::DrawBridge => crate::floppybridge::DriverKind::DrawBridge,
+            BridgeDriver::Greaseweazle => crate::floppybridge::DriverKind::Greaseweazle,
+            BridgeDriver::SupercardPro => crate::floppybridge::DriverKind::SuperCardPro,
+        };
         // The bridge is linked in, so it always has drivers to describe. If it
         // ever answers with none there is nothing to ask, and leaving every row
         // live is better than greying out a page the user cannot then fix.
@@ -3545,13 +3551,8 @@ impl MachineSetup {
         }
         drivers
             .iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .is_none_or(|d| d.supports(option))
+            .find(|driver| driver.kind == kind)
+            .is_none_or(|driver| driver.capabilities.contains(capability))
     }
 
     /// Serial ports to offer, "Automatic" first -- the default, and what

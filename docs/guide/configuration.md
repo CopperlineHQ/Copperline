@@ -1164,7 +1164,7 @@ swap button cycles to the next image, wrapping around.
 ### A real drive on a bay
 
 A bay can be given a physical 3.5" drive instead of an image, over a
-DrawBridge, Greaseweazle, or Supercard Pro:
+DrawBridge, Greaseweazle, or SuperCard Pro:
 
 ```toml
 [floppy.df0]
@@ -1182,12 +1182,15 @@ A bay takes either a bridge or an image, never both: the disk in the drive
 is its media, and naming a `path` alongside is an error. `bridge = "off"`
 returns the bay to images and keeps the other bridge settings for later.
 
-Nothing needs installing -- Rob Smith's FloppyBridge is built into Copperline
--- but it changes how the machine runs in several ways -- writes need both the disk's tab and
+Nothing needs installing -- the Rust FluxBridge dependency is built into
+Copperline -- but it changes how the machine runs in several ways. FluxBridge
+ports the runtime portions of Rob Smith's
+[FloppyDriveBridge](https://github.com/RobSmithDev/FloppyDriveBridge). Writes
+need both the disk's tab and
 `write_protected = false`, the status bar's eject and swap do nothing for
 that bay, and a machine with a physical drive is paced to wall-clock time and is
-not reproducible. [](floppybridge) covers the whole feature: installing the
-library on each platform, what each option does, and what to expect of it.
+not reproducible. [](floppybridge) covers the whole feature: host permissions
+and hardware setup on each platform, what each option does, and what to expect.
 
 ## `[ide]` -- IDE hard disks
 

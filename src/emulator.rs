@@ -2040,96 +2040,85 @@ fn open_scsi_target(
 pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config) -> Result<()> {
     use crate::config::{BridgeCable, BridgeDensity, BridgeSpeedMode};
     use crate::floppybridge::{
-        self, Bridge, BridgeConfig, BridgeDensityMode, BridgeMode, DriveSelection,
+        self, Bridge, BridgeConfig, DensityMode, DriveSelect, DriverKind, PortId, PortSelection,
+        ReadMode,
     };
 
     for (idx, bridge_cfg) in cfg.floppy.bridges.iter().enumerate() {
         let Some(bridge_cfg) = bridge_cfg else {
             continue;
         };
-        // The bridge is compiled into this binary, so it cannot be missing --
-        // the link would have failed. This is a failsafe against it being
-        // present but not working: a vendored build that produced stubs, or a
-        // future upstream that drops a driver Copperline still offers.
+        // This is a failsafe against a feature set that omits every backend, or
+        // a future FluxBridge release that drops a driver Copperline offers.
         if floppybridge::drivers().is_empty() {
             anyhow::bail!(
-                "floppy.df{idx} asks for a physical drive, but the built-in FloppyBridge \
+                "floppy.df{idx} asks for a physical drive, but FluxBridge \
                  reports no interfaces at all. This build is broken rather than \
                  misconfigured; please report it."
             );
         }
-        // Resolve the driver by name against what the bridge actually
-        // offers, so the config does not depend on enumeration order.
-        let token = bridge_cfg.driver.match_token();
-        let driver = floppybridge::drivers()
-            .into_iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "floppy.df{idx}: the built-in FloppyBridge has no {} driver",
-                    bridge_cfg.driver.label()
-                )
-            })?;
+        let driver = match bridge_cfg.driver {
+            crate::config::BridgeDriver::DrawBridge => DriverKind::DrawBridge,
+            crate::config::BridgeDriver::Greaseweazle => DriverKind::Greaseweazle,
+            crate::config::BridgeDriver::SupercardPro => DriverKind::SuperCardPro,
+        };
+        if !floppybridge::drivers()
+            .iter()
+            .any(|available| available.kind == driver)
+        {
+            return Err(anyhow!(
+                "floppy.df{idx}: FluxBridge has no {} driver",
+                bridge_cfg.driver.label()
+            ));
+        }
         let open = BridgeConfig {
-            driver: driver.index,
+            driver,
             mode: match bridge_cfg.mode {
-                BridgeSpeedMode::Compatible => BridgeMode::Compatible,
-                BridgeSpeedMode::Normal => BridgeMode::Fast,
-                BridgeSpeedMode::Stalling => BridgeMode::Stalling,
+                BridgeSpeedMode::Compatible => ReadMode::Compatible,
+                BridgeSpeedMode::Normal => ReadMode::Fast,
+                BridgeSpeedMode::Stalling => ReadMode::Stalling,
             },
             density: match bridge_cfg.density {
-                BridgeDensity::Auto => BridgeDensityMode::Auto,
-                BridgeDensity::Dd => BridgeDensityMode::DdOnly,
-                BridgeDensity::Hd => BridgeDensityMode::HdOnly,
+                BridgeDensity::Auto => DensityMode::Auto,
+                BridgeDensity::Dd => DensityMode::Double,
+                BridgeDensity::Hd => DensityMode::High,
             },
             drive: match bridge_cfg.cable {
-                BridgeCable::DriveA => DriveSelection::DriveA,
-                BridgeCable::DriveB => DriveSelection::DriveB,
-                BridgeCable::Shugart0 => DriveSelection::Drive0,
-                BridgeCable::Shugart1 => DriveSelection::Drive1,
-                BridgeCable::Shugart2 => DriveSelection::Drive2,
-                BridgeCable::Shugart3 => DriveSelection::Drive3,
+                BridgeCable::DriveA => DriveSelect::PcA,
+                BridgeCable::DriveB => DriveSelect::PcB,
+                BridgeCable::Shugart0 => DriveSelect::Shugart0,
+                BridgeCable::Shugart1 => DriveSelect::Shugart1,
+                BridgeCable::Shugart2 => DriveSelect::Shugart2,
+                BridgeCable::Shugart3 => DriveSelect::Shugart3,
             },
-            port: bridge_cfg.port.clone(),
+            port: bridge_cfg
+                .port
+                .as_ref()
+                .map(|port| PortId::new(port.clone()).map(PortSelection::Exact))
+                .transpose()
+                .map_err(|e| anyhow!("floppy.df{idx}: invalid bridge port: {e}"))?
+                .unwrap_or_default(),
             auto_cache: bridge_cfg.auto_cache,
+            ..BridgeConfig::default()
         };
         let bridge = Bridge::open(&open)
             .map_err(|e| anyhow!("floppy.df{idx}: could not open the physical drive: {e}"))?;
-        // Name the port as well as the interface: with auto-detect on, the
-        // library does not report back which one it took, so say so from the
-        // ports it can see -- unambiguous when there is only one, and honest
-        // rather than guessing when there is not.
-        let port = match bridge_cfg.port.as_deref() {
-            Some(port) => port.to_string(),
-            None => {
-                let seen = floppybridge::com_ports();
-                match seen.len() {
-                    1 => format!("{} (auto-detected)", seen[0]),
-                    _ => "auto-detected".to_string(),
-                }
-            }
-        };
-        let drive_type = match bridge.drive_type() {
+        let port = bridge.selected_port().to_string();
+        let status = bridge.status();
+        let drive_type = match status.drive_type {
             floppybridge::DriveType::Dd35 => "3.5\" DD",
-            floppybridge::DriveType::Dd35Hd => "3.5\" HD",
+            floppybridge::DriveType::Hd35 => "3.5\" HD",
             floppybridge::DriveType::Sd525 => "5.25\" SD",
         };
-        let version = match floppybridge::version() {
-            Some((major, minor)) => format!("FloppyDriveBridge v{major}.{minor}"),
-            None => "FloppyDriveBridge".to_string(),
-        };
         log::info!(
-            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, {version}",
+            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, \
+             FluxBridge v{}",
             bridge_cfg.driver.label(),
+            floppybridge::VERSION,
         );
         // Whether there is anything in it is the next thing anyone wants to
         // know, and unlike an image nobody told us either way.
-        if bridge.disk_in_drive() {
+        if status.disk_present {
             log::info!("floppy.df{idx} disk in the physical drive");
         } else {
             log::info!("floppy.df{idx} no disk in the physical drive");

@@ -1,15 +1,16 @@
 # Physical floppy drives
 
 Copperline can give any of its four floppy bays a *physical* 3.5" drive instead
-of a disk image. The drive is attached to the host over one of three interfaces, 
-and Rob Smith's [FloppyBridge](https://amiga.robsmithdev.co.uk/winuae) library 
-does the talking:
+of a disk image. The drive is attached to the host over one of three interfaces,
+and the safe Rust [FluxBridge](https://github.com/CopperlineHQ/FluxBridge) crate
+does the talking. FluxBridge is a port of the runtime parts of Rob Smith's
+[FloppyDriveBridge](https://github.com/RobSmithDev/FloppyDriveBridge):
 
 | Interface | What it is |
 |---|---|
 | DrawBridge | An Arduino-based reader/writer, by RobSmithDev |
 | Greaseweazle | Keir Fraser's flux reader/writer |
-| Supercard Pro | Jim Drew's flux board |
+| SuperCard Pro | Jim Drew's flux board |
 
 The emulated machine is not changed by any of this. The bridge supplies the
 MFM the head would be passing over, so Paula, the disk DMA, and
@@ -17,22 +18,25 @@ MFM the head would be passing over, so Paula, the disk DMA, and
 
 ## What you need
 
-You need a [DrawBridge](https://amiga.robsmithdev.co.uk), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [Supercard Pro](https://www.cbmstuff.com/index.php?route=product/product&product_id=52) interface, a 3.5" floppy drive, and some disks. 
+You need a [DrawBridge](https://amiga.robsmithdev.co.uk), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [SuperCard Pro](https://www.cbmstuff.com/index.php?route=product/product&product_id=52) interface, a 3.5" floppy drive, and some disks.
 
-FloppyBridge is compiled into Copperline from `vendor/floppybridge`, so a build that offers a physical drive can actually
-drive one -- there is no library to fetch, install, or keep beside the binary.
+FluxBridge is a Rust dependency compiled into Copperline, so a build that
+offers a physical drive can actually drive one -- there is no shared library
+to fetch, install, or keep beside the binary.
 
 ```sh
 cargo build --release
 ```
 
-The `floppybridge` Cargo feature, on by default, is what includes it. Built
+The historical `floppybridge` Cargo feature, on by default, is what includes
+it. Built
 without it (`--no-default-features`), none of this exists: no **Physical
 drive** tick box in the launcher, no `--floppy-bridge` flags, and a config
 file's `bridge` keys are read and ignored.
 
-`vendor/floppybridge/README.md` records the commit vendored and how to move to
-a newer one.
+FluxBridge's own README and `docs/` directory document the public Rust API,
+hardware protocols, porting decisions, and its relationship to the original
+project.
 
 
 ## Using a physical drive
@@ -202,7 +206,7 @@ so this refusal should never be seen in ordinary use.
 
 A **drive select the interface does not support** fails the open instead of
 being ignored. Every interface advertises the cable conventions it can drive
--- a Supercard Pro offers only the IBM PC `a`/`b` pair, for instance -- and a
+-- a SuperCard Pro offers only the IBM PC `a`/`b` pair, for instance -- and a
 rejected selection would otherwise leave it quietly on Drive A, reading and
 writing a different physical drive than the one asked for.
 
@@ -259,8 +263,8 @@ is holding it open. Starting with `--floppy-bridge df0 greaseweazle` reports
 what it found and refuses to run if it found nothing, which is the quickest
 check.
 
-**"the built-in FloppyBridge has no *X* driver"** -- the vendored bridge is
-older than the interface you asked for; a maintainer needs to update it.
+**"FluxBridge has no *X* driver"** -- this build omitted the requested backend
+or is pinned to a FluxBridge revision that does not provide it.
 
 **The launcher shows `None` with the interface plugged in** -- the check runs
 when the launcher opens and when a bay is switched over, so untick and re-tick
@@ -270,7 +274,7 @@ when the launcher opens and when a bay is switched over, so untick and re-tick
 the same footing as an image being inserted:
 
 ```text
-floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" DD drive, FloppyDriveBridge v1.6
+floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" DD drive, FluxBridge v0.1.1
 floppy.df0 disk in the real drive
 floppy.df0 write-protected by the configuration; set write_protected = false to write to the disk
 ```

@@ -14,10 +14,6 @@ publish = false
 # `copperline-bench` bin target exists.
 default-run = "copperline"
 
-[build-dependencies]
-# Compiles the vendored FloppyBridge sources; see build.rs.
-cc = "1"
-
 [features]
 default = [
     "midi",
@@ -85,15 +81,14 @@ net-nat = ["dep:smoltcp"]
 net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
-# Real floppy drives through Rob Smith's FloppyBridge (src/floppybridge/): a
-# DrawBridge, Greaseweazle, or Supercard Pro standing in for a disk image on any
-# drive. On, build.rs compiles the vendored bridge (vendor/floppybridge) into the
-# binary, so nothing has to be installed for a physical drive to work. Off, none
-# of it is built -- neither the C++ nor the Rust side -- which is what browser
-# builds (--no-default-features) want.
-floppybridge = []
+# Real floppy drives through the safe Rust FluxBridge crate: a DrawBridge,
+# Greaseweazle, or SuperCard Pro standing in for a disk image on any drive.
+# The historical feature name is retained for configuration/build compatibility.
+floppybridge = ["dep:fluxbridge"]
 
 [dependencies]
+# FluxBridge v0.1.1, pinned to the tag's immutable commit.
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge.git", rev = "0288fa13053867d26f7589ef2d5367a989706098", optional = true }
 m68k = { version = "0.7.1", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
