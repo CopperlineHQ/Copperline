@@ -292,9 +292,9 @@ Shown only when something is on the port.
 
 - **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
   onto the host's MIDI sources and destinations; see the `[serial]` section
-  of [Configuration](configuration.md). **Munt MT-32** is offered here too,
-  and with it playing, a **Munt MT-32** submenu carries its front panel and
-  display style; see [The Munt MT-32](mt32.md).
+  of [Configuration](configuration.md). **MT-32** is offered here too,
+  and with it playing, an **MT-32** submenu carries its front panel and
+  display style; see [The MT-32](mt32.md).
 - **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
   sampler's host capture device, and its input gain, which the *Increase* and
   *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
@@ -434,7 +434,7 @@ The layout is:
   **Parallel:** / **Ethernet:** headings, with each port's options indented
   beneath it: serial mode and MIDI endpoints, with the emulated MT-32's ROM
   images, front panel and display style when it is the chosen output (see
-  [The Munt MT-32](mt32.md)); the
+  [The MT-32](mt32.md)); the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --

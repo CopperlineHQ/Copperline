@@ -31,8 +31,8 @@ default = [
     "mt32",
     "cpu-jit",
 ]
-# MT-32 emulation through the vendored mt32-rs engine (vendor/mt32-rs),
-# reachable as a MIDI-Out target. Off builds carry none of it.
+# MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
+# target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
@@ -99,8 +99,8 @@ floppybridge = []
 
 [dependencies]
 m68k = { version = "0.7.1", features = ["serde"] }
-# The MT-32 synthesiser engine, vendored whole -- see vendor/mt32-rs.
-mt32-rs = { path = "vendor/mt32-rs", optional = true }
+# The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
+mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "899a2080959bd7aad5092edc9c6c8e1d4a9d4fba", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

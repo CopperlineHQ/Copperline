@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The MT-32, emulated by the vendored mt32-rs engine (see `vendor/mt32-rs`).
+//! The MT-32, emulated by our own engine,
+//! <https://github.com/CopperlineHQ/mt32-rs>.
 //!
 //! Paula's serial bytes go straight into the engine and stereo frames come
 //! back at the mixer's rate, so nothing passes through the host's MIDI stack:
