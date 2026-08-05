@@ -1167,29 +1167,30 @@ swap button cycles to the next image, wrapping around.
 ### A real drive on a bay
 
 A bay can be given a physical 3.5" drive instead of an image, over a
-DrawBridge, Greaseweazle, or Supercard Pro:
+Greaseweazle:
 
 ```toml
 [floppy.df0]
-bridge = "greaseweazle"      # drawbridge/greaseweazle/supercardpro/off
+bridge = "greaseweazle"      # or "off"
 write_protected = true       # emulator-level protection, on top of the tab
 # bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
-# bridge_mode = "compatible"     # compatible/stalling
-# replay_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
+# bridge_mode = "normal"         # normal/compatible/stalling
+# replay_speed = "fast"          # or "normal"; fast is the default
 ```
 
 A bay takes either a bridge or an image, never both: the disk in the drive
 is its media, and naming a `path` alongside is an error. `bridge = "off"`
 returns the bay to images and keeps the other bridge settings for later.
 
-Nothing needs installing -- Rob Smith's FloppyBridge is built into Copperline
--- but it changes how the machine runs in several ways -- writes need both the disk's tab and
-`write_protected = false`, the status bar's eject and swap do nothing for
-that bay, and a machine with a physical drive is paced to wall-clock time and is
-not reproducible. [](floppybridge) covers the whole feature: installing the
-library on each platform, what each option does, and what to expect of it.
+Nothing needs installing -- the pure-Rust FluxBridge library is built into
+Copperline -- but a physical drive changes how the machine runs in several
+ways: writes need both the disk's tab and `write_protected = false`, the
+status bar's eject and swap do nothing for that bay, and a machine with a
+physical drive is paced to wall-clock time and is not reproducible.
+[](fluxbridge) covers the whole feature: what each option does, which mode
+suits which disks, and what to expect of it.
 
 ## `[ide]` -- IDE hard disks
 

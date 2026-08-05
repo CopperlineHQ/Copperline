@@ -1,15 +1,14 @@
 # Physical floppy drives
 
-Copperline can give any of its four floppy bays a *physical* 3.5" drive instead
-of a disk image. The drive is attached to the host over one of three interfaces, 
-and Rob Smith's [FloppyBridge](https://amiga.robsmithdev.co.uk/winuae) library 
-does the talking:
-
-| Interface | What it is |
-|---|---|
-| DrawBridge | An Arduino-based reader/writer, by RobSmithDev |
-| Greaseweazle | Keir Fraser's flux reader/writer |
-| Supercard Pro | Jim Drew's flux board |
+Copperline can give any of its four floppy bays a *physical* 3.5" drive
+instead of a disk image. The drive is attached to the host over a
+[Greaseweazle](https://github.com/keirf/greaseweazle), and
+[FluxBridge](https://github.com/CopperlineHQ/FluxBridge) -- CopperlineHQ's
+own pure-Rust library, grown from a port of Rob Smith's FloppyDriveBridge --
+does the talking. FluxBridge also carries DrawBridge and SuperCard Pro
+protocols for the future; Copperline compiles in the drivers it supports and
+the launcher offers exactly those, so today the interface list reads
+Greaseweazle.
 
 The emulated machine is not changed by any of this. The bridge supplies the
 MFM the head would be passing over, so Paula, the disk DMA, and
@@ -17,23 +16,22 @@ MFM the head would be passing over, so Paula, the disk DMA, and
 
 ## What you need
 
-You need a [DrawBridge](https://amiga.robsmithdev.co.uk), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [Supercard Pro](https://www.cbmstuff.com/index.php?route=product/product&product_id=52) interface, a 3.5" floppy drive, and some disks. 
+A [Greaseweazle](https://github.com/keirf/greaseweazle) (any revision with
+main firmware 0.27 or newer), a 3.5" floppy drive, and some disks.
 
-FloppyBridge is compiled into Copperline from `vendor/floppybridge`, so a build that offers a physical drive can actually
-drive one -- there is no library to fetch, install, or keep beside the binary.
+FluxBridge is pure Rust, pinned by revision in `Cargo.toml` and compiled into
+Copperline, so a build that offers a physical drive can actually drive one --
+there is no library to fetch, install, or keep beside the binary, and no C or
+C++ toolchain involved in building it.
 
 ```sh
 cargo build --release
 ```
 
-The `floppybridge` Cargo feature, on by default, is what includes it. Built
+The `fluxbridge` Cargo feature, on by default, is what includes it. Built
 without it (`--no-default-features`), none of this exists: no **Physical
 drive** tick box in the launcher, no `--floppy-bridge` flags, and a config
 file's `bridge` keys are read and ignored.
-
-`vendor/floppybridge/README.md` records the commit vendored and how to move to
-a newer one.
-
 
 ## Using a physical drive
 
@@ -47,13 +45,13 @@ You can also define this in your .TOML file;
 
 ```toml
 [floppy.df0]
-bridge = "greaseweazle"      # or "drawbridge", "supercardpro", "off"
+bridge = "greaseweazle"      # or "off"
 write_protected = true       # emulator-level protection; default true
 # bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "normal"         # normal/compatible/stalling
-# replay_speed = 125             # 100, 125, 150, 175, or 200 percent
+# replay_speed = "fast"          # or "normal"; fast is the default
 ```
 
 A bay cannot have both a bridge and an image -- the disk in the drive is its
@@ -73,17 +71,14 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 | `--floppy-bridge-port DFN PORT` | `bridge_port` |
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` |
-| `--floppy-bridge-density DFN D` | `bridge_density` |
-| `--floppy-replay-speed DFN PCT` | `replay_speed = PCT` |
+| `--floppy-replay-speed DFN SPEED` | `replay_speed` |
 | `--floppy-bridge-writable DFN` | `write_protected = false` |
 
 These layer on top of a config file as every other flag does, so
 `--floppy-bridge df0 greaseweazle` turns DF0 over to a physical drive even if
-the file gives it an image -- the flag says the bay *is* a physical drive, so the
-image it displaces is not a conflict. There is deliberately no flag for
-protecting a drive, because that is already the default. The remaining
-options -- density, read mode, replay speed, and profiles -- are
-config-file only; they describe a rig rather than a run.
+the file gives it an image -- the flag says the bay *is* a physical drive, so
+the image it displaces is not a conflict. There is deliberately no flag for
+protecting a drive, because that is already the default.
 
 If a bay asks for a physical drive and it cannot be opened, Copperline
 stops with the reason rather than booting a machine with an empty drive
@@ -91,66 +86,77 @@ where you asked for your disk.
 
 ### Serial port
 
-Every current interface connects over a serial port, and every one of them
-can be found automatically, which is the default. Name `bridge_port`
-explicitly to pin a particular device when more than one is attached.
+The interface connects over a serial port and can be found automatically,
+which is the default. Name `bridge_port` explicitly to pin a particular
+device when more than one is attached.
 
 The launcher lists **Automatic**, then every serial device the host has.
 
 ### Drive select
 
 `bridge_cable` picks which drive on the ribbon the interface selects: `a` or
-`b` for the IBM PC cable convention, `0` to `3` for Shugart. It only applies
-to interfaces that have a drive-select line -- a Greaseweazle does, a
-DrawBridge does not -- and the launcher greys the row for those that do not,
-as reported by the driver itself.
+`b` for the IBM PC cable convention, `0` to `3` for Shugart. A Greaseweazle
+drives both conventions; pick the one matching your cable and the drive's
+jumper. Disk-change sensing works on the IBM PC cable; the Shugart bus
+cannot report it, so a swap there is noticed on the next read instead.
+
+### Density
+
+`bridge_density` is `auto` by default: the density is read from the flux
+itself, which cannot confuse DD with HD, and a freshly inserted disk is
+sensed anew. Force `dd` or `hd` only when a disk misreads -- an HD disk
+formatted as DD in an Amiga drive is the classic case for forcing `dd`.
 
 ### Read mode
 
-The driver's own enum calls `normal` "Fast"; that spelling is accepted in the
-config file too.
+`bridge_mode` decides how flux gets off the disk. Two of the three modes are
+the ones to know:
 
-`normal`, the default, captures wherever the head happens to be, saving the
-wait for the index -- most of a revolution on every track it has not read
-before.
+**`normal` -- the default, and the fastest.** The capture starts the instant
+the head settles, wherever the disk happens to be in its spin -- no waiting
+for the index hole -- and the guest is served the early sectors while the
+later ones are still passing the real head, exactly as a real controller
+reads. A capture that begins away from the index has its two ends joined
+where the recording repeats; FluxBridge proves that join by pattern
+matching, and verifies the capture decodes as a complete AmigaDOS track with
+every checksum passing besides. A proven capture replays like an image's
+track; one that cannot be proven is served once and fetched afresh on the
+next visit, so a retry always reads new data.
+This is the mode for essentially everything: it reads the same disks as
+`compatible` and reaches a Workbench desktop appreciably sooner.
 
-A capture that begins away from the index has its two ends joined by the
-driver where the recording repeats, and that join is not always perfect.
-Copperline verifies each capture: one that decodes as a complete AmigaDOS
-track with every checksum passing is kept and replayed like an image's
-track; anything less -- damaged, or a format the scan does not recognise --
-is served once and fetched afresh on the next visit, so a retry always
-reads new data.
+**`compatible` -- the archivist's mode, and the one for copy-protected
+disks.** Each track is captured from one index pulse to the next, so the
+revolution begins where the real one does and its two ends meet by
+construction -- there is no join to prove and nothing to reconstruct, on any
+format, including protected and non-AmigaDOS disks the verifier cannot read.
+The price is waiting for the index, on average an extra half-revolution per
+fresh track. Reach for it for disk preservation work, for titles whose
+protection reads the track layout itself, or for any disk that misbehaves in
+`normal`.
 
-The drive cannot always finish a capture in the revolution the guest takes to
-read the last one. When it has nothing newer, the recording just read is used
-again, and the guest meets a splice at the join: the sector straddling it fails
-and is retried, costing a revolution. Ten good sectors out of eleven beat none,
-which is what refusing the stale recording gives -- the guest is handed filler
-and starves. If a disk reads badly this way, `compatible` is the mode with no
-seam to begin with.
+**`stalling`** also captures from the index, but holds the emulated machine
+-- pointer and all -- whenever a track is not ready, for as long as it
+takes. A real Amiga never does that; it is the last resort for pathological
+loaders that cannot tolerate being answered "not yet".
 
-`compatible` captures each track from the index pulse, so a revolution
-begins where the real one does and its two ends meet in the sector gap,
-exactly as a captured image's do. Slower, for the reason above; reach for it
-if a disk reads badly without the index to anchor it.
-
-`stalling` also captures from the index, but the driver holds the caller up
-until a track is ready instead of answering "not yet". The wait lands on the
-emulated machine, which stops -- pointer and all -- for as long as it takes.
+The driver's own enum calls `normal` "Fast"; that spelling is accepted in
+the config file too.
 
 ### Replay speed
 
-`replay_speed` serves captured tracks at `100`, `125` (the default), `150`,
-`175`, or `200` percent of real speed. Capturing still takes a full
-revolution; only the serving is faster, so the gain lands on tracks already
-in hand. As with `[floppy] speed`, software that times its own loading can
-notice.
+Every track the guest reads is kept in memory, so re-reads never touch the
+platter twice. `replay_speed` is how fast those replays are served:
 
-A track's *first* read is not affected by this setting at all: the capture is
-served as it arrives, at the platter's own pace, exactly as the real machine
-reads. Every track the guest reads is kept in memory, so re-reads never touch
-the platter twice -- those replays are what the speed applies to.
+- `fast` (the default): replays run at double speed. A track's *first* read
+  always arrives at the platter's own pace -- the capture is served as it
+  arrives -- so this only compresses the wait when the guest asks for a
+  track already in hand, which is pure gain on loaders that revisit tracks.
+- `normal`: replays run at the platter's real speed, indistinguishable from
+  the disk itself. The opt-in for software that times its own drive.
+
+As with `[floppy] speed`, software that measures its loading can notice
+`fast`; nothing can notice `normal`.
 
 ## Write protection
 
@@ -190,18 +196,19 @@ at once, which is a whole revolution and lands correctly wherever it begins,
 so this refusal should never be seen in ordinary use.
 
 A **drive select the interface does not support** fails the open instead of
-being ignored. Every interface advertises the cable conventions it can drive
--- a Supercard Pro offers only the IBM PC `a`/`b` pair, for instance -- and a
-rejected selection would otherwise leave it quietly on Drive A, reading and
-writing a different physical drive than the one asked for.
+being ignored. Every driver advertises the cable conventions it can drive,
+and a rejected selection would otherwise leave it quietly on Drive A,
+reading and writing a different physical drive than the one asked for.
 
 ## What behaves differently
 
 **The disk eject button is disabled for a bridged drive.** The status bar keeps a
 bridged drive's numbered icon, so you can see the drive is there, but its
 eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga!
+Putting a disk in or taking one out raises the same on-screen message an
+image insert or eject shows, from the drive's own report.
 
-**No synthesized drive sounds.** The real drive makes its own noise. A bay in the 
+**No synthesized drive sounds.** The real drive makes its own noise. A bay in the
 same machine running an ADF still sounds as it should when enabled.
 
 **The `[floppy] speed` option does not apply.** A physical drive is served
@@ -227,29 +234,25 @@ deterministic as ever; it is the disk under it that is not.
 
 ## Speed
 
-Reading a track means waiting for the drive to capture a whole revolution,
-which takes as long as a revolution takes -- about 200 ms. A faithful
-recording -- index-aligned, or verified clean -- is kept and served from
-Copperline's own copy with no drive involvement at all, so software that
-re-reads such a track pays nothing, and `replay_speed` can serve the
-recovered cells faster than the platter turns.
+A track's first read is served while the platter is still turning it, so the
+guest starts on the early sectors as the later ones arrive -- the same
+pipelining a real Amiga gets from a real drive. The head steps at the
+Amiga's own 3 ms rate, and a faithful recording -- index-aligned, or
+verified clean -- is kept and served from Copperline's own copy with no
+drive involvement at all, so software that re-reads a track pays nothing and
+`replay_speed = "fast"` serves the recovered cells at double speed.
 
-The head follows the emulated stepper, so the driver starts capturing while
-the guest is still settling, and nothing waits on the drive with the machine
-held still: the pointer keeps moving while a disk loads, as it does on a
-real Amiga.
+Put together, a Workbench 1.3 boot from a physical drive lands within a few
+seconds of the same disk in a real A500.
 
 ## Troubleshooting
 
 **Nothing is detected, and the drive is definitely there.** On Linux, check
 the serial device's group first (above) -- that is the usual answer. Then
-confirm the interface is one of the three supported, and that no other program
-is holding it open. Starting with `--floppy-bridge df0 greaseweazle` reports
-what it found and refuses to run if it found nothing, which is the quickest
-check.
-
-**"the built-in FloppyBridge has no *X* driver"** -- the vendored bridge is
-older than the interface you asked for; a maintainer needs to update it.
+confirm the interface is a Greaseweazle on main firmware (0.27 or newer), and
+that no other program is holding the port open. Starting with
+`--floppy-bridge df0 greaseweazle` reports what it found and refuses to run
+if it found nothing, which is the quickest check.
 
 **The launcher shows `None` with the interface plugged in** -- the check runs
 when the launcher opens and when a bay is switched over, so untick and re-tick
@@ -259,18 +262,18 @@ when the launcher opens and when a bay is switched over, so untick and re-tick
 the same footing as an image being inserted:
 
 ```text
-floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" DD drive, FloppyDriveBridge v1.6
-floppy.df0 disk in the real drive
+floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" HD drive, FluxBridge v0.2.0
+floppy.df0 disk in the physical drive
 floppy.df0 write-protected by the configuration; set write_protected = false to write to the disk
 ```
 
-Putting a disk in or taking one out is reported as it happens, as is the
-protection changing and the drive being let go on power off. Nothing here
-needs a debug build or a log filter.
+Putting a disk in or taking one out is reported as it happens -- in the log
+and on screen -- as is the protection changing and the drive being let go on
+power off. Nothing here needs a debug build or a log filter.
 
 **Reads fail or the guest reports errors** -- check the disk's tab, then that
 `bridge_cable` matches the drive's jumper. Then set
-`COPPERLINE_DIAG_FLOPPYBRIDGE=1`, which turns on the drive's own running
+`COPPERLINE_DIAG_FLUXBRIDGE=1`, which turns on the drive's own running
 commentary: every head move, every track handed over with how long it took and
 how many attempts it cost, and the drive's state whenever a track is not ready.
 
