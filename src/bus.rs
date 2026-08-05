@@ -1443,7 +1443,7 @@ pub struct BeamChipRamWrite {
 
 impl BeamChipRamWrite {
     fn from_cpu_write(vpos: u32, hpos: u32, offset: usize, size: usize, value: u32) -> Self {
-        debug_assert!(matches!(size, 1 | 2 | 4));
+        debug_assert!(matches!(size, 1..=4));
         let mut bytes = [0; 4];
         let len = size.min(bytes.len());
         for (idx, byte) in bytes.iter_mut().enumerate().take(len) {
