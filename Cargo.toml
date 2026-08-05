@@ -148,7 +148,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 # nothing has to be installed and nothing is vendored. Only the drivers named
 # here are compiled in, and the launcher's interface list follows this line:
 # adding a driver Copperline supports means adding its feature, nothing else.
-fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", rev = "d6e40b0f23a14f5a1e53d3e6c63766f24a23d309", default-features = false, features = ["greaseweazle"], optional = true }
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", rev = "8101f2114e116c857cc8e0e1c9b7f2676ff51263", default-features = false, features = ["greaseweazle"], optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
