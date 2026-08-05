@@ -2080,7 +2080,7 @@ impl MachineSetup {
                 bridge_mode: (bridge.mode != default.mode)
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
                 bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT)
-                    .then_some(bridge.speed),
+                    .then(|| crate::config::RawReplaySpeed::Word("fast".into())),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.
                 write_protected: (!self.df_write_protected[idx]).then_some(false),
@@ -2690,9 +2690,10 @@ impl MachineSetup {
                 Some(BridgeSpeedMode::Stalling) => "Stalling".to_string(),
                 None => "(none)".to_string(),
             },
-            F::BridgeServeSpeed => {
-                format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
-            }
+            F::BridgeServeSpeed => match self.bridge_edit().map_or(100, |c| c.speed) {
+                200 => "Fast".to_string(),
+                _ => "Normal".to_string(),
+            },
             F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),

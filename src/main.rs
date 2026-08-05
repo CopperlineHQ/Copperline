@@ -535,11 +535,10 @@ where
             }
             #[cfg(feature = "fluxbridge")]
             "--floppy-replay-speed" | "--floppy-bridge-speed" => {
-                const USAGE: &str =
-                    "--floppy-bridge-speed requires DFN PERCENT (100, 125, 150, 175, or 200)";
+                const USAGE: &str = "--floppy-replay-speed requires DFN SPEED (normal, or fast)";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let percent_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-speed")?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-replay-speed")?;
                 overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
             #[cfg(feature = "fluxbridge")]
@@ -1133,7 +1132,7 @@ fn print_help() {
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
-         --floppy-bridge-speed DFN PCT  serve captured tracks at 100, 125, 150, 175, or 200%\n  \
+         --floppy-replay-speed DFN SPEED  replay captured tracks at normal or fast\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
     #[cfg(not(feature = "fluxbridge"))]
@@ -1318,12 +1317,14 @@ fn parse_floppy_speed(s: &str) -> Result<u16> {
 
 #[cfg(feature = "fluxbridge")]
 fn parse_floppy_bridge_speed(s: &str) -> Result<u16> {
-    const MSG: &str = "--floppy-bridge-speed PERCENT must be 100, 125, 150, 175, or 200";
-    let speed: u16 = s.trim().parse().map_err(|_| anyhow!(MSG))?;
-    if !copperline::config::SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&speed) {
-        return Err(anyhow!(MSG));
+    const MSG: &str = "--floppy-replay-speed SPEED must be \"normal\" (real speed) or \
+                       \"fast\" (double); a track's first read always streams at the \
+                       platter's own pace";
+    match s.trim().to_ascii_lowercase().as_str() {
+        "normal" | "100" => Ok(100),
+        "fast" | "200" => Ok(200),
+        _ => Err(anyhow!(MSG)),
     }
-    Ok(speed)
 }
 
 fn parse_floppy_drive_count(s: &str) -> Result<u8> {
@@ -2686,13 +2687,10 @@ mod tests {
     #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_speed_flag_refuses_an_unsupported_percentage() {
-        let err = parse(&["--floppy-bridge-speed", "df0", "120"])
-            .expect_err("120 is not a supported serving speed");
+        let err =
+            parse(&["--floppy-replay-speed", "df0", "120"]).expect_err("120 is not a replay speed");
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("100, 125, 150, 175, or 200"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("normal"), "unexpected error: {msg}");
     }
 
     /// A real drive can be asked for entirely from the command line, with no
@@ -2720,9 +2718,9 @@ mod tests {
             "--floppy-bridge-density",
             "df1",
             "dd",
-            "--floppy-bridge-speed",
+            "--floppy-replay-speed",
             "df1",
-            "125",
+            "fast",
         ])?;
 
         let raw = Config::load_raw(None, &args.overrides)?;

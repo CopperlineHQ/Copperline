@@ -1340,10 +1340,10 @@ pub enum BridgeCable {
 /// Serving speeds a bridged bay accepts, as percentages of the platter's
 /// real speed. Shared by the config parser, the CLI, and the launcher's
 /// cycle row so all three offer the same set.
-pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 5] = [100, 125, 150, 175, 200];
+pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 2] = [100, 200];
 
 /// The serving speed a bridged bay uses unless told otherwise.
-pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 125;
+pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 100;
 
 /// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
 ///
@@ -2304,7 +2304,7 @@ impl ConfigOverrides {
                 drive.bridge_density = Some(density.clone());
             }
             if let Some(speed) = self.floppy_bridge_speed[idx] {
-                drive.bridge_speed = Some(speed);
+                drive.bridge_speed = Some(RawReplaySpeed::Percent(speed));
             }
         }
         if let Some(joystick) = &self.joystick {
@@ -3218,7 +3218,16 @@ pub(crate) struct RawFloppyDrive {
         alias = "bridge_speed",
         rename = "replay_speed"
     )]
-    pub(crate) bridge_speed: Option<u16>,
+    pub(crate) bridge_speed: Option<RawReplaySpeed>,
+}
+
+/// The replay speed as a config file may spell it: a word, or one of the
+/// percentages the setting used to take.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawReplaySpeed {
+    Percent(u16),
+    Word(String),
 }
 
 /// Convert a parsed `[ide]`/`[scsi]` drive entry into a `DriveImage`,
@@ -5032,12 +5041,18 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let speed = match raw.bridge_speed {
+    // Replays of captured revolutions run at real speed or at double it; a
+    // track's first read always streams at the platter's own pace, so finer
+    // steps between the two had nothing distinct to mean.
+    let speed = match &raw.bridge_speed {
         None => DEFAULT_BRIDGE_SPEED_PERCENT,
-        Some(p) if SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&p) => p,
+        Some(RawReplaySpeed::Word(word)) if word.eq_ignore_ascii_case("normal") => 100,
+        Some(RawReplaySpeed::Word(word)) if word.eq_ignore_ascii_case("fast") => 200,
+        Some(RawReplaySpeed::Percent(100)) => 100,
+        Some(RawReplaySpeed::Percent(200)) => 200,
         Some(other) => bail!(
-            "floppy.df{idx} bridge_speed = {other} is not a supported serving \
-             speed (100, 125, 150, 175, or 200)"
+            "floppy.df{idx} replay_speed = {other:?} is not a replay speed: \
+             \"normal\" (real speed) or \"fast\" (double)"
         ),
     };
 
@@ -7528,7 +7543,7 @@ mod tests {
             bridge_mode = "stalling"
             bridge_density = "hd"
             bridge_cable = "b"
-            replay_speed = 125
+            replay_speed = "fast"
         "#,
         )?;
         let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
@@ -7546,7 +7561,7 @@ mod tests {
         assert_eq!(df1.mode, BridgeSpeedMode::Stalling);
         assert_eq!(df1.density, BridgeDensity::Hd);
         assert_eq!(df1.cable, BridgeCable::DriveB);
-        assert_eq!(df1.speed, 125);
+        assert_eq!(df1.speed, 200);
 
         // Bridging a bay wires the drive in, and leaves it with no image.
         assert!(cfg.floppy.drives[0].is_none());
@@ -7569,8 +7584,8 @@ mod tests {
             ))
             .expect_err("not a supported serving speed");
             let msg = format!("{err:#}");
-            assert!(msg.contains("bridge_speed"), "unexpected error: {msg}");
-            assert!(msg.contains("125"), "names the accepted values: {msg}");
+            assert!(msg.contains("replay_speed"), "unexpected error: {msg}");
+            assert!(msg.contains("normal"), "names the accepted values: {msg}");
         }
     }
 
