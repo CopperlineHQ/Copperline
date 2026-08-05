@@ -120,7 +120,50 @@ pub struct MidiSerialSink {
     input: InputConsumer,
     framer: MidiFramer,
     debug: Option<MidiDebug>,
+    /// Where the MT-32's ROMs are, so one can be attached and dropped while
+    /// the machine runs. Empty when none were configured, which is what
+    /// keeps [`MIDI_OUT_MT32`] out of the picker.
+    #[cfg(feature = "mt32")]
+    mt32_roms: crate::mt32::Mt32Roms,
+    /// What the control ROM calls itself, read from the image once when the
+    /// pair is configured. The engine keeps its copy of the ROM private, so
+    /// this is read from the file, and read once: it cannot change while
+    /// the machine runs.
+    #[cfg(feature = "mt32")]
+    mt32_version: Option<String>,
+    /// The fitted MT-32. Absent costs nothing: no ROMs read, no engine, and
+    /// no rendering asked for. Absent while it is switched off, too -- an
+    /// unpowered synth is not a quieter synth, it is no synth.
+    #[cfg(feature = "mt32")]
+    mt32: Option<crate::mt32::Mt32Device>,
+    /// Whether the MT-32 is the chosen output, which it stays across being
+    /// switched off and on again.
+    #[cfg(feature = "mt32")]
+    mt32_selected: bool,
+    /// Why the MT-32 could not be fitted when it was last asked for, so the
+    /// window can say so rather than leaving a silent blank panel.
+    #[cfg(feature = "mt32")]
+    mt32_fault: Option<String>,
+    /// Whether the MT-32's own MIDI OUT is wired back to the machine, which
+    /// is what a patch editor on the Amiga needs to read the module back.
+    /// Only meaningful while the MT-32 is also the output: it answers what
+    /// it was sent, so with nothing going to it there is nothing to answer.
+    #[cfg(feature = "mt32")]
+    mt32_input: bool,
+    /// The reply waiting to go back to the guest. Paula's receiver drains it
+    /// at the emulated baud rate exactly as it drains the host ring, so a
+    /// dump arrives over the wire at MIDI speed rather than all at once.
+    #[cfg(feature = "mt32")]
+    mt32_reply: std::collections::VecDeque<u8>,
 }
+
+/// The output-device name that means the built-in MT-32 rather than a host
+/// endpoint. Shown as [`MIDI_OUT_MT32_LABEL`].
+#[cfg(feature = "mt32")]
+pub use crate::config::MIDI_OUT_MT32;
+
+/// What the MT-32 output is called anywhere a person reads it.
+pub const MIDI_OUT_MT32_LABEL: &str = "MT-32";
 
 /// MIDI Active Sensing status byte.
 pub(crate) const ACTIVE_SENSE: u8 = 0xFE;
@@ -335,6 +378,20 @@ impl MidiSerialSink {
             input,
             framer: MidiFramer::default(),
             debug,
+            #[cfg(feature = "mt32")]
+            mt32_roms: crate::mt32::Mt32Roms::default(),
+            #[cfg(feature = "mt32")]
+            mt32_version: None,
+            #[cfg(feature = "mt32")]
+            mt32: None,
+            #[cfg(feature = "mt32")]
+            mt32_selected: false,
+            #[cfg(feature = "mt32")]
+            mt32_fault: None,
+            #[cfg(feature = "mt32")]
+            mt32_input: false,
+            #[cfg(feature = "mt32")]
+            mt32_reply: std::collections::VecDeque::new(),
         })
     }
 
@@ -369,20 +426,223 @@ impl MidiSerialSink {
         log::info!("midi: input -> {}", self.input_label());
     }
 
-    /// Point the output at a named host endpoint, or at nothing.
+    /// Point the output at a named host endpoint, at the built-in MT-32, or
+    /// at nothing.
+    ///
+    /// The MT-32 is fitted here and dropped again when the output moves on,
+    /// so a session that never selects one never reads a ROM or runs an
+    /// engine.
     pub fn set_output_endpoint(&mut self, endpoint: Option<&str>) {
+        #[cfg(feature = "mt32")]
+        if crate::config::midi_out_is_mt32(endpoint) {
+            self.attach_mt32();
+            return;
+        }
+        #[cfg(feature = "mt32")]
+        {
+            self.mt32 = None;
+            self.mt32_selected = false;
+            // Nothing reaches the module any more, so it has nothing left
+            // to answer: its MIDI OUT goes with its MIDI IN.
+            self.mt32_input = false;
+        }
+        #[cfg(feature = "mt32")]
+        self.stop_answering();
         self.backend.set_output(endpoint);
         log::info!("midi: output -> {}", self.output_label());
     }
 
-    /// Point the input at a named host endpoint, or at nothing.
+    /// Fit the MT-32, leaving the host output silent: the device on the far
+    /// end of the cable is the one here.
+    #[cfg(feature = "mt32")]
+    fn attach_mt32(&mut self) {
+        if self.mt32.is_some() {
+            return;
+        }
+        self.mt32_selected = true;
+        self.mt32_fault = None;
+        let Some((control, pcm)) = self.mt32_roms.pair() else {
+            log::warn!(
+                "midi: {MIDI_OUT_MT32_LABEL} needs both ROM images; \
+                 set [serial] mt32_control_rom and mt32_pcm_rom"
+            );
+            self.mt32_fault = Some("missing ROM(s)".to_string());
+            return;
+        };
+        match crate::mt32::Mt32Device::open(control, pcm) {
+            Ok(device) => {
+                self.backend.set_output(None);
+                self.mt32 = Some(device);
+            }
+            Err(e) => {
+                log::warn!("midi: {MIDI_OUT_MT32_LABEL} could not be fitted: {e:#}");
+                self.mt32_fault = Some("invalid ROM(s)".to_string());
+            }
+        }
+    }
+
+    /// Switch the fitted MT-32 off or on again, leaving it the chosen
+    /// output either way.
+    ///
+    /// Off drops the engine entirely, which is what a real one being switched
+    /// off amounts to; on builds a fresh one, so it comes up with its
+    /// power-on greeting and its defaults, exactly as the hardware does.
+    #[cfg(feature = "mt32")]
+    pub fn set_mt32_power(&mut self, on: bool) {
+        if !self.mt32_selected || on == self.mt32.is_some() {
+            return;
+        }
+        if on {
+            self.attach_mt32();
+        } else {
+            self.mt32 = None;
+            // A module with no power answers nothing.
+            self.stop_answering();
+            log::info!("midi: {MIDI_OUT_MT32_LABEL} switched off");
+        }
+    }
+
+    /// Stop answering the machine: nothing half-gathered, nothing half-sent.
+    ///
+    /// Called wherever the module stops being what the guest is talking to,
+    /// so a request begun against the old one cannot finish against the new,
+    /// and a dump cut off partway cannot arrive as a broken message.
+    #[cfg(feature = "mt32")]
+    fn stop_answering(&mut self) {
+        self.mt32_reply.clear();
+        // Whatever the module had queued on its OUT jack goes with it.
+        if let Some(mt32) = self.mt32.as_mut() {
+            let _ = mt32.take_midi_out();
+        }
+    }
+
+    /// Why the MT-32 could not be fitted, if it could not. Taken rather than
+    /// borrowed: it is said once, not on every frame.
+    #[cfg(feature = "mt32")]
+    pub fn take_mt32_fault(&mut self) -> Option<String> {
+        self.mt32_fault.take()
+    }
+
+    /// Whether the MT-32 is the chosen output, powered or not.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_selected(&self) -> bool {
+        self.mt32_selected
+    }
+
+    /// Whether an MT-32 could be selected at all.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_available(&self) -> bool {
+        self.mt32_roms.configured()
+    }
+
+    /// The attached MT-32, for the front panel.
+    #[cfg(feature = "mt32")]
+    pub fn mt32(&self) -> Option<&crate::mt32::Mt32Device> {
+        self.mt32.as_ref()
+    }
+
+    #[cfg(feature = "mt32")]
+    pub fn mt32_mut(&mut self) -> Option<&mut crate::mt32::Mt32Device> {
+        self.mt32.as_mut()
+    }
+
+    /// Where the ROMs are. Set once from the configuration; the picker and
+    /// the runtime switch both read it.
+    #[cfg(feature = "mt32")]
+    pub fn set_mt32_roms(&mut self, roms: crate::mt32::Mt32Roms) {
+        self.mt32_version = roms
+            .control
+            .as_deref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|image| crate::mt32::rom::version_line(&image));
+        self.mt32_roms = roms;
+    }
+
+    /// What the control ROM calls itself, for the panel's version screen.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_version(&self) -> Option<&str> {
+        self.mt32_version.as_deref()
+    }
+
+    /// Stop whatever song is playing.
+    #[cfg(feature = "mt32")]
+    pub fn stop_mt32_demo(&mut self) {
+        if let Some(mt32) = self.mt32.as_mut() {
+            mt32.play_demo(None);
+        }
+    }
+
+    /// Whether a demo song is still running.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_demo_playing(&self) -> bool {
+        self.mt32
+            .as_ref()
+            .is_some_and(crate::mt32::Mt32Device::demo_playing)
+    }
+
+    /// Start one of the control ROM's own songs, and say what it is called.
+    /// The image is read here rather than kept: a demo is a rare thing to
+    /// ask for, and the songs are a good deal larger than the answer.
+    #[cfg(feature = "mt32")]
+    pub fn play_mt32_demo(&mut self, track: usize) -> Option<String> {
+        let image = std::fs::read(self.mt32_roms.control.as_deref()?).ok()?;
+        let mut songs = crate::mt32::demo::songs(&image);
+        if songs.is_empty() {
+            return None;
+        }
+        let song = songs.swap_remove(track % songs.len());
+        let title = song.title.clone();
+        self.mt32.as_mut()?.play_demo(Some(song));
+        Some(title)
+    }
+
+    /// Point the input at a named host endpoint, at the MT-32's own MIDI
+    /// OUT, or at nothing.
     pub fn set_input_endpoint(&mut self, endpoint: Option<&str>) {
+        #[cfg(feature = "mt32")]
+        if crate::config::midi_out_is_mt32(endpoint) {
+            // Its MIDI OUT and its MIDI IN are the same cable pair to the
+            // same module, so taking the input silences the host source.
+            self.backend.set_input(None);
+            self.mt32_input = true;
+            log::info!("midi: input -> {}", self.input_label());
+            return;
+        }
+        #[cfg(feature = "mt32")]
+        {
+            self.mt32_input = false;
+            self.stop_answering();
+        }
         self.backend.set_input(endpoint);
         log::info!("midi: input -> {}", self.input_label());
     }
 
+    /// Whether the module's MIDI OUT is the machine's MIDI IN.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_input(&self) -> bool {
+        self.mt32_input
+    }
+
+    /// Say what the port ended up wired to, once the output is settled.
+    ///
+    /// Reported here rather than by each backend, because until the MT-32
+    /// has had its chance to attach, "no host endpoint" does not yet mean
+    /// the port is inert.
+    pub fn report_wiring(&self) {
+        let (out, input) = (self.output_label(), self.input_label());
+        if out == "None" && input == "None" {
+            log::warn!("[serial] mode = midi but no endpoint is selected; MIDI is inert");
+        } else {
+            log::info!("midi: out {out}, in {input}");
+        }
+    }
+
     /// Current output device name, or "None".
     pub fn output_label(&self) -> String {
+        #[cfg(feature = "mt32")]
+        if self.mt32_selected {
+            return MIDI_OUT_MT32_LABEL.to_string();
+        }
         self.backend
             .current_output()
             .unwrap_or_else(|| "None".to_string())
@@ -390,6 +650,10 @@ impl MidiSerialSink {
 
     /// Current input device name, or "None".
     pub fn input_label(&self) -> String {
+        #[cfg(feature = "mt32")]
+        if self.mt32_input {
+            return MIDI_OUT_MT32_LABEL.to_string();
+        }
         self.backend
             .current_input()
             .unwrap_or_else(|| "None".to_string())
@@ -397,10 +661,37 @@ impl MidiSerialSink {
 }
 
 impl SerialSink for MidiSerialSink {
+    fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
+        #[cfg(feature = "mt32")]
+        if let Some(mt32) = &mut self.mt32 {
+            let frame = mt32.next_frame();
+            // A request the module has answered goes back down the wire --
+            // when its MIDI OUT is wired to the machine. Unwired, the jack
+            // answers into a cable that is not there.
+            let replies = mt32.take_midi_out();
+            if self.mt32_input && !replies.is_empty() {
+                self.mt32_reply.extend(replies);
+            }
+            return Some(frame);
+        }
+        None
+    }
+
     fn write_byte(&mut self, b: u8, at_cck: u64) {
         // Faithful by default; only drops Active Sensing when opted in (see
         // strip_active_sense).
         if b == ACTIVE_SENSE && strip_active_sense() {
+            return;
+        }
+        // With an MT-32 attached, it is the device on the far end of the
+        // cable: the bytes go to it rather than out to the host, and no
+        // scheduling is needed because it answers in emulated time.
+        #[cfg(feature = "mt32")]
+        if let Some(mt32) = &mut self.mt32 {
+            if let Some(dbg) = &mut self.debug {
+                dbg.tx_bytes += 1;
+            }
+            mt32.write_byte(b);
             return;
         }
         // Map the emit clock onto host time so the byte is scheduled rather
@@ -430,6 +721,15 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn read_byte(&mut self) -> Option<u8> {
+        // The module's own reply comes first: it is answering something the
+        // guest asked for, and a host source is a separate cable anyway.
+        #[cfg(feature = "mt32")]
+        if let Some(b) = self.mt32_reply.pop_front() {
+            if let Some(dbg) = &mut self.debug {
+                dbg.rx_bytes += 1;
+            }
+            return Some(b);
+        }
         let b = self.input.try_pop();
         if let Some(byte) = b {
             if let Some(dbg) = &mut self.debug {
@@ -445,6 +745,10 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn has_pending_input(&self) -> bool {
+        #[cfg(feature = "mt32")]
+        if !self.mt32_reply.is_empty() {
+            return true;
+        }
         !self.input.is_empty()
     }
 
@@ -453,6 +757,10 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn as_midi(&mut self) -> Option<&mut MidiSerialSink> {
+        Some(self)
+    }
+
+    fn as_midi_ref(&self) -> Option<&MidiSerialSink> {
         Some(self)
     }
 

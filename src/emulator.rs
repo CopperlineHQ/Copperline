@@ -1976,10 +1976,56 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Off => Ok(Box::new(crate::serial::NullSerialSink)),
         SerialMode::Stdout => Ok(Box::new(StdoutSink::new())),
         #[cfg(feature = "midi")]
-        SerialMode::Midi => Ok(Box::new(crate::midi::MidiSerialSink::open(
-            cfg.serial.midi_out.as_deref(),
-            cfg.serial.midi_in.as_deref(),
-        )?)),
+        SerialMode::Midi => {
+            // "mt32" names the built-in synth, not a host endpoint, so the
+            // host output starts unset and the device is attached below.
+            let wants_mt32 = crate::config::midi_out_is_mt32(cfg.serial.midi_out.as_deref());
+            let host_out = (!wants_mt32)
+                .then_some(cfg.serial.midi_out.as_deref())
+                .flatten();
+            // Likewise on the way in: "mt32" is the module's own MIDI OUT,
+            // and it only has one while it is also the output. Either way
+            // the name is a sentinel, never a host endpoint's, so it does
+            // not reach the backend even when the module is not driving it.
+            let names_mt32_in = crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref());
+            let wants_mt32_in = wants_mt32 && names_mt32_in;
+            let host_in = (!names_mt32_in)
+                .then_some(cfg.serial.midi_in.as_deref())
+                .flatten();
+            #[allow(unused_mut)]
+            let mut sink = crate::midi::MidiSerialSink::open(host_out, host_in)?;
+            #[cfg(feature = "mt32")]
+            {
+                sink.set_mt32_roms(crate::mt32::Mt32Roms {
+                    control: cfg.serial.mt32_control_rom.clone(),
+                    pcm: cfg.serial.mt32_pcm_rom.clone(),
+                });
+                if wants_mt32 {
+                    sink.set_output_endpoint(Some(crate::config::MIDI_OUT_MT32));
+                }
+                if wants_mt32_in {
+                    sink.set_input_endpoint(Some(crate::config::MIDI_OUT_MT32));
+                }
+            }
+            #[cfg(not(feature = "mt32"))]
+            let _ = wants_mt32_in;
+            #[cfg(not(feature = "mt32"))]
+            if wants_mt32 {
+                log::warn!(
+                    "[serial] midi_out = \"mt32\" needs a build with --features mt32; \
+                     the MIDI output is unset"
+                );
+            }
+            if names_mt32_in && !wants_mt32_in {
+                log::warn!(
+                    "[serial] midi_in = \"mt32\" needs midi_out = \"mt32\" as well: \
+                     the module answers what it is sent, so with nothing going \
+                     to it there is nothing to hear back; the MIDI input is unset"
+                );
+            }
+            sink.report_wiring();
+            Ok(Box::new(sink))
+        }
         #[cfg(not(feature = "midi"))]
         SerialMode::Midi => Err(anyhow!(
             "[serial] mode = \"midi\" needs a build with --features midi"

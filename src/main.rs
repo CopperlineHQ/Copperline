@@ -410,6 +410,21 @@ where
             "--show-status-bar" => {
                 overrides.status_bar = Some(true);
             }
+            "--mt32-control-rom" => {
+                overrides.mt32_control_rom = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--mt32-control-rom requires a path"))?,
+                );
+            }
+            "--mt32-pcm-rom" => {
+                overrides.mt32_pcm_rom = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--mt32-pcm-rom requires a path"))?,
+                );
+            }
+            "--mt32-panel" => {
+                overrides.mt32_panel = Some(true);
+            }
             "--menu-scale" => {
                 overrides.menu_scale = Some(
                     args.next()
@@ -1099,8 +1114,16 @@ fn print_help() {
     let shortcut = HOST_SHORTCUT_MODIFIER_LABEL;
     // The MIDI endpoint options only do anything in a `midi`-feature build, so
     // list them only there. `--serial` itself is always shown: off/stdout work
-    // in every build, and it names midi as a mode.
-    #[cfg(feature = "midi")]
+    // in every build, and it names midi as a mode. The MT-32 rides with them
+    // when its own feature is in, being reached through `--midi-out`.
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    let midi = "--midi-out NAME                host MIDI destination, or mt32 (implies --serial midi)\n  \
+                --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
+                --list-midi                    list host MIDI endpoints and exit\n  \
+                --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
+                --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
+                --mt32-panel                   show the MT-32's front panel under the display\n  ";
+    #[cfg(all(feature = "midi", not(feature = "mt32")))]
     let midi = "--midi-out NAME                host MIDI destination (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  ";
@@ -1236,6 +1259,10 @@ fn print_help() {
          --perf-overlay                 show the performance overlay at start\n  \
          \x20                            (Cmd/Alt+P toggles it live)\n  \
          --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
+         --mt32-control-rom PATH        MT-32 control ROM (with --mt32-pcm-rom,\n  \
+         \x20                            makes \"mt32\" selectable as the MIDI output)\n  \
+         --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
+         --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
@@ -1975,6 +2002,8 @@ fn main() -> Result<()> {
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     video::set_display_scaling(cfg.scaling);
     video::set_menu_scale(cfg.menu_scale);
+    video::set_mt32_panel_shown(cfg.serial.mt32_panel);
+    video::set_mt32_lcd(cfg.serial.mt32_lcd);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's
     // event-loop setup registers with the display server, which aborts or

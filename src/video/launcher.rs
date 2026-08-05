@@ -25,8 +25,8 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
     BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
-    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan,
-    PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
+    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd,
+    Overscan, PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
     RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
     WarpSpeed, BOOT_PRI_NEVER,
 };
@@ -397,6 +397,10 @@ pub enum LauncherField {
     SerialMode,
     #[cfg(feature = "midi")]
     MidiOut,
+    Mt32ControlRom,
+    Mt32PcmRom,
+    Mt32Panel,
+    Mt32Lcd,
     #[cfg(feature = "midi")]
     MidiIn,
     // Parallel
@@ -681,6 +685,18 @@ const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
 ];
+// Picking MT-32 as the output adds the two ROM images it runs on and
+// its front panel; nothing else needs them, so nothing else shows them.
+#[cfg(all(feature = "midi", feature = "mt32"))]
+const SERIAL_ROWS_MT32: [Row; 7] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::MidiIn, "  MIDI input", Cycle),
+    row(F::MidiOut, "  MIDI output", Cycle),
+    row(F::Mt32ControlRom, "  Control ROM", PathRow),
+    row(F::Mt32PcmRom, "  PCM ROM", PathRow),
+    row(F::Mt32Panel, "  Front panel", Toggle),
+    row(F::Mt32Lcd, "  Display", Cycle),
+];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
 const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "  Device", Cycle)];
@@ -750,6 +766,7 @@ pub fn rows(
     tab: LauncherTab,
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
         LauncherTab::System => Cow::Borrowed(&SYSTEM_ROWS),
@@ -776,7 +793,11 @@ pub fn rows(
         }
         LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
-        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
+        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
+            serial_mode,
+            midi_out_is_mt32,
+            parallel_device,
+        )),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
         // A/V & Emu defaults to the Audio category; Video and Emulation are its
@@ -791,9 +812,13 @@ pub fn rows(
 /// only build with serial rows), a `Parallel:` section, then an `Ethernet:`
 /// section, each under a greyed heading and each showing only the rows relevant
 /// to its selected device/mode.
-fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Vec<Row> {
+fn io_ports_rows(
+    serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
+    parallel_device: ParallelDevice,
+) -> Vec<Row> {
     let mut rows = Vec::new();
-    let serial = serial_rows(serial_mode);
+    let serial = serial_rows(serial_mode, midi_out_is_mt32);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
@@ -807,18 +832,22 @@ fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Ve
 
 /// Serial rows for the current mode. Only the `midi` build has any; without it
 /// the Serial section is empty and omitted from the I/O Ports tab.
-fn serial_rows(serial_mode: SerialMode) -> &'static [Row] {
+fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
-        if serial_mode == SerialMode::Midi {
-            &SERIAL_ROWS_MIDI
-        } else {
-            &SERIAL_ROWS_BASE
+        if serial_mode != SerialMode::Midi {
+            return &SERIAL_ROWS_BASE;
         }
+        #[cfg(feature = "mt32")]
+        if midi_out_is_mt32 {
+            return &SERIAL_ROWS_MT32;
+        }
+        let _ = midi_out_is_mt32;
+        &SERIAL_ROWS_MIDI
     }
     #[cfg(not(feature = "midi"))]
     {
-        let _ = serial_mode;
+        let _ = (serial_mode, midi_out_is_mt32);
         &[]
     }
 }
@@ -1356,6 +1385,12 @@ pub struct MachineSetup {
     bezel: bool,
     /// Performance overlay in the top-right ([display] perf_overlay).
     perf_overlay: bool,
+    /// The MT-32's two ROM images, whether its front panel starts up, and
+    /// how that panel's display is lit.
+    mt32_control_rom: Option<PathBuf>,
+    mt32_pcm_rom: Option<PathBuf>,
+    mt32_panel: bool,
+    mt32_lcd: Mt32Lcd,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -1529,6 +1564,10 @@ impl MachineSetup {
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
             perf_overlay: cfg.perf_overlay,
+            mt32_control_rom: cfg.serial.mt32_control_rom.clone(),
+            mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
+            mt32_panel: cfg.serial.mt32_panel,
+            mt32_lcd: cfg.serial.mt32_lcd,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -1584,6 +1623,12 @@ impl MachineSetup {
 
     /// The selected serial mode and parallel device, so the panel can pick the
     /// dynamic Serial/Parallel row sets (see [`rows`]).
+    /// Whether the MIDI output is pointed at the built-in MT-32, which is
+    /// what puts its ROM and panel rows on the I/O Ports tab.
+    pub fn midi_out_is_mt32(&self) -> bool {
+        crate::config::midi_out_is_mt32(self.midi_out.as_deref())
+    }
+
     pub fn serial_mode(&self) -> SerialMode {
         self.serial_mode
     }
@@ -1868,6 +1913,21 @@ impl MachineSetup {
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
+        if self.mt32_control_rom != base.serial.mt32_control_rom {
+            raw.serial.mt32_control_rom = self
+                .mt32_control_rom
+                .as_ref()
+                .map(|p| p.display().to_string());
+        }
+        if self.mt32_pcm_rom != base.serial.mt32_pcm_rom {
+            raw.serial.mt32_pcm_rom = self.mt32_pcm_rom.as_ref().map(|p| p.display().to_string());
+        }
+        if self.mt32_panel != base.serial.mt32_panel {
+            raw.serial.mt32_panel = Some(self.mt32_panel);
+        }
+        if self.mt32_lcd != base.serial.mt32_lcd {
+            raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
+        }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
@@ -2112,6 +2172,10 @@ impl MachineSetup {
         self.perf_overlay = base.perf_overlay;
         self.tint = base.tint;
         self.menu_scale = base.menu_scale;
+        self.mt32_control_rom = base.serial.mt32_control_rom.clone();
+        self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
+        self.mt32_panel = base.serial.mt32_panel;
+        self.mt32_lcd = base.serial.mt32_lcd;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2404,6 +2468,7 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace,
             F::Bezel => self.bezel,
             F::PerfOverlay => self.perf_overlay,
+            F::Mt32Panel => self.mt32_panel,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -2414,6 +2479,8 @@ impl MachineSetup {
     pub fn path(&self, field: LauncherField) -> Option<&Path> {
         match field {
             F::Rom => self.rom.as_deref(),
+            F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
+            F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
             F::Df1Image => self.df_playlists[1].first().map(PathBuf::as_path),
@@ -2597,6 +2664,7 @@ impl MachineSetup {
             F::Scaling => self.scaling.label().to_string(),
             F::Tint => self.tint.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
+            F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -2674,9 +2742,20 @@ impl MachineSetup {
                 SerialMode::Pty => "PTY".to_string(),
             },
             #[cfg(feature = "midi")]
-            F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
+            F::MidiOut => {
+                if self.midi_out_is_mt32() {
+                    return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
+                }
+                self.midi_out.clone().unwrap_or_else(|| "None".to_string())
+            }
             #[cfg(feature = "midi")]
-            F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
+            F::MidiIn => {
+                #[cfg(feature = "mt32")]
+                if crate::config::midi_out_is_mt32(self.midi_in.as_deref()) {
+                    return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
+                }
+                self.midi_in.clone().unwrap_or_else(|| "None".to_string())
+            }
             F::ParallelDevice => match self.parallel_device {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
@@ -2919,6 +2998,9 @@ impl MachineSetup {
             F::MenuScale => {
                 self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
             }
+            F::Mt32Lcd => {
+                self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);
+            }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -2970,9 +3052,42 @@ impl MachineSetup {
                 self.serial_mode = cycle_slice(&choices, self.serial_mode, forward)
             }
             #[cfg(feature = "midi")]
-            F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
+            F::MidiOut => {
+                // MT-32 rides at the end of the output list: it is
+                // always there to be chosen, whatever the host offers.
+                let names: Vec<String> = self
+                    .midi_endpoints
+                    .outputs
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(true))
+                    .collect();
+                self.midi_out =
+                    crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
+                // The MT-32 is only a source while it is the destination,
+                // so moving the output elsewhere takes the input with it.
+                #[cfg(feature = "mt32")]
+                if !self.midi_out_is_mt32()
+                    && crate::config::midi_out_is_mt32(self.midi_in.as_deref())
+                {
+                    self.midi_in = None;
+                }
+            }
             #[cfg(feature = "midi")]
-            F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
+            F::MidiIn => {
+                // The module is a sound module: it has no keyboard, and
+                // what it sends is an answer to what it was sent. So it is
+                // offered as a source only while it is the destination,
+                // which is also the wiring a patch editor needs.
+                let names: Vec<String> = self
+                    .midi_endpoints
+                    .inputs
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(self.midi_out_is_mt32()))
+                    .collect();
+                self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
+            }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its
                 // Output file row (with a Browse button); until a file is set
@@ -3151,6 +3266,7 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::Bezel => self.bezel = !self.bezel,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
+            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
             F::BridgeAutoCache => {
                 if let Some(c) = self.bridge_edit_mut() {
@@ -3174,6 +3290,8 @@ impl MachineSetup {
             && !crate::config::is_cd_image_path(&path);
         match field {
             F::Rom => self.rom = Some(path),
+            F::Mt32ControlRom => self.mt32_control_rom = Some(path),
+            F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
             F::Df1Image => self.set_floppy(1, path),
@@ -3219,6 +3337,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
+            F::Mt32ControlRom => self.mt32_control_rom = None,
+            F::Mt32PcmRom => self.mt32_pcm_rom = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
             F::Df2Image => self.df_playlists[2].clear(),
@@ -3809,18 +3929,6 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
     )
 }
 
-/// Step a MIDI endpoint selection through "None" then the available endpoints,
-/// storing the chosen device's exact name.
-#[cfg(feature = "midi")]
-fn cycle_endpoint(
-    current: &mut Option<String>,
-    endpoints: &[crate::midi::MidiEndpoint],
-    forward: bool,
-) {
-    let names: Vec<String> = endpoints.iter().map(|e| e.name.clone()).collect();
-    *current = crate::midi::next_endpoint(current.as_deref(), &names, forward);
-}
-
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
 /// field (toggle vs path) without threading the tab through every call, called
 /// per drawn row, so it scans the static row tables directly rather than
@@ -3828,7 +3936,9 @@ fn cycle_endpoint(
 /// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    #[cfg(feature = "midi")]
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI, &SERIAL_ROWS_MT32];
+    #[cfg(all(feature = "midi", not(feature = "mt32")))]
     let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];
@@ -4000,6 +4110,14 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
+}
+
+/// The tail a MIDI picker's list carries when the built-in module belongs
+/// on it: the module is not a host endpoint, so it is added rather than
+/// enumerated. Nothing to add on a build without it.
+#[cfg(feature = "midi")]
+fn mt32_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -4909,6 +5027,100 @@ mod tests {
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
     }
 
+    /// The module is offered as a source only while it is the destination,
+    /// and stops being one the moment the output moves elsewhere.
+    #[test]
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    fn the_mt32_is_a_midi_source_only_while_it_is_the_destination() {
+        let mut s = MachineSetup {
+            midi_out: Some(crate::config::MIDI_OUT_MT32.to_string()),
+            ..MachineSetup::default()
+        };
+        assert!(s.midi_out_is_mt32());
+
+        // With no host sources at all, the module is still there to pick.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(
+            s.value_label(LauncherField::MidiIn),
+            crate::midi::MIDI_OUT_MT32_LABEL
+        );
+
+        // Moving the output off the module takes the input with it:
+        // nothing reaches it, so it has nothing left to answer. The module
+        // rides at the end of the output list, so one step wraps to None.
+        s.cycle(LauncherField::MidiOut, true);
+        assert!(!s.midi_out_is_mt32());
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
+
+        // And it is no longer among the sources to cycle onto.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
+    }
+
+    #[test]
+    fn the_mt32_rows_appear_only_when_it_is_the_midi_output() {
+        let midi_rows = |out: Option<&str>| {
+            let s = MachineSetup {
+                midi_out: out.map(str::to_string),
+                ..MachineSetup::default()
+            };
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                SerialMode::Midi,
+                s.midi_out_is_mt32(),
+            )
+            .iter()
+            .map(|r| r.field)
+            .collect::<Vec<_>>()
+        };
+
+        // A host endpoint: the ROM pair and the panel are nothing to do with
+        // it, so they are not offered.
+        let host = midi_rows(Some("Some USB Interface"));
+        assert!(host.contains(&LauncherField::MidiOut));
+        assert!(!host.contains(&LauncherField::Mt32ControlRom));
+        assert!(!host.contains(&LauncherField::Mt32Panel));
+
+        // The built-in synth: both ROMs and the panel.
+        let mt32 = midi_rows(Some(crate::config::MIDI_OUT_MT32));
+        assert!(mt32.contains(&LauncherField::Mt32ControlRom));
+        assert!(mt32.contains(&LauncherField::Mt32PcmRom));
+        assert!(mt32.contains(&LauncherField::Mt32Panel));
+    }
+
+    #[test]
+    fn the_mt32_rom_pair_and_panel_round_trip_through_raw() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.to_raw().serial.mt32_control_rom, None);
+
+        s.set_path(
+            LauncherField::Mt32ControlRom,
+            std::path::PathBuf::from("MT32_CONTROL.ROM"),
+        );
+        s.set_path(
+            LauncherField::Mt32PcmRom,
+            std::path::PathBuf::from("MT32_PCM.ROM"),
+        );
+        s.toggle(LauncherField::Mt32Panel);
+        assert!(s.toggle_value(LauncherField::Mt32Panel));
+
+        let raw = s.to_raw();
+        assert_eq!(
+            raw.serial.mt32_control_rom.as_deref(),
+            Some("MT32_CONTROL.ROM")
+        );
+        assert_eq!(raw.serial.mt32_pcm_rom.as_deref(), Some("MT32_PCM.ROM"));
+        assert_eq!(raw.serial.mt32_panel, Some(true));
+
+        let reloaded = MachineSetup::from_raw(&raw).expect("valid raw");
+        assert_eq!(
+            reloaded.path(LauncherField::Mt32PcmRom),
+            Some(std::path::Path::new("MT32_PCM.ROM"))
+        );
+        assert!(reloaded.toggle_value(LauncherField::Mt32Panel));
+    }
+
     #[test]
     fn menu_scale_round_trips_through_raw() {
         let mut s = MachineSetup::default();
@@ -5232,6 +5444,7 @@ mod tests {
             LauncherTab::Storage,
             ParallelDevice::None,
             SerialMode::default(),
+            false,
         );
         assert_eq!(
             storage.first().map(|r| r.field),
@@ -5245,7 +5458,7 @@ mod tests {
             (LauncherTab::Cd, LauncherField::CdImage),
             (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
         ] {
-            let page = rows(tab, ParallelDevice::None, SerialMode::default());
+            let page = rows(tab, ParallelDevice::None, SerialMode::default(), false);
             assert!(page.iter().any(|r| r.field == marker));
         }
     }
@@ -5280,7 +5493,7 @@ mod tests {
         assert!(!LauncherTab::System.has_top_nav());
 
         // Each category shows only its own settings; the default is Audio.
-        let page = |t| rows(t, ParallelDevice::None, SerialMode::default());
+        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false);
         let audio = page(LauncherTab::AvAudio);
         assert!(audio.iter().any(|r| r.field == F::AudioDevice));
         assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
@@ -5436,7 +5649,12 @@ mod tests {
     #[cfg(feature = "midi")]
     #[test]
     fn io_ports_tab_groups_serial_parallel_and_ethernet_under_headers() {
-        let r = rows(LauncherTab::IoPorts, ParallelDevice::None, SerialMode::Midi);
+        let r = rows(
+            LauncherTab::IoPorts,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+        );
         let headers: Vec<_> = r
             .iter()
             .filter(|x| x.kind == RowKind::SectionHeader)
@@ -5601,7 +5819,7 @@ mod tests {
     #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default())
+            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
                 .iter()
                 .any(|r| r.field == LauncherField::SamplerInput)
         };
@@ -5614,7 +5832,7 @@ mod tests {
     #[test]
     fn midi_rows_appear_only_in_midi_mode() {
         let has = |mode| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode)
+            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
                 .iter()
                 .any(|r| r.field == LauncherField::MidiOut)
         };
@@ -5639,7 +5857,7 @@ mod tests {
         let mut s = MachineSetup::default();
         // The Output file row shows only when the printer is selected.
         let has_output = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default())
+            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
                 .iter()
                 .any(|r| r.field == LauncherField::ParallelOutput)
         };
@@ -6164,6 +6382,7 @@ mod tests {
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Stdout,
+            false,
         );
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiOut));
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiIn));

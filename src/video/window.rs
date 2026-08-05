@@ -181,7 +181,7 @@ const STATUS_BAR_HEIGHT: usize = 44;
 /// plus the status bar below it unless it is hidden (in which case the display
 /// scales to fill the whole window).
 fn window_present_height() -> usize {
-    present_height() + status_bar_height()
+    present_height() + mt32_panel_height() + status_bar_height()
 }
 
 /// Scanlines the CRT pass draws across the display rect: the emulated field
@@ -227,6 +227,23 @@ fn status_bar_height() -> usize {
     } else {
         STATUS_BAR_HEIGHT
     }
+}
+
+/// Where the status bar starts: below the display, and below the MT-32
+/// panel when one is up. The bar sits at the very bottom either way; the
+/// panel takes the strip immediately above it.
+fn status_bar_top() -> usize {
+    present_height() + mt32_panel_height()
+}
+
+/// The MT-32 panel's height, or 0 while it is not shown. It sits between the
+/// display and the status bar, the way the real unit sits under the monitor.
+fn mt32_panel_height() -> usize {
+    #[cfg(feature = "mt32")]
+    if super::mt32_panel_shown() {
+        return mt32panel::MT32_PANEL_HEIGHT;
+    }
+    0
 }
 const STATUS_LABEL_X: usize = 18;
 const STATUS_LED_X: usize = 58;
@@ -304,8 +321,8 @@ const TV_LIVE_PAD_X: usize = (FB_WIDTH - TV_CAPTURED_WIDTH) / 2;
 // the captured aperture's width that breaks this must rethink the live
 // layout.
 const _: () = assert!(TV_LIVE_PAD_X * 2 + TV_CAPTURED_WIDTH == FB_WIDTH);
-const STATUS_BG: u32 = rgba(28, 28, 26);
-const STATUS_TOP: u32 = rgba(78, 76, 70);
+pub(super) const STATUS_BG: u32 = rgba(28, 28, 26);
+pub(super) const STATUS_TOP: u32 = rgba(78, 76, 70);
 const STATUS_BOTTOM: u32 = rgba(12, 12, 11);
 const LED_BEZEL_DARK: u32 = rgba(8, 8, 7);
 const LED_BEZEL_LIGHT: u32 = rgba(78, 76, 68);
@@ -353,7 +370,7 @@ const CD_HUB: u32 = rgba(120, 124, 130);
 const CD_HOLE: u32 = rgba(24, 24, 26);
 const CAMERA_BODY: u32 = rgba(190, 188, 178);
 const CAMERA_LENS: u32 = rgba(20, 22, 24);
-const STATUS_TEXT: u32 = rgba(174, 170, 154);
+pub(super) const STATUS_TEXT: u32 = rgba(174, 170, 154);
 const VOLUME_FILL: u32 = rgba(44, 178, 94);
 const VOLUME_FILL_HIGHLIGHT: u32 = rgba(128, 244, 150);
 const WINDOW_TITLE: &str = concat!("Copperline ", env!("COPPERLINE_DISPLAY_VERSION"));
@@ -379,6 +396,8 @@ fn mouse_sensitivity_factor(sensitivity: u8) -> f64 {
 const OSD_DURATION: std::time::Duration = std::time::Duration::from_millis(2500);
 /// On-screen overlay colours (packed R,G,B,A in memory order).
 const OSD_TEXT: u32 = rgba(236, 236, 232);
+/// Amber, for a message about something that did not go as asked.
+const OSD_TEXT_WARNING: u32 = rgba(248, 205, 78);
 const OSD_SHADOW: u32 = rgba(0, 0, 0);
 const OSD_BG: u32 = rgba(10, 10, 12);
 const RECORD_DOT: u32 = rgba(229, 56, 48);
@@ -436,6 +455,8 @@ fn window_title_mouse_captured() -> String {
 struct Osd {
     text: String,
     expires_at: Instant,
+    /// Drawn in amber rather than white: something did not go as asked.
+    warning: bool,
 }
 
 /// How often the performance overlay resamples its counters. Twice a
@@ -865,6 +886,15 @@ pub struct App {
     held_rawkeys: [bool; 128],
     raw_device_held_rawkeys: [bool; 128],
     main_window_focused: bool,
+    /// Whether the user has sized the main window themselves, in which case
+    /// the canvas reflows into it instead of the window snapping to the
+    /// canvas. Tracked from the resizes that arrive rather than measured
+    /// from the current size: a snap the platform clamped or rounded reads
+    /// as the user's own drag, and the window would never snap again.
+    window_manually_sized: bool,
+    /// The logical size the last snap asked for, so the resize it causes is
+    /// not counted as the user's.
+    snap_request: Option<(f64, f64)>,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
@@ -1007,6 +1037,11 @@ pub struct App {
     rewind_budget_mb: usize,
     rewind_interval_frames: u64,
     rewind_armed: bool,
+    /// The MT-32's front panel: what it is showing and what it believes
+    /// each value to be. The synth has no panel of its own -- on the
+    /// hardware this is firmware -- so it is kept here.
+    #[cfg(feature = "mt32")]
+    mt32_panel: mt32panel::Mt32Panel,
     /// Mapped host keys currently held for keyboard joystick emulation.
     keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
     /// Host-key to controller-control bindings, loaded from the per-user
@@ -1242,6 +1277,11 @@ struct MainRedrawState {
     /// The performance overlay's line revision (0 while hidden), so a
     /// resample repaints an otherwise static frame.
     perf_revision: u64,
+    /// The MT-32 panel's face -- its display line and lamp -- folded to a
+    /// fingerprint, so a program writing to the LCD repaints an otherwise
+    /// static frame. Zero while the panel is hidden.
+    #[cfg(feature = "mt32")]
+    mt32_face: u64,
 }
 
 struct RenderWorker {
@@ -1490,6 +1530,8 @@ impl App {
             held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
+            window_manually_sized: false,
+            snap_request: None,
             cursor_pos: None,
             last_display_cursor_pos: None,
             last_cursor_phys: None,
@@ -1534,6 +1576,8 @@ impl App {
             rewind_budget_mb,
             rewind_interval_frames,
             rewind_armed,
+            #[cfg(feature = "mt32")]
+            mt32_panel: mt32panel::Mt32Panel::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
@@ -2939,6 +2983,14 @@ impl ApplicationHandler for App {
                     .render
                     .as_ref()
                     .and_then(|r| cursor_texture_position(&r.pixels, position, r.texture_scale));
+                // A button held on the dial turns it by following the hand
+                // round the face.
+                #[cfg(feature = "mt32")]
+                if self.mt32_panel.dial_held() {
+                    if let Some(pos) = pos {
+                        self.drag_mt32_dial(pos);
+                    }
+                }
                 if self.mouse_captured {
                     self.cursor_pos = None;
                     self.last_display_cursor_pos = None;
@@ -2964,7 +3016,17 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 }
                 let layout = bar_layout(&self.media_bar());
+                // The MT-32's buttons light under the pointer as the bar's
+                // do, so they need the same redraw when it crosses one.
+                #[cfg(feature = "mt32")]
+                let mt32_hover_changed =
+                    mt32panel::shown_panel_rect(present_height()).is_some_and(|panel| {
+                        mt32panel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
+                    });
+                #[cfg(not(feature = "mt32"))]
+                let mt32_hover_changed = false;
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
+                    || mt32_hover_changed
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
                 {
                     self.request_redraw();
@@ -3065,6 +3127,34 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
+                // The MT-32's panel sits above the status bar and takes its
+                // own clicks, the way the bar does.
+                #[cfg(feature = "mt32")]
+                if !pressed {
+                    self.mt32_panel.release_dial();
+                    // The buttons are momentary: one lights while the mouse
+                    // is down on it and comes back out when it lifts.
+                    self.mt32_panel.release_press();
+                    self.request_redraw();
+                }
+                #[cfg(feature = "mt32")]
+                if pressed
+                    && !self.mouse_captured
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
+                {
+                    if let (Some(pos), Some(panel)) = (
+                        self.cursor_pos,
+                        mt32panel::shown_panel_rect(present_height()),
+                    ) {
+                        if panel.contains(pos) {
+                            if let Some(control) = mt32panel::control_at(panel, pos) {
+                                let left = button == MouseButton::Left;
+                                self.press_mt32_control(control, left, pos);
+                            }
+                            return;
+                        }
+                    }
+                }
                 if pressed
                     && !self.mouse_captured
                     && self.cursor_pos.is_some_and(cursor_in_status_bar)
@@ -3158,6 +3248,7 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::Resized(size) => {
+                self.note_window_resize(size);
                 self.apply_surface_size(size);
             }
             WindowEvent::RedrawRequested => {
@@ -3195,6 +3286,12 @@ impl ApplicationHandler for App {
                 let osd = self.active_osd_text();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
                 let recording = self.recorder.is_some();
+                // The MT-32's panel reads its display live off the engine, so
+                // it is only gathered when the panel is actually up.
+                #[cfg(feature = "mt32")]
+                let mt32_panel = super::mt32_panel_shown()
+                    .then(|| self.mt32_panel_view())
+                    .flatten();
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
@@ -3280,6 +3377,10 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                    #[cfg(feature = "mt32")]
+                    if let Some(panel) = &mt32_panel {
+                        mt32panel::draw(frame, panel, present_height(), r.texture_scale);
+                    }
                     if !super::status_bar_hidden() {
                         draw_status_bar(frame, &view, r.texture_scale);
                     }
@@ -3291,8 +3392,8 @@ impl ApplicationHandler for App {
                     if self.perf_overlay {
                         draw_perf_overlay(frame, &self.perf.lines, r.texture_scale, recording);
                     }
-                    if let Some(text) = &osd {
-                        draw_osd(frame, text, r.texture_scale);
+                    if let Some((text, warning)) = &osd {
+                        draw_osd(frame, text, *warning, r.texture_scale);
                     }
                     ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
                     // The drag hint sits on top of everything: the drop will
@@ -3557,6 +3658,16 @@ impl ApplicationHandler for App {
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
+        #[cfg(feature = "mt32")]
+        {
+            self.repeat_mt32_dial();
+            // A machine booted straight into an MT-32 has its port fitted
+            // before there is a window to say anything on, so the fault is
+            // picked up here instead. Taking it means this says it once.
+            if self.serial_is_midi {
+                self.report_mt32_fault();
+            }
+        }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
         let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
@@ -4196,7 +4307,7 @@ impl App {
         MediaBar { drives, cd }
     }
 
-    fn main_redraw_state(&self) -> MainRedrawState {
+    fn main_redraw_state(&mut self) -> MainRedrawState {
         let mut status = self.emu.bus().front_panel_status();
         if status.fdd_track.is_none() {
             status.fdd_track = self.last_fdd_track;
@@ -4210,6 +4321,20 @@ impl App {
             {
                 false
             }
+        };
+        #[cfg(feature = "mt32")]
+        let mt32_face = if crate::video::mt32_panel_shown() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.emu
+                .bus_mut()
+                .midi_serial_mut()
+                .and_then(crate::midi::MidiSerialSink::mt32_mut)
+                .map(|mt32| mt32.synth_mut().display_raw())
+                .hash(&mut h);
+            h.finish()
+        } else {
+            0
         };
         MainRedrawState {
             status,
@@ -4226,6 +4351,8 @@ impl App {
             } else {
                 0
             },
+            #[cfg(feature = "mt32")]
+            mt32_face,
         }
     }
 
@@ -4581,6 +4708,23 @@ impl App {
             crate::audio::AudioOutput::Default => AudioOutputChoice::Default,
         };
 
+        // Whether an MT-32 can be picked, whether it is the one playing, and
+        // whether its own MIDI OUT is wired back to the machine.
+        #[cfg(feature = "mt32")]
+        let (mt32_available, mt32_attached, mt32_input) = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .map_or((false, false, false), |sink| {
+                (
+                    sink.mt32_available(),
+                    sink.mt32().is_some(),
+                    sink.mt32_input(),
+                )
+            });
+        #[cfg(not(feature = "mt32"))]
+        let (mt32_available, mt32_attached, mt32_input) = (false, false, false);
+
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
             fullscreen,
@@ -4612,6 +4756,11 @@ impl App {
             midi_out: &midi_out,
             midi_inputs: &midi_inputs,
             midi_outputs: &midi_outputs,
+            mt32_available,
+            mt32_attached,
+            mt32_input,
+            mt32_panel: crate::video::mt32_panel_shown(),
+            mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
             sampler_inputs: &sampler_inputs,
             sampler_gain: self.sampler.gain_db,
@@ -4791,20 +4940,52 @@ impl App {
 
             #[cfg(feature = "midi")]
             A::SetMidiInput(name) => {
+                let mut shown = "None".to_string();
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_input_endpoint(Some(&name));
+                    sink.set_input_endpoint(name.as_deref());
+                    shown = sink.input_label();
                 }
-                self.show_osd(format!("MIDI input: {name}"));
+                self.show_osd(format!("MIDI input: {shown}"));
             }
             #[cfg(feature = "midi")]
             A::SetMidiOutput(name) => {
+                let mut shown = "None".to_string();
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_output_endpoint(Some(&name));
+                    sink.set_output_endpoint(name.as_deref());
+                    shown = sink.output_label();
                 }
-                self.show_osd(format!("MIDI output: {name}"));
+                // The device on the port changed, so the mixer has to ask it
+                // for audio again -- an MT-32 just attached, or just left.
+                self.emu.bus_mut().paula.rearm_synth_audio();
+                #[cfg(feature = "mt32")]
+                {
+                    self.sync_mt32_panel();
+                    self.report_mt32_fault();
+                }
+                self.show_osd(format!("MIDI output: {shown}"));
             }
             #[cfg(not(feature = "midi"))]
             A::SetMidiInput(_) | A::SetMidiOutput(_) => {}
+            #[cfg(feature = "mt32")]
+            A::ToggleMt32Panel => {
+                let shown = !crate::video::mt32_panel_shown();
+                self.set_mt32_panel_shown(shown);
+                self.show_osd(if shown {
+                    "MT-32: front panel shown"
+                } else {
+                    "MT-32: front panel hidden"
+                });
+            }
+            #[cfg(not(feature = "mt32"))]
+            A::ToggleMt32Panel => {}
+            #[cfg(feature = "mt32")]
+            A::SetMt32Lcd(style) => {
+                crate::video::set_mt32_lcd(style);
+                self.show_osd(format!("MT-32: {} display", style.menu_label()));
+                self.request_redraw();
+            }
+            #[cfg(not(feature = "mt32"))]
+            A::SetMt32Lcd(_) => {}
             A::SetSamplerInput(name) => {
                 if self.sampler.enabled {
                     self.sampler.input_device = Some(name.clone());
@@ -4936,6 +5117,295 @@ impl App {
             _ => return false,
         }
         self.request_redraw();
+        true
+    }
+
+    /// Show or hide the MT-32's panel, resizing the presentation to match.
+    ///
+    /// The panel takes height from the canvas, and the draw helpers size
+    /// themselves from the flag, so the two must move together: a taller
+    /// canvas over an unchanged buffer indexes past the end of it. Every
+    /// route in goes through here.
+    #[cfg(feature = "mt32")]
+    fn set_mt32_panel_shown(&mut self, shown: bool) {
+        if shown == crate::video::mt32_panel_shown() {
+            return;
+        }
+        // Decide before the flag flips whether the window still matches the
+        // canvas, so a manual resize survives.
+        let was_canvas_sized = self.window_is_canvas_sized();
+        crate::video::set_mt32_panel_shown(shown);
+        if self.resync_canvas_height() {
+            if was_canvas_sized {
+                self.snap_window_to_canvas();
+            }
+        } else {
+            crate::video::set_mt32_panel_shown(!shown);
+            let _ = self.resync_canvas_height();
+        }
+        self.request_redraw();
+    }
+
+    /// The synth the panel is driving, when one is fitted and switched on.
+    #[cfg(feature = "mt32")]
+    fn mt32_synth_mut(&mut self) -> Option<&mut crate::mt32::Mt32Synth> {
+        Some(
+            self.emu
+                .bus_mut()
+                .midi_serial_mut()?
+                .mt32_mut()?
+                .synth_mut(),
+        )
+    }
+
+    /// A press on the MT-32's front panel. The panel decides what it means;
+    /// anything it cannot reach itself comes back as an action.
+    #[cfg(feature = "mt32")]
+    fn press_mt32_control(&mut self, control: mt32panel::Mt32Control, left: bool, pos: (i32, i32)) {
+        let Some(rect) = mt32panel::shown_panel_rect(present_height()) else {
+            return;
+        };
+        // A unit that is switched off still takes note of what is held on
+        // it, so the panel is told which it is.
+        let powered = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.mt32().is_some());
+        let mut panel = std::mem::take(&mut self.mt32_panel);
+        let action = panel.press(control, left, pos, rect, powered, self.mt32_synth_mut());
+        self.mt32_panel = panel;
+        self.apply_mt32_action(action);
+        self.serve_mt32_demo();
+        self.request_redraw();
+    }
+
+    /// Carry out what the panel asked for.
+    #[cfg(feature = "mt32")]
+    fn apply_mt32_action(&mut self, action: mt32panel::PanelAction) {
+        use mt32panel::PanelAction;
+        match action {
+            PanelAction::None => {}
+            PanelAction::Say(text) => self.show_osd(text),
+            PanelAction::Power(_) => self.toggle_mt32_power(),
+            PanelAction::Recycle => {
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    // Off and on again is what a reset amounts to here: the
+                    // engine comes back at its power-on defaults.
+                    sink.set_mt32_power(false);
+                    sink.set_mt32_power(true);
+                }
+                self.emu.bus_mut().paula.rearm_synth_audio();
+                self.mt32_panel.reset();
+                self.show_osd("MT-32: all reset");
+            }
+        }
+    }
+
+    /// The power switch.
+    #[cfg(feature = "mt32")]
+    fn toggle_mt32_power(&mut self) {
+        let on = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.mt32().is_some());
+        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+            sink.set_mt32_power(!on);
+        }
+        // A fresh synth has to be asked for audio again, and the panel
+        // starts over: a unit just switched on is at its defaults, showing
+        // its greeting.
+        self.emu.bus_mut().paula.rearm_synth_audio();
+        self.mt32_panel.reset();
+        self.tell_panel_the_rom_version();
+        self.serve_mt32_demo();
+        let came_up = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.mt32().is_some());
+        if !on && !came_up {
+            // Asked to switch on and it did not: say why rather than
+            // claiming it is running.
+            self.report_mt32_fault();
+            return;
+        }
+        self.show_osd(if on {
+            "MT-32: power off"
+        } else {
+            "MT-32: power on"
+        });
+    }
+
+    /// Follow the pointer while a button is held on the dial.
+    #[cfg(feature = "mt32")]
+    fn drag_mt32_dial(&mut self, pos: (i32, i32)) {
+        let Some(rect) = mt32panel::shown_panel_rect(present_height()) else {
+            return;
+        };
+        let mut panel = std::mem::take(&mut self.mt32_panel);
+        panel.drag_dial(pos, rect, self.mt32_synth_mut());
+        self.mt32_panel = panel;
+        self.request_redraw();
+    }
+
+    /// Step the dial on while a button is held still on it.
+    #[cfg(feature = "mt32")]
+    fn repeat_mt32_dial(&mut self) {
+        if !self.mt32_panel.dial_held() {
+            return;
+        }
+        let mut panel = std::mem::take(&mut self.mt32_panel);
+        let moved = panel.repeat_dial(self.mt32_synth_mut());
+        self.mt32_panel = panel;
+        if moved {
+            self.request_redraw();
+        }
+    }
+
+    /// Say why the MT-32 is not there, if it was asked for and could not be
+    /// fitted. Said once: the fault is taken, not borrowed.
+    #[cfg(feature = "mt32")]
+    fn report_mt32_fault(&mut self) {
+        let fault = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .and_then(crate::midi::MidiSerialSink::take_mt32_fault);
+        if let Some(fault) = fault {
+            self.warn_osd(format!("MT-32: {fault}"));
+        }
+    }
+
+    /// Bring the panel into line with what is on the port.
+    ///
+    /// Unplugging the MT-32 takes the panel down with it -- a fascia with no
+    /// instrument behind it is just a blank strip -- and plugging one in
+    /// starts its panel from scratch, so the engine's power-up greeting is
+    /// what shows.
+    #[cfg(feature = "mt32")]
+    fn sync_mt32_panel(&mut self) {
+        // Selected, not powered: switching the unit off leaves its panel
+        // where it is, which is the whole point of having a switch.
+        let selected = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.mt32_selected());
+        self.mt32_panel.reset();
+        self.tell_panel_the_rom_version();
+        if !selected {
+            self.set_mt32_panel_shown(false);
+        }
+    }
+
+    /// Start whichever of the ROM's own songs the panel is asking for, and
+    /// tell it what that one is called.
+    #[cfg(feature = "mt32")]
+    fn serve_mt32_demo(&mut self) {
+        // A song that has run out hands on to the next, which is what makes
+        // it a chain.
+        if self.mt32_panel.chain_ran_out(
+            self.emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.mt32_demo_playing()),
+        ) {
+            self.request_redraw();
+        }
+        let Some(want) = self.mt32_panel.demo_want() else {
+            return;
+        };
+        let track = match want {
+            mt32panel::DemoWant::Play(track) => Some(track),
+            mt32panel::DemoWant::Stop => None,
+        };
+        let title = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .map(|sink| match track {
+                Some(track) => sink
+                    .play_mt32_demo(track)
+                    // Only the later ROMs carry them; the earlier units had
+                    // no demonstration to play.
+                    .unwrap_or_else(|| "Needs v2.0x ROM".to_string()),
+                None => {
+                    sink.stop_mt32_demo();
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
+        self.mt32_panel.set_track_title(title);
+    }
+
+    /// Hand the panel what the control ROM calls itself, for its version
+    /// screen. The engine keeps its copy of the image to itself, so this
+    /// comes from the sink, which read it off disk when the pair was
+    /// configured.
+    #[cfg(feature = "mt32")]
+    fn tell_panel_the_rom_version(&mut self) {
+        if let Some(version) = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .and_then(|sink| sink.mt32_version().map(str::to_string))
+        {
+            self.mt32_panel.set_version(version);
+        }
+    }
+
+    /// What the MT-32's panel should show, when one is attached.
+    #[cfg(feature = "mt32")]
+    fn mt32_panel_view(&mut self) -> Option<mt32panel::Mt32PanelView> {
+        // A song that runs out hands on to the next, which only happens
+        // while frames are being rendered -- so it is looked at here, as
+        // the panel is drawn, rather than only when something is clicked.
+        self.serve_mt32_demo();
+        let sink = self.emu.bus_mut().midi_serial_mut()?;
+        if !sink.mt32_selected() {
+            return None;
+        }
+        // Switched off, the fascia is still there: dark display, no lamp.
+        let (lcd, led) = sink
+            .mt32_mut()
+            .map_or_else(|| (String::new(), false), |mt32| mt32.synth_mut().display());
+        let powered = sink.mt32().is_some();
+        let hover = self
+            .cursor_pos
+            .zip(mt32panel::shown_panel_rect(present_height()))
+            .and_then(|(pos, panel)| mt32panel::hover_at(panel, pos));
+        Some(self.mt32_panel.view(lcd, led, powered, hover))
+    }
+
+    /// Re-plan the presentation after the canvas height changed, and resize
+    /// every buffer that indexes by it. False when the texture could not be
+    /// resized, in which case the caller has to put its flag back: the draw
+    /// helpers size themselves from the flag, so a taller canvas over a
+    /// shorter buffer would index past it.
+    #[cfg(feature = "mt32")]
+    fn resync_canvas_height(&mut self) -> bool {
+        if let Some(r) = self.render.as_mut() {
+            let surface = r.window.inner_size();
+            if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
+                warn!("resize texture buffer for the MT-32 panel failed: {e}");
+                return false;
+            }
+        }
+        // Tool windows draw through the same canvas height, so their buffers
+        // follow too. Buffer only: their own window sizes are their business.
+        for kind in ToolPanelKind::ALL {
+            if let Some(tool) = self.tool_window_mut(kind) {
+                if let Err(e) = tool.pixels.resize_buffer(
+                    texture_width(tool.texture_scale) as u32,
+                    texture_height(tool.texture_scale) as u32,
+                ) {
+                    warn!("resize tool texture buffer for the MT-32 panel failed: {e}");
+                }
+                tool.window.request_redraw();
+            }
+        }
         true
     }
 
@@ -6165,7 +6635,13 @@ impl App {
             LauncherField::Rom
             | LauncherField::ExtendedRom
             | LauncherField::ScsiRom
-            | LauncherField::ScsiRomOdd => dialog.add_filter("ROM images", &["rom", "bin"]),
+            | LauncherField::ScsiRomOdd
+            | LauncherField::Mt32ControlRom
+            | LauncherField::Mt32PcmRom => {
+                // Both cases spelled out: ROM dumps are as often shouted as
+                // not, and some hosts match the filter case-sensitively.
+                dialog.add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
+            }
             LauncherField::Df0Image
             | LauncherField::Df1Image
             | LauncherField::Df2Image
@@ -6533,6 +7009,22 @@ impl App {
         self.perf = PerfOverlay::default();
         self.set_tint(crate::config::resolve_tint(cfg.tint));
         crate::video::set_menu_scale(cfg.menu_scale);
+        #[cfg(feature = "mt32")]
+        {
+            crate::video::set_mt32_lcd(cfg.serial.mt32_lcd);
+            // The panel belongs to a module that is both fitted and asked
+            // for: a machine built without one would otherwise keep the
+            // last one's strip, dead and taking up room.
+            let fitted = self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.mt32_selected());
+            self.set_mt32_panel_shown(fitted && cfg.serial.mt32_panel);
+            self.mt32_panel.reset();
+            self.tell_panel_the_rom_version();
+            self.report_mt32_fault();
+        }
         self.ui.menu_open = false;
         self.ui.panel = None;
         self.powered_on = true;
@@ -9128,15 +9620,50 @@ impl App {
             return;
         }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
+        self.snap_request = Some((size.width, size.height));
         if let Some(applied) = window.request_inner_size(size) {
             self.apply_surface_size(applied);
         }
     }
 
-    /// Whether the main window is still exactly the presentation canvas size in
-    /// logical points -- i.e. it has not been manually resized (fullscreen
-    /// counts as resized). Lets the status-bar toggle snap an untouched window
-    /// to the new canvas size while leaving a resized one alone.
+    /// Classify a resize of the main window: the user's own drag, or the
+    /// window following a canvas change.
+    ///
+    /// A snap asks for the canvas size; what comes back may be clamped by
+    /// the platform or rounded by the scale factor, and that near miss must
+    /// not read as a drag or the window stops following the canvas for the
+    /// rest of the run. A drag onto the canvas size hands it back.
+    fn note_window_resize(&mut self, size: PhysicalSize<u32>) {
+        // Read what is needed and let the borrow go: a drag delivers these
+        // continuously, so this takes nothing it has to hold on to.
+        let Some((fullscreen, scale)) = self
+            .render
+            .as_ref()
+            .map(|r| (r.window.fullscreen().is_some(), r.window.scale_factor()))
+        else {
+            return;
+        };
+        // Fullscreen sizes the window itself; leave the standing verdict.
+        if fullscreen {
+            return;
+        }
+        let logical_w = f64::from(size.width) / scale;
+        let logical_h = f64::from(size.height) / scale;
+        let asked_for = self
+            .snap_request
+            .is_some_and(|(w, h)| (logical_w - w).abs() < 2.0 && (logical_h - h).abs() < 2.0);
+        if asked_for || logical_size_is_canvas(logical_w, logical_h, window_present_height()) {
+            self.snap_request = None;
+            self.window_manually_sized = false;
+            return;
+        }
+        self.window_manually_sized = true;
+    }
+
+    /// Whether the main window still belongs to the canvas rather than to the
+    /// user -- i.e. it has not been manually resized (fullscreen counts as
+    /// resized). Lets a canvas change snap an untouched window to the new
+    /// size while leaving a resized one alone.
     fn window_is_canvas_sized(&self) -> bool {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return false;
@@ -9144,11 +9671,7 @@ impl App {
         if window.fullscreen().is_some() {
             return false;
         }
-        let scale = window.scale_factor();
-        let inner = window.inner_size();
-        let logical_w = f64::from(inner.width) / scale;
-        let logical_h = f64::from(inner.height) / scale;
-        logical_size_is_canvas(logical_w, logical_h, window_present_height())
+        !self.window_manually_sized
     }
 
     /// Cmd/Alt+M: toggle the monitor-bezel pass for the rest of the run
@@ -9561,15 +10084,28 @@ impl App {
         self.osd = Some(Osd {
             text: text.into(),
             expires_at: Instant::now() + OSD_DURATION,
+            warning: false,
+        });
+        self.request_redraw();
+    }
+
+    /// Say something that did not go as asked, in amber. Otherwise as
+    /// [`Self::show_osd`].
+    #[cfg(feature = "mt32")]
+    fn warn_osd(&mut self, text: impl Into<String>) {
+        self.osd = Some(Osd {
+            text: text.into(),
+            expires_at: Instant::now() + OSD_DURATION,
+            warning: true,
         });
         self.request_redraw();
     }
 
     /// The overlay text to draw this frame, or None when nothing is
     /// active. Expired overlays are dropped as a side effect.
-    fn active_osd_text(&mut self) -> Option<String> {
+    fn active_osd_text(&mut self) -> Option<(String, bool)> {
         match &self.osd {
-            Some(osd) if Instant::now() < osd.expires_at => Some(osd.text.clone()),
+            Some(osd) if Instant::now() < osd.expires_at => Some((osd.text.clone(), osd.warning)),
             Some(_) => {
                 self.osd = None;
                 None
@@ -10065,6 +10601,8 @@ mod console;
 mod control;
 mod crt_shader;
 mod host_input;
+#[cfg(feature = "mt32")]
+mod mt32panel;
 mod present;
 mod rtg_texture;
 mod statusbar;

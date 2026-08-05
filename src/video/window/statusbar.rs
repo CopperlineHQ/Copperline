@@ -20,7 +20,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
     );
     draw_hline(
         frame,
-        present_height() * texture_scale,
+        status_bar_top() * texture_scale,
         STATUS_TOP,
         texture_scale,
     );
@@ -35,7 +35,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         draw_text(
             frame,
             STATUS_LABEL_X * texture_scale,
-            (present_height() + led_row_label_y(row, rows.len())) * texture_scale,
+            (status_bar_top() + led_row_label_y(row, rows.len())) * texture_scale,
             spec.label,
             STATUS_TEXT,
             texture_scale,
@@ -114,7 +114,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         draw_text(
             frame,
             (JOY_TOGGLE_X.saturating_sub(44)) * texture_scale,
-            (present_height() + STATUS_CONTROL_Y + 2) * texture_scale,
+            (status_bar_top() + STATUS_CONTROL_Y + 2) * texture_scale,
             "CCP",
             STATUS_TEXT,
             texture_scale,
@@ -261,13 +261,13 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
             let row = pos / 2;
             (
                 MEDIA_CLUSTER_X + col * (MEDIA_CLUSTER_W + MEDIA_CLUSTER_GAP),
-                present_height() + MEDIA_STACKED_ROW0_Y + row * MEDIA_STACKED_PITCH,
+                status_bar_top() + MEDIA_STACKED_ROW0_Y + row * MEDIA_STACKED_PITCH,
                 MEDIA_STACKED_H,
             )
         } else {
             (
                 MEDIA_CLUSTER_X + pos * (MEDIA_CLUSTER_W + MEDIA_CLUSTER_GAP),
-                present_height() + STATUS_CONTROL_Y,
+                status_bar_top() + STATUS_CONTROL_Y,
                 STATUS_CONTROL_H,
             )
         };
@@ -287,7 +287,7 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
         };
         // The CD cluster is load plus eject only; eject takes the slot a
         // drive cluster gives to swap.
-        let (load, eject, _) = cluster(x, present_height() + STATUS_CONTROL_Y, STATUS_CONTROL_H);
+        let (load, eject, _) = cluster(x, status_bar_top() + STATUS_CONTROL_Y, STATUS_CONTROL_H);
         layout.cd_load = Some(load);
         layout.cd_eject = Some(eject);
     }
@@ -340,7 +340,7 @@ pub(super) fn control_at(pos: (i32, i32), layout: &BarLayout) -> Option<BarContr
 pub(super) fn status_bar_rect() -> Rect {
     Rect {
         x: 0,
-        y: present_height(),
+        y: status_bar_top(),
         w: FB_WIDTH,
         h: STATUS_BAR_HEIGHT,
     }
@@ -425,7 +425,7 @@ pub(super) fn led_row_label_y(row: usize, count: usize) -> usize {
 pub(super) fn led_row_rect(row: usize, count: usize) -> Rect {
     Rect {
         x: STATUS_LED_X,
-        y: present_height() + led_row_label_y(row, count) + STATUS_LED_Y_OFFSET,
+        y: status_bar_top() + led_row_label_y(row, count) + STATUS_LED_Y_OFFSET,
         w: STATUS_LED_W,
         h: STATUS_LED_H,
     }
@@ -434,7 +434,7 @@ pub(super) fn led_row_rect(row: usize, count: usize) -> Rect {
 pub(super) fn fdd_track_counter_rect() -> Rect {
     Rect {
         x: 132,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: 58,
         h: STATUS_CONTROL_H,
     }
@@ -453,7 +453,7 @@ pub(super) fn fdd_track_digit_rect(index: usize) -> Rect {
 pub(super) fn shot_button_rect() -> Rect {
     Rect {
         x: SHOT_BUTTON_X,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: SHOT_BUTTON_W,
         h: STATUS_CONTROL_H,
     }
@@ -462,7 +462,7 @@ pub(super) fn shot_button_rect() -> Rect {
 pub(super) fn menu_button_rect() -> Rect {
     Rect {
         x: ui::MENU_BUTTON_X,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: ui::MENU_BUTTON_W,
         h: STATUS_CONTROL_H,
     }
@@ -471,7 +471,7 @@ pub(super) fn menu_button_rect() -> Rect {
 pub(super) fn volume_control_hit_rect() -> Rect {
     Rect {
         x: VOLUME_SLIDER_X - 8,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: VOLUME_SLIDER_W + 16,
         h: STATUS_CONTROL_H,
     }
@@ -480,7 +480,7 @@ pub(super) fn volume_control_hit_rect() -> Rect {
 pub(super) fn joystick_toggle_rect() -> Rect {
     Rect {
         x: JOY_TOGGLE_X,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: JOY_TOGGLE_W,
         h: STATUS_CONTROL_H,
     }
@@ -489,7 +489,7 @@ pub(super) fn joystick_toggle_rect() -> Rect {
 pub(super) fn volume_slider_track_rect() -> Rect {
     Rect {
         x: VOLUME_SLIDER_X,
-        y: present_height() + VOLUME_SLIDER_Y,
+        y: status_bar_top() + VOLUME_SLIDER_Y,
         w: VOLUME_SLIDER_W,
         h: VOLUME_SLIDER_H,
     }
@@ -501,7 +501,7 @@ pub(super) fn volume_slider_knob_rect(percent: u8) -> Rect {
     let center = track.x + range * usize::from(percent.min(100)) / 100;
     Rect {
         x: center.saturating_sub(VOLUME_KNOB_W / 2),
-        y: present_height() + STATUS_CONTROL_Y + (STATUS_CONTROL_H - VOLUME_KNOB_H) / 2,
+        y: status_bar_top() + STATUS_CONTROL_Y + (STATUS_CONTROL_H - VOLUME_KNOB_H) / 2,
         w: VOLUME_KNOB_W,
         h: VOLUME_KNOB_H,
     }
@@ -510,7 +510,7 @@ pub(super) fn volume_slider_knob_rect(percent: u8) -> Rect {
 pub(super) fn reboot_button_rect() -> Rect {
     Rect {
         x: FB_WIDTH - 58,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: 42,
         h: STATUS_CONTROL_H,
     }
@@ -519,7 +519,7 @@ pub(super) fn reboot_button_rect() -> Rect {
 pub(super) fn power_button_rect() -> Rect {
     Rect {
         x: FB_WIDTH - 108,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: 42,
         h: STATUS_CONTROL_H,
     }
@@ -528,7 +528,7 @@ pub(super) fn power_button_rect() -> Rect {
 pub(super) fn pause_button_rect() -> Rect {
     Rect {
         x: FB_WIDTH - 158,
-        y: present_height() + STATUS_CONTROL_Y,
+        y: status_bar_top() + STATUS_CONTROL_Y,
         w: 42,
         h: STATUS_CONTROL_H,
     }
@@ -871,7 +871,7 @@ pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: bool, textur
 pub(super) fn draw_speaker_glyph(frame: &mut [u8], texture_scale: usize) {
     let s = texture_scale;
     let x = VOLUME_GLYPH_X * s;
-    let y = (present_height() + STATUS_CONTROL_Y) * s;
+    let y = (status_bar_top() + STATUS_CONTROL_Y) * s;
     let fs = s as f32;
     fill_rect(
         frame,
@@ -1469,11 +1469,25 @@ pub(super) fn draw_power_glyph(
     color: u32,
     texture_scale: usize,
 ) {
+    draw_power_glyph_sized(frame, cx, cy, 5.5, color, texture_scale);
+}
+
+/// The same mark at a chosen radius, for panels with less room than the
+/// status bar. `radius` is in unscaled pixels; the stroke follows it so the
+/// ring keeps its proportions.
+pub(super) fn draw_power_glyph_sized(
+    frame: &mut [u8],
+    cx: usize,
+    cy: usize,
+    radius_px: f32,
+    color: u32,
+    texture_scale: usize,
+) {
     let scale = texture_scale as f32;
     let ccx = cx as f32 + 0.5;
     let ccy = cy as f32 + 0.5 + 0.5 * scale;
-    let radius = 5.5 * scale;
-    let stroke = 1.35 * scale;
+    let radius = radius_px * scale;
+    let stroke = (radius_px / 4.07).max(0.75) * scale;
 
     // Ring, swept clockwise from just right of top all the way around to
     // just left of top, leaving a gap centred on 12 o'clock.
@@ -1805,12 +1819,14 @@ pub(super) fn draw_perf_overlay(
     }
 }
 
-pub(super) fn draw_osd(frame: &mut [u8], text: &str, texture_scale: usize) {
+pub(super) fn draw_osd(frame: &mut [u8], text: &str, warning: bool, texture_scale: usize) {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels
     let pad = 4 * s;
     let margin = 8 * s;
     let fw = texture_width(s);
+    // Above the MT-32 panel as well as the status bar: the message belongs
+    // over the picture, not over the instrument under it.
     let display_h = present_height() * s;
 
     let text_w = font::text_width(text, px).min(fw.saturating_sub(2 * (margin + pad)));
@@ -1851,7 +1867,7 @@ pub(super) fn draw_osd(frame: &mut [u8], text: &str, texture_scale: usize) {
         text_x,
         text_y,
         text,
-        OSD_TEXT,
+        if warning { OSD_TEXT_WARNING } else { OSD_TEXT },
         px,
     );
 }

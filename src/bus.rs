@@ -4125,6 +4125,12 @@ impl Bus {
         self.paula.serial.as_midi()
     }
 
+    /// The same sink shared, for state that is read rather than switched.
+    #[cfg(feature = "midi")]
+    pub fn midi_serial(&self) -> Option<&crate::midi::MidiSerialSink> {
+        self.paula.serial.as_midi_ref()
+    }
+
     pub fn live_audio_output_lead_seconds(&self) -> f64 {
         self.paula.live_audio_output_lead_seconds()
     }
