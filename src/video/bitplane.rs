@@ -5576,7 +5576,13 @@ fn render_planned_playfield_line(
                 (sample, output, None)
             };
             if ham_mode || !shres {
-                next_ham_native_x = next_ham_native_x.max(native_x + 1);
+                // The SHRES pair path consumes native_per_pixel samples and
+                // advances the hold colour for each; tracking fewer would
+                // make the next preroll re-process the pair's right half.
+                // Reachable with ham_mode only through the colour/pixel
+                // domain split on a mid-line HAM-to-SHRES BPLCON0 write --
+                // steady-state SHRES decodes HAM off.
+                next_ham_native_x = next_ham_native_x.max(native_x + native_per_pixel);
             }
             // Collision classification is identical for every framebuffer
             // pixel of this native sample, so look it up once. CLXDAT only
