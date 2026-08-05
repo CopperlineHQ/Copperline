@@ -5004,13 +5004,9 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
 
     let mode = match raw.bridge_mode.as_deref().map(str::trim) {
         None => BridgeReadMode::default(),
+        Some(s) if s.eq_ignore_ascii_case("normal") => BridgeReadMode::Normal,
         Some(s) if s.eq_ignore_ascii_case("compatible") => BridgeReadMode::Compatible,
         Some(s) if s.eq_ignore_ascii_case("stalling") => BridgeReadMode::Stalling,
-        // The driver's own enum calls this one Fast. Copperline calls it
-        // normal; both spellings are accepted.
-        Some(s) if s.eq_ignore_ascii_case("normal") || s.eq_ignore_ascii_case("fast") => {
-            BridgeReadMode::Normal
-        }
         // "turbo" is not a read mode: it intercepts AmigaDOS calls rather
         // than reading the disk, which is not something an emulator modelling
         // the hardware can use. Refused by name rather than quietly
@@ -5019,7 +5015,7 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         Some(s) if s.eq_ignore_ascii_case("turbo") => bail!(
             "floppy.df{idx} bridge_mode = \"{s}\" answers AmigaDOS calls instead of \
              reading the disk, which Copperline has no use for: it models the drive. \
-             Use compatible, fast or stalling."
+             Use normal, compatible or stalling."
         ),
         Some(s) => bail!("floppy.df{idx} unknown bridge_mode {s:?}"),
     };
@@ -7662,8 +7658,6 @@ mod tests {
         // so it is named in the refusal rather than silently swapped for one
         // that works, and a config brought over from another emulator
         // explains itself.
-        // "fast" is a read mode Copperline can use now that it chains
-        // consecutive recordings, so it parses.
         assert_eq!(
             parse_config(
                 r#"

@@ -245,7 +245,7 @@ fn bridge_decoder_smoke() {
 fn bridge_seek_capture_soak() {
     let mode = match env_or("PROBE_MODE", "normal").as_str() {
         "compatible" => BridgeMode::Compatible,
-        _ => BridgeMode::Fast,
+        _ => BridgeMode::Normal,
     };
     let captures: usize = env_or("PROBE_CAPTURES", "120").parse().unwrap();
     let away: u8 = env_or("PROBE_AWAY", "20").parse().unwrap();

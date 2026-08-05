@@ -140,9 +140,6 @@ protection reads the track layout itself, or for any disk that misbehaves in
 takes. A real Amiga never does that; it is the last resort for pathological
 loaders that cannot tolerate being answered "not yet".
 
-The driver's own enum calls `normal` "Fast"; that spelling is accepted in
-the config file too.
-
 ### Replay speed
 
 Every track the guest reads is kept in memory, so re-reads never touch the

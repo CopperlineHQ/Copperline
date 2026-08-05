@@ -2117,7 +2117,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             driver: driver.index,
             mode: match bridge_cfg.mode {
                 BridgeReadMode::Compatible => BridgeMode::Compatible,
-                BridgeReadMode::Normal => BridgeMode::Fast,
+                BridgeReadMode::Normal => BridgeMode::Normal,
                 BridgeReadMode::Stalling => BridgeMode::Stalling,
             },
             density: match bridge_cfg.density {

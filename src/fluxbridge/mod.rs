@@ -97,7 +97,7 @@ pub enum BridgeMode {
     /// Quicker by most of a revolution, at the cost of a join that has to be
     /// proved before the capture can be turned twice.
     #[default]
-    Fast,
+    Normal,
     /// Capture from one index pulse to the next, so the revolution's ends meet
     /// in the sector gap and it can be replayed indefinitely.
     Compatible,
@@ -293,7 +293,7 @@ impl Bridge {
         let settings = fb::BridgeConfig {
             driver: driver.kind,
             mode: match config.mode {
-                BridgeMode::Fast => fb::ReadMode::Fast,
+                BridgeMode::Normal => fb::ReadMode::Normal,
                 BridgeMode::Compatible => fb::ReadMode::Compatible,
                 BridgeMode::Stalling => fb::ReadMode::Stalling,
             },
@@ -329,7 +329,7 @@ impl Bridge {
             } else {
                 status.max_cylinders
             },
-            quality: if matches!(config.mode, BridgeMode::Fast) {
+            quality: if matches!(config.mode, BridgeMode::Normal) {
                 fb::CaptureQuality::Unverified
             } else {
                 fb::CaptureQuality::IndexAligned
