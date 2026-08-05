@@ -3664,7 +3664,7 @@ impl ApplicationHandler for App {
             #[cfg(feature = "fluxbridge")]
             for (bay, present, tab) in self.emu.bus_mut().floppy.take_bridge_media_events() {
                 self.show_osd(match (present, tab) {
-                    (false, _) => format!("DF{bay}: ejected"),
+                    (false, _) => format!("DF{bay}: disk ejected"),
                     (true, None) => format!("DF{bay}: disk inserted"),
                     (true, Some(true)) => format!("DF{bay}: disk inserted (write protected)"),
                     (true, Some(false)) => format!("DF{bay}: disk inserted (writable)"),
