@@ -8349,10 +8349,13 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
 
-        // The FluxBridge settings page reached from Configure. The Interface
-        // row offers exactly the drivers the library compiled in, and a fresh
-        // configuration names the supported lead driver, so the page renders
-        // as a new setup shows it. Only exists in a build with the feature --
+        // The FluxBridge settings page reached from Configure, with an
+        // interface selected, which is the state its rows are drawn live in.
+        // Bridging a bay samples the host, so the row starts at "None" on a
+        // machine with nothing plugged in and at the interface on one that
+        // has: cycle until a driver is named, since what a test machine has
+        // attached is not this test's subject. Bounded because cycling is a
+        // fixed-length ring. Only exists in a build with the feature --
         // without it no bay can be bridged, so there is no such page to draw.
         #[cfg(feature = "fluxbridge")]
         {
@@ -8360,11 +8363,15 @@ mod tests {
             let mut setup = launcher::MachineSetup::default();
             setup.set_drive_bridged(0, true);
             setup.set_bridge_edit_drive(0);
-            assert_eq!(
-                setup.value_label(LauncherField::BridgeDevice),
-                "Greaseweazle",
-                "the supported interface leads the row"
-            );
+            let mut named = false;
+            for _ in 0..8 {
+                if setup.value_label(LauncherField::BridgeDevice) != "None" {
+                    named = true;
+                    break;
+                }
+                setup.cycle(LauncherField::BridgeDevice, true);
+            }
+            assert!(named, "the row can name an interface to draw");
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::FluxBridge;
             let ui = UiState {

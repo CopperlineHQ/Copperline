@@ -4445,6 +4445,34 @@ mod tests {
         }
     }
 
+    /// The Interface row carries no driver list of its own: it offers what
+    /// the library compiled in, in the library's order, so the row leads with
+    /// the driver that build is meant to use. The starting value is pinned to
+    /// "None" rather than sampled, because bridging a bay asks the host what
+    /// is plugged in, and what a test machine has attached is not this test's
+    /// subject.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn the_interface_row_offers_the_librarys_drivers_in_its_order() {
+        let offered = bridge_drivers();
+        let lead = *offered.first().expect("the bridge offers its drivers");
+        let library: Vec<&str> = crate::fluxbridge::drivers()
+            .iter()
+            .map(|driver| driver.token)
+            .collect();
+        let row: Vec<&str> = offered.iter().map(|d| d.match_token()).collect();
+        assert_eq!(row, library, "the row is the library's table, in order");
+
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+        setup.df_bridge_none[0] = true;
+        assert_eq!(setup.value_label(F::BridgeDevice), "None");
+        // One step forward off "None" reaches the first interface offered.
+        setup.cycle(F::BridgeDevice, true);
+        assert_eq!(setup.value_label(F::BridgeDevice), lead.label());
+    }
+
     /// Drive speed acts on image bays only, so the row greys exactly when
     /// every fitted bay is physical: one image bay anywhere keeps it live.
     #[cfg(feature = "fluxbridge")]
