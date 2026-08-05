@@ -408,6 +408,20 @@ impl Bridge {
         self.index_aligned
     }
 
+    /// The capture in flight for `cylinder`/`side`, as far as it has got.
+    ///
+    /// The words are the decode of the flux the head has already passed, so
+    /// the caller can serve them while the rest of the revolution is still
+    /// arriving. Grows monotonically until [`Bridge::read_track`] hands over
+    /// the finished revolution.
+    pub fn partial_track(&mut self, cylinder: u8, side: bool) -> Option<(Vec<u16>, usize)> {
+        let track = fb::TrackAddress {
+            cylinder: self.clamp_cylinder(cylinder),
+            side: side_of(side),
+        };
+        self.inner.partial_track(track)
+    }
+
     /// Retire the revolution just consumed so the next read returns the next
     /// recording of the track, making successive revolutions continuous the way
     /// the cells coming off a real head are.

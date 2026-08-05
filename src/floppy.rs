@@ -71,6 +71,15 @@ fn bridge_diag() -> bool {
 /// decides how often we ask -- see `ensure_track`.
 #[cfg(feature = "fluxbridge")]
 const BRIDGE_POLL_INTERVAL_CCK: u64 = (PAULA_CLOCK_HZ / 1_000) as u64;
+
+/// Bits a capture in flight must hold before it is served as it grows.
+///
+/// The emulated head reads the growing revolution at the platter's real pace
+/// while the capture grows at the platter's real pace, so a head started this
+/// far behind the growth edge stays behind it. Fifty milliseconds of track at
+/// the nominal cell rate.
+#[cfg(feature = "fluxbridge")]
+const BRIDGE_PARTIAL_MIN_BITS: usize = 25_000;
 const DISK_STATUS_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000;
 const INDEX_PULSE_CCK: u32 = PAULA_CLOCK_HZ / 250;
 const INDEX_FLAG_SYNC_CCK: u32 = 1;
@@ -2166,6 +2175,27 @@ impl FloppyController {
                     cylinder,
                     bridge.is_working(),
                 );
+                // A capture on its way in is better than filler: its early
+                // sectors are real, and the guest can read them while the rest
+                // of the revolution is still passing the head -- which is
+                // exactly how the machine this emulates read its disks. Served
+                // at the platter's own pace, never compressed: the head must
+                // not outrun the growth edge, and both move at real speed with
+                // the head spotted this much of a start.
+                if let Some((words, bits)) = bridge.partial_track(cylinder, side) {
+                    if bits >= BRIDGE_PARTIAL_MIN_BITS {
+                        let nominal = encoded_track_words();
+                        drive.cached.revs = vec![TrackRev::new(
+                            words,
+                            bits,
+                            Self::word_cck_for_track_words(nominal),
+                        )];
+                        drive.bridge_filler_track = None;
+                        drive.bridge_rev_seamless = false;
+                        drive.clamp_head();
+                        return;
+                    }
+                }
                 // Keep the head over something. Stopping the platter until the
                 // capture lands makes the guest pay the capture and then its
                 // own rotational wait one after the other; turning over filler
