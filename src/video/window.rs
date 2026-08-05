@@ -3657,13 +3657,17 @@ impl ApplicationHandler for App {
             // A disk swapped by hand in a bridged bay is the one media change
             // no menu or drop initiated, so its message is raised here from
             // the drive's own report -- the same style an image insert or
-            // eject shows. The log already carries the detail.
+            // eject shows. On a drive the configuration lets write, the tab
+            // is the fact the user just changed disks to check, so it rides
+            // along; a config-protected drive says nothing about it, since
+            // nothing can be written either way.
             #[cfg(feature = "fluxbridge")]
-            for (bay, present) in self.emu.bus_mut().floppy.take_bridge_media_events() {
-                self.show_osd(if present {
-                    format!("DF{bay}: disk inserted")
-                } else {
-                    format!("DF{bay}: ejected")
+            for (bay, present, tab) in self.emu.bus_mut().floppy.take_bridge_media_events() {
+                self.show_osd(match (present, tab) {
+                    (false, _) => format!("DF{bay}: ejected"),
+                    (true, None) => format!("DF{bay}: disk inserted"),
+                    (true, Some(true)) => format!("DF{bay}: disk inserted (write protected)"),
+                    (true, Some(false)) => format!("DF{bay}: disk inserted (writable)"),
                 });
             }
         }

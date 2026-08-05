@@ -206,7 +206,10 @@ reading and writing a different physical drive than the one asked for.
 bridged drive's numbered icon, so you can see the drive is there, but its
 eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga!
 Putting a disk in or taking one out raises the same on-screen message an
-image insert or eject shows, from the drive's own report.
+image insert or eject shows, from the drive's own report; on a drive the
+configuration lets write, the message also names the inserted disk's tab --
+`(write protected)` or `(writable)` -- since that is the fact worth checking
+a new disk for.
 
 **No synthesized drive sounds.** The real drive makes its own noise. A bay in the
 same machine running an ADF still sounds as it should when enabled.

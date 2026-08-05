@@ -278,12 +278,15 @@ pub struct FloppyController {
     #[serde(default)]
     idle_cache: bool,
     /// Media changes bridged bays have noticed since the frontend last asked:
-    /// `(bay, present)`. The log line has already said it in full; this feeds
-    /// the same on-screen message an image insert or eject raises. Host-side
-    /// and transient, so never serialized.
+    /// `(bay, present, tab)`. `tab` is the inserted disk's write-protect tab,
+    /// carried only when the configuration would otherwise allow a write --
+    /// the one case where the tab decides anything worth announcing. The log
+    /// line has already said it in full; this feeds the same on-screen
+    /// message an image insert or eject raises. Host-side and transient, so
+    /// never serialized.
     #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
-    bridge_media_events: Vec<(usize, bool)>,
+    bridge_media_events: Vec<(usize, bool, Option<bool>)>,
 }
 
 impl Default for FloppyController {
@@ -812,7 +815,10 @@ impl FloppyController {
                 // these are hand-speed events, and the frontend takes them
                 // every frame, so the cap is never met in a windowed session.
                 if self.bridge_media_events.len() < 64 {
-                    self.bridge_media_events.push((idx, drive.bridge_media));
+                    let tab =
+                        (drive.bridge_media && !drive.bridge_write_protected).then_some(sensed_tab);
+                    self.bridge_media_events
+                        .push((idx, drive.bridge_media, tab));
                 }
             }
             if changed {
@@ -1597,11 +1603,14 @@ impl FloppyController {
         std::mem::take(&mut self.sound_steps)
     }
 
-    /// Drains the media changes bridged bays have noticed: `(bay, present)`,
-    /// oldest first. The frontend raises the same on-screen message an image
-    /// insert or eject shows; the log line has already said it in full.
+    /// Drains the media changes bridged bays have noticed: `(bay, present,
+    /// tab)`, oldest first, where `tab` is the inserted disk's write-protect
+    /// tab on the one kind of drive where it decides anything -- one the
+    /// configuration lets write. The frontend raises the same on-screen
+    /// message an image insert or eject shows; the log line has already said
+    /// it in full.
     #[cfg(feature = "fluxbridge")]
-    pub fn take_bridge_media_events(&mut self) -> Vec<(usize, bool)> {
+    pub fn take_bridge_media_events(&mut self) -> Vec<(usize, bool, Option<bool>)> {
         std::mem::take(&mut self.bridge_media_events)
     }
 
