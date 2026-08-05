@@ -94,7 +94,7 @@ ctl-bin = ["dep:serde_json"]
 floppybridge = []
 
 [dependencies]
-m68k = { version = "0.7.0", features = ["serde"] }
+m68k = { version = "0.7.1", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

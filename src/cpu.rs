@@ -3291,6 +3291,39 @@ impl CpuBus {
         value
     }
 
+    /// Whether a three-byte operand at `address` lands entirely inside plain
+    /// memory, and so can be moved as one sized access.
+    ///
+    /// This is the 68020's dynamic bus sizing decided in advance. The
+    /// processor requests the whole operand and the addressed port answers
+    /// with its own width: a 32-bit port (Alice chip RAM, local fast RAM)
+    /// takes all three bytes in one cycle, while a 16-bit port makes the
+    /// processor run a word cycle and then a byte cycle for the remainder.
+    /// Plain memory is a byte array whichever width it answers at, so a
+    /// single sized access carries the right data and `grant_cpu_bus_access_at`
+    /// already bills it by port width. Every device port on an Amiga is 16
+    /// bits, and a device decodes a register per access rather than a byte
+    /// range -- one three-byte read of $DFFxxx is not a register -- so those
+    /// keep the split cycles, which is both what the silicon runs and what
+    /// preserves each register's own read/write side effects.
+    ///
+    /// A span crossing out of a region also lands here: `region_offset` only
+    /// matches when the whole operand fits, so the split path handles the
+    /// halves through their own decodes.
+    fn three_byte_operand_is_plain_memory(&self, address: u32) -> bool {
+        self.classify_plain_memory(self.mask(address), 3).is_some()
+    }
+
+    fn read_three_bytes_plain(&mut self, address: u32) -> u32 {
+        self.sample_ipl();
+        self.read_sized(address, 3, CpuBusAccessKind::Read)
+    }
+
+    fn write_three_bytes_plain(&mut self, address: u32, value: u32) {
+        self.sample_ipl();
+        self.write_sized(address, 3, value);
+    }
+
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
@@ -3725,24 +3758,41 @@ impl AddressBus for CpuBus {
     }
 
     fn try_read_three_bytes(&mut self, address: u32) -> Result<u32, BusFault> {
+        if !self.three_byte_operand_is_plain_memory(address) {
+            let hi = self.try_read_word(address)? as u32;
+            let lo = self.try_read_byte(address.wrapping_add(2))? as u32;
+            return Ok((hi << 8) | lo);
+        }
         self.check_injected_fault(address, 3, false)?;
-        Ok(self.read_three_bytes(address))
+        Ok(self.read_three_bytes_plain(address))
     }
 
     fn try_write_three_bytes(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
+        if !self.three_byte_operand_is_plain_memory(address) {
+            self.try_write_word(address, (value >> 8) as u16)?;
+            return self.try_write_byte(address.wrapping_add(2), value as u8);
+        }
         self.check_injected_fault(address, 3, true)?;
-        self.write_three_bytes(address, value);
+        self.write_three_bytes_plain(address, value);
         Ok(())
     }
 
     fn read_three_bytes(&mut self, address: u32) -> u32 {
-        self.sample_ipl();
-        self.read_sized(address, 3, CpuBusAccessKind::Read)
+        if !self.three_byte_operand_is_plain_memory(address) {
+            let hi = self.read_word(address) as u32;
+            let lo = self.read_byte(address.wrapping_add(2)) as u32;
+            return (hi << 8) | lo;
+        }
+        self.read_three_bytes_plain(address)
     }
 
     fn write_three_bytes(&mut self, address: u32, value: u32) {
-        self.sample_ipl();
-        self.write_sized(address, 3, value);
+        if !self.three_byte_operand_is_plain_memory(address) {
+            self.write_word(address, (value >> 8) as u16);
+            self.write_byte(address.wrapping_add(2), value as u8);
+            return;
+        }
+        self.write_three_bytes_plain(address, value);
     }
 
     fn try_read_immediate_word(&mut self, address: u32) -> Result<u16, BusFault> {
@@ -4548,6 +4598,52 @@ mod tests {
         assert!(
             three < composed,
             "three-byte transfer ({three} cck) must beat the composed word+byte ({composed} cck)"
+        );
+    }
+
+    #[test]
+    fn three_byte_operand_over_custom_registers_splits_into_word_and_byte() {
+        // Dynamic bus sizing: the chipset answers a three-byte request at its
+        // own 16-bit width, so the processor runs a word cycle and then a byte
+        // cycle. That matters beyond timing here, because a device decodes a
+        // register per access -- a single three-byte read of $DFFxxx would name
+        // no register, so the second half has to be its own access or the third
+        // byte never comes from INTREQR at all.
+        let mut bus = CpuBus {
+            bus: test_bus(reset_rom(0, 0)),
+            address_mask: ADDRESS_MASK_24BIT,
+            dbg_memw_addr: None,
+            dbg_memw_hit: None,
+            icache: None,
+            dcache: None,
+            dbg_irq_window: None,
+            last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
+            sampled_irq_level: 0,
+            ipl_sample_held: false,
+            diag_current_pc: 0,
+            jit_enabled: false,
+        };
+        // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
+        // adjacent and beam-independent, so the pair reads back deterministically.
+        bus.bus.custom_write(0x09A, 2, 0x8000 | 0x4020);
+        bus.bus.custom_write(0x09C, 2, 0x8000 | 0x2000);
+
+        let base = CUSTOM_BASE + 0x01C;
+        let composed =
+            ((bus.read_word(base) as u32) << 8) | u32::from(bus.read_byte(base.wrapping_add(2)));
+        let three = bus.read_three_bytes(base);
+
+        assert_eq!(
+            three, composed,
+            "a three-byte span over a 16-bit port must read what its word and byte cycles read"
+        );
+        // A single sized access would reach custom_read as one 3-byte read,
+        // which names no register and answers with just the word at `base`.
+        assert_ne!(
+            three,
+            u32::from(bus.read_word(base)),
+            "INTENAR alone is a dropped third byte, not a three-byte operand"
         );
     }
 

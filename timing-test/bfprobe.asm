@@ -52,7 +52,9 @@
 ; Row 10 read 2D11 (28.17) until m68k 0.7.0: AddressBus had no
 ; three-byte transfer, so the crate composed that span from a word and a
 ; byte and the host billed the extra access. The crate now carries a
-; three-byte operand transfer and Copperline bills it as one access, so
+; three-byte operand transfer, and the host sizes it by the addressed
+; port the way dynamic bus sizing does -- one access to the 32-bit chip
+; RAM these rows target, still a word plus a byte to any 16-bit port. So
 ; the three-byte span costs what the one-, two- and four-byte spans do,
 ; which is what the real column says it should.
 ;
