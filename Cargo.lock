@@ -1877,7 +1877,7 @@ dependencies = [
 [[package]]
 name = "mt32-rs"
 version = "0.1.0"
-source = "git+https://github.com/CopperlineHQ/mt32-rs?rev=899a2080959bd7aad5092edc9c6c8e1d4a9d4fba#899a2080959bd7aad5092edc9c6c8e1d4a9d4fba"
+source = "git+https://github.com/CopperlineHQ/mt32-rs?rev=ac00f818629a549a2712747660091e4f84d55599#ac00f818629a549a2712747660091e4f84d55599"
 
 [[package]]
 name = "naga"

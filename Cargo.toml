@@ -100,7 +100,7 @@ floppybridge = []
 [dependencies]
 m68k = { version = "0.7.1", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
-mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "899a2080959bd7aad5092edc9c6c8e1d4a9d4fba", optional = true }
+mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"
