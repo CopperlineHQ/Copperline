@@ -177,7 +177,6 @@ fn capability_options(capabilities: fb::Capabilities) -> u32 {
     // port name always applies; the rest are genuinely per-driver.
     let mut options = config_option::COM_PORT;
     for (capability, option) in [
-        (fb::Capabilities::AUTO_CACHE, config_option::AUTO_CACHE),
         (
             fb::Capabilities::AUTO_DETECT_PORT,
             config_option::AUTO_DETECT_COMPORT,
@@ -294,7 +293,6 @@ impl Bridge {
                 DriveSelection::Drive3 => fb::DriveSelect::Shugart3,
             },
             port,
-            auto_cache: config.auto_cache,
             stall_timeout: STALL_TIMEOUT,
         };
         settings.validate().map_err(|e| e.to_string())?;

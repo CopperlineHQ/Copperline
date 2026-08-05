@@ -76,10 +76,10 @@ const BRIDGE_POLL_INTERVAL_CCK: u64 = (PAULA_CLOCK_HZ / 1_000) as u64;
 ///
 /// The emulated head reads the growing revolution at the platter's real pace
 /// while the capture grows at the platter's real pace, so a head started this
-/// far behind the growth edge stays behind it. Fifty milliseconds of track at
-/// the nominal cell rate.
+/// far behind the growth edge stays behind it. Forty milliseconds of track:
+/// five times the growth's publish granularity.
 #[cfg(feature = "fluxbridge")]
-const BRIDGE_PARTIAL_MIN_BITS: usize = 25_000;
+const BRIDGE_PARTIAL_MIN_BITS: usize = 20_000;
 const DISK_STATUS_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000;
 const INDEX_PULSE_CCK: u32 = PAULA_CLOCK_HZ / 250;
 const INDEX_FLAG_SYNC_CCK: u32 = 1;
@@ -2192,6 +2192,11 @@ impl FloppyController {
                         )];
                         drive.bridge_filler_track = None;
                         drive.bridge_rev_seamless = false;
+                        // Refresh the growth at the poll cadence, not every
+                        // tick: the snapshot only changes when the worker
+                        // publishes, and re-cloning it thousands of times a
+                        // second would tax the emulation thread for nothing.
+                        drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
                         drive.clamp_head();
                         return;
                     }

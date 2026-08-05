@@ -3227,7 +3227,7 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) bridge_cable: Option<String>,
     /// Serve captured tracks at this percentage of real speed: 100,
     /// 125 (the default), 150, 175, or 200.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "replay_speed")]
     pub(crate) bridge_speed: Option<u16>,
     /// Let the driver cache other cylinders while the disk is
     /// idle. Off by default: it keeps the real drive working continuously.
