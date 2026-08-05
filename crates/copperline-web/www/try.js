@@ -54,6 +54,15 @@ let queuedMs = 0;
 let running = false;
 let paused = false;
 let framesThisSecond = 0;
+// Diagnostic split of the fps figure. fps counts frames *stepped*, but a
+// tick that steps more than one frame blits only the last, so "shown"
+// (ticks that stepped at least once, each blitting one new picture) is the
+// true output rate and "ticks" is the rAF callback rate. 60 fps with 30
+// shown over 60 ticks means the audio gate is duty-cycling production;
+// 30 shown over 30 ticks means the browser halved the rAF cadence.
+let ticksThisSecond = 0;
+let presentsThisSecond = 0;
+let audioUnderruns = 0;
 let lastStatUpdate = 0;
 // Size of the last presented frame in emulated pixels. Under the monitor
 // path the canvas backing store is display-resolution, so pointer scaling
@@ -486,6 +495,7 @@ async function boot() {
     });
     audioNode.port.onmessage = (e) => {
       if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
+      if (typeof e.data?.underruns === 'number') audioUnderruns = e.data.underruns;
     };
     audioNode.connect(audioCtx.destination);
     // Autoplay policies can leave the context suspended, and resume() may
@@ -607,8 +617,11 @@ function tick(nowMs) {
   pumpGamepads();
   syncCapsLed();
   pumpHostKeys();
+  ticksThisSecond++;
   try {
-    framesThisSecond += emu.run(nowMs, maxFramesForQueue());
+    const stepped = emu.run(nowMs, maxFramesForQueue());
+    framesThisSecond += stepped;
+    if (stepped > 0) presentsThisSecond++;
   } catch (e) {
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
@@ -637,10 +650,13 @@ function tick(nowMs) {
 
   if (nowMs - lastStatUpdate >= 1000) {
     statLine.textContent =
-      `${framesThisSecond} fps | ` +
+      `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
-      `audio ${queuedMs.toFixed(0)} ms`;
+      `audio ${queuedMs.toFixed(0)} ms` +
+      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '');
     framesThisSecond = 0;
+    ticksThisSecond = 0;
+    presentsThisSecond = 0;
     lastStatUpdate = nowMs;
     updateStatusDisks();
   }
