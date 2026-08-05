@@ -10,6 +10,7 @@
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::dms;
+use crate::ipf;
 use anyhow::{bail, ensure, Context, Result};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::CrcReader;
@@ -153,7 +154,6 @@ const DISK_WRITE_LOST_BITS: usize = 3;
 const DEFAULT_DSKSYNC: u16 = 0x4489;
 const UAE_EXT1_SIGNATURE: &[u8; 8] = b"UAE--ADF";
 const UAE_EXT2_SIGNATURE: &[u8; 8] = b"UAE-1ADF";
-const IPF_SIGNATURE: &[u8; 4] = b"CAPS";
 const SCP_SIGNATURE: &[u8; 3] = b"SCP";
 const GZIP_SIGNATURE: &[u8; 2] = &[0x1F, 0x8B];
 const ZIP_SIGNATURE: &[u8; 4] = &[0x50, 0x4b, 0x03, 0x04];
@@ -3130,16 +3130,19 @@ fn decode_floppy_payload(
         let data = dms::decode_dms_adf(&packed)
             .with_context(|| format!("decoding DMS {}", path.display()))?;
         (FloppyImageData::StandardAdf(data), true)
-    } else if packed.starts_with(IPF_SIGNATURE) {
-        bail!(
-            "IPF/CAPS floppy image {} is not supported: Copperline treats IPF as an explicit non-goal for the built-in loader until support is implemented as a direct IPF parser or optional SPS/CAPS library integration with licensing and platform packaging reviewed",
-            path.display()
-        );
+    } else if ipf::is_ipf(&packed) {
+        // IPF preserves the written track rather than its sectors, so there is
+        // nothing to write back into: it is always read-only.
+        (
+            decode_ipf_image(&packed)
+                .with_context(|| format!("decoding IPF {}", path.display()))?,
+            true,
+        )
     } else if packed.starts_with(SCP_SIGNATURE) {
         (decode_scp_flux_image(&packed)?, true)
     } else {
         bail!(
-            "floppy image {} is {} bytes; expected {} bytes (ADF), gzip-compressed supported image, UAE extended ADF, SCP, or DMS",
+            "floppy image {} is {} bytes; expected {} bytes (ADF), gzip-compressed supported image, UAE extended ADF, IPF, SCP, or DMS",
             path.display(),
             packed.len(),
             ADF_SIZE
@@ -3372,6 +3375,29 @@ fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageData> {
         }
     }
     Ok(FloppyImageData::Tracks(out))
+}
+
+/// An IPF stores the encoded track itself, so each of its tracks arrives as a
+/// finished revolution of MFM -- the same shape a flux capture takes, and read
+/// back through the same path.
+fn decode_ipf_image(data: &[u8]) -> Result<FloppyImageData> {
+    let tracks = ipf::decode(data)?
+        .into_iter()
+        .map(|track| {
+            track.map(|track| FloppyTrackImage::RawMfm {
+                stored_len: track.words.len() * 2,
+                words: track.words,
+                bit_len: track.bit_len,
+                // The format describes one canonical revolution, and its cell
+                // rate is the nominal 2 us that `word_cck_for_track_words`
+                // already paces a raw track at.
+                revolutions: 1,
+                legacy_sync: None,
+                bitcell_ns: None,
+            })
+        })
+        .collect();
+    Ok(FloppyImageData::Tracks(tracks))
 }
 
 fn decode_scp_flux_image(data: &[u8]) -> Result<FloppyImageData> {
@@ -4896,22 +4922,20 @@ mod tests {
         Ok(())
     }
 
+    /// An IPF describes the written track rather than its sectors, so it
+    /// arrives as a raw MFM revolution and can never be written back to.
     #[test]
-    #[ignore = "IPF/CAPS support is an explicit non-goal until a direct parser or optional external library strategy is chosen"]
-    fn ipf_caps_images_fail_with_explicit_strategy() -> Result<()> {
+    fn ipf_images_load_as_raw_mfm_tracks_and_are_write_protected() -> Result<()> {
         let path = temp_path("test.ipf");
-        let mut image = Vec::new();
-        image.extend_from_slice(IPF_SIGNATURE);
-        image.extend_from_slice(&12u32.to_be_bytes());
-        image.extend_from_slice(&0u32.to_be_bytes());
-        fs::write(&path, image)?;
+        fs::write(&path, crate::ipf::tests::amigados_ipf_image())?;
         let cfg = FloppyConfig {
             bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
-                    write_protected: true,
+                    // An IPF overrides a writable configuration.
+                    write_protected: false,
                 }),
                 None,
                 None,
@@ -4919,13 +4943,22 @@ mod tests {
             ],
         };
 
-        let err = FloppyController::from_config(&cfg)
-            .err()
-            .expect("IPF/CAPS images should fail with the recorded strategy");
-        let message = format!("{err:#}");
-        assert!(message.contains("IPF/CAPS floppy image"));
-        assert!(message.contains("explicit non-goal"));
-        assert!(message.contains("SPS/CAPS library integration"));
+        let controller = FloppyController::from_config(&cfg)?;
+        let image = controller.drives[0]
+            .image
+            .as_ref()
+            .expect("the IPF should have loaded");
+        assert!(image.write_protected);
+        let FloppyImageData::Tracks(tracks) = &image.data else {
+            panic!("an IPF should decode to per-track raw MFM, not a sector image");
+        };
+        let Some(FloppyTrackImage::RawMfm { bit_len, words, .. }) = &tracks[0] else {
+            panic!("cylinder 0 head 0 should hold a raw MFM revolution");
+        };
+        assert_eq!(*bit_len, crate::ipf::tests::AMIGADOS_TRACK_BITS);
+        assert_eq!(words.len(), (*bit_len as usize).div_ceil(16));
+        // The track the fixture describes is the only formatted one.
+        assert!(tracks[1..].iter().all(Option::is_none));
 
         let _ = fs::remove_file(path);
         Ok(())

@@ -134,7 +134,7 @@ headless runs (see [](../debugger/control)).
 
 Disk images can be dropped anywhere on the emulator window:
 
-- **Floppy images** (ADF/ADZ/DMS/SCP, gzip or zip packed): with one
+- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, gzip or zip packed): with one
   connected drive the disk is inserted immediately. With several, a drive
   chooser opens over the display -- click a drive, press its number
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once

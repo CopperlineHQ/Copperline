@@ -8672,7 +8672,7 @@ impl App {
             .set_title(format!("Load DF{drive_idx} disk image(s)"))
             .add_filter(
                 "Amiga disk images",
-                &["adf", "adz", "dms", "scp", "gz", "zip"],
+                &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
             )
             .pick_files();
 
