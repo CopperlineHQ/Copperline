@@ -16,6 +16,7 @@
 //! for how close to real hardware the emulation is, so matching it exactly is
 //! what "sounds like an MT-32" means here.
 
+pub mod analog;
 pub mod demo;
 pub mod display;
 pub mod engine;

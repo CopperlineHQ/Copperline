@@ -1500,3 +1500,225 @@ fn the_stream_parser_matches_the_reference_engine() {
     unsafe { mt32_oracle_parser_free(theirs) };
     println!("  {compared} event-log bytes identical");
 }
+
+extern "C" {
+    fn mt32_oracle_analog_new(mode: c_int, old_mt32_lpf: c_int) -> *mut std::ffi::c_void;
+    fn mt32_oracle_analog_free(analog: *mut std::ffi::c_void);
+    fn mt32_oracle_analog_rate(analog: *const std::ffi::c_void) -> c_uint;
+    fn mt32_oracle_analog_in_count(analog: *const std::ffi::c_void, out_len: c_uint) -> c_uint;
+    #[allow(clippy::too_many_arguments)]
+    fn mt32_oracle_analog_process(
+        analog: *mut std::ffi::c_void,
+        out_interleaved: *mut i16,
+        non_l: *const i16,
+        non_r: *const i16,
+        dry_l: *const i16,
+        dry_r: *const i16,
+        wet_l: *const i16,
+        wet_r: *const i16,
+        out_len: c_uint,
+    );
+}
+
+/// The analogue stage against the reference: all four models in both
+/// circuit flavours, fed full-range deterministic noise on every stream
+/// in awkward block sizes, every output frame and every input-appetite
+/// figure equal. Needs no ROMs: the taps are the reference's constants.
+#[test]
+fn the_analog_stage_matches_the_reference_engine() {
+    let noise = |seed: u32, n: usize| -> Vec<i16> {
+        (0..n)
+            .map(|i| ((i as u32).wrapping_add(seed).wrapping_mul(2654435761) >> 16) as i16)
+            .collect()
+    };
+    let mut compared = 0u64;
+    for (mode, oracle_mode, rate) in [
+        (mt32_rs::analog::AnalogMode::DigitalOnly, 0, 32_000u32),
+        (mt32_rs::analog::AnalogMode::Coarse, 1, 32_000),
+        (mt32_rs::analog::AnalogMode::Accurate, 2, 48_000),
+        (mt32_rs::analog::AnalogMode::Oversampled, 3, 96_000),
+    ] {
+        for old_lpf in [false, true] {
+            let theirs = unsafe { mt32_oracle_analog_new(oracle_mode, old_lpf as c_int) };
+            assert_eq!(unsafe { mt32_oracle_analog_rate(theirs) }, rate);
+            let mut ours = mt32_rs::analog::Analog::new(mode, old_lpf);
+            assert_eq!(ours.output_sample_rate(), rate);
+
+            let mut streams = mt32_rs::analog::Streams::default();
+            let mut seed = 1u32;
+            let mut sizes = [1usize, 7, 100, 977, 256, 3].into_iter().cycle();
+            for block in 0..200 {
+                let out_len = sizes.next().unwrap();
+                let in_len = ours.dac_streams_length(out_len);
+                assert_eq!(
+                    in_len,
+                    unsafe { mt32_oracle_analog_in_count(theirs, out_len as c_uint) } as usize,
+                    "{mode:?} old_lpf {old_lpf} block {block}: appetite"
+                );
+                streams.clear(in_len);
+                for (n, stream) in [
+                    &mut streams.non_l,
+                    &mut streams.non_r,
+                    &mut streams.dry_l,
+                    &mut streams.dry_r,
+                    &mut streams.wet_l,
+                    &mut streams.wet_r,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    stream.copy_from_slice(&noise(seed + n as u32 * 37, in_len));
+                }
+                seed = seed.wrapping_add(in_len as u32);
+
+                let mut mine = vec![(0i16, 0i16); out_len];
+                ours.process(&mut mine, &streams);
+                let mut reference = vec![0i16; out_len * 2];
+                unsafe {
+                    mt32_oracle_analog_process(
+                        theirs,
+                        reference.as_mut_ptr(),
+                        streams.non_l.as_ptr(),
+                        streams.non_r.as_ptr(),
+                        streams.dry_l.as_ptr(),
+                        streams.dry_r.as_ptr(),
+                        streams.wet_l.as_ptr(),
+                        streams.wet_r.as_ptr(),
+                        out_len as c_uint,
+                    )
+                };
+                for (n, &(l, r)) in mine.iter().enumerate() {
+                    assert_eq!(
+                        (l, r),
+                        (reference[2 * n], reference[2 * n + 1]),
+                        "{mode:?} old_lpf {old_lpf} block {block} frame {n}"
+                    );
+                }
+                compared += 2 * out_len as u64;
+            }
+            unsafe { mt32_oracle_analog_free(theirs) };
+        }
+    }
+    println!("  {compared} analogue samples identical");
+}
+
+/// The whole chain through every analogue model: both engines opened in
+/// the same mode on the same pair, the same note held and released, every
+/// frame at the model's own rate compared. The coarse filter, the
+/// accurate three-for-two polyphase and the oversampled run all sit on
+/// top of the digital path already proven above.
+#[test]
+#[ignore = "needs a ROM pair in MT32_RS_ROMS"]
+fn a_note_matches_through_every_analogue_model() {
+    let Some((control, pcm)) = rom_pair() else {
+        panic!("MT32_RS_ROMS is not set or the pair is unreadable");
+    };
+    for (mode, oracle_mode) in [
+        (mt32_rs::analog::AnalogMode::Coarse, 1),
+        (mt32_rs::analog::AnalogMode::Accurate, 2),
+        (mt32_rs::analog::AnalogMode::Oversampled, 3),
+    ] {
+        let handle = unsafe {
+            mt32_oracle_open(
+                control.as_ptr(),
+                control.len(),
+                pcm.as_ptr(),
+                pcm.len(),
+                oracle_mode,
+            )
+        };
+        assert!(!handle.is_null(), "{mode:?}: the reference engine opens");
+        let mut oracle = Oracle(handle);
+        let mut ours = mt32_rs::engine::Engine::open_with_analog(&control, &pcm, mode)
+            .expect("the engine opens");
+        let rate = ours.output_sample_rate() as usize;
+        assert_eq!(oracle.sample_rate() as usize, rate, "{mode:?}: rate");
+
+        let mut at = 0usize;
+        let mode_name = format!("{mode:?}");
+        oracle.play_msg(0x007F_3C91);
+        ours.play_msg(0x007F_3C91);
+        assert_frames_match(
+            &mut oracle,
+            &mut ours,
+            rate,
+            &mut at,
+            &format!("{mode_name}: the note held"),
+        );
+        oracle.play_msg(0x0000_3C81);
+        ours.play_msg(0x0000_3C81);
+        assert_frames_match(
+            &mut oracle,
+            &mut ours,
+            rate,
+            &mut at,
+            &format!("{mode_name}: the release tail"),
+        );
+        println!("  {mode_name:<12} {at} frames identical at {rate} Hz");
+    }
+}
+
+/// How fast the engines run: a crowded scene rendered for a minute of
+/// module time, wall-clock measured, ours beside the reference. Not a
+/// pass/fail check -- a figure to keep an eye on.
+#[test]
+#[ignore = "benchmark; needs a ROM pair in MT32_RS_ROMS"]
+fn bench_the_engines() {
+    let Some((control, pcm)) = rom_pair() else {
+        panic!("MT32_RS_ROMS is not set or the pair is unreadable");
+    };
+    let busy = |play: &mut dyn FnMut(u32)| {
+        for note in [0x30u32, 0x34, 0x37, 0x3C, 0x40, 0x43] {
+            play(0x0064_0091 | (note << 8));
+            play(0x0064_0092 | ((note + 5) << 8));
+            play(0x0064_0093 | ((note + 10) << 8));
+        }
+        play(0x007F_2499);
+        play(0x0064_2699);
+    };
+    for (label, mode, oracle_mode) in [
+        ("digital", mt32_rs::analog::AnalogMode::DigitalOnly, 0),
+        ("accurate", mt32_rs::analog::AnalogMode::Accurate, 2),
+    ] {
+        let mut ours =
+            mt32_rs::engine::Engine::open_with_analog(&control, &pcm, mode).expect("opens");
+        busy(&mut |m| ours.play_msg(m));
+        let rate = ours.output_sample_rate() as usize;
+        let mut block = vec![(0i16, 0i16); 4096];
+        let started = std::time::Instant::now();
+        let mut left = rate * 60;
+        while left > 0 {
+            let n = left.min(4096);
+            ours.render(&mut block[..n]);
+            left -= n;
+        }
+        let ours_took = started.elapsed();
+
+        let handle = unsafe {
+            mt32_oracle_open(
+                control.as_ptr(),
+                control.len(),
+                pcm.as_ptr(),
+                pcm.len(),
+                oracle_mode,
+            )
+        };
+        let mut oracle = Oracle(handle);
+        busy(&mut |m| oracle.play_msg(m));
+        let started = std::time::Instant::now();
+        let mut left = rate * 60;
+        while left > 0 {
+            let n = left.min(4096);
+            oracle.render(n);
+            left -= n;
+        }
+        let theirs_took = started.elapsed();
+        println!(
+            "  {label:<9} 60s of module time: ours {:>7.1?} ({:.0}x realtime), reference {:>7.1?} ({:.0}x)",
+            ours_took,
+            60.0 / ours_took.as_secs_f64(),
+            theirs_took,
+            60.0 / theirs_took.as_secs_f64(),
+        );
+    }
+}

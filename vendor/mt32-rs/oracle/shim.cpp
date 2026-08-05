@@ -344,3 +344,46 @@ unsigned int mt32_oracle_parser_take_log(void *parser, unsigned char *out,
 }
 
 } // extern "C"
+
+/* The analogue stage standing alone: the integer renderer's model, for
+ * differencing the port's filters, gains and stream appetite before the
+ * whole chain is compared. */
+
+#include "Analog.h"
+
+extern "C" {
+
+void *mt32_oracle_analog_new(int mode, int old_mt32_lpf) {
+    Analog *analog = Analog::createAnalog(static_cast<AnalogOutputMode>(mode),
+                                          old_mt32_lpf != 0, RendererType_BIT16S);
+    /* The gains the engine sets under its defaults: unity synth, and the
+     * reverb gain as the never-yet-opened compatibility check leaves it. */
+    analog->setSynthOutputGain(1.0f);
+    analog->setReverbOutputGain(1.0f, false);
+    return analog;
+}
+
+void mt32_oracle_analog_free(void *analog) {
+    delete static_cast<Analog *>(analog);
+}
+
+unsigned int mt32_oracle_analog_rate(const void *analog) {
+    return static_cast<const Analog *>(analog)->getOutputSampleRate();
+}
+
+/* How many native frames the stage wants for `out_len` output frames,
+ * from the phase it currently stands at. */
+unsigned int mt32_oracle_analog_in_count(const void *analog, unsigned int out_len) {
+    return static_cast<const Analog *>(analog)->getDACStreamsLength(out_len);
+}
+
+void mt32_oracle_analog_process(void *analog, short *out_interleaved,
+                                const short *non_l, const short *non_r,
+                                const short *dry_l, const short *dry_r,
+                                const short *wet_l, const short *wet_r,
+                                unsigned int out_len) {
+    static_cast<Analog *>(analog)->process(out_interleaved, non_l, non_r,
+                                           dry_l, dry_r, wet_l, wet_r, out_len);
+}
+
+} // extern "C"

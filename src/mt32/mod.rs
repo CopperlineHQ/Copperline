@@ -5,9 +5,9 @@
 //! Paula's serial bytes go straight into the engine and stereo frames come
 //! back at the mixer's rate, so nothing passes through the host's MIDI stack:
 //! no IAC bus on macOS, no loopMIDI on Windows, no ALSA sequencer client.
-//! The engine renders at the module's native 32 kHz; the resampler here
-//! carries that up to the mixer's rate, which is the one conversion between
-//! the module and the mix.
+//! The engine renders through the accurate analogue model at its 48 kHz;
+//! the resampler here carries that to the mixer's rate, the one
+//! conversion between the module and the mix.
 //!
 //! The engine needs two ROM images, a control ROM and a PCM ROM, which are
 //! not Copperline's to ship and so are the user's to supply. Without them the
@@ -72,13 +72,19 @@ impl Mt32Synth {
     pub fn open(control_rom: &Path, pcm_rom: &Path, sample_rate: u32) -> Result<Self> {
         let control = read_rom(control_rom, "control")?;
         let pcm = read_rom(pcm_rom, "PCM")?;
-        let engine = mt32_rs::engine::Engine::open(&control, &pcm)
-            .map_err(|e| anyhow!("the MT-32 engine refused the ROM pair: {e}"))?;
+        // The accurate analogue model: the output stage the LA32 fed on
+        // real hardware, imaging and all, leaving at its own 48 kHz.
+        let engine = mt32_rs::engine::Engine::open_with_analog(
+            &control,
+            &pcm,
+            mt32_rs::analog::AnalogMode::Accurate,
+        )
+        .map_err(|e| anyhow!("the MT-32 engine refused the ROM pair: {e}"))?;
         Ok(Self {
+            resampler: resample::Resampler::new(engine.output_sample_rate(), sample_rate),
             engine,
             parser: mt32_rs::midi::Parser::new(),
             sample_rate,
-            resampler: resample::Resampler::new(mt32_rs::SAMPLE_RATE, sample_rate),
             native: Vec::new(),
             taken: 0,
         })

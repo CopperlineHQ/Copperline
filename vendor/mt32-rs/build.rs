@@ -64,6 +64,10 @@ fn build_oracle() {
         // which the Rust engine mirrors exactly. The sources stay
         // byte-identical to upstream.
         .define("rand", "mt32_oracle_rand");
+    // The accurate analogue filter is float arithmetic; forbid the
+    // compiler from contracting its multiply-adds into fused ones, so
+    // the reference computes the same low bits the port does.
+    build.flag_if_supported("-ffp-contract=off");
     for source in SOURCES {
         build.file(dir.join(source));
     }

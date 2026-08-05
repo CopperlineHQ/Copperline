@@ -17,6 +17,7 @@
 //! re-aims the running one, and zero time with zero level switches the
 //! chip out.
 
+use crate::analog::{Analog, AnalogMode, Streams};
 use crate::display::Display;
 use crate::jitter::Jitter;
 use crate::la32::wave::Pair;
@@ -95,14 +96,27 @@ pub struct Engine {
     rendered_sample_count: u32,
     nice: NiceOptions,
     master_tune_pitch_delta: i32,
-    /// The analog stage's fixed-point gains: eight fraction bits.
-    synth_gain: i32,
-    reverb_gain: i32,
+    /// The analogue stage between the DAC and the jacks, and the stream
+    /// scratch the digital half fills for it.
+    analog: Analog,
+    streams: Streams,
 }
 
 impl Engine {
-    /// Open the module on a control and PCM ROM pair.
+    /// Open the module on a control and PCM ROM pair, with no analogue
+    /// circuit modelled: the LA32's stream as it stands, at the native
+    /// rate.
     pub fn open(control_image: &[u8], pcm_image: &[u8]) -> Result<Engine, String> {
+        Engine::open_with_analog(control_image, pcm_image, AnalogMode::DigitalOnly)
+    }
+
+    /// Open the module with one of the analogue output models; the rate
+    /// [Self::output_sample_rate] reports depends on it.
+    pub fn open_with_analog(
+        control_image: &[u8],
+        pcm_image: &[u8],
+        mode: AnalogMode,
+    ) -> Result<Engine, String> {
         let control_info =
             rom::identify(control_image).ok_or_else(|| "unknown control ROM".to_string())?;
         let pcm_info = rom::identify(pcm_image).ok_or_else(|| "unknown PCM ROM".to_string())?;
@@ -141,14 +155,8 @@ impl Engine {
             aborting_part_ix: 0,
             rendered_sample_count: 0,
             nice: NiceOptions::default(),
-            // Unity synth gain in the eight-bit fixed point. The wet
-            // gain carries the CM-32L low-pass compensation factor on
-            // every model, the MT-32 flavours included: the reference
-            // asks its reverb-compatibility question before it counts
-            // itself as opened, so the answer is always no. Mirrored
-            // for bit-identity.
-            synth_gain: 256,
-            reverb_gain: (0.68 * 256.0) as i32,
+            analog: Analog::new(mode, layout.quirks.old_mt32_analog_lpf),
+            streams: Streams::default(),
             master_tune_pitch_delta: 0,
         };
         engine.refresh_reserve();
@@ -174,6 +182,12 @@ impl Engine {
 
     pub fn memory(&mut self) -> &mut Memory {
         &mut self.memory
+    }
+
+    /// The rate frames leave [Self::render] at: the native 32 kHz, or
+    /// the analogue model's own.
+    pub fn output_sample_rate(&self) -> u32 {
+        self.analog.output_sample_rate()
     }
 
     pub fn rendered_sample_count(&self) -> u32 {
@@ -1050,40 +1064,58 @@ impl Engine {
         }
     }
 
-    /// Render interleaved stereo, as the module's DAC hears it.
+    /// Render interleaved stereo, as the module's jacks give it: at the
+    /// analogue model's rate. Until a message has arrived the machinery
+    /// is held still, though the analogue filters' clock keeps moving.
     pub fn render(&mut self, stream: &mut [(i16, i16)]) {
         if !self.activated {
             stream.fill((0, 0));
-            self.rendered_sample_count =
-                self.rendered_sample_count.wrapping_add(stream.len() as u32);
+            let native = self.analog.dac_streams_length(stream.len());
+            self.rendered_sample_count = self.rendered_sample_count.wrapping_add(native as u32);
+            self.analog.skip(stream.len());
             self.display.refresh(self.rendered_sample_count);
             return;
         }
         let mut done = 0;
         while done < stream.len() {
-            // The reference's own pacing: while a poly aborts, one frame
-            // at a time and the queue waits; a waiting message plays and
-            // is followed by exactly one frame, so zero-duration notes
-            // still sound; otherwise the run goes through whole.
+            let this_pass = (stream.len() - done).min(MAX_SAMPLES_PER_RUN);
+            let native_len = self.analog.dac_streams_length(this_pass);
+            self.render_streams(native_len);
+            let Self {
+                analog, streams, ..
+            } = self;
+            analog.process(&mut stream[done..done + this_pass], streams);
+            done += this_pass;
+        }
+    }
+
+    /// The digital half's streams for `len` native frames, with the
+    /// reference's own pacing: while a poly aborts, one frame at a time
+    /// and the queue waits; a waiting message plays and is followed by
+    /// exactly one frame, so zero-duration notes still sound; otherwise
+    /// the run goes through whole.
+    fn render_streams(&mut self, len: usize) {
+        let mut streams = std::mem::take(&mut self.streams);
+        streams.clear(len);
+        self.streams = streams;
+        let mut done = 0;
+        while done < len {
             let mut chunk = 1;
             if !self.is_aborting_poly() {
                 if self.queue.is_empty() {
-                    chunk = (stream.len() - done).min(MAX_SAMPLES_PER_RUN);
+                    chunk = len - done;
                 } else {
                     self.play_one_queued();
                 }
             }
-            self.produce_chunk(&mut stream[done..done + chunk]);
+            self.produce_chunk(done, chunk);
             done += chunk;
         }
     }
 
-    fn produce_chunk(&mut self, out: &mut [(i16, i16)]) {
-        let len = out.len();
-        let mut non_reverb_l = vec![0i16; len];
-        let mut non_reverb_r = vec![0i16; len];
-        let mut dry_l = vec![0i16; len];
-        let mut dry_r = vec![0i16; len];
+    fn produce_chunk(&mut self, offset: usize, len: usize) {
+        let mut streams = std::mem::take(&mut self.streams);
+        let span = offset..offset + len;
 
         for id in 0..PARTIAL_COUNT {
             if !self.partials[id].is_active()
@@ -1094,38 +1126,46 @@ impl Engine {
                 continue;
             }
             if self.partials[id].should_reverb() {
-                let (l, r) = (&mut dry_l, &mut dry_r);
+                let (l, r) = (
+                    &mut streams.dry_l[span.clone()],
+                    &mut streams.dry_r[span.clone()],
+                );
                 self.render_partial_chunk(id, l, r);
             } else {
-                let (l, r) = (&mut non_reverb_l, &mut non_reverb_r);
+                let (l, r) = (
+                    &mut streams.non_l[span.clone()],
+                    &mut streams.non_r[span.clone()],
+                );
                 self.render_partial_chunk(id, l, r);
             }
         }
 
         // The NICE DAC transform doubles into the clip; the dry stream
         // takes it before the reverb would, the non-reverb before the
-        // analog stage.
-        for sample in dry_l.iter_mut().chain(dry_r.iter_mut()) {
+        // analogue stage.
+        for sample in streams.dry_l[span.clone()]
+            .iter_mut()
+            .chain(streams.dry_r[span.clone()].iter_mut())
+        {
             *sample = nice_dac(*sample);
         }
-        for sample in non_reverb_l.iter_mut().chain(non_reverb_r.iter_mut()) {
+        for sample in streams.non_l[span.clone()]
+            .iter_mut()
+            .chain(streams.non_r[span.clone()].iter_mut())
+        {
             *sample = nice_dac(*sample);
         }
         // The wet pair comes off the reverb chip, fed the DAC-shaped dry
         // streams; with no chip selected it stays silent.
-        let mut wet_l = vec![0i16; len];
-        let mut wet_r = vec![0i16; len];
         if let Some(reverb) = self.reverb.as_mut() {
-            reverb.process(&dry_l, &dry_r, &mut wet_l, &mut wet_r);
+            reverb.process(
+                &streams.dry_l[span.clone()],
+                &streams.dry_r[span.clone()],
+                &mut streams.wet_l[span.clone()],
+                &mut streams.wet_r[span],
+            );
         }
-
-        for n in 0..len {
-            let in_l = (i32::from(non_reverb_l[n]) + i32::from(dry_l[n])) * self.synth_gain
-                + i32::from(wet_l[n]) * self.reverb_gain;
-            let in_r = (i32::from(non_reverb_r[n]) + i32::from(dry_r[n])) * self.synth_gain
-                + i32::from(wet_r[n]) * self.reverb_gain;
-            out[n] = (clip(in_l >> 8), clip(in_r >> 8));
-        }
+        self.streams = streams;
 
         for partial in self.partials.iter_mut() {
             partial.already_outputed = false;
@@ -1154,21 +1194,23 @@ impl Engine {
                 break;
             }
             let master_source = self.partials[master].param_source().unwrap();
-            let master_param = self.memory.partial_param(master_source).to_vec();
-            let param = PartialParam(&master_param);
-            let amp = self.partials[master].next_amp(&self.tables, param, &live, &self.quirks);
-            let pitch = self.partials[master].next_pitch(
-                &self.tables,
-                param,
-                &self.waves,
-                &live,
-                &self.quirks,
-                &mut self.jitter,
-            );
-            let cutoff = self.partials[master].next_cutoff(&self.tables, param);
-            self.partials[master].la32.generate_next_sample(
-                &self.tables,
-                &self.pcm,
+            let Self {
+                memory,
+                partials,
+                tables,
+                waves,
+                quirks,
+                jitter,
+                pcm,
+                ..
+            } = self;
+            let param = PartialParam(memory.partial_param(master_source));
+            let amp = partials[master].next_amp(tables, param, &live, quirks);
+            let pitch = partials[master].next_pitch(tables, param, waves, &live, quirks, jitter);
+            let cutoff = partials[master].next_cutoff(tables, param);
+            partials[master].la32.generate_next_sample(
+                tables,
+                pcm,
                 Pair::Master,
                 amp,
                 pitch,
@@ -1180,27 +1222,23 @@ impl Engine {
                     let slave_drum = self.partials[slave_id].rhythm_key();
                     let slave_live = self.live_values(slave_part, slave_drum);
                     let slave_source = self.partials[slave_id].param_source().unwrap();
-                    let slave_param = self.memory.partial_param(slave_source).to_vec();
-                    let sparam = PartialParam(&slave_param);
-                    let (m, s) = two(&mut self.partials, master, slave_id);
-                    let s_amp = s.next_amp(&self.tables, sparam, &slave_live, &self.quirks);
-                    let s_pitch = s.next_pitch(
-                        &self.tables,
-                        sparam,
-                        &self.waves,
-                        &slave_live,
-                        &self.quirks,
-                        &mut self.jitter,
-                    );
-                    let s_cutoff = s.next_cutoff(&self.tables, sparam);
-                    m.la32.generate_next_sample(
-                        &self.tables,
-                        &self.pcm,
-                        Pair::Slave,
-                        s_amp,
-                        s_pitch,
-                        s_cutoff,
-                    );
+                    let Self {
+                        memory,
+                        partials,
+                        tables,
+                        waves,
+                        quirks,
+                        jitter,
+                        pcm,
+                        ..
+                    } = self;
+                    let sparam = PartialParam(memory.partial_param(slave_source));
+                    let (m, s) = two(partials, master, slave_id);
+                    let s_amp = s.next_amp(tables, sparam, &slave_live, quirks);
+                    let s_pitch = s.next_pitch(tables, sparam, waves, &slave_live, quirks, jitter);
+                    let s_cutoff = s.next_cutoff(tables, sparam);
+                    m.la32
+                        .generate_next_sample(tables, pcm, Pair::Slave, s_amp, s_pitch, s_cutoff);
                     if !s.tva_playing() || !m.la32.is_active(Pair::Slave) {
                         m.la32.deactivate(Pair::Slave);
                         slave_died = true;
@@ -1243,13 +1281,5 @@ fn two(partials: &mut [Partial], a: usize, b: usize) -> (&mut Partial, &mut Part
 
 /// The NICE DAC transform: double into the reference's exact clip.
 fn nice_dac(sample: i16) -> i16 {
-    clip(i32::from(sample) << 1)
-}
-
-fn clip(sample: i32) -> i16 {
-    if (-0x8000..=0x7FFF).contains(&sample) {
-        sample as i16
-    } else {
-        ((sample >> 31) ^ 0x7FFF) as i16
-    }
+    crate::analog::clip(i32::from(sample) << 1)
 }

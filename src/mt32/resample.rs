@@ -2,13 +2,14 @@
 
 //! The one rate conversion between the module and the mix.
 //!
-//! The engine renders at the MT-32's native 32 kHz; the mixer runs at
+//! The engine renders at the analogue model's rate; the mixer runs at
 //! [`crate::audio::MIX_SAMPLE_RATE`]. The two are in a fixed rational
-//! ratio, so the conversion is a polyphase windowed-sinc interpolator: a
-//! bank of one filter per output phase, computed once, each output frame
-//! one pass of taps over the input history. Band-limited at the source's
-//! Nyquist, so raising the rate adds no images; the phase advances by an
-//! exact integer counter, so a run never drifts.
+//! ratio, so the conversion is a polyphase windowed-sinc filter: a bank
+//! of one kernel per output phase, computed once, each output frame one
+//! pass of taps over the input history. Band-limited at whichever
+//! Nyquist is lower, so raising a rate adds no images and lowering one
+//! folds none back; the phase advances by an exact integer counter, so
+//! a run never drifts.
 
 /// Taps each side of the output instant. Sixty-four in all keeps the
 /// passband flat to the top of what the module produces and the
@@ -16,10 +17,9 @@
 const HALF: usize = 32;
 const TAPS: usize = 2 * HALF;
 
-/// The cutoff as a fraction of the source's Nyquist: just inside it, so
-/// the transition band straddles the edge rather than eating the top of
-/// the passband.
-const CUTOFF: f64 = 0.985;
+/// How far inside the limiting Nyquist the cutoff sits, so the
+/// transition band straddles the edge rather than eating the passband.
+const CUTOFF_MARGIN: f64 = 0.985;
 
 pub struct Resampler {
     /// Interpolation and decimation counts: the output runs `l` frames to
@@ -30,14 +30,21 @@ pub struct Resampler {
     phase: u32,
     /// One windowed-sinc kernel per phase, phase-major.
     kernels: Vec<f32>,
-    /// The last [`TAPS`] input frames, oldest first.
-    history: std::collections::VecDeque<(f32, f32)>,
+    /// The last [`TAPS`] input frames, written twice [`TAPS`] apart so
+    /// the window starting at `head` is always one contiguous slice,
+    /// oldest first.
+    history: Vec<(f32, f32)>,
+    head: usize,
+    primed: bool,
 }
 
 impl Resampler {
     pub fn new(from: u32, to: u32) -> Resampler {
         let g = gcd(from, to);
         let (l, m) = (to / g, from / g);
+        // Downsampling, the output's own Nyquist is the ceiling; the
+        // kernel is stretched to cut there instead.
+        let cutoff = CUTOFF_MARGIN * (f64::from(l) / f64::from(m)).min(1.0);
         let mut kernels = Vec::with_capacity(l as usize * TAPS);
         for phase in 0..l {
             // The output instant sits `frac` past the newest-but-HALF
@@ -47,7 +54,7 @@ impl Resampler {
             let mut sum = 0.0;
             for (j, tap) in kernel.iter_mut().enumerate() {
                 let x = frac - (j as f64 - (HALF as f64 - 1.0));
-                *tap = CUTOFF * sinc(CUTOFF * x) * blackman(x / HALF as f64);
+                *tap = cutoff * sinc(cutoff * x) * blackman(x / HALF as f64);
                 sum += *tap;
             }
             // Unity gain at DC exactly, so the window's ripple cannot
@@ -59,27 +66,44 @@ impl Resampler {
             m,
             phase: 0,
             kernels,
-            history: std::collections::VecDeque::with_capacity(TAPS),
+            history: vec![(0.0, 0.0); 2 * TAPS],
+            head: 0,
+            primed: false,
+        }
+    }
+
+    /// A frame into the history, twice, keeping the window contiguous.
+    fn push(&mut self, frame: (f32, f32)) {
+        self.history[self.head] = frame;
+        self.history[self.head + TAPS] = frame;
+        self.head += 1;
+        if self.head == TAPS {
+            self.head = 0;
         }
     }
 
     /// The next output frame, pulling input frames from `refill` as the
     /// phase crosses them.
     pub fn next(&mut self, mut refill: impl FnMut() -> (f32, f32)) -> (f32, f32) {
-        while self.history.len() < TAPS {
-            self.history.push_back(refill());
+        if !self.primed {
+            self.primed = true;
+            for _ in 0..TAPS {
+                let frame = refill();
+                self.push(frame);
+            }
         }
         let kernel = &self.kernels[self.phase as usize * TAPS..][..TAPS];
+        let window = &self.history[self.head..self.head + TAPS];
         let (mut left, mut right) = (0.0f32, 0.0f32);
-        for (&(l, r), &k) in self.history.iter().zip(kernel) {
+        for (&(l, r), &k) in window.iter().zip(kernel) {
             left += l * k;
             right += r * k;
         }
         self.phase += self.m;
-        if self.phase >= self.l {
+        while self.phase >= self.l {
             self.phase -= self.l;
-            self.history.pop_front();
-            self.history.push_back(refill());
+            let frame = refill();
+            self.push(frame);
         }
         (left, right)
     }
