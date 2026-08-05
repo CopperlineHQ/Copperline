@@ -4797,6 +4797,7 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
         || sig[..4] == [0x50, 0x4b, 0x03, 0x04]
         || &sig[..3] == b"SCP"
         || &sig[..4] == b"DMS!"
+        || &sig[..4] == b"CAPS"
         || &sig == b"UAE-1ADF"
         || &sig == b"UAE--ADF"
     {
@@ -4805,7 +4806,7 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
 
     bail!(
         "floppy.df{} image {} is {} bytes, expected {} bytes (standard DD ADF),
-        gzip-compressed supported image, UAE extended ADF, SCP, DMS or single file ZIP",
+        gzip-compressed supported image, UAE extended ADF, IPF, SCP, DMS or single file ZIP",
         idx,
         path.display(),
         meta.len(),
@@ -7767,6 +7768,25 @@ mod tests {
         ))?;
         let df0 = cfg.floppy.drives[0].as_ref().unwrap();
         assert_eq!(df0.path, adf);
+        let _ = fs::remove_file(df0.path.clone());
+        Ok(())
+    }
+
+    #[test]
+    fn ipf_floppy_path_is_accepted() -> Result<()> {
+        let ipf = temp_path("test.ipf");
+        // The bare CAPS signature chunk an IPF opens with.
+        fs::write(&ipf, b"CAPS\x00\x00\x00\x0c")?;
+        let cfg = parse_config(&format!(
+            r#"
+            [floppy.df0]
+            path = "{}"
+            "#,
+            toml_path(&ipf)
+        ))?;
+        let df0 = cfg.floppy.drives[0].as_ref().unwrap();
+        assert_eq!(df0.path, ipf);
+        assert!(df0.write_protected);
         let _ = fs::remove_file(df0.path.clone());
         Ok(())
     }

@@ -1138,14 +1138,23 @@ bays only; a physical drive has its own `bridge_speed`.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
-read-only SCP flux images. DMS, gzip, and SCP images are decoded at load time
-and always treated as write-protected; set `write_protected = false` on a plain
-ADF to allow write-through updates to the image file.
+read-only IPF and SCP images. DMS, gzip, IPF, and SCP images are decoded at
+load time and always treated as write-protected; set `write_protected = false`
+on a plain ADF to allow write-through updates to the image file.
 
-The loader deliberately rejects IPF/CAPS images. Useful support would require
-either a direct IPF parser or an optional SPS/CAPS library, with its licensing,
-platform packaging, and dynamic-loading strategy settled before it becomes a
-dependency. The browser frontend shares this decoder, so it rejects IPF too.
+IPF (the SPS/CAPS preservation format) is decoded by Copperline itself rather
+than through the closed-source `capsimg` library, so every build reads IPF on
+every platform with nothing to install. Because an IPF preserves the encoded
+track -- sync marks, gaps, and sector headers, not just sector contents -- it
+carries the custom trackloaders and copy protections that an ADF cannot
+express. Each track is decoded to the revolution of MFM the head would pass
+over and read back through the same path as a flux capture. Two limits are
+worth knowing: tracks recorded with a variable cell *rate* (the Copylock,
+Speedlock, and Brierley density models) are decoded with uniform 2 us cells,
+which is logged at load time and leaves a protection that measures cell timing
+seeing the wrong answer; and weak ("flakey") bits are replayed as the single
+deterministic revolution the file stores rather than varying per revolution.
+The browser frontend shares this decoder, so it reads IPF too.
 
 A `paths` playlist lets multi-disk software that only drives DF0: run
 without a second drive: the first entry is the boot disk and the disk-swap

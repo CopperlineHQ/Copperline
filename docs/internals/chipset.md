@@ -268,7 +268,8 @@ DMA drains Paula's recovered 16-bit disk word phase even when DSKLEN is
 armed between disk-word boundaries; WORDSYNC is the explicit mode that
 realigns framing to a matched sync word before transfer. Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
- `dms.rs`), UAE extended ADF, and read-only SCP flux images.
+ `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
+images.
 Connected mechanisms with no media keep the active-low disk-change line
 asserted; a step pulse only clears that latch once media is actually
 present, so guest software sees a no-disk condition rather than unreadable
@@ -278,9 +279,26 @@ Standard ADF and AmigaDOS tracks are synthesized as one PAL-sized
 revolution: 11 sectors occupy 5984 MFM words, and the generated revolution
 is 6334 16-bit MFM words so the index gap matches normal Amiga floppy
 timing. This matters for raw loaders that DMA a fixed-size window and make
-their own assumptions about the post-sector gap. UAE extended raw tracks
-and SCP flux captures keep their stored track length and per-revolution
-timing instead of using this synthetic geometry.
+their own assumptions about the post-sector gap. UAE extended raw tracks,
+IPF tracks, and SCP flux captures keep their stored track length and
+per-revolution timing instead of using this synthetic geometry.
+
+IPF images are decoded by `ipf.rs` rather than the closed-source `capsimg`
+library. The format stores each track as blocks of *stream samples*: sync
+marks and raw runs are already-encoded MFM written through untouched (which
+is how an address mark keeps its illegal clocking), while data and gap
+samples hold decoded bytes the loader MFM-encodes, setting the clock bit
+only between two zero data bits. Block gaps are filled either from a single
+repeated byte or from forward and backward gap streams whose loop samples
+stretch to meet at the write splice in the middle. Each track is checked
+against the bit counts its descriptors declare and then rotated so the
+revolution starts at the index, matching the shape a flux capture already
+has. Two modelling gaps remain: the variable cell-*rate* density profiles
+(Copylock, Speedlock, Brierley) decode with uniform 2 us cells and log a
+warning, and weak bits replay as the one deterministic revolution the file
+stores rather than varying per revolution -- `FloppyTrackImage::RawMfm` can
+already carry both (`bitcell_ns` and multiple revolutions) when the
+per-protection profiles are modelled.
 
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the

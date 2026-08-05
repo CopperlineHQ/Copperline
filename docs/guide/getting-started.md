@@ -181,7 +181,7 @@ path = "MyGame.adf"
 ```
 
 Copperline accepts plain ADF images, gzip-compressed images, single file ZIP
-archives, DMS archives, UAE extended ADFs, and read-only SCP flux images.
+archives, DMS archives, UAE extended ADFs, and read-only IPF and SCP images.
 In a windowed session you can also just drag a disk image onto the window
 to insert it -- see [](ui#drag-and-drop).
 

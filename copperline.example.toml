@@ -587,8 +587,8 @@ floppy_sounds_volume = 100
 # to wire empty external mechanisms as well (1-4 total drives). Missing
 # [floppy.dfN] tables mean no disk in that drive. Supported images:
 # DD ADF (901120 bytes), ADZ/gzip, single file ZIP archives, DMS, UAE extended
-# ADF, and read-only SCP flux captures. DMS/gzip/SCP are always treated as
-# write-protected.
+# ADF, and read-only IPF and SCP images. DMS/gzip/IPF/SCP are always treated
+# as write-protected.
 #
 # Drive speed: 100 (real, the default), 200/400/800 (that many percent of
 # real speed; the whole data path stays bit-identical, just faster), or 0

@@ -51,6 +51,7 @@ pub mod heatmap;
 pub mod ide_a4000;
 pub mod inputrec;
 pub mod inputsched;
+pub mod ipf;
 // Host-keyboard controller bindings: a frontend concern (it speaks winit key
 // codes and produces the same `JoystickState` the gamepad reader does), so it
 // rides the same feature gate as `gamepad`. The autofire policy that pairs
