@@ -6350,11 +6350,24 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
 }
 
 #[test]
-fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
+fn planned_ham_dma_carries_early_ddf_history_across_diw_open() {
+    // Denise's HAM accumulator advances on every shifted sample; DIW only
+    // selects between border and playfield output. With DDFSTRT one fetch
+    // period before the window, the hidden samples must seed the hold colour
+    // the first visible pixel modifies. Regression example: the Lemmings 2
+    // FES demo's DMA Design logo (352px overscan HAM, DDFSTRT $30, DIW
+    // HSTART $79) opens every line with a set-palette pixel in the hidden
+    // span; dropping it turned the left edge into black-and-green streaks.
     let mut row_words = vec![vec![0; 2]; 6];
-    row_words[0][0] |= 0x8000; // native x 0: direct palette entry 1
-    row_words[4][0] |= 0x0001; // native x 15: HAM blue := 0 (hidden, pre-DIW)
-    row_words[4][1] |= 0x8000; // native x 16: HAM blue := 0 (first visible)
+    row_words[0][0] |= 0x8000; // native x 0: direct palette entry 1 (hidden)
+    row_words[0][0] |= 0x7FFF; // native x 1..15: HAM blue := $B (hidden)
+    row_words[1][0] |= 0x7FFF;
+    row_words[3][0] |= 0x7FFF;
+    row_words[4][0] |= 0x7FFF;
+    row_words[2][1] |= 0x8000; // native x 16: HAM green := $C (first visible)
+    row_words[3][1] |= 0x8000;
+    row_words[4][1] |= 0x8000;
+    row_words[5][1] |= 0x8000;
     let line_plan = DenisePlannedPlayfieldLine::new(0, 62, 64, &row_words, 32);
     let mut control = visible_lowres_control(0x6800);
     control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16;
@@ -6396,8 +6409,10 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
     // placement is linear and the hardware window edge (2H-196) is flush
     // with the standard-DDF picture (vAmigaTS Agnus/DIW/OLDDIW/diw1 photos).
     assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 16);
-    assert_eq!(fb[62], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[63], rgb12_to_rgba8(0x0000));
+    // Hidden history: pal[1]=$123, then blue:=$B fifteen times -> $12B held
+    // at the window edge; the visible green:=$C pixel lands on $1CB.
+    assert_eq!(fb[62], rgb12_to_rgba8(0x01CB));
+    assert_eq!(fb[63], rgb12_to_rgba8(0x01CB));
     assert_eq!(&playfield_mask[62..64], &[0x02, 0x02]);
 }
 

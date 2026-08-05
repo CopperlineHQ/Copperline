@@ -487,7 +487,15 @@ staircase reads the landing column off the ruler. The HAM select feeds
 Denise's colour-selection stage, so it lands where a COLORxx write carried
 by the same bus slot would, not in the later generic register domain --
 the Hollywood Poker Pro HAM-photo/EHB-scoreboard split-line class;
-vAmiga-verified byte-for-byte over the whole frame).
+vAmiga-verified byte-for-byte over the whole frame), and
+`hamprobe-prediw` (the HAM hold colour accumulates across the DIW left
+edge: DDFSTRT one fetch period before the window hides the first eight
+lo-res samples behind the border, and a set-palette pixel there seeds
+the hold colour every visible pixel modifies. Two bands with identical
+visible fetch words render magenta and cyan from their hidden seeds
+alone, and collapse to one blue field if the history is truncated at the
+window edge -- the Lemmings 2 FES demo DMA Design logo class;
+vAmiga-verified band colours, border span per the DIW-edge photos).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not

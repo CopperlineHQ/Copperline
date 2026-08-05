@@ -35,16 +35,18 @@ changes. Each framebuffer collision entry is packed into one byte; this
 is only a representation change, and the same playfield-presence and
 match bits feed sprite priority and CLXDAT.
 For DMA-fetched HAM playfields, the display window gates framebuffer output
-and collision recording, but the low-res Denise phase can still seed the HAM
-component history just before DIW: when the window opens to the right of the
-fetch origin (a late DIWSTRT, or an early DDFSTRT), replay pre-advances the
-hidden samples before painting the DIW edge. The standard `$81` window edge
+and collision recording, but it does not rewind the HAM component history:
+Denise's hold register advances on every shifted sample, so fetched samples
+that sit before DIW opens (a late DIWSTRT, or an early DDFSTRT) still
+advance the hold colour, and replay pre-advances those hidden samples
+before painting the DIW edge. The standard `$81` window edge
 is flush with the standard `$38` picture (both at framebuffer x 62,
 hardware-verified on the sblit0 A500 photo), so a stock screen hides no
-samples. Extra fetch
-groups from an earlier DDFSTRT are not decoded into the HAM hold colour before
-DIW opens; they are fetched by Agnus, but the first visible HAM history is
-bounded to the display-phase samples. Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
+samples. Overscan HAM pictures rely on the hidden span: the Lemmings 2
+FES demo's DMA Design logo (DDFSTRT `$30`, DIW HSTART `$79`) opens each
+line with a set-palette pixel in the eight hidden lo-res samples, and
+bounding the history to the display-phase samples turned its left edge
+into modify-green streaks. Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
 period before the standard `$38` slot moves the picture exactly 16 lo-res
 pixels left (hardware-verified
 against the vAmigaTS `Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS).
