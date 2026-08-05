@@ -531,6 +531,7 @@ dependencies = [
  "libloading",
  "log",
  "m68k",
+ "mt32-rs",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -1872,6 +1873,10 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
+
+[[package]]
+name = "mt32-rs"
+version = "0.1.0"
 
 [[package]]
 name = "naga"

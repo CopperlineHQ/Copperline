@@ -150,9 +150,6 @@ pub struct MidiSerialSink {
     /// it was sent, so with nothing going to it there is nothing to answer.
     #[cfg(feature = "mt32")]
     mt32_input: bool,
-    /// Assembles the requests the guest sends to the module.
-    #[cfg(feature = "mt32")]
-    mt32_responder: crate::mt32::reply::Responder,
     /// The reply waiting to go back to the guest. Paula's receiver drains it
     /// at the emulated baud rate exactly as it drains the host ring, so a
     /// dump arrives over the wire at MIDI speed rather than all at once.
@@ -166,7 +163,7 @@ pub struct MidiSerialSink {
 pub use crate::config::MIDI_OUT_MT32;
 
 /// What the MT-32 output is called anywhere a person reads it.
-pub const MIDI_OUT_MT32_LABEL: &str = "Munt MT-32";
+pub const MIDI_OUT_MT32_LABEL: &str = "MT-32";
 
 /// MIDI Active Sensing status byte.
 pub(crate) const ACTIVE_SENSE: u8 = 0xFE;
@@ -394,8 +391,6 @@ impl MidiSerialSink {
             #[cfg(feature = "mt32")]
             mt32_input: false,
             #[cfg(feature = "mt32")]
-            mt32_responder: crate::mt32::reply::Responder::default(),
-            #[cfg(feature = "mt32")]
             mt32_reply: std::collections::VecDeque::new(),
         })
     }
@@ -515,7 +510,10 @@ impl MidiSerialSink {
     #[cfg(feature = "mt32")]
     fn stop_answering(&mut self) {
         self.mt32_reply.clear();
-        self.mt32_responder = crate::mt32::reply::Responder::default();
+        // Whatever the module had queued on its OUT jack goes with it.
+        if let Some(mt32) = self.mt32.as_mut() {
+            let _ = mt32.take_midi_out();
+        }
     }
 
     /// Why the MT-32 could not be fitted, if it could not. Taken rather than
@@ -666,7 +664,15 @@ impl SerialSink for MidiSerialSink {
     fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
         #[cfg(feature = "mt32")]
         if let Some(mt32) = &mut self.mt32 {
-            return Some(mt32.next_frame());
+            let frame = mt32.next_frame();
+            // A request the module has answered goes back down the wire --
+            // when its MIDI OUT is wired to the machine. Unwired, the jack
+            // answers into a cable that is not there.
+            let replies = mt32.take_midi_out();
+            if self.mt32_input && !replies.is_empty() {
+                self.mt32_reply.extend(replies);
+            }
+            return Some(frame);
         }
         None
     }
@@ -686,14 +692,6 @@ impl SerialSink for MidiSerialSink {
                 dbg.tx_bytes += 1;
             }
             mt32.write_byte(b);
-            // With its MIDI OUT wired back, a request the guest just
-            // finished is answered from the module's own memory.
-            if self.mt32_input {
-                if let Some(request) = self.mt32_responder.write_byte(b) {
-                    let reply = crate::mt32::reply::answer(mt32.synth(), request);
-                    self.mt32_reply.extend(reply);
-                }
-            }
             return;
         }
         // Map the emit clock onto host time so the byte is scheduled rather

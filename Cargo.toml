@@ -31,9 +31,9 @@ default = [
     "mt32",
     "cpu-jit",
 ]
-# MT-32 emulation through Munt's mt32emu (vendor/munt), reachable as a
-# MIDI-Out target. Off builds carry none of it.
-mt32 = []
+# MT-32 emulation through the vendored mt32-rs engine (vendor/mt32-rs),
+# reachable as a MIDI-Out target. Off builds carry none of it.
+mt32 = ["dep:mt32-rs"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
@@ -99,6 +99,8 @@ floppybridge = []
 
 [dependencies]
 m68k = { version = "0.7.1", features = ["serde"] }
+# The MT-32 synthesiser engine, vendored whole -- see vendor/mt32-rs.
+mt32-rs = { path = "vendor/mt32-rs", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

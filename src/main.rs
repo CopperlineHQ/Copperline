@@ -1259,10 +1259,10 @@ fn print_help() {
          --perf-overlay                 show the performance overlay at start\n  \
          \x20                            (Cmd/Alt+P toggles it live)\n  \
          --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
-         --mt32-control-rom PATH        Munt MT-32 control ROM (with --mt32-pcm-rom,\n  \
+         --mt32-control-rom PATH        MT-32 control ROM (with --mt32-pcm-rom,\n  \
          \x20                            makes \"mt32\" selectable as the MIDI output)\n  \
-         --mt32-pcm-rom PATH            Munt MT-32 PCM ROM\n  \
-         --mt32-panel                   show the Munt MT-32 front panel\n  \
+         --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
+         --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \

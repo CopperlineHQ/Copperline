@@ -685,7 +685,7 @@ const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
 ];
-// Picking Munt MT-32 as the output adds the two ROM images it runs on and
+// Picking MT-32 as the output adds the two ROM images it runs on and
 // its front panel; nothing else needs them, so nothing else shows them.
 #[cfg(all(feature = "midi", feature = "mt32"))]
 const SERIAL_ROWS_MT32: [Row; 7] = [
@@ -3053,7 +3053,7 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::MidiOut => {
-                // Munt MT-32 rides at the end of the output list: it is
+                // MT-32 rides at the end of the output list: it is
                 // always there to be chosen, whatever the host offers.
                 let names: Vec<String> = self
                     .midi_endpoints

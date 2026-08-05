@@ -1,0 +1,20 @@
+[package]
+name = "mt32-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+license = "LGPL-2.1-or-later"
+description = "MT-32 sound module emulation in Rust, a port of Munt's mt32emu"
+repository = "https://github.com/hobbo91/mt32-rs"
+publish = false
+
+[features]
+# Builds the reference C++ engine (oracle/munt) into the test harness so the
+# differential tests can compare this crate's output against it sample by
+# sample. Test-only: a normal build carries no C++ at all.
+oracle = ["dep:cc"]
+
+[dependencies]
+
+[build-dependencies]
+cc = { version = "1", optional = true }

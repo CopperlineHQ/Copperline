@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The Munt MT-32's front panel, drawn under the display.
+//! The MT-32's front panel, drawn under the display.
 //!
 //! Laid out the way the unit is: the LCD at the left with the MIDI MESSAGE
 //! lamp beside it, then the six part buttons under an underlined PART, then
@@ -1577,7 +1577,7 @@ struct DialGrab {
 const DIAL_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
 
 /// How long the chain rests between songs rather than running one straight
-/// into the next: the two hundred and forty ticks Munt's own player leaves,
+/// into the next: the two hundred and forty ticks the reference player leaves,
 /// which at eighty a second is three of them.
 const BETWEEN_SONGS: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -1881,7 +1881,7 @@ impl Mt32Panel {
                 // Parts 6, 7 and 8 have no buttons of their own.
                 self.part = part;
                 self.mode = Mode::Function(Function::Volume);
-                PanelAction::Say(format!("Munt MT-32: part {}", part + 1))
+                PanelAction::Say(format!("MT-32: part {}", part + 1))
             }
             Chord::UnitNumber => {
                 // The unit number picks which MT-32 a SysEx message is
@@ -1889,7 +1889,7 @@ impl Mt32Panel {
                 // nothing to disambiguate, and the engine offers no way to
                 // change it.
                 self.mode = Mode::Chord(chord);
-                PanelAction::Say("Munt MT-32: unit number is fixed at 1".to_string())
+                PanelAction::Say("MT-32: unit number is fixed at 1".to_string())
             }
             _ if chord.needs_confirming() => {
                 self.mode = Mode::Confirm(chord);
@@ -1928,7 +1928,7 @@ impl Mt32Panel {
                 self.mode = Mode::Home;
                 self.holding.clear();
                 PanelAction::Say(format!(
-                    "Munt MT-32: parts 1-8 on channels {}-{}",
+                    "MT-32: parts 1-8 on channels {}-{}",
                     base + 1,
                     base + 8
                 ))
@@ -1937,7 +1937,7 @@ impl Mt32Panel {
                 self.release(synth);
                 // Spilling notes past the unit's capacity needs a second
                 // synth on MIDI OUT, which there is nowhere to put here.
-                PanelAction::Say("Munt MT-32: overflow assign needs a second unit".to_string())
+                PanelAction::Say("MT-32: overflow assign needs a second unit".to_string())
             }
             _ => {
                 self.release(synth);

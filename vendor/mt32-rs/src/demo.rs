@@ -1,24 +1,25 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: LGPL-2.1-or-later
 
-//! The demonstration songs the later control ROMs carry, and playing them.
+//! The demonstration songs the second-generation control ROMs carry, and
+//! playing them.
 //!
-//! A real MT-32 plays these itself: its microcontroller runs the code in the
-//! control ROM, and that code reads the songs out of the same ROM and works
-//! the synthesis chip with them. The engine Copperline uses has no such
-//! microcontroller -- it re-implements what that code *computes* rather than
-//! running it -- so it never touches them, and keeps only the half of the
-//! image the songs are not in.
+//! A real MT-32 plays these itself: its microcontroller runs the code in
+//! the control ROM, and that code reads the songs out of the same ROM and
+//! works the synthesis chip with them. This crate re-implements what that
+//! code *computes* rather than running it, so the part the missing
+//! firmware would do is done here: read the songs out of the image, and
+//! play them as if a sequencer were sending them down the cable --
+//! [Player::advance] emits the bytes due, and the MIDI front door
+//! ([crate::midi]) takes them from there.
 //!
-//! The songs are still there, though, and they are ordinary MIDI. So the
-//! part the missing firmware would do is done here: read them out of the
-//! image, and play them into the engine as if a sequencer were sending
-//! them down the cable. Same as the front panel and the dump replies -- the
-//! engine synthesises, Copperline does what the firmware would.
+//! Carried over from the player Copperline grew beside the reference
+//! engine; the layout facts are read the way Munt's own demo player reads
+//! them (`mt32emu_qt/src/DemoPlayer.cpp`).
 //!
 //! ## What is in the image
 //!
-//! Only the two-hundred-and-fifty-six-kilobit ROMs (v2.xx) carry them, in
-//! the upper half, one after another:
+//! Only the second-generation ROMs carry songs, in the upper half the
+//! engine itself never reads, one after another:
 //!
 //! ```text
 //!   +0x000  fourteen characters, the title, padded with spaces
@@ -29,15 +30,11 @@
 //!
 //! The performance is MIDI with running status, every message followed by
 //! one byte saying how many ticks to wait before the next. `FF` ends it.
-//!
-//! The tick is the unit's own timer rather than anything the song carries:
-//! the gaps between notes land on it unevenly -- thirteen ticks then
-//! fourteen, over and over -- which is what a fixed clock does to music
-//! written against a different one.
 
-/// Where the songs and the settings they want are, all read the way Munt's
-/// own player reads them (`mt32emu_qt/src/DemoPlayer.cpp`).
-const ROM_SIZE: usize = 128 * 1024;
+use crate::rom;
+use crate::sysex::dt1;
+
+/// Where the songs and the settings they want sit in the image.
 const SONG_REFS: usize = 0x86E0;
 const SONG_COUNT: usize = 5;
 const TIMBRE_ADDRESSES: usize = 0x8700;
@@ -55,8 +52,9 @@ const RHYTHM: usize = 0x20;
 const RHYTHM_LEN: usize = 256;
 const STREAM: usize = 0x120;
 
-/// The waits are counted by a timer running at this, divided by the figure
-/// each song carries -- 6250 on every one of them, so eighty a second.
+/// The waits are counted by a timer running at this, divided by the
+/// figure each song carries -- 6250 on every one of them, eighty a
+/// second.
 const TIMER_HZ: f32 = 500_000.0;
 
 /// Where the settings go, as the unit addresses its own memory.
@@ -93,10 +91,10 @@ struct Event {
 pub struct Song {
     /// What the unit shows while it plays, as the ROM spells it.
     pub title: String,
-    /// The settings it wants before a note of it is played: its reverb and
-    /// partial reserve, its rhythm kit, the timbres it was written with and
-    /// the patches that name them. Without these the songs that lean on
-    /// their own timbres play in whatever the unit was left in.
+    /// The settings it wants before a note is played: its reverb and
+    /// partial reserve, its rhythm kit, the timbres it was written with
+    /// and the patches that name them. Without these the songs that lean
+    /// on their own timbres play in whatever the unit was left in.
     setup: Vec<u8>,
     events: Vec<Event>,
     seconds_per_tick: f32,
@@ -113,13 +111,10 @@ impl Song {
 }
 
 /// Every song a control ROM carries, in the order the ROM lists them.
-///
-/// Empty for the earlier ROMs, which are half the size and have none: the
-/// unit those came in had no demonstration to play.
+/// Empty for the ROMs that have none: only the second generation came
+/// with a demonstration to play.
 pub fn songs(image: &[u8]) -> Vec<Song> {
-    // Only the later control ROMs, which are twice the size and carry them
-    // in the half the engine does not read.
-    if image.len() != ROM_SIZE {
+    if rom::identify(image).and_then(|info| info.family) != Some(rom::Family::Mt32Gen2) {
         return Vec::new();
     }
     (0..SONG_COUNT)
@@ -136,8 +131,6 @@ pub fn songs(image: &[u8]) -> Vec<Song> {
 fn u16le(image: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*image.get(at)?, *image.get(at + 1)?]))
 }
-
-use super::dt1;
 
 fn read_song(image: &[u8], song: &[u8]) -> Option<Song> {
     let title = String::from_utf8_lossy(song.get(..TITLE)?)
@@ -246,11 +239,12 @@ fn read_stream(at: &[u8]) -> Vec<Event> {
     events
 }
 
-/// Plays a song into the engine, a frame at a time.
+/// Plays a song, a rendered chunk at a time.
 ///
-/// It is driven by rendered frames rather than by the host clock, so a demo
-/// runs in emulated time like everything else: the same frame carries the
-/// same message on every run.
+/// Driven by frames rather than by any host clock, so a demo runs in the
+/// engine's own time: the same frame carries the same message on every
+/// run. The bytes go out through whatever feeds the engine -- typically
+/// a [crate::midi::Parser] over the engine itself.
 #[derive(Debug)]
 pub struct Player {
     song: Song,
@@ -262,10 +256,17 @@ pub struct Player {
 }
 
 impl Player {
-    /// Start `song` at the top, for an engine rendering at `sample_rate`.
-    pub fn new(song: Song, sample_rate: u32) -> Self {
+    /// Start `song` at the top, timed in the module's own frames.
+    pub fn new(song: Song) -> Player {
+        Player::at_rate(song, crate::SAMPLE_RATE)
+    }
+
+    /// Start `song` at the top, counting frames at `sample_rate`: for a
+    /// host that paces the song against a resampled stream rather than
+    /// the module's own.
+    pub fn at_rate(song: Song, sample_rate: u32) -> Player {
         let frames_per_tick = sample_rate as f32 * song.seconds_per_tick;
-        Self {
+        Player {
             song,
             next: 0,
             frames_per_tick,
@@ -279,11 +280,9 @@ impl Player {
         self.next >= self.song.events.len()
     }
 
-    /// Append the bytes due over the next `frames` to `due`, in the order
-    /// they are due.
-    ///
-    /// Several can fall together -- a chord is a run of messages with no
-    /// wait between them -- so they land together, which is also how they
+    /// Append the bytes due over the next `frames` to `due`, in the
+    /// order they are due. Several can fall together -- a chord is a run
+    /// of messages with no wait between them -- which is also how they
     /// would arrive down a cable at this speed.
     pub fn advance(&mut self, frames: usize, due: &mut Vec<u8>) {
         if !self.setup_sent {
@@ -307,16 +306,16 @@ impl Player {
 mod tests {
     use super::*;
 
-    /// The songs come out of a real image: named, in the order the ROM
-    /// lists them, timed by what each carries, and with the settings they
-    /// want ahead of the first note. Roland's ROMs cannot be committed, so
-    /// this runs only where one is to hand.
+    /// The songs come out of every second-generation image in the
+    /// directory: named, in the order the ROM lists them, timed by what
+    /// each carries, and with the settings they want ahead of the first
+    /// note. Roland's ROMs cannot be committed, so this runs only where
+    /// they are to hand.
     #[test]
-    #[ignore = "needs a v2.xx control ROM in COPPERLINE_MT32_ROMS"]
-    fn the_songs_come_out_of_a_real_control_rom() {
-        let Some(dir) = std::env::var_os("COPPERLINE_MT32_ROMS").map(std::path::PathBuf::from)
-        else {
-            return;
+    #[ignore = "needs a ROM directory in MT32_RS_ROMS_ALL"]
+    fn the_songs_come_out_of_the_real_images() {
+        let Some(dir) = std::env::var_os("MT32_RS_ROMS_ALL").map(std::path::PathBuf::from) else {
+            panic!("MT32_RS_ROMS_ALL is not set");
         };
         let mut checked = 0;
         for entry in std::fs::read_dir(&dir)
@@ -328,7 +327,6 @@ mod tests {
             if songs.is_empty() {
                 continue;
             }
-            println!("{}:", entry.file_name().to_string_lossy());
             assert_eq!(songs.len(), SONG_COUNT);
             // The order is the ROM's own, not the order they sit in it.
             let names: Vec<&str> = songs.iter().map(|s| s.title.as_str()).collect();
@@ -344,21 +342,13 @@ mod tests {
             );
             for song in &songs {
                 let secs = song.seconds();
-                println!(
-                    "    {:<16} {:>5} events  {}m{:04.1}s  {} bytes of setup",
-                    song.title,
-                    song.events.len(),
-                    (secs / 60.0) as u32,
-                    secs % 60.0,
-                    song.setup.len()
-                );
                 assert!(song.events.len() > 100, "it has a performance in it");
                 assert!(
                     (20.0..600.0).contains(&secs),
                     "it runs for a plausible time: {secs}"
                 );
-                // Every note that starts is stopped: a misread stream would
-                // lose its place and the two would not balance.
+                // Every note that starts is stopped: a misread stream
+                // would lose its place and the two would not balance.
                 let (mut on, mut off) = (0u32, 0u32);
                 for e in song.events.iter().filter(|e| !e.message.is_empty()) {
                     match (e.message[0] & 0xF0, e.message.get(2)) {
@@ -371,23 +361,22 @@ mod tests {
                     on.abs_diff(off) <= 1,
                     "{on} notes started, {off} stopped -- the stream was misread"
                 );
-                // The setup is whole messages, every one of them a DT1.
+                // The setup is whole messages, every one of them closed.
                 assert_eq!(song.setup[0], 0xF0);
                 assert_eq!(*song.setup.last().unwrap(), 0xF7);
                 assert_eq!(
                     song.setup.iter().filter(|&&b| b == 0xF0).count(),
                     song.setup.iter().filter(|&&b| b == 0xF7).count(),
-                    "every setting is a closed message"
                 );
             }
             checked += songs.len();
-        }
-        if checked == 0 {
             println!(
-                "no v2.xx control ROM in {}, nothing to check",
-                dir.display()
+                "  {:<24} {} songs, titled and balanced",
+                entry.file_name().to_string_lossy(),
+                songs.len()
             );
         }
+        assert!(checked > 0, "no second-generation ROM to check");
     }
 
     #[test]
@@ -396,21 +385,11 @@ mod tests {
         assert!(songs(&[]).is_empty(), "no image at all");
     }
 
-    #[test]
-    fn a_message_is_built_with_its_address_and_checksum() {
-        let msg = dt1(0x10_0001, &[1, 2, 3]);
-        assert_eq!(msg[..5], [0xF0, 0x41, 0x10, 0x16, 0x12]);
-        assert_eq!(msg[5..8], [0x10, 0x00, 0x01], "the address it is sent to");
-        assert_eq!(*msg.last().unwrap(), 0xF7);
-        let sum: u32 = msg[5..msg.len() - 1].iter().map(|&b| u32::from(b)).sum();
-        assert_eq!(sum % 128, 0, "it adds up");
-    }
-
-    /// A wait comes before its message, and the two ways a song can end are
-    /// both taken.
+    /// A wait comes before its message, and the two ways a song can end
+    /// are both taken.
     #[test]
     fn the_performance_reads_wait_then_message() {
-        // wait 0, note on; wait 24, running status; wait 12, program
+        // Wait 0, note on; wait 24, running status; wait 12, program
         // change (one byte); then the end.
         let stream = [0, 0x91, 0x3C, 0x64, 24, 0x3E, 0x64, 12, 0xC1, 0x05, END];
         let events = read_stream(&stream);
@@ -445,5 +424,47 @@ mod tests {
         assert_eq!(timed.len(), 3);
         assert!(timed[0].message.is_empty(), "nothing to play, only to wait");
         assert_eq!(timed[2].message, vec![0x91, 0x3C, 0x64]);
+    }
+
+    /// The player pays out bytes against frames: nothing early, chords
+    /// together, the setup ahead of everything.
+    #[test]
+    fn the_player_pays_out_on_time() {
+        let song = Song {
+            title: "Test".into(),
+            setup: dt1(0x10_0016, &[80]),
+            events: vec![
+                Event {
+                    wait: 0,
+                    message: vec![0x91, 0x3C, 0x64],
+                },
+                Event {
+                    wait: 0,
+                    message: vec![0x91, 0x40, 0x64],
+                },
+                Event {
+                    wait: 80,
+                    message: vec![0x91, 0x3C, 0x00],
+                },
+            ],
+            seconds_per_tick: 6250.0 / TIMER_HZ,
+        };
+        let mut player = Player::new(song);
+        let mut due = Vec::new();
+        player.advance(0, &mut due);
+        assert_eq!(due[0], 0xF0, "the setup leads");
+        assert_eq!(
+            &due[due.len() - 6..],
+            &[0x91, 0x3C, 0x64, 0x91, 0x40, 0x64],
+            "the chord lands together at once"
+        );
+        assert!(!player.finished());
+        // Eighty ticks at eighty a second is one second of frames.
+        due.clear();
+        player.advance(crate::SAMPLE_RATE as usize / 2, &mut due);
+        assert!(due.is_empty(), "half a second early, nothing due");
+        player.advance(crate::SAMPLE_RATE as usize / 2, &mut due);
+        assert_eq!(due, [0x91, 0x3C, 0x00], "and on the second, the note off");
+        assert!(player.finished());
     }
 }

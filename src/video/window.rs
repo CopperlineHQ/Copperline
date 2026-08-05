@@ -4307,7 +4307,7 @@ impl App {
         MediaBar { drives, cd }
     }
 
-    fn main_redraw_state(&self) -> MainRedrawState {
+    fn main_redraw_state(&mut self) -> MainRedrawState {
         let mut status = self.emu.bus().front_panel_status();
         if status.fdd_track.is_none() {
             status.fdd_track = self.last_fdd_track;
@@ -4327,10 +4327,10 @@ impl App {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             self.emu
-                .bus()
-                .midi_serial()
-                .and_then(crate::midi::MidiSerialSink::mt32)
-                .map(|mt32| mt32.synth().display())
+                .bus_mut()
+                .midi_serial_mut()
+                .and_then(crate::midi::MidiSerialSink::mt32_mut)
+                .map(|mt32| mt32.synth_mut().display())
                 .hash(&mut h);
             h.finish()
         } else {
@@ -4971,9 +4971,9 @@ impl App {
                 let shown = !crate::video::mt32_panel_shown();
                 self.set_mt32_panel_shown(shown);
                 self.show_osd(if shown {
-                    "Munt MT-32: front panel shown"
+                    "MT-32: front panel shown"
                 } else {
-                    "Munt MT-32: front panel hidden"
+                    "MT-32: front panel hidden"
                 });
             }
             #[cfg(not(feature = "mt32"))]
@@ -4981,7 +4981,7 @@ impl App {
             #[cfg(feature = "mt32")]
             A::SetMt32Lcd(style) => {
                 crate::video::set_mt32_lcd(style);
-                self.show_osd(format!("Munt MT-32: {} display", style.menu_label()));
+                self.show_osd(format!("MT-32: {} display", style.menu_label()));
                 self.request_redraw();
             }
             #[cfg(not(feature = "mt32"))]
@@ -5197,7 +5197,7 @@ impl App {
                 }
                 self.emu.bus_mut().paula.rearm_synth_audio();
                 self.mt32_panel.reset();
-                self.show_osd("Munt MT-32: all reset");
+                self.show_osd("MT-32: all reset");
             }
         }
     }
@@ -5232,9 +5232,9 @@ impl App {
             return;
         }
         self.show_osd(if on {
-            "Munt MT-32: power off"
+            "MT-32: power off"
         } else {
-            "Munt MT-32: power on"
+            "MT-32: power on"
         });
     }
 
@@ -5274,7 +5274,7 @@ impl App {
             .midi_serial_mut()
             .and_then(crate::midi::MidiSerialSink::take_mt32_fault);
         if let Some(fault) = fault {
-            self.warn_osd(format!("Munt MT-32: {fault}"));
+            self.warn_osd(format!("MT-32: {fault}"));
         }
     }
 
@@ -5369,8 +5369,8 @@ impl App {
         }
         // Switched off, the fascia is still there: dark display, no lamp.
         let (lcd, led) = sink
-            .mt32()
-            .map_or_else(|| (String::new(), false), |mt32| mt32.synth().display());
+            .mt32_mut()
+            .map_or_else(|| (String::new(), false), |mt32| mt32.synth_mut().display());
         let powered = sink.mt32().is_some();
         let hover = self
             .cursor_pos

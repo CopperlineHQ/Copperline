@@ -722,7 +722,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
 
 /// What the MT-32 output is called in the menu, and the endpoint name that
 /// selects it.
-const MT32_LABEL: &str = "Munt MT-32";
+const MT32_LABEL: &str = "MT-32";
 const MT32_ENDPOINT: &str = crate::config::MIDI_OUT_MT32;
 
 fn parallel_rows(s: &MenuState) -> Vec<MenuRow> {

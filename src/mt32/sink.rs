@@ -33,7 +33,7 @@ impl Mt32Device {
     pub fn open(control_rom: &Path, pcm_rom: &Path) -> Result<Self> {
         let synth = Mt32Synth::open(control_rom, pcm_rom, crate::audio::MIX_SAMPLE_RATE)?;
         log::info!(
-            "midi: Munt MT-32 attached (engine {}, {} Hz)",
+            "midi: MT-32 attached ({}, {} Hz)",
             super::engine_version(),
             synth.sample_rate()
         );
@@ -82,12 +82,18 @@ impl Mt32Device {
 
     /// Play one of the ROM's own songs, or stop.
     pub fn play_demo(&mut self, song: Option<super::demo::Song>) {
-        self.demo = song.map(|s| super::demo::Player::new(s, self.synth.sample_rate()));
+        let rate = self.synth.sample_rate();
+        self.demo = song.map(|s| super::demo::Player::at_rate(s, rate));
     }
 
     /// Whether a song is still running, so the chain knows to move on.
     pub fn demo_playing(&self) -> bool {
         self.demo.is_some()
+    }
+
+    /// Drain the module's MIDI OUT: what it has answered since last asked.
+    pub fn take_midi_out(&mut self) -> Vec<u8> {
+        self.synth.take_midi_out()
     }
 
     /// The synth, for the front panel and the display.

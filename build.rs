@@ -32,7 +32,6 @@ fn main() {
 
     set_windows_main_thread_stack();
     build_floppybridge();
-    build_munt();
 }
 
 /// Compile the vendored FloppyBridge into the emulator, so a build produces a
@@ -147,86 +146,4 @@ fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
     let text = String::from_utf8(output.stdout).ok()?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
-}
-
-/// Compile Munt's mt32emu, the MT-32 synthesiser engine, into the
-/// emulator. Vendored whole -- keeping it in step with upstream is the
-/// maintainer's job -- see vendor/munt/README.md.
-fn build_munt() {
-    if std::env::var_os("CARGO_FEATURE_MT32").is_none() {
-        return;
-    }
-    let dir = Path::new("vendor/munt/src");
-    // Upstream's own library source list. The optional resampler adapters are
-    // not among them: MT32EMU_WITH_INTERNAL_RESAMPLER below picks the built-in
-    // one, which is what keeps this free of external dependencies.
-    const SOURCES: [&str; 29] = [
-        "Analog.cpp",
-        "BReverbModel.cpp",
-        "Display.cpp",
-        "File.cpp",
-        "FileStream.cpp",
-        "LA32FloatWaveGenerator.cpp",
-        "LA32Ramp.cpp",
-        "LA32WaveGenerator.cpp",
-        "MidiStreamParser.cpp",
-        "Part.cpp",
-        "Partial.cpp",
-        "PartialManager.cpp",
-        "Poly.cpp",
-        "ROMInfo.cpp",
-        "SampleRateConverter.cpp",
-        "Synth.cpp",
-        "TVA.cpp",
-        "TVF.cpp",
-        "TVP.cpp",
-        "Tables.cpp",
-        "VersionTagging.cpp",
-        "c_interface/c_interface.cpp",
-        "sha1/sha1.cpp",
-        "srchelper/InternalResampler.cpp",
-        "srchelper/srctools/src/FIRResampler.cpp",
-        "srchelper/srctools/src/IIR2xResampler.cpp",
-        "srchelper/srctools/src/LinearResampler.cpp",
-        "srchelper/srctools/src/ResamplerModel.cpp",
-        "srchelper/srctools/src/SincResampler.cpp",
-    ];
-    println!("cargo:rerun-if-changed=vendor/munt/src");
-
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-
-    let mut build = cc::Build::new();
-    build
-        .cpp(true)
-        .include(dir)
-        // The built-in sample-rate converter, so the engine renders straight
-        // at the mixer's rate with nothing else to link against.
-        .define("MT32EMU_WITH_INTERNAL_RESAMPLER", "1")
-        .warnings(false);
-    if target_env == "msvc" {
-        // The sources use the standard library's containers, so they need
-        // real unwinding; MSVC does not enable it by default.
-        build.flag("/EHsc");
-        // No standard is asked for here: MSVC has no C++11 setting -- its
-        // lowest is C++14, which its default already meets -- so naming one
-        // earns a "command line warning D9002" from cl for every source.
-    } else {
-        build.std("c++11");
-    }
-    for source in SOURCES {
-        build.file(dir.join(source));
-    }
-    // Copperline's own shim, which formats the engine's diagnostics where
-    // the compiler knows what a va_list is.
-    println!("cargo:rerun-if-changed=src/mt32/print_debug.cpp");
-    build.file("src/mt32/print_debug.cpp");
-    build.compile("mt32emu");
-
-    // The C++ runtime the engine's containers are built against.
-    match target_os.as_str() {
-        "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
-        "windows" => {}
-        _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
-    }
 }

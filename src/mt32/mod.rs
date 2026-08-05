@@ -1,26 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The MT-32, emulated by Munt's mt32emu (see `vendor/munt`).
+//! The MT-32, emulated by the vendored mt32-rs engine (see `vendor/mt32-rs`).
 //!
 //! Paula's serial bytes go straight into the engine and stereo frames come
 //! back at the mixer's rate, so nothing passes through the host's MIDI stack:
 //! no IAC bus on macOS, no loopMIDI on Windows, no ALSA sequencer client.
+//! The engine renders at the module's native 32 kHz; the resampler here
+//! carries that up to the mixer's rate, which is the one conversion between
+//! the module and the mix.
 //!
 //! The engine needs two ROM images, a control ROM and a PCM ROM, which are
 //! not Copperline's to ship and so are the user's to supply. Without them the
 //! machine still runs; it simply has nothing on the far end of the cable.
 
-use anyhow::{anyhow, bail, Result};
-use std::ffi::{c_char, c_void, CString};
+use anyhow::{anyhow, Result};
 use std::path::Path;
 
-pub mod demo;
-mod ffi;
-pub mod reply;
+mod resample;
 pub mod rom;
 mod sink;
 
 pub use sink::{Mt32Device, Mt32Roms};
+
+/// The songs the second-generation control ROMs carry, and the player that
+/// paces them; the engine crate reads both out of the image.
+pub use mt32_rs::demo;
 
 /// What the engine puts in a part's place on the main screen while that
 /// part is sounding. On the hardware it is a character the display
@@ -29,170 +33,64 @@ pub use sink::{Mt32Device, Mt32Roms};
 pub const ACTIVE_PART: char = '\u{1}';
 
 /// How wide the emulated LCD is, in characters. The panel is drawn to this.
-pub const LCD_WIDTH: usize = 20;
+pub const LCD_WIDTH: usize = mt32_rs::LCD_WIDTH;
 
-/// Whether to log everything the MT-32 does, the engine's own running
-/// commentary included (`COPPERLINE_MT32_DEBUG=1`).
+/// How many native frames the engine is asked for at a time on the way
+/// into the resampler: 4 ms, so a message lands within that of its frame.
+const NATIVE_BLOCK: usize = 128;
+
+/// Whether to log everything the MT-32 does (`COPPERLINE_MT32_DEBUG=1`).
 ///
-/// Off, the engine says nothing. It is chatty about MIDI it cannot make
-/// sense of, which on a serial line carrying whatever a guest emits is
-/// ordinary and says nothing about Copperline.
+/// Off, the module says nothing. The stream off a guest's serial line
+/// carries whatever the guest emits, so bytes the module drops are
+/// ordinary and say nothing about Copperline.
 pub(crate) fn debug_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_MT32_DEBUG"))
 }
 
-/// Which interface version this handler implements.
-///
-/// The engine calls this one without checking it for null, unlike every
-/// other callback here, so it has to be filled in.
-unsafe extern "C" fn get_version_id(_handler: ffi::ReportHandler) -> u32 {
-    ffi::REPORT_HANDLER_VERSION_0
-}
-
-/// Takes the engine's diagnostics, already formatted by the C shim, and
-/// puts them in the log rather than on the console.
-///
-/// # Safety
-/// Called from `print_debug.cpp` with a null-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn copperline_mt32_log(text: *const c_char) {
-    if !debug_enabled() || text.is_null() {
-        return;
-    }
-    // SAFETY: null-checked, and the shim passes a terminated buffer.
-    let line = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
-    log::debug!("mt32: {}", line.trim_end());
-}
-
-/// What a program wrote to the module's display.
-///
-/// The engine's own handler prints this to the console, where it arrives
-/// unstamped and unprefixed among Copperline's log lines. Taking the
-/// callback puts it in the log instead, so everything the module says
-/// reads the same way.
-///
-/// # Safety
-/// Called by the engine with a null-terminated string.
-unsafe extern "C" fn show_lcd_message(_instance: *mut c_void, text: *const c_char) {
-    if text.is_null() {
-        return;
-    }
-    // SAFETY: null-checked, and the engine passes a terminated buffer.
-    let line = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
-    log::info!("mt32: display {:?}", line.trim());
-}
-
-/// The handler the engine reports through. Only the display and
-/// `print_debug` are taken: everything else Copperline wants to know it
-/// asks for directly, and a callback left null keeps the engine's own
-/// default.
-static REPORT_HANDLER_V0: ffi::ReportHandlerV0 = ffi::ReportHandlerV0 {
-    get_version_id: Some(get_version_id),
-    print_debug: Some(ffi::copperline_mt32_print_debug),
-    on_error_control_rom: None,
-    on_error_pcm_rom: None,
-    show_lcd_message: Some(show_lcd_message),
-    on_midi_message_played: None,
-    on_midi_queue_overflow: None,
-    on_midi_system_realtime: None,
-    on_device_reset: None,
-    on_device_reconfig: None,
-    on_new_reverb_mode: None,
-    on_new_reverb_time: None,
-    on_new_reverb_level: None,
-    on_poly_state_changed: None,
-    on_program_changed: None,
-};
-
-/// A running MT-32. Dropping it closes the synth and frees the engine.
+/// A running MT-32. Dropping it switches the module off.
 pub struct Mt32Synth {
-    context: ffi::Context,
-    /// What the engine reported as its output rate once opened. Asked for
-    /// [`crate::audio::MIX_SAMPLE_RATE`]; kept so a mismatch is visible
-    /// rather than silently detuning everything.
+    engine: mt32_rs::engine::Engine,
+    parser: mt32_rs::midi::Parser,
+    /// The rate frames leave at, which is what the mixer asked for.
     sample_rate: u32,
-    /// The engine's samples land here on the way to the mixer's frames,
-    /// kept so rendering does not allocate once a block.
-    scratch: Vec<i16>,
+    resampler: resample::Resampler,
+    /// Native frames rendered and not yet resampled, and how far the
+    /// resampler has drunk from them.
+    native: Vec<(i16, i16)>,
+    taken: usize,
 }
-
-// The engine keeps all its state behind the context pointer and Copperline
-// drives it from one thread (the emulator loop, like the rest of the mixer).
-unsafe impl Send for Mt32Synth {}
 
 impl Mt32Synth {
-    /// Fit an MT-32 with the given ROM images and start it at `sample_rate`.
+    /// Fit an MT-32 with the given ROM images, producing at `sample_rate`.
     ///
-    /// The engine identifies a ROM by its size and SHA-1 rather than its
-    /// name, so a mislabelled or truncated file is rejected here rather than
+    /// The engine identifies a ROM by its content rather than its name, so
+    /// a mislabelled or truncated file is rejected here rather than
     /// producing a synth that sounds subtly wrong.
     pub fn open(control_rom: &Path, pcm_rom: &Path, sample_rate: u32) -> Result<Self> {
-        let handler = ffi::ReportHandler {
-            v0: &raw const REPORT_HANDLER_V0,
-        };
-        // SAFETY: the handler is static and outlives the context; its
-        // unfilled callbacks are null, which the engine checks for.
-        let context = unsafe { ffi::mt32emu_create_context(handler, std::ptr::null_mut()) };
-        if context.is_null() {
-            bail!("could not create the MT-32 engine context");
-        }
-        // One owner from here on: every early return below drops `synth`,
-        // which closes and frees the context exactly once. (`close` on a
-        // synth that never opened is a no-op the engine guards.)
-        let mut synth = Self {
-            context,
-            sample_rate: 0,
-            scratch: Vec::new(),
-        };
-
-        synth.add_rom(control_rom, "control")?;
-        synth.add_rom(pcm_rom, "PCM")?;
-
-        // SAFETY: `context` is live, and both calls only record intent for
-        // the `open` below.
-        unsafe {
-            ffi::mt32emu_set_stereo_output_samplerate(context, f64::from(sample_rate));
-            // The analogue output stage the LA32 fed on real hardware. The
-            // accurate model is what the engine resamples from.
-            ffi::mt32emu_set_analog_output_mode(context, ffi::AOM_ACCURATE);
-        }
-
-        // SAFETY: `context` is live and has both ROMs.
-        let rc = unsafe { ffi::mt32emu_open_synth(context) };
-        if rc != ffi::RC_OK {
-            bail!("the MT-32 engine refused to start (code {rc})");
-        }
-        // SAFETY: the synth is open.
-        synth.sample_rate = unsafe { ffi::mt32emu_get_actual_stereo_output_samplerate(context) };
-        Ok(synth)
+        let control = read_rom(control_rom, "control")?;
+        let pcm = read_rom(pcm_rom, "PCM")?;
+        let engine = mt32_rs::engine::Engine::open(&control, &pcm)
+            .map_err(|e| anyhow!("the MT-32 engine refused the ROM pair: {e}"))?;
+        Ok(Self {
+            engine,
+            parser: mt32_rs::midi::Parser::new(),
+            sample_rate,
+            resampler: resample::Resampler::new(mt32_rs::SAMPLE_RATE, sample_rate),
+            native: Vec::new(),
+            taken: 0,
+        })
     }
 
-    fn add_rom(&self, path: &Path, what: &str) -> Result<()> {
-        let text = path
-            .to_str()
-            .ok_or_else(|| anyhow!("the {what} ROM path is not valid UTF-8: {}", path.display()))?;
-        let c_path = CString::new(text)?;
-        // SAFETY: `context` is live and `c_path` outlives the call.
-        let rc = unsafe { ffi::mt32emu_add_rom_file(self.context, c_path.as_ptr()) };
-        match rc {
-            ffi::RC_ADDED_CONTROL_ROM | ffi::RC_ADDED_PCM_ROM => Ok(()),
-            _ => Err(anyhow!(
-                "{} is not a ROM the MT-32 engine recognises (code {rc}); \
-                 it identifies ROMs by content, not by name",
-                path.display()
-            )),
-        }
-    }
-
-    /// The rate the engine is actually producing at.
+    /// The rate the module is producing at.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
     /// Feed raw MIDI bytes, exactly as they arrived on Paula's serial line.
-    /// Running status and split messages are the engine's problem, which is
-    /// what its stream parser is for.
+    /// Running status and split messages are the stream parser's problem,
+    /// which is what it is for.
     pub fn parse(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -200,29 +98,35 @@ impl Mt32Synth {
         if debug_enabled() {
             log::debug!("mt32: in {bytes:02X?}");
         }
-        // SAFETY: `context` is live and the slice is valid for the call.
-        unsafe {
-            ffi::mt32emu_parse_stream(self.context, bytes.as_ptr(), bytes.len() as u32);
-        }
+        let mut sink = EngineSink {
+            engine: &mut self.engine,
+        };
+        self.parser.parse(bytes, &mut sink);
     }
 
-    /// Render `frames.len()` stereo frames, normalised for the mixer.
+    /// Render `frames.len()` stereo frames at the mixer's rate, normalised
+    /// for the mix. The engine runs at its native rate underneath; blocks
+    /// of it are pulled through the resampler as the output needs them.
     pub fn render(&mut self, frames: &mut [(f32, f32)]) {
-        if frames.is_empty() {
-            return;
-        }
-        self.scratch.resize(frames.len() * 2, 0);
-        // SAFETY: `context` is live and `scratch` holds two samples per frame,
-        // which is what the engine writes.
-        unsafe {
-            ffi::mt32emu_render_bit16s(
-                self.context,
-                self.scratch.as_mut_ptr(),
-                frames.len() as u32,
-            );
-        }
-        for (frame, pair) in frames.iter_mut().zip(self.scratch.chunks_exact(2)) {
-            *frame = (f32::from(pair[0]) / 32768.0, f32::from(pair[1]) / 32768.0);
+        let Self {
+            engine,
+            resampler,
+            native,
+            taken,
+            ..
+        } = self;
+        for frame in frames.iter_mut() {
+            *frame = resampler.next(|| {
+                if *taken == native.len() {
+                    native.clear();
+                    native.resize(NATIVE_BLOCK, (0, 0));
+                    engine.render(native);
+                    *taken = 0;
+                }
+                let (l, r) = native[*taken];
+                *taken += 1;
+                (f32::from(l) / 32768.0, f32::from(r) / 32768.0)
+            });
         }
     }
 
@@ -232,22 +136,19 @@ impl Mt32Synth {
     /// ROM: the greeting it powers up with, the timbre names it shows on a
     /// program change, whatever a program puts there over SysEx, and its
     /// own checksum errors.
-    pub fn display(&self) -> (String, bool) {
-        // The engine documents this as needing room for 20 characters and a
-        // terminator.
-        let mut buffer = [0i8; LCD_WIDTH + 1];
-        // SAFETY: `context` is live and the buffer is the documented size.
-        let led = unsafe {
-            ffi::mt32emu_get_display_state(self.context, buffer.as_mut_ptr().cast::<c_char>(), 0)
-        };
-        // The ROM writes ASCII (plus the filled-cell mark), so the bytes
-        // are characters as they stand.
-        let text = buffer
+    pub fn display(&mut self) -> (String, bool) {
+        let mut volume = [0u8; 1];
+        self.engine
+            .memory()
+            .read(mt32_rs::memory::flat(addr::MASTER_VOLUME), &mut volume);
+        let (text, lamp) = self.engine.display().state(volume[0]);
+        let text = text
             .iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| c as u8 as char)
-            .collect();
-        (text, led != 0)
+            .map(|&b| if b == 1 { ACTIVE_PART } else { b as char })
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        (text, lamp)
     }
 
     /// Write into the synth's memory the way the front panel does, as a
@@ -261,45 +162,26 @@ impl Mt32Synth {
     /// `addr` is written as the manual prints it, a byte per pair of hex
     /// digits, which is what [`addr`] holds and what goes on the wire.
     pub fn write_memory(&mut self, addr: u32, data: &[u8]) {
-        let msg = dt1(addr, data);
         if debug_enabled() {
             log::debug!("mt32: write {addr:06X} <- {data:02X?}");
         }
-        // SAFETY: `context` is live and the message outlives the call.
-        unsafe {
-            ffi::mt32emu_play_sysex_now(self.context, msg.as_ptr(), msg.len() as u32);
-        }
+        self.engine.play_sysex(&dt1(addr, data));
     }
 
-    /// Read the synth's memory back, for the dump a librarian asks for.
+    /// Read the synth's memory back. False means no memory lives there and
+    /// there is nothing to answer with.
     ///
     /// `addr` is written as the manual prints it, the same way [`addr`] and
-    /// [`write_memory`] take one. False means no memory lives there and
-    /// there is nothing to answer with: the engine leaves the buffer alone
-    /// for an address it does not recognise, which the fill makes visible --
-    /// a byte it did write is seven-bit, so a whole block still reading `FF`
-    /// is one it never touched.
+    /// [`write_memory`] take one.
     ///
     /// [`write_memory`]: Self::write_memory
-    pub fn read_memory(&self, addr: u32, out: &mut [u8]) -> bool {
-        out.fill(0xFF);
-        // The engine addresses its memory as a flat seven-bit count, which
-        // is what it converts an incoming message's address bytes to.
-        let flat = reply::linear(addr);
-        // SAFETY: `context` is live and the buffer is valid for `out.len()`.
-        unsafe {
-            ffi::mt32emu_read_memory(self.context, flat, out.len() as u32, out.as_mut_ptr());
-        }
-        if out.iter().all(|&b| b == 0xFF) {
+    pub fn read_memory(&mut self, addr: u32, out: &mut [u8]) -> bool {
+        let got = self.engine.memory().read(mt32_rs::memory::flat(addr), out);
+        if got != out.len() {
             if debug_enabled() {
                 log::debug!("mt32: read {addr:06X} -- no memory there");
             }
             return false;
-        }
-        // Seven bits per byte, so the reply cannot carry a value that would
-        // read as the end of the message.
-        for b in out.iter_mut() {
-            *b &= 0x7F;
         }
         if debug_enabled() {
             log::debug!("mt32: read {addr:06X} -> {} bytes", out.len());
@@ -312,18 +194,13 @@ impl Mt32Synth {
         if debug_enabled() {
             log::debug!("mt32: display -> main");
         }
-        // SAFETY: `context` is live.
-        unsafe { ffi::mt32emu_set_main_display_mode(self.context) };
+        self.engine.display().set_main_display_mode();
     }
-}
 
-impl Drop for Mt32Synth {
-    fn drop(&mut self) {
-        // SAFETY: `context` was created by the engine and is closed once.
-        unsafe {
-            ffi::mt32emu_close_synth(self.context);
-            ffi::mt32emu_free_context(self.context);
-        }
+    /// Drain the module's MIDI OUT: the dump replies it has made since the
+    /// last call, in order. Everything on that jack is an answer.
+    pub fn take_midi_out(&mut self) -> Vec<u8> {
+        self.engine.take_midi_out()
     }
 }
 
@@ -335,20 +212,56 @@ impl std::fmt::Debug for Mt32Synth {
     }
 }
 
+/// Reads one ROM image whole, naming the file when it cannot.
+fn read_rom(path: &Path, what: &str) -> Result<Vec<u8>> {
+    let image = std::fs::read(path)
+        .map_err(|e| anyhow!("reading the {what} ROM {}: {e}", path.display()))?;
+    if mt32_rs::rom::identify(&image).is_none() {
+        return Err(anyhow!(
+            "{} is not a ROM the MT-32 engine recognises; \
+             it identifies ROMs by content, not by name",
+            path.display()
+        ));
+    }
+    Ok(image)
+}
+
+/// The parser's landing place: complete messages into the engine, with the
+/// module's commentary put in the log on the way past.
+struct EngineSink<'a> {
+    engine: &'a mut mt32_rs::engine::Engine,
+}
+
+impl mt32_rs::midi::Sink for EngineSink<'_> {
+    fn short_message(&mut self, message: u32) {
+        self.engine.play_msg(message);
+    }
+
+    fn sysex(&mut self, frame: &[u8]) {
+        // What a program writes to the module's display goes in the log,
+        // so everything the module says reads the same way.
+        if frame.len() > 10 && frame[4] == 0x12 && frame[5] == 0x20 && frame[6] == 0x00 {
+            let text: String = frame[8..frame.len() - 2]
+                .iter()
+                .map(|&b| b as char)
+                .collect();
+            log::info!("mt32: display {:?}", text.trim());
+        }
+        self.engine.play_sysex(frame);
+    }
+
+    fn dropped(&mut self, what: &'static str) {
+        if debug_enabled() {
+            log::debug!("mt32: dropped {what}");
+        }
+    }
+}
+
 /// One DT1 message -- `F0 41 10 16 12 <addr> <data> <checksum> F7` -- with
 /// `addr` written as the manual prints it, a byte per pair of hex digits.
-/// Everything Copperline writes into the module is built here.
+/// Everything Copperline writes into the module is built this way.
 pub(crate) fn dt1(addr: u32, data: &[u8]) -> Vec<u8> {
-    const HEADER: usize = 5;
-    let mut msg = Vec::with_capacity(HEADER + 3 + data.len() + 2);
-    msg.extend_from_slice(&[0xF0, 0x41, 0x10, 0x16, 0x12]);
-    msg.extend_from_slice(&addr.to_be_bytes()[1..]);
-    msg.extend_from_slice(data);
-    // Everything from the address on adds up to a multiple of 128.
-    let sum: u32 = msg[HEADER..].iter().map(|&b| u32::from(b) & 0x7F).sum();
-    msg.push(((128 - sum % 128) % 128) as u8);
-    msg.push(0xF7);
-    msg
+    mt32_rs::sysex::dt1(addr, data)
 }
 
 /// Where the panel writes. Addresses are seven bits per byte.
@@ -376,17 +289,9 @@ pub mod addr {
     }
 }
 
-/// The engine's own version string, for the About panel and the log.
+/// The engine's name and version, for the About panel and the log.
 pub(crate) fn engine_version() -> String {
-    // SAFETY: the engine returns a static, null-terminated string.
-    let ptr = unsafe { ffi::mt32emu_get_library_version_string() };
-    if ptr.is_null() {
-        return String::new();
-    }
-    // SAFETY: null-checked above, and the string is static.
-    unsafe { std::ffi::CStr::from_ptr(ptr) }
-        .to_string_lossy()
-        .into_owned()
+    format!("mt32-rs {}", mt32_rs::VERSION)
 }
 
 #[cfg(test)]

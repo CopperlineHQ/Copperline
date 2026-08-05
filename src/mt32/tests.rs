@@ -25,13 +25,13 @@ fn open_synth() -> Option<Mt32Synth> {
     )
 }
 
-/// The engine is linked in and answers, with or without ROMs.
+/// The engine is linked in and names itself, with or without ROMs.
 #[test]
 fn the_engine_reports_its_version() {
     let version = engine_version();
     assert!(
-        version.starts_with('2'),
-        "unexpected mt32emu version {version:?}"
+        version.starts_with("mt32-rs "),
+        "unexpected engine version {version:?}"
     );
 }
 
@@ -299,7 +299,7 @@ fn the_engine_reports_through_the_log() {
     CAPTURED.lock().expect("capture").clear();
 
     // Data bytes with no status byte before them: exactly what makes the
-    // engine complain about running status.
+    // stream parser note what it dropped.
     synth.parse(&[0x40, 0x41, 0x42, 0x43, 0x44]);
     let mut frames = vec![(0.0f32, 0.0f32); 4096];
     synth.render(&mut frames);
@@ -318,10 +318,8 @@ fn the_engine_reports_through_the_log() {
 }
 
 /// The round trip a patch editor depends on: it asks for a stretch of the
-/// module's memory and gets it back, with what it wrote in it.
-///
-/// The engine itself never answers a request -- its `readSysex` is
-/// unimplemented -- so this is the whole of the module's MIDI OUT.
+/// module's memory and gets it back, with what it wrote in it -- the
+/// whole of the module's MIDI OUT.
 #[test]
 #[ignore = "needs an MT-32 ROM pair in COPPERLINE_MT32_ROMS"]
 fn the_module_answers_a_request_for_its_memory() {
@@ -341,14 +339,9 @@ fn the_module_answers_a_request_for_its_memory() {
         msg
     };
 
-    let mut responder = reply::Responder::default();
-    let mut answered = None;
-    for b in request {
-        if let Some(r) = responder.write_byte(b) {
-            answered = Some(reply::answer(&synth, r));
-        }
-    }
-    let reply = answered.expect("the request was recognised");
+    synth.parse(&request);
+    let reply = synth.take_midi_out();
+    assert!(!reply.is_empty(), "the request was recognised");
 
     // F0 41 10 16 12 <10 00 16> <volume> <checksum> F7
     assert_eq!(reply.len(), 11, "one block: {reply:02X?}");
@@ -368,7 +361,7 @@ fn the_module_answers_a_request_for_its_memory() {
 #[test]
 #[ignore = "needs an MT-32 ROM pair in COPPERLINE_MT32_ROMS"]
 fn a_long_dump_comes_back_in_blocks() {
-    let Some(synth) = open_synth() else {
+    let Some(mut synth) = open_synth() else {
         return;
     };
     // The whole patch temporary area: eight parts of sixteen bytes each,
@@ -388,13 +381,8 @@ fn a_long_dump_comes_back_in_blocks() {
     };
     assert_eq!(want, 128, "the size bytes above ask for 0x80");
 
-    let mut responder = reply::Responder::default();
-    let mut reply = Vec::new();
-    for b in request {
-        if let Some(r) = responder.write_byte(b) {
-            reply = reply::answer(&synth, r);
-        }
-    }
+    synth.parse(&request);
+    let reply = synth.take_midi_out();
     assert!(!reply.is_empty(), "the area answered");
     // Every message is well formed and every data byte fits in seven bits,
     // so nothing in the dump can read as the end of a message.
@@ -480,7 +468,7 @@ fn a_demo_song_renders_to_audio() {
     let rate = crate::audio::MIX_SAMPLE_RATE;
     let mut synth =
         Mt32Synth::open(&dir.join(&control), &dir.join(&pcm), rate).expect("the pair opens");
-    let mut player = crate::mt32::demo::Player::new(song, rate);
+    let mut player = crate::mt32::demo::Player::at_rate(song, rate);
 
     const BLOCK: usize = 256;
     let mut block = vec![(0.0f32, 0.0f32); BLOCK];
