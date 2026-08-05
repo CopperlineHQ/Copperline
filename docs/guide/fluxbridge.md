@@ -247,10 +247,12 @@ seconds of the same disk in a real A500.
 
 ## Troubleshooting
 
-**Nothing is detected, and the drive is definitely there.** On Linux, check
-the serial device's group first (above) -- that is the usual answer. Then
-confirm the interface is a Greaseweazle on main firmware (0.27 or newer), and
-that no other program is holding the port open. Starting with
+**Nothing is detected, and the drive is definitely there.** On Linux, serial
+permissions are the usual answer: your user must be able to open
+`/dev/ttyACM0`, which normally means membership of the `dialout` group
+(`uucp` or `plugdev` on some distributions) -- add yourself and log in
+again. Then confirm the interface is a Greaseweazle on main firmware (0.27
+or newer), and that no other program is holding the port open. Starting with
 `--floppy-bridge df0 greaseweazle` reports what it found and refuses to run
 if it found nothing, which is the quickest check.
 
