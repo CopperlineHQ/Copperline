@@ -2053,7 +2053,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
         if floppybridge::drivers().is_empty() {
             anyhow::bail!(
                 "floppy.df{idx} asks for a physical drive, but FluxBridge \
-                 reports no interfaces at all. This build is broken rather than \
+                 has no hardware drivers compiled in. This build is broken rather than \
                  misconfigured; please report it."
             );
         }

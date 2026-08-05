@@ -1852,13 +1852,18 @@ impl FloppyController {
             let cylinder = (track / SIDES) as u8;
             let side = !track.is_multiple_of(SIDES);
             let start_bit = write_start_word * 16 + write_start_bit as usize;
+            let bit_len = if lose_tail_bits {
+                disk_write_effective_bits(write_words)
+            } else {
+                write_words.len() * 16
+            };
             let request = crate::floppybridge::WriteRequest {
                 track: crate::floppybridge::TrackAddress {
                     cylinder,
                     side: side.into(),
                 },
                 words: write_words.to_vec(),
-                bit_len: write_words.len() * 16,
+                bit_len,
                 start_bit,
             };
             match bridge.submit_write(request) {

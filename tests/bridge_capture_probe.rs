@@ -230,7 +230,7 @@ fn poll_track(bridge: &mut Bridge, cyl: u8, side: bool) -> Option<(Vec<u16>, usi
 /// Proves the decoder against an index-aligned capture before the soak's
 /// results can mean anything.
 #[test]
-#[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
+#[ignore = "needs a FluxBridge device with an AmigaDOS disk inserted"]
 fn bridge_decoder_smoke() {
     let mut bridge = open_bridge(ReadMode::Compatible);
     spin_up(&mut bridge);
@@ -255,7 +255,7 @@ fn bridge_decoder_smoke() {
 
 /// The soak: capture repeatedly across seeks and score every capture.
 #[test]
-#[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
+#[ignore = "needs a FluxBridge device with an AmigaDOS disk inserted"]
 fn bridge_seek_capture_soak() {
     let mode = match env_or("PROBE_MODE", "normal").as_str() {
         "compatible" => ReadMode::Compatible,
