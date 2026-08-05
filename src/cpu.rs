@@ -3724,6 +3724,27 @@ impl AddressBus for CpuBus {
         Ok(())
     }
 
+    fn try_read_three_bytes(&mut self, address: u32) -> Result<u32, BusFault> {
+        self.check_injected_fault(address, 3, false)?;
+        Ok(self.read_three_bytes(address))
+    }
+
+    fn try_write_three_bytes(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 3, true)?;
+        self.write_three_bytes(address, value);
+        Ok(())
+    }
+
+    fn read_three_bytes(&mut self, address: u32) -> u32 {
+        self.sample_ipl();
+        self.read_sized(address, 3, CpuBusAccessKind::Read)
+    }
+
+    fn write_three_bytes(&mut self, address: u32, value: u32) {
+        self.sample_ipl();
+        self.write_sized(address, 3, value);
+    }
+
     fn try_read_immediate_word(&mut self, address: u32) -> Result<u16, BusFault> {
         self.check_injected_fault(address, 2, false)?;
         Ok(self.read_immediate_word(address))
@@ -4465,6 +4486,101 @@ mod tests {
         let _ = bus.read_immediate_word(0);
         let (cck, _) = bus.bus.take_slice_bus_advance();
         assert!(cck >= 2);
+    }
+
+    #[test]
+    fn three_byte_operand_costs_one_alice_slot_not_a_word_plus_a_byte() {
+        // The 020/030 size an operand as a byte, word, three-byte or long
+        // (MC68020UM 5.3.1), so a memory bit field spanning three bytes is a
+        // single transfer. Alice moves anything up to a longword in one bus
+        // slot, so on AGA that costs exactly what a long costs -- and strictly
+        // less than the word-plus-byte pair the core composes when the bus
+        // offers no three-byte transfer.
+        //
+        // Regression: timing-test/bfprobe.asm row 10 (`bfextu (a0){4:16}`)
+        // measured the composed form billing the extra slot, reading 0.5% high
+        // against a real A1200 while every other bit-field span matched.
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        let cost = |access: &mut dyn FnMut(&mut CpuBus)| -> u32 {
+            let mut bus = CpuBus {
+                bus: test_bus(reset_rom(0, 0)),
+                address_mask: ADDRESS_MASK_24BIT,
+                dbg_memw_addr: None,
+                dbg_memw_hit: None,
+                icache: None,
+                dcache: None,
+                dbg_irq_window: None,
+                last_fetch_cache_hit: false,
+                instruction_fetches_cached: false,
+                sampled_irq_level: 0,
+                ipl_sample_held: false,
+                diag_current_pc: 0,
+                jit_enabled: false,
+            };
+            bus.bus
+                .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+            bus.bus.set_cpu_bus_arbitration_enabled(true);
+            // Same starting slot for every case, so the comparison is of slots
+            // consumed rather than of where in the line the access began.
+            bus.bus.agnus.hpos = 0x040;
+            access(&mut bus);
+            bus.bus.take_slice_bus_advance().0
+        };
+
+        // A longword-aligned three-byte field, entirely inside one longword.
+        let three = cost(&mut |bus| {
+            let _ = bus.read_three_bytes(CHIP_RAM_BASE as u32);
+        });
+        let long = cost(&mut |bus| {
+            let _ = bus.read_long(CHIP_RAM_BASE as u32);
+        });
+        let composed = cost(&mut |bus| {
+            let _ = bus.read_word(CHIP_RAM_BASE as u32);
+            let _ = bus.read_byte(CHIP_RAM_BASE as u32 + 2);
+        });
+
+        assert_eq!(
+            three, long,
+            "a three-byte operand inside one longword must cost what a long costs on Alice"
+        );
+        assert!(
+            three < composed,
+            "three-byte transfer ({three} cck) must beat the composed word+byte ({composed} cck)"
+        );
+    }
+
+    #[test]
+    fn three_byte_operand_moves_exactly_three_bytes() {
+        // The transfer must not touch the byte past the field: on a
+        // memory-mapped register or at the end of a mapped region that byte is
+        // observable, not merely mistimed.
+        let mut bus = CpuBus {
+            bus: test_bus(reset_rom(0, 0)),
+            address_mask: ADDRESS_MASK_24BIT,
+            dbg_memw_addr: None,
+            dbg_memw_hit: None,
+            icache: None,
+            dcache: None,
+            dbg_irq_window: None,
+            last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
+            sampled_irq_level: 0,
+            ipl_sample_held: false,
+            diag_current_pc: 0,
+            jit_enabled: false,
+        };
+        let base = CHIP_RAM_BASE as u32;
+        write_chip_long(&mut bus.bus, base, 0x1122_3344);
+        assert_eq!(bus.read_three_bytes(base), 0x0011_2233);
+
+        bus.write_three_bytes(base, 0x00AA_BBCC);
+        assert_eq!(
+            read_chip_long(&bus.bus, base),
+            0xAABB_CC44,
+            "the fourth byte must be untouched"
+        );
     }
 
     #[test]
