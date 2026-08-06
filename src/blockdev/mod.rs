@@ -194,6 +194,15 @@ pub struct BlockDevice {
     refusal_reported: bool,
 }
 
+/// Closing the handle drops the exclusive claim, which is what lets the host
+/// mount the disk again. Say so: the disk went from the host's control to the
+/// machine's on the way in, and this is it going back.
+impl Drop for BlockDevice {
+    fn drop(&mut self) {
+        log::info!("blockdev: {} released back to the host", self.id);
+    }
+}
+
 impl BlockDevice {
     /// Wrap an already-open device. The handle is expected to have come from
     /// a platform opener, which is where privilege is dealt with.

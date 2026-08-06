@@ -356,9 +356,10 @@ where
             "--list-disks" => {
                 list_disks = true;
             }
-            "--hdd" => {
-                const USAGE: &str = "--hdd requires DEVICE (and optionally ide-master/ide-slave)";
-                let device = args.next().ok_or_else(|| anyhow!(USAGE))?;
+            "--hdd" | "--hdd-read-only" => {
+                let read_only = a == "--hdd-read-only";
+                let usage = format!("{a} requires DEVICE (and optionally an attachment point)");
+                let device = args.next().ok_or_else(|| anyhow!(usage))?;
                 // The attachment point is optional and only ever one of a
                 // known set, so a following token that is not one is the next
                 // flag rather than a mistake.
@@ -368,13 +369,11 @@ where
                         .any(|a| a.token().eq_ignore_ascii_case(next))
                 });
                 let attach = takes_attach.then(|| args.next().expect("peeked"));
-                overrides.host_disks.push((device, attach));
-            }
-            "--hdd-read-only" => {
-                const USAGE: &str = "--hdd-read-only requires DEVICE";
-                overrides
-                    .host_disks_read_only
-                    .push(args.next().ok_or_else(|| anyhow!(USAGE))?);
+                overrides.host_disks.push(copperline::config::HostDiskArg {
+                    device,
+                    attach,
+                    read_only,
+                });
             }
             "--install-net-helper" => {
                 if net_helper_action.is_some() {
@@ -1166,7 +1165,8 @@ fn print_help() {
          --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
          --hdd DEVICE [ATTACH]          give the machine a real host disk (--list-disks names\n  \
          \x20                            them); ATTACH is ide-master (default) or ide-slave\n  \
-         --hdd-read-only DEVICE         protect that disk; without it the guest can write to it\n  \
+         --hdd-read-only DEVICE [ATTACH]\n  \
+         \x20                            the same, but the guest cannot write to the disk\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  "
     );

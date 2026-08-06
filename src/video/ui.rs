@@ -4985,7 +4985,7 @@ fn draw_host_disk_page(
         // disk names the disk, so a scrolled list still ticks the right one.
         let i = scroll + slot;
         let row = host_disk_row_rect(rect, slot);
-        let ticked = setup.host_disk_selected() == Some(disk.id.as_str());
+        let ticked = setup.host_disk_is_selected(&disk.id);
         if ticked || hover == Some(UiControl::LauncherHostDiskSelect(i)) {
             fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
         }
@@ -5114,7 +5114,7 @@ fn draw_host_disk_page(
         // Mounting needs both a disk to mount and the access to open it;
         // Refresh only ever looks, so it stays live.
         let enabled = match control {
-            UiControl::LauncherHostDiskMount => setup.host_disk_selected().is_some(),
+            UiControl::LauncherHostDiskMount => !setup.host_disks_selected().is_empty(),
             _ => true,
         };
         draw_text_button(
@@ -5127,36 +5127,41 @@ fn draw_host_disk_page(
         );
     }
 
-    // What the page is waiting for, under the buttons, so the greyed Mount
-    // button is never a mystery.
-    let note_y = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
-    let chosen = setup
+    // What Mount will do, one line per ticked disk, under the buttons so the
+    // greyed Mount button is never a mystery and two ticks are never a
+    // surprise about where the second disk went.
+    let mut note_y = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
+    let chosen: Vec<&crate::video::launcher::HostDiskRow> = setup
         .host_disks()
         .iter()
-        .find(|d| Some(d.id.as_str()) == setup.host_disk_selected());
-    let note = {
-        match chosen {
-            None => "Tick a disk to attach it to the machine.".to_string(),
-            // A disk the host is using will be taken from it, which is worth
-            // saying before it happens rather than after.
-            Some(disk) if !disk.mounted.is_empty() => format!(
-                "Mount will unmount {} from this computer, then attach it to {}.",
-                disk.mounted.join(", "),
-                disk.attach.label()
-            ),
-            Some(disk) => format!(
-                "Mount attaches {} to {}{}.",
-                disk.id,
-                disk.attach.label(),
-                if disk.writable {
-                    ", which the guest can write to"
-                } else {
-                    ""
-                }
-            ),
-        }
-    };
-    draw_panel_text(frame, table.x, note_y, &note, PANEL_TEXT_DIM, 1, scale);
+        .filter(|d| setup.host_disk_is_selected(&d.id))
+        .collect();
+    if chosen.is_empty() {
+        draw_panel_text(
+            frame,
+            table.x,
+            note_y,
+            "Select a disk to attach it to the machine",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    for disk in chosen {
+        let access = if disk.writable {
+            "read/write"
+        } else {
+            "read only"
+        };
+        let line = format!(
+            "{} ({}): attached {access} to {}",
+            disk.id,
+            disk.volume,
+            disk.attach.label()
+        );
+        draw_panel_text(frame, table.x, note_y, &line, PANEL_TEXT_DIM, 1, scale);
+        note_y += font::GLYPH_H + 4;
+    }
 }
 
 /// Truncate `text` (already a short file name) to fit `avail_px`, appending a
@@ -5724,11 +5729,11 @@ fn draw_launcher_row(
             // do with it here is give it back. Browse and Clear make way for
             // one Unmount spanning both.
             if let Some(disk) = setup.host_disk_on_row(r.field) {
-                // Just the volume. The row's own label already says which
-                // drive this is, and Unmount beside it already says the disk
-                // is a real one.
+                // The device and the volume on it: the device name is what
+                // the Host Disk page and the host itself call it, and the
+                // volume is what makes it recognisable.
                 let text = truncate_to_width(
-                    &setup.host_disk_volume(&disk.device),
+                    &setup.host_disk_label(&disk.device),
                     browse.x.saturating_sub(value_x + 8),
                 );
                 draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
@@ -8835,7 +8840,7 @@ mod tests {
                 attach: crate::config::HostDiskAttach::IdeMaster,
             }]);
             setup.select_host_disk(0);
-            setup.mount_host_disk().expect("A1200 has IDE");
+            setup.mount_host_disks().expect("A1200 has IDE");
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::Storage;
             let panel = Panel::Launcher(Box::new(state));
@@ -8880,6 +8885,7 @@ mod tests {
                 },
             ]);
             setup.select_host_disk(0);
+            setup.select_host_disk(1);
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::HostDisk;
             let ui = UiState {
@@ -8955,7 +8961,7 @@ mod tests {
             }]);
             setup.select_host_disk(0);
             setup
-                .mount_host_disk()
+                .mount_host_disks()
                 .expect("the fixture machine has IDE");
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::Storage;

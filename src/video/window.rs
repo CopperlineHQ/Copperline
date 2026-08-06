@@ -5596,6 +5596,9 @@ impl App {
             UiControl::LauncherTab(tab) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.tab = tab;
+                    // A message reports what the page just did, so it belongs
+                    // to that page: leaving clears it.
+                    state.status = None;
                     // Opening the Host Disk page is the moment to look at the
                     // host's storage: a card pushed in since the launcher
                     // opened should be there when the page is.
@@ -5663,10 +5666,13 @@ impl App {
                 if let Some(state) = self.launcher_state_mut() {
                     let attach = crate::video::launcher::MachineSetup::host_disk_attach_of(field);
                     let removed = attach.and_then(|a| state.setup.unmount_host_disk(a));
-                    state.status = Some(StatusMessage::ok(match removed {
-                        Some(device) => format!("{device} released; the host has it back"),
-                        None => "Nothing to unmount".to_string(),
-                    }));
+                    state.status = Some(match removed {
+                        Some(device) => {
+                            log::info!("host disk: {device} released back to the host");
+                            StatusMessage::ok(format!("{device} released; the host has it back"))
+                        }
+                        None => StatusMessage::err("Nothing to unmount"),
+                    });
                 }
             }
             UiControl::LauncherHostDiskScroll(delta) => {
@@ -5689,18 +5695,32 @@ impl App {
             }
             UiControl::LauncherHostDiskMount => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.status = Some(match state.setup.mount_host_disk() {
-                        Ok(disk) => StatusMessage::ok(format!(
-                            "{} attached to {}{}",
-                            disk.device,
-                            disk.attach.label(),
-                            if disk.writable {
-                                " -- the guest can write to it"
-                            } else {
-                                ""
+                    state.status = Some(match state.setup.mount_host_disks() {
+                        Ok(disks) => {
+                            for disk in &disks {
+                                log::info!(
+                                    "host disk: {} attached to {} ({})",
+                                    disk.device,
+                                    disk.attach.label(),
+                                    if disk.writable {
+                                        "read/write"
+                                    } else {
+                                        "read only"
+                                    }
+                                );
                             }
-                        )),
-                        Err(reason) => StatusMessage::err(reason),
+                            let places: Vec<String> =
+                                disks.iter().map(|d| d.attach.label()).collect();
+                            StatusMessage::ok(if disks.len() == 1 {
+                                format!("Host disk attached to {}", places[0])
+                            } else {
+                                format!("Host disks attached to {}", places.join(", "))
+                            })
+                        }
+                        Err(reason) => {
+                            log::warn!("host disk: not attached: {reason}");
+                            StatusMessage::err(reason)
+                        }
                     });
                 }
             }

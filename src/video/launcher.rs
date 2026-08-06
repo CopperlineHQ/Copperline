@@ -561,6 +561,13 @@ impl LauncherField {
     }
 }
 
+/// What a hard-disk slot holds. The two are interchangeable to everything
+/// that only wants to know whether the slot is occupied.
+enum DriveContents<'a> {
+    Image(&'a Path),
+    HostDisk,
+}
+
 use LauncherField as F;
 use RowKind::{Bootpri, Cycle, Drive, Toggle};
 // `RowKind::Path` is written out below so it does not collide with the
@@ -1402,10 +1409,11 @@ pub struct MachineSetup {
     /// First row shown in the disk table. The list can be longer than the
     /// box, and a disk that cannot be scrolled to cannot be chosen.
     host_disk_scroll: usize,
-    /// The disk ticked in the table. At most one: attaching two real disks at
-    /// once is not something this page does, and a single tick makes that
-    /// obvious without needing to be explained.
-    host_disk_selected: Option<String>,
+    /// The disks ticked in the table. A machine can take several at once, so
+    /// long as no two want the same place; ticking one claims the first place
+    /// still free. Seeded from what is already attached, so leaving the page
+    /// and coming back shows the machine as it stands rather than as new.
+    host_disk_selected: Vec<String>,
     /// Real disks given to the machine, at most one per attachment point.
     /// Held in the configuration's own shape: this is a setting that
     /// persists, not a fact about this session.
@@ -1620,7 +1628,7 @@ impl MachineSetup {
             // Not sampled at construction: the page samples when it opens, so
             // a launcher that never visits it never touches the host's disks.
             host_disks: Vec::new(),
-            host_disk_selected: None,
+            host_disk_selected: Vec::new(),
             host_disk_scroll: 0,
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
@@ -2390,8 +2398,14 @@ impl MachineSetup {
         self.model == Some(MachineModel::A3000)
     }
 
+    /// Whether a SCSI controller is fitted, which is what a SCSI unit needs
+    /// to exist at all.
+    pub fn has_scsi_controller(&self) -> bool {
+        self.scsi_controller.is_some()
+    }
+
     /// Machines with an IDE port: Gayle's, and the A4000's at $DD2020.
-    fn has_ide(&self) -> bool {
+    pub fn has_ide(&self) -> bool {
         self.has_gayle() || self.model == Some(MachineModel::A4000)
     }
 
@@ -2432,7 +2446,7 @@ impl MachineSetup {
             | F::ScsiUnit6Boot => {
                 self.scsi_controller.is_none()
                     || Self::boot_field_drive(field)
-                        .and_then(|drive| self.path(drive))
+                        .and_then(|drive| self.drive_holds(drive))
                         .is_none()
             }
             _ => false,
@@ -2536,10 +2550,16 @@ impl MachineSetup {
             | F::ScsiUnit5Boot
             | F::ScsiUnit6Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
-                match self.path(drive) {
+                match self.drive_holds(drive) {
                     None => Some("No drive"),
-                    Some(p) if crate::config::is_cd_image_path(p) => Some("CD-ROM"),
-                    Some(_) => None,
+                    Some(DriveContents::Image(p)) if crate::config::is_cd_image_path(p) => {
+                        Some("CD-ROM")
+                    }
+                    // A real disk's partitions carry their own de_BootPri, on
+                    // the disk. Nothing here overrides that, so the row says
+                    // where the priority actually lives.
+                    Some(DriveContents::HostDisk) => Some("Own RDB"),
+                    Some(DriveContents::Image(_)) => None,
                 }
             }
             F::Filesys0ReadOnly
@@ -3556,6 +3576,16 @@ impl MachineSetup {
         }
     }
 
+    /// What a hard-disk drive slot holds, if anything: an image path, or a
+    /// real host disk. Boot priority applies to either -- a real disk takes
+    /// its place in the boot order the same way an image does.
+    fn drive_holds(&self, drive: LauncherField) -> Option<DriveContents<'_>> {
+        if self.host_disk_on_row(drive).is_some() {
+            return Some(DriveContents::HostDisk);
+        }
+        self.path(drive).map(DriveContents::Image)
+    }
+
     /// The hard-disk drive field a boot-priority field belongs to (its twin on
     /// the Storage tab), or None when `field` is not a boot-priority field.
     fn boot_field_drive(field: LauncherField) -> Option<LauncherField> {
@@ -3613,9 +3643,11 @@ impl MachineSetup {
     /// Whether a boot-priority field is editable: its drive holds a hard-disk
     /// image. Priority is meaningless for an empty slot or a CD image.
     fn boot_field_applies(&self, field: LauncherField) -> bool {
-        Self::boot_field_drive(field)
-            .and_then(|drive| self.path(drive))
-            .is_some_and(|p| !crate::config::is_cd_image_path(p))
+        match Self::boot_field_drive(field).and_then(|drive| self.drive_holds(drive)) {
+            Some(DriveContents::Image(p)) => !crate::config::is_cd_image_path(p),
+            Some(DriveContents::HostDisk) => false,
+            None => false,
+        }
     }
 
     /// Whether any Boot Priority row is editable -- a hard-disk drive is present.
@@ -3818,68 +3850,19 @@ impl MachineSetup {
             }
         }
         // A disk that has gone (unplugged between looks) cannot stay ticked.
-        if let Some(selected) = &self.host_disk_selected {
-            if !self.host_disks.iter().any(|d| &d.id == selected) {
-                self.host_disk_selected = None;
+        self.host_disk_selected
+            .retain(|id| self.host_disks.iter().any(|d| &d.id == id));
+        // The page shows the machine as it stands: a disk already given to it
+        // is ticked, sitting where it was put.
+        for attached in &self.host_disks_attached {
+            if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == attached.device) {
+                row.attach = attached.attach;
+                row.writable = attached.writable;
+            }
+            if !self.host_disk_selected.contains(&attached.device) {
+                self.host_disk_selected.push(attached.device.clone());
             }
         }
-    }
-
-    /// The disk ticked in the table, if any.
-    pub fn host_disk_selected(&self) -> Option<&str> {
-        self.host_disk_selected.as_deref()
-    }
-
-    /// Tick one disk, which unticks whatever was ticked before: the page
-    /// attaches one disk, so the table behaves like a choice rather than a set
-    /// of independent boxes. Ticking the ticked one clears it.
-    pub fn select_host_disk(&mut self, index: usize) {
-        let Some(row) = self.host_disks.get(index) else {
-            return;
-        };
-        if self.host_disk_selected.as_deref() == Some(row.id.as_str()) {
-            self.host_disk_selected = None;
-        } else {
-            self.host_disk_selected = Some(row.id.clone());
-        }
-    }
-
-    /// Flip one disk between writable and protected.
-    pub fn toggle_host_disk_writable(&mut self, index: usize) {
-        if let Some(row) = self.host_disks.get_mut(index) {
-            row.writable = !row.writable;
-        }
-    }
-
-    /// Step one disk through the places the machine could see it.
-    pub fn cycle_host_disk_attach(&mut self, index: usize, forward: bool) {
-        let Some(row) = self.host_disks.get_mut(index) else {
-            return;
-        };
-        let all = crate::config::HostDiskAttach::all();
-        let at = all.iter().position(|a| *a == row.attach).unwrap_or(0);
-        let next = if forward {
-            (at + 1) % all.len()
-        } else {
-            (at + all.len() - 1) % all.len()
-        };
-        row.attach = all[next];
-    }
-
-    /// The attachment point a Storage row stands for, if it is one that can
-    /// hold a real disk.
-    pub fn host_disk_attach_of(field: LauncherField) -> Option<crate::config::HostDiskAttach> {
-        match field {
-            LauncherField::IdeMaster => Some(crate::config::HostDiskAttach::IdeMaster),
-            LauncherField::IdeSlave => Some(crate::config::HostDiskAttach::IdeSlave),
-            _ => None,
-        }
-    }
-
-    /// The real disk on the slot a row stands for, if there is one. This is
-    /// what makes a drive row show a disk instead of an image.
-    pub fn host_disk_on_row(&self, field: LauncherField) -> Option<&crate::config::HostDiskConfig> {
-        Self::host_disk_attach_of(field).and_then(|a| self.host_disk_at(a))
     }
 
     /// The real disks currently given to the machine.
@@ -3895,6 +3878,66 @@ impl MachineSetup {
         self.host_disks_attached.iter().find(|d| d.attach == attach)
     }
 
+    /// Whether a disk is ticked.
+    pub fn host_disk_is_selected(&self, device: &str) -> bool {
+        self.host_disk_selected.iter().any(|d| d == device)
+    }
+
+    /// The ticked disks, in the order they were ticked.
+    pub fn host_disks_selected(&self) -> &[String] {
+        &self.host_disk_selected
+    }
+
+    /// The first attachment point nothing has claimed, preferring the ones
+    /// the machine can actually use so a tick lands somewhere useful.
+    fn free_host_disk_attach(
+        &self,
+        ignoring: Option<&str>,
+    ) -> Option<crate::config::HostDiskAttach> {
+        let claimed: Vec<_> = self
+            .host_disks
+            .iter()
+            .filter(|row| self.host_disk_is_selected(&row.id) && Some(row.id.as_str()) != ignoring)
+            .map(|row| row.attach)
+            .collect();
+        let usable = |a: &crate::config::HostDiskAttach| {
+            if a.is_scsi() {
+                self.has_scsi_controller()
+            } else {
+                self.has_ide()
+            }
+        };
+        crate::config::HostDiskAttach::all()
+            .into_iter()
+            .filter(|a| !claimed.contains(a))
+            .find(usable)
+            .or_else(|| {
+                // Nothing the machine supports is free, so fall back to the
+                // first free point at all: the message explains the rest.
+                crate::config::HostDiskAttach::all()
+                    .into_iter()
+                    .find(|a| !claimed.contains(a))
+            })
+    }
+
+    /// Tick or untick one disk. Ticking claims the first free attachment
+    /// point, so a second disk lands beside the first rather than on it.
+    pub fn select_host_disk(&mut self, index: usize) {
+        let Some(id) = self.host_disks.get(index).map(|d| d.id.clone()) else {
+            return;
+        };
+        if self.host_disk_is_selected(&id) {
+            self.host_disk_selected.retain(|d| *d != id);
+            return;
+        }
+        if let Some(free) = self.free_host_disk_attach(Some(&id)) {
+            if let Some(row) = self.host_disks.get_mut(index) {
+                row.attach = free;
+            }
+        }
+        self.host_disk_selected.push(id);
+    }
+
     /// What to call a disk that is attached: the volume the host reported for
     /// it, or its identifier when it is not attached to this computer now --
     /// a configuration outlives the card reader it was written at.
@@ -3906,33 +3949,61 @@ impl MachineSetup {
             .unwrap_or_else(|| device.to_string())
     }
 
-    /// Give the ticked disk to the machine.
+    /// How a slot holding a real disk reads: the device the host calls it,
+    /// and the volume on it. A configuration can outlive the disk it names,
+    /// so one that is not there says so rather than reading as normal.
+    pub fn host_disk_label(&self, device: &str) -> String {
+        match self.host_disks.iter().find(|d| d.id == device) {
+            Some(disk) => format!("{device}: {}", disk.volume),
+            None => format!("{device}: not connected"),
+        }
+    }
+
+    /// Give every ticked disk to the machine.
     ///
     /// A slot holds one thing, so whatever was there -- another disk, or an
-    /// image -- makes way, exactly as the configuration parser requires.
-    pub fn mount_host_disk(&mut self) -> Result<crate::config::HostDiskConfig, &'static str> {
-        // Attaching to a port the machine does not have would leave a disk
-        // configured and silently unreachable, which is worse than refusing.
-        if !self.has_ide() {
-            return Err("needs A600/A1200/A4000");
+    /// image -- makes way. Disks whose attachment point the machine does not
+    /// have are left alone and reported: configuring a disk somewhere it can
+    /// never be reached is worse than saying so.
+    pub fn mount_host_disks(&mut self) -> Result<Vec<crate::config::HostDiskConfig>, String> {
+        if self.host_disk_selected.is_empty() {
+            return Err("Select a disk to attach it to the machine".to_string());
         }
-        let selected = self.host_disk_selected.clone().ok_or("Tick a disk first")?;
-        let row = self
+        let chosen: Vec<HostDiskRow> = self
             .host_disks
             .iter()
-            .find(|d| d.id == selected)
-            .ok_or("That disk is no longer attached")?
-            .clone();
-        let entry = crate::config::HostDiskConfig {
-            device: row.id.clone(),
-            attach: row.attach,
-            writable: row.writable,
-        };
-        self.host_disks_attached
-            .retain(|d| d.attach != entry.attach);
-        // The image that slot was holding goes: the parser refuses a slot
-        // with both, and the user just said which one they want.
-        match entry.attach {
+            .filter(|row| self.host_disk_is_selected(&row.id))
+            .cloned()
+            .collect();
+        if let Some(bad) = chosen.iter().find(|row| {
+            if row.attach.is_scsi() {
+                !self.has_scsi_controller()
+            } else {
+                !self.has_ide()
+            }
+        }) {
+            return Err(bad.attach.requirement().to_string());
+        }
+
+        let mut attached = Vec::new();
+        for row in chosen {
+            let entry = crate::config::HostDiskConfig {
+                device: row.id.clone(),
+                attach: row.attach,
+                writable: row.writable,
+            };
+            self.host_disks_attached
+                .retain(|d| d.attach != entry.attach);
+            self.clear_slot(entry.attach);
+            self.host_disks_attached.push(entry.clone());
+            attached.push(entry);
+        }
+        Ok(attached)
+    }
+
+    /// Empty whatever image was in a slot a disk is taking.
+    fn clear_slot(&mut self, attach: crate::config::HostDiskAttach) {
+        match attach {
             crate::config::HostDiskAttach::IdeMaster => {
                 self.ide_master = None;
                 self.ide_master_name = None;
@@ -3941,10 +4012,15 @@ impl MachineSetup {
                 self.ide_slave = None;
                 self.ide_slave_name = None;
             }
+            crate::config::HostDiskAttach::Scsi(unit) => {
+                if let Some(slot) = self.scsi_units.get_mut(usize::from(unit)) {
+                    *slot = None;
+                }
+                if let Some(name) = self.scsi_unit_names.get_mut(usize::from(unit)) {
+                    *name = None;
+                }
+            }
         }
-        self.host_disks_attached.push(entry.clone());
-        self.host_disk_selected = None;
-        Ok(entry)
     }
 
     /// Take a disk back off the machine and hand it to the host.
@@ -3954,6 +4030,64 @@ impl MachineSetup {
             .iter()
             .position(|d| d.attach == attach)?;
         Some(self.host_disks_attached.remove(at).device)
+    }
+
+    /// Flip whether the guest may write to one disk.
+    pub fn toggle_host_disk_writable(&mut self, index: usize) {
+        if let Some(row) = self.host_disks.get_mut(index) {
+            row.writable = !row.writable;
+        }
+    }
+
+    /// Step one disk's attachment point, skipping the ones another ticked
+    /// disk has already claimed so the cycle only offers places it can go.
+    pub fn cycle_host_disk_attach(&mut self, index: usize, forward: bool) {
+        let Some(row) = self.host_disks.get(index) else {
+            return;
+        };
+        let (id, current) = (row.id.clone(), row.attach);
+        let claimed: Vec<_> = self
+            .host_disks
+            .iter()
+            .filter(|r| r.id != id && self.host_disk_is_selected(&r.id))
+            .map(|r| r.attach)
+            .collect();
+        let options: Vec<_> = crate::config::HostDiskAttach::all()
+            .into_iter()
+            .filter(|a| *a == current || !claimed.contains(a))
+            .collect();
+        let at = options.iter().position(|a| *a == current).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % options.len()
+        } else {
+            (at + options.len() - 1) % options.len()
+        };
+        let next = options[next];
+        if let Some(row) = self.host_disks.get_mut(index) {
+            row.attach = next;
+        }
+    }
+
+    /// The attachment point a Storage-page row stands for, for the rows that
+    /// can hold a real disk.
+    pub fn host_disk_attach_of(field: F) -> Option<crate::config::HostDiskAttach> {
+        match field {
+            F::IdeMaster => Some(crate::config::HostDiskAttach::IdeMaster),
+            F::IdeSlave => Some(crate::config::HostDiskAttach::IdeSlave),
+            F::ScsiUnit0 => Some(crate::config::HostDiskAttach::Scsi(0)),
+            F::ScsiUnit1 => Some(crate::config::HostDiskAttach::Scsi(1)),
+            F::ScsiUnit2 => Some(crate::config::HostDiskAttach::Scsi(2)),
+            F::ScsiUnit3 => Some(crate::config::HostDiskAttach::Scsi(3)),
+            F::ScsiUnit4 => Some(crate::config::HostDiskAttach::Scsi(4)),
+            F::ScsiUnit5 => Some(crate::config::HostDiskAttach::Scsi(5)),
+            F::ScsiUnit6 => Some(crate::config::HostDiskAttach::Scsi(6)),
+            _ => None,
+        }
+    }
+
+    /// The real disk sitting on a Storage-page row, if one is.
+    pub fn host_disk_on_row(&self, field: F) -> Option<&crate::config::HostDiskConfig> {
+        self.host_disk_at(Self::host_disk_attach_of(field)?)
     }
 
     pub fn set_bridge_edit_drive(&mut self, idx: usize) {
@@ -4797,36 +4931,63 @@ mod tests {
         ]);
 
         setup.select_model(Some(MachineModel::A1200));
+        // Ticking claims the first free attachment point, whatever the row
+        // happened to be showing.
         setup.select_host_disk(0);
-        let mounted = setup.mount_host_disk().expect("a ticked disk mounts");
-        assert_eq!(mounted.device, "disk4");
-        assert_eq!(mounted.attach, crate::config::HostDiskAttach::IdeSlave);
-        assert!(mounted.writable, "the choice to allow writing carries");
-        // Ticking is cleared by mounting: the disk is attached now, and
-        // leaving it ticked would invite mounting it twice.
-        assert_eq!(setup.host_disk_selected(), None);
+        assert_eq!(
+            setup.host_disks()[0].attach,
+            crate::config::HostDiskAttach::IdeMaster
+        );
+        // The second disk lands beside the first, not on it.
+        setup.select_host_disk(1);
+        assert_eq!(
+            setup.host_disks()[1].attach,
+            crate::config::HostDiskAttach::IdeSlave
+        );
 
-        // It shows on the row that holds it, and not on the other one.
-        assert!(setup.host_disk_on_row(LauncherField::IdeSlave).is_some());
-        assert!(setup.host_disk_on_row(LauncherField::IdeMaster).is_none());
+        let mounted = setup.mount_host_disks().expect("ticked disks mount");
+        assert_eq!(mounted.len(), 2);
+        assert_eq!(mounted[0].device, "disk4");
+        assert_eq!(mounted[0].attach, crate::config::HostDiskAttach::IdeMaster);
+        assert!(mounted[0].writable, "the choice to allow writing carries");
+        assert!(!mounted[1].writable);
+        // Mounting leaves the ticks alone: they show what the machine has, so
+        // coming back to the page shows the machine rather than a blank slate.
+        assert!(setup.host_disk_is_selected("disk4"));
+
+        // Each shows on the row that holds it.
+        assert_eq!(
+            setup
+                .host_disk_on_row(LauncherField::IdeMaster)
+                .map(|d| d.device.as_str()),
+            Some("disk4")
+        );
+        assert_eq!(
+            setup
+                .host_disk_on_row(LauncherField::IdeSlave)
+                .map(|d| d.device.as_str()),
+            Some("disk9")
+        );
 
         // Out to a configuration file, and back.
         let raw = setup.to_raw();
-        assert_eq!(raw.host_disk.len(), 1);
+        assert_eq!(raw.host_disk.len(), 2);
         assert_eq!(raw.host_disk[0].device, "disk4");
-        assert_eq!(raw.host_disk[0].attach.as_deref(), Some("ide-slave"));
-        // Writable is the default, so nothing is written down for it.
+        assert_eq!(raw.host_disk[0].attach.as_deref(), Some("ide-master"));
+        // Writable is the default, so nothing is written down for it; the
+        // read-only one says so.
         assert_eq!(raw.host_disk[0].read_only, None);
+        assert_eq!(raw.host_disk[1].read_only, Some(true));
 
         let reloaded = MachineSetup::from_raw(&raw).expect("the written configuration reads back");
         let back = reloaded
-            .host_disk_at(crate::config::HostDiskAttach::IdeSlave)
+            .host_disk_at(crate::config::HostDiskAttach::IdeMaster)
             .expect("the attachment survives being written and read");
         assert_eq!(back.device, "disk4");
         assert!(back.writable);
 
         // A machine with no IDE port refuses rather than configuring a disk
-        // it could never reach.
+        // it could never reach, and says which port it wants.
         let mut no_ide = MachineSetup::default();
         no_ide.select_model(Some(MachineModel::A500));
         no_ide.set_host_disks_for_test(vec![HostDiskRow {
@@ -4838,17 +4999,53 @@ mod tests {
             attach: crate::config::HostDiskAttach::IdeMaster,
         }]);
         no_ide.select_host_disk(0);
-        assert!(no_ide.mount_host_disk().is_err());
+        let refusal = no_ide
+            .mount_host_disks()
+            .expect_err("no IDE port to attach to");
+        assert!(refusal.contains("IDE"), "{refusal}");
         assert!(no_ide.host_disks_attached().is_empty());
 
         // And taking it off gives it back to the host.
         let mut reloaded = reloaded;
         assert_eq!(
-            reloaded.unmount_host_disk(crate::config::HostDiskAttach::IdeSlave),
+            reloaded.unmount_host_disk(crate::config::HostDiskAttach::IdeMaster),
             Some("disk4".to_string())
         );
-        assert!(reloaded.host_disks_attached().is_empty());
-        assert!(reloaded.to_raw().host_disk.is_empty());
+        assert_eq!(reloaded.host_disks_attached().len(), 1);
+        assert_eq!(reloaded.to_raw().host_disk.len(), 1);
+    }
+
+    /// A real disk takes its place on the Boot Priority page like any other
+    /// drive, but the priority itself is not ours to set: the partitions on
+    /// the disk carry their own, and nothing here overrides them.
+    #[test]
+    fn a_host_disk_shows_on_boot_priority_with_its_priority_where_it_lives() {
+        let mut setup = MachineSetup::default();
+        setup.select_model(Some(MachineModel::A1200));
+        setup.set_host_disks_for_test(vec![HostDiskRow {
+            id: "disk4".to_string(),
+            volume: "SanDisk".to_string(),
+            size: "31.9 GB".to_string(),
+            mounted: Vec::new(),
+            writable: true,
+            attach: crate::config::HostDiskAttach::IdeMaster,
+        }]);
+        // Nothing attached: the row reads as an empty slot.
+        assert_eq!(
+            setup.disabled_reason(LauncherField::IdeMasterBoot),
+            Some("No drive")
+        );
+
+        setup.select_host_disk(0);
+        setup.mount_host_disks().expect("A1200 has an IDE port");
+        assert_eq!(
+            setup.disabled_reason(LauncherField::IdeMasterBoot),
+            Some("Own RDB")
+        );
+        assert!(
+            !setup.row_hidden(LauncherField::IdeMasterBoot),
+            "the drive is there, so its row is too"
+        );
     }
 
     /// The Interface row carries no driver list of its own: it offers what

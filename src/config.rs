@@ -1271,28 +1271,58 @@ pub enum HostDiskAttach {
     #[default]
     IdeMaster,
     IdeSlave,
+    /// A unit on whichever SCSI controller the machine has fitted.
+    Scsi(u8),
 }
+
+/// SCSI units a controller addresses. Unit 7 is the controller itself.
+pub const SCSI_UNITS: u8 = 7;
 
 impl HostDiskAttach {
     /// The spelling a configuration file uses.
-    pub fn token(self) -> &'static str {
+    pub fn token(self) -> String {
         match self {
-            Self::IdeMaster => "ide-master",
-            Self::IdeSlave => "ide-slave",
+            Self::IdeMaster => "ide-master".to_string(),
+            Self::IdeSlave => "ide-slave".to_string(),
+            Self::Scsi(unit) => format!("scsi{unit}"),
         }
     }
 
     /// How the launcher and logs name it.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::IdeMaster => "IDE Master",
-            Self::IdeSlave => "IDE Slave",
+            Self::IdeMaster => "IDE Master".to_string(),
+            Self::IdeSlave => "IDE Slave".to_string(),
+            Self::Scsi(unit) => format!("SCSI Unit {unit}"),
         }
     }
 
-    /// Every attachment point, in the order a picker should cycle them.
-    pub fn all() -> &'static [Self] {
-        &[Self::IdeMaster, Self::IdeSlave]
+    /// What a machine must have for this point to exist at all. Both IDE
+    /// positions share one requirement, so they share one message.
+    pub fn requirement(self) -> &'static str {
+        match self {
+            Self::IdeMaster | Self::IdeSlave => "Attach to IDE requires an A600, A1200 or A4000",
+            Self::Scsi(_) => "Attach to SCSI requires a SCSI controller",
+        }
+    }
+
+    /// Whether this is a SCSI unit.
+    pub fn is_scsi(self) -> bool {
+        matches!(self, Self::Scsi(_))
+    }
+
+    /// Every attachment point, in the order a picker cycles them.
+    pub fn all() -> Vec<Self> {
+        let mut all = vec![Self::IdeMaster, Self::IdeSlave];
+        all.extend((0..SCSI_UNITS).map(Self::Scsi));
+        all
+    }
+
+    /// The point a configuration token names.
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|a| a.token().eq_ignore_ascii_case(token))
     }
 }
 
@@ -2213,12 +2243,9 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
-    /// Real host disks given to the machine (`--hdd DEVICE [ATTACH]`), in
-    /// command-line order. Each is `(device, attachment point)`, the second
-    /// unset meaning the first free IDE position.
-    pub host_disks: Vec<(String, Option<String>)>,
-    /// Devices named by `--hdd-read-only`, which protects them.
-    pub host_disks_read_only: Vec<String>,
+    /// Real host disks given to the machine (`--hdd DEVICE [ATTACH]`, or
+    /// `--hdd-read-only` for the protected form), in command-line order.
+    pub host_disks: Vec<HostDiskArg>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -2270,7 +2297,6 @@ impl ConfigOverrides {
             && self.floppy_bridge_speed.iter().all(Option::is_none)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
             && self.host_disks.is_empty()
-            && self.host_disks_read_only.is_empty()
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
             && self.mouse_capture.is_none()
@@ -2348,17 +2374,12 @@ impl ConfigOverrides {
         // Real host disks named on the command line are added to whatever the
         // file already asked for; the parser is what refuses two disks, or a
         // disk and an image, on one attachment point.
-        for (device, attach) in &self.host_disks {
-            raw.host_disk.push(RawHostDisk {
-                device: device.clone(),
-                attach: attach.clone(),
-                read_only: self
-                    .host_disks_read_only
-                    .iter()
-                    .any(|protected| protected == device)
-                    .then_some(true),
-            });
-        }
+        raw.host_disk
+            .extend(self.host_disks.iter().map(|disk| RawHostDisk {
+                device: disk.device.clone(),
+                attach: disk.attach.clone(),
+                read_only: disk.read_only.then_some(true),
+            }));
         for idx in 0..4 {
             if self.floppy_bridge[idx].is_none()
                 && self.floppy_bridge_port[idx].is_none()
@@ -2686,6 +2707,16 @@ pub(crate) struct RawDisplay {
     /// Show the status bar at start (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status_bar: Option<bool>,
+}
+
+/// A host disk named on the command line, before it is checked against the
+/// machine. The attachment point is the token form (`ide-slave`, `scsi3`);
+/// unset means the default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostDiskArg {
+    pub device: String,
+    pub attach: Option<String>,
+    pub read_only: bool,
 }
 
 /// One `[[filesys]]` entry (experimental): a host directory exported to the
@@ -4111,18 +4142,20 @@ impl TryFrom<RawConfig> for Config {
             None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
         };
 
-        let host_disks = parse_host_disks(&raw.host_disk, &ide)?;
+        let host_disks = parse_host_disks(
+            &raw.host_disk,
+            &ide,
+            &scsi,
+            has_ide_port,
+            scsi.enabled() || defaults.sdmac,
+        )?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
         // under a machine whose only drive is a real one -- which opens
         // perfectly and is then never looked at.
-        let host_disk_on_ide = host_disks.iter().any(|disk| {
-            matches!(
-                disk.attach,
-                HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave
-            )
-        });
+        let host_disk_on_ide = host_disks.iter().any(|disk| !disk.attach.is_scsi());
+        let host_disk_on_scsi = host_disks.iter().any(|disk| disk.attach.is_scsi());
         Ok(Config {
             host_disks,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
@@ -4175,7 +4208,7 @@ impl TryFrom<RawConfig> for Config {
                     && (ide.master.is_some() || ide.slave.is_some() || host_disk_on_ide))
                     || (defaults.sdmac
                         && scsi.controller == ScsiController::A3000
-                        && scsi.units.iter().any(Option::is_some));
+                        && (scsi.units.iter().any(Option::is_some) || host_disk_on_scsi));
                 (has_ide_port || defaults.sdmac) && !builtin_drives
             }),
             akiko: defaults.akiko,
@@ -5240,7 +5273,13 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
 /// configuration is written once and used on a machine whose card reader may
 /// be empty, so a missing disk is a condition to report when the machine is
 /// built, not a reason to refuse to read the file.
-fn parse_host_disks(raw: &[RawHostDisk], ide: &IdeConfig) -> Result<Vec<HostDiskConfig>> {
+fn parse_host_disks(
+    raw: &[RawHostDisk],
+    ide: &IdeConfig,
+    scsi: &ScsiConfig,
+    has_ide_port: bool,
+    has_scsi: bool,
+) -> Result<Vec<HostDiskConfig>> {
     let mut disks: Vec<HostDiskConfig> = Vec::new();
     for (index, entry) in raw.iter().enumerate() {
         let device = entry.device.trim();
@@ -5249,21 +5288,28 @@ fn parse_host_disks(raw: &[RawHostDisk], ide: &IdeConfig) -> Result<Vec<HostDisk
         }
         let attach = match entry.attach.as_deref().map(str::trim) {
             None => HostDiskAttach::default(),
-            Some(token) => HostDiskAttach::all()
-                .iter()
-                .copied()
-                .find(|a| a.token().eq_ignore_ascii_case(token))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "host_disk[{index}] attach = \"{token}\" is not an attachment point ({})",
-                        HostDiskAttach::all()
-                            .iter()
-                            .map(|a| a.token())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })?,
+            Some(token) => HostDiskAttach::from_token(token).ok_or_else(|| {
+                anyhow!(
+                    "host_disk[{index}] attach = \"{token}\" is not an attachment point ({})",
+                    HostDiskAttach::all()
+                        .iter()
+                        .map(|a| a.token())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?,
         };
+        // A disk attached where the machine has no port is not a disk at
+        // all: nothing would ever look at it, so say so now rather than
+        // opening it and leaving it unreachable.
+        let fitted = if attach.is_scsi() {
+            has_scsi
+        } else {
+            has_ide_port
+        };
+        if !fitted {
+            bail!("host_disk[{index}]: {}", attach.requirement());
+        }
         if let Some(clash) = disks.iter().find(|d| d.attach == attach) {
             bail!(
                 "host_disk[{index}] and {} are both attached to {}; a slot holds one disk",
@@ -5274,6 +5320,10 @@ fn parse_host_disks(raw: &[RawHostDisk], ide: &IdeConfig) -> Result<Vec<HostDisk
         let taken = match attach {
             HostDiskAttach::IdeMaster => ide.master.is_some(),
             HostDiskAttach::IdeSlave => ide.slave.is_some(),
+            HostDiskAttach::Scsi(unit) => scsi
+                .units
+                .get(usize::from(unit))
+                .is_some_and(Option::is_some),
         };
         if taken {
             bail!(

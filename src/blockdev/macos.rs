@@ -639,7 +639,7 @@ fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
     let status = child.wait().context("waiting for authopen")?;
     let fd = received?;
     if !status.success() {
-        anyhow::bail!("authorization was refused");
+        anyhow::bail!("permission to open the disk was refused");
     }
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }

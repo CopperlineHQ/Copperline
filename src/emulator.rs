@@ -2053,6 +2053,46 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
 
 /// Open a `[scsi]` unit entry as a bus target: a CD image (cue/ISO) becomes
 /// a CD-ROM drive, anything else a hard disk. Logs the fitted unit.
+/// Attach every real host disk the config puts on a SCSI unit.
+///
+/// A configuration outlives the disk it names, so one that is not here is
+/// reported and skipped: the machine comes up with that unit empty, as it
+/// would if the drive had been unplugged. Only a disk that is present is
+/// opened, so a missing one never raises the host's permission prompt.
+#[cfg(not(target_arch = "wasm32"))]
+fn attach_scsi_host_disks(
+    cfg: &Config,
+    mut attach: impl FnMut(usize, crate::scsi::ScsiTarget),
+) -> usize {
+    let mut attached = 0;
+    for disk in &cfg.host_disks {
+        let crate::config::HostDiskAttach::Scsi(unit) = disk.attach else {
+            continue;
+        };
+        let unit = usize::from(unit);
+        match crate::scsi::ScsiDisk::open_host_disk(&disk.device, disk.writable) {
+            Ok(drive) => {
+                attach(unit, drive.into());
+                attached += 1;
+                info!(
+                    "scsi: unit {unit} is host disk {}{}",
+                    disk.device,
+                    if disk.writable {
+                        " (WRITABLE)"
+                    } else {
+                        " (read-only)"
+                    }
+                );
+            }
+            Err(error) => warn!(
+                "scsi: unit {unit} asked for host disk {}, which is not available: {error}",
+                disk.device
+            ),
+        }
+    }
+    attached
+}
+
 fn open_scsi_target(
     drive: &crate::config::DriveImage,
     unit: usize,
@@ -2206,6 +2246,8 @@ pub fn build_machine(
                     let Some(drive) = drive else { continue };
                     board.attach_drive(unit, open_scsi_target(drive, unit)?);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                attach_scsi_host_disks(cfg, |unit, target| board.attach_drive(unit, target));
                 zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
                 info!(
                     "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
@@ -2235,6 +2277,8 @@ pub fn build_machine(
                     let Some(drive) = drive else { continue };
                     board.attach_drive(unit, open_scsi_target(drive, unit)?);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                attach_scsi_host_disks(cfg, |unit, target| board.attach_drive(unit, target));
                 zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
                 info!(
                     "scsi: A4091 controller on the Zorro chain (slot {slot}), ROM {}",
@@ -2484,9 +2528,11 @@ pub fn build_machine(
         // refused by configuration validation rather than silently replaced.
         #[cfg(not(target_arch = "wasm32"))]
         for disk in &cfg.host_disks {
+            // SCSI units are attached with the controller, further down.
             let slot = match disk.attach {
                 crate::config::HostDiskAttach::IdeMaster => 0,
                 crate::config::HostDiskAttach::IdeSlave => 1,
+                crate::config::HostDiskAttach::Scsi(_) => continue,
             };
             // A configuration outlives the card reader it was written at, so a
             // disk that is not here is a thing to report and carry on from --
@@ -2559,6 +2605,11 @@ pub fn build_machine(
                 let Some(drive) = drive else { continue };
                 sdmac.attach_drive(unit, open_scsi_target(drive, unit)?);
                 drives += 1;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                drives +=
+                    attach_scsi_host_disks(cfg, |unit, target| sdmac.attach_drive(unit, target));
             }
         }
         bus.attach_sdmac(sdmac);

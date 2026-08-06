@@ -194,6 +194,17 @@ impl ScsiDisk {
         })
     }
 
+    /// Open a SCSI unit backed by a real host disk. The disk carries its own
+    /// RDB, so nothing is synthesized over it and there is no device name or
+    /// boot priority to choose here.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
+        Ok(Self {
+            disk: HardDriveImage::open_device(device, "scsi", writable)?,
+            sense: [0u8; SENSE_LEN],
+        })
+    }
+
     fn set_sense(&mut self, key: u8, asc: u8) {
         self.sense = [0u8; SENSE_LEN];
         self.sense[0] = 0x70; // current error, fixed format
