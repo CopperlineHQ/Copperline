@@ -5134,30 +5134,45 @@ fn draw_host_disk_page(
             scale,
         );
     }
-    for (i, disk) in chosen.iter().enumerate() {
+    // A disk gets two lines if it needs them. The sentence ends with where the
+    // disk is going, and on a long model name that is exactly the half a
+    // single clipped line loses -- leaving a summary that says everything
+    // except the thing it was written to say. Past two lines it is truncated,
+    // because the summary cannot keep growing without reaching the panel edge.
+    let first_px = table.w.saturating_sub(8);
+    let rest_px = table.w.saturating_sub(16);
+    let bottom = rect.y + rect.h;
+    let mut y = summary_top + 16;
+    for disk in &chosen {
         let access = if disk.writable {
             "read/write"
         } else {
             "read only"
         };
-        let line = truncate_to_width(
-            &format!(
-                "{} ({}): attached {access} to {}",
-                disk.id,
-                disk.volume,
-                disk.attach.label()
-            ),
-            table.w.saturating_sub(8),
+        let text = format!(
+            "{} ({}): attached {access} to {}",
+            disk.id,
+            disk.volume,
+            disk.attach.label()
         );
-        draw_panel_text(
-            frame,
-            table.x + 8,
-            summary_top + 16 + i * 14,
-            &line,
-            PANEL_TEXT,
-            1,
-            scale,
-        );
+        let mut lines = wrap_text(&text, first_px / font::GLYPH_W, rest_px / font::GLYPH_W);
+        if lines.len() > 2 {
+            let overflow = lines[1..].join(" ");
+            lines.truncate(1);
+            lines.push(truncate_to_width(&overflow, rest_px));
+        }
+        for (n, line) in lines.iter().enumerate() {
+            // Out of panel is not somewhere to draw: the rest of the page is
+            // below this and would be written over.
+            if y + HOST_DISK_ROW_H > bottom {
+                return;
+            }
+            // A continuation is indented, so it reads as the rest of the line
+            // above rather than as another disk.
+            let indent = if n == 0 { 8 } else { 16 };
+            draw_panel_text(frame, table.x + indent, y, line, PANEL_TEXT, 1, scale);
+            y += HOST_DISK_ROW_H;
+        }
     }
 }
 
