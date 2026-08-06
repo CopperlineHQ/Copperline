@@ -142,6 +142,31 @@ impl IdeDrive {
         })
     }
 
+    /// Open a real host disk as an IDE drive.
+    ///
+    /// The geometry comes from the disk's own capacity, exactly as it does
+    /// for an image: the guest's driver reads the RDB the disk already
+    /// carries, so nothing here invents a partition table over media that
+    /// came out of a real Amiga.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_host_disk(device: &str, unit: usize, writable: bool) -> anyhow::Result<Self> {
+        let disk = HardDriveImage::open_device(device, "ide", writable)?;
+        let heads = RDB_HEADS as u8;
+        let spt = RDB_SPT as u8;
+        let cylinders =
+            (disk.total_sectors() / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
+        let _ = unit;
+        Ok(Self {
+            disk,
+            default_heads: heads,
+            default_spt: spt,
+            cylinders,
+            heads,
+            spt,
+            multiple: 0,
+        })
+    }
+
     /// IDENTIFY DEVICE data. The Amiga IDE ports wire the drive's data bus
     /// byte-swapped relative to the 68000 (IDE D7-D0 land on CPU D15-D8), so
     /// the CPU reads every ATA word with its bytes exchanged. The ROM driver's

@@ -105,6 +105,9 @@ pub struct Config {
     /// AmigaDOS devices `HOSTFS0:`, `HOSTFS1:`, ... (experimental). Empty:
     /// no services board on the autoconfig chain.
     pub filesys: Vec<crate::filesys::MountSpec>,
+    /// `[[host_disk]]` real host disks attached to the machine. Empty is the
+    /// ordinary case: a machine with no real storage bolted to it.
+    pub host_disks: Vec<HostDiskConfig>,
     pub chipset: Chipset,
     /// Concrete chip revisions derived from the `[chipset] revision` preset,
     /// installed chip RAM, and the optional `agnus`/`denise` overrides.
@@ -1258,6 +1261,72 @@ impl Default for AudioConfig {
     }
 }
 
+/// Where on the emulated machine a host disk is attached.
+///
+/// An Amiga IDE channel carries two devices, so master and slave are
+/// positions on one bus rather than separate buses. SCSI units will join this
+/// when a host disk can be given to a controller; the shape is already here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostDiskAttach {
+    #[default]
+    IdeMaster,
+    IdeSlave,
+}
+
+impl HostDiskAttach {
+    /// The spelling a configuration file uses.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::IdeMaster => "ide-master",
+            Self::IdeSlave => "ide-slave",
+        }
+    }
+
+    /// How the launcher and logs name it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IdeMaster => "IDE Master",
+            Self::IdeSlave => "IDE Slave",
+        }
+    }
+
+    /// Every attachment point, in the order a picker should cycle them.
+    pub fn all() -> &'static [Self] {
+        &[Self::IdeMaster, Self::IdeSlave]
+    }
+}
+
+/// One real host disk given to the emulated machine, from `[[host_disk]]`.
+///
+/// Kept apart from the image configuration deliberately. A disk is not a file:
+/// it is chosen from what the host has attached, it needs the host's
+/// permission to open, it may have to be taken from the host first, and the
+/// operations that will grow around it -- preparing, partitioning -- have no
+/// counterpart for an image. Sharing a representation with image paths would
+/// mean every one of those concerns leaking into the image path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostDiskConfig {
+    /// The host's stable identifier for the disk (`disk4`, `sdb`,
+    /// `PhysicalDrive1`), never the node path: a node path belongs to one
+    /// boot of the host, the identifier belongs to the hardware.
+    pub device: String,
+    /// Where the machine sees it.
+    pub attach: HostDiskAttach,
+    /// Read-only unless deliberately cleared. This is somebody's real disk,
+    /// and the guest writing to it is the thing that cannot be undone.
+    pub read_only: bool,
+}
+
+impl Default for HostDiskConfig {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            attach: HostDiskAttach::default(),
+            read_only: true,
+        }
+    }
+}
+
 /// Which FluxBridge driver backs a bridged drive.
 ///
 /// Named rather than indexed so a config file does not depend on the order the
@@ -1848,6 +1917,7 @@ impl Default for Config {
             wasm_boards: Vec::new(),
             identify_board: true,
             filesys: Vec::new(),
+            host_disks: Vec::new(),
             // The no-[machine] default models the most common and most-
             // targeted Amiga: the A500 Rev 6A (the ECS "Fatter" 8372A Agnus
             // with the original OCS 8362 Denise). Selecting `[chipset]
@@ -2511,6 +2581,9 @@ pub struct RawConfig {
     /// `[[filesys]]` host-directory mount entries, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) filesys: Vec<RawFilesysMount>,
+    /// `[[host_disk]]` real host disks, in file order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) host_disk: Vec<RawHostDisk>,
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
@@ -2594,6 +2667,20 @@ pub(crate) struct RawDisplay {
 
 /// One `[[filesys]]` entry (experimental): a host directory exported to the
 /// guest as the AmigaDOS device `HOSTFS<n>:` (n = position in the config).
+/// `[[host_disk]]`: a real disk of the host's, given to the machine.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawHostDisk {
+    /// The host's identifier for the disk, as `--list-disks` prints it.
+    pub(crate) device: String,
+    /// Where the machine sees it: `ide-master` (the default) or `ide-slave`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attach: Option<String>,
+    /// Let the guest write to the disk. Absent means read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) read_only: Option<bool>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawFilesysMount {
@@ -3999,7 +4086,9 @@ impl TryFrom<RawConfig> for Config {
             None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
         };
 
+        let host_disks = parse_host_disks(&raw.host_disk, &ide)?;
         Ok(Config {
+            host_disks,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
             cpu,
             fpu,
@@ -5101,6 +5190,69 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         cable,
         speed,
     })
+}
+
+/// Parse `[[host_disk]]` entries and check they can all be honoured.
+///
+/// Two things are refused here rather than at the point of use. A slot holds
+/// one thing, so two host disks cannot share an attachment point, and a slot
+/// already given an image cannot also be given a disk -- the same rule a
+/// floppy bay follows for a bridge and an image, and for the same reason:
+/// silently preferring one would leave the other quietly ignored.
+///
+/// Whether the disk is actually *there* is deliberately not checked. A
+/// configuration is written once and used on a machine whose card reader may
+/// be empty, so a missing disk is a condition to report when the machine is
+/// built, not a reason to refuse to read the file.
+fn parse_host_disks(raw: &[RawHostDisk], ide: &IdeConfig) -> Result<Vec<HostDiskConfig>> {
+    let mut disks: Vec<HostDiskConfig> = Vec::new();
+    for (index, entry) in raw.iter().enumerate() {
+        let device = entry.device.trim();
+        if device.is_empty() {
+            bail!("host_disk[{index}] has no device; name one as --list-disks prints it");
+        }
+        let attach = match entry.attach.as_deref().map(str::trim) {
+            None => HostDiskAttach::default(),
+            Some(token) => HostDiskAttach::all()
+                .iter()
+                .copied()
+                .find(|a| a.token().eq_ignore_ascii_case(token))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "host_disk[{index}] attach = \"{token}\" is not an attachment point ({})",
+                        HostDiskAttach::all()
+                            .iter()
+                            .map(|a| a.token())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?,
+        };
+        if let Some(clash) = disks.iter().find(|d| d.attach == attach) {
+            bail!(
+                "host_disk[{index}] and {} are both attached to {}; a slot holds one disk",
+                clash.device,
+                attach.label()
+            );
+        }
+        let taken = match attach {
+            HostDiskAttach::IdeMaster => ide.master.is_some(),
+            HostDiskAttach::IdeSlave => ide.slave.is_some(),
+        };
+        if taken {
+            bail!(
+                "host_disk[{index}] is attached to {}, which already has an image; \
+                 a slot holds either a disk or an image",
+                attach.label()
+            );
+        }
+        disks.push(HostDiskConfig {
+            device: device.to_string(),
+            attach,
+            read_only: entry.read_only.unwrap_or(true),
+        });
+    }
+    Ok(disks)
 }
 
 fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {

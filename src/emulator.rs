@@ -2480,6 +2480,40 @@ pub fn build_machine(
             );
             info!("ide: slave {}", drive.path.display());
         }
+        // Real host disks last, so an image in the same slot has already been
+        // refused by configuration validation rather than silently replaced.
+        #[cfg(not(target_arch = "wasm32"))]
+        for disk in &cfg.host_disks {
+            let slot = match disk.attach {
+                crate::config::HostDiskAttach::IdeMaster => 0,
+                crate::config::HostDiskAttach::IdeSlave => 1,
+            };
+            // A configuration outlives the card reader it was written at, so a
+            // disk that is not here is a thing to report and carry on from --
+            // the machine boots with that slot empty, as it would if the drive
+            // had been unplugged. Only a disk that is present is opened, so a
+            // missing one never raises the host's permission prompt.
+            match crate::ata::IdeDrive::open_host_disk(&disk.device, slot, !disk.read_only) {
+                Ok(drive) => {
+                    gayle.attach_drive(slot, drive);
+                    info!(
+                        "ide: {} is host disk {}{}",
+                        disk.attach.label(),
+                        disk.device,
+                        if disk.read_only {
+                            " (read-only)"
+                        } else {
+                            " (WRITABLE)"
+                        }
+                    );
+                }
+                Err(error) => warn!(
+                    "ide: {} asked for host disk {}, which is not available: {error}",
+                    disk.attach.label(),
+                    disk.device
+                ),
+            }
+        }
         bus.attach_gayle(gayle);
     }
     if cfg.ide_a4000 {
