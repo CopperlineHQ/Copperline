@@ -674,7 +674,10 @@ elements, and pages without them are untouched:
   fullscreen overlay carries a copy of it labelled Type -- but only where
   there is a keyboard to raise. On a screen without touch, or a wasm bundle
   without `key_raw`, neither is built at all and a shell that provided the
-  button has it hidden. It shares `--cl-kbd-h` with `#keyboard`,
+  button has it hidden; a shell may also ship the button with the `hidden`
+  attribute already set, so a desktop never shows it even for the moment
+  before the glue loads, and the glue un-hides it on the touch screens it
+  serves. It shares `--cl-kbd-h` with `#keyboard`,
   publishing how much of the viewport the device keyboard covers. The
   off-screen field it focuses is built by the glue and lives inside
   `#shell`, so no input element is needed in the shell.
