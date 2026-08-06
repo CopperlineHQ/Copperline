@@ -491,11 +491,16 @@ where
             // error names it rather than the flag quietly doing nothing.
             #[cfg(feature = "fluxbridge")]
             "--floppy-bridge" => {
-                const USAGE: &str = "--floppy-bridge requires DFN INTERFACE \
-                                     (drawbridge, greaseweazle, supercardpro, or off)";
-                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                // The names this build accepts come from the library's driver
+                // table, so the usage line cannot advertise a driver that is
+                // not compiled in.
+                let usage = format!(
+                    "--floppy-bridge requires DFN INTERFACE ({})",
+                    copperline::config::supported_bridge_drivers().join(", ")
+                );
+                let drive_s = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
                 let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge")?;
-                let interface = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let interface = args.next().ok_or_else(|| anyhow!(usage))?;
                 overrides.floppy_bridge[idx] = Some(interface);
             }
             #[cfg(feature = "fluxbridge")]
@@ -1124,18 +1129,20 @@ fn print_help() {
     // A build without the feature cannot attach a physical drive at all, so
     // the flags are not listed and not accepted.
     #[cfg(feature = "fluxbridge")]
-    let floppy_bridge =
+    let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
+    let floppy_bridge = format!(
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
-         \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
+         \x20                            {floppy_bridge_names}\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
-         \x20                            write-protected unless asked otherwise)\n  ";
+         \x20                            write-protected unless asked otherwise)\n  "
+    );
     #[cfg(not(feature = "fluxbridge"))]
-    let floppy_bridge = "";
+    let floppy_bridge = String::new();
     eprintln!(
         "copperline - Amiga emulator\n\
          \n\

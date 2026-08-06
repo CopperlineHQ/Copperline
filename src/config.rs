@@ -4985,6 +4985,19 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
     ))
 }
 
+/// The interface names this build actually accepts, from the library's own
+/// driver table -- so help text, error messages and validation cannot drift
+/// from what can really be opened.
+#[cfg(feature = "fluxbridge")]
+pub fn supported_bridge_drivers() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = crate::fluxbridge::drivers()
+        .into_iter()
+        .map(|driver| driver.token)
+        .collect();
+    names.push("off");
+    names
+}
+
 /// Parse one bay's `bridge = ...` plus its `bridge_*` settings.
 #[cfg(feature = "fluxbridge")]
 fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<FluxBridgeConfig> {
@@ -4997,10 +5010,22 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         "greaseweazle" | "gw" => BridgeDriver::Greaseweazle,
         "supercardpro" | "scp" => BridgeDriver::SupercardPro,
         _ => bail!(
-            "floppy.df{idx} bridge = \"{spec}\" is not a known interface \
-             (drawbridge, greaseweazle, supercardpro)"
+            "floppy.df{idx} bridge = \"{spec}\" is not a known interface ({})",
+            supported_bridge_drivers().join(", ")
         ),
     };
+    // Recognising a name is not the same as having its driver. FluxBridge is
+    // compiled with the drivers Copperline supports, so a configuration
+    // naming one this build does not carry is refused here, where the name is
+    // read, rather than surviving validation only to fail when the drive is
+    // opened.
+    if crate::fluxbridge::driver_named(driver.match_token()).is_none() {
+        bail!(
+            "floppy.df{idx} bridge = \"{spec}\": this build has no {} driver (it has {})",
+            driver.label(),
+            supported_bridge_drivers().join(", ")
+        );
+    }
 
     let mode = match raw.bridge_mode.as_deref().map(str::trim) {
         None => BridgeReadMode::default(),
@@ -7540,12 +7565,12 @@ mod tests {
             [floppy.df0]
             bridge = "greaseweazle"
             [floppy.df1]
-            bridge = "DrawBridge"
+            bridge = "GreaseWeazle"
             bridge_port = "/dev/tty.usbmodem1111301"
             bridge_mode = "stalling"
             bridge_density = "hd"
             bridge_cable = "b"
-            replay_speed = "fast"
+            replay_speed = "normal"
         "#,
         )?;
         let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
@@ -7557,18 +7582,44 @@ mod tests {
         assert_eq!(df0.density, BridgeDensity::Auto);
         assert_eq!(df0.speed, DEFAULT_BRIDGE_SPEED_PERCENT);
 
+        // Spelling and case are the user's business, not the parser's.
         let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
-        assert_eq!(df1.driver, BridgeDriver::DrawBridge);
+        assert_eq!(df1.driver, BridgeDriver::Greaseweazle);
         assert_eq!(df1.port.as_deref(), Some("/dev/tty.usbmodem1111301"));
         assert_eq!(df1.mode, BridgeReadMode::Stalling);
         assert_eq!(df1.density, BridgeDensity::Hd);
         assert_eq!(df1.cable, BridgeCable::DriveB);
-        assert_eq!(df1.speed, 200);
+        assert_eq!(df1.speed, 100);
 
         // Bridging a bay wires the drive in, and leaves it with no image.
         assert!(cfg.floppy.drives[0].is_none());
         assert!(cfg.floppy_connected[0] && cfg.floppy_connected[1]);
         Ok(())
+    }
+
+    /// A driver name this build does not carry is refused where it is read,
+    /// naming what is available -- not accepted here only to fail later when
+    /// the drive is opened, by which time the machine is half built.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn a_driver_this_build_lacks_is_refused_with_what_it_has() {
+        let available = supported_bridge_drivers();
+        assert!(available.contains(&"greaseweazle"), "{available:?}");
+        for absent in ["drawbridge", "supercardpro"] {
+            if available.contains(&absent) {
+                continue;
+            }
+            let err = parse_config(&format!(
+                r#"
+                [floppy.df0]
+                bridge = "{absent}"
+            "#
+            ))
+            .expect_err("a driver this build lacks cannot be configured")
+            .to_string();
+            assert!(err.contains("this build has no"), "unexpected: {err}");
+            assert!(err.contains("greaseweazle"), "must say what it has: {err}");
+        }
     }
 
     /// Only the listed serving speeds are accepted, by name in the error so

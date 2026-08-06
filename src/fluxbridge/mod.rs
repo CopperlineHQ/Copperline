@@ -127,6 +127,16 @@ pub enum DriveSelection {
     Drive3,
 }
 
+/// What became of a write once the platter had turned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteOutcome {
+    pub cylinder: u8,
+    /// Upper surface.
+    pub side: bool,
+    /// The reason it failed, or `None` if the cells went down.
+    pub error: Option<String>,
+}
+
 /// The kind of mechanism the interface reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveType {
@@ -526,23 +536,31 @@ impl Bridge {
         }
     }
 
-    /// Whether a write that had been accepted has since failed on the platter.
+    /// Collect the writes the drive has finished with since this was last
+    /// asked, whether they worked or not.
     ///
-    /// A real write is only known to have worked once the drive has turned, so
-    /// the failure arrives after the emulator has moved on. Reporting it lets
-    /// the guest be told its disk is not what it thinks, rather than the
-    /// failure passing silently.
-    pub fn take_write_failure(&mut self) -> Option<String> {
-        let mut failure = None;
+    /// A write is only *queued* when [`Bridge::write_track`] returns: the
+    /// cells reach the platter a revolution later, on FluxBridge's own thread.
+    /// Until then the library still holds the capture taken *before* the
+    /// write, and handing that to the guest would show it the disk as it was
+    /// rather than as it now is. So both outcomes are reported, not just
+    /// failures: completion is what tells the caller the track may be read
+    /// again, and failure is what tells it -- and the user -- that the disk is
+    /// not what the guest believes.
+    pub fn poll_write_outcomes(&mut self) -> Vec<WriteOutcome> {
+        let mut outcomes = Vec::new();
         while let Some(event) = self.inner.poll_event() {
             match event {
-                fb::BridgeEvent::WriteFailed { track, .. } => {
-                    failure.get_or_insert_with(|| {
-                        format!(
-                            "cylinder {} side {}",
-                            track.cylinder,
-                            u8::from(track.side == fb::Side::Upper)
-                        )
+                fb::BridgeEvent::WriteCompleted { track, .. } => outcomes.push(WriteOutcome {
+                    cylinder: track.cylinder,
+                    side: track.side == fb::Side::Upper,
+                    error: None,
+                }),
+                fb::BridgeEvent::WriteFailed { track, error, .. } => {
+                    outcomes.push(WriteOutcome {
+                        cylinder: track.cylinder,
+                        side: track.side == fb::Side::Upper,
+                        error: Some(error.to_string()),
                     });
                 }
                 fb::BridgeEvent::DiskChanged { present } if present != self.disk_present => {
@@ -552,7 +570,7 @@ impl Bridge {
                 _ => {}
             }
         }
-        failure
+        outcomes
     }
 }
 

@@ -717,6 +717,9 @@ impl FloppyController {
             drive.cached_track = None;
             drive.cached = CachedTrack::default();
             drive.bridge_filler_track = None;
+            drive.bridge_partial_track = None;
+            // The drive is gone; a write still in flight will never report.
+            drive.bridge_writing.clear();
             drive.bridge_tracks.clear();
             drive.eject_image();
             self.idle_cache = false;
@@ -779,6 +782,40 @@ impl FloppyController {
                 );
             }
             drive.bridge_reported_failed = !working;
+            // What became of the writes handed over earlier. A track is held
+            // unreadable from the moment its write is accepted until one of
+            // these arrives, so this is also what releases it -- and it is
+            // released whether the write worked or not, because either way
+            // the platter now holds something the guest has not seen.
+            for outcome in bridge.poll_write_outcomes() {
+                let track = usize::from(outcome.cylinder) * SIDES + usize::from(outcome.side);
+                drive.bridge_writing.retain(|pending| *pending != track);
+                if let Some(known) = drive.bridge_tracks.get_mut(track) {
+                    *known = BridgeTrack::Unknown;
+                }
+                if drive.cached_track == Some(track) {
+                    drive.cached_track = None;
+                }
+                match &outcome.error {
+                    // A real write is only known to have worked once the disk
+                    // has turned, so a failure lands here rather than at the
+                    // instruction that caused it. Saying so is the difference
+                    // between a disk the guest believes it wrote and one it
+                    // knows it did not.
+                    Some(error) => warn!(
+                        "floppy.df{idx} the write of track {track} (cyl {} side {}) did not \
+                         reach the disk: {error}",
+                        outcome.cylinder,
+                        u8::from(outcome.side)
+                    ),
+                    None if bridge_diag() => info!(
+                        "fluxbridge.df{idx} track {track} (cyl {} side {}) is on the platter",
+                        outcome.cylinder,
+                        u8::from(outcome.side)
+                    ),
+                    None => {}
+                }
+            }
             let changed = bridge.take_disk_changed();
             let had_media = drive.bridge_media;
             drive.bridge_media = bridge.disk_in_drive();
@@ -825,6 +862,7 @@ impl FloppyController {
                 drive.cached_track = None;
                 drive.cached = CachedTrack::default();
                 drive.bridge_filler_track = None;
+                drive.bridge_partial_track = None;
                 drive.bridge_tracks.clear();
                 drive.set_disk_change(true);
                 self.idle_cache = false;
@@ -1867,6 +1905,13 @@ impl FloppyController {
                         write_words.len()
                     );
                 }
+                // Accepted, not yet on the platter. Hold the track until the
+                // drive says what became of it: until then the library still
+                // has the recording from before the write, and serving that
+                // would show the guest a disk that no longer exists.
+                if !drive.bridge_writing.contains(&track) {
+                    drive.bridge_writing.push(track);
+                }
             } else {
                 warn!("floppy.df{drive_idx} bridge write of track {track} was rejected");
             }
@@ -1874,6 +1919,7 @@ impl FloppyController {
             // whatever the drive actually managed to lay down, which is not
             // necessarily what was asked for.
             drive.cached_track = None;
+            drive.bridge_partial_track = None;
             if let Some(known) = drive.bridge_tracks.get_mut(track) {
                 *known = BridgeTrack::Unknown;
             }
@@ -2003,14 +2049,18 @@ impl FloppyController {
         if drive.cached_track == Some(track) && !spent {
             return;
         }
-        // Filler already turning under the head for this very track stays: it
-        // is what keeps the platter moving while the capture finishes, and
-        // rebuilding it every tick would be the opposite of cheap.
+        // Whatever is already turning under the head for this very track
+        // stays: filler keeps the platter moving while a capture finishes, and
+        // a part-captured revolution is real data the guest is part way
+        // through reading. Both are provisional, and both are rebuilt only
+        // when they are replaced -- clearing either every tick would leave the
+        // head with nothing to read between polls.
         #[cfg(feature = "fluxbridge")]
-        let keep_filler = drive.bridge_filler_track == Some(track);
+        let keep_provisional =
+            drive.bridge_filler_track == Some(track) || drive.bridge_partial_track == Some(track);
         #[cfg(not(feature = "fluxbridge"))]
-        let keep_filler = false;
-        if !keep_filler {
+        let keep_provisional = false;
+        if !keep_provisional {
             drive.cached = CachedTrack::default();
         }
 
@@ -2045,6 +2095,16 @@ impl FloppyController {
                 drive.bridge_wait_since_cck = 0;
                 drive.bridge_attempts = 0;
                 drive.clamp_head();
+                return;
+            }
+            // A write of this track is on its way to the platter. The drive
+            // still holds the recording taken before it, so reading now would
+            // hand the guest the disk as it was -- and if that recording
+            // proved out, it would be filed as faithful and served from
+            // memory long after the platter had moved on. Wait for the
+            // outcome; the guest's own re-read finds the new cells.
+            if drive.bridge_writing.contains(&track) {
+                drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
                 return;
             }
             // While the head is still travelling (or ringing after the last
@@ -2160,6 +2220,9 @@ impl FloppyController {
                 drive.bridge_rev_seamless = keep;
                 drive.cached_track = Some(track);
                 drive.bridge_filler_track = None;
+                // The finished revolution supersedes the part-captured one it
+                // grew from.
+                drive.bridge_partial_track = None;
                 if drive.bridge_tracks.len() <= track {
                     drive.bridge_tracks.resize(track + 1, BridgeTrack::Unknown);
                 }
@@ -2216,6 +2279,10 @@ impl FloppyController {
                             Self::word_cck_for_track_words(nominal),
                         )];
                         drive.bridge_filler_track = None;
+                        // Mark what this is standing in for, so the next tick
+                        // keeps it rather than clearing the cache and leaving
+                        // the head with nothing until the following poll.
+                        drive.bridge_partial_track = Some(track);
                         drive.bridge_rev_seamless = false;
                         // Refresh the growth at the poll cadence, not every
                         // tick: the snapshot only changes when the worker
@@ -2321,6 +2388,20 @@ struct FloppyDrive {
     #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_poll_cck: u64,
+    /// Tracks whose write has been handed to the drive but not yet laid on
+    /// the platter. The library still holds the capture taken *before* such a
+    /// write, so reading one of these would show the guest the disk as it was
+    /// -- and, worse, could file that stale recording as proven. Nothing is
+    /// read or cached for a track in here until its outcome arrives.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_writing: Vec<usize>,
+    /// The track a part-captured revolution is currently standing in for.
+    /// Retains it between ticks: without a marker the next tick clears the
+    /// cache and the guest sees nothing until the following poll.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_partial_track: Option<usize>,
     /// Whether the interface going quiet has already been reported, so an
     /// unplugged drive says so once rather than once a frame.
     #[cfg(feature = "fluxbridge")]
@@ -2437,6 +2518,10 @@ impl Default for FloppyDrive {
             bridge_tab_write_protected: true,
             #[cfg(feature = "fluxbridge")]
             bridge_poll_cck: 0,
+            #[cfg(feature = "fluxbridge")]
+            bridge_writing: Vec::new(),
+            #[cfg(feature = "fluxbridge")]
+            bridge_partial_track: None,
             #[cfg(feature = "fluxbridge")]
             bridge_reported_failed: false,
             #[cfg(feature = "fluxbridge")]
@@ -4842,6 +4927,85 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A write reaches a real platter a revolution after it is handed over,
+    /// and until it does the drive still holds the recording from *before*
+    /// it. Reading in that window would show the guest a disk that no longer
+    /// exists -- and worse, a recording that proved out would be filed as
+    /// faithful and served from memory indefinitely. So a track is held
+    /// unreadable from the moment its write is accepted until the drive says
+    /// what became of it, whether that is success or failure.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn a_track_being_written_is_not_read_from_the_drive() {
+        let mut drive = FloppyDrive::default();
+        let track = 7;
+
+        // Nothing pending: an ordinary read may proceed.
+        assert!(!drive.bridge_writing.contains(&track));
+
+        // The write is accepted, so the track is held.
+        drive.bridge_writing.push(track);
+        assert!(
+            drive.bridge_writing.contains(&track),
+            "an accepted write must hold its track"
+        );
+        // ...and only that track.
+        assert!(!drive.bridge_writing.contains(&(track + 1)));
+
+        // The outcome releases it, and a failed write releases it too: either
+        // way the platter now holds something the guest has not seen.
+        for outcome_is_failure in [false, true] {
+            drive.bridge_writing.clear();
+            drive.bridge_writing.push(track);
+            drive.bridge_tracks.resize(track + 1, BridgeTrack::Unknown);
+            drive.bridge_tracks[track] = BridgeTrack::Kept(CachedTrack::default());
+            drive.cached_track = Some(track);
+
+            drive.bridge_writing.retain(|pending| *pending != track);
+            drive.bridge_tracks[track] = BridgeTrack::Unknown;
+            drive.cached_track = None;
+
+            assert!(
+                !drive.bridge_writing.contains(&track),
+                "{outcome_is_failure}"
+            );
+            assert!(
+                matches!(drive.bridge_tracks[track], BridgeTrack::Unknown),
+                "the recording from before the write must not survive it"
+            );
+            assert_eq!(drive.cached_track, None);
+        }
+    }
+
+    /// A part-captured revolution stands in for its track between polls. It
+    /// must survive the ticks in between: without a marker saying which track
+    /// it belongs to, the next tick clears the cache and the head has nothing
+    /// to read until the following poll, which is most of the window.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn a_partial_capture_is_retained_between_ticks() {
+        let mut drive = FloppyDrive::default();
+        let track = 12;
+        drive.bridge_partial_track = Some(track);
+        drive.bridge_filler_track = None;
+
+        // The retention test the tick applies, for this track and another.
+        let keep_this =
+            drive.bridge_filler_track == Some(track) || drive.bridge_partial_track == Some(track);
+        assert!(keep_this, "a partial must be kept for the track it serves");
+        let other = track + 1;
+        let keep_other =
+            drive.bridge_filler_track == Some(other) || drive.bridge_partial_track == Some(other);
+        assert!(!keep_other, "and only for that track");
+
+        // The finished revolution supersedes it.
+        drive.bridge_partial_track = None;
+        assert!(
+            !(drive.bridge_filler_track == Some(track)
+                || drive.bridge_partial_track == Some(track))
+        );
+    }
 
     fn tick_index_flag_sync(ctrl: &mut FloppyController) {
         ctrl.tick(INDEX_FLAG_SYNC_CCK, 0, &mut []);
