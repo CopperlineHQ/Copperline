@@ -246,6 +246,15 @@ been unlocked (any click or key press does it): the audio pipeline is
 what clocks the machine while the page cannot see it, so with audio still
 suspended the machine sleeps as before.
 
+A page that stays visible but is starved of animation frames -- an
+unfocused window on a host bent on saving power (Windows "efficiency
+mode" is the classic) -- keeps real time the same way, and needs no
+option: the audio pipeline steps the machine between whatever animation
+frames still arrive, so emulation and sound never slow down and only the
+displayed frame rate drops to what the browser delivers. This too needs
+unlocked audio; with the AudioContext still suspended there is no
+fallback clock, and a starved page slows down as the browser dictates.
+
 (browser-save-states)=
 ### Save states
 
@@ -361,7 +370,12 @@ through wasm-bindgen; the page's JavaScript drives everything from
   (messages, which background tabs still receive; only timers are
   throttled) clock the machine in rAF's place: the real-time audio
   pipeline never stops, so the tab keeps running the way a video tab
-  keeps playing, skipping only the frame rendering nobody can see.
+  keeps playing, skipping only the frame rendering nobody can see. The
+  same clock backstops a visible page whose animation frames are being
+  throttled (an unfocused window under a power-saving OS): a queue report
+  that finds the last animation frame more than ~50 ms stale steps the
+  machine itself, keeping emulation and audio real time while rAF is left
+  to blit the newest frame at whatever rate the compositor manages.
 - **Input**: `KeyboardEvent.code` strings map to Amiga raw keycodes with the
   same table as the desktop frontend (winit's `KeyCode` names *are* the W3C
   code strings); the mouse uses Pointer Lock for relative motion, with a
