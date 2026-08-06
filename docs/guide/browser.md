@@ -719,6 +719,14 @@ elements, and pages without them are untouched:
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the
   canvas shell. Either way it fills in once a machine boots.
+- `#build-info` (a container): filled once the wasm module loads with the
+  bundle's build identity -- the tag or branch and commit CI compiled it
+  from (`v0.14.0 (abc123def)`, the commit linked to its GitHub page), or
+  `dev build` for a bundle built outside CI -- so a page can show what is
+  deployed. The element is untouched until the module resolves, so a
+  shell can hide the empty state with `:empty`; without the element
+  nothing is inserted. The same string is what the bug-report link files
+  under its version field.
 - `data-default="keys"` on the `#joy` toggle: the joystick mode the page
   starts in -- `off`, `keys`, `cd32`, or `touch` (the config file's
   `joy` and then `?joy=` in the URL override it).
