@@ -206,6 +206,10 @@ impl Drop for BlockDevice {
 impl BlockDevice {
     /// Wrap an already-open device. The handle is expected to have come from
     /// a platform opener, which is where privilege is dealt with.
+    ///
+    /// A platform opener is the only caller, and not every platform has one
+    /// yet, so on those this is built but never reached.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn new(
         file: std::fs::File,
         id: String,
