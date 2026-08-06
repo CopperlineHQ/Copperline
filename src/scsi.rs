@@ -655,6 +655,30 @@ impl Wd33c93 {
         self.targets.get(id).is_some_and(Option::is_some)
     }
 
+    /// Let go of any real disk of the host's, and say how many went.
+    ///
+    /// The same rule as the IDE bus: a machine that is switched off does not
+    /// hold a physical disk, because holding it keeps the host from having it
+    /// back. Images and CD-ROM drives are untouched.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        for (id, target) in self.targets.iter_mut().enumerate() {
+            let holds_disk = matches!(
+                target.as_ref(),
+                Some(ScsiTarget::Disk(disk)) if disk.disk.is_host_disk()
+            );
+            if !holds_disk {
+                continue;
+            }
+            *target = None;
+            released += 1;
+            log::info!(
+                "scsi: unit {id} released; the machine is off and the host has the disk back"
+            );
+        }
+        released
+    }
+
     /// The lowest-ID CD-ROM drive on the bus, when one is attached.
     pub fn first_cd(&self) -> Option<&ScsiCdRom> {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)

@@ -61,6 +61,11 @@ impl Gayle {
         self.ata.attach_drive(slot, drive);
     }
 
+    /// Let go of any real disk of the host's, and say how many went.
+    pub fn release_host_disks(&mut self) -> usize {
+        self.ata.release_host_disks()
+    }
+
     /// System reset: clear the register file and any in-flight transfer but
     /// keep the mounted drives.
     pub fn reset(&mut self) {

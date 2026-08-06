@@ -10373,6 +10373,8 @@ impl App {
             self.sync_live_audio_suspension();
             #[cfg(feature = "fluxbridge")]
             self.attach_configured_bridges();
+            // The disks powering off handed back to the host, taken again.
+            self.attach_configured_host_disks();
             info!("power button: machine powered on (cold boot)");
         }
         self.request_redraw();
@@ -10400,6 +10402,30 @@ impl App {
         let floppy = &mut self.emu.bus_mut().floppy;
         if let Err(e) = crate::emulator::attach_floppy_bridges(floppy, &cfg) {
             warn!("physical floppy drive not available: {e:#}");
+        }
+    }
+
+    /// Put the real disks back on the machine's cables after a power cycle.
+    ///
+    /// Powering off hands them to the host, so powering on has to take them
+    /// again or the machine comes back up with the slot empty. Nothing is
+    /// asked of the user: the disks were taken from the host once and are
+    /// still held, so this only puts them back where the guest looks for them.
+    fn attach_configured_host_disks(&mut self) {
+        let raw = self.machine_config.clone();
+        let cfg = match crate::config::Config::try_from(raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("could not re-read the configuration to open the real disks: {e:#}");
+                return;
+            }
+        };
+        if cfg.host_disks.is_empty() {
+            return;
+        }
+        let back = self.emu.bus_mut().attach_host_disks(&cfg);
+        if back > 0 {
+            info!("power button: {back} host disk(s) back on with the machine");
         }
     }
 
@@ -10434,6 +10460,15 @@ impl App {
         // could open it.
         #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
+        // A real hard disk is the same story, and matters more: it is held
+        // exclusively, with the host's volumes dismounted, so a machine that
+        // is off but still holding one leaves the disk unusable to everything
+        // -- Windows, the configuration screen's Unmount, and the next machine
+        // built here alike.
+        let released = self.emu.bus_mut().release_host_disks();
+        if released > 0 {
+            info!("power button: {released} host disk(s) handed back to the host");
+        }
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
         self.control_complete_pending("pause", "power state changed");

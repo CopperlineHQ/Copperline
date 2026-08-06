@@ -425,6 +425,22 @@ impl HardDriveImage {
         &self.path
     }
 
+    /// Whether this drive is a real disk of the host's rather than an image.
+    ///
+    /// Only a real disk cares: an image file can be opened again by anyone at
+    /// any time, but a physical disk is held exclusively, and while it is held
+    /// the host cannot have it back and nothing else can open it.
+    pub fn is_host_disk(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            matches!(self.backing, Backing::Device(_))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     pub fn total_sectors(&self) -> u64 {
         self.total_sectors
     }

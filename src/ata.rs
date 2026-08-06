@@ -299,6 +299,32 @@ impl AtaBus {
         self.drives[slot.min(1)] = Some(drive);
     }
 
+    /// Let go of any real disk of the host's, and say how many went.
+    ///
+    /// A drive is powered by the machine, so a machine that is switched off
+    /// does not hold one: the disk goes back to the host, where it can be
+    /// unmounted, taken out, or given to the next machine this window builds.
+    /// Image-backed drives stay exactly where they are -- a file is not held
+    /// against anybody.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        for (slot, drive) in self.drives.iter_mut().enumerate() {
+            if !drive
+                .as_ref()
+                .is_some_and(|drive| drive.disk.is_host_disk())
+            {
+                continue;
+            }
+            *drive = None;
+            released += 1;
+            log::info!(
+                "ide: {} released; the machine is off and the host has the disk back",
+                if slot == 0 { "master" } else { "slave" }
+            );
+        }
+        released
+    }
+
     /// System reset: clear the register file and any in-flight transfer but
     /// keep the mounted drives.
     pub fn reset(&mut self) {
