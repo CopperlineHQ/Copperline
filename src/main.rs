@@ -1694,7 +1694,7 @@ fn print_audio_output_devices() -> Result<()> {
 /// hiding it silently would just look like a missing device.
 #[cfg(not(target_arch = "wasm32"))]
 fn print_host_disks() -> Result<()> {
-    println!("Host disks (for --hdd / [hdd] device):");
+    println!("Host disks (name one to --hdd, or as [[host_disk]] device):");
     let devices = copperline::blockdev::list_devices()?;
     if devices.is_empty() {
         println!("  (none found)");
