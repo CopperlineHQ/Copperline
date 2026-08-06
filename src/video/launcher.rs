@@ -176,6 +176,11 @@ pub enum LauncherTab {
     FluxBridge,
     BootPriority,
     HostFs,
+    /// Real host storage -- an SD card, a CF card, an Amiga's own hard
+    /// drive -- attached in place of a disk image. Drawn as its own layout
+    /// rather than a list of settings rows, because choosing a disk is a
+    /// table with a single selection, not a field.
+    HostDisk,
     Cd,
     /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
     /// section headings.
@@ -218,7 +223,8 @@ impl LauncherTab {
             LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
-            LauncherTab::HostFs => "Host Mounts",
+            LauncherTab::HostFs => "Host Folder",
+            LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::Input => "Input",
@@ -234,9 +240,10 @@ impl LauncherTab {
     /// the A/V & Emu one.
     pub fn strip_tab(self) -> LauncherTab {
         match self {
-            LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
-                LauncherTab::Storage
-            }
+            LauncherTab::Cd
+            | LauncherTab::HostFs
+            | LauncherTab::HostDisk
+            | LauncherTab::BootPriority => LauncherTab::Storage,
             LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
@@ -248,9 +255,10 @@ impl LauncherTab {
     /// top nav row instead).
     pub fn parent_tab(self) -> Option<LauncherTab> {
         match self {
-            LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
-                Some(LauncherTab::Storage)
-            }
+            LauncherTab::Cd
+            | LauncherTab::HostFs
+            | LauncherTab::HostDisk
+            | LauncherTab::BootPriority => Some(LauncherTab::Storage),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
@@ -277,7 +285,8 @@ impl LauncherTab {
 /// The Storage tab's top nav links (its sub-pages), left to right.
 const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("CD", LauncherTab::Cd),
-    ("Host Mounts", LauncherTab::HostFs),
+    ("Host Folder", LauncherTab::HostFs),
+    ("Host Disk", LauncherTab::HostDisk),
     ("Boot Priority", LauncherTab::BootPriority),
 ];
 
@@ -790,6 +799,8 @@ pub fn rows(
             Cow::Owned(rows)
         }
         LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
+        // Drawn as its own layout: a disk table and its buttons, not rows.
+        LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
             serial_mode,
@@ -969,6 +980,54 @@ const Z3_PRESETS: [usize; 8] = [
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+/// One line of the Host Disk table.
+///
+/// Flattened for drawing: the page shows text, and the work of deciding what
+/// a device is called and whether it may be touched belongs to the layer that
+/// knows about hardware, not to the launcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostDiskRow {
+    /// The identifier the host and the configuration both use: `disk4`,
+    /// `sdb`, `PhysicalDrive1`.
+    pub id: String,
+    /// What the hardware calls itself, or the volume on it.
+    pub volume: String,
+    /// Capacity, already rounded for reading.
+    pub size: String,
+    /// Where the host currently has this disk mounted, if anywhere. Shown so
+    /// somebody can see why a disk cannot simply be taken.
+    pub mounted: Vec<String>,
+}
+
+/// The disks the Host Disk page will offer.
+///
+/// Only media the emulator could genuinely use is listed. The disk the host
+/// is running from is excluded, and so is internal fixed storage: an Amiga
+/// disk reaches a modern computer through a card reader or a USB adapter, and
+/// on a machine whose system volume is synthesised (an APFS container, an LVM
+/// volume) the *physical* disk underneath it is not always identifiable --
+/// so offering internal disks at all would risk offering the one holding the
+/// running system under another name.
+#[cfg(not(target_arch = "wasm32"))]
+fn sample_host_disks() -> Vec<HostDiskRow> {
+    crate::blockdev::list_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|device| device.safety.listable())
+        .map(|device| HostDiskRow {
+            volume: device.model.clone().unwrap_or_else(|| device.id.clone()),
+            size: device.size_label(),
+            mounted: device.mounted.clone(),
+            id: device.id,
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sample_host_disks() -> Vec<HostDiskRow> {
+    Vec::new()
+}
+
 /// How close a bay is to actually having a physical drive behind it.
 ///
 /// The library is compiled in, so the only thing that can be missing is the
@@ -1283,6 +1342,19 @@ pub struct MachineSetup {
     /// `bridge_status` (launcher open, a bay switched to a physical drive):
     /// the scan walks the serial bus, which is not a per-frame activity.
     bridge_ports: Vec<Option<String>>,
+    /// Host disks the Host Disk page can offer, sampled when that page is
+    /// opened or refreshed rather than every frame: enumerating walks the
+    /// host's storage tree, and a card pushed in mid-session is picked up by
+    /// Refresh rather than by polling.
+    host_disks: Vec<HostDiskRow>,
+    /// The disk ticked in the table. At most one: attaching two real disks at
+    /// once is not something this page does, and a single tick makes that
+    /// obvious without needing to be explained.
+    host_disk_selected: Option<String>,
+    /// Whether the host has granted the access raw disks need. Real media is
+    /// privileged on every supported platform, so the page stays read-only
+    /// until this is asked for and given.
+    host_disk_privileged: bool,
     // Hard disk. Each drive's optional volume-name override (directory mounts
     // only) sits in the matching `*_name` slot, paralleling the path slot. Boot
     // priority is edited on the Boot Priority sub-page and split across two
@@ -1490,6 +1562,11 @@ impl MachineSetup {
             bridge_edit_drive: 0,
             bridge_status: bridge_status(),
             bridge_ports: sample_bridge_ports(),
+            // Not sampled at construction: the page samples when it opens, so
+            // a launcher that never visits it never touches the host's disks.
+            host_disks: Vec::new(),
+            host_disk_selected: None,
+            host_disk_privileged: false,
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
             ide_master_bootpri: boot_priority_of(raw.ide.master.as_ref().and_then(|d| d.bootpri)),
@@ -3630,6 +3707,60 @@ impl MachineSetup {
         self.bridge_edit_drive
     }
 
+    /// Stand in for the host's storage, so the page can be drawn and tested
+    /// without one attached.
+    #[cfg(test)]
+    pub fn set_host_disks_for_test(&mut self, disks: Vec<HostDiskRow>) {
+        self.host_disks = disks;
+    }
+
+    /// The disks the Host Disk table is showing.
+    pub fn host_disks(&self) -> &[HostDiskRow] {
+        &self.host_disks
+    }
+
+    /// Look at the host's storage again. Called when the page opens and from
+    /// its Refresh button, so a card pushed in mid-session appears without the
+    /// launcher polling for it.
+    pub fn refresh_host_disks(&mut self) {
+        self.host_disks = sample_host_disks();
+        // A disk that has gone (unplugged between looks) cannot stay ticked.
+        if let Some(selected) = &self.host_disk_selected {
+            if !self.host_disks.iter().any(|d| &d.id == selected) {
+                self.host_disk_selected = None;
+            }
+        }
+    }
+
+    /// The disk ticked in the table, if any.
+    pub fn host_disk_selected(&self) -> Option<&str> {
+        self.host_disk_selected.as_deref()
+    }
+
+    /// Tick one disk, which unticks whatever was ticked before: the page
+    /// attaches one disk, so the table behaves like a choice rather than a set
+    /// of independent boxes. Ticking the ticked one clears it.
+    pub fn select_host_disk(&mut self, index: usize) {
+        let Some(row) = self.host_disks.get(index) else {
+            return;
+        };
+        if self.host_disk_selected.as_deref() == Some(row.id.as_str()) {
+            self.host_disk_selected = None;
+        } else {
+            self.host_disk_selected = Some(row.id.clone());
+        }
+    }
+
+    /// Whether the host has granted what raw disk access needs.
+    pub fn host_disk_privileged(&self) -> bool {
+        self.host_disk_privileged
+    }
+
+    /// Record that privilege was granted (or given up).
+    pub fn set_host_disk_privileged(&mut self, on: bool) {
+        self.host_disk_privileged = on;
+    }
+
     pub fn set_bridge_edit_drive(&mut self, idx: usize) {
         self.bridge_edit_drive = idx.min(3);
     }
@@ -5440,6 +5571,7 @@ mod tests {
         for t in [
             LauncherTab::Cd,
             LauncherTab::HostFs,
+            LauncherTab::HostDisk,
             LauncherTab::BootPriority,
         ] {
             assert!(!TABS.contains(&t));
@@ -5462,6 +5594,7 @@ mod tests {
             [
                 LauncherTab::Cd,
                 LauncherTab::HostFs,
+                LauncherTab::HostDisk,
                 LauncherTab::BootPriority
             ]
         );

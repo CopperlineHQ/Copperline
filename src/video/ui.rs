@@ -758,6 +758,14 @@ pub enum UiControl {
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
     LauncherZorroRemove(usize),
+    /// Ask the host for the access raw disks need, or give it up.
+    LauncherHostDiskPrivileged,
+    /// Tick one disk in the Host Disk table.
+    LauncherHostDiskSelect(usize),
+    /// Look at the host's storage again.
+    LauncherHostDiskRefresh,
+    /// Attach the ticked disk to the machine.
+    LauncherHostDiskMount,
     /// Plugin config: step an enum/int option of a Zorro board.
     LauncherBoardCycle {
         board: usize,
@@ -4271,6 +4279,71 @@ fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
     }
 }
 
+/// The Privileged-mode button, sitting beside Back on the nav row.
+///
+/// Wider than a nav chip because its label is long and because it is a state,
+/// not a link: it should not read as another page to visit.
+const HOST_DISK_PRIV_W: usize = LAUNCH_SIDEBAR_W + 60;
+
+fn host_disk_privileged_button_rect(rect: Rect) -> Rect {
+    let back = launcher_back_button_rect(rect);
+    Rect {
+        x: back.x + back.w + 8,
+        y: back.y,
+        w: HOST_DISK_PRIV_W,
+        h: back.h,
+    }
+}
+
+/// Geometry of the Host Disk table: the framed box listing what the host has.
+const HOST_DISK_ROW_H: usize = 14;
+const HOST_DISK_HEADER_H: usize = 16;
+/// Rows drawn inside the box. Beyond this the list is clipped; a host with
+/// more removable disks than this attached is not the case to optimise for.
+const HOST_DISK_VISIBLE_ROWS: usize = 8;
+/// Column starts, as offsets from the inside edge of the box.
+const HOST_DISK_COL_DISK: usize = 8;
+const HOST_DISK_COL_VOLUME: usize = 88;
+const HOST_DISK_COL_SIZE: usize = 300;
+const HOST_DISK_COL_TICK: usize = 396;
+
+fn host_disk_table_rect(rect: Rect) -> Rect {
+    let x = launcher_pane_x(rect);
+    Rect {
+        x,
+        y: launcher_content_top(rect) + LAUNCH_NAV_BLOCK_H + 18,
+        w: rect.w.saturating_sub(x - rect.x + 16),
+        h: HOST_DISK_HEADER_H + HOST_DISK_VISIBLE_ROWS * HOST_DISK_ROW_H + 4,
+    }
+}
+
+/// One row inside the table, by index.
+fn host_disk_row_rect(rect: Rect, index: usize) -> Rect {
+    let table = host_disk_table_rect(rect);
+    Rect {
+        x: table.x + 2,
+        y: table.y + HOST_DISK_HEADER_H + index * HOST_DISK_ROW_H,
+        w: table.w.saturating_sub(4),
+        h: HOST_DISK_ROW_H,
+    }
+}
+
+/// The buttons under the table, left to right.
+fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let table = host_disk_table_rect(rect);
+    let y = table.y + table.h + 10;
+    let button = |slot: usize| Rect {
+        x: table.x + slot * 96,
+        y,
+        w: 88,
+        h: LAUNCH_TAB_H,
+    };
+    [
+        (UiControl::LauncherHostDiskMount, button(0)),
+        (UiControl::LauncherHostDiskRefresh, button(1)),
+    ]
+}
+
 /// A sub-page's Back button, on the nav row.
 fn launcher_back_button_rect(rect: Rect) -> Rect {
     launcher_nav_button_rect(rect, 0)
@@ -4705,6 +4778,21 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     }
     // The top nav row: a page's sibling links (the Storage and A/V sub-pages),
     // or a Back button.
+    if state.tab == LauncherTab::HostDisk {
+        if host_disk_privileged_button_rect(rect).contains(pos) {
+            return Some(UiControl::LauncherHostDiskPrivileged);
+        }
+        for i in 0..state.setup.host_disks().len().min(HOST_DISK_VISIBLE_ROWS) {
+            if host_disk_row_rect(rect, i).contains(pos) {
+                return Some(UiControl::LauncherHostDiskSelect(i));
+            }
+        }
+        for (control, button) in host_disk_button_rects(rect) {
+            if button.contains(pos) {
+                return Some(control);
+            }
+        }
+    }
     if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherTab(parent));
@@ -4722,6 +4810,199 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     }
     None
+}
+
+/// A button that stays down while it is on.
+///
+/// The bevel is drawn the other way up when pressed -- light along the bottom
+/// and right instead of the top and left -- so the face reads as pushed into
+/// the panel rather than standing off it. It is the same treatment the MT-32
+/// front panel gives its latching buttons, and it says "this is a state you
+/// are in", which a button that merely looks clicked does not.
+fn draw_latching_button(
+    frame: &mut [u8],
+    rect: Rect,
+    label: &str,
+    on: bool,
+    hover: bool,
+    scale: usize,
+) {
+    // The flipped bevel is what says "on"; the face only follows the pointer,
+    // so the state stays readable when the mouse is elsewhere.
+    let face = if hover {
+        BUTTON_FACE_HOVER
+    } else {
+        BUTTON_FACE
+    };
+    let scaled = scale_rect(rect, scale);
+    fill_rect(frame, scaled, face, scale);
+    if on {
+        draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
+    } else {
+        draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    }
+    let text_w = label.chars().count() * font::GLYPH_W;
+    let x = rect.x + rect.w.saturating_sub(text_w) / 2;
+    let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
+    // A pressed button's label shifts with the face, the way a real one does.
+    let nudge = usize::from(on);
+    draw_panel_text(frame, x + nudge, y + nudge, label, BUTTON_TEXT, 1, scale);
+}
+
+/// The Host Disk page: what the host has, and which of it to attach.
+fn draw_host_disk_page(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let setup = &state.setup;
+    let privileged = setup.host_disk_privileged();
+    let table = host_disk_table_rect(rect);
+
+    // The box, sunk into the panel like an entry field so it reads as
+    // something to look into rather than a raised control.
+    let scaled = scale_rect(table, scale);
+    fill_rect(frame, scaled, ENTRY_BG, scale);
+    draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
+
+    // Column headings, then a rule under them.
+    let head_y = table.y + 4;
+    for (offset, title) in [
+        (HOST_DISK_COL_DISK, "Disk"),
+        (HOST_DISK_COL_VOLUME, "Volume"),
+        (HOST_DISK_COL_SIZE, "Size"),
+        (HOST_DISK_COL_TICK, "Enabled"),
+    ] {
+        draw_panel_text(
+            frame,
+            table.x + offset,
+            head_y,
+            title,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    fill_rect(
+        frame,
+        scale_rect(
+            Rect {
+                x: table.x + 2,
+                y: table.y + HOST_DISK_HEADER_H - 2,
+                w: table.w.saturating_sub(4),
+                h: 1,
+            },
+            scale,
+        ),
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+
+    let disks = setup.host_disks();
+    if disks.is_empty() {
+        draw_panel_text(
+            frame,
+            table.x + HOST_DISK_COL_DISK,
+            table.y + HOST_DISK_HEADER_H + 4,
+            "No removable disks found -- attach one and choose Refresh",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    for (i, disk) in disks.iter().take(HOST_DISK_VISIBLE_ROWS).enumerate() {
+        let row = host_disk_row_rect(rect, i);
+        let ticked = setup.host_disk_selected() == Some(disk.id.as_str());
+        if ticked || hover == Some(UiControl::LauncherHostDiskSelect(i)) {
+            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
+        }
+        let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
+        // A disk the host is using cannot simply be taken, so say so where
+        // the reason is visible rather than only when Mount fails.
+        let colour = if disk.mounted.is_empty() {
+            PANEL_TEXT
+        } else {
+            PANEL_TEXT_DIM
+        };
+        let volume = if disk.mounted.is_empty() {
+            truncate_to_width(&disk.volume, HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8)
+        } else {
+            truncate_to_width(
+                &format!("{} (in use)", disk.volume),
+                HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8,
+            )
+        };
+        for (offset, text) in [
+            (HOST_DISK_COL_DISK, disk.id.clone()),
+            (HOST_DISK_COL_VOLUME, volume),
+            (HOST_DISK_COL_SIZE, disk.size.clone()),
+        ] {
+            draw_panel_text(frame, row.x + offset, text_y, &text, colour, 1, scale);
+        }
+        let box_rect = Rect {
+            x: row.x + HOST_DISK_COL_TICK + 12,
+            y: row.y + 2,
+            w: 10,
+            h: 10,
+        };
+        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+        draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
+        if ticked {
+            fill_rect(
+                frame,
+                scale_rect(
+                    Rect {
+                        x: box_rect.x + 2,
+                        y: box_rect.y + 2,
+                        w: 6,
+                        h: 6,
+                    },
+                    scale,
+                ),
+                if privileged {
+                    PANEL_TEXT_HILIGHT
+                } else {
+                    PANEL_TEXT_DIM
+                },
+                scale,
+            );
+        }
+    }
+
+    for (control, button) in host_disk_button_rects(rect) {
+        let label = match control {
+            UiControl::LauncherHostDiskMount => "Mount",
+            _ => "Refresh",
+        };
+        // Mounting needs both a disk to mount and the access to open it;
+        // Refresh only ever looks, so it stays live.
+        let enabled = match control {
+            UiControl::LauncherHostDiskMount => privileged && setup.host_disk_selected().is_some(),
+            _ => true,
+        };
+        draw_text_button(
+            frame,
+            button,
+            label,
+            enabled,
+            enabled && hover == Some(control),
+            scale,
+        );
+    }
+
+    // What the page is waiting for, under the buttons, so the greyed Mount
+    // button is never a mystery.
+    let note_y = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
+    let note = if !privileged {
+        "Choose Privileged mode to let Copperline open real disks."
+    } else if setup.host_disk_selected().is_none() {
+        "Tick a disk to attach it to the machine."
+    } else {
+        "Mount attaches the ticked disk as a hard drive."
+    };
+    draw_panel_text(frame, table.x, note_y, note, PANEL_TEXT_DIM, 1, scale);
 }
 
 /// Truncate `text` (already a short file name) to fit `avail_px`, appending a
@@ -5640,6 +5921,18 @@ fn draw_launcher(
                 hover == Some(UiControl::LauncherTab(parent)),
                 scale,
             );
+            // Host Disk carries its privilege state beside Back, because it
+            // governs the whole page rather than any one control on it.
+            if state.tab == LauncherTab::HostDisk {
+                draw_latching_button(
+                    frame,
+                    host_disk_privileged_button_rect(rect),
+                    "Privileged mode",
+                    state.setup.host_disk_privileged(),
+                    hover == Some(UiControl::LauncherHostDiskPrivileged),
+                    scale,
+                );
+            }
         } else {
             for (slot, &(label, target)) in options.iter().enumerate() {
                 draw_launcher_chip(
@@ -5653,6 +5946,9 @@ fn draw_launcher(
                 );
             }
         }
+    }
+    if state.tab == LauncherTab::HostDisk {
+        draw_host_disk_page(frame, rect, state, hover, scale);
     }
     // The Input tab spells out what the chosen wiring means: which host
     // input source ends up driving each port, live as the values cycle.
@@ -8348,6 +8644,38 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
+
+        // The Host Disk page, with a disk ticked and privileged mode on, so
+        // the table, the latching button and the enabled Mount all render.
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_host_disk_privileged(true);
+            setup.set_host_disks_for_test(vec![
+                launcher::HostDiskRow {
+                    id: "disk4".to_string(),
+                    volume: "SanDisk Extreme SD".to_string(),
+                    size: "31.9 GB".to_string(),
+                    mounted: Vec::new(),
+                },
+                launcher::HostDiskRow {
+                    id: "disk6".to_string(),
+                    volume: "Kingston DataTraveler".to_string(),
+                    size: "3.9 GB".to_string(),
+                    mounted: vec!["/Volumes/UNTITLED".to_string()],
+                },
+            ]);
+            setup.select_host_disk(0);
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::HostDisk;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-host-disk");
+        }
 
         // The FluxBridge settings page reached from Configure, with an
         // interface selected, which is the state its rows are drawn live in.

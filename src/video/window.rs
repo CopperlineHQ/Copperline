@@ -5596,6 +5596,12 @@ impl App {
             UiControl::LauncherTab(tab) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.tab = tab;
+                    // Opening the Host Disk page is the moment to look at the
+                    // host's storage: a card pushed in since the launcher
+                    // opened should be there when the page is.
+                    if tab == crate::video::launcher::LauncherTab::HostDisk {
+                        state.setup.refresh_host_disks();
+                    }
                 }
             }
             UiControl::LauncherCycle { field, forward } => {
@@ -5633,6 +5639,53 @@ impl App {
                     let on = !state.setup.drive_bridged(bay);
                     state.setup.set_drive_bridged(bay, on);
                     state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskPrivileged => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // Asking the host for raw-disk access is the platform's
+                    // business and its prompt, not a dialog of ours. Until
+                    // that is wired up the button records the intent, which is
+                    // what the rest of the page keys off.
+                    let on = !state.setup.host_disk_privileged();
+                    state.setup.set_host_disk_privileged(on);
+                    if on {
+                        state.setup.refresh_host_disks();
+                    }
+                    state.status = Some(StatusMessage::ok(if on {
+                        "Privileged mode on: real disks can be opened"
+                    } else {
+                        "Privileged mode off"
+                    }));
+                }
+            }
+            UiControl::LauncherHostDiskSelect(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.select_host_disk(index);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskRefresh => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.refresh_host_disks();
+                    let found = state.setup.host_disks().len();
+                    state.status = Some(StatusMessage::ok(match found {
+                        0 => "No removable disks found".to_string(),
+                        1 => "1 disk found".to_string(),
+                        n => format!("{n} disks found"),
+                    }));
+                }
+            }
+            UiControl::LauncherHostDiskMount => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // Attaching the disk to a machine is the next piece of
+                    // work; the page can already choose one, which is what
+                    // decides everything after it.
+                    state.status =
+                        Some(StatusMessage::ok(match state.setup.host_disk_selected() {
+                            Some(id) => format!("{id} selected (attaching is not wired up yet)"),
+                            None => "Tick a disk first".to_string(),
+                        }));
                 }
             }
             UiControl::LauncherBridgeConfigure(bay) => {

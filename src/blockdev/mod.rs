@@ -122,12 +122,18 @@ pub struct HostDevice {
 }
 
 impl HostDevice {
-    /// Capacity rounded for display: `3.7 GB`, `512 MB`.
+    /// Capacity rounded for display: `2.0 TB`, `3.7 GB`, `512 MB`.
+    ///
+    /// Decimal units, because that is what the hardware is sold and labelled
+    /// in -- a card that says 32 GB should read as about 32 GB here, not 29.
     pub fn size_label(&self) -> String {
+        const TB: f64 = 1_000_000_000_000.0;
         const GB: f64 = 1_000_000_000.0;
         const MB: f64 = 1_000_000.0;
         let bytes = self.size_bytes as f64;
-        if bytes >= GB {
+        if bytes >= TB {
+            format!("{:.1} TB", bytes / TB)
+        } else if bytes >= GB {
             format!("{:.1} GB", bytes / GB)
         } else {
             format!("{:.0} MB", bytes / MB)
