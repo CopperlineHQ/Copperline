@@ -422,6 +422,7 @@ async function load() {
     setLoadStatus('loading emulator...');
     wasm = await init();
     buildInfo = WebEmu.build_info?.() ?? null;
+    showBuildInfo();
     populateMachineSelect();
     populateVideoSelect();
   } catch (e) {
@@ -5201,6 +5202,32 @@ $('kickurl')?.addEventListener('click', () => {
 
 const BUG_REPORT_URL = 'https://github.com/CopperlineHQ/Copperline/issues/new';
 let buildInfo = null; // the wasm build's tag and commit, known once init resolves
+
+// Optional page-shell hook: a #build-info element is filled with the
+// running bundle's identity once the wasm module is up, so a page can show
+// what is deployed. The "ref (commit)" shape CI bakes into build_info()
+// gets the commit linked to GitHub; anything else ("dev build", or
+// "unknown" for a bundle too old to carry build_info) stays plain text.
+// The element is untouched until the module resolves, so a shell can hide
+// the empty state with :empty.
+function showBuildInfo() {
+  const el = $('build-info');
+  if (!el) return;
+  const info = buildInfo ?? 'unknown';
+  el.textContent = '';
+  const m = /^.+ \(([0-9a-f]{6,40})\)$/.exec(info);
+  if (m) {
+    el.append('build: ');
+    const a = document.createElement('a');
+    a.href = `https://github.com/CopperlineHQ/Copperline/commit/${m[1]}`;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = info;
+    el.appendChild(a);
+  } else {
+    el.append(`build: ${info}`);
+  }
+}
 
 function bugReportHref() {
   const toml = (v) =>
