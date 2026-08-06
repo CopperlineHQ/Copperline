@@ -58,11 +58,13 @@ mod platform;
 
 use std::path::PathBuf;
 
-/// Windows has no broker of its own that hands back an opened device, so
-/// Copperline is one for itself: this is the privileged half, and the flag
-/// that reaches it. See the [`platform`] module docs for why it is a separate
+/// Neither Windows nor Linux has a broker of its own that hands back an opened
+/// device -- macOS's `authopen` has no equivalent on either -- so Copperline is
+/// one for itself: this is the privileged half, and the flag that reaches it.
+/// What is behind the flag differs by host and is private to the two halves
+/// that speak it; see the [`platform`] module docs for why it is a separate
 /// process and what it will refuse.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub use platform::{serve_broker_request, BROKER_FLAG};
 
 /// How safe a device is to hand to the emulated machine.
@@ -234,7 +236,10 @@ impl BlockDevice {
     ///
     /// A platform opener is the only caller, and not every platform has
     /// written one yet, so on those this is built but never reached.
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", windows)),
+        allow(dead_code)
+    )]
     pub(crate) fn new(
         file: std::fs::File,
         id: String,
@@ -479,9 +484,9 @@ pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
         refuse_if_unusable(&device, *write)?;
         wanted.push((device, *write));
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     return platform::reserve_devices(&wanted);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = wanted;
         Ok(())
@@ -494,9 +499,9 @@ pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
 /// nothing to hand back, and neither has one where the machine has since taken
 /// it for itself.
 pub fn release_device(id: &str) -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     return platform::release_device(id);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = id;
         false
@@ -611,6 +616,27 @@ mod tests {
     /// A VHD is not on a bus anything removable arrives on, so it lists as
     /// `internal`: hidden from the launcher, still reachable by name here,
     /// which is what this wants.
+    ///
+    /// On Linux the disposable disk is a `scsi_debug` one, which appears as a
+    /// whole SCSI disk of its own and lists as `internal` for the same reason.
+    /// A loop device is *not* the equivalent: loop devices are deliberately
+    /// left out of enumeration, so one cannot be reached by name here.
+    /// `sector_size` is the useful knob -- it is the only way most machines
+    /// have of exercising the read-modify-write path on media whose blocks are
+    /// larger than a guest sector.
+    ///
+    /// ```sh
+    /// sudo modprobe scsi_debug dev_size_mb=64            # add sector_size=4096 for 4Kn
+    /// copperline --list-disks                            # says which sdN it took
+    /// cargo test --release --lib --no-run                # then run that binary as root:
+    /// sudo COPPERLINE_TEST_DISK=sdN target/release/deps/copperline-XXXX \
+    ///     blockdev::tests::device_round_trip --ignored --nocapture
+    /// sudo rmmod scsi_debug
+    /// ```
+    ///
+    /// Run as root deliberately: the test is about the sector translation, and
+    /// going through the privileged opener would put a password prompt in the
+    /// middle of a test run.
     #[test]
     #[ignore = "writes to a real device named by COPPERLINE_TEST_DISK"]
     fn device_round_trip() {

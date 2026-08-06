@@ -135,11 +135,13 @@ pub struct CliArgs {
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
     pub list_net_interfaces: bool,
     pub list_disks: bool,
-    /// The privileged half of the Windows host-disk opener: which process to
-    /// hand the open disks back to, where to leave the answer, and the disks
-    /// themselves as `DEVICE:rw`/`DEVICE:ro`. Set only by the unprivileged
-    /// half of this same program, which is why it is absent from `--help`.
-    pub host_disk_broker: Option<(u32, PathBuf, Vec<String>)>,
+    /// The privileged half of the host-disk opener, and everything the
+    /// unprivileged half wrote for it. What the words mean is private to those
+    /// two halves and differs by host -- Windows names a process and a file to
+    /// answer in, Linux a socket to answer down -- so they are kept as written
+    /// and handed to the backend to read. Set only by this same program, which
+    /// is why it is absent from `--help`.
+    pub host_disk_broker: Option<Vec<String>>,
     /// Linux companion helper setup action: install, uninstall, or status.
     pub net_helper_action: Option<String>,
     /// `--sampler-list-audio-inputs`: print the host audio input devices (for
@@ -340,10 +342,10 @@ where
     let mut list_audio_devices = false;
     let mut list_net_interfaces = false;
     let mut list_disks = false;
-    // Only the Windows build has a privileged half to be, so only it ever
-    // fills this in.
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut host_disk_broker: Option<(u32, PathBuf, Vec<String>)> = None;
+    // Only the hosts with a privileged half of their own ever fill this in;
+    // macOS has `authopen` and needs none.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(unused_mut))]
+    let mut host_disk_broker: Option<Vec<String>> = None;
     let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
@@ -367,26 +369,19 @@ where
             }
             // Copperline talking to itself across a privilege boundary, not an
             // interface: the unprivileged half writes this command line, so
-            // its arguments are positional and unforgiving.
-            #[cfg(windows)]
+            // everything after the flag belongs to the backend that will read
+            // it, and opening those disks is the whole of what this process
+            // does -- nothing else can follow.
+            #[cfg(any(windows, target_os = "linux"))]
             copperline::blockdev::BROKER_FLAG => {
-                let usage = format!(
-                    "{} is used by Copperline itself and takes PID REPLY DEVICE:rw|ro...",
-                    copperline::blockdev::BROKER_FLAG
-                );
-                let parent: u32 = args
-                    .next()
-                    .ok_or_else(|| anyhow!(usage.clone()))?
-                    .parse()
-                    .map_err(|_| anyhow!(usage.clone()))?;
-                let reply = PathBuf::from(args.next().ok_or_else(|| anyhow!(usage.clone()))?);
-                // Everything after is a disk. Opening them is the whole of
-                // what this process does, so nothing else can follow.
-                let disks: Vec<String> = args.by_ref().collect();
-                if disks.is_empty() {
-                    return Err(anyhow!(usage));
+                let rest: Vec<String> = args.by_ref().collect();
+                if rest.is_empty() {
+                    return Err(anyhow!(
+                        "{} is used by Copperline itself",
+                        copperline::blockdev::BROKER_FLAG
+                    ));
                 }
-                host_disk_broker = Some((parent, reply, disks));
+                host_disk_broker = Some(rest);
             }
             "--host-disk" | "--host-disk-read-only" => {
                 let read_only = a == "--host-disk-read-only";
@@ -1938,12 +1933,30 @@ fn main() -> Result<()> {
     if cli.list_disks {
         return print_host_disks();
     }
-    // Before anything else this process might do: it exists only to open one
-    // disk for the Copperline that could not, and it must not open a window,
+    // Before anything else this process might do: it exists only to open the
+    // disks for the Copperline that could not, and it must not open a window,
     // read a configuration, or touch a machine on the way.
-    #[cfg(windows)]
-    if let Some((parent, reply, disks)) = &cli.host_disk_broker {
-        return copperline::blockdev::serve_broker_request(disks, *parent, reply);
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(arguments) = &cli.host_disk_broker {
+        // Each host's two halves have their own private arrangement, so the
+        // backend reads what its own other half wrote.
+        #[cfg(windows)]
+        {
+            let usage = "the privileged half takes PID REPLY DEVICE:rw|ro...";
+            let parent: u32 = arguments
+                .first()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| anyhow!(usage))?;
+            let reply = PathBuf::from(arguments.get(1).ok_or_else(|| anyhow!(usage))?);
+            let disks = arguments.get(2..).filter(|disks| !disks.is_empty());
+            return copperline::blockdev::serve_broker_request(
+                disks.ok_or_else(|| anyhow!(usage))?,
+                parent,
+                &reply,
+            );
+        }
+        #[cfg(target_os = "linux")]
+        return copperline::blockdev::serve_broker_request(arguments);
     }
     if let Some(action) = cli.net_helper_action.as_deref() {
         return run_net_helper_setup(action);
