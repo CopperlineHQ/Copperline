@@ -5710,7 +5710,13 @@ impl App {
                             // some hosts, and this is where somebody has just
                             // asked for one -- a dialog minutes later, behind
                             // a machine booting, belongs to nothing they did.
-                            let asked: Vec<(String, bool)> = disks
+                            // Every disk the machine is set up to have, not
+                            // only the ones just ticked: this says which disks
+                            // are wanted, and anything held that is not on the
+                            // list goes back to the host.
+                            let asked: Vec<(String, bool)> = state
+                                .setup
+                                .host_disks_attached()
                                 .iter()
                                 .map(|disk| (disk.device.clone(), disk.writable))
                                 .collect();
