@@ -107,6 +107,109 @@ unsafe extern "C" {
     fn CFNumberGetValue(number: CFTypeRef, the_type: CFIndex, value: *mut i64) -> u8;
 }
 
+// Security.framework: enough to ask for one right ourselves, so the prompt
+// is presented on Copperline's behalf rather than by the tool it drives.
+#[allow(non_camel_case_types)]
+type AuthorizationRef = *mut std::ffi::c_void;
+type OSStatus = i32;
+
+/// `AuthorizationExternalForm`: an opaque 32-byte blob by definition.
+const AUTHORIZATION_EXTERNAL_FORM_LENGTH: usize = 32;
+
+#[repr(C)]
+struct AuthorizationItem {
+    name: *const libc::c_char,
+    value_length: usize,
+    value: *mut std::ffi::c_void,
+    flags: u32,
+}
+
+#[repr(C)]
+struct AuthorizationRights {
+    count: u32,
+    items: *mut AuthorizationItem,
+}
+
+/// `kAuthorizationFlagInteractionAllowed | kAuthorizationFlagExtendRights`.
+const AUTH_FLAGS_ASK: u32 = (1 << 0) | (1 << 1);
+
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn AuthorizationCreate(
+        rights: *const AuthorizationRights,
+        environment: *const std::ffi::c_void,
+        flags: u32,
+        authorization: *mut AuthorizationRef,
+    ) -> OSStatus;
+    fn AuthorizationCopyRights(
+        authorization: AuthorizationRef,
+        rights: *const AuthorizationRights,
+        environment: *const std::ffi::c_void,
+        flags: u32,
+        authorized_rights: *mut *mut AuthorizationRights,
+    ) -> OSStatus;
+    fn AuthorizationMakeExternalForm(
+        authorization: AuthorizationRef,
+        external_form: *mut u8,
+    ) -> OSStatus;
+    fn AuthorizationFree(authorization: AuthorizationRef, flags: u32) -> OSStatus;
+}
+
+/// Ask the user for the right to open one device, as Copperline.
+///
+/// `authopen` will present its own dialog if left to it, and that dialog
+/// names `authopen` -- which tells the user nothing about who is asking or
+/// why. Building the authorization here instead means the prompt is raised by
+/// this process, so it is attributed to Copperline, and `authopen` is handed
+/// the result rather than asking again.
+///
+/// Returns the external form to write to its stdin, or `None` if the user
+/// declined or the request failed -- in which case the caller lets `authopen`
+/// ask in its own name rather than failing outright.
+fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]> {
+    // The right is per-path, which is what keeps a granted open from being
+    // turned on any other device.
+    let right = CString::new(format!(
+        "sys.openfile.{}.{path}",
+        if write { "readwrite" } else { "readonly" }
+    ))
+    .ok()?;
+    let mut item = AuthorizationItem {
+        name: right.as_ptr(),
+        value_length: 0,
+        value: std::ptr::null_mut(),
+        flags: 0,
+    };
+    let rights = AuthorizationRights {
+        count: 1,
+        items: &mut item,
+    };
+
+    let mut auth: AuthorizationRef = std::ptr::null_mut();
+    // Created empty, then extended: the dialog belongs to the second call, so
+    // a failure to create is distinguishable from a refusal to grant.
+    if unsafe { AuthorizationCreate(std::ptr::null(), std::ptr::null(), 0, &mut auth) } != 0 {
+        return None;
+    }
+    let granted = unsafe {
+        AuthorizationCopyRights(
+            auth,
+            &rights,
+            std::ptr::null(),
+            AUTH_FLAGS_ASK,
+            std::ptr::null_mut(),
+        )
+    };
+    if granted != 0 {
+        unsafe { AuthorizationFree(auth, 0) };
+        return None;
+    }
+    let mut external = [0u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH];
+    let made = unsafe { AuthorizationMakeExternalForm(auth, external.as_mut_ptr()) };
+    unsafe { AuthorizationFree(auth, 0) };
+    (made == 0).then_some(external)
+}
+
 /// A CoreFoundation object this code owns and must release.
 struct CfOwned(CFTypeRef);
 
@@ -487,14 +590,36 @@ fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
     let ours = unsafe { OwnedFd::from_raw_fd(pair[0]) };
     let theirs = unsafe { OwnedFd::from_raw_fd(pair[1]) };
 
-    let mut child = std::process::Command::new("/usr/libexec/authopen")
-        .arg("-stdoutpipe")
+    // Ask for the right ourselves so the prompt is raised by, and named
+    // after, Copperline. If that does not happen -- the user declines, or the
+    // request fails -- fall back to letting the tool ask in its own name
+    // rather than refusing to open at all.
+    let external = authorize_open(path, flags != libc::O_RDONLY);
+    let mut command = std::process::Command::new("/usr/libexec/authopen");
+    command.arg("-stdoutpipe");
+    if external.is_some() {
+        command.arg("-extauth");
+    }
+    command
         .arg("-o")
         .arg(flags.to_string())
         .arg(path)
-        .stdout(std::process::Stdio::from(theirs))
-        .spawn()
-        .context("running /usr/libexec/authopen")?;
+        .stdout(std::process::Stdio::from(theirs));
+    if external.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+    let mut child = command.spawn().context("running /usr/libexec/authopen")?;
+    // The authorization is read before anything else on stdin.
+    if let Some(form) = external {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(&form)
+                .context("handing over the authorization")?;
+            stdin.flush().ok();
+        }
+        drop(child.stdin.take());
+    }
 
     let received = receive_fd(ours.as_raw_fd());
     let status = child.wait().context("waiting for authopen")?;
