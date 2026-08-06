@@ -5675,9 +5675,20 @@ impl App {
                             // close what that opened, or the host would be
                             // told it may have a disk this process still
                             // holds.
-                            crate::blockdev::release_device(&device);
+                            let released = crate::blockdev::release_device(&device);
                             log::info!("host disk: {device} taken off {}", attach.label());
-                            StatusMessage::ok(format!("{device} released"))
+                            StatusMessage::ok(if released {
+                                format!("{device} released")
+                            } else {
+                                // The setting is gone either way, but a
+                                // machine already running with this disk holds
+                                // it in its own right, and saying "released"
+                                // of a disk still locked is how somebody ends
+                                // up wondering why they cannot have it back.
+                                format!(
+                                    "{device} released; a running machine keeps it until it stops"
+                                )
+                            })
                         }
                         _ => StatusMessage::err("Nothing to unmount"),
                     });
@@ -5739,10 +5750,11 @@ impl App {
                                 Err(error) => {
                                     // The whole chain goes to the log, which
                                     // has room for it; the status line gets
-                                    // the outermost link, which is the one
-                                    // written to be read.
+                                    // the shortened first sentence, the same
+                                    // as every other failure the launcher
+                                    // reports.
                                     log::warn!("host disk: not attached: {error:#}");
-                                    Some(error.to_string())
+                                    Some(short_status_error(&error))
                                 }
                             };
                             match refused {

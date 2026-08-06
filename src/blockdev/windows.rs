@@ -1020,7 +1020,12 @@ fn take_volumes(disk: u32, id: &str) -> Result<Vec<std::fs::File>> {
         )
         // These read out to somebody on one line of a launcher, so each says
         // the thing to do about it and leaves the detail to the chain beneath.
-        .with_context(|| format!("{id}: Windows would not give up {where_it_is}"))?;
+        // A volume that will not open at all is usually locked by a machine
+        // still running in this very process, which is the one cause nobody
+        // guesses from "access denied".
+        .with_context(|| {
+            format!("{id}: {where_it_is} is still held; a machine running here may have it")
+        })?;
         control(&handle, FSCTL_LOCK_VOLUME, &[], &mut [])
             .with_context(|| format!("{id}: {where_it_is} is in use; close anything open on it"))?;
         control(&handle, FSCTL_DISMOUNT_VOLUME, &[], &mut [])

@@ -4043,6 +4043,11 @@ impl MachineSetup {
     pub fn host_disk_label(&self, device: &str) -> String {
         match self.host_disks.iter().find(|d| d.id == device) {
             Some(disk) => format!("{device}: {}", disk.volume),
+            // Nothing has been sampled yet, so nothing is known: the Host Disk
+            // page looks when it opens, and a launcher that has not been there
+            // has not asked. A disk sitting in the reader called "not
+            // connected" is worse than one described only by its name.
+            None if self.host_disks.is_empty() => device.to_string(),
             None => format!("{device}: not connected"),
         }
     }
