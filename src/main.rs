@@ -134,6 +134,7 @@ pub struct CliArgs {
     pub list_audio_devices: bool,
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
     pub list_net_interfaces: bool,
+    pub list_disks: bool,
     /// Linux companion helper setup action: install, uninstall, or status.
     pub net_helper_action: Option<String>,
     /// `--sampler-list-audio-inputs`: print the host audio input devices (for
@@ -333,6 +334,7 @@ where
     let mut list_midi = false;
     let mut list_audio_devices = false;
     let mut list_net_interfaces = false;
+    let mut list_disks = false;
     let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
@@ -350,6 +352,9 @@ where
             }
             "--list-net-interfaces" => {
                 list_net_interfaces = true;
+            }
+            "--list-disks" => {
+                list_disks = true;
             }
             "--install-net-helper" => {
                 if net_helper_action.is_some() {
@@ -1101,6 +1106,7 @@ where
         list_midi,
         list_audio_devices,
         list_net_interfaces,
+        list_disks,
         net_helper_action,
         list_sampler_inputs,
         overrides,
@@ -1653,6 +1659,35 @@ fn print_audio_output_devices() -> Result<()> {
 }
 
 /// Print exact adapter identifiers accepted by bridged networking.
+/// List the host's own disks, for `--hdd`.
+///
+/// Enumeration opens nothing and needs no privileges, so this is safe to run
+/// at any time; the disk the host is running from is named but marked, since
+/// hiding it silently would just look like a missing device.
+#[cfg(not(target_arch = "wasm32"))]
+fn print_host_disks() -> Result<()> {
+    println!("Host disks (for --hdd / [hdd] device):");
+    let devices = copperline::blockdev::list_devices()?;
+    if devices.is_empty() {
+        println!("  (none found)");
+    }
+    for device in devices {
+        let usable = if device.safety.openable() {
+            ""
+        } else {
+            "  -- cannot be used"
+        };
+        println!("  {:<10} {}{usable}", device.id, device.label());
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn print_host_disks() -> Result<()> {
+    println!("Host disks: not available in this build");
+    Ok(())
+}
+
 fn print_net_interfaces() -> Result<()> {
     #[cfg(all(feature = "net-bridge", not(target_arch = "wasm32")))]
     {
@@ -1838,6 +1873,9 @@ fn main() -> Result<()> {
     }
     if cli.list_net_interfaces {
         return print_net_interfaces();
+    }
+    if cli.list_disks {
+        return print_host_disks();
     }
     if let Some(action) = cli.net_helper_action.as_deref() {
         return run_net_helper_setup(action);

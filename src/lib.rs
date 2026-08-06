@@ -17,6 +17,11 @@ pub mod akiko;
 pub mod amigaos;
 pub mod ata;
 pub mod audio;
+// Host block devices: a real disk (an SD card, a CF card, an Amiga's own
+// hard drive) standing in for a hard-drive image. Not built for wasm32,
+// which has no such thing to reach.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blockdev;
 pub mod bus;
 pub mod cache;
 pub mod cdrom;
