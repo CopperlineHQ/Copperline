@@ -49,6 +49,7 @@ jobs:
         # table by 4". Modern binaryen also reads the module's feature
         # section itself, so the pass needs no --enable flags to keep.
         run: |
+          set -euo pipefail
           V=version_131
           curl --location --silent --show-error --fail \
             https://github.com/WebAssembly/binaryen/releases/download/$V/binaryen-$V-x86_64-linux.tar.gz \
@@ -77,15 +78,21 @@ jobs:
         # pair fails here, before the site sees it.
         working-directory: crates/copperline-web
         run: |
+          set -euo pipefail
+          # The glue is a self-contained ES module behind a .js name, and
+          # wasm-bindgen emits no package.json "type" to say so; a copy
+          # with an .mjs name loads as ESM on every Node version, without
+          # leaning on newer Nodes' syntax detection.
+          cp pkg/copperline_web.js pkg-smoke-glue.mjs
           cat > pkg-smoke.mjs <<'SMOKE'
           import { readFileSync } from 'fs';
-          import init, { WebEmu } from './pkg/copperline_web.js';
+          import init, { WebEmu } from './pkg-smoke-glue.mjs';
           await init(readFileSync('./pkg/copperline_web_bg.wasm'));
           const emu = new WebEmu('A500', 'PAL');
           console.log('bundle loads:', emu.machine_summary());
           SMOKE
           node pkg-smoke.mjs
-          rm pkg-smoke.mjs
+          rm pkg-smoke.mjs pkg-smoke-glue.mjs
       - name: Check out the website repository
         uses: actions/checkout@v7
         with:
