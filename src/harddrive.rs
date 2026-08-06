@@ -237,9 +237,13 @@ impl HardDriveImage {
     pub fn open_device(id: &str, bus_name: &'static str, writable: bool) -> anyhow::Result<Self> {
         let device = crate::blockdev::find_device(id)?
             .ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+        // A disk the host has mounted is not refused: taking it is the point,
+        // and the platform layer asks the host to let go before opening it.
+        // Say which volumes are going, because the user may have something
+        // open on one of them.
         if !device.mounted.is_empty() {
-            anyhow::bail!(
-                "{id} is in use by this computer ({}); eject it first",
+            log::info!(
+                "{bus_name}: {id} is mounted ({}); taking it from the host",
                 device.mounted.join(", ")
             );
         }

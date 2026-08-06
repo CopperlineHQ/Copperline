@@ -365,6 +365,42 @@ fn describe(
     })
 }
 
+/// Take a disk away from the host so the guest can have it exclusively.
+///
+/// An Amiga-formatted disk usually is not mounted at all -- macOS cannot read
+/// the filesystem, and offers to initialise it instead, which is the offer to
+/// decline. But a disk that carries anything macOS *does* recognise will be
+/// mounted, and the kernel holds the media while a volume is mounted from it,
+/// so opening the whole disk for writing fails with `EBUSY` until every
+/// volume on it is gone. This is the step a user otherwise has to know to do
+/// by hand (`diskutil unmountDisk /dev/diskN`), which is exactly the sort of
+/// thing an emulator should do for them.
+///
+/// `diskutil` is used rather than the DiskArbitration API directly: it is the
+/// supported interface, it already resolves the whole-disk relationship, and
+/// it needs no entitlement -- so it keeps working unchanged inside a signed,
+/// notarized application bundle, where a hand-rolled unmount would be one
+/// more thing to get past the sandbox and the notary.
+pub fn unmount_whole_disk(id: &str) -> Result<()> {
+    let output = std::process::Command::new("/usr/sbin/diskutil")
+        .arg("unmountDisk")
+        .arg(format!("/dev/{id}"))
+        .output()
+        .context("running diskutil unmountDisk")?;
+    if output.status.success() {
+        log::info!("blockdev: {id} unmounted; the machine has it exclusively");
+        return Ok(());
+    }
+    // Nothing mounted is a success as far as we are concerned: the disk is
+    // already ours to open, which is the state this was asked to reach.
+    let message = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{message}", String::from_utf8_lossy(&output.stdout));
+    if combined.contains("was already unmounted") || combined.contains("Unmount successful") {
+        return Ok(());
+    }
+    anyhow::bail!("{id} could not be unmounted: {}", combined.trim());
+}
+
 /// Open a device, asking the system for permission only if it has to.
 ///
 /// Two things stand between a process and `/dev/rdiskN`, and they are
@@ -396,6 +432,11 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
         libc::O_RDONLY
     };
 
+    // The host must let go before the machine can take hold: a mounted volume
+    // keeps the kernel's claim on the media and the open below would fail.
+    if !device.mounted.is_empty() {
+        unmount_whole_disk(&device.id)?;
+    }
     let file = match direct_open(path, flags) {
         Ok(file) => file,
         Err(error) => {

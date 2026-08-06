@@ -4782,9 +4782,13 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         if host_disk_privileged_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherHostDiskPrivileged);
         }
-        for i in 0..state.setup.host_disks().len().min(HOST_DISK_VISIBLE_ROWS) {
-            if host_disk_row_rect(rect, i).contains(pos) {
-                return Some(UiControl::LauncherHostDiskSelect(i));
+        // Ticking a disk is the act that needs the host's permission, so it
+        // is refused until that has been granted.
+        if state.setup.host_disk_privileged() {
+            for i in 0..state.setup.host_disks().len().min(HOST_DISK_VISIBLE_ROWS) {
+                if host_disk_row_rect(rect, i).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskSelect(i));
+                }
             }
         }
         for (control, button) in host_disk_button_rects(rect) {
@@ -4862,10 +4866,28 @@ fn draw_host_disk_page(
     let table = host_disk_table_rect(rect);
 
     // The box, sunk into the panel like an entry field so it reads as
-    // something to look into rather than a raised control.
+    // something to look into rather than a raised control. The outline comes
+    // first and goes all the way round: the inset shading alone is nearly the
+    // panel's own colour, so on its own only the lit edges show and the box
+    // looks bevelled on two sides rather than recessed.
     let scaled = scale_rect(table, scale);
     fill_rect(frame, scaled, ENTRY_BG, scale);
-    draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
+    draw_outline(frame, table, BUTTON_EDGE_LIGHT, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(
+            Rect {
+                x: table.x + 1,
+                y: table.y + 1,
+                w: table.w.saturating_sub(2),
+                h: table.h.saturating_sub(2),
+            },
+            scale,
+        ),
+        BUTTON_EDGE_DARK,
+        ENTRY_BG,
+        scale,
+    );
 
     // Column headings, then a rule under them.
     let head_y = table.y + 4;
@@ -4915,16 +4937,20 @@ fn draw_host_disk_page(
     for (i, disk) in disks.iter().take(HOST_DISK_VISIBLE_ROWS).enumerate() {
         let row = host_disk_row_rect(rect, i);
         let ticked = setup.host_disk_selected() == Some(disk.id.as_str());
-        if ticked || hover == Some(UiControl::LauncherHostDiskSelect(i)) {
+        if ticked || (privileged && hover == Some(UiControl::LauncherHostDiskSelect(i))) {
             fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
         // A disk the host is using cannot simply be taken, so say so where
         // the reason is visible rather than only when Mount fails.
-        let colour = if disk.mounted.is_empty() {
-            PANEL_TEXT
-        } else {
+        // Listing needs nothing of the host, so the disks are always shown --
+        // seeing what is attached is how somebody knows privileged mode is
+        // worth granting. Choosing one is what needs the access, so until it
+        // is granted the rows read as inert.
+        let colour = if !privileged || !disk.mounted.is_empty() {
             PANEL_TEXT_DIM
+        } else {
+            PANEL_TEXT
         };
         let volume = if disk.mounted.is_empty() {
             truncate_to_width(&disk.volume, HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8)
@@ -8675,6 +8701,26 @@ mod tests {
             };
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-host-disk");
+
+            // The same page before the host has granted anything: the disks
+            // are listed (looking costs nothing) but nothing can be chosen.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk Extreme SD".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+            }]);
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::HostDisk;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-host-disk-locked");
         }
 
         // The FluxBridge settings page reached from Configure, with an
