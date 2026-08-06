@@ -5291,7 +5291,6 @@ fn apply_programmable_blanking(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Bounds of the fast interior of one control run, if it has one:
 /// `(x_lo, x_hi, f0, planes_mask)` with `x_lo`/`x_hi` on the output pixel
 /// grid and `f0` the prepared-pixel index of `x_lo`'s sample. The interior
