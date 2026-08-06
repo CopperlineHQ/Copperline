@@ -58,6 +58,13 @@ mod platform;
 
 use std::path::PathBuf;
 
+/// Windows has no broker of its own that hands back an opened device, so
+/// Copperline is one for itself: this is the privileged half, and the flag
+/// that reaches it. See the [`platform`] module docs for why it is a separate
+/// process and what it will refuse.
+#[cfg(windows)]
+pub use platform::{serve_broker_request, BROKER_FLAG};
+
 /// How safe a device is to hand to the emulated machine.
 ///
 /// Ordered by how much protection the device needs, not by preference.
@@ -200,6 +207,16 @@ pub struct BlockDevice {
     /// Whether a refused write has already been reported. The guest will keep
     /// trying, and one explanation is worth more than thousands.
     refusal_reported: bool,
+    /// Volumes the host had mounted from this disk, locked and dismounted for
+    /// as long as the machine has it.
+    ///
+    /// Only Windows has this: a lock there lasts exactly as long as the handle
+    /// that took it, so something must hold them or the host mounts the disk
+    /// back underneath a running emulator. Declared after `file` so the disk
+    /// handle closes first, and the host is let back in only once the machine
+    /// has finished with it.
+    #[cfg(windows)]
+    dismounted: Vec<std::fs::File>,
 }
 
 /// Closing the handle drops the exclusive claim, which is what lets the host
@@ -217,7 +234,7 @@ impl BlockDevice {
     ///
     /// A platform opener is the only caller, and not every platform has
     /// written one yet, so on those this is built but never reached.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     pub(crate) fn new(
         file: std::fs::File,
         id: String,
@@ -234,7 +251,20 @@ impl BlockDevice {
             writable,
             block: vec![0; block_size as usize],
             refusal_reported: false,
+            #[cfg(windows)]
+            dismounted: Vec::new(),
         }
+    }
+
+    /// Hold the volumes a backend had to take from the host to get this disk.
+    ///
+    /// Only Windows calls this. Elsewhere an unmount stands on its own once
+    /// done; a Windows lock lives exactly as long as the handle that took it,
+    /// so the device has to carry them until it goes back.
+    #[cfg(windows)]
+    pub(crate) fn holding(mut self, volumes: Vec<std::fs::File>) -> Self {
+        self.dismounted = volumes;
+        self
     }
 
     /// Which device this is, for logs and errors.
@@ -511,6 +541,25 @@ mod tests {
     /// COPPERLINE_TEST_DISK=diskN cargo test --release \
     ///     blockdev::tests::device_round_trip -- --ignored --nocapture
     /// ```
+    ///
+    /// On Windows the disposable disk is a VHD, which attaches as a physical
+    /// disk of its own. Both the attach and the test want Administrator:
+    /// Windows gives raw access to a whole disk to nobody else, so an
+    /// ordinary shell fails this at the open with that as the reason.
+    ///
+    /// ```text
+    /// diskpart
+    ///   create vdisk file=C:\testdisk.vhd maximum=64 type=fixed
+    ///   attach vdisk
+    ///   list disk                                       # says which number it took
+    ///   exit
+    /// $env:COPPERLINE_TEST_DISK = 'PhysicalDriveN'
+    /// cargo test --release blockdev::tests::device_round_trip -- --ignored --nocapture
+    /// ```
+    ///
+    /// A VHD is not on a bus anything removable arrives on, so it lists as
+    /// `internal`: hidden from the launcher, still reachable by name here,
+    /// which is what this wants.
     #[test]
     #[ignore = "writes to a real device named by COPPERLINE_TEST_DISK"]
     fn device_round_trip() {
