@@ -1154,8 +1154,9 @@ fn print_help() {
     // A build without the feature cannot attach a physical drive at all, so
     // the flags are not listed and not accepted.
     #[cfg(feature = "fluxbridge")]
-    let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
-    let floppy_bridge = format!(
+    let floppy_bridge = {
+        let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
+        format!(
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            {floppy_bridge_names}\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
@@ -1163,13 +1164,10 @@ fn print_help() {
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
-         --hdd DEVICE [ATTACH]          give the machine a real host disk (--list-disks names\n  \
-         \x20                            them); ATTACH is ide-master (default) or ide-slave\n  \
-         --hdd-read-only DEVICE [ATTACH]\n  \
-         \x20                            the same, but the guest cannot write to the disk\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  "
-    );
+        )
+    };
     #[cfg(not(feature = "fluxbridge"))]
     let floppy_bridge = String::new();
     eprintln!(
@@ -1196,7 +1194,12 @@ fn print_help() {
          \x20                            CPUs), e.g. 0, 32M, 128M\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
-         {floppy_bridge}--rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
+         {floppy_bridge}--hdd DEVICE [ATTACH]          give the machine one of the host's own disks\n  \
+         \x20                            (--list-disks names them); ATTACH is ide-master\n  \
+         \x20                            (default), ide-slave, or scsi0..scsi6\n  \
+         --hdd-read-only DEVICE [ATTACH]\n  \
+         \x20                            the same, but the guest cannot write to the disk\n  \
+         --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
@@ -1274,6 +1277,8 @@ fn print_help() {
          --audio-stereo-separation PCT  stereo width 0-100 (100 default, 0 = mono)\n  \
          --list-audio-devices           list host audio output devices and exit\n  \
          --list-net-interfaces          list adapters usable for bridged Ethernet and exit\n  \
+         --list-disks                   list the host disks that can be given to a machine,\n  \
+         \x20                            and exit\n  \
          --install-net-helper           install Linux bridge helper (CAP_NET_RAW only)\n  \
          --uninstall-net-helper         remove the Linux bridge helper\n  \
          --net-helper-status            report Linux bridge-helper status\n  \

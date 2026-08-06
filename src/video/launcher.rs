@@ -1137,9 +1137,13 @@ fn host_serial_ports() -> Vec<String> {
 }
 
 /// "Automatic", then the library's scan in its own order, then the host
-/// devices it did not name. A macOS device counts as already named when the
+/// devices it did not name.
+///
+/// Only the FluxBridge page has a port to choose, so without the feature
+/// there is nothing to merge. A macOS device counts as already named when the
 /// scan lists its `tty.` twin: `cu.usbmodem101` and `tty.usbmodem101` are
 /// one port, and the scan's spelling wins.
+#[cfg(feature = "fluxbridge")]
 fn merge_port_lists(library: Vec<String>, host: Vec<String>) -> Vec<Option<String>> {
     let mut out: Vec<Option<String>> = std::iter::once(None)
         .chain(library.iter().cloned().map(Some))
@@ -1158,16 +1162,11 @@ fn merge_port_lists(library: Vec<String>, host: Vec<String>) -> Vec<Option<Strin
     out
 }
 
-/// The combined port list, or the bare "Automatic" without the feature.
+/// The ports the bridge page offers: what the library scanned, plus whatever
+/// else the host has.
+#[cfg(feature = "fluxbridge")]
 fn sample_bridge_ports() -> Vec<Option<String>> {
-    #[cfg(feature = "fluxbridge")]
-    {
-        merge_port_lists(crate::fluxbridge::com_ports(), host_serial_ports())
-    }
-    #[cfg(not(feature = "fluxbridge"))]
-    {
-        vec![None]
-    }
+    merge_port_lists(crate::fluxbridge::com_ports(), host_serial_ports())
 }
 
 /// What the bridge can see of the host right now.
@@ -1400,6 +1399,7 @@ pub struct MachineSetup {
     /// every host serial device the scan did not name. Sampled with
     /// `bridge_status` (launcher open, a bay switched to a physical drive):
     /// the scan walks the serial bus, which is not a per-frame activity.
+    #[cfg(feature = "fluxbridge")]
     bridge_ports: Vec<Option<String>>,
     /// Host disks the Host Disk page can offer, sampled when that page is
     /// opened or refreshed rather than every frame: enumerating walks the
@@ -1624,6 +1624,7 @@ impl MachineSetup {
             df_bridge_none: [false; 4],
             bridge_edit_drive: 0,
             bridge_status: bridge_status(),
+            #[cfg(feature = "fluxbridge")]
             bridge_ports: sample_bridge_ports(),
             // Not sampled at construction: the page samples when it opens, so
             // a launcher that never visits it never touches the host's disks.
@@ -3766,7 +3767,10 @@ impl MachineSetup {
             // Look again now: this is the moment the user expects to be told
             // whether there is anything on the other end.
             self.bridge_status = bridge_status();
-            self.bridge_ports = sample_bridge_ports();
+            #[cfg(feature = "fluxbridge")]
+            {
+                self.bridge_ports = sample_bridge_ports();
+            }
             // With nothing on the other end, the honest interface is "None";
             // the row is there to change once something is plugged in.
             self.df_bridge_none[idx] = self.bridge_status == BridgeStatus::NoInterface;
@@ -5249,6 +5253,7 @@ mod tests {
     /// "Automatic" leads, the library's scan keeps its order, and host
     /// devices join only when the scan did not already name them -- a macOS
     /// `cu.` device counts as named when its `tty.` twin is listed.
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn port_lists_merge_without_duplicates() {
         let merged = merge_port_lists(
