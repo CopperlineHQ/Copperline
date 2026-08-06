@@ -53,11 +53,28 @@
 //! the rest of it. So there is no unprivileged route to a whole disk, and an
 //! Amiga disk is exactly the case with no volume to borrow one from.
 //!
-//! A process cannot elevate itself, and relaunching elevated would throw the
-//! session away, so `ERROR_ACCESS_DENIED` is reported for what it is and the
-//! user decides whether to start Copperline again as Administrator. Windows
-//! has no broker that hands back an opened handle, so there is nothing here
-//! like macOS's `authopen`.
+//! # Being our own broker
+//!
+//! A process cannot elevate itself, and relaunching Copperline as
+//! Administrator would throw away the machine already running -- which is
+//! precisely what somebody attaching a disk mid-session does not want. macOS
+//! is spared this by `authopen`, a system tool that opens a device on your
+//! behalf and passes the descriptor back. Windows ships nothing equivalent,
+//! so this module is that tool for itself.
+//!
+//! On `ERROR_ACCESS_DENIED`, the same binary is run once more through
+//! `ShellExecuteEx` with the `runas` verb, which is what raises the consent
+//! dialog. That privileged half opens the disk, takes the volumes, copies the
+//! handles into the still-running unprivileged process with `DuplicateHandle`,
+//! and exits. Access on Windows is decided at open and travels with the
+//! handle, so what comes back keeps working long after the process that
+//! obtained it is gone -- the same property `authopen` relies on, reached
+//! down a different road.
+//!
+//! The privileged half decides for itself what it is willing to open. It is
+//! reached by a command line, and a command line can say anything, so it
+//! re-applies the safety rules rather than trusting the half that asked: the
+//! disk the host runs from is refused there too.
 //!
 //! # Taking the disk from the host
 //!
@@ -98,6 +115,7 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_NOT_READY: i32 = 21;
 const ERROR_WRITE_PROTECT: i32 = 19;
 const ERROR_NO_MORE_FILES: i32 = 18;
+const ERROR_MORE_DATA: i32 = 234;
 
 // CTL_CODE(device, function, METHOD_BUFFERED, access): the access field is the
 // part that matters here, and the comment on each says which it is.
@@ -156,6 +174,9 @@ const ERROR_CANCELLED: i32 = 1223;
 const PROCESS_DUP_HANDLE: u32 = 0x0040;
 /// `DUPLICATE_SAME_ACCESS`.
 const DUPLICATE_SAME_ACCESS: u32 = 0x0002;
+/// `DUPLICATE_CLOSE_SOURCE`, which is the only way to close a handle living in
+/// another process: duplicate it out and throw the copy away.
+const DUPLICATE_CLOSE_SOURCE: u32 = 0x0001;
 
 #[repr(C)]
 struct StoragePropertyQuery {
@@ -432,9 +453,11 @@ fn multi_string(buffer: &[u16]) -> Vec<String> {
         .collect()
 }
 
-/// Open a device node. The handle owns itself, so every early return closes
-/// it -- and on the failure paths that matter, a volume this had already
-/// locked is unlocked by the same mechanism.
+/// Open a device node -- a whole disk, or a volume cut from one.
+///
+/// The handle owns itself, so a path that gives up part-way closes what it
+/// had: volumes taken from the host before something failed go back to it on
+/// the way out, rather than being left locked against it.
 fn open_device_node(path: &str, access: u32, flags: u32) -> std::io::Result<OwnedHandle> {
     let path = wide(path);
     let handle = unsafe {
@@ -603,26 +626,37 @@ fn disks_behind(guid_path: &str) -> Vec<u32> {
     let Ok(volume) = open_device_node(&volume_node_path(guid_path), 0, 0) else {
         return Vec::new();
     };
-    // Room for a striped volume across many disks; a plain partition uses one
-    // extent and the rest of the buffer goes unused.
-    let mut buffer = vec![
-        0u8;
-        std::mem::size_of::<VolumeDiskExtents>()
-            + 64 * std::mem::size_of::<DiskExtent>()
-    ];
-    if control(
-        &volume,
-        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-        &[],
-        &mut buffer,
-    )
-    .is_err()
-    {
-        return Vec::new();
-    }
-    let count = u32::from_ne_bytes(buffer[..4].try_into().expect("4 bytes")) as usize;
     let first = std::mem::offset_of!(VolumeDiskExtents, extents);
     let stride = std::mem::size_of::<DiskExtent>();
+    // A plain partition has one extent; enough room for a few, and a volume
+    // spanning more says so rather than being cut short.
+    let mut buffer = vec![0u8; first + 8 * stride];
+    loop {
+        match control(
+            &volume,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            &[],
+            &mut buffer,
+        ) {
+            Ok(_) => break,
+            Err(error) if error.raw_os_error() == Some(ERROR_MORE_DATA) => {
+                // The count is filled in even when the extents themselves did
+                // not fit, which is how a volume says how much room it wants.
+                // Asking again matters more here than anywhere else in the
+                // file: this is how the disk Windows runs from is recognised,
+                // and a volume left unread is a disk left unprotected.
+                let wanted = u32::from_ne_bytes(buffer[..4].try_into().expect("4 bytes")) as usize;
+                let needed = first + wanted * stride;
+                if wanted == 0 || needed <= buffer.len() {
+                    return Vec::new();
+                }
+                buffer = vec![0u8; needed];
+            }
+            Err(_) => return Vec::new(),
+        }
+    }
+
+    let count = u32::from_ne_bytes(buffer[..4].try_into().expect("4 bytes")) as usize;
     let mut disks = Vec::new();
     for index in 0..count {
         let at = first + index * stride;
@@ -799,22 +833,31 @@ fn system_disks() -> Vec<u32> {
     disks_behind(&from_wide(&guid))
 }
 
-/// Capacity in bytes.
+/// Capacity in bytes, from a handle that may have been opened for nothing.
 ///
-/// `IOCTL_DISK_GET_LENGTH_INFO` is the exact answer but is declared
-/// `FILE_READ_ACCESS`, so it only answers a handle opened for reading -- which
-/// on Windows means an Administrator. The geometry IOCTL is `FILE_ANY_ACCESS`
-/// and carries the same figure in `DiskSize`, so it is what enumeration uses
-/// and the other is a refinement for when the disk is actually open.
+/// The geometry IOCTL is `FILE_ANY_ACCESS`, so this is the one enumeration can
+/// ask. `DiskSize` is the true capacity and not the cylinder-rounded figure
+/// the old geometry fields imply -- on the card this was written against it
+/// agrees with the storage service to the byte, where the rounded figure is
+/// nearly a megabyte short.
 fn capacity(device: &OwnedHandle) -> Option<u64> {
-    let mut length = [0u8; 8];
-    if control(device, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length).is_ok() {
-        return Some(i64::from_ne_bytes(length).max(0) as u64);
-    }
     let mut geometry = vec![0u8; std::mem::size_of::<DiskGeometryEx>()];
     control(device, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], &mut geometry).ok()?;
     let at = std::mem::offset_of!(DiskGeometryEx, disk_size);
     let size = i64::from_ne_bytes(geometry[at..at + 8].try_into().expect("8 bytes"));
+    (size > 0).then_some(size as u64)
+}
+
+/// Capacity as the disk itself reports it, which only a handle opened for
+/// reading may ask.
+///
+/// `IOCTL_DISK_GET_LENGTH_INFO` is declared `FILE_READ_ACCESS`, so asking it
+/// during enumeration is a syscall that cannot succeed; it is worth asking
+/// once the disk is really open, in case a device rounds the geometry.
+fn exact_capacity(device: &OwnedHandle) -> Option<u64> {
+    let mut length = [0u8; 8];
+    control(device, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length).ok()?;
+    let size = i64::from_ne_bytes(length);
     (size > 0).then_some(size as u64)
 }
 
@@ -1062,11 +1105,55 @@ fn duplicate_into(target: Handle, source: RawHandle) -> Result<usize> {
     Ok(duplicated as usize)
 }
 
+/// Close a handle this process put into another one's table.
+///
+/// Best effort by nature: if it fails there is nothing further to try, and the
+/// caller is already reporting a failure of its own.
+fn close_in(target: Handle, handle: usize) {
+    unsafe {
+        DuplicateHandle(
+            target,
+            handle as Handle,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+            0,
+            DUPLICATE_CLOSE_SOURCE,
+        )
+    };
+}
+
 /// The flag that puts this program into its privileged half. Undocumented in
 /// `--help` on purpose: it is one process talking to another, not an
 /// interface, and its arguments only mean anything to the process that wrote
 /// them.
 pub const BROKER_FLAG: &str = "--host-disk-broker";
+
+/// Read what the privileged half said: the handles it opened, in the order it
+/// opened them, or the reason it did not.
+///
+/// Every failure here means something is answering that is not the half this
+/// asked for, so none of them produce a handle: a number that is not one, an
+/// answer in no known shape, and an empty list are all refusals.
+fn parse_answer(answer: &str) -> Result<Vec<usize>> {
+    let handles = match answer.split_once(' ') {
+        Some(("ok", handles)) => handles,
+        // A refusal it explained is passed on as it wrote it -- it knows why,
+        // and this side does not.
+        Some(("error", message)) => anyhow::bail!("{}", message.trim()),
+        _ => anyhow::bail!("the answer was in no shape this understands"),
+    };
+    let opened: Vec<usize> = handles
+        .split_whitespace()
+        .map(|value| {
+            usize::from_str_radix(value, 16).map_err(|_| anyhow::anyhow!("{value} is not a handle"))
+        })
+        .collect::<Result<_>>()?;
+    if opened.is_empty() {
+        anyhow::bail!("it opened nothing");
+    }
+    Ok(opened)
+}
 
 /// Ask for the disk through a moment of Administrator.
 ///
@@ -1094,6 +1181,11 @@ fn open_through_broker(
         std::process::id(),
         reply.display()
     );
+
+    // Nothing of an earlier attempt may be left where the answer goes: a
+    // privileged half that dies before writing must read as silence, not as
+    // whatever was there before.
+    let _ = std::fs::remove_file(&reply);
 
     let verb = wide("runas");
     let file = wide(&exe.to_string_lossy());
@@ -1136,22 +1228,13 @@ fn open_through_broker(
     })?;
     let _ = std::fs::remove_file(&reply);
 
-    let handles = match answer.split_once(' ') {
-        Some(("ok", handles)) => handles,
-        Some(("error", message)) => anyhow::bail!("{}", message.trim()),
-        _ => anyhow::bail!("{}: the privileged half answered nonsense", device.id),
-    };
-    let mut opened: Vec<OwnedHandle> = handles
-        .split_whitespace()
-        .map(|value| {
-            usize::from_str_radix(value, 16)
-                .map(|raw| unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
-                .map_err(|_| anyhow::anyhow!("{}: {value} is not a handle", device.id))
-        })
-        .collect::<Result<_>>()?;
-    if opened.is_empty() {
-        anyhow::bail!("{}: nothing came back from the privileged half", device.id);
-    }
+    let mut opened: Vec<OwnedHandle> = parse_answer(&answer)
+        .with_context(|| format!("taking {} from the privileged half", device.id))?
+        .into_iter()
+        // Safe only because the numbers were put in this process's handle
+        // table by the child, and what they name is checked below.
+        .map(|raw| unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+        .collect();
 
     let disk = opened.remove(0);
     // What came back is trusted only as far as it can be checked: this is a
@@ -1209,7 +1292,8 @@ fn broker_open(id: &str, write: bool, parent_process_id: u32) -> Result<Vec<usiz
         anyhow::bail!("{id} is write protected by the hardware");
     }
 
-    let disk = open_disk_node(&device, write).map_err(|error| explain_open_failure(&error, &device))?;
+    let disk =
+        open_disk_node(&device, write).map_err(|error| explain_open_failure(&error, &device))?;
     let number = disk_number_of(&device.id)
         .with_context(|| format!("{} is not a physical disk name", device.id))?;
     let volumes = take_volumes(number, &device.id)?;
@@ -1219,9 +1303,31 @@ fn broker_open(id: &str, write: bool, parent_process_id: u32) -> Result<Vec<usiz
         return Err(std::io::Error::last_os_error())
             .context("reaching the Copperline that asked for this disk");
     }
-    let mut handed = vec![duplicate_into(parent, disk.as_raw_handle())?];
-    for volume in &volumes {
-        handed.push(duplicate_into(parent, volume.as_raw_handle())?);
+    let mut handed = Vec::new();
+    let mut failed = None;
+    for source in std::iter::once(disk.as_raw_handle()).chain(
+        volumes
+            .iter()
+            .map(std::os::windows::io::AsRawHandle::as_raw_handle),
+    ) {
+        match duplicate_into(parent, source) {
+            Ok(handle) => handed.push(handle),
+            Err(error) => {
+                failed = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some(error) = failed {
+        // A half-finished handover must leave nothing behind. The asking
+        // process is about to be told this failed, so it will never close what
+        // it was already given -- and a volume it holds without knowing stays
+        // dismounted from the host for as long as it runs.
+        for handle in handed {
+            close_in(parent, handle);
+        }
+        unsafe { CloseHandle(parent) };
+        return Err(error);
     }
     unsafe { CloseHandle(parent) };
     // This process's own handles close as it returns. The file objects behind
@@ -1252,10 +1358,10 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
         Err(error) => return Err(explain_open_failure(&error, device)),
     };
 
-    // Now that there is a read handle, the exact capacity can be had; the
-    // geometry the listing was built from is rounded on some devices, and a
+    // Now that there is a handle opened for reading, the disk can be asked its
+    // length outright; the listing had to infer it from the geometry, and a
     // disk that reads as longer than it is would fail at the very end.
-    let size_bytes = capacity(&handle).unwrap_or(device.size_bytes);
+    let size_bytes = exact_capacity(&handle).unwrap_or(device.size_bytes);
     if size_bytes != device.size_bytes {
         log::debug!(
             "blockdev: {} is {size_bytes} bytes, not the {} the listing reported",
@@ -1380,6 +1486,28 @@ mod tests {
         assert_eq!(multi_string(&padded), vec![r"\\?\a", r"\\?\b"]);
         assert!(multi_string(&[0u16, 0]).is_empty());
         assert!(multi_string(&[]).is_empty());
+    }
+
+    /// The answer crosses a privilege boundary in a file, so nothing about it
+    /// is assumed: only the shape the privileged half writes turns into
+    /// handles, and everything else is a refusal rather than a guess at what
+    /// was meant.
+    #[test]
+    fn only_a_well_formed_answer_becomes_handles() {
+        assert_eq!(parse_answer("ok 1a4 2b8").unwrap(), vec![0x1a4, 0x2b8]);
+        assert_eq!(parse_answer("ok 40").unwrap(), vec![0x40]);
+
+        // A refusal it explained reaches the user in its own words.
+        let refused = parse_answer("error PhysicalDrive0 is the disk this computer runs from")
+            .expect_err("a refusal is not a success");
+        assert!(refused.to_string().contains("runs from"), "{refused}");
+
+        for nonsense in ["", "ok", "ok ", "okay 1a4", "ok 1a4 zz", "1a4"] {
+            assert!(
+                parse_answer(nonsense).is_err(),
+                "{nonsense:?} must not become a handle"
+            );
+        }
     }
 
     /// Enumeration must work unprivileged and with nothing plugged in: it is

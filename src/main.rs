@@ -340,6 +340,9 @@ where
     let mut list_audio_devices = false;
     let mut list_net_interfaces = false;
     let mut list_disks = false;
+    // Only the Windows build has a privileged half to be, so only it ever
+    // fills this in.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut host_disk_broker: Option<(String, bool, u32, PathBuf)> = None;
     let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
