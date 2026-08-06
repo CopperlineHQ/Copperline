@@ -356,8 +356,8 @@ where
             "--list-disks" => {
                 list_disks = true;
             }
-            "--hdd" | "--hdd-read-only" => {
-                let read_only = a == "--hdd-read-only";
+            "--host-disk" | "--host-disk-read-only" => {
+                let read_only = a == "--host-disk-read-only";
                 let usage = format!("{a} requires DEVICE (and optionally an attachment point)");
                 let device = args.next().ok_or_else(|| anyhow!(usage))?;
                 // The attachment point is optional and only ever one of a
@@ -1194,10 +1194,10 @@ fn print_help() {
          \x20                            CPUs), e.g. 0, 32M, 128M\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
-         {floppy_bridge}--hdd DEVICE [ATTACH]          give the machine one of the host's own disks\n  \
+         {floppy_bridge}--host-disk DEVICE [ATTACH]    give the machine one of the host's own disks\n  \
          \x20                            (--list-disks names them); ATTACH is ide-master\n  \
          \x20                            (default), ide-slave, or scsi0..scsi6\n  \
-         --hdd-read-only DEVICE [ATTACH]\n  \
+         --host-disk-read-only DEVICE [ATTACH]\n  \
          \x20                            the same, but the guest cannot write to the disk\n  \
          --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
@@ -1687,14 +1687,14 @@ fn print_audio_output_devices() -> Result<()> {
 }
 
 /// Print exact adapter identifiers accepted by bridged networking.
-/// List the host's own disks, for `--hdd`.
+/// List the host's own disks, for `--host-disk`.
 ///
 /// Enumeration opens nothing and needs no privileges, so this is safe to run
 /// at any time; the disk the host is running from is named but marked, since
 /// hiding it silently would just look like a missing device.
 #[cfg(not(target_arch = "wasm32"))]
 fn print_host_disks() -> Result<()> {
-    println!("Host disks (name one to --hdd, or as [[host_disk]] device):");
+    println!("Host disks (name one to --host-disk, or as [[host_disk]] device):");
     let devices = copperline::blockdev::list_devices()?;
     if devices.is_empty() {
         println!("  (none found)");

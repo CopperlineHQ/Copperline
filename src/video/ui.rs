@@ -5126,6 +5126,11 @@ fn draw_host_disk_page(
         draw_panel_text(frame, table.x, note_y, &line, PANEL_TEXT_DIM, 1, scale);
         note_y += font::GLYPH_H + 4;
     }
+    // A tick that did not take, and why. Orange: it is a thing to deal with,
+    // not a thing that happened.
+    if let Some(warning) = setup.host_disk_warning() {
+        draw_panel_text(frame, table.x, note_y, warning, PANEL_TEXT_ACCENT, 1, scale);
+    }
 }
 
 /// A small square box, filled when set. The fill colour distinguishes what
@@ -8819,6 +8824,7 @@ mod tests {
                 mounted: Vec::new(),
                 writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
+                attach_chosen: false,
             }]);
             setup.select_host_disk(0);
             setup.mount_host_disks().expect("A1200 has IDE");
@@ -8855,6 +8861,7 @@ mod tests {
                     mounted: Vec::new(),
                     writable: true,
                     attach: crate::config::HostDiskAttach::IdeMaster,
+                    attach_chosen: false,
                 },
                 launcher::HostDiskRow {
                     id: "disk6".to_string(),
@@ -8863,10 +8870,22 @@ mod tests {
                     mounted: vec!["/Volumes/UNTITLED".to_string()],
                     writable: false,
                     attach: crate::config::HostDiskAttach::IdeSlave,
+                    attach_chosen: false,
+                },
+                launcher::HostDiskRow {
+                    id: "disk9".to_string(),
+                    volume: "Generic CF Reader".to_string(),
+                    size: "512 MB".to_string(),
+                    mounted: Vec::new(),
+                    writable: true,
+                    attach: crate::config::HostDiskAttach::IdeMaster,
+                    attach_chosen: false,
                 },
             ]);
+            setup.select_model(Some(crate::config::MachineModel::A1200));
             setup.select_host_disk(0);
             setup.select_host_disk(1);
+            setup.select_host_disk(2);
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::HostDisk;
             let ui = UiState {
@@ -8888,6 +8907,7 @@ mod tests {
                 mounted: Vec::new(),
                 writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
+                attach_chosen: false,
             }]);
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::HostDisk;
@@ -8912,6 +8932,7 @@ mod tests {
                         mounted: Vec::new(),
                         writable: true,
                         attach: crate::config::HostDiskAttach::IdeMaster,
+                        attach_chosen: false,
                     })
                     .collect(),
             );
@@ -8939,6 +8960,7 @@ mod tests {
                 mounted: Vec::new(),
                 writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
+                attach_chosen: false,
             }]);
             setup.select_host_disk(0);
             setup

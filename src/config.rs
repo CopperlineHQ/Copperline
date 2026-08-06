@@ -2277,8 +2277,8 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
-    /// Real host disks given to the machine (`--hdd DEVICE [ATTACH]`, or
-    /// `--hdd-read-only` for the protected form), in command-line order.
+    /// Real host disks given to the machine (`--host-disk DEVICE [ATTACH]`, or
+    /// `--host-disk-read-only` for the protected form), in command-line order.
     pub host_disks: Vec<HostDiskArg>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
@@ -4177,13 +4177,13 @@ impl TryFrom<RawConfig> for Config {
             None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
         };
 
-        let host_disks = parse_host_disks(
-            &raw.host_disk,
-            &ide,
-            &scsi,
-            has_ide_port,
-            scsi.enabled() || defaults.sdmac,
-        )?;
+        // A SCSI unit exists when something answers on it: a Zorro board
+        // that was asked for, or the A3000's own controller with the silicon
+        // behind it. This mirrors what `build_machine` actually wires up, so
+        // a disk is never accepted onto a bus that will not be built.
+        let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
+            || (defaults.sdmac && scsi.controller == ScsiController::A3000);
+        let host_disks = parse_host_disks(&raw.host_disk, &ide, &scsi, has_ide_port, has_scsi)?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
