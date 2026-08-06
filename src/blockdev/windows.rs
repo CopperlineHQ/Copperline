@@ -1485,16 +1485,6 @@ fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
     Ok(taken)
 }
 
-/// Take one disk, for a machine starting with no launcher to have taken it.
-fn take_disk(device: &HostDevice, write: bool) -> Result<(OwnedHandle, Vec<std::fs::File>)> {
-    let taken = take_disks(std::slice::from_ref(&(device.clone(), write)))?;
-    let held = taken
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("{} was not opened", device.id))?;
-    Ok((held.disk, held.dismounted))
-}
-
 /// Take disks now and hold them until the machine asks for them.
 ///
 /// All of them together, because the consent they may need is a dialog
@@ -1562,14 +1552,56 @@ pub fn release_device(id: &str) -> bool {
     released
 }
 
-/// Claim a disk the launcher took, if it took this one on these terms.
-fn claim_reserved(id: &str, write: bool) -> Option<(OwnedHandle, Vec<std::fs::File>)> {
-    let mut held = reserved();
-    let at = held
+/// Copy an open handle within this process, so two owners can hold the one
+/// open thing. Both name the same file object, so the volume lock behind it
+/// lasts until the last of them closes.
+fn duplicate_here(source: RawHandle) -> Result<OwnedHandle> {
+    let mut copy: Handle = ptr::null_mut();
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source as Handle,
+            GetCurrentProcess(),
+            &mut copy,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error()).context("copying an open disk");
+    }
+    Ok(unsafe { OwnedHandle::from_raw_handle(copy as RawHandle) })
+}
+
+/// Lend a disk the launcher took to a machine that is starting.
+///
+/// The machine gets handles of its own and the reservation keeps its own, so
+/// the disk stays taken from the host across a machine being stopped and
+/// started again. That matters twice over: consent was given once, at the
+/// Mount button, and Run must not ask for it afresh every time; and a machine
+/// that stops does not silently hand the disk back to Windows behind a
+/// launcher still showing it as attached.
+///
+/// Releasing the disk closes this side of it. A machine still running holds
+/// its own copy until it stops, which is why a disk cannot be taken back
+/// from underneath one.
+fn lend_reserved(id: &str, write: bool) -> Option<(OwnedHandle, Vec<std::fs::File>)> {
+    let held = reserved();
+    let entry = held
         .iter()
-        .position(|entry| entry.id == id && entry.write == write)?;
-    let entry = held.remove(at);
-    Some((entry.disk, entry.dismounted))
+        .find(|entry| entry.id == id && entry.write == write)?;
+    let disk = duplicate_here(entry.disk.as_raw_handle())
+        .map_err(|error| log::warn!("blockdev: {id} could not be lent to the machine: {error:#}"))
+        .ok()?;
+    let dismounted = entry
+        .dismounted
+        .iter()
+        .map(|volume| duplicate_here(volume.as_raw_handle()).map(std::fs::File::from))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|error| log::warn!("blockdev: {id}: a volume could not be lent: {error:#}"))
+        .ok()?;
+    Some((disk, dismounted))
 }
 
 /// Take a disk from the host and open it for the emulated machine.
@@ -1577,12 +1609,25 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
     // A disk the launcher already took is used as it stands. The consent for
     // it was given there, and asking again would raise a dialog for something
     // this process is already holding.
-    let (handle, dismounted) = match claim_reserved(&device.id, write) {
+    let (handle, dismounted) = match lend_reserved(&device.id, write) {
         Some(held) => {
             log::info!("blockdev: {} was already taken from the host", device.id);
             held
         }
-        None => take_disk(device, write)?,
+        None => {
+            // Nothing had taken it yet -- a machine run straight from a
+            // configuration, with nobody having pressed Mount. Take it and
+            // keep it, so this is the only time it is asked for: a machine
+            // stopped and started again finds the disk already in hand.
+            let taken = take_disks(std::slice::from_ref(&(device.clone(), write)))?;
+            reserved().extend(taken);
+            lend_reserved(&device.id, write).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} was taken from the host but could not be used",
+                    device.id
+                )
+            })?
+        }
     };
 
     // Now that there is a handle opened for reading, the disk can be asked its

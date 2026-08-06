@@ -5748,13 +5748,13 @@ impl App {
                                     None
                                 }
                                 Err(error) => {
-                                    // The whole chain goes to the log, which
-                                    // has room for it; the status line gets
-                                    // the shortened first sentence, the same
-                                    // as every other failure the launcher
-                                    // reports.
+                                    // The outermost sentence only. These are
+                                    // written to be read, and flattening the
+                                    // chain onto one line ends in a raw OS
+                                    // code with the useful half cut out of the
+                                    // middle. The log keeps all of it.
                                     log::warn!("host disk: not attached: {error:#}");
-                                    Some(short_status_error(&error))
+                                    Some(error.to_string())
                                 }
                             };
                             match refused {
@@ -6756,9 +6756,17 @@ impl App {
     /// last-applied) machine so it reflects the current settings.
     pub fn open_launcher(&mut self) {
         self.ui.menu_open = false;
-        self.ui.panel = Some(Panel::Launcher(Box::new(LauncherState::from_raw(
-            &self.machine_config,
-        ))));
+        let mut state = LauncherState::from_raw(&self.machine_config);
+        // A machine set up with a real disk names it on the Storage page, and
+        // naming it properly means knowing what is on it. Looking is otherwise
+        // put off until the Host Disk page opens, so a launcher that never
+        // goes there never touches the host's disks -- but a configuration
+        // already naming one has spent that cost, and without this the same
+        // disk reads by its bare device name here and by its volume there.
+        if !state.setup.host_disks_attached().is_empty() {
+            state.setup.refresh_host_disks();
+        }
+        self.ui.panel = Some(Panel::Launcher(Box::new(state)));
         self.request_redraw();
     }
 
