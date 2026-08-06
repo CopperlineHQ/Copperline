@@ -28,9 +28,11 @@ Thank you to:
 
 ## Bundled third-party code
 
-- **FloppyBridge**, by Rob Smith
-  ([RobSmithDev](https://amiga.robsmithdev.co.uk/winuae)), is what lets a
-  floppy bay drive a physical 3.5" drive over a DrawBridge, a Greaseweazle, or
-  a Supercard Pro. Its sources are vendored in `vendor/floppybridge` and
-  compiled into the emulator, under MPL-2.0 or GPL-2.0-or-later; see
-  `vendor/floppybridge/README.md` for the exact revision.
+- **[FluxBridge](https://github.com/CopperlineHQ/FluxBridge)**, CopperlineHQ's
+  own pure-Rust library, is what lets a floppy bay drive a physical 3.5" drive
+  over a Greaseweazle. It grew from a port of Rob Smith's
+  [FloppyDriveBridge](https://github.com/RobSmithDev/FloppyDriveBridge) and
+  records that provenance in its `NOTICE.md`; it is pinned by revision in
+  `Cargo.toml` under `LGPL-3.0-or-later AND MPL-2.0`. Thanks to Rob Smith for
+  the architecture and protocol knowledge it began from, and to Keir Fraser
+  for the Greaseweazle itself.

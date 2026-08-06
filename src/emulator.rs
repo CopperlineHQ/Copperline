@@ -1335,7 +1335,7 @@ impl Emulator {
         // down faster than it can reach speed, and tracks are stepped past
         // before the drive has captured them. Enforced here rather than at
         // each caller so no future runner can quietly opt out of it.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if !paced && self.bus().floppy.has_bridged_drive() {
             return;
         }
@@ -2082,10 +2082,10 @@ fn open_scsi_target(
 /// Failing to open one is fatal rather than a warning: a bay configured as a
 /// real drive has no image to fall back on, so carrying on would silently boot
 /// a machine with an empty drive where the user asked for their disk.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config) -> Result<()> {
-    use crate::config::{BridgeCable, BridgeDensity, BridgeSpeedMode};
-    use crate::floppybridge::{
+    use crate::config::{BridgeCable, BridgeDensity, BridgeReadMode};
+    use crate::fluxbridge::{
         self, Bridge, BridgeConfig, BridgeDensityMode, BridgeMode, DriveSelection,
     };
 
@@ -2094,39 +2094,31 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             continue;
         };
         // The bridge is compiled into this binary, so it cannot be missing --
-        // the link would have failed. This is a failsafe against it being
-        // present but not working: a vendored build that produced stubs, or a
-        // future upstream that drops a driver Copperline still offers.
-        if floppybridge::drivers().is_empty() {
+        // the link would have failed. This is a failsafe against a build with
+        // every FluxBridge driver feature turned off, which would leave the
+        // library linked in but offering nothing.
+        if fluxbridge::drivers().is_empty() {
             anyhow::bail!(
-                "floppy.df{idx} asks for a physical drive, but the built-in FloppyBridge \
-                 reports no interfaces at all. This build is broken rather than \
-                 misconfigured; please report it."
+                "floppy.df{idx} asks for a physical drive, but this build of Copperline \
+                 compiled no FluxBridge drivers in"
             );
         }
-        // Resolve the driver by name against what the bridge actually
-        // offers, so the config does not depend on enumeration order.
-        let token = bridge_cfg.driver.match_token();
-        let driver = floppybridge::drivers()
-            .into_iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .ok_or_else(|| {
+        // Resolve the driver by the library's own token, so the config does
+        // not depend on enumeration order or on name spellings kept in step
+        // by hand.
+        let driver =
+            fluxbridge::driver_named(bridge_cfg.driver.match_token()).ok_or_else(|| {
                 anyhow!(
-                    "floppy.df{idx}: the built-in FloppyBridge has no {} driver",
+                    "floppy.df{idx}: this build of Copperline has no {} driver",
                     bridge_cfg.driver.label()
                 )
             })?;
         let open = BridgeConfig {
             driver: driver.index,
             mode: match bridge_cfg.mode {
-                BridgeSpeedMode::Compatible => BridgeMode::Compatible,
-                BridgeSpeedMode::Normal => BridgeMode::Fast,
-                BridgeSpeedMode::Stalling => BridgeMode::Stalling,
+                BridgeReadMode::Compatible => BridgeMode::Compatible,
+                BridgeReadMode::Normal => BridgeMode::Normal,
+                BridgeReadMode::Stalling => BridgeMode::Stalling,
             },
             density: match bridge_cfg.density {
                 BridgeDensity::Auto => BridgeDensityMode::Auto,
@@ -2142,7 +2134,6 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
                 BridgeCable::Shugart3 => DriveSelection::Drive3,
             },
             port: bridge_cfg.port.clone(),
-            auto_cache: bridge_cfg.auto_cache,
         };
         let bridge = Bridge::open(&open)
             .map_err(|e| anyhow!("floppy.df{idx}: could not open the physical drive: {e}"))?;
@@ -2153,7 +2144,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
         let port = match bridge_cfg.port.as_deref() {
             Some(port) => port.to_string(),
             None => {
-                let seen = floppybridge::com_ports();
+                let seen = fluxbridge::com_ports();
                 match seen.len() {
                     1 => format!("{} (auto-detected)", seen[0]),
                     _ => "auto-detected".to_string(),
@@ -2161,17 +2152,14 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
             }
         };
         let drive_type = match bridge.drive_type() {
-            floppybridge::DriveType::Dd35 => "3.5\" DD",
-            floppybridge::DriveType::Dd35Hd => "3.5\" HD",
-            floppybridge::DriveType::Sd525 => "5.25\" SD",
-        };
-        let version = match floppybridge::version() {
-            Some((major, minor)) => format!("FloppyDriveBridge v{major}.{minor}"),
-            None => "FloppyDriveBridge".to_string(),
+            fluxbridge::DriveType::Dd35 => "3.5\" DD",
+            fluxbridge::DriveType::Dd35Hd => "3.5\" HD",
+            fluxbridge::DriveType::Sd525 => "5.25\" SD",
         };
         log::info!(
-            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, {version}",
+            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, FluxBridge v{}",
             bridge_cfg.driver.label(),
+            fluxbridge::version(),
         );
         // Whether there is anything in it is the next thing anyone wants to
         // know, and unlike an image nobody told us either way.
@@ -2416,7 +2404,7 @@ pub fn build_machine(
     };
     let mut floppy = FloppyController::from_config(&cfg.floppy)?;
     floppy.set_connected_drives(cfg.floppy_connected);
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     attach_floppy_bridges(&mut floppy, cfg)?;
     let serial = build_serial_sink(cfg)?;
     let mut paula = Paula::new(serial, audio);

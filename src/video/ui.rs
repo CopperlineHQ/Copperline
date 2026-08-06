@@ -752,7 +752,7 @@ pub enum UiControl {
     LauncherDriveBootToggle(LauncherField),
     /// Floppy tab: turn a bay over to a real drive, or back to images.
     LauncherDriveBridgeToggle(usize),
-    /// Floppy tab: open the FloppyBridge settings for a bay.
+    /// Floppy tab: open the FluxBridge settings for a bay.
     LauncherBridgeConfigure(usize),
     /// Configuration screen: add a Zorro metadata board file.
     LauncherZorroAdd,
@@ -4311,16 +4311,15 @@ fn launcher_bootable_box(cell: Rect) -> Rect {
 
 const BOOTABLE_LABEL: &str = "Bootable";
 
-/// The heading above the FloppyBridge settings: upstream's own name for the
+/// The heading above the FluxBridge settings: upstream's own name for the
 /// library, and which version of it is installed. Nothing else in the launcher
 /// says which build is in use, and it is the first thing worth knowing when a
 /// drive misbehaves.
 fn bridge_library_heading() -> String {
-    #[cfg(feature = "floppybridge")]
-    if let Some((major, minor)) = crate::floppybridge::version() {
-        return format!("FloppyDriveBridge v{major}.{minor}:");
-    }
-    "FloppyDriveBridge:".to_string()
+    #[cfg(feature = "fluxbridge")]
+    return format!("FluxBridge v{}:", crate::fluxbridge::version());
+    #[cfg(not(feature = "fluxbridge"))]
+    "FluxBridge:".to_string()
 }
 
 const WRITE_PROTECT_LABEL: &str = "Write protect:";
@@ -4677,7 +4676,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     }
                     // A build without the feature has no physical-drive box to
                     // hit: the whole thing is absent rather than inert.
-                    #[cfg(feature = "floppybridge")]
+                    #[cfg(feature = "fluxbridge")]
                     if _bridge.contains(pos) {
                         if let Some(bay) = launcher::MachineSetup::drive_protect_bay(r.field) {
                             return Some(UiControl::LauncherDriveBridgeToggle(bay));
@@ -4879,9 +4878,8 @@ fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> Gre
         | F::BridgePort
         | F::BridgeCable
         | F::BridgeDensity
-        | F::BridgeSpeed
-        | F::BridgeServeSpeed
-        | F::BridgeAutoCache => GreyedAs::Blank,
+        | F::BridgeReadMode
+        | F::BridgeReplaySpeed => GreyedAs::Blank,
         _ => GreyedAs::Reason,
     }
 }
@@ -4901,7 +4899,7 @@ fn draw_launcher_row(
     // A section heading is a greyed, non-interactive label grouping the rows
     // below it (the Serial:/Parallel: sections of the I/O Ports tab).
     if r.kind == RowKind::SectionHeader {
-        // The FloppyBridge page's heading names the installed library, so its
+        // The FluxBridge page's heading names the installed library, so its
         // text is not the one in the row table.
         let heading;
         let text = if r.field == LauncherField::BridgeLibrary {
@@ -4944,11 +4942,10 @@ fn draw_launcher_row(
         && launcher::MachineSetup::drive_image_bay(r.field)
             .is_some_and(|bay| setup.drive_bridged(bay))
     {
-        // Matches the tick box that turned it on, and fits the label column
-        // where the full "FloppyDriveBridge" would run into the value. Which
-        // version of the library is installed is named on the Configure page,
-        // where there is room for it.
-        "  FloppyBridge"
+        // Matches the tick box that turned it on. Which version of the
+        // library is linked in is named on the Configure page, where there is
+        // room for it.
+        "  FluxBridge"
     } else {
         r.label
     };
@@ -5185,9 +5182,9 @@ fn draw_launcher_row(
             }
         }
         RowKind::FloppyFlags => {
-            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let bay = launcher::MachineSetup::drive_protect_bay(r.field);
-            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let (protect_cell, bridge_cell) = launcher_floppy_flag_rects(rect, row_y);
             let mut tick = |cell: Rect, label: &str, on: bool, hot: bool| {
                 draw_panel_text(frame, cell.x, cell.y + 6, label, PANEL_TEXT, 1, scale);
@@ -5225,7 +5222,7 @@ fn draw_launcher_row(
             // Only drawn where a physical drive can actually be attached; a
             // build without the feature leaves the write-protect box alone on
             // the row rather than offering a switch that does nothing.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             if let Some(bay) = bay {
                 tick(
                     bridge_cell,
@@ -8352,38 +8349,38 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
 
-        // The FloppyBridge settings page reached from Configure, on an
-        // interface with no drive-select line: that row greys, and its value
-        // column stays empty rather than explaining itself. Only exists in a
-        // build with the feature -- without it no bay can be bridged, so there
-        // is no such page to draw.
-        #[cfg(feature = "floppybridge")]
+        // The FluxBridge settings page reached from Configure, with an
+        // interface selected, which is the state its rows are drawn live in.
+        // Bridging a bay samples the host, so the row starts at "None" on a
+        // machine with nothing plugged in and at the interface on one that
+        // has: cycle until a driver is named, since what a test machine has
+        // attached is not this test's subject. Bounded because cycling is a
+        // fixed-length ring. Only exists in a build with the feature --
+        // without it no bay can be bridged, so there is no such page to draw.
+        #[cfg(feature = "fluxbridge")]
         {
             let mut frame = vec![0u8; w * h * 4];
             let mut setup = launcher::MachineSetup::default();
             setup.set_drive_bridged(0, true);
             setup.set_bridge_edit_drive(0);
-            // Bounded: cycling is a fixed-length ring, so a value that never
-            // arrives is a bug to report, not a reason to spin forever.
-            let interfaces = 8;
-            let mut found = false;
-            for _ in 0..interfaces {
-                if setup.value_label(LauncherField::BridgeDevice) == "DrawBridge" {
-                    found = true;
+            let mut named = false;
+            for _ in 0..8 {
+                if setup.value_label(LauncherField::BridgeDevice) != "None" {
+                    named = true;
                     break;
                 }
                 setup.cycle(LauncherField::BridgeDevice, true);
             }
-            assert!(found, "the DrawBridge interface is one of the choices");
+            assert!(named, "the row can name an interface to draw");
             let mut state = LauncherState::new(setup);
-            state.tab = LauncherTab::FloppyBridge;
+            state.tab = LauncherTab::FluxBridge;
             let ui = UiState {
                 menu_open: false,
                 panel: Some(Panel::Launcher(Box::new(state))),
                 ..Default::default()
             };
             draw(&mut frame, scale, &ui, None, None);
-            save(&frame, "launcher-floppybridge-page");
+            save(&frame, "launcher-fluxbridge-page");
         }
     }
 }

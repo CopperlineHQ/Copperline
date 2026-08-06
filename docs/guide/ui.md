@@ -80,7 +80,7 @@ Status Bar*):
   four drives the clusters stack two-up. A bay driving a physical floppy drive
   keeps its numbered disk button, so you can see the drive is there, but
   loading, swapping and ejecting do nothing for it -- the disk is in a real
-  drive, and changing it is done by hand (see [](floppybridge)).
+  drive, and changing it is done by hand (see [](fluxbridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`/`.chd`) with the proper media-change notification, and a
@@ -416,9 +416,9 @@ The layout is:
   carries a **Physical drive** tick box that hands the bay to a physical
   floppy drive: its media row then names the interface -- or `None` with nothing
   plugged in -- and a **Configure** button opens that drive's own page,
-  headed with the installed library and its version, for the serial port,
-  drive select, density, read mode, bridge speed and auto-cache, greying
-  whatever the chosen interface does not honour. See [](floppybridge)),
+  headed with the built-in FluxBridge library and its version, for the
+  serial port, drive select, density, read mode and replay speed, greying
+  whatever the chosen interface does not honour. See [](fluxbridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
   links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host

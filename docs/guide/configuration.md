@@ -48,13 +48,12 @@ range checks as the equivalent TOML fields:
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
-| `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `drawbridge`, `greaseweazle`, `supercardpro`, `off` |
+| `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `greaseweazle`, or `off` |
 | `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
 | `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (IBM PC cable) or `0`-`3` (Shugart) |
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
-| `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
-| `--floppy-bridge-auto-cache DFN` | `[floppy.dfN] bridge_auto_cache = true` | cache disk data while the drive is idle |
+| `--floppy-replay-speed DFN SPEED` | `[floppy.dfN] replay_speed` | replay already-captured tracks at `fast` (the default, double speed) or `normal` (the platter's own) |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
@@ -1138,7 +1137,7 @@ emulators: the operating system and most loaders tolerate them, but
 software that times its own loading against the beam, CIA timers, or music
 playback can break. The setting can be changed live from the runtime menu
 ("Floppy Speed") without restarting the machine. It applies to image-backed
-bays only; a physical drive has its own `bridge_speed`.
+bays only; a physical drive has its own `replay_speed`.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
@@ -1168,30 +1167,30 @@ swap button cycles to the next image, wrapping around.
 ### A real drive on a bay
 
 A bay can be given a physical 3.5" drive instead of an image, over a
-DrawBridge, Greaseweazle, or Supercard Pro:
+Greaseweazle:
 
 ```toml
 [floppy.df0]
-bridge = "greaseweazle"      # drawbridge/greaseweazle/supercardpro/off
+bridge = "greaseweazle"      # or "off"
 write_protected = true       # emulator-level protection, on top of the tab
 # bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
-# bridge_mode = "compatible"     # compatible/stalling
-# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
-# bridge_auto_cache = false      # read tracks ahead while the drive is idle
+# bridge_mode = "normal"         # normal/compatible/stalling
+# replay_speed = "fast"          # or "normal"; fast is the default
 ```
 
 A bay takes either a bridge or an image, never both: the disk in the drive
 is its media, and naming a `path` alongside is an error. `bridge = "off"`
 returns the bay to images and keeps the other bridge settings for later.
 
-Nothing needs installing -- Rob Smith's FloppyBridge is built into Copperline
--- but it changes how the machine runs in several ways -- writes need both the disk's tab and
-`write_protected = false`, the status bar's eject and swap do nothing for
-that bay, and a machine with a physical drive is paced to wall-clock time and is
-not reproducible. [](floppybridge) covers the whole feature: installing the
-library on each platform, what each option does, and what to expect of it.
+Nothing needs installing -- the pure-Rust FluxBridge library is built into
+Copperline -- but a physical drive changes how the machine runs in several
+ways: writes need both the disk's tab and `write_protected = false`, the
+status bar's eject and swap do nothing for that bay, and a machine with a
+physical drive is paced to wall-clock time and is not reproducible.
+[](fluxbridge) covers the whole feature: what each option does, which mode
+suits which disks, and what to expect of it.
 
 ## `[ide]` -- IDE hard disks
 

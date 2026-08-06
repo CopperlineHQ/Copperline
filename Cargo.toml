@@ -14,10 +14,6 @@ publish = false
 # `copperline-bench` bin target exists.
 default-run = "copperline"
 
-[build-dependencies]
-# Compiles the vendored FloppyBridge sources; see build.rs.
-cc = "1"
-
 [features]
 default = [
     "midi",
@@ -27,7 +23,7 @@ default = [
     "ctl-bin",
     "net-nat",
     "net-bridge",
-    "floppybridge",
+    "fluxbridge",
     "mt32",
     "cpu-jit",
 ]
@@ -89,13 +85,12 @@ net-nat = ["dep:smoltcp"]
 net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
-# Real floppy drives through Rob Smith's FloppyBridge (src/floppybridge/): a
-# DrawBridge, Greaseweazle, or Supercard Pro standing in for a disk image on any
-# drive. On, build.rs compiles the vendored bridge (vendor/floppybridge) into the
-# binary, so nothing has to be installed for a physical drive to work. Off, none
-# of it is built -- neither the C++ nor the Rust side -- which is what browser
-# builds (--no-default-features) want.
-floppybridge = []
+# Real floppy drives through FluxBridge (src/fluxbridge/): a DrawBridge,
+# Greaseweazle, or Supercard Pro standing in for a disk image on any drive.
+# FluxBridge is a pure-Rust library, so there is nothing to install and no C++
+# in the build. Off, none of it is built, which is what browser builds
+# (--no-default-features) want.
+fluxbridge = ["dep:fluxbridge"]
 
 [dependencies]
 m68k = { version = "0.7.1", features = ["serde"] }
@@ -148,6 +143,15 @@ smoltcp = { version = "0.12", default-features = false, features = [
 # optional realtime-priority feature (see src/priority.rs).
 libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
+# Physical floppy drives: CopperlineHQ/FluxBridge, tracking its main branch.
+# Pure Rust -- the interfaces sit behind one typed API with no C or C++ ABI,
+# so nothing has to be installed and nothing is vendored. `Cargo.lock` still
+# fixes the exact commit every build uses, so a checkout is reproducible;
+# `cargo update -p fluxbridge` is how a newer one is taken. Only the drivers
+# named here are compiled in, and the launcher's interface list follows this
+# line: adding a driver Copperline supports means adding its feature, nothing
+# else.
+fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "main", default-features = false, features = ["greaseweazle"], optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"

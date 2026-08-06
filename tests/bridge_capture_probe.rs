@@ -2,7 +2,7 @@
 
 //! Hardware probes for the floppy-bridge capture path.
 //!
-//! All `#[ignore]`d: they need a FloppyBridge interface (a Greaseweazle in
+//! All `#[ignore]`d: they need a FluxBridge interface (a Greaseweazle in
 //! practice) with an AmigaDOS disk in the drive. There is one drive, so run
 //! one test at a time:
 //!
@@ -25,11 +25,11 @@
 //! - `PROBE_SEEK`: `pulse` (default; one-cylinder seeks 3 ms apart, as the
 //!   emulated stepper drives the bridge) or `direct` (one seek to the target)
 
-#![cfg(feature = "floppybridge")]
+#![cfg(feature = "fluxbridge")]
 
 use std::time::{Duration, Instant};
 
-use copperline::floppybridge::{drivers, Bridge, BridgeConfig, BridgeMode};
+use copperline::fluxbridge::{drivers, Bridge, BridgeConfig, BridgeMode};
 
 const MASK: u32 = 0x5555_5555;
 
@@ -216,7 +216,7 @@ fn poll_track(bridge: &mut Bridge, cyl: u8, side: bool) -> Option<(Vec<u16>, usi
 /// Proves the decoder against an index-aligned capture before the soak's
 /// results can mean anything.
 #[test]
-#[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
+#[ignore = "needs a FluxBridge device with an AmigaDOS disk inserted"]
 fn bridge_decoder_smoke() {
     let mut bridge = open_bridge(BridgeMode::Compatible);
     spin_up(&mut bridge);
@@ -241,11 +241,11 @@ fn bridge_decoder_smoke() {
 
 /// The soak: capture repeatedly across seeks and score every capture.
 #[test]
-#[ignore = "needs a FloppyBridge device with an AmigaDOS disk inserted"]
+#[ignore = "needs a FluxBridge device with an AmigaDOS disk inserted"]
 fn bridge_seek_capture_soak() {
     let mode = match env_or("PROBE_MODE", "normal").as_str() {
         "compatible" => BridgeMode::Compatible,
-        _ => BridgeMode::Fast,
+        _ => BridgeMode::Normal,
     };
     let captures: usize = env_or("PROBE_CAPTURES", "120").parse().unwrap();
     let away: u8 = env_or("PROBE_AWAY", "20").parse().unwrap();

@@ -5635,7 +5635,7 @@ impl Bus {
         // exactly what a real disk gets pointed at -- leaves the bit set for
         // good. Gated on it, the drive would be asked once and never again.
         // `pending_vbi` already paces this to once per frame wrap.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         self.floppy.poll_bridge_media();
         if self.paula.intreq & INT_VERTB == 0 {
             self.paula.intreq |= INT_VERTB;

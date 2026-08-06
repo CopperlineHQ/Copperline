@@ -3654,6 +3654,22 @@ impl ApplicationHandler for App {
                 }
             }
             self.refresh_tool_windows_paced(event_loop);
+            // A disk swapped by hand in a bridged bay is the one media change
+            // no menu or drop initiated, so its message is raised here from
+            // the drive's own report -- the same style an image insert or
+            // eject shows. On a drive the configuration lets write, the tab
+            // is the fact the user just changed disks to check, so it rides
+            // along; a config-protected drive says nothing about it, since
+            // nothing can be written either way.
+            #[cfg(feature = "fluxbridge")]
+            for (bay, present, tab) in self.emu.bus_mut().floppy.take_bridge_media_events() {
+                self.show_osd(match (present, tab) {
+                    (false, _) => format!("DF{bay}: disk ejected"),
+                    (true, None) => format!("DF{bay}: disk inserted"),
+                    (true, Some(true)) => format!("DF{bay}: disk inserted (write protected)"),
+                    (true, Some(false)) => format!("DF{bay}: disk inserted (writable)"),
+                });
+            }
         }
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
@@ -4279,11 +4295,11 @@ impl App {
 
     /// Whether this drive is backed by a real one on a bridge.
     fn drive_is_bridged(&self, idx: usize) -> bool {
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         {
             self.emu.bus().floppy.is_bridged(idx)
         }
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         {
             let _ = idx;
             false
@@ -4298,9 +4314,9 @@ impl App {
             connected: bus.floppy.drive_connected(idx),
             inserted: bus.floppy.disk_inserted(idx),
             multi: self.disk_playlists[idx].len() > 1,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridged: bus.floppy.is_bridged(idx),
-            #[cfg(not(feature = "floppybridge"))]
+            #[cfg(not(feature = "fluxbridge"))]
             bridged: false,
         });
         let cd = bus.cd_drive_present().then(|| bus.cd_disc_inserted());
@@ -5622,7 +5638,7 @@ impl App {
             UiControl::LauncherBridgeConfigure(bay) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.set_bridge_edit_drive(bay);
-                    state.tab = crate::video::launcher::LauncherTab::FloppyBridge;
+                    state.tab = crate::video::launcher::LauncherTab::FluxBridge;
                     state.status = None;
                 }
             }
@@ -6890,7 +6906,7 @@ impl App {
         // machine being replaced is not dropped until `run_machine` swaps it
         // in -- so without this the new machine tries to open a device its
         // predecessor still owns, and is told it is in use.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
         // The launcher boots a fresh machine, never a save state, so a real
         // ROM is required here.
@@ -6902,7 +6918,7 @@ impl App {
                 // The machine that is staying put had its drives taken away
                 // above; give them back rather than leaving it with empty bays
                 // because a different configuration failed to build.
-                #[cfg(feature = "floppybridge")]
+                #[cfg(feature = "fluxbridge")]
                 self.attach_configured_bridges();
                 return;
             }
@@ -10191,7 +10207,7 @@ impl App {
         } else {
             self.powered_on = true;
             self.sync_live_audio_suspension();
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             self.attach_configured_bridges();
             info!("power button: machine powered on (cold boot)");
         }
@@ -10204,7 +10220,7 @@ impl App {
     /// again. A drive that will not open is logged rather than refused: the
     /// machine comes up with an empty bay, which is what an Amiga with a dead
     /// drive does, and the alternative is a power button that does nothing.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     fn attach_configured_bridges(&mut self) {
         let raw = self.machine_config.clone();
         let cfg = match crate::config::Config::try_from(raw) {
@@ -10252,7 +10268,7 @@ impl App {
         // leave it clicking as though the machine were still running, and
         // nothing else -- including the next machine this window builds --
         // could open it.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
