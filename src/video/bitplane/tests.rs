@@ -8319,7 +8319,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
             fetched_pixels,
         );
 
-        let mut render = |fast: bool| {
+        let render = |fast: bool| {
             let mut fb = vec![0u32; FB_PIXELS];
             let mut pf_mask = vec![0u8; FB_PIXELS];
             let mut collisions = vec![CollisionPixel::default(); FB_PIXELS];
