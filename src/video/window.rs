@@ -5669,6 +5669,13 @@ impl App {
                     }));
                 }
             }
+            UiControl::LauncherHostDiskScroll(delta) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state
+                        .setup
+                        .scroll_host_disks(delta, crate::video::ui::HOST_DISK_VISIBLE_ROWS);
+                }
+            }
             UiControl::LauncherHostDiskRefresh => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.refresh_host_disks();

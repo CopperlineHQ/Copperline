@@ -1050,12 +1050,34 @@ fn sample_host_disks() -> Vec<HostDiskRow> {
             writable: true,
             attach: crate::config::HostDiskAttach::default(),
         })
+        .chain(fake_host_disks())
         .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
 fn sample_host_disks() -> Vec<HostDiskRow> {
     Vec::new()
+}
+
+/// Invented disks appended to the real ones, for seeing how a long list
+/// behaves without owning a drawer of card readers. `COPPERLINE_FAKE_DISKS=20`
+/// adds twenty; unset, nothing changes. Diagnostic only -- they cannot be
+/// opened, so mounting one fails as any absent disk does.
+fn fake_host_disks() -> Vec<HostDiskRow> {
+    let Some(count) = crate::envcfg::var_os("COPPERLINE_FAKE_DISKS") else {
+        return Vec::new();
+    };
+    let count: usize = count.to_string_lossy().trim().parse().unwrap_or(0);
+    (0..count.min(64))
+        .map(|i| HostDiskRow {
+            id: format!("fakedisk{i}"),
+            volume: format!("Pretend Media {i}"),
+            size: format!("{}.0 GB", i % 9 + 1),
+            mounted: Vec::new(),
+            writable: true,
+            attach: crate::config::HostDiskAttach::default(),
+        })
+        .collect()
 }
 
 /// How close a bay is to actually having a physical drive behind it.
@@ -1377,6 +1399,9 @@ pub struct MachineSetup {
     /// host's storage tree, and a card pushed in mid-session is picked up by
     /// Refresh rather than by polling.
     host_disks: Vec<HostDiskRow>,
+    /// First row shown in the disk table. The list can be longer than the
+    /// box, and a disk that cannot be scrolled to cannot be chosen.
+    host_disk_scroll: usize,
     /// The disk ticked in the table. At most one: attaching two real disks at
     /// once is not something this page does, and a single tick makes that
     /// obvious without needing to be explained.
@@ -1596,6 +1621,7 @@ impl MachineSetup {
             // a launcher that never visits it never touches the host's disks.
             host_disks: Vec::new(),
             host_disk_selected: None,
+            host_disk_scroll: 0,
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
@@ -3762,6 +3788,19 @@ impl MachineSetup {
         &self.host_disks
     }
 
+    /// First row shown in the table.
+    pub fn host_disk_scroll(&self) -> usize {
+        self.host_disk_scroll
+    }
+
+    /// Move the window over the list, stopping at either end. `visible` is
+    /// how many rows the box shows, which is the caller's geometry to know.
+    pub fn scroll_host_disks(&mut self, delta: isize, visible: usize) {
+        let last_start = self.host_disks.len().saturating_sub(visible);
+        let at = self.host_disk_scroll as isize + delta;
+        self.host_disk_scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
     /// Look at the host's storage again. Called when the page opens and from
     /// its Refresh button, so a card pushed in mid-session appears without the
     /// launcher polling for it.
@@ -3770,6 +3809,8 @@ impl MachineSetup {
         // keeps the read-only and attachment it was given.
         let previous = std::mem::take(&mut self.host_disks);
         self.host_disks = sample_host_disks();
+        // A shorter list must not leave the window past its end.
+        self.host_disk_scroll = self.host_disk_scroll.min(self.host_disks.len());
         for row in &mut self.host_disks {
             if let Some(old) = previous.iter().find(|p| p.id == row.id) {
                 row.writable = old.writable;
