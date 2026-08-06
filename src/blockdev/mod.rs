@@ -42,11 +42,19 @@
 //! between the two is the backend's job, so the emulated machine sees the
 //! 512-byte device it expects whatever the media underneath is.
 
+// A platform backend supplies exactly two things: `list_devices` and
+// `open_device`. Each host's lives in its own file; one that has not been
+// written yet lists nothing and says so when asked to open, so every caller
+// works everywhere and simply finds no disks to offer.
 #[cfg(target_os = "macos")]
-mod macos;
-
-#[cfg(target_os = "macos")]
-use macos as platform;
+#[path = "macos.rs"]
+mod platform;
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod platform;
+#[cfg(target_os = "windows")]
+#[path = "windows.rs"]
+mod platform;
 
 use std::path::PathBuf;
 
@@ -207,8 +215,8 @@ impl BlockDevice {
     /// Wrap an already-open device. The handle is expected to have come from
     /// a platform opener, which is where privilege is dealt with.
     ///
-    /// A platform opener is the only caller, and not every platform has one
-    /// yet, so on those this is built but never reached.
+    /// A platform opener is the only caller, and not every platform has
+    /// written one yet, so on those this is built but never reached.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn new(
         file: std::fs::File,
@@ -411,17 +419,7 @@ pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevi
             device.id
         );
     }
-    platform_open(device, write)
-}
-
-#[cfg(target_os = "macos")]
-fn platform_open(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
     platform::open_device(device, write)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_open(_device: &HostDevice, _write: bool) -> anyhow::Result<BlockDevice> {
-    anyhow::bail!("physical disks are not supported on this platform yet")
 }
 
 /// Every whole device the host can see, including ones held back for safety
@@ -431,7 +429,7 @@ fn platform_open(_device: &HostDevice, _write: bool) -> anyhow::Result<BlockDevi
 /// offerable before internal, and larger media before smaller, since an Amiga
 /// disk is usually the odd small one on a modern host.
 pub fn list_devices() -> anyhow::Result<Vec<HostDevice>> {
-    let mut devices = platform_list()?;
+    let mut devices = platform::list_devices()?;
     devices.sort_by(|a, b| {
         a.safety
             .cmp(&b.safety)
@@ -447,19 +445,6 @@ pub fn list_devices() -> anyhow::Result<Vec<HostDevice>> {
 /// path is a property of this boot, not of the hardware.
 pub fn find_device(id: &str) -> anyhow::Result<Option<HostDevice>> {
     Ok(list_devices()?.into_iter().find(|device| device.id == id))
-}
-
-#[cfg(target_os = "macos")]
-fn platform_list() -> anyhow::Result<Vec<HostDevice>> {
-    platform::list_devices()
-}
-
-/// Hosts without a backend yet report nothing rather than failing, so every
-/// caller (config validation, the launcher) works everywhere and simply finds
-/// no devices to offer.
-#[cfg(not(target_os = "macos"))]
-fn platform_list() -> anyhow::Result<Vec<HostDevice>> {
-    Ok(Vec::new())
 }
 
 #[cfg(test)]
