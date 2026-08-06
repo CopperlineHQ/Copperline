@@ -60,6 +60,11 @@ install -Dm644 assets/aros/aros-amiga-m68k-ext.bin \
 install -Dm644 assets/aros/LICENSE \
   "$appdir/usr/share/copperline/aros/LICENSE"
 
+# Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
+# without naming a ROM); romsearch.rs looks under share/copperline/a4091.
+install -Dm644 assets/a4091/a4091_cdfs.rom \
+  "$appdir/usr/share/copperline/a4091/a4091_cdfs.rom"
+
 # Desktop integration metadata, shared with the Flatpak build.
 install -Dm644 "$flatpak_meta/dev.copperline.Copperline.desktop" \
   "$appdir/usr/share/applications/dev.copperline.Copperline.desktop"

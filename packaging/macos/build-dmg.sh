@@ -60,7 +60,8 @@ done
 
 echo "==> Staging $app_name"
 rm -rf "$stage"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/aros"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/aros" \
+  "$app/Contents/Resources/a4091"
 
 # Universal binary from the per-arch builds (a single-arch lipo is a no-op copy).
 bins=()
@@ -91,6 +92,10 @@ for f in \
   ACKNOWLEDGEMENTS; do
   cp "assets/aros/$f" "$app/Contents/Resources/aros/$f"
 done
+
+# Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
+# without naming a ROM); romsearch.rs resolves Contents/Resources/a4091.
+cp "assets/a4091/a4091_cdfs.rom" "$app/Contents/Resources/a4091/a4091_cdfs.rom"
 
 echo "==> Ad-hoc signing $app_name"
 # --deep so the nested executable is signed too; "-" selects the ad-hoc

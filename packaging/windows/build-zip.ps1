@@ -51,6 +51,12 @@ foreach ($f in @(
     Copy-Item "assets\aros\$f" (Join-Path $arosDir $f)
 }
 
+# Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
+# without naming a ROM); romsearch.rs probes a sibling a4091\ next to the exe.
+$a4091Dir = Join-Path $stage "a4091"
+New-Item -ItemType Directory -Force -Path $a4091Dir | Out-Null
+Copy-Item "assets\a4091\a4091_cdfs.rom" (Join-Path $a4091Dir "a4091_cdfs.rom")
+
 # Top-level docs and an example config to get users started.
 Copy-Item "copperline.example.toml" $stage
 Copy-Item "LICENSE" (Join-Path $stage "LICENSE.txt")
