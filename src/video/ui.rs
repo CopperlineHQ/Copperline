@@ -766,6 +766,8 @@ pub enum UiControl {
     LauncherHostDiskReadOnly(usize),
     /// Step one disk through the attachment points.
     LauncherHostDiskAttach(usize),
+    /// Give a real disk back to the host, from the drive row holding it.
+    LauncherHostDiskUnmount(LauncherField),
     /// Look at the host's storage again.
     LauncherHostDiskRefresh,
     /// Attach the ticked disk to the machine.
@@ -4790,6 +4792,19 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 }
                 RowKind::Drive => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
+                    // A real disk replaces both buttons with one.
+                    if state.setup.host_disk_on_row(r.field).is_some() {
+                        let unmount = Rect {
+                            x: browse.x,
+                            y: browse.y,
+                            w: clear.x + clear.w - browse.x,
+                            h: browse.h,
+                        };
+                        if unmount.contains(pos) {
+                            return Some(UiControl::LauncherHostDiskUnmount(r.field));
+                        }
+                        return None;
+                    }
                     if browse.contains(pos) {
                         return Some(UiControl::LauncherBrowse(r.field));
                     }
@@ -5694,6 +5709,42 @@ fn draw_launcher_row(
         RowKind::Drive => {
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
+            // A slot holding a real disk is not something to browse for: the
+            // disk was chosen from what the host has, and the only thing to
+            // do with it here is give it back. Browse and Clear make way for
+            // one Unmount spanning both.
+            if let Some(disk) = setup.host_disk_on_row(r.field) {
+                let text = format!(
+                    "{} ({}){}",
+                    disk.device,
+                    disk.attach.label(),
+                    if disk.read_only { "" } else { "  rw" }
+                );
+                draw_panel_text(
+                    frame,
+                    value_x,
+                    browse.y + 6,
+                    &truncate_to_width(&text, browse.x.saturating_sub(value_x + 8)),
+                    PANEL_TEXT,
+                    1,
+                    scale,
+                );
+                let unmount = Rect {
+                    x: browse.x,
+                    y: browse.y,
+                    w: clear.x + clear.w - browse.x,
+                    h: browse.h,
+                };
+                draw_text_button(
+                    frame,
+                    unmount,
+                    "Unmount",
+                    true,
+                    hover == Some(UiControl::LauncherHostDiskUnmount(r.field)),
+                    scale,
+                );
+                return;
+            }
             // The volume-name box only appears once an image is chosen (a name
             // has nothing to label otherwise, and never labels a CD image);
             // until then the row reads like a plain path row and the path text
@@ -8830,6 +8881,33 @@ mod tests {
             };
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-host-disk-locked");
+
+            // Storage, with a real disk on IDE master: the row names the disk
+            // and offers Unmount where an image would offer Browse/Clear.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            // A machine that actually has IDE, so the rows are live.
+            setup.select_model(Some(crate::config::MachineModel::A1200));
+            setup.set_host_disk_privileged(true);
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk Extreme SD".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                read_only: true,
+                attach: crate::config::HostDiskAttach::IdeMaster,
+            }]);
+            setup.select_host_disk(0);
+            setup.mount_host_disk();
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::Storage;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-storage-host-disk");
         }
 
         // The FluxBridge settings page reached from Configure, with an

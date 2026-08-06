@@ -5677,6 +5677,16 @@ impl App {
                     state.status = None;
                 }
             }
+            UiControl::LauncherHostDiskUnmount(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    let attach = crate::video::launcher::MachineSetup::host_disk_attach_of(field);
+                    let removed = attach.and_then(|a| state.setup.unmount_host_disk(a));
+                    state.status = Some(StatusMessage::ok(match removed {
+                        Some(device) => format!("{device} released; the host has it back"),
+                        None => "Nothing to unmount".to_string(),
+                    }));
+                }
+            }
             UiControl::LauncherHostDiskRefresh => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.refresh_host_disks();

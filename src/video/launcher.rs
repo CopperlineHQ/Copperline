@@ -27,8 +27,8 @@ use crate::config::{
     BridgeDriver, BridgeReadMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
     FluxBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd, Overscan,
     PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
-    RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
-    WarpSpeed, BOOT_PRI_NEVER,
+    RawFloppyDrive, RawHostDisk, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode,
+    Tint, WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -980,6 +980,29 @@ const Z3_PRESETS: [usize; 8] = [
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+/// The real disks a loaded configuration already gives the machine.
+fn raw_host_disks(raw: &RawConfig) -> Vec<crate::config::HostDiskConfig> {
+    raw.host_disk
+        .iter()
+        .filter(|entry| !entry.device.trim().is_empty())
+        .map(|entry| crate::config::HostDiskConfig {
+            device: entry.device.trim().to_string(),
+            attach: entry
+                .attach
+                .as_deref()
+                .map(str::trim)
+                .and_then(|token| {
+                    crate::config::HostDiskAttach::all()
+                        .iter()
+                        .copied()
+                        .find(|a| a.token().eq_ignore_ascii_case(token))
+                })
+                .unwrap_or_default(),
+            read_only: entry.read_only.unwrap_or(true),
+        })
+        .collect()
+}
+
 /// One line of the Host Disk table.
 ///
 /// Flattened for drawing: the page shows text, and the work of deciding what
@@ -1358,6 +1381,10 @@ pub struct MachineSetup {
     /// once is not something this page does, and a single tick makes that
     /// obvious without needing to be explained.
     host_disk_selected: Option<String>,
+    /// Real disks given to the machine, at most one per attachment point.
+    /// Held in the configuration's own shape: this is a setting that
+    /// persists, not a fact about this session.
+    host_disks_attached: Vec<crate::config::HostDiskConfig>,
     /// Whether the host has granted the access raw disks need. Real media is
     /// privileged on every supported platform, so the page stays read-only
     /// until this is asked for and given.
@@ -1573,6 +1600,7 @@ impl MachineSetup {
             // a launcher that never visits it never touches the host's disks.
             host_disks: Vec::new(),
             host_disk_selected: None,
+            host_disks_attached: raw_host_disks(raw),
             host_disk_privileged: false,
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
@@ -1976,6 +2004,18 @@ impl MachineSetup {
                 })
             })
             .chain(self.filesys_extra.iter().cloned())
+            .collect();
+        // Real host disks. Emitted in attachment order so the file reads the
+        // way the page does, and read_only only when it has been cleared:
+        // protected is the default, so an untouched entry stays as written.
+        raw.host_disk = crate::config::HostDiskAttach::all()
+            .iter()
+            .filter_map(|attach| self.host_disk_at(*attach))
+            .map(|disk| RawHostDisk {
+                device: disk.device.clone(),
+                attach: Some(disk.attach.token().to_string()),
+                read_only: (!disk.read_only).then_some(false),
+            })
             .collect();
         // CD
         raw.cd.image = self.cd_image.as_deref().map(path_string);
@@ -3789,6 +3829,75 @@ impl MachineSetup {
         row.attach = all[next];
     }
 
+    /// The attachment point a Storage row stands for, if it is one that can
+    /// hold a real disk.
+    pub fn host_disk_attach_of(field: LauncherField) -> Option<crate::config::HostDiskAttach> {
+        match field {
+            LauncherField::IdeMaster => Some(crate::config::HostDiskAttach::IdeMaster),
+            LauncherField::IdeSlave => Some(crate::config::HostDiskAttach::IdeSlave),
+            _ => None,
+        }
+    }
+
+    /// The real disk on the slot a row stands for, if there is one. This is
+    /// what makes a drive row show a disk instead of an image.
+    pub fn host_disk_on_row(&self, field: LauncherField) -> Option<&crate::config::HostDiskConfig> {
+        Self::host_disk_attach_of(field).and_then(|a| self.host_disk_at(a))
+    }
+
+    /// The real disks currently given to the machine.
+    pub fn host_disks_attached(&self) -> &[crate::config::HostDiskConfig] {
+        &self.host_disks_attached
+    }
+
+    /// What is attached at one point, if anything.
+    pub fn host_disk_at(
+        &self,
+        attach: crate::config::HostDiskAttach,
+    ) -> Option<&crate::config::HostDiskConfig> {
+        self.host_disks_attached.iter().find(|d| d.attach == attach)
+    }
+
+    /// Give the ticked disk to the machine.
+    ///
+    /// A slot holds one thing, so whatever was there -- another disk, or an
+    /// image -- makes way, exactly as the configuration parser requires.
+    pub fn mount_host_disk(&mut self) -> Option<crate::config::HostDiskConfig> {
+        let selected = self.host_disk_selected.clone()?;
+        let row = self.host_disks.iter().find(|d| d.id == selected)?.clone();
+        let entry = crate::config::HostDiskConfig {
+            device: row.id.clone(),
+            attach: row.attach,
+            read_only: row.read_only,
+        };
+        self.host_disks_attached
+            .retain(|d| d.attach != entry.attach);
+        // The image that slot was holding goes: the parser refuses a slot
+        // with both, and the user just said which one they want.
+        match entry.attach {
+            crate::config::HostDiskAttach::IdeMaster => {
+                self.ide_master = None;
+                self.ide_master_name = None;
+            }
+            crate::config::HostDiskAttach::IdeSlave => {
+                self.ide_slave = None;
+                self.ide_slave_name = None;
+            }
+        }
+        self.host_disks_attached.push(entry.clone());
+        self.host_disk_selected = None;
+        Some(entry)
+    }
+
+    /// Take a disk back off the machine and hand it to the host.
+    pub fn unmount_host_disk(&mut self, attach: crate::config::HostDiskAttach) -> Option<String> {
+        let at = self
+            .host_disks_attached
+            .iter()
+            .position(|d| d.attach == attach)?;
+        Some(self.host_disks_attached.remove(at).device)
+    }
+
     /// Whether the host has granted what raw disk access needs.
     pub fn host_disk_privileged(&self) -> bool {
         self.host_disk_privileged
@@ -4612,6 +4721,69 @@ mod tests {
             // Every interface here talks over a serial port.
             assert!(setup.disabled_reason(F::BridgePort).is_none());
         }
+    }
+
+    /// A disk chosen on the Host Disk page reaches the machine's
+    /// configuration, and comes back the same when it is read again -- which
+    /// is what makes an attachment outlive the session that made it.
+    #[test]
+    fn a_mounted_host_disk_round_trips_through_the_configuration() {
+        let mut setup = MachineSetup::default();
+        setup.set_host_disk_privileged(true);
+        setup.set_host_disks_for_test(vec![
+            HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                read_only: false,
+                attach: crate::config::HostDiskAttach::IdeSlave,
+            },
+            HostDiskRow {
+                id: "disk9".to_string(),
+                volume: "Kingston".to_string(),
+                size: "3.9 GB".to_string(),
+                mounted: Vec::new(),
+                read_only: true,
+                attach: crate::config::HostDiskAttach::IdeMaster,
+            },
+        ]);
+
+        setup.select_host_disk(0);
+        let mounted = setup.mount_host_disk().expect("a ticked disk mounts");
+        assert_eq!(mounted.device, "disk4");
+        assert_eq!(mounted.attach, crate::config::HostDiskAttach::IdeSlave);
+        assert!(!mounted.read_only, "the choice not to protect it carries");
+        // Ticking is cleared by mounting: the disk is attached now, and
+        // leaving it ticked would invite mounting it twice.
+        assert_eq!(setup.host_disk_selected(), None);
+
+        // It shows on the row that holds it, and not on the other one.
+        assert!(setup.host_disk_on_row(LauncherField::IdeSlave).is_some());
+        assert!(setup.host_disk_on_row(LauncherField::IdeMaster).is_none());
+
+        // Out to a configuration file, and back.
+        let raw = setup.to_raw();
+        assert_eq!(raw.host_disk.len(), 1);
+        assert_eq!(raw.host_disk[0].device, "disk4");
+        assert_eq!(raw.host_disk[0].attach.as_deref(), Some("ide-slave"));
+        assert_eq!(raw.host_disk[0].read_only, Some(false));
+
+        let reloaded = MachineSetup::from_raw(&raw).expect("the written configuration reads back");
+        let back = reloaded
+            .host_disk_at(crate::config::HostDiskAttach::IdeSlave)
+            .expect("the attachment survives being written and read");
+        assert_eq!(back.device, "disk4");
+        assert!(!back.read_only);
+
+        // And taking it off gives it back to the host.
+        let mut reloaded = reloaded;
+        assert_eq!(
+            reloaded.unmount_host_disk(crate::config::HostDiskAttach::IdeSlave),
+            Some("disk4".to_string())
+        );
+        assert!(reloaded.host_disks_attached().is_empty());
+        assert!(reloaded.to_raw().host_disk.is_empty());
     }
 
     /// The Interface row carries no driver list of its own: it offers what
