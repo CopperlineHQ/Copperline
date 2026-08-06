@@ -496,13 +496,34 @@ async function load() {
 // the unpause path that would otherwise resume the context.
 let audioBuildGeneration = 0;
 
+// One shared autoplay-unlock handler instead of a closure per build:
+// re-arming with the same function is an addEventListener no-op, so
+// rebuilds while the policy holds contexts suspended cannot stack
+// listeners, and firing resumes whatever stack is current rather than
+// the one that happened to be live when the listener was armed.
+function audioUnlock() {
+  window.removeEventListener('pointerdown', audioUnlock);
+  window.removeEventListener('keydown', audioUnlock);
+  audioCtx?.resume().catch(() => {});
+}
+
+function armAudioUnlock() {
+  window.addEventListener('pointerdown', audioUnlock);
+  window.addEventListener('keydown', audioUnlock);
+}
+
 async function buildAudioStack(suspendForPause) {
   const gen = ++audioBuildGeneration;
   if (audioCtx) {
     audioNode?.disconnect();
+    // Deliberately not awaited: on iOS the context being replaced may be
+    // wedged in a dead audio session, and its teardown must never gate
+    // the stack that restores the sound. The transient second context is
+    // bounded - one per rebuild, with the close already under way.
     audioCtx.close().catch(() => {});
     audioCtx = null;
     audioNode = null;
+    window.__audioCtx = null; // keep the debug surface truthful
   }
   const ctx = new AudioContext({ sampleRate: 44100 });
   let node;
@@ -576,11 +597,7 @@ async function buildAudioStack(suspendForPause) {
   // boot. Video runs regardless, and the next real interaction unlocks
   // the sound.
   ctx.resume().catch(() => {});
-  if (ctx.state !== 'running') {
-    const unlock = () => ctx.resume().catch(() => {});
-    window.addEventListener('pointerdown', unlock, { once: true });
-    window.addEventListener('keydown', unlock, { once: true });
-  }
+  if (ctx.state !== 'running') armAudioUnlock();
 }
 
 // --- boot ----------------------------------------------------------------
