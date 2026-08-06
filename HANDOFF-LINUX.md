@@ -164,6 +164,18 @@ decisions behind them, and the parts that will actually cost you time:
   the polkit prompt they already know from their file manager.
   Note the Windows backend takes the volumes on **every** attach, read-only
   included, because exclusive use is the point of attaching at all. Match that.
+- **A machine that is switched off must not still hold the disk.** This one is
+  not platform-specific and it cost the Windows session real time. Powering off
+  does not tear the machine down — it cold-resets it and *keeps its drives* —
+  so a real disk stayed held, exclusively, with the host's volumes unmounted:
+  the launcher could not hand it back, the host could not mount it, and the
+  next attempt to take it met a lock nothing could reach. `Bus::release_host_disks`
+  and `Bus::attach_host_disks` now hand real disks back on power off and take
+  them again on power on, gated on `HardDriveImage::is_host_disk` so images are
+  untouched. Both live in `bus.rs` and are not `cfg`-gated, so this is already
+  done for you — but check it behaves on Linux, where `O_EXCL` is what will be
+  released. The physical floppy drives had the same rule first
+  (`release_bridges`), which is the precedent to point at.
 - **Privilege, and the escalation.** `/dev/sdX` is `root:disk 0660`. Try the
   direct open first regardless — a user in the `disk` group, a udev rule, or
   simply running as root all make it work, and prompting when nothing is in the
@@ -294,11 +306,12 @@ and that the system's own disk is identified.
 
 Push the branch to the fork (`origin`, `hobbo91/Copperline`). Do not open a PR.
 
-That is the last of the three backends, so also: delete this file and
-`HANDOFF-WINDOWS.md`, and make sure `docs/guide/` actually describes the
-feature. At the time this was written the host-disk feature had no chapter of
-its own — only a passing mention under save states — which is a debt the last
-of the three sessions is best placed to clear.
+That is the last of the three backends, so also: delete this file — it replaced
+`HANDOFF-WINDOWS.md`, which went when the Windows backend landed — and make
+sure `docs/guide/` actually describes the feature. At the time this was written
+the host-disk feature had no chapter of its own, only a passing mention under
+save states, which is a debt the last of the three sessions is best placed to
+clear.
 
 **Write down what both this and the Windows backend turned out to need.** The
 maintainer goes back to macOS after this to finish the rest, and that session
