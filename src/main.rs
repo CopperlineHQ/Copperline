@@ -135,11 +135,11 @@ pub struct CliArgs {
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
     pub list_net_interfaces: bool,
     pub list_disks: bool,
-    /// The privileged half of the Windows host-disk opener: which disk,
-    /// whether it may be written, which process to hand the open disk back to,
-    /// and where to leave the answer. Set only by the unprivileged half of
-    /// this same program, which is why it is absent from `--help`.
-    pub host_disk_broker: Option<(String, bool, u32, PathBuf)>,
+    /// The privileged half of the Windows host-disk opener: which process to
+    /// hand the open disks back to, where to leave the answer, and the disks
+    /// themselves as `DEVICE:rw`/`DEVICE:ro`. Set only by the unprivileged
+    /// half of this same program, which is why it is absent from `--help`.
+    pub host_disk_broker: Option<(u32, PathBuf, Vec<String>)>,
     /// Linux companion helper setup action: install, uninstall, or status.
     pub net_helper_action: Option<String>,
     /// `--sampler-list-audio-inputs`: print the host audio input devices (for
@@ -343,7 +343,7 @@ where
     // Only the Windows build has a privileged half to be, so only it ever
     // fills this in.
     #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut host_disk_broker: Option<(String, bool, u32, PathBuf)> = None;
+    let mut host_disk_broker: Option<(u32, PathBuf, Vec<String>)> = None;
     let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
@@ -371,19 +371,22 @@ where
             #[cfg(windows)]
             copperline::blockdev::BROKER_FLAG => {
                 let usage = format!(
-                    "{} is used by Copperline itself and takes DEVICE ro|rw PID REPLY",
+                    "{} is used by Copperline itself and takes PID REPLY DEVICE:rw|ro...",
                     copperline::blockdev::BROKER_FLAG
                 );
-                let device = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
-                let mode = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
-                let parent = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
-                let reply = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
-                host_disk_broker = Some((
-                    device,
-                    mode == "rw",
-                    parent.parse().map_err(|_| anyhow!(usage))?,
-                    PathBuf::from(reply),
-                ));
+                let parent: u32 = args
+                    .next()
+                    .ok_or_else(|| anyhow!(usage.clone()))?
+                    .parse()
+                    .map_err(|_| anyhow!(usage.clone()))?;
+                let reply = PathBuf::from(args.next().ok_or_else(|| anyhow!(usage.clone()))?);
+                // Everything after is a disk. Opening them is the whole of
+                // what this process does, so nothing else can follow.
+                let disks: Vec<String> = args.by_ref().collect();
+                if disks.is_empty() {
+                    return Err(anyhow!(usage));
+                }
+                host_disk_broker = Some((parent, reply, disks));
             }
             "--host-disk" | "--host-disk-read-only" => {
                 let read_only = a == "--host-disk-read-only";
@@ -1939,8 +1942,8 @@ fn main() -> Result<()> {
     // disk for the Copperline that could not, and it must not open a window,
     // read a configuration, or touch a machine on the way.
     #[cfg(windows)]
-    if let Some((device, write, parent, reply)) = &cli.host_disk_broker {
-        return copperline::blockdev::serve_broker_request(device, *write, *parent, reply);
+    if let Some((parent, reply, disks)) = &cli.host_disk_broker {
+        return copperline::blockdev::serve_broker_request(disks, *parent, reply);
     }
     if let Some(action) = cli.net_helper_action.as_deref() {
         return run_net_helper_setup(action);

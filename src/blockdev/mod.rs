@@ -421,11 +421,12 @@ fn write_all_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Resul
     Ok(())
 }
 
-/// Open a device for the emulated machine.
+/// Refuse a device nothing should be allowed to touch, whatever asks.
 ///
-/// Refuses the host's own system disk outright, before any platform code
-/// runs: that check is not something a backend gets to have an opinion on.
-pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
+/// Every route to a real disk goes through here first, so a backend never gets
+/// an opinion on the system disk and no later path can skip the question by
+/// taking a different door.
+fn refuse_if_unusable(device: &HostDevice, write: bool) -> anyhow::Result<()> {
     // The read-modify-write path assumes a guest sector sits wholly inside one
     // media block. Odd block sizes exist (520-byte SCSI media, formatted for a
     // controller's own use), and one would have it straddling two.
@@ -449,7 +450,57 @@ pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevi
             device.id
         );
     }
+    Ok(())
+}
+
+/// Open a device for the emulated machine.
+///
+/// Refuses the host's own system disk outright, before any platform code
+/// runs: that check is not something a backend gets to have an opinion on.
+pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
+    refuse_if_unusable(device, write)?;
     platform::open_device(device, write)
+}
+
+/// Take disks from the host now, ahead of the machine that will use them.
+///
+/// The launcher settles which disks it wants long before anything runs, and
+/// the permission a real disk needs is best asked for there -- where somebody
+/// has just asked for them -- rather than minutes later, behind a machine
+/// starting up. They are taken together because that permission is a dialog
+/// somebody has to read, and one is enough for however many disks were ticked.
+///
+/// A host with nothing to ask for does nothing here and opens as usual when
+/// the machine starts, which is why this is allowed to be a no-op.
+pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
+    let mut wanted = Vec::new();
+    for (id, write) in disks {
+        let device = find_device(id)?.ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+        refuse_if_unusable(&device, *write)?;
+        wanted.push((device, *write));
+    }
+    #[cfg(windows)]
+    return platform::reserve_devices(&wanted);
+    #[cfg(not(windows))]
+    {
+        let _ = wanted;
+        Ok(())
+    }
+}
+
+/// Give a disk taken early back to the host, and say whether one was held.
+///
+/// Nothing held is not a failure: a host that never took the disk early has
+/// nothing to hand back, and neither has one where the machine has since taken
+/// it for itself.
+pub fn release_device(id: &str) -> bool {
+    #[cfg(windows)]
+    return platform::release_device(id);
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        false
+    }
 }
 
 /// Every whole device the host can see, including ones held back for safety

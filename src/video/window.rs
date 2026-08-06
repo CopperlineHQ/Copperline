@@ -5670,11 +5670,14 @@ impl App {
                     let removed = attach.and_then(|a| state.setup.unmount_host_disk(a));
                     state.status = Some(match (removed, attach) {
                         (Some(device), Some(attach)) => {
-                            // The launcher configures; nothing is opened until
-                            // the machine runs, so this is the setting going,
-                            // not a handle being closed.
+                            // Off the machine and back to the host in one act.
+                            // Mounting took the disk, so letting go has to
+                            // close what that opened, or the host would be
+                            // told it may have a disk this process still
+                            // holds.
+                            crate::blockdev::release_device(&device);
                             log::info!("host disk: {device} taken off {}", attach.label());
-                            StatusMessage::ok(format!("{device} released; the host has it back"))
+                            StatusMessage::ok(format!("{device} released"))
                         }
                         _ => StatusMessage::err("Nothing to unmount"),
                     });
@@ -5700,36 +5703,74 @@ impl App {
             }
             UiControl::LauncherHostDiskMount => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.status = Some(match state.setup.mount_host_disks() {
+                    let status = match state.setup.mount_host_disks() {
                         Ok(disks) => {
-                            for disk in &disks {
-                                // Configured, not yet opened: the machine
-                                // takes the disk when it starts, and that is
-                                // where the permission prompt happens.
-                                log::info!(
-                                    "host disk: {} set to attach to {} ({})",
-                                    disk.device,
-                                    disk.attach.label(),
-                                    if disk.writable {
-                                        "read/write"
-                                    } else {
-                                        "read only"
+                            // The host gives the disk up here, not when the
+                            // machine starts. A real disk needs permission on
+                            // some hosts, and this is where somebody has just
+                            // asked for one -- a dialog minutes later, behind
+                            // a machine booting, belongs to nothing they did.
+                            let asked: Vec<(String, bool)> = disks
+                                .iter()
+                                .map(|disk| (disk.device.clone(), disk.writable))
+                                .collect();
+                            let refused = match crate::blockdev::reserve_devices(&asked) {
+                                Ok(()) => {
+                                    for disk in &disks {
+                                        log::info!(
+                                            "host disk: {} attached to {} ({})",
+                                            disk.device,
+                                            disk.attach.label(),
+                                            if disk.writable {
+                                                "read/write"
+                                            } else {
+                                                "read only"
+                                            }
+                                        );
                                     }
-                                );
+                                    None
+                                }
+                                Err(error) => {
+                                    // The whole chain goes to the log, which
+                                    // has room for it; the status line gets
+                                    // the outermost link, which is the one
+                                    // written to be read.
+                                    log::warn!("host disk: not attached: {error:#}");
+                                    Some(error.to_string())
+                                }
+                            };
+                            match refused {
+                                Some(reason) => {
+                                    // Nothing stays attached that the host did
+                                    // not give up, including the disks taken
+                                    // before the one that failed: a machine
+                                    // must not start expecting a disk that was
+                                    // refused here.
+                                    for disk in &disks {
+                                        crate::blockdev::release_device(&disk.device);
+                                        state.setup.unmount_host_disk(disk.attach);
+                                    }
+                                    log::warn!("host disk: not attached: {reason}");
+                                    StatusMessage::err(reason)
+                                }
+                                None => {
+                                    let places: Vec<_> = disks.iter().map(|d| d.attach).collect();
+                                    let where_to =
+                                        crate::config::HostDiskAttach::describe_all(&places);
+                                    StatusMessage::ok(if disks.len() == 1 {
+                                        format!("Host disk attached to {where_to}")
+                                    } else {
+                                        format!("Host disks attached to {where_to}")
+                                    })
+                                }
                             }
-                            let places: Vec<_> = disks.iter().map(|d| d.attach).collect();
-                            let where_to = crate::config::HostDiskAttach::describe_all(&places);
-                            StatusMessage::ok(if disks.len() == 1 {
-                                format!("Host disk attached to {where_to}")
-                            } else {
-                                format!("Host disks attached to {where_to}")
-                            })
                         }
                         Err(reason) => {
                             log::warn!("host disk: not attached: {reason}");
                             StatusMessage::err(reason)
                         }
-                    });
+                    };
+                    state.status = Some(status);
                 }
             }
             UiControl::LauncherBridgeConfigure(bay) => {
