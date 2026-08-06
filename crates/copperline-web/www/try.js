@@ -3470,15 +3470,26 @@ const devKeyboardBtn = $('devkeyboard');
 pauseBtn?.addEventListener('click', togglePause);
 screenshotBtn?.addEventListener('click', copyScreenshot);
 // Hidden rather than degraded on a bundle that predates key_raw: the keys
-// are rawkeys, and there is no half of this that still works.
+// are rawkeys, and there is no half of this that still works. Inline as
+// well as by the attribute, for the same shell-stylesheet reason as the
+// device-keys button below.
 if (HAS_KEY_RAW) keyboardBtn?.addEventListener('click', toggleKeyboard);
-else if (keyboardBtn) keyboardBtn.hidden = true;
+else if (keyboardBtn) {
+  keyboardBtn.hidden = true;
+  keyboardBtn.style.display = 'none';
+}
 // The device keyboard is offered where there is one to offer. A screen
 // without touch already has the real thing plugged in, and routing it
 // through a text field would only lose every key the field cannot
 // describe -- which is most of an Amiga keyboard.
-if (HAS_KEY_RAW && hasTouch) devKeyboardBtn?.addEventListener('click', toggleHostKeyboard);
-else if (devKeyboardBtn) {
+if (HAS_KEY_RAW && hasTouch && devKeyboardBtn) {
+  // A shell can ship the button hidden so a desktop never shows it, not
+  // even for the moment before this module loads; the touch screens the
+  // button serves un-hide it here.
+  devKeyboardBtn.hidden = false;
+  devKeyboardBtn.style.display = '';
+  devKeyboardBtn.addEventListener('click', toggleHostKeyboard);
+} else if (devKeyboardBtn) {
   // Only a shell-provided button can reach here (the self-inserted one is
   // not built at all off a touch screen), and it goes away inline as well
   // as by the attribute: `[hidden]` is a user-agent rule, so a shell whose
