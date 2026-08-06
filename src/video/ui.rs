@@ -5139,8 +5139,10 @@ fn draw_host_disk_page(
     // single clipped line loses -- leaving a summary that says everything
     // except the thing it was written to say. Past two lines it is truncated,
     // because the summary cannot keep growing without reaching the panel edge.
-    let first_px = table.w.saturating_sub(8);
-    let rest_px = table.w.saturating_sub(16);
+    // Both lines start at the same edge: the wrap is one sentence running on,
+    // not a list with sub-items, and stepping the second line in makes it read
+    // as something subordinate to the first.
+    let width_px = table.w.saturating_sub(8);
     let bottom = rect.y + rect.h;
     let mut y = summary_top + 16;
     for disk in &chosen {
@@ -5155,22 +5157,20 @@ fn draw_host_disk_page(
             disk.volume,
             disk.attach.label()
         );
-        let mut lines = wrap_text(&text, first_px / font::GLYPH_W, rest_px / font::GLYPH_W);
+        let chars = width_px / font::GLYPH_W;
+        let mut lines = wrap_text(&text, chars, chars);
         if lines.len() > 2 {
             let overflow = lines[1..].join(" ");
             lines.truncate(1);
-            lines.push(truncate_to_width(&overflow, rest_px));
+            lines.push(truncate_to_width(&overflow, width_px));
         }
-        for (n, line) in lines.iter().enumerate() {
+        for line in &lines {
             // Out of panel is not somewhere to draw: the rest of the page is
             // below this and would be written over.
             if y + HOST_DISK_ROW_H > bottom {
                 return;
             }
-            // A continuation is indented, so it reads as the rest of the line
-            // above rather than as another disk.
-            let indent = if n == 0 { 8 } else { 16 };
-            draw_panel_text(frame, table.x + indent, y, line, PANEL_TEXT, 1, scale);
+            draw_panel_text(frame, table.x + 8, y, line, PANEL_TEXT, 1, scale);
             y += HOST_DISK_ROW_H;
         }
     }
@@ -6282,11 +6282,16 @@ fn draw_launcher(
         } else {
             PANEL_TEXT_HILIGHT
         };
+        // Kept inside the panel. A failure explains itself at whatever length
+        // it needs to, and one long enough to run past the edge is drawn over
+        // the window either side of it -- so it is clipped here, with the log
+        // holding the whole of what went wrong.
+        let text = truncate_to_width(&status.text, rect.w.saturating_sub(20));
         draw_panel_text(
             frame,
             rect.x + 10,
             launcher_status_y(rect),
-            &status.text,
+            &text,
             color,
             1,
             scale,
