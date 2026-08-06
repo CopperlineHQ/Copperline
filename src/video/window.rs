@@ -5700,14 +5700,19 @@ impl App {
             }
             UiControl::LauncherHostDiskMount => {
                 if let Some(state) = self.launcher_state_mut() {
-                    // Attaching the disk to a machine is the next piece of
-                    // work; the page can already choose one, which is what
-                    // decides everything after it.
-                    state.status =
-                        Some(StatusMessage::ok(match state.setup.host_disk_selected() {
-                            Some(id) => format!("{id} selected (attaching is not wired up yet)"),
-                            None => "Tick a disk first".to_string(),
-                        }));
+                    state.status = Some(match state.setup.mount_host_disk() {
+                        Some(disk) => StatusMessage::ok(format!(
+                            "{} attached to {}{}",
+                            disk.device,
+                            disk.attach.label(),
+                            if disk.read_only {
+                                ""
+                            } else {
+                                " -- the guest can write to it"
+                            }
+                        )),
+                        None => StatusMessage::ok("Tick a disk first"),
+                    });
                 }
             }
             UiControl::LauncherBridgeConfigure(bay) => {
