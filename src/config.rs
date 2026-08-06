@@ -4087,6 +4087,17 @@ impl TryFrom<RawConfig> for Config {
         };
 
         let host_disks = parse_host_disks(&raw.host_disk, &ide)?;
+        // A real host disk is a drive on the port just as an image is, and
+        // the ROM's driver is what finds it and mounts what its RDB
+        // describes. Counting only images would cull that driver out from
+        // under a machine whose only drive is a real one -- which opens
+        // perfectly and is then never looked at.
+        let host_disk_on_ide = host_disks.iter().any(|disk| {
+            matches!(
+                disk.attach,
+                HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave
+            )
+        });
         Ok(Config {
             host_disks,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
@@ -4136,7 +4147,7 @@ impl TryFrom<RawConfig> for Config {
             // no scsi.device in ROM, so there is nothing to disable.
             rom_scsi_device_disable: raw.machine.rom_scsi_device_disable.unwrap_or({
                 let builtin_drives = (has_ide_port
-                    && (ide.master.is_some() || ide.slave.is_some()))
+                    && (ide.master.is_some() || ide.slave.is_some() || host_disk_on_ide))
                     || (defaults.sdmac
                         && scsi.controller == ScsiController::A3000
                         && scsi.units.iter().any(Option::is_some));

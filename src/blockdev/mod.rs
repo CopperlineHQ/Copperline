@@ -189,6 +189,9 @@ pub struct BlockDevice {
     writable: bool,
     /// Scratch for a partial block, so steady-state I/O allocates nothing.
     block: Vec<u8>,
+    /// Whether a refused write has already been reported. The guest will keep
+    /// trying, and one explanation is worth more than thousands.
+    refusal_reported: bool,
 }
 
 impl BlockDevice {
@@ -209,6 +212,7 @@ impl BlockDevice {
             size_bytes,
             writable,
             block: vec![0; block_size as usize],
+            refusal_reported: false,
         }
     }
 
@@ -269,6 +273,20 @@ impl BlockDevice {
     /// neighbouring sectors intact, so it is not optional.
     pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
         if !self.writable {
+            // Say it once, plainly: a guest that meets this shows its own
+            // error, and "why did my disk fail to write" is answered here
+            // rather than left to be guessed at. Amiga filesystems commonly
+            // write on mount -- PFS marks the volume in use -- so a
+            // read-only disk raises this during boot, not only when
+            // something is saved.
+            if !self.refusal_reported {
+                self.refusal_reported = true;
+                log::warn!(
+                    "blockdev: {} is attached read-only, so the guest's write to sector {lba} \
+                     was refused; untick R/O (or set read_only = false) to let it write",
+                    self.id
+                );
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!("{}: opened read-only", self.id),
