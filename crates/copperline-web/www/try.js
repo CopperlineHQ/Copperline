@@ -727,8 +727,14 @@ document.addEventListener('visibilitychange', () => {
   syncWakeLock();
   if (!audioCtx) return;
   if (document.hidden) {
+    // The toggle is read through the DOM rather than its const, which is
+    // declared further down the file: a handler must not couple to
+    // evaluation order (with the box not built yet, this reads unticked).
     keepRunningHidden =
-      bgRunToggle.checked && running && !paused && audioCtx.state === 'running';
+      !!$('background-run')?.checked &&
+      running &&
+      !paused &&
+      audioCtx.state === 'running';
     if (!keepRunningHidden) audioCtx.suspend();
   } else {
     const kept = keepRunningHidden;
@@ -5281,8 +5287,8 @@ async function startup() {
   }
   // Run-in-background: the visitor's own remembered choice first (a
   // per-browser behavior preference, the overscan rule), then the config
-  // file's starting point; neither disturbs a shell checkbox's own
-  // initial state.
+  // file's starting point; a shell checkbox's own initial state stands
+  // only when neither says otherwise.
   const bgRunPref = storedPref(BG_RUN_STORAGE_KEY);
   if (bgRunPref !== null) bgRunToggle.checked = bgRunPref === 'on';
   else if (typeof cfg.background_run === 'boolean') bgRunToggle.checked = cfg.background_run;
