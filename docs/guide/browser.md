@@ -354,8 +354,8 @@ through wasm-bindgen; the page's JavaScript drives everything from
   A frame whose render input exactly matches the previous one skips the
   render pipeline entirely (the desktop render cache's reuse detector),
   so a static screen costs no render work at all.
-  There is no wgpu in the build, which keeps the wasm
-  around 1.4 MiB (about 0.6 MiB over the wire).
+  There is no wgpu in the build, which keeps the wasm-opt'd wasm
+  around 2.1 MiB (about 0.8 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
   and posted to an `AudioWorklet` as transferred `Float32Array` chunks. The
   build is single threaded -- no SharedArrayBuffer, so no COOP/COEP headers
