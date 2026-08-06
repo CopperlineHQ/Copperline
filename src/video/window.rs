@@ -5647,7 +5647,9 @@ impl App {
             UiControl::LauncherHostDiskSelect(index) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.select_host_disk(index);
-                    state.status = None;
+                    // A refused tick reports itself on the status line, where
+                    // every other warning is looked for.
+                    state.status = state.setup.host_disk_warning().map(StatusMessage::err);
                 }
             }
             UiControl::LauncherHostDiskWritable(index) => {

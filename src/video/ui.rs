@@ -4290,13 +4290,16 @@ const HOST_DISK_ROW_H: usize = 14;
 const HOST_DISK_HEADER_H: usize = 16;
 /// Rows drawn inside the box at once. A longer list scrolls.
 pub(crate) const HOST_DISK_VISIBLE_ROWS: usize = 8;
-/// Column starts, as offsets from the inside edge of the box.
+/// Column starts, as offsets from the inside edge of the box. Each is wide
+/// enough for what actually goes in it: a device identifier runs to
+/// `PhysicalDrive11` on Windows, and an attachment point to `SCSI Unit 0`.
 const HOST_DISK_COL_DISK: usize = 8;
-const HOST_DISK_COL_VOLUME: usize = 70;
-const HOST_DISK_COL_SIZE: usize = 250;
-const HOST_DISK_COL_ATTACH: usize = 326;
-const HOST_DISK_COL_WRITABLE: usize = 414;
-const HOST_DISK_COL_TICK: usize = 462;
+const HOST_DISK_COL_VOLUME: usize = 128;
+const HOST_DISK_COL_SIZE: usize = 272;
+const HOST_DISK_COL_ATTACH: usize = 344;
+const HOST_DISK_COL_WRITABLE: usize = 440;
+/// The last column ends before the scroll arrows, which sit inside the frame.
+const HOST_DISK_COL_TICK: usize = 472;
 
 fn host_disk_table_rect(rect: Rect) -> Rect {
     let x = launcher_pane_x(rect);
@@ -4385,8 +4388,8 @@ fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
         h: LAUNCH_TAB_H,
     };
     [
-        (UiControl::LauncherHostDiskMount, button(0)),
-        (UiControl::LauncherHostDiskRefresh, button(1)),
+        (UiControl::LauncherHostDiskRefresh, button(0)),
+        (UiControl::LauncherHostDiskMount, button(1)),
     ]
 }
 
@@ -4990,13 +4993,23 @@ fn draw_host_disk_page(
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
         // A disk the host has mounted is not dimmed: mounting takes it from
         // the host first, so being in use is not a reason it cannot be had.
-        let volume = truncate_to_width(&disk.volume, HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8);
-        for (offset, text) in [
-            (HOST_DISK_COL_DISK, disk.id.clone()),
-            (HOST_DISK_COL_VOLUME, volume),
-            (HOST_DISK_COL_SIZE, disk.size.clone()),
-            (HOST_DISK_COL_ATTACH, disk.attach.label().to_string()),
+        // Every column is clipped to the space before the next one: a long
+        // device name or volume must not run into its neighbour.
+        for (offset, next, text) in [
+            (HOST_DISK_COL_DISK, HOST_DISK_COL_VOLUME, disk.id.clone()),
+            (
+                HOST_DISK_COL_VOLUME,
+                HOST_DISK_COL_SIZE,
+                disk.volume.clone(),
+            ),
+            (HOST_DISK_COL_SIZE, HOST_DISK_COL_ATTACH, disk.size.clone()),
+            (
+                HOST_DISK_COL_ATTACH,
+                HOST_DISK_COL_WRITABLE,
+                disk.attach.label(),
+            ),
         ] {
+            let text = truncate_to_width(&text, next - offset - 8);
             draw_panel_text(frame, row.x + offset, text_y, &text, PANEL_TEXT, 1, scale);
         }
         // Two ticks, the same kind of answer either way: may the guest write
@@ -5093,8 +5106,18 @@ fn draw_host_disk_page(
 
     // What Mount will do, one line per ticked disk, under the buttons so the
     // greyed Mount button is never a mystery and two ticks are never a
-    // surprise about where the second disk went.
-    let mut note_y = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
+    // surprise about where the second disk went. Same shape as the Input
+    // page's summary: a dimmed heading over the lines it introduces.
+    let summary_top = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
+    draw_panel_text(
+        frame,
+        table.x,
+        summary_top,
+        "With these settings:",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
     let chosen: Vec<&crate::video::launcher::HostDiskRow> = setup
         .host_disks()
         .iter()
@@ -5103,33 +5126,38 @@ fn draw_host_disk_page(
     if chosen.is_empty() {
         draw_panel_text(
             frame,
-            table.x,
-            note_y,
+            table.x + 8,
+            summary_top + 16,
             "Select a disk to attach it to the machine",
-            PANEL_TEXT_DIM,
+            PANEL_TEXT,
             1,
             scale,
         );
     }
-    for disk in chosen {
+    for (i, disk) in chosen.iter().enumerate() {
         let access = if disk.writable {
             "read/write"
         } else {
             "read only"
         };
-        let line = format!(
-            "{} ({}): attached {access} to {}",
-            disk.id,
-            disk.volume,
-            disk.attach.label()
+        let line = truncate_to_width(
+            &format!(
+                "{} ({}): attached {access} to {}",
+                disk.id,
+                disk.volume,
+                disk.attach.label()
+            ),
+            table.w.saturating_sub(8),
         );
-        draw_panel_text(frame, table.x, note_y, &line, PANEL_TEXT_DIM, 1, scale);
-        note_y += font::GLYPH_H + 4;
-    }
-    // A tick that did not take, and why. Orange: it is a thing to deal with,
-    // not a thing that happened.
-    if let Some(warning) = setup.host_disk_warning() {
-        draw_panel_text(frame, table.x, note_y, warning, PANEL_TEXT_ACCENT, 1, scale);
+        draw_panel_text(
+            frame,
+            table.x + 8,
+            summary_top + 16 + i * 14,
+            &line,
+            PANEL_TEXT,
+            1,
+            scale,
+        );
     }
 }
 
@@ -8873,8 +8901,8 @@ mod tests {
                     attach_chosen: false,
                 },
                 launcher::HostDiskRow {
-                    id: "disk9".to_string(),
-                    volume: "Generic CF Reader".to_string(),
+                    id: "PhysicalDrive11".to_string(),
+                    volume: "Generic USB3.0 CRW-SD/MS Multi-Card Reader".to_string(),
                     size: "512 MB".to_string(),
                     mounted: Vec::new(),
                     writable: true,

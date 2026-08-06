@@ -1415,9 +1415,9 @@ pub struct MachineSetup {
     /// First row shown in the disk table. The list can be longer than the
     /// box, and a disk that cannot be scrolled to cannot be chosen.
     host_disk_scroll: usize,
-    /// Why the last tick was refused, shown under the table until the next
-    /// one. Cleared by any tick, because the situation it describes is the
-    /// one the user is in the middle of changing.
+    /// Why the last tick was refused. Read once by the caller, which puts it
+    /// on the status line with every other warning; cleared by the next tick,
+    /// because the situation it describes is the one being changed.
     host_disk_warning: Option<String>,
     /// The disks ticked in the table. A machine can take several at once, so
     /// long as no two want the same place; ticking one claims the first place
