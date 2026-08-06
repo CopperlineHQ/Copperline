@@ -351,6 +351,9 @@ through wasm-bindgen; the page's JavaScript drives everything from
   [the presentation internals](../internals/video.md)). Border-only frames
   keep the previous frame's geometry, as on the desktop, so the canvas
   does not switch shape across the blanks a screen change produces.
+  A frame whose render input exactly matches the previous one skips the
+  render pipeline entirely (the desktop render cache's reuse detector),
+  so a static screen costs no render work at all.
   There is no wgpu in the build, which keeps the wasm
   around 1.4 MiB (about 0.6 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame

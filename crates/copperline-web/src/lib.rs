@@ -241,6 +241,13 @@ pub struct WebEmu {
     /// previous presentation geometry instead of snapping to the full
     /// framebuffer, so the canvas does not jump at every mode change.
     presentation_latch: present_common::PresentationLatch,
+    /// Exact previous-frame reuse, the desktop render cache's detector via
+    /// the same path the benchmark uses: a frame whose render input matches
+    /// the previous one skips the whole render/present pipeline, since the
+    /// present buffer already shows it. A static screen then costs no
+    /// render at all. Replaced whenever the machine or the presentation
+    /// settings change under it.
+    repeated_frame_detector: bitplane::RepeatedFrameDetector,
 }
 
 #[wasm_bindgen]
@@ -297,6 +304,7 @@ impl WebEmu {
             serial,
             overscan: Overscan::Tv,
             presentation_latch: present_common::PresentationLatch::default(),
+            repeated_frame_detector: bitplane::RepeatedFrameDetector::default(),
         })
     }
 
@@ -432,7 +440,17 @@ impl WebEmu {
             return;
         }
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
-        bitplane::render(self.emu.bus_mut(), &mut self.fb);
+        // A frame identical to the previous render needs no pipeline at
+        // all: the present buffer already shows it, and the detector
+        // carries the frame's CLXDAT so collisions still accumulate.
+        if bitplane::render_reusing_previous(
+            self.emu.bus_mut(),
+            &mut self.fb,
+            &mut self.repeated_frame_detector,
+        ) {
+            self.last_rendered_frame = Some(emulated_frame);
+            return;
+        }
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
         let base = self.emu.bus().frame_render_base();
@@ -864,6 +882,9 @@ impl WebEmu {
         // timeline, so it starts over too.
         self.last_rendered_frame = None;
         self.presentation_latch.reset();
+        // The reuse detector's snapshot belongs to the replaced machine;
+        // the repaint below must render, not match against it.
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
         self.presentation_stale = false;
         Ok(())
@@ -878,6 +899,7 @@ impl WebEmu {
         self.mouse_remainder = (0.0, 0.0);
         self.mouse_pending = (0, 0);
         self.presentation_latch.reset();
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         Ok(())
     }
 
@@ -908,9 +930,12 @@ impl WebEmu {
         }
         self.overscan = overscan;
         // Judge the new mode's geometry fresh rather than from decisions
-        // latched under the old one.
+        // latched under the old one. The reuse detector resets with it:
+        // the frame's content has not changed, but its presentation has,
+        // so the repaint below must run the pipeline, not match.
         self.presentation_latch.reset();
         self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
     }
 
