@@ -299,3 +299,19 @@ That is the last of the three backends, so also: delete this file and
 feature. At the time this was written the host-disk feature had no chapter of
 its own — only a passing mention under save states — which is a debt the last
 of the three sessions is best placed to clear.
+
+**Write down what both this and the Windows backend turned out to need.** The
+maintainer goes back to macOS after this to finish the rest, and that session
+starts knowing none of it: which claims in these briefs held up and which did
+not, what each host demanded that its brief did not predict, and what is still
+owed. Record it wherever this session's notes persist as well as in the code —
+the module docs in `windows.rs` are the model, in that they say what was
+*measured*, on what, and when.
+
+One Windows decision worth a look before you copy it: the launcher's Mount
+button takes the disk there and then (`blockdev::reserve_device`), so the
+consent dialog belongs to the button somebody just pressed instead of turning
+up minutes later behind a machine starting. `release_device` hands it back.
+Both are no-ops off Windows, deliberately — macOS was left alone rather than
+changed on a guess. Decide whether polkit wants the same, and say which you
+chose and why.
