@@ -42,7 +42,18 @@ jobs:
           test -n "$V"
           cargo install wasm-bindgen-cli --version "$V" --locked
       - name: Install binaryen
-        run: sudo apt-get update && sudo apt-get install -y binaryen
+        # Pinned from upstream releases, never apt: Ubuntu ships binaryen
+        # 108 (2022), whose wasm-opt mangles the externref table
+        # wasm-bindgen's glue grows at startup - the published bundle then
+        # dies at load with "WebAssembly.Table.grow(): failed to grow
+        # table by 4". Modern binaryen also reads the module's feature
+        # section itself, so the pass needs no --enable flags to keep.
+        run: |
+          V=version_131
+          curl --location --silent --show-error --fail \
+            https://github.com/WebAssembly/binaryen/releases/download/$V/binaryen-$V-x86_64-linux.tar.gz \
+            | tar xz
+          echo "$PWD/binaryen-$V/bin" >> "$GITHUB_PATH"
       - name: Build the web crate
         working-directory: crates/copperline-web
         # simd128: every wasm-capable browser has had fixed-width SIMD for
@@ -57,10 +68,24 @@ jobs:
           wasm-bindgen --target web --out-dir pkg \
             target/wasm32-unknown-unknown/release/copperline_web.wasm
           wasm-opt -O3 \
-            --enable-simd --enable-bulk-memory --enable-sign-ext \
-            --enable-mutable-globals --enable-nontrapping-float-to-int \
             pkg/copperline_web_bg.wasm -o pkg/copperline_web_bg.wasm
           test -s pkg/copperline_web_bg.wasm
+      - name: Smoke-load the optimized bundle
+        # The one check that would have caught a wasm-opt-mangled table:
+        # instantiate the exact glue + binary pair that is about to be
+        # published and build a machine from it. Anything wrong with the
+        # pair fails here, before the site sees it.
+        working-directory: crates/copperline-web
+        run: |
+          cat > pkg-smoke.mjs <<'SMOKE'
+          import { readFileSync } from 'fs';
+          import init, { WebEmu } from './pkg/copperline_web.js';
+          await init(readFileSync('./pkg/copperline_web_bg.wasm'));
+          const emu = new WebEmu('A500', 'PAL');
+          console.log('bundle loads:', emu.machine_summary());
+          SMOKE
+          node pkg-smoke.mjs
+          rm pkg-smoke.mjs
       - name: Check out the website repository
         uses: actions/checkout@v7
         with:
