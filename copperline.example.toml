@@ -676,3 +676,30 @@ floppy_sounds_volume = 100
 #                                # at double speed (the default) or the
 #                                # platter's real speed; a track's first read
 #                                # always streams at the platter's own pace
+
+# Real hard disks --------------------------------------------------------
+#
+# Give the machine a real disk of this computer's -- the CF or SD card an
+# Amiga boots from, in a reader -- instead of a hard drive image. The Amiga
+# sees the medium as it is: its own Rigid Disk Block, its own partitions,
+# its own filesystem. Nothing is copied or synthesised, and no RDB is
+# invented over a disk that has none.
+#
+# `device` is the host's stable name for the disk, exactly as
+# `--list-disks` prints it: "sdb" on Linux, "disk4" on macOS,
+# "PhysicalDrive1" on Windows. A disk named here that is not plugged in
+# leaves that drive slot empty and the machine starts anyway.
+#
+# The disk this computer is running from is never offered and never opened,
+# whatever is written here. Opening a real disk needs permission the first
+# time -- polkit on Linux, authopen on macOS, Administrator on Windows --
+# and the host's volumes on it are unmounted for as long as the machine has
+# it. Attach read-only first: an Amiga filesystem writes when it mounts, so
+# a correct read-only attach raises the guest's own write error, which is
+# proof the whole read path works. See the "Real hard disks" chapter of the
+# guide.
+#
+# [[host_disk]]
+# device = "sdb"                 # as --list-disks prints it
+# attach = "ide-master"          # ide-master (default), ide-slave, scsi0..scsi6
+# read_only = true               # absent means writable

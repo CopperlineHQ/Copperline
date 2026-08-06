@@ -44,6 +44,8 @@ running in Copperline.
   gamepad calibration.
 - [](guide/fluxbridge) -- reading and writing real Amiga floppies in a
   physical drive, over a DrawBridge, Greaseweazle, or Supercard Pro.
+- [](guide/host-disks) -- giving the machine a real hard disk: the CF or SD
+  card an Amiga boots from, read in a card reader with its own RDB intact.
 - [](guide/headless) -- scripted, deterministic runs: screenshots, frame
   dumps, scripted input, and WAV capture.
 - [](guide/browser) -- the same core compiled to WebAssembly, hosted at
