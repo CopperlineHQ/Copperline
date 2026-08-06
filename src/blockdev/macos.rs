@@ -166,6 +166,16 @@ unsafe extern "C" {
 /// Returns the external form to write to its stdin, or `None` if the user
 /// declined or the request failed -- in which case the caller lets `authopen`
 /// ask in its own name rather than failing outright.
+///
+/// Known limitation: from this binary as built today, `AuthorizationCreate`
+/// returns `errAuthorizationInternal` (-60008) even for an empty request, so
+/// the fallback is what runs and the prompt is titled `authopen`. The same
+/// call succeeds from a minimal binary on the same machine, and it is not the
+/// FFI, the ad-hoc signature, the linked frameworks, or the earlier denied
+/// open -- each was ruled out by comparison. Authorization Services expects a
+/// bundled application with an identity, which is also what gives the prompt
+/// a name worth showing, so this is expected to resolve when Copperline is
+/// packaged and signed rather than by changing anything here.
 fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]> {
     // The right is per-path, which is what keeps a granted open from being
     // turned on any other device.
@@ -188,7 +198,9 @@ fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL
     let mut auth: AuthorizationRef = std::ptr::null_mut();
     // Created empty, then extended: the dialog belongs to the second call, so
     // a failure to create is distinguishable from a refusal to grant.
-    if unsafe { AuthorizationCreate(std::ptr::null(), std::ptr::null(), 0, &mut auth) } != 0 {
+    let created = unsafe { AuthorizationCreate(std::ptr::null(), std::ptr::null(), 0, &mut auth) };
+    if created != 0 {
+        log::debug!("blockdev: AuthorizationCreate failed ({created})");
         return None;
     }
     let granted = unsafe {
@@ -201,12 +213,16 @@ fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL
         )
     };
     if granted != 0 {
+        log::debug!("blockdev: {right:?} was not granted ({granted})");
         unsafe { AuthorizationFree(auth, 0) };
         return None;
     }
     let mut external = [0u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH];
     let made = unsafe { AuthorizationMakeExternalForm(auth, external.as_mut_ptr()) };
     unsafe { AuthorizationFree(auth, 0) };
+    if made != 0 {
+        log::debug!("blockdev: AuthorizationMakeExternalForm failed ({made})");
+    }
     (made == 0).then_some(external)
 }
 
@@ -595,6 +611,10 @@ fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
     // request fails -- fall back to letting the tool ask in its own name
     // rather than refusing to open at all.
     let external = authorize_open(path, flags != libc::O_RDONLY);
+    log::debug!(
+        "blockdev: authorization obtained here: {}",
+        external.is_some()
+    );
     let mut command = std::process::Command::new("/usr/libexec/authopen");
     command.arg("-stdoutpipe");
     if external.is_some() {
