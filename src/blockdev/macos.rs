@@ -359,16 +359,11 @@ fn mounted_volumes() -> Vec<(String, String)> {
 /// The whole-disk name a slice belongs to: `disk3s5` and `disk3s1s1` are both
 /// `disk3`.
 fn whole_disk_of(slice: &str) -> String {
-    match slice.find('s') {
-        // Skip the "disk" prefix before looking for the slice separator, so
-        // the 's' in "disk" is not mistaken for one.
-        Some(_) => {
-            let (head, tail) = slice.split_at(4.min(slice.len()));
-            match tail.find('s') {
-                Some(at) => format!("{head}{}", &tail[..at]),
-                None => slice.to_string(),
-            }
-        }
+    // Past the "disk" prefix before looking for the slice separator, so the
+    // 's' in "disk" is not mistaken for one.
+    let (head, tail) = slice.split_at(4.min(slice.len()));
+    match tail.find('s') {
+        Some(at) => format!("{head}{}", &tail[..at]),
         None => slice.to_string(),
     }
 }

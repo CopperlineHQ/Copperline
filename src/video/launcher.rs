@@ -3888,6 +3888,15 @@ impl MachineSetup {
         &self.host_disk_selected
     }
 
+    /// Whether the machine has the port an attachment point needs.
+    fn attach_is_fitted(&self, attach: crate::config::HostDiskAttach) -> bool {
+        if attach.is_scsi() {
+            self.has_scsi_controller()
+        } else {
+            self.has_ide()
+        }
+    }
+
     /// The first attachment point nothing has claimed, preferring the ones
     /// the machine can actually use so a tick lands somewhere useful.
     fn free_host_disk_attach(
@@ -3900,17 +3909,10 @@ impl MachineSetup {
             .filter(|row| self.host_disk_is_selected(&row.id) && Some(row.id.as_str()) != ignoring)
             .map(|row| row.attach)
             .collect();
-        let usable = |a: &crate::config::HostDiskAttach| {
-            if a.is_scsi() {
-                self.has_scsi_controller()
-            } else {
-                self.has_ide()
-            }
-        };
         crate::config::HostDiskAttach::all()
             .into_iter()
             .filter(|a| !claimed.contains(a))
-            .find(usable)
+            .find(|a| self.attach_is_fitted(*a))
             .or_else(|| {
                 // Nothing the machine supports is free, so fall back to the
                 // first free point at all: the message explains the rest.
@@ -3975,13 +3977,7 @@ impl MachineSetup {
             .filter(|row| self.host_disk_is_selected(&row.id))
             .cloned()
             .collect();
-        if let Some(bad) = chosen.iter().find(|row| {
-            if row.attach.is_scsi() {
-                !self.has_scsi_controller()
-            } else {
-                !self.has_ide()
-            }
-        }) {
+        if let Some(bad) = chosen.iter().find(|row| !self.attach_is_fitted(row.attach)) {
             return Err(bad.attach.requirement().to_string());
         }
 

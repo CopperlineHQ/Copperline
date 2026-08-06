@@ -4288,8 +4288,7 @@ fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
 /// Geometry of the Host Disk table: the framed box listing what the host has.
 const HOST_DISK_ROW_H: usize = 14;
 const HOST_DISK_HEADER_H: usize = 16;
-/// Rows drawn inside the box. Beyond this the list is clipped; a host with
-/// more removable disks than this attached is not the case to optimise for.
+/// Rows drawn inside the box at once. A longer list scrolls.
 pub(crate) const HOST_DISK_VISIBLE_ROWS: usize = 8;
 /// Column starts, as offsets from the inside edge of the box.
 const HOST_DISK_COL_DISK: usize = 8;
@@ -4298,9 +4297,6 @@ const HOST_DISK_COL_SIZE: usize = 250;
 const HOST_DISK_COL_ATTACH: usize = 326;
 const HOST_DISK_COL_WRITABLE: usize = 414;
 const HOST_DISK_COL_TICK: usize = 462;
-/// Width of the two columns that are clicked rather than read, so a click
-/// lands on the cell and not merely on its text.
-const HOST_DISK_CELL_W: usize = 92;
 
 fn host_disk_table_rect(rect: Rect) -> Rect {
     let x = launcher_pane_x(rect);
@@ -4360,18 +4356,20 @@ fn host_disk_attach_cell(rect: Rect, index: usize) -> Rect {
     Rect {
         x: row.x + HOST_DISK_COL_ATTACH,
         y: row.y,
-        w: HOST_DISK_CELL_W,
+        // Up to the next column, so a click near the edge cannot land on
+        // both this cell and the one beside it.
+        w: HOST_DISK_COL_WRITABLE - HOST_DISK_COL_ATTACH,
         h: row.h,
     }
 }
 
-/// The Writable cell of one row.
+/// The R/W cell of one row.
 fn host_disk_writable_cell(rect: Rect, index: usize) -> Rect {
     let row = host_disk_row_rect(rect, index);
     Rect {
         x: row.x + HOST_DISK_COL_WRITABLE,
         y: row.y,
-        w: 40,
+        w: HOST_DISK_COL_TICK - HOST_DISK_COL_WRITABLE,
         h: row.h,
     }
 }
@@ -4990,9 +4988,6 @@ fn draw_host_disk_page(
             fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
-        // A disk the host is using cannot simply be taken, so say so where
-        // the reason is visible rather than only when Mount fails.
-        // Listing needs nothing of the host, so the disks are always shown --
         // A disk the host has mounted is not dimmed: mounting takes it from
         // the host first, so being in use is not a reason it cannot be had.
         let volume = truncate_to_width(&disk.volume, HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8);
@@ -5004,57 +4999,26 @@ fn draw_host_disk_page(
         ] {
             draw_panel_text(frame, row.x + offset, text_y, &text, PANEL_TEXT, 1, scale);
         }
-        // Writable is a tick like the selection: the same kind of answer, on
-        // or off for this disk. On by default -- a disk given to a machine is
-        // normally meant to be used -- so unticking it is what protects it.
-        let ro_box = Rect {
-            x: row.x + HOST_DISK_COL_WRITABLE + 6,
-            y: row.y + 2,
-            w: 10,
-            h: 10,
-        };
-        fill_rect(frame, scale_rect(ro_box, scale), ENTRY_BG, scale);
-        draw_outline(frame, ro_box, BUTTON_EDGE_LIGHT, scale);
-        if disk.writable {
-            fill_rect(
-                frame,
-                scale_rect(
-                    Rect {
-                        x: ro_box.x + 2,
-                        y: ro_box.y + 2,
-                        w: 6,
-                        h: 6,
-                    },
-                    scale,
-                ),
-                PANEL_TEXT,
-                scale,
-            );
-        }
-        let box_rect = Rect {
-            x: row.x + HOST_DISK_COL_TICK + 12,
-            y: row.y + 2,
-            w: 10,
-            h: 10,
-        };
-        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
-        draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
-        if ticked {
-            fill_rect(
-                frame,
-                scale_rect(
-                    Rect {
-                        x: box_rect.x + 2,
-                        y: box_rect.y + 2,
-                        w: 6,
-                        h: 6,
-                    },
-                    scale,
-                ),
-                PANEL_TEXT_HILIGHT,
-                scale,
-            );
-        }
+        // Two ticks, the same kind of answer either way: may the guest write
+        // to this disk, and is it going to the machine at all. Writing is on
+        // by default -- a disk given to a machine is normally meant to be
+        // used -- so unticking R/W is what protects it.
+        draw_tick_box(
+            frame,
+            row.x + HOST_DISK_COL_WRITABLE + 6,
+            row.y + 2,
+            disk.writable,
+            PANEL_TEXT,
+            scale,
+        );
+        draw_tick_box(
+            frame,
+            row.x + HOST_DISK_COL_TICK + 12,
+            row.y + 2,
+            ticked,
+            PANEL_TEXT_HILIGHT,
+            scale,
+        );
     }
 
     // Arrows only when there is somewhere to go, and each greys at its end
@@ -5161,6 +5125,23 @@ fn draw_host_disk_page(
         );
         draw_panel_text(frame, table.x, note_y, &line, PANEL_TEXT_DIM, 1, scale);
         note_y += font::GLYPH_H + 4;
+    }
+}
+
+/// A small square box, filled when set. The fill colour distinguishes what
+/// is being answered: one page can carry more than one kind of tick.
+fn draw_tick_box(frame: &mut [u8], x: usize, y: usize, set: bool, colour: u32, scale: usize) {
+    let outer = Rect { x, y, w: 10, h: 10 };
+    fill_rect(frame, scale_rect(outer, scale), ENTRY_BG, scale);
+    draw_outline(frame, outer, BUTTON_EDGE_LIGHT, scale);
+    if set {
+        let inner = Rect {
+            x: x + 2,
+            y: y + 2,
+            w: 6,
+            h: 6,
+        };
+        fill_rect(frame, scale_rect(inner, scale), colour, scale);
     }
 }
 
@@ -8861,8 +8842,8 @@ mod tests {
             }
         }
 
-        // The Host Disk page, with a disk ticked and privileged mode on, so
-        // the table, the latching button and the enabled Mount all render.
+        // The Host Disk page with two disks ticked: the table, the second
+        // disk landing beside the first, and a line each saying where they go.
         {
             let mut frame = vec![0u8; w * h * 4];
             let mut setup = launcher::MachineSetup::default();
@@ -8896,8 +8877,8 @@ mod tests {
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-host-disk");
 
-            // The same page before the host has granted anything: the disks
-            // are listed (looking costs nothing) but nothing can be chosen.
+            // The same page with nothing ticked: Mount is greyed, and the
+            // page says what it is waiting for.
             let mut frame = vec![0u8; w * h * 4];
             let mut setup = launcher::MachineSetup::default();
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {

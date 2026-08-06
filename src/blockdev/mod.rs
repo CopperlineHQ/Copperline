@@ -292,7 +292,7 @@ impl BlockDevice {
                 self.refusal_reported = true;
                 log::warn!(
                     "blockdev: {} is attached read-only, so the guest's write to sector {lba} \
-                     was refused; untick R/O (or set read_only = false) to let it write",
+                     was refused; tick R/W (or drop `read_only`) to let it write",
                     self.id
                 );
             }
@@ -316,9 +316,16 @@ impl BlockDevice {
 
     /// Push everything to the medium. A physical disk can be pulled out, so
     /// buffered writes are a hazard an image file does not have.
+    ///
+    /// `File::flush` is a no-op -- there is no userspace buffer to empty --
+    /// so this syncs, which is what actually reaches the platter. Harmless
+    /// on an unbuffered character device, and the difference between a
+    /// written disk and a lost one on a buffered block device.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
-        self.file.flush()
+        if !self.writable {
+            return Ok(());
+        }
+        self.file.sync_data()
     }
 }
 
@@ -377,6 +384,17 @@ fn write_all_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Resul
 /// Refuses the host's own system disk outright, before any platform code
 /// runs: that check is not something a backend gets to have an opinion on.
 pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
+    // The read-modify-write path assumes a guest sector sits wholly inside one
+    // media block. Odd block sizes exist (520-byte SCSI media, formatted for a
+    // controller's own use), and one would have it straddling two.
+    if !(device.block_size as usize).is_multiple_of(crate::harddrive::SECTOR_SIZE) {
+        anyhow::bail!(
+            "{} has {}-byte blocks, which are not whole {}-byte sectors",
+            device.id,
+            device.block_size,
+            crate::harddrive::SECTOR_SIZE
+        );
+    }
     if !device.safety.openable() {
         anyhow::bail!(
             "{} is the disk this computer is running from and cannot be used as an Amiga drive",

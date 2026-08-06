@@ -5666,12 +5666,15 @@ impl App {
                 if let Some(state) = self.launcher_state_mut() {
                     let attach = crate::video::launcher::MachineSetup::host_disk_attach_of(field);
                     let removed = attach.and_then(|a| state.setup.unmount_host_disk(a));
-                    state.status = Some(match removed {
-                        Some(device) => {
-                            log::info!("host disk: {device} released back to the host");
+                    state.status = Some(match (removed, attach) {
+                        (Some(device), Some(attach)) => {
+                            // The launcher configures; nothing is opened until
+                            // the machine runs, so this is the setting going,
+                            // not a handle being closed.
+                            log::info!("host disk: {device} taken off {}", attach.label());
                             StatusMessage::ok(format!("{device} released; the host has it back"))
                         }
-                        None => StatusMessage::err("Nothing to unmount"),
+                        _ => StatusMessage::err("Nothing to unmount"),
                     });
                 }
             }
@@ -5698,8 +5701,11 @@ impl App {
                     state.status = Some(match state.setup.mount_host_disks() {
                         Ok(disks) => {
                             for disk in &disks {
+                                // Configured, not yet opened: the machine
+                                // takes the disk when it starts, and that is
+                                // where the permission prompt happens.
                                 log::info!(
-                                    "host disk: {} attached to {} ({})",
+                                    "host disk: {} set to attach to {} ({})",
                                     disk.device,
                                     disk.attach.label(),
                                     if disk.writable {

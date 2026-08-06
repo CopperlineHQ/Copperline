@@ -1264,8 +1264,10 @@ impl Default for AudioConfig {
 /// Where on the emulated machine a host disk is attached.
 ///
 /// An Amiga IDE channel carries two devices, so master and slave are
-/// positions on one bus rather than separate buses. SCSI units will join this
-/// when a host disk can be given to a controller; the shape is already here.
+/// positions on one bus rather than separate buses. A SCSI unit is a target
+/// address on whichever controller the machine has fitted, which is why the
+/// unit is a number here and the controller is not named: the machine has at
+/// most one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostDiskAttach {
     #[default]
@@ -1343,8 +1345,9 @@ pub struct HostDiskConfig {
     /// Where the machine sees it.
     pub attach: HostDiskAttach,
     /// Whether the guest may write to the disk. On by default, matching the
-    /// launcher's Writable column: a disk given to a machine is normally
-    /// meant to be used, and protecting it is the deliberate choice.
+    /// launcher's R/W column and the config's `read_only`: a disk given to a
+    /// machine is normally meant to be used, and protecting it is the
+    /// deliberate choice.
     pub writable: bool,
 }
 
@@ -2727,7 +2730,8 @@ pub struct HostDiskArg {
 pub(crate) struct RawHostDisk {
     /// The host's identifier for the disk, as `--list-disks` prints it.
     pub(crate) device: String,
-    /// Where the machine sees it: `ide-master` (the default) or `ide-slave`.
+    /// Where the machine sees it: `ide-master` (the default), `ide-slave`,
+    /// or `scsi0`..`scsi6`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attach: Option<String>,
     /// Protect the disk from the guest. Absent means writable, which is what
