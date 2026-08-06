@@ -237,6 +237,15 @@ Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
 
+Hiding the tab normally puts the machine to sleep with the page, exactly
+where it was until the tab returns. Ticking **Run in background** keeps
+it running -- and audible -- the way a video tab keeps playing, so a long
+render or a BBS transfer carries on while you read something else. The
+choice is remembered per browser. Running hidden needs the sound to have
+been unlocked (any click or key press does it): the audio pipeline is
+what clocks the machine while the page cannot see it, so with audio still
+suspended the machine sleeps as before.
+
 (browser-save-states)=
 ### Save states
 
@@ -341,9 +350,18 @@ through wasm-bindgen; the page's JavaScript drives everything from
   are needed and any static host (GitHub Pages included) can serve it.
 - **Pacing**: each animation frame steps the core up to the wall clock, with
   the audio queue as the master clock -- when the worklet reports more than
-  ~150 ms buffered, stepping pauses for a tick. Deficits past 100 ms (a
-  backgrounded tab, a GC pause) are forgiven rather than fast-forwarded,
-  mirroring the native pacer's re-anchor behaviour.
+  ~150 ms buffered, stepping pauses until the queue drains back under
+  ~90 ms (hysteresis, so a queue riding one threshold cannot flip the gate
+  every report), and the pacer re-anchors while it waits, so the pause is
+  forgiven rather than repaid as a burst that would drop frames from the
+  output. Deficits past 100 ms (a backgrounded tab, a GC pause) are
+  forgiven the same way, mirroring the native pacer's re-anchor behaviour.
+  A hidden tab normally sleeps -- no animation frames, audio suspended --
+  but with the run-in-background option on, the worklet's queue reports
+  (messages, which background tabs still receive; only timers are
+  throttled) clock the machine in rAF's place: the real-time audio
+  pipeline never stops, so the tab keeps running the way a video tab
+  keeps playing, skipping only the frame rendering nobody can see.
 - **Input**: `KeyboardEvent.code` strings map to Amiga raw keycodes with the
   same table as the desktop frontend (winit's `KeyCode` names *are* the W3C
   code strings); the mouse uses Pointer Lock for relative motion, with a
@@ -535,6 +553,16 @@ elements, and pages without them are untouched:
   boot, so a shell can default to mono by shipping the box checked.
   Without the element the output stays stereo unless the
   [configuration file](#browser-page-config) sets `mono_audio`.
+- `#background-run` (checkbox): keeps the machine running -- and audible
+  -- while the tab is hidden, clocked by the audio pipeline the way a
+  video tab keeps playing; unticked (the default), a hidden tab sleeps as
+  it always has. Like `#machine` it is always on: without the element a
+  labelled checkbox inserts itself below the canvas shell. The visitor's
+  choice is remembered per browser, and the
+  [configuration file](#browser-page-config)'s `background_run` is the
+  starting point for first-time visitors. Running hidden needs unlocked
+  audio: while the AudioContext is still suspended there is no clock, and
+  the machine sleeps as before.
 - `#machine` (a `<select>`): hosts the machine model control, letting the
   page place and style it. Like `#floppy-speed` it is always on: without
   the element a labelled select inserts itself below the canvas shell
@@ -693,6 +721,7 @@ per URL, and anything the visitor changes by hand wins as usual:
   "tint": "green",
   "monitor": "plain",
   "joy": "keys",
+  "background_run": true,
   "serial_url": "wss://bbs.example.com:8443/",
   "serial_raw": false,
   "autoboot": true
@@ -714,7 +743,10 @@ the glue remembers, and a visitor's own remembered choice wins over the
 file. `serial_url` and `serial_raw` preset the
 serial bridge's inputs and therefore need those elements: a shell
 without them has no connect button to dial with either. `joy` picks the
-starting joystick mode. `autoboot: true` powers the machine on by itself once the
+starting joystick mode. `background_run` starts first-time visitors with
+the run-in-background box ticked (a per-browser preference the glue
+remembers, so as with the viewing choices a visitor's own remembered
+choice wins over the file). `autoboot: true` powers the machine on by itself once the
 emulator, the ROM, and any configured disk have loaded -- the whole
 recipe for a page dedicated to one demo or a BBS: name the disk, set
 `autoboot`, and a visitor lands in the running machine. Browsers keep
