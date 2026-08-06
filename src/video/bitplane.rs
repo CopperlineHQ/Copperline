@@ -5292,7 +5292,254 @@ fn apply_programmable_blanking(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Bounds of the fast interior of one control run, if it has one:
+/// `(x_lo, x_hi, f0, planes_mask)` with `x_lo`/`x_hi` on the output pixel
+/// grid and `f0` the prepared-pixel index of `x_lo`'s sample. The interior
+/// is where the per-pixel loop's every decision is provably constant, so
+/// eligibility mirrors that loop's branches one for one; anything outside -
+/// scroll lead-in, the DDFSTOP hold pixel one past the fetch span, window
+/// edges - is left to the per-pixel code.
+#[allow(clippy::too_many_arguments)]
+fn fast_playfield_run_interior(
+    plan: &DenisePlannedPlayfieldLine<'_>,
+    x: usize,
+    run_stop: usize,
+    bpl_output_start_x: usize,
+    pixel_repeat: usize,
+    native_per_pixel: usize,
+    pixel_fetch_start_native_x: usize,
+    native_x_offset: usize,
+    min_fetch_x: usize,
+    delays: &[i32; 8],
+    nplanes: usize,
+    ham_mode: bool,
+    shres: bool,
+    canvas_scale: usize,
+    have_indexed_outputs: bool,
+    ham_diag_active: bool,
+    window_open: bool,
+    line_visible: bool,
+    control: ControlState,
+) -> Option<(usize, usize, usize, u8)> {
+    // Below this many samples the setup outweighs the tight loop.
+    const MIN_FAST_SAMPLES: i64 = 16;
+
+    let available_planes = nplanes.min(8);
+    // genlock_transparent is constant false when the ZD clock overrides it
+    // or no keying mode is enabled at all; only then can the alpha be
+    // folded into the run.
+    let genlock_inert = control.zd_clock_enabled()
+        || (!control.color_key_enabled() && !control.bitplane_key_enabled());
+    if ham_mode
+        || shres
+        || !have_indexed_outputs
+        || ham_diag_active
+        || !window_open
+        || !line_visible
+        || !genlock_inert
+        || canvas_scale != 1
+        || native_per_pixel != 1
+        || plan.pixels.is_none()
+        || available_planes < 2
+        || delays[0] != delays[1]
+        || active_debug_plane_mask() != u8::MAX
+    {
+        return None;
+    }
+    let planes_mask = if available_planes == 8 {
+        u8::MAX
+    } else {
+        ((1u16 << available_planes) - 1) as u8
+    };
+    let delay = i64::from(delays[0]);
+    let pr = pixel_repeat as i64;
+    let x_start = plan.x_start as i64;
+    let pfsn = pixel_fetch_start_native_x as i64;
+    let nxo = native_x_offset as i64;
+
+    // q is the sample index on the output grid: x_k = x_start + q * repeat,
+    // native_x = q - pfsn + nxo, fetch_x = native_x - delay. The loop below
+    // steps x from x_start in whole repeats, so every x it visits has an
+    // exact q.
+    let q_of_x_ceil = |v: i64| -> i64 { (v - x_start + pr - 1).div_euclid(pr) };
+    let q_lo = q_of_x_ceil(x as i64)
+        .max(q_of_x_ceil(bpl_output_start_x as i64))
+        .max(pfsn)
+        .max(min_fetch_x as i64 + delay + pfsn - nxo);
+
+    // Exclusive: the last sample must keep every repeated pixel inside the
+    // display span, stay inside the run, and fetch strictly inside the
+    // prepared span (the DDFSTOP hold pixel sits one past it).
+    let q_hi = ((run_stop as i64 - 1 - x_start).div_euclid(pr))
+        .min((plan.x_stop as i64 - pr - x_start).div_euclid(pr))
+        .min(plan.fetched_pixels as i64 - 1 + delay + pfsn - nxo)
+        + 1;
+
+    if q_hi - q_lo < MIN_FAST_SAMPLES {
+        return None;
+    }
+    let f0 = q_lo - pfsn + nxo - delay;
+    debug_assert!(f0 >= min_fetch_x as i64);
+    let x_lo = x_start + q_lo * pr;
+    let x_hi = x_start + q_hi * pr;
+    Some((x_lo as usize, x_hi as usize, f0 as usize, planes_mask))
+}
+
+/// The interior itself: one prepared byte, two table loads, and the stores
+/// per sample. Mirrors the per-pixel loop's visible-sample body exactly for
+/// the constant case the eligibility check proved: opaque alpha (genlock
+/// inert), unconditional collision store, playfield mask store only when a
+/// playfield is present, and the indexed resolver's held-colour seeding
+/// (the last colour of the run, exactly as the per-pixel calls would leave
+/// it).
+#[allow(clippy::too_many_arguments)]
+fn render_fast_playfield_run(
+    idx_bytes: &[u8],
+    planes_mask: u8,
+    outputs: &[DenisePlayfieldOutput; 256],
+    collision_table: &[CollisionPixel; 256],
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    collision_pixels: &mut [CollisionPixel],
+    clxdat: &mut u16,
+    ham_color: &mut u32,
+    y: usize,
+    x_lo: usize,
+    pixel_repeat: usize,
+    out_w: usize,
+    canvas_scale: usize,
+) {
+    debug_assert_eq!(canvas_scale, 1);
+    let row_fb = y * FB_WIDTH;
+    let row_out = y * out_w;
+    let mut clx = *clxdat;
+    let mut last_color = *ham_color;
+    for (i, &byte) in idx_bytes.iter().enumerate() {
+        let idx = usize::from(byte & planes_mask);
+        let output = outputs[idx];
+        let collision = collision_table[idx];
+        clx |= collision.clxdat_bits();
+        last_color = output.color;
+        let pixel = rgb24_to_rgba8_alpha(output.color, true);
+        let x = x_lo + i * pixel_repeat;
+        let fb_idx = row_fb + x;
+        let out_base = row_out + x;
+        let pf = collision.playfield_mask();
+        for dx in 0..pixel_repeat {
+            collision_pixels[fb_idx + dx] = collision;
+            if pf != 0 {
+                playfield_mask[fb_idx + dx] = pf;
+            }
+            fb[out_base + dx] = pixel;
+        }
+    }
+    *clxdat = clx;
+    *ham_color = last_color;
+}
+
 fn render_planned_playfield_line(
+    plan: &DenisePlannedPlayfieldLine<'_>,
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    collision_pixels: &mut [CollisionPixel],
+    collision_lookup: &mut CollisionLookup,
+    indexed_output_cache: &mut IndexedOutputCache,
+    clxdat: &mut u16,
+    palette: Palette,
+    palette_segments: &[PaletteSegment],
+    segment_idx: usize,
+    pixel_control: ControlState,
+    control_segments: &[ControlSegment],
+    control_segment_idx: usize,
+    base_scroll_bplcon1: u16,
+    base_ham_bplcon0: u16,
+    suppress_prefetch_scroll_fill: bool,
+    bpl_output_start_x: usize,
+    h_row: &HWindowRow,
+    visible_line0: i32,
+    emulated_seconds: f64,
+    emulated_frames: u64,
+) {
+    render_planned_playfield_line_impl(
+        true,
+        plan,
+        fb,
+        playfield_mask,
+        collision_pixels,
+        collision_lookup,
+        indexed_output_cache,
+        clxdat,
+        palette,
+        palette_segments,
+        segment_idx,
+        pixel_control,
+        control_segments,
+        control_segment_idx,
+        base_scroll_bplcon1,
+        base_ham_bplcon0,
+        suppress_prefetch_scroll_fill,
+        bpl_output_start_x,
+        h_row,
+        visible_line0,
+        emulated_seconds,
+        emulated_frames,
+    );
+}
+
+/// Scalar-only variant: the oracle the differential regression test holds
+/// the fast interior path against, pixel for pixel.
+#[cfg(test)]
+fn render_planned_playfield_line_scalar(
+    plan: &DenisePlannedPlayfieldLine<'_>,
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    collision_pixels: &mut [CollisionPixel],
+    collision_lookup: &mut CollisionLookup,
+    indexed_output_cache: &mut IndexedOutputCache,
+    clxdat: &mut u16,
+    palette: Palette,
+    palette_segments: &[PaletteSegment],
+    segment_idx: usize,
+    pixel_control: ControlState,
+    control_segments: &[ControlSegment],
+    control_segment_idx: usize,
+    base_scroll_bplcon1: u16,
+    base_ham_bplcon0: u16,
+    suppress_prefetch_scroll_fill: bool,
+    bpl_output_start_x: usize,
+    h_row: &HWindowRow,
+    visible_line0: i32,
+    emulated_seconds: f64,
+    emulated_frames: u64,
+) {
+    render_planned_playfield_line_impl(
+        false,
+        plan,
+        fb,
+        playfield_mask,
+        collision_pixels,
+        collision_lookup,
+        indexed_output_cache,
+        clxdat,
+        palette,
+        palette_segments,
+        segment_idx,
+        pixel_control,
+        control_segments,
+        control_segment_idx,
+        base_scroll_bplcon1,
+        base_ham_bplcon0,
+        suppress_prefetch_scroll_fill,
+        bpl_output_start_x,
+        h_row,
+        visible_line0,
+        emulated_seconds,
+        emulated_frames,
+    );
+}
+
+fn render_planned_playfield_line_impl(
+    fast_runs: bool,
     plan: &DenisePlannedPlayfieldLine<'_>,
     fb: &mut [u32],
     playfield_mask: &mut [u8],
@@ -5444,7 +5691,73 @@ fn render_planned_playfield_line(
         let collision_table =
             collision_lookup.table(pixel_control.clxcon, pixel_control.clxcon2, collision_dual);
 
+        // The interior of a run where every per-pixel decision is constant:
+        // single-tap sampling (all planes share one BPLCON1 delay), indexed
+        // (non-HAM) colour resolution, classic canvas, genlock inert, no
+        // debug plane isolation, the whole pixel inside the open window and
+        // the fetch span. There the sampler collapses to
+        // `pixels[fetch_x] & mask` and the loop body to two table loads and
+        // the stores, which is where the render spends its time on real
+        // content. All edges - scroll lead-in, the DDFSTOP hold pixel,
+        // window, segment and fetch-span boundaries - keep the per-pixel
+        // loop below, which runs before and after the interior unchanged.
+        let fast_interior = if fast_runs {
+            fast_playfield_run_interior(
+                plan,
+                x,
+                run_stop,
+                bpl_output_start_x,
+                pixel_repeat,
+                native_per_pixel,
+                pixel_fetch_start_native_x,
+                native_x_offset,
+                min_fetch_x,
+                &delays,
+                nplanes,
+                ham_mode,
+                shres,
+                canvas_scale,
+                indexed_outputs.is_some(),
+                ham_diag.is_some(),
+                window_open,
+                line_visible,
+                pixel_control,
+            )
+        } else {
+            None
+        };
+
         loop {
+            if let Some((fast_x_lo, fast_x_hi, fast_f0, fast_mask)) = fast_interior {
+                if x == fast_x_lo {
+                    let outputs = indexed_outputs.expect("fast interior requires indexed outputs");
+                    render_fast_playfield_run(
+                        &plan.pixels.expect("fast interior requires prepared pixels")
+                            [fast_f0..fast_f0 + (fast_x_hi - fast_x_lo) / pixel_repeat],
+                        fast_mask,
+                        outputs,
+                        collision_table,
+                        fb,
+                        playfield_mask,
+                        collision_pixels,
+                        clxdat,
+                        &mut ham_color,
+                        plan.y,
+                        fast_x_lo,
+                        pixel_repeat,
+                        out_w,
+                        canvas_scale,
+                    );
+                    let samples = (fast_x_hi - fast_x_lo) / pixel_repeat;
+                    let native_after = (fast_f0 + samples) as i32 + delays[0];
+                    next_ham_native_x = next_ham_native_x.max(native_after.max(0) as usize);
+                    x = fast_x_hi;
+                    if x >= run_stop {
+                        break;
+                    }
+                    continue;
+                }
+            }
             let output_native_x = ((x - plan.x_start) / pixel_repeat) * native_per_pixel;
             let Some(relative_native_x) = output_native_x.checked_sub(pixel_fetch_start_native_x)
             else {
