@@ -532,7 +532,9 @@ async function boot() {
         const nowMs = performance.now();
         if (
           keepRunningHidden ||
-          (!document.hidden && nowMs - lastRafMs > RAF_STARVED_MS)
+          (!document.hidden &&
+            nowMs - lastRafMs > RAF_STARVED_MS &&
+            avgStepMs < STEP_OVERLOAD_MS)
         ) {
           stepMachine(nowMs, true);
         }
@@ -639,6 +641,36 @@ let audioGateClosed = false;
 const RAF_STARVED_MS = 50;
 let lastRafMs = 0;
 
+// Adaptive render stride for hosts that cannot afford a frame render
+// every emulated frame. The wasm-side presentation render is a large
+// share of a step's cost (about 45% on an Ice Lake laptop), and a host
+// saturated by it drops animation frames until the pacer starts
+// forgiving deficits - slow motion, the worst possible degradation.
+// When the moving average of a step's cost nears the 60 Hz frame
+// budget, alternate ticks step with the render deferred (the same
+// run_hidden + stale-repaint path the off-tick clocks use), trading
+// display rate for guaranteed real-time emulation and audio. The
+// hysteresis keeps the mode from flapping on the threshold, and the
+// stride never exceeds every-other-tick, so the picture keeps at least
+// half the tick rate. Old bundles without run_hidden render every
+// step regardless, which simply leaves the behavior they always had.
+const RENDER_SKIP_ENTER_MS = 15;
+const RENDER_SKIP_EXIT_MS = 11;
+// The starved-rAF fallback exists for a THROTTLED host: animation frames
+// withheld from a machine that is cheap to step. On an OVERLOADED host -
+// the machine itself eating more than the worklet's ~29 ms report
+// interval per step - stepping on every report leaves the main thread no
+// idle at all: the page (input, the stat line, devtools) freezes solid
+// while emulated time barely gains, because the wall-paced core cannot
+// exceed the host's throughput however often it is called. Past this
+// step cost the fallback stands down and rAF alone drives the machine,
+// keeping the page usable through the worst stretches (a 68020 decrunch
+// on a slow host) at whatever rate the host can actually sustain.
+const STEP_OVERLOAD_MS = 25;
+let avgStepMs = 0;
+let renderSkipActive = false;
+let renderDeferredLastTick = false;
+
 function maxFramesForQueue() {
   const limit = audioGateClosed ? AUDIO_GATE_OPEN_MS : AUDIO_GATE_CLOSE_MS;
   audioGateClosed = queuedMs > limit;
@@ -693,10 +725,18 @@ function presentFrame() {
 function stepMachine(nowMs, deferRender) {
   try {
     const max = maxFramesForQueue();
+    const stepStart = performance.now();
     const stepped =
       deferRender && typeof emu.run_hidden === 'function'
         ? emu.run_hidden(nowMs, max)
         : emu.run(nowMs, max);
+    // Rolling cost of a step, the render-stride controller's signal.
+    // Idle steps (nothing to advance) pull it down, which is right:
+    // they mean the host is keeping up.
+    avgStepMs = avgStepMs * 0.9 + (performance.now() - stepStart) * 0.1;
+    renderSkipActive = renderSkipActive
+      ? avgStepMs > RENDER_SKIP_EXIT_MS
+      : avgStepMs > RENDER_SKIP_ENTER_MS;
     framesThisSecond += stepped;
     if (stepped > 0) presentDirty = true;
   } catch (e) {
@@ -727,7 +767,8 @@ function stepMachine(nowMs, deferRender) {
       `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
       `audio ${queuedMs.toFixed(0)} ms` +
-      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '');
+      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '') +
+      (renderSkipActive ? ' | render 1/2' : '');
     framesThisSecond = 0;
     ticksThisSecond = 0;
     presentsThisSecond = 0;
@@ -747,9 +788,18 @@ function tick(nowMs) {
   pumpGamepads();
   syncCapsLed();
   pumpHostKeys();
-  if (!stepMachine(nowMs, false)) return;
+  // Under sustained overload, defer the frame render on alternate ticks
+  // (see the render-stride notes above): the machine keeps real time on
+  // a host that cannot afford a render per frame, and only the shown
+  // rate degrades - never the emulation or its audio.
+  const deferRender = renderSkipActive && !renderDeferredLastTick;
+  if (!stepMachine(nowMs, deferRender)) return;
+  renderDeferredLastTick = deferRender;
   presentFrame();
-  if (presentDirty) {
+  // A deferred tick blits the previous picture again; the flag rides
+  // through to the rendering tick whose blit really shows something
+  // new, so "shown" stays the count of fresh pictures on the canvas.
+  if (presentDirty && !deferRender) {
     presentsThisSecond++;
     presentDirty = false;
   }
@@ -5355,7 +5405,6 @@ async function startup() {
   const bgRunPref = storedPref(BG_RUN_STORAGE_KEY);
   if (bgRunPref !== null) bgRunToggle.checked = bgRunPref === 'on';
   else if (typeof cfg.background_run === 'boolean') bgRunToggle.checked = cfg.background_run;
-
   const fetches = [];
   const linkedDisk =
     pageParams.get('df0') ?? (typeof cfg.df0 === 'string' ? cfg.df0 : null);

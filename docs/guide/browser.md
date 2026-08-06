@@ -351,8 +351,11 @@ through wasm-bindgen; the page's JavaScript drives everything from
   [the presentation internals](../internals/video.md)). Border-only frames
   keep the previous frame's geometry, as on the desktop, so the canvas
   does not switch shape across the blanks a screen change produces.
-  There is no wgpu in the build, which keeps the wasm
-  around 1.4 MiB (about 0.6 MiB over the wire).
+  A frame whose render input exactly matches the previous one skips the
+  render pipeline entirely (the desktop render cache's reuse detector),
+  so a static screen costs no render work at all.
+  There is no wgpu in the build, which keeps the wasm-opt'd wasm
+  around 2.1 MiB (about 0.8 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
   and posted to an `AudioWorklet` as transferred `Float32Array` chunks. The
   build is single threaded -- no SharedArrayBuffer, so no COOP/COEP headers
@@ -376,6 +379,13 @@ through wasm-bindgen; the page's JavaScript drives everything from
   that finds the last animation frame more than ~50 ms stale steps the
   machine itself, keeping emulation and audio real time while rAF is left
   to blit the newest frame at whatever rate the compositor manages.
+  On a host too slow to afford a frame render per emulated frame (the
+  render is roughly half a step's cost), the pacer degrades the picture
+  before it degrades the machine: when a step's rolling cost nears the
+  60 Hz frame budget, alternate ticks step with the render deferred, so
+  emulation and audio hold real time and only the displayed rate halves.
+  The stat line shows `render 1/2` while this is active, and the mode
+  disengages (with hysteresis) as soon as the host keeps up again.
 - **Input**: `KeyboardEvent.code` strings map to Amiga raw keycodes with the
   same table as the desktop frontend (winit's `KeyCode` names *are* the W3C
   code strings); the mouse uses Pointer Lock for relative motion, with a
