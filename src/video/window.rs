@@ -5701,7 +5701,7 @@ impl App {
             UiControl::LauncherHostDiskMount => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.status = Some(match state.setup.mount_host_disk() {
-                        Some(disk) => StatusMessage::ok(format!(
+                        Ok(disk) => StatusMessage::ok(format!(
                             "{} attached to {}{}",
                             disk.device,
                             disk.attach.label(),
@@ -5711,7 +5711,7 @@ impl App {
                                 " -- the guest can write to it"
                             }
                         )),
-                        None => StatusMessage::ok("Tick a disk first"),
+                        Err(reason) => StatusMessage::err(reason),
                     });
                 }
             }

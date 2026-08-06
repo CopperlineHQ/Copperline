@@ -3858,13 +3858,34 @@ impl MachineSetup {
         self.host_disks_attached.iter().find(|d| d.attach == attach)
     }
 
+    /// What to call a disk that is attached: the volume the host reported for
+    /// it, or its identifier when it is not attached to this computer now --
+    /// a configuration outlives the card reader it was written at.
+    pub fn host_disk_volume(&self, device: &str) -> String {
+        self.host_disks
+            .iter()
+            .find(|d| d.id == device)
+            .map(|d| d.volume.clone())
+            .unwrap_or_else(|| device.to_string())
+    }
+
     /// Give the ticked disk to the machine.
     ///
     /// A slot holds one thing, so whatever was there -- another disk, or an
     /// image -- makes way, exactly as the configuration parser requires.
-    pub fn mount_host_disk(&mut self) -> Option<crate::config::HostDiskConfig> {
-        let selected = self.host_disk_selected.clone()?;
-        let row = self.host_disks.iter().find(|d| d.id == selected)?.clone();
+    pub fn mount_host_disk(&mut self) -> Result<crate::config::HostDiskConfig, &'static str> {
+        // Attaching to a port the machine does not have would leave a disk
+        // configured and silently unreachable, which is worse than refusing.
+        if !self.has_ide() {
+            return Err("needs A600/A1200/A4000");
+        }
+        let selected = self.host_disk_selected.clone().ok_or("Tick a disk first")?;
+        let row = self
+            .host_disks
+            .iter()
+            .find(|d| d.id == selected)
+            .ok_or("That disk is no longer attached")?
+            .clone();
         let entry = crate::config::HostDiskConfig {
             device: row.id.clone(),
             attach: row.attach,
@@ -3886,7 +3907,7 @@ impl MachineSetup {
         }
         self.host_disks_attached.push(entry.clone());
         self.host_disk_selected = None;
-        Some(entry)
+        Ok(entry)
     }
 
     /// Take a disk back off the machine and hand it to the host.
@@ -4749,6 +4770,7 @@ mod tests {
             },
         ]);
 
+        setup.select_model(Some(MachineModel::A1200));
         setup.select_host_disk(0);
         let mounted = setup.mount_host_disk().expect("a ticked disk mounts");
         assert_eq!(mounted.device, "disk4");
@@ -4775,6 +4797,23 @@ mod tests {
             .expect("the attachment survives being written and read");
         assert_eq!(back.device, "disk4");
         assert!(!back.read_only);
+
+        // A machine with no IDE port refuses rather than configuring a disk
+        // it could never reach.
+        let mut no_ide = MachineSetup::default();
+        no_ide.select_model(Some(MachineModel::A500));
+        no_ide.set_host_disk_privileged(true);
+        no_ide.set_host_disks_for_test(vec![HostDiskRow {
+            id: "disk4".to_string(),
+            volume: "SanDisk".to_string(),
+            size: "31.9 GB".to_string(),
+            mounted: Vec::new(),
+            read_only: true,
+            attach: crate::config::HostDiskAttach::IdeMaster,
+        }]);
+        no_ide.select_host_disk(0);
+        assert!(no_ide.mount_host_disk().is_err());
+        assert!(no_ide.host_disks_attached().is_empty());
 
         // And taking it off gives it back to the host.
         let mut reloaded = reloaded;

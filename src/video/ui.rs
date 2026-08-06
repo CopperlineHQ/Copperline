@@ -4289,7 +4289,7 @@ fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
 ///
 /// Wider than a nav chip because its label is long and because it is a state,
 /// not a link: it should not read as another page to visit.
-const HOST_DISK_PRIV_W: usize = LAUNCH_SIDEBAR_W + 60;
+const HOST_DISK_PRIV_W: usize = LAUNCH_SIDEBAR_W + 24;
 
 fn host_disk_privileged_button_rect(rect: Rect) -> Rect {
     let back = launcher_back_button_rect(rect);
@@ -4792,7 +4792,9 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 }
                 RowKind::Drive => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
-                    // A real disk replaces both buttons with one.
+                    // A real disk replaces both buttons with one. Only this
+                    // row's buttons change: everything else on the panel must
+                    // still be reachable, so nothing returns early here.
                     if state.setup.host_disk_on_row(r.field).is_some() {
                         let unmount = Rect {
                             x: browse.x,
@@ -4803,13 +4805,13 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         if unmount.contains(pos) {
                             return Some(UiControl::LauncherHostDiskUnmount(r.field));
                         }
-                        return None;
-                    }
-                    if browse.contains(pos) {
-                        return Some(UiControl::LauncherBrowse(r.field));
-                    }
-                    if clear.contains(pos) {
-                        return Some(UiControl::LauncherClear(r.field));
+                    } else {
+                        if browse.contains(pos) {
+                            return Some(UiControl::LauncherBrowse(r.field));
+                        }
+                        if clear.contains(pos) {
+                            return Some(UiControl::LauncherClear(r.field));
+                        }
                     }
                     // The volume name only matters once an image is chosen
                     // (and never for a CD image).
@@ -5123,7 +5125,7 @@ fn draw_host_disk_page(
         .iter()
         .find(|d| Some(d.id.as_str()) == setup.host_disk_selected());
     let note = if !privileged {
-        "Choose Privileged mode to let Copperline open real disks.".to_string()
+        "Choose Privileged Mode to let Copperline open real disks.".to_string()
     } else {
         match chosen {
             None => "Tick a disk to attach it to the machine.".to_string(),
@@ -5714,21 +5716,24 @@ fn draw_launcher_row(
             // do with it here is give it back. Browse and Clear make way for
             // one Unmount spanning both.
             if let Some(disk) = setup.host_disk_on_row(r.field) {
+                // The row's own label already says master or slave, so
+                // repeating it here would crowd out the one thing this column
+                // is for: which disk it is. The volume gives way when the
+                // space runs out, never the note saying what kind of thing
+                // this is -- a clipped name is still recognisable, "(Host
+                // Di~" is not.
+                let suffix = if disk.read_only {
+                    " (Host Disk)".to_string()
+                } else {
+                    " (Host Disk)  rw".to_string()
+                };
+                let avail = browse.x.saturating_sub(value_x + 8);
+                let room = avail.saturating_sub(suffix.chars().count() * font::GLYPH_W);
                 let text = format!(
-                    "{} ({}){}",
-                    disk.device,
-                    disk.attach.label(),
-                    if disk.read_only { "" } else { "  rw" }
+                    "{}{suffix}",
+                    truncate_to_width(&setup.host_disk_volume(&disk.device), room)
                 );
-                draw_panel_text(
-                    frame,
-                    value_x,
-                    browse.y + 6,
-                    &truncate_to_width(&text, browse.x.saturating_sub(value_x + 8)),
-                    PANEL_TEXT,
-                    1,
-                    scale,
-                );
+                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
                 let unmount = Rect {
                     x: browse.x,
                     y: browse.y,
@@ -5745,6 +5750,7 @@ fn draw_launcher_row(
                 );
                 return;
             }
+
             // The volume-name box only appears once an image is chosen (a name
             // has nothing to label otherwise, and never labels a CD image);
             // until then the row reads like a plain path row and the path text
@@ -6107,7 +6113,7 @@ fn draw_launcher(
                 draw_latching_button(
                     frame,
                     host_disk_privileged_button_rect(rect),
-                    "Privileged mode",
+                    "Privileged Mode",
                     state.setup.host_disk_privileged(),
                     hover == Some(UiControl::LauncherHostDiskPrivileged),
                     scale,
@@ -8825,6 +8831,46 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
 
+        // A drive row holding a real disk must not swallow the rest of the
+        // panel. The Unmount button replaces that row's own two buttons and
+        // nothing else: Run, Defaults, Load, Save and the page links all kept
+        // working before, and an early return here quietly killed every one
+        // of them until the disk was cleared.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut setup = launcher::MachineSetup::default();
+            setup.select_model(Some(crate::config::MachineModel::A1200));
+            setup.set_host_disk_privileged(true);
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                read_only: true,
+                attach: crate::config::HostDiskAttach::IdeMaster,
+            }]);
+            setup.select_host_disk(0);
+            setup.mount_host_disk().expect("A1200 has IDE");
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::Storage;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let Panel::Launcher(state) = &panel else {
+                unreachable!()
+            };
+            for (control, button) in launcher_action_rects(rect) {
+                let centre = (
+                    (button.x + button.w / 2) as i32,
+                    (button.y + button.h / 2) as i32,
+                );
+                assert_eq!(
+                    launcher_control_at(rect, state, centre),
+                    Some(control),
+                    "a mounted disk must not block {control:?}"
+                );
+            }
+        }
+
         // The Host Disk page, with a disk ticked and privileged mode on, so
         // the table, the latching button and the enabled Mount all render.
         {
@@ -8898,7 +8944,9 @@ mod tests {
                 attach: crate::config::HostDiskAttach::IdeMaster,
             }]);
             setup.select_host_disk(0);
-            setup.mount_host_disk();
+            setup
+                .mount_host_disk()
+                .expect("the fixture machine has IDE");
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::Storage;
             let ui = UiState {

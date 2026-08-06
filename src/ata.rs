@@ -147,15 +147,16 @@ impl IdeDrive {
     /// The geometry comes from the disk's own capacity, exactly as it does
     /// for an image: the guest's driver reads the RDB the disk already
     /// carries, so nothing here invents a partition table over media that
-    /// came out of a real Amiga.
+    /// came out of a real Amiga. That is also why there is no unit number to
+    /// pass -- it names the device a synthesized RDB advertises, and a real
+    /// disk brings its own.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_host_disk(device: &str, unit: usize, writable: bool) -> anyhow::Result<Self> {
+    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
         let disk = HardDriveImage::open_device(device, "ide", writable)?;
         let heads = RDB_HEADS as u8;
         let spt = RDB_SPT as u8;
         let cylinders =
             (disk.total_sectors() / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
-        let _ = unit;
         Ok(Self {
             disk,
             default_heads: heads,

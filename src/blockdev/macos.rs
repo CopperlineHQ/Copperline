@@ -167,15 +167,9 @@ unsafe extern "C" {
 /// declined or the request failed -- in which case the caller lets `authopen`
 /// ask in its own name rather than failing outright.
 ///
-/// Known limitation: from this binary as built today, `AuthorizationCreate`
-/// returns `errAuthorizationInternal` (-60008) even for an empty request, so
-/// the fallback is what runs and the prompt is titled `authopen`. The same
-/// call succeeds from a minimal binary on the same machine, and it is not the
-/// FFI, the ad-hoc signature, the linked frameworks, or the earlier denied
-/// open -- each was ruled out by comparison. Authorization Services expects a
-/// bundled application with an identity, which is also what gives the prompt
-/// a name worth showing, so this is expected to resolve when Copperline is
-/// packaged and signed rather than by changing anything here.
+/// Known limitation: `AuthorizationCreate` currently fails from this
+/// binary, so the fallback runs and the prompt is titled `authopen`. Likely
+/// wants a signed application bundle; revisit then.
 fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]> {
     // The right is per-path, which is what keeps a granted open from being
     // turned on any other device.
