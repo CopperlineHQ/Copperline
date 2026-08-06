@@ -997,6 +997,11 @@ pub struct HostDiskRow {
     /// Where the host currently has this disk mounted, if anywhere. Shown so
     /// somebody can see why a disk cannot simply be taken.
     pub mounted: Vec<String>,
+    /// Keep the guest from writing to it. On by default: a real disk is
+    /// somebody's only copy, and the write is the part that cannot be undone.
+    pub read_only: bool,
+    /// Where the machine would see this disk.
+    pub attach: crate::config::HostDiskAttach,
 }
 
 /// The disks the Host Disk page will offer.
@@ -1019,6 +1024,8 @@ fn sample_host_disks() -> Vec<HostDiskRow> {
             size: device.size_label(),
             mounted: device.mounted.clone(),
             id: device.id,
+            read_only: true,
+            attach: crate::config::HostDiskAttach::default(),
         })
         .collect()
 }
@@ -3723,7 +3730,16 @@ impl MachineSetup {
     /// its Refresh button, so a card pushed in mid-session appears without the
     /// launcher polling for it.
     pub fn refresh_host_disks(&mut self) {
+        // Looking again should not undo what was chosen: a disk still present
+        // keeps the read-only and attachment it was given.
+        let previous = std::mem::take(&mut self.host_disks);
         self.host_disks = sample_host_disks();
+        for row in &mut self.host_disks {
+            if let Some(old) = previous.iter().find(|p| p.id == row.id) {
+                row.read_only = old.read_only;
+                row.attach = old.attach;
+            }
+        }
         // A disk that has gone (unplugged between looks) cannot stay ticked.
         if let Some(selected) = &self.host_disk_selected {
             if !self.host_disks.iter().any(|d| &d.id == selected) {
@@ -3749,6 +3765,28 @@ impl MachineSetup {
         } else {
             self.host_disk_selected = Some(row.id.clone());
         }
+    }
+
+    /// Flip one disk between read-only and writable.
+    pub fn toggle_host_disk_read_only(&mut self, index: usize) {
+        if let Some(row) = self.host_disks.get_mut(index) {
+            row.read_only = !row.read_only;
+        }
+    }
+
+    /// Step one disk through the places the machine could see it.
+    pub fn cycle_host_disk_attach(&mut self, index: usize, forward: bool) {
+        let Some(row) = self.host_disks.get_mut(index) else {
+            return;
+        };
+        let all = crate::config::HostDiskAttach::all();
+        let at = all.iter().position(|a| *a == row.attach).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % all.len()
+        } else {
+            (at + all.len() - 1) % all.len()
+        };
+        row.attach = all[next];
     }
 
     /// Whether the host has granted what raw disk access needs.

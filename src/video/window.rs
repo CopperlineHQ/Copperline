@@ -5665,6 +5665,18 @@ impl App {
                     state.status = None;
                 }
             }
+            UiControl::LauncherHostDiskReadOnly(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.toggle_host_disk_read_only(index);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskAttach(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.cycle_host_disk_attach(index, true);
+                    state.status = None;
+                }
+            }
             UiControl::LauncherHostDiskRefresh => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.refresh_host_disks();
