@@ -237,6 +237,13 @@ Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
 
+On an iPhone or iPad, leaving the browser for another app deactivates
+the page's audio output at the OS level, and coming back does not
+reliably reactivate it -- the pipeline can keep consuming samples with
+nothing reaching the speaker. The page rebuilds its audio pipeline
+whenever it returns to the foreground there, so the sound carries on;
+if iOS demands a fresh gesture first, the next tap brings it back.
+
 Hiding the tab normally puts the machine to sleep with the page, exactly
 where it was until the tab returns. Ticking **Run in background** keeps
 it running -- and audible -- the way a video tab keeps playing, so a long
