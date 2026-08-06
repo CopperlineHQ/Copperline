@@ -80,7 +80,7 @@ Status Bar*):
   four drives the clusters stack two-up. A bay driving a physical floppy drive
   keeps its numbered disk button, so you can see the drive is there, but
   loading, swapping and ejecting do nothing for it -- the disk is in a real
-  drive, and changing it is done by hand (see [](floppybridge)).
+  drive, and changing it is done by hand (see [](fluxbridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`/`.chd`) with the proper media-change notification, and a
@@ -134,7 +134,7 @@ headless runs (see [](../debugger/control)).
 
 Disk images can be dropped anywhere on the emulator window:
 
-- **Floppy images** (ADF/ADZ/DMS/SCP, gzip or zip packed): with one
+- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, gzip or zip packed): with one
   connected drive the disk is inserted immediately. With several, a drive
   chooser opens over the display -- click a drive, press its number
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
@@ -292,7 +292,9 @@ Shown only when something is on the port.
 
 - **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
   onto the host's MIDI sources and destinations; see the `[serial]` section
-  of [Configuration](configuration.md).
+  of [Configuration](configuration.md). **MT-32** is offered here too,
+  and with it playing, an **MT-32** submenu carries its front panel and
+  display style; see [The MT-32](mt32.md).
 - **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
   sampler's host capture device, and its input gain, which the *Increase* and
   *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
@@ -414,9 +416,9 @@ The layout is:
   carries a **Physical drive** tick box that hands the bay to a physical
   floppy drive: its media row then names the interface -- or `None` with nothing
   plugged in -- and a **Configure** button opens that drive's own page,
-  headed with the installed library and its version, for the serial port,
-  drive select, density, read mode, bridge speed and auto-cache, greying
-  whatever the chosen interface does not honour. See [](floppybridge)),
+  headed with the built-in FluxBridge library and its version, for the
+  serial port, drive select, density, read mode and replay speed, greying
+  whatever the chosen interface does not honour. See [](fluxbridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
   links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host
@@ -430,7 +432,9 @@ The layout is:
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
   **Parallel:** / **Ethernet:** headings, with each port's options indented
-  beneath it: serial mode and MIDI endpoints; the
+  beneath it: serial mode and MIDI endpoints, with the emulated MT-32's ROM
+  images, front panel and display style when it is the chosen output (see
+  [The MT-32](mt32.md)); the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --

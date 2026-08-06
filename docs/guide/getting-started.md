@@ -13,11 +13,8 @@ native desktop build.
   `gilrs` crate.
 - A GPU backend for presentation: Metal on macOS, DX12 on Windows, and
   **Vulkan on Linux** (see [](#vulkan-is-required-on-linux)).
-- A host C++ compiler for the vendored FloppyBridge library (built by the
-  default `floppybridge` feature): the Xcode command-line tools on macOS,
-  `g++` on Linux, or the MSVC Build Tools on Windows.
 - Fedora build dependencies:
-  `sudo dnf install alsa-lib-devel systemd-devel gcc-c++`.
+  `sudo dnf install alsa-lib-devel systemd-devel gcc`.
 - A boot ROM. Copperline ships with the [AROS](http://www.aros.org/)
   open-source Kickstart replacement and boots it by default, so it runs out
   of the box with no ROM of your own. It also boots Kickstart 1.3, 2.05, and
@@ -181,7 +178,7 @@ path = "MyGame.adf"
 ```
 
 Copperline accepts plain ADF images, gzip-compressed images, single file ZIP
-archives, DMS archives, UAE extended ADFs, and read-only SCP flux images.
+archives, DMS archives, UAE extended ADFs, and read-only IPF and SCP images.
 In a windowed session you can also just drag a disk image onto the window
 to insert it -- see [](ui#drag-and-drop).
 

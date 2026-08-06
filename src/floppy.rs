@@ -10,13 +10,14 @@
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::dms;
+use crate::ipf;
 use anyhow::{bail, ensure, Context, Result};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::CrcReader;
 use log::{debug, warn};
 // The bridge's retry path traces, and its media reporting is worth an info
 // line; both are compiled out with the feature.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 use log::{info, trace};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -57,19 +58,28 @@ const DMACON_DISK: u16 = 1 << 4;
 const DMACON_DMAEN: u16 = 1 << 9;
 
 const MOTOR_READY_CCK: u32 = PAULA_CLOCK_HZ / 4;
-/// Whether `COPPERLINE_DIAG_FLOPPYBRIDGE` asked for the physical drive's own
+/// Whether `COPPERLINE_DIAG_FLUXBRIDGE` asked for the physical drive's own
 /// running commentary. Snapshotted, like every other diagnostic switch.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn bridge_diag() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_FLOPPYBRIDGE"))
+    *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_FLUXBRIDGE"))
 }
 
 /// How long to leave a bridged drive alone after it says a track is not ready
 /// yet. The physical capture takes a revolution either way, so this only
 /// decides how often we ask -- see `ensure_track`.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 const BRIDGE_POLL_INTERVAL_CCK: u64 = (PAULA_CLOCK_HZ / 1_000) as u64;
+
+/// Bits a capture in flight must hold before it is served as it grows.
+///
+/// The emulated head reads the growing revolution at the platter's real pace
+/// while the capture grows at the platter's real pace, so a head started this
+/// far behind the growth edge stays behind it. Forty milliseconds of track:
+/// five times the growth's publish granularity.
+#[cfg(feature = "fluxbridge")]
+const BRIDGE_PARTIAL_MIN_BITS: usize = 20_000;
 const DISK_STATUS_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000;
 const INDEX_PULSE_CCK: u32 = PAULA_CLOCK_HZ / 250;
 const INDEX_FLAG_SYNC_CCK: u32 = 1;
@@ -117,7 +127,7 @@ pub const SUPPORTED_SPEED_PERCENTS: [u16; 4] = [100, 200, 400, 800];
 /// `[floppy] speed` value selecting turbo mode.
 pub const SPEED_TURBO: u16 = 0;
 
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn default_bridge_speed_percent() -> u16 {
     100
 }
@@ -153,7 +163,6 @@ const DISK_WRITE_LOST_BITS: usize = 3;
 const DEFAULT_DSKSYNC: u16 = 0x4489;
 const UAE_EXT1_SIGNATURE: &[u8; 8] = b"UAE--ADF";
 const UAE_EXT2_SIGNATURE: &[u8; 8] = b"UAE-1ADF";
-const IPF_SIGNATURE: &[u8; 4] = b"CAPS";
 const SCP_SIGNATURE: &[u8; 3] = b"SCP";
 const GZIP_SIGNATURE: &[u8; 2] = &[0x1F, 0x8B];
 const ZIP_SIGNATURE: &[u8; 4] = &[0x50, 0x4b, 0x03, 0x04];
@@ -268,6 +277,16 @@ pub struct FloppyController {
     /// save states loadable: the default `false` just costs one settling tick.
     #[serde(default)]
     idle_cache: bool,
+    /// Media changes bridged bays have noticed since the frontend last asked:
+    /// `(bay, present, tab)`. `tab` is the inserted disk's write-protect tab,
+    /// carried only when the configuration would otherwise allow a write --
+    /// the one case where the tab decides anything worth announcing. The log
+    /// line has already said it in full; this feeds the same on-screen
+    /// message an image insert or eject raises. Host-side and transient, so
+    /// never serialized.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_media_events: Vec<(usize, bool, Option<bool>)>,
 }
 
 impl Default for FloppyController {
@@ -309,6 +328,8 @@ impl Default for FloppyController {
             read_shifter: PaulaDiskReadDpllFifo::new(),
             // Idle at power-on; the first tick confirms it.
             idle_cache: true,
+            #[cfg(feature = "fluxbridge")]
+            bridge_media_events: Vec::new(),
         }
     }
 }
@@ -537,7 +558,7 @@ impl FloppyController {
         // greys its own buttons, but scheduled inserts, drag-and-drop and the
         // control protocol all arrive here instead, so the invariant belongs
         // where every route passes.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         ensure!(
             !self.drives[drive_idx].is_bridged(),
             "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
@@ -579,7 +600,7 @@ impl FloppyController {
         // greys its own buttons, but scheduled inserts, drag-and-drop and the
         // control protocol all arrive here instead, so the invariant belongs
         // where every route passes.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         ensure!(
             !self.drives[drive_idx].is_bridged(),
             "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
@@ -607,7 +628,7 @@ impl FloppyController {
         // greys its own buttons, but scheduled inserts, drag-and-drop and the
         // control protocol all arrive here instead, so the invariant belongs
         // where every route passes.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         ensure!(
             !self.drives[drive_idx].is_bridged(),
             "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
@@ -622,11 +643,11 @@ impl FloppyController {
     /// bridge supplies the track under the head from then on. `speed_percent`
     /// is the serving speed from `[floppy.dfN] bridge_speed`, already
     /// validated against `SUPPORTED_BRIDGE_SPEED_PERCENTS`.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn attach_bridge(
         &mut self,
         drive_idx: usize,
-        bridge: crate::floppybridge::Bridge,
+        bridge: crate::fluxbridge::Bridge,
         write_protected: bool,
         speed_percent: u16,
     ) -> Result<()> {
@@ -654,7 +675,7 @@ impl FloppyController {
     /// Whether any bay is a physical drive. Such a machine cannot be run
     /// faster than real time: the platter turns at its own speed and nothing
     /// the emulator does will hurry it.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn has_bridged_drive(&self) -> bool {
         self.drives.iter().any(|d| d.bridge.is_some())
     }
@@ -665,9 +686,9 @@ impl FloppyController {
     /// setting to act on.
     pub fn has_image_drive(&self) -> bool {
         (0..self.drives.len()).any(|idx| {
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             let bridged = self.is_bridged(idx);
-            #[cfg(not(feature = "floppybridge"))]
+            #[cfg(not(feature = "fluxbridge"))]
             let bridged = false;
             self.drive_connected(idx) && !bridged
         })
@@ -685,7 +706,7 @@ impl FloppyController {
     ///
     /// The bays revert to empty image-backed drives, so a machine that carries
     /// on running simply has nothing in them.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn release_bridges(&mut self) {
         for (idx, drive) in self.drives.iter_mut().enumerate() {
             if drive.bridge.take().is_none() {
@@ -696,6 +717,9 @@ impl FloppyController {
             drive.cached_track = None;
             drive.cached = CachedTrack::default();
             drive.bridge_filler_track = None;
+            drive.bridge_partial_track = None;
+            // The drive is gone; a write still in flight will never report.
+            drive.bridge_writing.clear();
             drive.bridge_tracks.clear();
             drive.eject_image();
             self.idle_cache = false;
@@ -703,7 +727,7 @@ impl FloppyController {
     }
 
     /// Whether this drive is backed by a real drive.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn is_bridged(&self, drive_idx: usize) -> bool {
         self.drives
             .get(drive_idx)
@@ -718,7 +742,7 @@ impl FloppyController {
     /// reading, the revolution is often already in hand. The library coalesces
     /// queued moves, so a trackloader sweeping across the disk does not pile up
     /// a seek per cylinder.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     fn sync_bridge_head(&mut self, idx: usize) {
         let side = self.side != 0;
         let Some(drive) = self.drives.get_mut(idx) else {
@@ -728,7 +752,7 @@ impl FloppyController {
         if let Some(bridge) = drive.bridge.as_mut() {
             if bridge_diag() {
                 info!(
-                    "floppybridge.df{idx} head to cylinder {cylinder} side {} (drive at {})",
+                    "fluxbridge.df{idx} head to cylinder {cylinder} side {} (drive at {})",
                     u8::from(side),
                     bridge.current_cylinder(),
                 );
@@ -740,7 +764,7 @@ impl FloppyController {
     /// Notice a disk swapped by hand in a bridged drive. Unlike an image, the
     /// medium can change without the emulator being told, so the frontend
     /// polls this (once a frame is ample) to raise the change line.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn poll_bridge_media(&mut self) {
         for (idx, drive) in self.drives.iter_mut().enumerate() {
             let Some(bridge) = drive.bridge.as_mut() else {
@@ -758,6 +782,40 @@ impl FloppyController {
                 );
             }
             drive.bridge_reported_failed = !working;
+            // What became of the writes handed over earlier. A track is held
+            // unreadable from the moment its write is accepted until one of
+            // these arrives, so this is also what releases it -- and it is
+            // released whether the write worked or not, because either way
+            // the platter now holds something the guest has not seen.
+            for outcome in bridge.poll_write_outcomes() {
+                let track = usize::from(outcome.cylinder) * SIDES + usize::from(outcome.side);
+                drive.bridge_writing.retain(|pending| *pending != track);
+                if let Some(known) = drive.bridge_tracks.get_mut(track) {
+                    *known = BridgeTrack::Unknown;
+                }
+                if drive.cached_track == Some(track) {
+                    drive.cached_track = None;
+                }
+                match &outcome.error {
+                    // A real write is only known to have worked once the disk
+                    // has turned, so a failure lands here rather than at the
+                    // instruction that caused it. Saying so is the difference
+                    // between a disk the guest believes it wrote and one it
+                    // knows it did not.
+                    Some(error) => warn!(
+                        "floppy.df{idx} the write of track {track} (cyl {} side {}) did not \
+                         reach the disk: {error}",
+                        outcome.cylinder,
+                        u8::from(outcome.side)
+                    ),
+                    None if bridge_diag() => info!(
+                        "fluxbridge.df{idx} track {track} (cyl {} side {}) is on the platter",
+                        outcome.cylinder,
+                        u8::from(outcome.side)
+                    ),
+                    None => {}
+                }
+            }
             let changed = bridge.take_disk_changed();
             let had_media = drive.bridge_media;
             drive.bridge_media = bridge.disk_in_drive();
@@ -790,11 +848,21 @@ impl FloppyController {
                 } else {
                     info!("floppy.df{idx} disk ejected (physical drive)");
                 }
+                // Bounded in case nothing ever drains it (a headless run):
+                // these are hand-speed events, and the frontend takes them
+                // every frame, so the cap is never met in a windowed session.
+                if self.bridge_media_events.len() < 64 {
+                    let tab =
+                        (drive.bridge_media && !drive.bridge_write_protected).then_some(sensed_tab);
+                    self.bridge_media_events
+                        .push((idx, drive.bridge_media, tab));
+                }
             }
             if changed {
                 drive.cached_track = None;
                 drive.cached = CachedTrack::default();
                 drive.bridge_filler_track = None;
+                drive.bridge_partial_track = None;
                 drive.bridge_tracks.clear();
                 drive.set_disk_change(true);
                 self.idle_cache = false;
@@ -894,7 +962,7 @@ impl FloppyController {
                 if stepper_fired && !self.drives[idx].is_bridged() {
                     self.sound_steps = self.sound_steps.saturating_add(1);
                 }
-                #[cfg(feature = "floppybridge")]
+                #[cfg(feature = "fluxbridge")]
                 if stepper_fired {
                     self.sync_bridge_head(idx);
                 }
@@ -905,13 +973,13 @@ impl FloppyController {
             }
         }
         if let Some(idx) = self.selected_drive() {
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             if side_changed {
                 self.sync_bridge_head(idx);
             }
             self.ensure_track(idx, self.track_for_drive(idx));
         }
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         let _ = side_changed;
     }
 
@@ -1573,6 +1641,17 @@ impl FloppyController {
         std::mem::take(&mut self.sound_steps)
     }
 
+    /// Drains the media changes bridged bays have noticed: `(bay, present,
+    /// tab)`, oldest first, where `tab` is the inserted disk's write-protect
+    /// tab on the one kind of drive where it decides anything -- one the
+    /// configuration lets write. The frontend raises the same on-screen
+    /// message an image insert or eject shows; the log line has already said
+    /// it in full.
+    #[cfg(feature = "fluxbridge")]
+    pub fn take_bridge_media_events(&mut self) -> Vec<(usize, bool, Option<bool>)> {
+        std::mem::take(&mut self.bridge_media_events)
+    }
+
     /// Per-drive platter spin level for the drive sound effects: 0.0
     /// stopped to 1.0 at full speed. Rides the motor spin-up/spin-down
     /// accumulator, so the audible motor glides over the real ~0.5 s
@@ -1779,12 +1858,12 @@ impl FloppyController {
         // place a real drive would have begun putting cells on the platter.
         // Read before the drive is borrowed to write through, so the guard
         // below and the /WPRO line the guest was given are the same two facts.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         let (config_protected, tab_protected) = (
             drive.bridge_write_protected,
             drive.bridge_tab_write_protected,
         );
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if let Some(bridge) = drive.bridge.as_mut() {
             // Two separate protections, and this is the last point either can
             // stop physical media being written. The emulated /WPRO line has
@@ -1814,7 +1893,7 @@ impl FloppyController {
             if bridge.write_track(cylinder, side, write_words, start_bit) {
                 if bridge_diag() {
                     info!(
-                        "floppybridge.df{drive_idx} track {track} (cyl {cylinder} side {}) \
+                        "fluxbridge.df{drive_idx} track {track} (cyl {cylinder} side {}) \
                          written: {} words from bit {start_bit}, queued to the platter",
                         u8::from(side),
                         write_words.len(),
@@ -1826,6 +1905,13 @@ impl FloppyController {
                         write_words.len()
                     );
                 }
+                // Accepted, not yet on the platter. Hold the track until the
+                // drive says what became of it: until then the library still
+                // has the recording from before the write, and serving that
+                // would show the guest a disk that no longer exists.
+                if !drive.bridge_writing.contains(&track) {
+                    drive.bridge_writing.push(track);
+                }
             } else {
                 warn!("floppy.df{drive_idx} bridge write of track {track} was rejected");
             }
@@ -1833,6 +1919,7 @@ impl FloppyController {
             // whatever the drive actually managed to lay down, which is not
             // necessarily what was asked for.
             drive.cached_track = None;
+            drive.bridge_partial_track = None;
             if let Some(known) = drive.bridge_tracks.get_mut(track) {
                 *known = BridgeTrack::Unknown;
             }
@@ -1945,7 +2032,7 @@ impl FloppyController {
         // both drags the real head between them, tick after tick, reading
         // nothing useful either way. Only fetch what the head is over; the
         // transfer gets what is passing under it, as it would on hardware.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if self.drives[idx].is_bridged() && track != self.track_for_drive(idx) {
             return;
         }
@@ -1955,21 +2042,25 @@ impl FloppyController {
         // again, because its two ends are a revolution apart in time and the
         // join between them falls inside a sector. Fall through and fetch the
         // recording that followed it instead.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         let spent = drive.bridge_rev_spent;
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         let spent = false;
         if drive.cached_track == Some(track) && !spent {
             return;
         }
-        // Filler already turning under the head for this very track stays: it
-        // is what keeps the platter moving while the capture finishes, and
-        // rebuilding it every tick would be the opposite of cheap.
-        #[cfg(feature = "floppybridge")]
-        let keep_filler = drive.bridge_filler_track == Some(track);
-        #[cfg(not(feature = "floppybridge"))]
-        let keep_filler = false;
-        if !keep_filler {
+        // Whatever is already turning under the head for this very track
+        // stays: filler keeps the platter moving while a capture finishes, and
+        // a part-captured revolution is real data the guest is part way
+        // through reading. Both are provisional, and both are rebuilt only
+        // when they are replaced -- clearing either every tick would leave the
+        // head with nothing to read between polls.
+        #[cfg(feature = "fluxbridge")]
+        let keep_provisional =
+            drive.bridge_filler_track == Some(track) || drive.bridge_partial_track == Some(track);
+        #[cfg(not(feature = "fluxbridge"))]
+        let keep_provisional = false;
+        if !keep_provisional {
             drive.cached = CachedTrack::default();
         }
 
@@ -1977,7 +2068,7 @@ impl FloppyController {
         // is already on its way: it followed the emulated stepper when the
         // guest moved it (see `sync_bridge_head`), and the driver names the
         // track it wants again here in case nothing stepped at all.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if drive.bridge.is_some() {
             // A real drive only reads while the platter is turning, and drive
             // select alone gets us here with the motor still off. Leave the
@@ -2004,6 +2095,16 @@ impl FloppyController {
                 drive.bridge_wait_since_cck = 0;
                 drive.bridge_attempts = 0;
                 drive.clamp_head();
+                return;
+            }
+            // A write of this track is on its way to the platter. The drive
+            // still holds the recording taken before it, so reading now would
+            // hand the guest the disk as it was -- and if that recording
+            // proved out, it would be filed as faithful and served from
+            // memory long after the platter had moved on. Wait for the
+            // outcome; the guest's own re-read finds the new cells.
+            if drive.bridge_writing.contains(&track) {
+                drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
                 return;
             }
             // While the head is still travelling (or ringing after the last
@@ -2075,25 +2176,18 @@ impl FloppyController {
                 // in proportionally less time.
                 let word_cck =
                     (Self::word_cck_for_track_words(words.len()) * 100 / serve_percent).max(1);
-                // Whether this recording can be trusted beyond a single pass.
-                // An index-aligned capture can by construction. An index-less
-                // one is assembled by pattern-matching where the revolution
-                // repeats, and on a small fraction of captures that match is
-                // ambiguous and splices duplicated flux mid-track -- damage
-                // that is the capture's, not the disk's. A capture that
-                // decodes as a complete AmigaDOS track with every checksum
-                // passing (read as the ring it will be served as) is proven
-                // faithful, join included; anything else is served once and
+                // Whether this recording can be trusted beyond a single pass
+                // is FluxBridge's own verdict: index-aligned captures close
+                // on themselves by construction, and an index-less one is
+                // kept only when the library proved it -- the join by pattern
+                // matching, the decode as a complete AmigaDOS track with
+                // every checksum passing. Anything less is served once and
                 // fetched afresh next time, so a retry always reaches new
-                // flux. Formats the scan does not recognise are simply never
+                // flux; formats the library cannot verify are simply never
                 // kept in index-less mode, which costs a re-read on revisit
                 // and never costs correctness.
-                let scan = crate::floppybridge::scan::scan_revolution(&words, bits);
-                let keep = bridge.index_aligned()
-                    || matches!(
-                        scan,
-                        crate::floppybridge::scan::RevolutionScan::CleanAmigaDos { .. }
-                    );
+                let quality = bridge.last_quality();
+                let keep = quality.reusable();
                 // How long the drive took, and how many times it had to be
                 // asked, is what separates a disk the head cannot read from an
                 // interface that is slow: a healthy DD track is one revolution,
@@ -2110,9 +2204,9 @@ impl FloppyController {
                     } else {
                         log::Level::Debug
                     },
-                    "floppybridge.df{idx} track {track} (cyl {cylinder} side {}) read: \
+                    "fluxbridge.df{idx} track {track} (cyl {cylinder} side {}) read: \
                      {bits} bits, {} words, {waited_ms}ms over {} attempt{}, \
-                     {word_cck} cck/word, {scan:?}{}",
+                     {word_cck} cck/word, {quality:?}{}",
                     u8::from(side),
                     words.len(),
                     drive.bridge_attempts,
@@ -2126,6 +2220,9 @@ impl FloppyController {
                 drive.bridge_rev_seamless = keep;
                 drive.cached_track = Some(track);
                 drive.bridge_filler_track = None;
+                // The finished revolution supersedes the part-captured one it
+                // grew from.
+                drive.bridge_partial_track = None;
                 if drive.bridge_tracks.len() <= track {
                     drive.bridge_tracks.resize(track + 1, BridgeTrack::Unknown);
                 }
@@ -2147,7 +2244,7 @@ impl FloppyController {
                 drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
                 if bridge_diag() && drive.bridge_attempts == 1 {
                     info!(
-                        "floppybridge.df{idx} waiting for track {track} (cyl {cylinder} side {}) \
+                        "fluxbridge.df{idx} waiting for track {track} (cyl {cylinder} side {}) \
                          [ready={} disk={} motor={} at_cyl={}]",
                         u8::from(side),
                         bridge.is_ready(),
@@ -2166,6 +2263,36 @@ impl FloppyController {
                     cylinder,
                     bridge.is_working(),
                 );
+                // A capture on its way in is better than filler: its early
+                // sectors are real, and the guest can read them while the rest
+                // of the revolution is still passing the head -- which is
+                // exactly how the machine this emulates read its disks. Served
+                // at the platter's own pace, never compressed: the head must
+                // not outrun the growth edge, and both move at real speed with
+                // the head spotted this much of a start.
+                if let Some((words, bits)) = bridge.partial_track(cylinder, side) {
+                    if bits >= BRIDGE_PARTIAL_MIN_BITS {
+                        let nominal = encoded_track_words();
+                        drive.cached.revs = vec![TrackRev::new(
+                            words,
+                            bits,
+                            Self::word_cck_for_track_words(nominal),
+                        )];
+                        drive.bridge_filler_track = None;
+                        // Mark what this is standing in for, so the next tick
+                        // keeps it rather than clearing the cache and leaving
+                        // the head with nothing until the following poll.
+                        drive.bridge_partial_track = Some(track);
+                        drive.bridge_rev_seamless = false;
+                        // Refresh the growth at the poll cadence, not every
+                        // tick: the snapshot only changes when the worker
+                        // publishes, and re-cloning it thousands of times a
+                        // second would tax the emulation thread for nothing.
+                        drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
+                        drive.clamp_head();
+                        return;
+                    }
+                }
                 // Keep the head over something. Stopping the platter until the
                 // capture lands makes the guest pay the capture and then its
                 // own rotational wait one after the other; turning over filler
@@ -2235,17 +2362,17 @@ struct FloppyDrive {
     /// Skipped by the save-state serialiser because a physical disk cannot be
     /// snapshotted -- a state saved with a bridge attached reloads as an empty
     /// drive, which is also why a bridged run is not reproducible.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
-    bridge: Option<crate::floppybridge::Bridge>,
+    bridge: Option<crate::fluxbridge::Bridge>,
     /// Last known answer to "is there a disk in the real drive", refreshed
     /// deliberately rather than polled per status read (see `has_media`).
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_media: bool,
     /// The config's own write protection for a bridged drive, held so the
     /// live tab state can be re-combined with it as the drive is polled.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_write_protected: bool,
     /// The disk's own write-protect tab, refreshed each time the drive is
@@ -2253,23 +2380,37 @@ struct FloppyDrive {
     /// the motor is doing, so this is good with the platter stopped -- which
     /// is most of the time. Both the /WPRO line the guest sees and the guard
     /// on the write itself come from here, so the two cannot disagree.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_tab_write_protected: bool,
     /// `elapsed_cck` before which not to ask the bridge for a track again,
     /// after it said it had none ready.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_poll_cck: u64,
+    /// Tracks whose write has been handed to the drive but not yet laid on
+    /// the platter. The library still holds the capture taken *before* such a
+    /// write, so reading one of these would show the guest the disk as it was
+    /// -- and, worse, could file that stale recording as proven. Nothing is
+    /// read or cached for a track in here until its outcome arrives.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_writing: Vec<usize>,
+    /// The track a part-captured revolution is currently standing in for.
+    /// Retains it between ticks: without a marker the next tick clears the
+    /// cache and the guest sees nothing until the following poll.
+    #[cfg(feature = "fluxbridge")]
+    #[serde(skip)]
+    bridge_partial_track: Option<usize>,
     /// Whether the interface going quiet has already been reported, so an
     /// unplugged drive says so once rather than once a frame.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_reported_failed: bool,
     /// The track `cached` is holding filler for, while the interface captures
     /// it. `None` once the real revolution lands, so it is never mistaken for
     /// data and the cache is not rebuilt on every tick.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_filler_track: Option<usize>,
     /// What is known about each track of the disk in a physical drive.
@@ -2283,17 +2424,17 @@ struct FloppyDrive {
     /// written, since those are the only ways what is on the platter stops
     /// matching. Only faithful recordings are kept, though -- see
     /// [`BridgeTrack`] for what qualifies and why.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_tracks: Vec<BridgeTrack>,
     /// Which track [`Self::bridge_wait_since_cck`] is timing.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_wait_track: Option<usize>,
     /// The revolution in hand has been turned all the way round. Only ever set
     /// for a physical drive serving a recording that cannot be trusted twice
     /// -- see [`Self::bridge_rev_seamless`] -- so the next one is fetched.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_rev_spent: bool,
     /// Whether the revolution under the head closes on itself: index-aligned,
@@ -2301,23 +2442,23 @@ struct FloppyDrive {
     /// does not is good for exactly one pass -- its ends were read a rotation
     /// apart, and any imperfection in how they were joined must not be shown
     /// to the guest twice.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_rev_seamless: bool,
     /// Serving speed for this bay, a percentage of the platter's real speed
     /// (`bridge_speed`: 100, 125, or 150). Compresses the cck-per-word fit
     /// when a captured revolution is served; the physical capture itself is
     /// untouched, so only rotational waits shrink.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip, default = "default_bridge_speed_percent")]
     bridge_speed_percent: u16,
     /// `elapsed_cck` when the drive was first asked for the track it is
     /// currently working on, and how many times it has been asked since. Only
     /// read to report how long a track took; 0 means "not waiting".
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_wait_since_cck: u64,
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_attempts: u32,
     cylinder: u8,
@@ -2358,34 +2499,38 @@ struct FloppyDrive {
 impl Default for FloppyDrive {
     fn default() -> Self {
         Self {
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_wait_track: None,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_rev_spent: false,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_rev_seamless: true,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_speed_percent: 100,
             image: None,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge: None,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_media: false,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_write_protected: true,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_tab_write_protected: true,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_poll_cck: 0,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
+            bridge_writing: Vec::new(),
+            #[cfg(feature = "fluxbridge")]
+            bridge_partial_track: None,
+            #[cfg(feature = "fluxbridge")]
             bridge_reported_failed: false,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_filler_track: None,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_tracks: Vec::new(),
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_wait_since_cck: 0,
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             bridge_attempts: 0,
             cylinder: 0,
             motor_on: false,
@@ -2451,11 +2596,11 @@ impl FloppyDrive {
 
     /// Whether this drive is a real one on a bridge.
     fn is_bridged(&self) -> bool {
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         {
             self.bridge.is_some()
         }
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         {
             false
         }
@@ -2466,7 +2611,7 @@ impl FloppyDrive {
     /// bridge reports empty until a disk is actually inserted, exactly as an
     /// empty drive does.
     fn has_media(&self) -> bool {
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if self.bridge.is_some() {
             // Deliberately the cached answer, not a fresh query. This is read
             // from the drive's status lines constantly, and asking the device
@@ -2543,7 +2688,7 @@ impl FloppyDrive {
         // Follow the motor line on the real drive: it has to be spinning
         // before a track can be read, and parking it when the guest drops
         // the line keeps the physical drive from running continuously.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         if let Some(bridge) = self.bridge.as_mut() {
             // The library takes a surface here as well, which it would switch
             // to. Which one is passed does not matter: every read and write
@@ -2774,7 +2919,7 @@ impl FloppyDrive {
             // index-aligned nor verified clean -- is good for exactly one
             // pass under the head. Mark it done; `ensure_track` replaces it
             // with the recording that followed rather than turning it again.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             if self.bridge.is_some() && !self.bridge_rev_seamless {
                 self.bridge_rev_spent = true;
             }
@@ -2844,12 +2989,12 @@ impl TrackRev {
     /// arrived at a track the interface has not finished capturing.
     ///
     /// Solid ones, which is what the hardware reads off unwritten media and
-    /// what the FloppyBridge library itself hands back before a buffer is
+    /// what the FluxBridge library itself hands back before a buffer is
     /// ready. It cannot match a sync word, so nothing is recovered from it --
     /// the point is only that the platter keeps turning while the capture
     /// completes, so the guest's own rotational wait overlaps it rather than
     /// starting afterwards.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     fn filler(bit_len: usize, word_cck: u32) -> Self {
         Self {
             words: vec![0xFFFF; bit_len.div_ceil(16)],
@@ -2945,7 +3090,7 @@ struct CachedTrack {
 /// clean. An index-less capture that cannot be verified is served exactly once
 /// and marked, so a return visit asks the drive for the recording that
 /// followed it rather than being shown the same one again.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 #[derive(Clone, Default)]
 enum BridgeTrack {
     /// Never read since the disk went in.
@@ -3130,16 +3275,19 @@ fn decode_floppy_payload(
         let data = dms::decode_dms_adf(&packed)
             .with_context(|| format!("decoding DMS {}", path.display()))?;
         (FloppyImageData::StandardAdf(data), true)
-    } else if packed.starts_with(IPF_SIGNATURE) {
-        bail!(
-            "IPF/CAPS floppy image {} is not supported: Copperline treats IPF as an explicit non-goal for the built-in loader until support is implemented as a direct IPF parser or optional SPS/CAPS library integration with licensing and platform packaging reviewed",
-            path.display()
-        );
+    } else if ipf::is_ipf(&packed) {
+        // IPF preserves the written track rather than its sectors, so there is
+        // nothing to write back into: it is always read-only.
+        (
+            decode_ipf_image(&packed)
+                .with_context(|| format!("decoding IPF {}", path.display()))?,
+            true,
+        )
     } else if packed.starts_with(SCP_SIGNATURE) {
         (decode_scp_flux_image(&packed)?, true)
     } else {
         bail!(
-            "floppy image {} is {} bytes; expected {} bytes (ADF), gzip-compressed supported image, UAE extended ADF, SCP, or DMS",
+            "floppy image {} is {} bytes; expected {} bytes (ADF), gzip-compressed supported image, UAE extended ADF, IPF, SCP, or DMS",
             path.display(),
             packed.len(),
             ADF_SIZE
@@ -3372,6 +3520,29 @@ fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageData> {
         }
     }
     Ok(FloppyImageData::Tracks(out))
+}
+
+/// An IPF stores the encoded track itself, so each of its tracks arrives as a
+/// finished revolution of MFM -- the same shape a flux capture takes, and read
+/// back through the same path.
+fn decode_ipf_image(data: &[u8]) -> Result<FloppyImageData> {
+    let tracks = ipf::decode(data)?
+        .into_iter()
+        .map(|track| {
+            track.map(|track| FloppyTrackImage::RawMfm {
+                stored_len: track.words.len() * 2,
+                words: track.words,
+                bit_len: track.bit_len,
+                // The format describes one canonical revolution, and its cell
+                // rate is the nominal 2 us that `word_cck_for_track_words`
+                // already paces a raw track at.
+                revolutions: 1,
+                legacy_sync: None,
+                bitcell_ns: None,
+            })
+        })
+        .collect();
+    Ok(FloppyImageData::Tracks(tracks))
 }
 
 fn decode_scp_flux_image(data: &[u8]) -> Result<FloppyImageData> {
@@ -4757,6 +4928,85 @@ mod tests {
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// A write reaches a real platter a revolution after it is handed over,
+    /// and until it does the drive still holds the recording from *before*
+    /// it. Reading in that window would show the guest a disk that no longer
+    /// exists -- and worse, a recording that proved out would be filed as
+    /// faithful and served from memory indefinitely. So a track is held
+    /// unreadable from the moment its write is accepted until the drive says
+    /// what became of it, whether that is success or failure.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn a_track_being_written_is_not_read_from_the_drive() {
+        let mut drive = FloppyDrive::default();
+        let track = 7;
+
+        // Nothing pending: an ordinary read may proceed.
+        assert!(!drive.bridge_writing.contains(&track));
+
+        // The write is accepted, so the track is held.
+        drive.bridge_writing.push(track);
+        assert!(
+            drive.bridge_writing.contains(&track),
+            "an accepted write must hold its track"
+        );
+        // ...and only that track.
+        assert!(!drive.bridge_writing.contains(&(track + 1)));
+
+        // The outcome releases it, and a failed write releases it too: either
+        // way the platter now holds something the guest has not seen.
+        for outcome_is_failure in [false, true] {
+            drive.bridge_writing.clear();
+            drive.bridge_writing.push(track);
+            drive.bridge_tracks.resize(track + 1, BridgeTrack::Unknown);
+            drive.bridge_tracks[track] = BridgeTrack::Kept(CachedTrack::default());
+            drive.cached_track = Some(track);
+
+            drive.bridge_writing.retain(|pending| *pending != track);
+            drive.bridge_tracks[track] = BridgeTrack::Unknown;
+            drive.cached_track = None;
+
+            assert!(
+                !drive.bridge_writing.contains(&track),
+                "{outcome_is_failure}"
+            );
+            assert!(
+                matches!(drive.bridge_tracks[track], BridgeTrack::Unknown),
+                "the recording from before the write must not survive it"
+            );
+            assert_eq!(drive.cached_track, None);
+        }
+    }
+
+    /// A part-captured revolution stands in for its track between polls. It
+    /// must survive the ticks in between: without a marker saying which track
+    /// it belongs to, the next tick clears the cache and the head has nothing
+    /// to read until the following poll, which is most of the window.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn a_partial_capture_is_retained_between_ticks() {
+        let mut drive = FloppyDrive::default();
+        let track = 12;
+        drive.bridge_partial_track = Some(track);
+        drive.bridge_filler_track = None;
+
+        // The retention test the tick applies, for this track and another.
+        let keep_this =
+            drive.bridge_filler_track == Some(track) || drive.bridge_partial_track == Some(track);
+        assert!(keep_this, "a partial must be kept for the track it serves");
+        let other = track + 1;
+        let keep_other =
+            drive.bridge_filler_track == Some(other) || drive.bridge_partial_track == Some(other);
+        assert!(!keep_other, "and only for that track");
+
+        // The finished revolution supersedes it.
+        drive.bridge_partial_track = None;
+        assert!(
+            !(drive.bridge_filler_track == Some(track)
+                || drive.bridge_partial_track == Some(track))
+        );
+    }
+
     fn tick_index_flag_sync(ctrl: &mut FloppyController) {
         ctrl.tick(INDEX_FLAG_SYNC_CCK, 0, &mut []);
     }
@@ -4896,22 +5146,20 @@ mod tests {
         Ok(())
     }
 
+    /// An IPF describes the written track rather than its sectors, so it
+    /// arrives as a raw MFM revolution and can never be written back to.
     #[test]
-    #[ignore = "IPF/CAPS support is an explicit non-goal until a direct parser or optional external library strategy is chosen"]
-    fn ipf_caps_images_fail_with_explicit_strategy() -> Result<()> {
+    fn ipf_images_load_as_raw_mfm_tracks_and_are_write_protected() -> Result<()> {
         let path = temp_path("test.ipf");
-        let mut image = Vec::new();
-        image.extend_from_slice(IPF_SIGNATURE);
-        image.extend_from_slice(&12u32.to_be_bytes());
-        image.extend_from_slice(&0u32.to_be_bytes());
-        fs::write(&path, image)?;
+        fs::write(&path, crate::ipf::tests::amigados_ipf_image())?;
         let cfg = FloppyConfig {
             bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
-                    write_protected: true,
+                    // An IPF overrides a writable configuration.
+                    write_protected: false,
                 }),
                 None,
                 None,
@@ -4919,13 +5167,22 @@ mod tests {
             ],
         };
 
-        let err = FloppyController::from_config(&cfg)
-            .err()
-            .expect("IPF/CAPS images should fail with the recorded strategy");
-        let message = format!("{err:#}");
-        assert!(message.contains("IPF/CAPS floppy image"));
-        assert!(message.contains("explicit non-goal"));
-        assert!(message.contains("SPS/CAPS library integration"));
+        let controller = FloppyController::from_config(&cfg)?;
+        let image = controller.drives[0]
+            .image
+            .as_ref()
+            .expect("the IPF should have loaded");
+        assert!(image.write_protected);
+        let FloppyImageData::Tracks(tracks) = &image.data else {
+            panic!("an IPF should decode to per-track raw MFM, not a sector image");
+        };
+        let Some(FloppyTrackImage::RawMfm { bit_len, words, .. }) = &tracks[0] else {
+            panic!("cylinder 0 head 0 should hold a raw MFM revolution");
+        };
+        assert_eq!(*bit_len, crate::ipf::tests::AMIGADOS_TRACK_BITS);
+        assert_eq!(words.len(), (*bit_len as usize).div_ceil(16));
+        // The track the fixture describes is the only formatted one.
+        assert!(tracks[1..].iter().all(Option::is_none));
 
         let _ = fs::remove_file(path);
         Ok(())

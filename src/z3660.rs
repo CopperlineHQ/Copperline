@@ -389,7 +389,6 @@ impl Z3660 {
         const COMPLEMENT: u8 = 2;
         const OP_SPRITE_COLOR: u32 = 12;
         const OP_SPRITE_BITMAP: u32 = 13;
-        const MINTERM_SRC: u8 = 0xC0;
         const JAM1: u8 = 0;
         // Drawmode bits (firmware rtg/gfx.h): JAM1/JAM2 in bit 0, COMPLEMENT
         // in bit 1, INVERSVID in bit 2.
@@ -454,16 +453,18 @@ impl Z3660 {
                 // dst rect (x0,y0) w=x1 h=y1 from src rect (x2,y2). Plain
                 // COPYRECT blits within the surface at offset[0]/pitch[0];
                 // the NOMASK variant reads surface offset[1]/pitch[1] and
-                // carries a minterm (only SRC is implemented; others log).
+                // carries a minterm, in the same low-nibble form the planar
+                // hooks use. A source copy is the common case and stays a
+                // straight byte move; everything else goes a pixel at a time
+                // through the truth table.
                 let dpitch = pitch0 * 4;
                 let (sbase, spitch) = if op == OP_COPYRECT {
                     (dst, dpitch)
                 } else {
                     (src, pitch1 * 4)
                 };
-                if op == OP_COPYRECT_NOMASK && minterm != MINTERM_SRC {
-                    log::debug!("z3660: copyrect minterm {minterm:#04x} treated as SRC");
-                }
+                let func = minterm & 0x0F;
+                let use_minterm = op == OP_COPYRECT_NOMASK && func != MINTERM_SRC_IDX;
                 let apply_mask = op == OP_COPYRECT && bpp == 1 && mask != 0xFF;
                 // Rects may overlap, so a row cannot be written while it is
                 // still needed as source. Buffer one row rather than the
@@ -486,16 +487,29 @@ impl Z3660 {
                         };
                     }
                     let drow = dst + (y0 + y) * dpitch + x0 * bpp;
-                    for (x, &s) in row.iter().enumerate() {
-                        let at = drow + x;
-                        if at >= self.vram.len() {
-                            continue;
+                    if use_minterm {
+                        for x in 0..x1 {
+                            let at = drow + x * bpp;
+                            let s = row[x * bpp..]
+                                .iter()
+                                .take(bpp)
+                                .fold(0u32, |acc, &b| (acc << 8) | u32::from(b));
+                            let v = minterm_apply(func, s, self.px_get(at, bpp));
+
+                            self.px_put(at, bpp, v & (u32::MAX >> (8 * (4 - bpp))));
                         }
-                        self.vram[at] = if apply_mask {
-                            (self.vram[at] & !mask) | (s & mask)
-                        } else {
-                            s
-                        };
+                    } else {
+                        for (x, &s) in row.iter().enumerate() {
+                            let at = drow + x;
+                            if at >= self.vram.len() {
+                                continue;
+                            }
+                            self.vram[at] = if apply_mask {
+                                (self.vram[at] & !mask) | (s & mask)
+                            } else {
+                                s
+                            };
+                        }
                     }
                 }
             }

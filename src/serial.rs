@@ -116,6 +116,27 @@ pub trait SerialSink: Send {
         None
     }
 
+    /// The same sink shared, for reads that only look.
+    #[cfg(feature = "midi")]
+    fn as_midi_ref(&self) -> Option<&crate::midi::MidiSerialSink> {
+        None
+    }
+
+    /// One stereo frame of what the device on the far end is sounding, at
+    /// the mixer's rate, or `None` from a device that makes no sound here.
+    ///
+    /// Only a device emulated in this process has anything to say: a host
+    /// MIDI endpoint makes its noise on the host, out of the emulator's
+    /// reach. The mixer treats what comes back the way it treats CD audio --
+    /// a line-level source beside Paula's own output, never in place of it.
+    ///
+    /// A `None` is final for the life of the sink, so the mixer asks once and
+    /// then stops. Buffering belongs to whoever implements this, which keeps
+    /// the mixer free of state for a device that is usually not there.
+    fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
+        None
+    }
+
     fn flush(&mut self);
 }
 

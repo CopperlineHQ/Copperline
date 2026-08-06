@@ -54,6 +54,15 @@ let queuedMs = 0;
 let running = false;
 let paused = false;
 let framesThisSecond = 0;
+// Diagnostic split of the fps figure. fps counts frames *stepped*, but a
+// tick that steps more than one frame blits only the last, so "shown"
+// (ticks that stepped at least once, each blitting one new picture) is the
+// true output rate and "ticks" is the rAF callback rate. 60 fps with 30
+// shown over 60 ticks means the audio gate is duty-cycling production;
+// 30 shown over 30 ticks means the browser halved the rAF cadence.
+let ticksThisSecond = 0;
+let presentsThisSecond = 0;
+let audioUnderruns = 0;
 let lastStatUpdate = 0;
 // Size of the last presented frame in emulated pixels. Under the monitor
 // path the canvas backing store is display-resolution, so pointer scaling
@@ -479,6 +488,15 @@ async function boot() {
       audioCtx.close().catch(() => {});
       audioNode = null;
     }
+    // The queue/underrun readouts belong to the worklet that reports them.
+    // Carried across a rebuild, a stale queuedMs over the pacing threshold
+    // would gate the fresh machine's stepping until the new worklet's first
+    // report - which never comes while autoplay policy holds the context
+    // suspended - and old underruns would sit in the stat line as if the
+    // new stack had already stuttered.
+    queuedMs = 0;
+    audioUnderruns = 0;
+    audioGateClosed = false;
     audioCtx = new AudioContext({ sampleRate: 44100 });
     await audioCtx.audioWorklet.addModule('./audio-worklet.js');
     audioNode = new AudioWorkletNode(audioCtx, 'copperline-audio', {
@@ -486,6 +504,15 @@ async function boot() {
     });
     audioNode.port.onmessage = (e) => {
       if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
+      if (typeof e.data?.underruns === 'number') audioUnderruns = e.data.underruns;
+      // Background running: while the page is hidden the worklet's queue
+      // reports (one every ~29 ms) are the clock that rAF stopped being.
+      // Input pumps and presentation stay out: there is nothing to show
+      // and nobody at the controls, but audio plays on and the serial
+      // bridge keeps flowing.
+      if (keepRunningHidden && running && !paused && emu) {
+        stepMachine(performance.now(), true);
+      }
     };
     audioNode.connect(audioCtx.destination);
     // Autoplay policies can leave the context suspended, and resume() may
@@ -560,13 +587,31 @@ async function boot() {
 
 // --- main loop -----------------------------------------------------------
 
+// The audio clock is the master: while the worklet has plenty queued, the
+// gate closes and stepping pauses, locking production to the audio
+// device's consumption rate. Two things keep the gate from chopping the
+// output. Hysteresis: it closes past 150 ms but reopens only under 90 ms,
+// because with a single threshold a queue riding it flips the gate every
+// report. And the pacer re-anchors while the gate is closed, so the pause
+// is forgiven rather than owed: repaid, the reopening tick steps several
+// frames at once and blits only the last, dropping the rest from the
+// output while the fps counter (which counts stepped frames) still reads
+// full rate.
+const AUDIO_GATE_CLOSE_MS = 150;
+const AUDIO_GATE_OPEN_MS = 90;
+let audioGateClosed = false;
+
 function maxFramesForQueue() {
-  // The audio clock is the master: when the worklet has plenty queued, skip
-  // stepping this tick (the pacer forgives deficits past 100 ms, so this
-  // locks production to the audio device's consumption rate). Otherwise step
-  // freely to the wall clock - the burst cap only bounds a single tick's
-  // catch-up work after rAF throttling.
-  return queuedMs > 150 ? 0 : 5;
+  const limit = audioGateClosed ? AUDIO_GATE_OPEN_MS : AUDIO_GATE_CLOSE_MS;
+  audioGateClosed = queuedMs > limit;
+  if (audioGateClosed) {
+    emu.resync_clock?.();
+    return 0;
+  }
+  // Step freely to the wall clock - the burst cap only bounds a single
+  // tick's catch-up work after rAF throttling (the pacer forgives
+  // deficits past 100 ms).
+  return 5;
 }
 
 // Blit whatever the core last rendered onto the canvas. Called once per
@@ -599,16 +644,21 @@ function presentFrame() {
   ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
 }
 
-function tick(nowMs) {
-  if (!running) return;
-  if (paused) return; // resumePause() restarts the loop
-  // Polled, not event-driven: the Gamepad API reports button state only
-  // when asked, so this is where a controller reaches the machine.
-  pumpGamepads();
-  syncCapsLed();
-  pumpHostKeys();
+// Advance the machine to nowMs and ship what it produced (audio, serial):
+// the half of a tick shared by the visible rAF loop and hidden background
+// stepping. Returns false when the machine crashed and the caller's loop
+// must stop. Hidden stepping skips the wasm-side frame render (nobody can
+// see it); the first visible run repaints unconditionally after that.
+function stepMachine(nowMs, hidden) {
+  ticksThisSecond++;
   try {
-    framesThisSecond += emu.run(nowMs, maxFramesForQueue());
+    const max = maxFramesForQueue();
+    const stepped =
+      hidden && typeof emu.run_hidden === 'function'
+        ? emu.run_hidden(nowMs, max)
+        : emu.run(nowMs, max);
+    framesThisSecond += stepped;
+    if (stepped > 0) presentsThisSecond++;
   } catch (e) {
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
@@ -622,10 +672,8 @@ function tick(nowMs) {
     showBugLink(true);
     syncWakeLock();
     console.error(e);
-    return;
+    return false;
   }
-
-  presentFrame();
 
   const audio = emu.take_audio();
   if (audio.length > 0 && audioNode) {
@@ -633,27 +681,71 @@ function tick(nowMs) {
   }
 
   pumpSerial();
-  updateStatusLeds();
 
   if (nowMs - lastStatUpdate >= 1000) {
     statLine.textContent =
-      `${framesThisSecond} fps | ` +
+      `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
-      `audio ${queuedMs.toFixed(0)} ms`;
+      `audio ${queuedMs.toFixed(0)} ms` +
+      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '');
     framesThisSecond = 0;
+    ticksThisSecond = 0;
+    presentsThisSecond = 0;
     lastStatUpdate = nowMs;
     updateStatusDisks();
   }
+  return true;
+}
+
+function tick(nowMs) {
+  if (!running) return;
+  if (paused) return; // resumePause() restarts the loop
+  // Polled, not event-driven: the Gamepad API reports button state only
+  // when asked, so this is where a controller reaches the machine.
+  pumpGamepads();
+  syncCapsLed();
+  pumpHostKeys();
+  if (!stepMachine(nowMs, false)) return;
+  presentFrame();
+  updateStatusLeds();
   requestAnimationFrame(tick);
 }
+
+// A hidden tab gets no animation frames, so by default the machine sleeps
+// with the page: audio is suspended and nothing steps. With the
+// run-in-background box ticked, a hidden tab keeps running the way a video
+// tab keeps playing - the real-time audio pipeline is the one thing
+// browsers never throttle, so the worklet's queue reports (which arrive as
+// messages, not timers, and so keep flowing) clock the machine while rAF
+// is asleep. That needs a running AudioContext: with autoplay still
+// locked there is no clock, and the machine sleeps as before.
+let keepRunningHidden = false;
 
 document.addEventListener('visibilitychange', () => {
   // The browser drops a screen wake lock when the page hides; re-request
   // it when a still-running machine comes back into view.
   syncWakeLock();
   if (!audioCtx) return;
-  if (document.hidden) audioCtx.suspend();
-  else audioCtx.resume();
+  if (document.hidden) {
+    // The toggle is read through the DOM rather than its const, which is
+    // declared further down the file: a handler must not couple to
+    // evaluation order (with the box not built yet, this reads unticked).
+    keepRunningHidden =
+      !!$('background-run')?.checked &&
+      running &&
+      !paused &&
+      audioCtx.state === 'running';
+    if (!keepRunningHidden) audioCtx.suspend();
+  } else {
+    const kept = keepRunningHidden;
+    keepRunningHidden = false;
+    audioCtx.resume();
+    // A machine that slept through the hide starts pacing from now: the
+    // guest owes the wall clock nothing, and catching up would burst
+    // frames whose audio lands in a queue that never drained while
+    // hidden, spiking it over the gate.
+    if (!kept && emu && running && !paused) emu.resync_clock?.();
+  }
 });
 
 // --- screen wake lock --------------------------------------------------
@@ -3710,6 +3802,20 @@ monoAudioToggle?.addEventListener('change', () => {
   if (emu) emu.set_mono_audio(monoAudioToggle.checked);
 });
 
+// The run-in-background choice: ticked, a hidden tab keeps the machine
+// running (and audible) the way a video tab keeps playing; unticked (the
+// default), a hidden tab sleeps as it always has. Always available, the
+// machine select's pattern: a page shell can host its own checkbox
+// #background-run, and without one the control inserts itself below the
+// canvas. The visitor's choice is remembered per browser; the config
+// file's background_run is the starting point for first-time visitors.
+const BG_RUN_STORAGE_KEY = 'copperline-background-run';
+const bgRunToggle =
+  $('background-run') ?? buildToggleControl('background-run', 'Run in background');
+bgRunToggle.addEventListener('change', () => {
+  storePref(BG_RUN_STORAGE_KEY, bgRunToggle.checked ? 'on' : 'off');
+});
+
 // The floppy drive speed control, always visible: a page shell can host
 // its own <select id="floppy-speed"> (option values 100/200/400/800 for
 // percent, 0 for turbo) wherever its control bar wants it; without one
@@ -3792,6 +3898,23 @@ function buildSettingControl(id, labelText) {
   row.appendChild(sel);
   shell.insertAdjacentElement('afterend', row);
   return sel;
+}
+
+// The checkbox variant of buildSettingControl: the same self-inserted
+// labelled row, with the box ahead of its label as checkboxes read.
+function buildToggleControl(id, labelText) {
+  const row = document.createElement('label');
+  row.style.cssText =
+    'display:inline-flex;align-items:center;gap:0.45rem;margin:0.4rem 0.6rem 0.4rem 0;' +
+    'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;' +
+    'color:rgba(255,255,255,0.75);cursor:pointer;';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.id = id;
+  row.appendChild(box);
+  row.appendChild(document.createTextNode(labelText));
+  shell.insertAdjacentElement('afterend', row);
+  return box;
 }
 const machineShellSel = $('machine');
 const machineSel = machineShellSel ?? buildSettingControl('machine', 'Machine');
@@ -5121,6 +5244,8 @@ const pageParams = new URLSearchParams(location.search);
 //                                    (1084|crt|bezel|plain, default 1084);
 //                                    same visitor rule
 //     "joy": "keys",                 off|keys|cd32|touch
+//     "background_run": true,        starting run-in-background choice;
+//                                    same visitor rule
 //     "serial_url": "wss://...",     preset the BBS gateway input
 //     "serial_raw": true,            preset the raw checkbox
 //     "autoboot": true               power on once everything is loaded
@@ -5160,6 +5285,13 @@ async function startup() {
     if (monoAudioToggle) monoAudioToggle.checked = cfg.mono_audio;
     else configMonoAudio = cfg.mono_audio;
   }
+  // Run-in-background: the visitor's own remembered choice first (a
+  // per-browser behavior preference, the overscan rule), then the config
+  // file's starting point; a shell checkbox's own initial state stands
+  // only when neither says otherwise.
+  const bgRunPref = storedPref(BG_RUN_STORAGE_KEY);
+  if (bgRunPref !== null) bgRunToggle.checked = bgRunPref === 'on';
+  else if (typeof cfg.background_run === 'boolean') bgRunToggle.checked = cfg.background_run;
 
   const fetches = [];
   const linkedDisk =

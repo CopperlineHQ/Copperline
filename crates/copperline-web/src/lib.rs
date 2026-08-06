@@ -214,6 +214,10 @@ pub struct WebEmu {
     /// [`Self::present_crt_lines`].
     present_crt_lines: f32,
     last_rendered_frame: Option<u64>,
+    /// Frames were stepped by `run_hidden` (which renders nothing) since
+    /// the last render, so the presentation buffer is behind the machine.
+    /// The next rendering `run` repaints even if it steps no frames.
+    presentation_stale: bool,
     /// Wall-clock/emulated-time pair the pacer chases from; None until the
     /// first `run` call after (re)boot.
     anchor: Option<(f64, f64)>,
@@ -286,6 +290,7 @@ impl WebEmu {
             present_rows: 0,
             present_crt_lines: 0.0,
             last_rendered_frame: None,
+            presentation_stale: false,
             anchor: None,
             mouse_remainder: (0.0, 0.0),
             mouse_pending: (0, 0),
@@ -373,6 +378,19 @@ impl WebEmu {
     /// forgiven by re-anchoring, so a backgrounded tab resumes at real time
     /// instead of fast-forwarding.
     pub fn run(&mut self, now_ms: f64, max_frames: u32) -> Result<u32, JsValue> {
+        self.run_paced(now_ms, max_frames, true)
+    }
+
+    /// `run` for a hidden page: step the machine and queue its audio, but
+    /// skip rendering the presentation buffer nobody can see. The first
+    /// rendering `run` after hidden stepping repaints even if it stepped
+    /// no frames itself, so a tab that kept running in the background
+    /// shows the current picture the moment it is visible again.
+    pub fn run_hidden(&mut self, now_ms: f64, max_frames: u32) -> Result<u32, JsValue> {
+        self.run_paced(now_ms, max_frames, false)
+    }
+
+    fn run_paced(&mut self, now_ms: f64, max_frames: u32, render: bool) -> Result<u32, JsValue> {
         let (anchor_wall, anchor_emu) = *self
             .anchor
             .get_or_insert((now_ms, self.emu.bus().emulated_seconds()));
@@ -391,8 +409,13 @@ impl WebEmu {
         if target - self.emu.bus().emulated_seconds() > MAX_CATCHUP_SECONDS {
             self.anchor = Some((now_ms, self.emu.bus().emulated_seconds()));
         }
-        if stepped > 0 {
-            self.render_completed_frame();
+        if render {
+            if stepped > 0 || self.presentation_stale {
+                self.render_completed_frame();
+                self.presentation_stale = false;
+            }
+        } else if stepped > 0 {
+            self.presentation_stale = true;
         }
         Ok(stepped)
     }
@@ -842,6 +865,7 @@ impl WebEmu {
         self.last_rendered_frame = None;
         self.presentation_latch.reset();
         self.render_completed_frame();
+        self.presentation_stale = false;
         Ok(())
     }
 

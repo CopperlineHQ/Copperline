@@ -4125,6 +4125,12 @@ impl Bus {
         self.paula.serial.as_midi()
     }
 
+    /// The same sink shared, for state that is read rather than switched.
+    #[cfg(feature = "midi")]
+    pub fn midi_serial(&self) -> Option<&crate::midi::MidiSerialSink> {
+        self.paula.serial.as_midi_ref()
+    }
+
     pub fn live_audio_output_lead_seconds(&self) -> f64 {
         self.paula.live_audio_output_lead_seconds()
     }
@@ -5629,7 +5635,7 @@ impl Bus {
         // exactly what a real disk gets pointed at -- leaves the bit set for
         // good. Gated on it, the drive would be asked once and never again.
         // `pending_vbi` already paces this to once per frame wrap.
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         self.floppy.poll_bridge_media();
         if self.paula.intreq & INT_VERTB == 0 {
             self.paula.intreq |= INT_VERTB;

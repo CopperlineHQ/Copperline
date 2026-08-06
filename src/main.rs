@@ -410,6 +410,21 @@ where
             "--show-status-bar" => {
                 overrides.status_bar = Some(true);
             }
+            "--mt32-control-rom" => {
+                overrides.mt32_control_rom = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--mt32-control-rom requires a path"))?,
+                );
+            }
+            "--mt32-pcm-rom" => {
+                overrides.mt32_pcm_rom = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--mt32-pcm-rom requires a path"))?,
+                );
+            }
+            "--mt32-panel" => {
+                overrides.mt32_panel = Some(true);
+            }
             "--menu-scale" => {
                 overrides.menu_scale = Some(
                     args.next()
@@ -474,16 +489,21 @@ where
             }
             // Absent from a build without the feature, so an unknown-argument
             // error names it rather than the flag quietly doing nothing.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge" => {
-                const USAGE: &str = "--floppy-bridge requires DFN INTERFACE \
-                                     (drawbridge, greaseweazle, supercardpro, or off)";
-                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                // The names this build accepts come from the library's driver
+                // table, so the usage line cannot advertise a driver that is
+                // not compiled in.
+                let usage = format!(
+                    "--floppy-bridge requires DFN INTERFACE ({})",
+                    copperline::config::supported_bridge_drivers().join(", ")
+                );
+                let drive_s = args.next().ok_or_else(|| anyhow!(usage.clone()))?;
                 let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge")?;
-                let interface = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let interface = args.next().ok_or_else(|| anyhow!(usage))?;
                 overrides.floppy_bridge[idx] = Some(interface);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-port" => {
                 const USAGE: &str = "--floppy-bridge-port requires DFN PORT";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -491,7 +511,7 @@ where
                 overrides.floppy_bridge_port[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-cable" => {
                 const USAGE: &str = "--floppy-bridge-cable requires DFN CABLE \
                                      (a or b for a PC cable, 0-3 for Shugart)";
@@ -500,7 +520,7 @@ where
                 overrides.floppy_bridge_cable[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-mode" => {
                 const USAGE: &str = "--floppy-bridge-mode requires DFN MODE \
                                      (normal, compatible, or stalling)";
@@ -509,7 +529,7 @@ where
                 overrides.floppy_bridge_mode[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-density" => {
                 const USAGE: &str = "--floppy-bridge-density requires DFN DENSITY \
                                      (auto, dd, or hd)";
@@ -518,23 +538,15 @@ where
                 overrides.floppy_bridge_density[idx] =
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
-            #[cfg(feature = "floppybridge")]
-            "--floppy-bridge-speed" => {
-                const USAGE: &str =
-                    "--floppy-bridge-speed requires DFN PERCENT (100, 125, 150, 175, or 200)";
+            #[cfg(feature = "fluxbridge")]
+            "--floppy-replay-speed" | "--floppy-bridge-speed" => {
+                const USAGE: &str = "--floppy-replay-speed requires DFN SPEED (normal, or fast)";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let percent_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-speed")?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-replay-speed")?;
                 overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
-            #[cfg(feature = "floppybridge")]
-            "--floppy-bridge-auto-cache" => {
-                const USAGE: &str = "--floppy-bridge-auto-cache requires DFN";
-                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-auto-cache")?;
-                overrides.floppy_bridge_auto_cache[idx] = true;
-            }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             "--floppy-bridge-writable" => {
                 const USAGE: &str = "--floppy-bridge-writable requires DFN";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -1099,8 +1111,16 @@ fn print_help() {
     let shortcut = HOST_SHORTCUT_MODIFIER_LABEL;
     // The MIDI endpoint options only do anything in a `midi`-feature build, so
     // list them only there. `--serial` itself is always shown: off/stdout work
-    // in every build, and it names midi as a mode.
-    #[cfg(feature = "midi")]
+    // in every build, and it names midi as a mode. The MT-32 rides with them
+    // when its own feature is in, being reached through `--midi-out`.
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    let midi = "--midi-out NAME                host MIDI destination, or mt32 (implies --serial midi)\n  \
+                --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
+                --list-midi                    list host MIDI endpoints and exit\n  \
+                --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
+                --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
+                --mt32-panel                   show the MT-32's front panel under the display\n  ";
+    #[cfg(all(feature = "midi", not(feature = "mt32")))]
     let midi = "--midi-out NAME                host MIDI destination (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  ";
@@ -1108,20 +1128,21 @@ fn print_help() {
     let midi = "";
     // A build without the feature cannot attach a physical drive at all, so
     // the flags are not listed and not accepted.
-    #[cfg(feature = "floppybridge")]
-    let floppy_bridge =
+    #[cfg(feature = "fluxbridge")]
+    let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
+    let floppy_bridge = format!(
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
-         \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
+         \x20                            {floppy_bridge_names}\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
-         --floppy-bridge-speed DFN PCT  serve captured tracks at 100, 125, 150, 175, or 200%\n  \
-         --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
+         --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
-         \x20                            write-protected unless asked otherwise)\n  ";
-    #[cfg(not(feature = "floppybridge"))]
-    let floppy_bridge = "";
+         \x20                            write-protected unless asked otherwise)\n  "
+    );
+    #[cfg(not(feature = "fluxbridge"))]
+    let floppy_bridge = String::new();
     eprintln!(
         "copperline - Amiga emulator\n\
          \n\
@@ -1236,6 +1257,10 @@ fn print_help() {
          --perf-overlay                 show the performance overlay at start\n  \
          \x20                            (Cmd/Alt+P toggles it live)\n  \
          --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
+         --mt32-control-rom PATH        MT-32 control ROM (with --mt32-pcm-rom,\n  \
+         \x20                            makes \"mt32\" selectable as the MIDI output)\n  \
+         --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
+         --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
@@ -1296,14 +1321,16 @@ fn parse_floppy_speed(s: &str) -> Result<u16> {
     Ok(speed)
 }
 
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn parse_floppy_bridge_speed(s: &str) -> Result<u16> {
-    const MSG: &str = "--floppy-bridge-speed PERCENT must be 100, 125, 150, 175, or 200";
-    let speed: u16 = s.trim().parse().map_err(|_| anyhow!(MSG))?;
-    if !copperline::config::SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&speed) {
-        return Err(anyhow!(MSG));
+    const MSG: &str = "--floppy-replay-speed SPEED must be \"normal\" (real speed) or \
+                       \"fast\" (double); a track's first read always streams at the \
+                       platter's own pace";
+    match s.trim().to_ascii_lowercase().as_str() {
+        "normal" | "100" => Ok(100),
+        "fast" | "200" => Ok(200),
+        _ => Err(anyhow!(MSG)),
     }
-    Ok(speed)
 }
 
 fn parse_floppy_drive_count(s: &str) -> Result<u8> {
@@ -1975,6 +2002,8 @@ fn main() -> Result<()> {
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     video::set_display_scaling(cfg.scaling);
     video::set_menu_scale(cfg.menu_scale);
+    video::set_mt32_panel_shown(cfg.serial.mt32_panel);
+    video::set_mt32_lcd(cfg.serial.mt32_lcd);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's
     // event-loop setup registers with the display server, which aborts or
@@ -2661,23 +2690,20 @@ mod tests {
 
     /// An unsupported serving speed is refused where it is typed, naming
     /// the values that work, rather than surfacing later from config parsing.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_speed_flag_refuses_an_unsupported_percentage() {
-        let err = parse(&["--floppy-bridge-speed", "df0", "120"])
-            .expect_err("120 is not a supported serving speed");
+        let err =
+            parse(&["--floppy-replay-speed", "df0", "120"]).expect_err("120 is not a replay speed");
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("100, 125, 150, 175, or 200"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("normal"), "unexpected error: {msg}");
     }
 
     /// A real drive can be asked for entirely from the command line, with no
     /// config file: the flags have to create the bay's table, not just fill
     /// one in.
     // The flags only exist in a build that can attach a physical drive.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_flags_configure_a_bay_with_no_config_file() -> Result<()> {
         let args = parse(&[
@@ -2698,11 +2724,9 @@ mod tests {
             "--floppy-bridge-density",
             "df1",
             "dd",
-            "--floppy-bridge-speed",
+            "--floppy-replay-speed",
             "df1",
-            "125",
-            "--floppy-bridge-auto-cache",
-            "df1",
+            "fast",
         ])?;
 
         let raw = Config::load_raw(None, &args.overrides)?;
@@ -2715,10 +2739,9 @@ mod tests {
         assert_eq!(bridge.port.as_deref(), Some("/dev/ttyACM0"));
         assert_eq!(bridge.cable, copperline::config::BridgeCable::DriveB);
         assert!(!bridge.write_protected);
-        assert_eq!(bridge.mode, copperline::config::BridgeSpeedMode::Compatible);
+        assert_eq!(bridge.mode, copperline::config::BridgeReadMode::Compatible);
         assert_eq!(bridge.density, copperline::config::BridgeDensity::Dd);
-        assert_eq!(bridge.speed, 125);
-        assert!(bridge.auto_cache);
+        assert_eq!(bridge.speed, 200);
         // Untouched bays stay as they were.
         assert!(cfg.floppy.bridges[0].is_none());
         Ok(())
@@ -2728,7 +2751,7 @@ mod tests {
     /// config file put there rather than colliding with it -- a bay cannot
     /// hold both, and the command line wins.
     // The flags only exist in a build that can attach a physical drive.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn floppy_bridge_flag_replaces_a_configured_image() -> Result<()> {
         let path = std::env::temp_dir().join(format!(

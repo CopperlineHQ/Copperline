@@ -24,8 +24,8 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
-    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
-    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan,
+    BridgeDriver, BridgeReadMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
+    FluxBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd, Overscan,
     PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
     RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
     WarpSpeed, BOOT_PRI_NEVER,
@@ -172,8 +172,8 @@ pub enum LauncherTab {
     Rom,
     Floppy,
     Storage,
-    /// FloppyBridge settings for one bay, reached from its Configure button.
-    FloppyBridge,
+    /// FluxBridge settings for one bay, reached from its Configure button.
+    FluxBridge,
     BootPriority,
     HostFs,
     Cd,
@@ -215,7 +215,7 @@ impl LauncherTab {
             LauncherTab::Memory => "Memory",
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
-            LauncherTab::FloppyBridge => "FloppyBridge",
+            LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
@@ -237,7 +237,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 LauncherTab::Storage
             }
-            LauncherTab::FloppyBridge => LauncherTab::Floppy,
+            LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
         }
@@ -251,7 +251,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 Some(LauncherTab::Storage)
             }
-            LauncherTab::FloppyBridge => Some(LauncherTab::Floppy),
+            LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
     }
@@ -348,9 +348,8 @@ pub enum LauncherField {
     BridgePort,
     BridgeCable,
     BridgeDensity,
-    BridgeSpeed,
-    BridgeServeSpeed,
-    BridgeAutoCache,
+    BridgeReadMode,
+    BridgeReplaySpeed,
     // Hard disk
     IdeMaster,
     IdeSlave,
@@ -397,6 +396,10 @@ pub enum LauncherField {
     SerialMode,
     #[cfg(feature = "midi")]
     MidiOut,
+    Mt32ControlRom,
+    Mt32PcmRom,
+    Mt32Panel,
+    Mt32Lcd,
     #[cfg(feature = "midi")]
     MidiIn,
     // Parallel
@@ -589,7 +592,7 @@ const ROM_ROWS: [Row; 2] = [
 // with the drive's rows when the drive is not wired in.
 // Each wired drive is a greyed "DFn:" heading, its media row, then the two
 // tick boxes that share a line beneath. The media row shows an image path with
-// Browse/Clear, or -- once FloppyBridge is ticked -- the real interface in use
+// Browse/Clear, or -- once FluxBridge is ticked -- the real interface in use
 // with a Configure button onto its settings.
 const FLOPPY_ROWS: [Row; 14] = [
     row(F::FloppyDrives, "Drives", Cycle),
@@ -607,9 +610,9 @@ const FLOPPY_ROWS: [Row; 14] = [
     row(F::Df3Image, "  Disk image", RowKind::FloppyMedia),
     row(F::Df3WriteProtect, "", RowKind::FloppyFlags),
 ];
-/// The FloppyBridge settings page, shown for whichever bay was configured.
-#[cfg(feature = "floppybridge")]
-const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
+/// The FluxBridge settings page, shown for whichever bay was configured.
+#[cfg(feature = "fluxbridge")]
+const FLOPPY_BRIDGE_ROWS: [Row; 7] = [
     // Inert: the label is built from the loaded library's version (see
     // `bridge_library_heading`), so the text here is never drawn.
     row(F::BridgeLibrary, "", RowKind::SectionHeader),
@@ -617,9 +620,8 @@ const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
     row(F::BridgePort, "Serial port", Cycle),
     row(F::BridgeCable, "Drive select", Cycle),
     row(F::BridgeDensity, "Density", Cycle),
-    row(F::BridgeSpeed, "Read mode", Cycle),
-    row(F::BridgeServeSpeed, "Bridge speed", Cycle),
-    row(F::BridgeAutoCache, "Auto-cache", Toggle),
+    row(F::BridgeReadMode, "Read mode", Cycle),
+    row(F::BridgeReplaySpeed, "Replay speed", Cycle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -680,6 +682,18 @@ const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
+];
+// Picking MT-32 as the output adds the two ROM images it runs on and
+// its front panel; nothing else needs them, so nothing else shows them.
+#[cfg(all(feature = "midi", feature = "mt32"))]
+const SERIAL_ROWS_MT32: [Row; 7] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::MidiIn, "  MIDI input", Cycle),
+    row(F::MidiOut, "  MIDI output", Cycle),
+    row(F::Mt32ControlRom, "  Control ROM", PathRow),
+    row(F::Mt32PcmRom, "  PCM ROM", PathRow),
+    row(F::Mt32Panel, "  Front panel", Toggle),
+    row(F::Mt32Lcd, "  Display", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
@@ -750,6 +764,7 @@ pub fn rows(
     tab: LauncherTab,
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
         LauncherTab::System => Cow::Borrowed(&SYSTEM_ROWS),
@@ -759,10 +774,10 @@ pub fn rows(
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
         // Unreachable without the feature: nothing offers a way in, since the
         // tick box that turns a bay over is not drawn either.
-        #[cfg(not(feature = "floppybridge"))]
-        LauncherTab::FloppyBridge => Cow::Borrowed(&[]),
-        #[cfg(feature = "floppybridge")]
-        LauncherTab::FloppyBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
+        #[cfg(not(feature = "fluxbridge"))]
+        LauncherTab::FluxBridge => Cow::Borrowed(&[]),
+        #[cfg(feature = "fluxbridge")]
+        LauncherTab::FluxBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
         // The Storage tab shows the IDE/SCSI options (the common case). Its
         // sub-page links are a fixed nav row at the top (see the panel code),
         // in the same place as each sub-page's Back button, so they are not part
@@ -776,7 +791,11 @@ pub fn rows(
         }
         LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
-        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
+        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
+            serial_mode,
+            midi_out_is_mt32,
+            parallel_device,
+        )),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
         // A/V & Emu defaults to the Audio category; Video and Emulation are its
@@ -791,9 +810,13 @@ pub fn rows(
 /// only build with serial rows), a `Parallel:` section, then an `Ethernet:`
 /// section, each under a greyed heading and each showing only the rows relevant
 /// to its selected device/mode.
-fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Vec<Row> {
+fn io_ports_rows(
+    serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
+    parallel_device: ParallelDevice,
+) -> Vec<Row> {
     let mut rows = Vec::new();
-    let serial = serial_rows(serial_mode);
+    let serial = serial_rows(serial_mode, midi_out_is_mt32);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
@@ -807,18 +830,22 @@ fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Ve
 
 /// Serial rows for the current mode. Only the `midi` build has any; without it
 /// the Serial section is empty and omitted from the I/O Ports tab.
-fn serial_rows(serial_mode: SerialMode) -> &'static [Row] {
+fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
-        if serial_mode == SerialMode::Midi {
-            &SERIAL_ROWS_MIDI
-        } else {
-            &SERIAL_ROWS_BASE
+        if serial_mode != SerialMode::Midi {
+            return &SERIAL_ROWS_BASE;
         }
+        #[cfg(feature = "mt32")]
+        if midi_out_is_mt32 {
+            return &SERIAL_ROWS_MT32;
+        }
+        let _ = midi_out_is_mt32;
+        &SERIAL_ROWS_MIDI
     }
     #[cfg(not(feature = "midi"))]
     {
-        let _ = serial_mode;
+        let _ = (serial_mode, midi_out_is_mt32);
         &[]
     }
 }
@@ -944,9 +971,8 @@ const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
 /// How close a bay is to actually having a physical drive behind it.
 ///
-/// The two ways it can fail look identical from the outside but need opposite
-/// fixes -- install the library, or plug the interface in -- so the launcher
-/// keeps them apart rather than saying "None" to both.
+/// The library is compiled in, so the only thing that can be missing is the
+/// hardware itself; the launcher says so plainly rather than "None".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeStatus {
     /// Nothing the bridge recognises is plugged in. The bridge itself is
@@ -963,7 +989,7 @@ pub enum BridgeStatus {
 /// filter misses (an Arduino clone on a CH340 mounts as `tty.wchusbserial*`).
 /// Linux: the USB serial classes. Windows: nothing extra -- the library
 /// already walks every COM port through SetupAPI.
-#[cfg(feature = "floppybridge")]
+#[cfg(feature = "fluxbridge")]
 fn host_serial_ports() -> Vec<String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -1016,11 +1042,11 @@ fn merge_port_lists(library: Vec<String>, host: Vec<String>) -> Vec<Option<Strin
 
 /// The combined port list, or the bare "Automatic" without the feature.
 fn sample_bridge_ports() -> Vec<Option<String>> {
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     {
-        merge_port_lists(crate::floppybridge::com_ports(), host_serial_ports())
+        merge_port_lists(crate::fluxbridge::com_ports(), host_serial_ports())
     }
-    #[cfg(not(feature = "floppybridge"))]
+    #[cfg(not(feature = "fluxbridge"))]
     {
         vec![None]
     }
@@ -1028,8 +1054,8 @@ fn sample_bridge_ports() -> Vec<Option<String>> {
 
 /// What the bridge can see of the host right now.
 fn bridge_status() -> BridgeStatus {
-    #[cfg(feature = "floppybridge")]
-    if crate::floppybridge::interface_connected() {
+    #[cfg(feature = "fluxbridge")]
+    if crate::fluxbridge::interface_connected() {
         return BridgeStatus::Attached;
     }
     BridgeStatus::NoInterface
@@ -1064,19 +1090,39 @@ fn bridge_density_name(d: BridgeDensity) -> &'static str {
     }
 }
 
-fn bridge_mode_name(m: BridgeSpeedMode) -> &'static str {
+fn bridge_mode_name(m: BridgeReadMode) -> &'static str {
     match m {
-        BridgeSpeedMode::Compatible => "compatible",
-        BridgeSpeedMode::Normal => "normal",
-        BridgeSpeedMode::Stalling => "stalling",
+        BridgeReadMode::Compatible => "compatible",
+        BridgeReadMode::Normal => "normal",
+        BridgeReadMode::Stalling => "stalling",
     }
 }
 
-const BRIDGE_DRIVERS: [BridgeDriver; 3] = [
-    BridgeDriver::DrawBridge,
-    BridgeDriver::Greaseweazle,
-    BridgeDriver::SupercardPro,
-];
+/// The interfaces the Interface row offers, straight from the FluxBridge
+/// build: the library's own driver table decides what exists, in its own
+/// order, so compiling a driver in is the whole job of adding it here.
+#[cfg(feature = "fluxbridge")]
+fn bridge_drivers() -> Vec<BridgeDriver> {
+    crate::fluxbridge::drivers()
+        .iter()
+        .filter_map(|driver| {
+            [
+                BridgeDriver::DrawBridge,
+                BridgeDriver::Greaseweazle,
+                BridgeDriver::SupercardPro,
+            ]
+            .into_iter()
+            .find(|kind| kind.match_token() == driver.token)
+        })
+        .collect()
+}
+
+/// Without the bridge the page is unreachable, but the row still needs a
+/// value to show.
+#[cfg(not(feature = "fluxbridge"))]
+fn bridge_drivers() -> Vec<BridgeDriver> {
+    vec![BridgeDriver::default()]
+}
 const BRIDGE_CABLES: [BridgeCable; 6] = [
     BridgeCable::DriveA,
     BridgeCable::DriveB,
@@ -1090,10 +1136,10 @@ const BRIDGE_DENSITIES: [BridgeDensity; 3] =
 // The driver's fourth mode, Turbo, is absent: it answers AmigaDOS calls
 // instead of reading the disk, so there is nothing for a drive model to do
 // with it.
-const BRIDGE_SPEEDS: [BridgeSpeedMode; 3] = [
-    BridgeSpeedMode::Normal,
-    BridgeSpeedMode::Compatible,
-    BridgeSpeedMode::Stalling,
+const BRIDGE_READ_MODES: [BridgeReadMode; 3] = [
+    BridgeReadMode::Normal,
+    BridgeReadMode::Compatible,
+    BridgeReadMode::Stalling,
 ];
 const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Auto,
@@ -1102,7 +1148,7 @@ const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
 ];
 const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
 // The bridge speed row cycles the same set the config and CLI accept.
-use crate::config::SUPPORTED_BRIDGE_SPEED_PERCENTS as BRIDGE_SERVE_SPEEDS;
+use crate::config::SUPPORTED_BRIDGE_SPEED_PERCENTS as BRIDGE_REPLAY_SPEEDS;
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
     WarpSpeed::X2,
@@ -1218,13 +1264,13 @@ pub struct MachineSetup {
     df_write_protected: [bool; 4],
     /// A real drive on this bay instead of an image. `None` is the ordinary
     /// image-backed drive.
-    df_bridge: [Option<FloppyBridgeConfig>; 4],
+    df_bridge: [Option<FluxBridgeConfig>; 4],
     /// The bay's interface is set to "None": still a physical-drive bay in
     /// the launcher, but with no interface to drive it -- the run and the
     /// written config treat it as unbridged. Selected automatically when a
     /// bay is bridged with nothing attached.
     df_bridge_none: [bool; 4],
-    /// Which bay the FloppyBridge settings page is showing. The page itself is
+    /// Which bay the FluxBridge settings page is showing. The page itself is
     /// one set of rows; this says whose values they are.
     bridge_edit_drive: usize,
     /// What the library could see the last time we looked. Sampled when the
@@ -1356,6 +1402,12 @@ pub struct MachineSetup {
     bezel: bool,
     /// Performance overlay in the top-right ([display] perf_overlay).
     perf_overlay: bool,
+    /// The MT-32's two ROM images, whether its front panel starts up, and
+    /// how that panel's display is lit.
+    mt32_control_rom: Option<PathBuf>,
+    mt32_pcm_rom: Option<PathBuf>,
+    mt32_panel: bool,
+    mt32_lcd: Mt32Lcd,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -1529,6 +1581,10 @@ impl MachineSetup {
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
             perf_overlay: cfg.perf_overlay,
+            mt32_control_rom: cfg.serial.mt32_control_rom.clone(),
+            mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
+            mt32_panel: cfg.serial.mt32_panel,
+            mt32_lcd: cfg.serial.mt32_lcd,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -1584,6 +1640,12 @@ impl MachineSetup {
 
     /// The selected serial mode and parallel device, so the panel can pick the
     /// dynamic Serial/Parallel row sets (see [`rows`]).
+    /// Whether the MIDI output is pointed at the built-in MT-32, which is
+    /// what puts its ROM and panel rows on the I/O Ports tab.
+    pub fn midi_out_is_mt32(&self) -> bool {
+        crate::config::midi_out_is_mt32(self.midi_out.as_deref())
+    }
+
     pub fn serial_mode(&self) -> SerialMode {
         self.serial_mode
     }
@@ -1868,6 +1930,21 @@ impl MachineSetup {
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
+        if self.mt32_control_rom != base.serial.mt32_control_rom {
+            raw.serial.mt32_control_rom = self
+                .mt32_control_rom
+                .as_ref()
+                .map(|p| p.display().to_string());
+        }
+        if self.mt32_pcm_rom != base.serial.mt32_pcm_rom {
+            raw.serial.mt32_pcm_rom = self.mt32_pcm_rom.as_ref().map(|p| p.display().to_string());
+        }
+        if self.mt32_panel != base.serial.mt32_panel {
+            raw.serial.mt32_panel = Some(self.mt32_panel);
+        }
+        if self.mt32_lcd != base.serial.mt32_lcd {
+            raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
+        }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
@@ -2011,7 +2088,7 @@ impl MachineSetup {
             .as_ref()
             .filter(|_| !self.df_bridge_none[idx])
         {
-            let default = FloppyBridgeConfig::default();
+            let default = FluxBridgeConfig::default();
             return Some(RawFloppyDrive {
                 bridge: Some(bridge_driver_name(bridge.driver).to_string()),
                 bridge_port: bridge.port.clone(),
@@ -2021,9 +2098,18 @@ impl MachineSetup {
                     .then(|| bridge_density_name(bridge.density).to_string()),
                 bridge_mode: (bridge.mode != default.mode)
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
-                bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT)
-                    .then_some(bridge.speed),
-                bridge_auto_cache: bridge.auto_cache.then_some(true),
+                bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT).then(
+                    || {
+                        crate::config::RawReplaySpeed::Word(
+                            if bridge.speed == 200 {
+                                "fast"
+                            } else {
+                                "normal"
+                            }
+                            .into(),
+                        )
+                    },
+                ),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.
                 write_protected: (!self.df_write_protected[idx]).then_some(false),
@@ -2044,7 +2130,7 @@ impl MachineSetup {
             // write_protected defaults to true; only an unprotected drive is
             // written explicitly.
             write_protected: (!self.df_write_protected[idx]).then_some(false),
-            // Bridges are emitted by the FloppyBridge page, not the image rows.
+            // Bridges are emitted by the FluxBridge page, not the image rows.
             ..RawFloppyDrive::default()
         })
     }
@@ -2112,6 +2198,10 @@ impl MachineSetup {
         self.perf_overlay = base.perf_overlay;
         self.tint = base.tint;
         self.menu_scale = base.menu_scale;
+        self.mt32_control_rom = base.serial.mt32_control_rom.clone();
+        self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
+        self.mt32_panel = base.serial.mt32_panel;
+        self.mt32_lcd = base.serial.mt32_lcd;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2322,14 +2412,10 @@ impl MachineSetup {
             // Interface one included. With the bay bridged but no interface
             // attached or selected, only the Interface row stays live -- the
             // rest describe hardware that is not present.
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
-            #[cfg(feature = "floppybridge")]
-            F::BridgeCable
-            | F::BridgeDensity
-            | F::BridgeSpeed
-            | F::BridgeServeSpeed
-            | F::BridgeAutoCache
+            #[cfg(feature = "fluxbridge")]
+            F::BridgeCable | F::BridgeDensity | F::BridgeReadMode | F::BridgeReplaySpeed
                 if self.bridge_edit().is_none()
                     || self.df_bridge_none[self.bridge_edit_drive]
                     || self.bridge_status == BridgeStatus::NoInterface =>
@@ -2341,7 +2427,7 @@ impl MachineSetup {
             // chip the scan does not name is selected by hand. It greys with
             // the interface set to None, and with nothing to pick (a list of
             // just "Automatic").
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgePort => {
                 if self.bridge_edit().is_none() || self.df_bridge_none[self.bridge_edit_drive] {
                     Some("no interface")
@@ -2349,22 +2435,16 @@ impl MachineSetup {
                     Some("no ports")
                 } else {
                     reason(
-                        self.bridge_driver_supports(crate::floppybridge::config_option::COM_PORT),
+                        self.bridge_driver_supports(crate::fluxbridge::config_option::COM_PORT),
                         "not on this interface",
                     )
                 }
             }
-            #[cfg(feature = "floppybridge")]
+            #[cfg(feature = "fluxbridge")]
             F::BridgeCable => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::DRIVE_AB_CABLE)
-                    || self.bridge_driver_supports(
-                        crate::floppybridge::config_option::SUPPORTS_SHUGART,
-                    ),
-                "not on this interface",
-            ),
-            #[cfg(feature = "floppybridge")]
-            F::BridgeAutoCache => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::AUTO_CACHE),
+                self.bridge_driver_supports(crate::fluxbridge::config_option::DRIVE_AB_CABLE)
+                    || self
+                        .bridge_driver_supports(crate::fluxbridge::config_option::SUPPORTS_SHUGART),
                 "not on this interface",
             ),
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
@@ -2399,11 +2479,11 @@ impl MachineSetup {
             F::Df3WriteProtect => self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
-            F::BridgeAutoCache => self.bridge_edit().is_some_and(|c| c.auto_cache),
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
             F::Bezel => self.bezel,
             F::PerfOverlay => self.perf_overlay,
+            F::Mt32Panel => self.mt32_panel,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -2414,6 +2494,8 @@ impl MachineSetup {
     pub fn path(&self, field: LauncherField) -> Option<&Path> {
         match field {
             F::Rom => self.rom.as_deref(),
+            F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
+            F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
             F::Df1Image => self.df_playlists[1].first().map(PathBuf::as_path),
@@ -2597,6 +2679,7 @@ impl MachineSetup {
             F::Scaling => self.scaling.label().to_string(),
             F::Tint => self.tint.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
+            F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -2630,15 +2713,16 @@ impl MachineSetup {
                 Some(BridgeDensity::Hd) => "HD only".to_string(),
                 None => "(none)".to_string(),
             },
-            F::BridgeSpeed => match self.bridge_edit().map(|c| c.mode) {
-                Some(BridgeSpeedMode::Compatible) => "Compatible".to_string(),
-                Some(BridgeSpeedMode::Normal) => "Normal".to_string(),
-                Some(BridgeSpeedMode::Stalling) => "Stalling".to_string(),
+            F::BridgeReadMode => match self.bridge_edit().map(|c| c.mode) {
+                Some(BridgeReadMode::Compatible) => "Compatible".to_string(),
+                Some(BridgeReadMode::Normal) => "Normal".to_string(),
+                Some(BridgeReadMode::Stalling) => "Stalling".to_string(),
                 None => "(none)".to_string(),
             },
-            F::BridgeServeSpeed => {
-                format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
-            }
+            F::BridgeReplaySpeed => match self.bridge_edit().map_or(100, |c| c.speed) {
+                200 => "Fast".to_string(),
+                _ => "Normal".to_string(),
+            },
             F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
@@ -2674,9 +2758,20 @@ impl MachineSetup {
                 SerialMode::Pty => "PTY".to_string(),
             },
             #[cfg(feature = "midi")]
-            F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
+            F::MidiOut => {
+                if self.midi_out_is_mt32() {
+                    return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
+                }
+                self.midi_out.clone().unwrap_or_else(|| "None".to_string())
+            }
             #[cfg(feature = "midi")]
-            F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
+            F::MidiIn => {
+                #[cfg(feature = "mt32")]
+                if crate::config::midi_out_is_mt32(self.midi_in.as_deref()) {
+                    return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
+                }
+                self.midi_in.clone().unwrap_or_else(|| "None".to_string())
+            }
             F::ParallelDevice => match self.parallel_device {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
@@ -2890,7 +2985,7 @@ impl MachineSetup {
                 // physical drive open: the row is gone from the page, so
                 // nothing would say why the interface was busy the next time
                 // it was asked for.
-                #[cfg(feature = "floppybridge")]
+                #[cfg(feature = "fluxbridge")]
                 for bay in self.df_bridge.iter_mut().skip(self.floppy_drives as usize) {
                     *bay = None;
                 }
@@ -2918,6 +3013,9 @@ impl MachineSetup {
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
             F::MenuScale => {
                 self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
+            }
+            F::Mt32Lcd => {
+                self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);
             }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
@@ -2970,9 +3068,42 @@ impl MachineSetup {
                 self.serial_mode = cycle_slice(&choices, self.serial_mode, forward)
             }
             #[cfg(feature = "midi")]
-            F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
+            F::MidiOut => {
+                // MT-32 rides at the end of the output list: it is
+                // always there to be chosen, whatever the host offers.
+                let names: Vec<String> = self
+                    .midi_endpoints
+                    .outputs
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(true))
+                    .collect();
+                self.midi_out =
+                    crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
+                // The MT-32 is only a source while it is the destination,
+                // so moving the output elsewhere takes the input with it.
+                #[cfg(feature = "mt32")]
+                if !self.midi_out_is_mt32()
+                    && crate::config::midi_out_is_mt32(self.midi_in.as_deref())
+                {
+                    self.midi_in = None;
+                }
+            }
             #[cfg(feature = "midi")]
-            F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
+            F::MidiIn => {
+                // The module is a sound module: it has no keyboard, and
+                // what it sends is an answer to what it was sent. So it is
+                // offered as a source only while it is the destination,
+                // which is also the wiring a patch editor needs.
+                let names: Vec<String> = self
+                    .midi_endpoints
+                    .inputs
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .chain(mt32_endpoint(self.midi_out_is_mt32()))
+                    .collect();
+                self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
+            }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its
                 // Output file row (with a Browse button); until a file is set
@@ -3028,28 +3159,28 @@ impl MachineSetup {
             F::BridgeDevice => {
                 // "None" sits before the first driver in the cycle: from it,
                 // forward reaches the first interface, backward the last.
+                let drivers = bridge_drivers();
                 let bay = self.bridge_edit_drive;
-                if self.bridge_edit().is_some() {
+                if self.bridge_edit().is_some() && !drivers.is_empty() {
                     if self.df_bridge_none[bay] {
                         self.df_bridge_none[bay] = false;
                         let end = if forward {
-                            BRIDGE_DRIVERS[0]
+                            drivers[0]
                         } else {
-                            BRIDGE_DRIVERS[BRIDGE_DRIVERS.len() - 1]
+                            drivers[drivers.len() - 1]
                         };
                         if let Some(c) = self.bridge_edit_mut() {
                             c.driver = end;
                         }
                     } else {
-                        let (first, last) =
-                            (BRIDGE_DRIVERS[0], BRIDGE_DRIVERS[BRIDGE_DRIVERS.len() - 1]);
+                        let (first, last) = (drivers[0], drivers[drivers.len() - 1]);
                         let at_edge = self
                             .bridge_edit()
                             .is_some_and(|c| c.driver == if forward { last } else { first });
                         if at_edge {
                             self.df_bridge_none[bay] = true;
                         } else if let Some(c) = self.bridge_edit_mut() {
-                            c.driver = cycle_slice(&BRIDGE_DRIVERS, c.driver, forward);
+                            c.driver = cycle_slice(&drivers, c.driver, forward);
                         }
                     }
                 }
@@ -3077,14 +3208,14 @@ impl MachineSetup {
                     c.density = cycle_slice(&BRIDGE_DENSITIES, c.density, forward);
                 }
             }
-            F::BridgeSpeed => {
+            F::BridgeReadMode => {
                 if let Some(c) = self.bridge_edit_mut() {
-                    c.mode = cycle_slice(&BRIDGE_SPEEDS, c.mode, forward);
+                    c.mode = cycle_slice(&BRIDGE_READ_MODES, c.mode, forward);
                 }
             }
-            F::BridgeServeSpeed => {
+            F::BridgeReplaySpeed => {
                 if let Some(c) = self.bridge_edit_mut() {
-                    c.speed = cycle_slice(&BRIDGE_SERVE_SPEEDS, c.speed, forward);
+                    c.speed = cycle_slice(&BRIDGE_REPLAY_SPEEDS, c.speed, forward);
                 }
             }
             F::AudioStereoSeparation => {
@@ -3151,12 +3282,8 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::Bezel => self.bezel = !self.bezel,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
+            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
-            F::BridgeAutoCache => {
-                if let Some(c) = self.bridge_edit_mut() {
-                    c.auto_cache = !c.auto_cache;
-                }
-            }
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
         }
@@ -3174,6 +3301,8 @@ impl MachineSetup {
             && !crate::config::is_cd_image_path(&path);
         match field {
             F::Rom => self.rom = Some(path),
+            F::Mt32ControlRom => self.mt32_control_rom = Some(path),
+            F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
             F::Df1Image => self.set_floppy(1, path),
@@ -3219,6 +3348,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
+            F::Mt32ControlRom => self.mt32_control_rom = None,
+            F::Mt32PcmRom => self.mt32_pcm_rom = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
             F::Df2Image => self.df_playlists[2].clear(),
@@ -3446,14 +3577,14 @@ impl MachineSetup {
     /// Without the feature there is no such thing as a bridged bay -- no tick
     /// box offers one, the config file's keys are ignored -- and this refuses
     /// as well, so no path can leave a bay in a state the build cannot honour.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     pub fn set_drive_bridged(&mut self, idx: usize, on: bool) {
         if idx >= self.df_bridge.len() || self.drive_bridged(idx) == on {
             return;
         }
         if on {
             self.df_playlists[idx].clear();
-            self.df_bridge[idx] = Some(FloppyBridgeConfig::default());
+            self.df_bridge[idx] = Some(FluxBridgeConfig::default());
             // Look again now: this is the moment the user expects to be told
             // whether there is anything on the other end.
             self.bridge_status = bridge_status();
@@ -3469,7 +3600,7 @@ impl MachineSetup {
         }
     }
 
-    #[cfg(not(feature = "floppybridge"))]
+    #[cfg(not(feature = "fluxbridge"))]
     pub fn set_drive_bridged(&mut self, _idx: usize, _on: bool) {}
 
     /// The interface a bridged bay is set to use, for its media row. Naming one
@@ -3489,7 +3620,7 @@ impl MachineSetup {
         }
     }
 
-    /// What the library can see, for the FloppyBridge page's heading.
+    /// What the library can see, for the FluxBridge page's heading.
     pub fn bridge_status(&self) -> BridgeStatus {
         self.bridge_status
     }
@@ -3513,12 +3644,12 @@ impl MachineSetup {
             && self.bridge_status == BridgeStatus::Attached
     }
 
-    /// The settings being shown on the FloppyBridge page.
-    fn bridge_edit(&self) -> Option<&FloppyBridgeConfig> {
+    /// The settings being shown on the FluxBridge page.
+    fn bridge_edit(&self) -> Option<&FluxBridgeConfig> {
         self.df_bridge[self.bridge_edit_drive].as_ref()
     }
 
-    fn bridge_edit_mut(&mut self) -> Option<&mut FloppyBridgeConfig> {
+    fn bridge_edit_mut(&mut self) -> Option<&mut FluxBridgeConfig> {
         self.df_bridge[self.bridge_edit_drive].as_mut()
     }
 
@@ -3530,28 +3661,16 @@ impl MachineSetup {
     /// Offering a switch the hardware ignores is how a user ends up believing
     /// they changed something, so the ones it does not honour are greyed with
     /// the interface's name against them.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     fn bridge_driver_supports(&self, option: u32) -> bool {
         let Some(cfg) = self.bridge_edit() else {
             return false;
         };
-        let token = cfg.driver.match_token();
-        // The bridge is linked in, so it always has drivers to describe. If it
-        // ever answers with none there is nothing to ask, and leaving every row
-        // live is better than greying out a page the user cannot then fix.
-        let drivers = crate::floppybridge::drivers();
-        if drivers.is_empty() {
-            return true;
-        }
-        drivers
-            .iter()
-            .find(|d| {
-                d.name
-                    .to_ascii_lowercase()
-                    .replace([' ', '-', '_'], "")
-                    .contains(token)
-            })
-            .is_none_or(|d| d.supports(option))
+        // A driver this build does not carry (a config written for another
+        // build) cannot be asked, and leaving its rows live is better than
+        // greying out a page the user cannot then fix.
+        crate::fluxbridge::driver_named(cfg.driver.match_token())
+            .is_none_or(|driver| driver.supports(option))
     }
 
     /// Serial ports to offer, "Automatic" first -- the default, and what
@@ -3562,11 +3681,11 @@ impl MachineSetup {
     /// names are the host's own: `/dev/cu.usbmodem101` on macOS,
     /// `/dev/ttyACM0` on Linux, `COM3` on Windows.
     fn bridge_port_options(&self) -> Vec<Option<String>> {
-        #[cfg(feature = "floppybridge")]
+        #[cfg(feature = "fluxbridge")]
         {
             self.bridge_ports.clone()
         }
-        #[cfg(not(feature = "floppybridge"))]
+        #[cfg(not(feature = "fluxbridge"))]
         {
             vec![None]
         }
@@ -3809,18 +3928,6 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
     )
 }
 
-/// Step a MIDI endpoint selection through "None" then the available endpoints,
-/// storing the chosen device's exact name.
-#[cfg(feature = "midi")]
-fn cycle_endpoint(
-    current: &mut Option<String>,
-    endpoints: &[crate::midi::MidiEndpoint],
-    forward: bool,
-) {
-    let names: Vec<String> = endpoints.iter().map(|e| e.name.clone()).collect();
-    *current = crate::midi::next_endpoint(current.as_deref(), &names, forward);
-}
-
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
 /// field (toggle vs path) without threading the tab through every call, called
 /// per drawn row, so it scans the static row tables directly rather than
@@ -3828,7 +3935,9 @@ fn cycle_endpoint(
 /// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    #[cfg(feature = "midi")]
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI, &SERIAL_ROWS_MT32];
+    #[cfg(all(feature = "midi", not(feature = "mt32")))]
     let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];
@@ -4000,6 +4109,14 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
+}
+
+/// The tail a MIDI picker's list carries when the built-in module belongs
+/// on it: the module is not a host endpoint, so it is added rather than
+/// enumerated. Nothing to add on a build without it.
+#[cfg(feature = "midi")]
+fn mt32_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -4289,16 +4406,15 @@ fn pacing_name(pacing: PacingBudget) -> &'static str {
 mod tests {
     use super::*;
 
-    /// The interfaces genuinely differ in what they honour, and the page says
-    /// so: a DrawBridge has no drive-select line on its cable, a Greaseweazle
-    /// does. Only meaningful with the library installed -- without it there is
-    /// nothing to ask, and every row deliberately stays live.
-    #[cfg(feature = "floppybridge")]
+    /// The page greys what an interface does not honour, exactly as the
+    /// library's own driver table reports it: the launcher carries no driver
+    /// knowledge of its own, so the expectation here is derived from the same
+    /// table and covers whichever drivers this build compiled in. A driver
+    /// the build does not carry deliberately greys nothing -- there is
+    /// nothing to ask, and a dead page cannot be fixed from the page.
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn bridge_rows_grey_what_the_interface_does_not_support() {
-        if crate::floppybridge::drivers().is_empty() {
-            return;
-        }
         let mut setup = MachineSetup::default();
         setup.set_drive_bridged(0, true);
         setup.set_bridge_edit_drive(0);
@@ -4311,25 +4427,55 @@ mod tests {
         setup.df_bridge_none[0] = false;
         setup.bridge_ports = vec![None, Some("/dev/ttyACM0".to_string())];
 
-        for (driver, cable_greyed) in [
-            (crate::config::BridgeDriver::Greaseweazle, false),
-            (crate::config::BridgeDriver::DrawBridge, true),
-        ] {
+        let offered = bridge_drivers();
+        assert!(!offered.is_empty(), "the bridge offers its drivers");
+        for driver in offered {
+            let info = crate::fluxbridge::driver_named(driver.match_token())
+                .expect("offered drivers come from the library's table");
+            let has_select = info.supports(crate::fluxbridge::config_option::DRIVE_AB_CABLE)
+                || info.supports(crate::fluxbridge::config_option::SUPPORTS_SHUGART);
             setup.df_bridge[0].as_mut().expect("bridged").driver = driver;
             assert_eq!(
-                setup.disabled_reason(F::BridgeCable).is_some(),
-                cable_greyed,
+                setup.disabled_reason(F::BridgeCable).is_none(),
+                has_select,
                 "drive select on {driver:?}"
             );
-            // Every interface here talks over a serial port and can auto-cache.
+            // Every interface here talks over a serial port.
             assert!(setup.disabled_reason(F::BridgePort).is_none());
-            assert!(setup.disabled_reason(F::BridgeAutoCache).is_none());
         }
+    }
+
+    /// The Interface row carries no driver list of its own: it offers what
+    /// the library compiled in, in the library's order, so the row leads with
+    /// the driver that build is meant to use. The starting value is pinned to
+    /// "None" rather than sampled, because bridging a bay asks the host what
+    /// is plugged in, and what a test machine has attached is not this test's
+    /// subject.
+    #[cfg(feature = "fluxbridge")]
+    #[test]
+    fn the_interface_row_offers_the_librarys_drivers_in_its_order() {
+        let offered = bridge_drivers();
+        let lead = *offered.first().expect("the bridge offers its drivers");
+        let library: Vec<&str> = crate::fluxbridge::drivers()
+            .iter()
+            .map(|driver| driver.token)
+            .collect();
+        let row: Vec<&str> = offered.iter().map(|d| d.match_token()).collect();
+        assert_eq!(row, library, "the row is the library's table, in order");
+
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+        setup.df_bridge_none[0] = true;
+        assert_eq!(setup.value_label(F::BridgeDevice), "None");
+        // One step forward off "None" reaches the first interface offered.
+        setup.cycle(F::BridgeDevice, true);
+        assert_eq!(setup.value_label(F::BridgeDevice), lead.label());
     }
 
     /// Drive speed acts on image bays only, so the row greys exactly when
     /// every fitted bay is physical: one image bay anywhere keeps it live.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn drive_speed_greys_when_every_fitted_bay_is_physical() {
         let mut setup = MachineSetup {
@@ -4364,7 +4510,7 @@ mod tests {
     /// Interface row stays live, and with the bay pulled out from under the
     /// page (a loaded config can do that) every row greys, Interface included.
     /// With an interface attached the rows answer to the driver as before.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn bridge_page_greys_without_an_interface() {
         let mut setup = MachineSetup::default();
@@ -4375,9 +4521,8 @@ mod tests {
         let all = [
             F::BridgeCable,
             F::BridgeDensity,
-            F::BridgeSpeed,
-            F::BridgeServeSpeed,
-            F::BridgeAutoCache,
+            F::BridgeReadMode,
+            F::BridgeReplaySpeed,
         ];
 
         setup.df_bridge_none[0] = false;
@@ -4392,7 +4537,7 @@ mod tests {
 
         setup.bridge_status = BridgeStatus::Attached;
         assert_eq!(setup.disabled_reason(F::BridgeDevice), None);
-        for f in [F::BridgeDensity, F::BridgeSpeed, F::BridgeServeSpeed] {
+        for f in [F::BridgeDensity, F::BridgeReadMode, F::BridgeReplaySpeed] {
             assert_eq!(setup.disabled_reason(f), None, "{f:?} greyed with one");
         }
 
@@ -4429,7 +4574,7 @@ mod tests {
     /// when there is one: attached and chosen. That is what separates a row
     /// greyed with its steppers (this interface has no drive-select line)
     /// from one blanked entirely (there is no interface to ask).
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn drive_select_answers_to_an_interface_only_when_there_is_one() {
         let mut setup = MachineSetup::default();
@@ -4456,7 +4601,7 @@ mod tests {
     /// configured for.
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn a_bridged_bay_names_its_interface_only_when_one_is_attached() {
         let mut setup = MachineSetup::default();
@@ -4485,7 +4630,7 @@ mod tests {
     /// An interface of "None" keeps the tick box and the page, but the built
     /// config -- what a run uses and what a save writes -- carries no bridge:
     /// the bay is effectively unbridged until an interface is chosen.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn a_none_interface_builds_an_unbridged_bay() {
         let mut setup = MachineSetup::default();
@@ -4529,7 +4674,7 @@ mod tests {
     /// The write-protect box governs a real drive as well as an image, and it
     /// starts ticked: a bay handed a physical disk must not come up writable
     /// because nobody said otherwise.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn dropping_a_drive_releases_the_physical_one_it_was_holding() {
         let mut setup = MachineSetup {
@@ -4555,7 +4700,7 @@ mod tests {
 
     // A build without the feature has no bridges to configure: the keys are
     // read and ignored, so there is nothing here to assert.
-    #[cfg(feature = "floppybridge")]
+    #[cfg(feature = "fluxbridge")]
     #[test]
     fn write_protect_governs_a_bridged_bay_and_survives_a_round_trip() {
         let mut setup = MachineSetup::default();
@@ -4909,6 +5054,100 @@ mod tests {
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
     }
 
+    /// The module is offered as a source only while it is the destination,
+    /// and stops being one the moment the output moves elsewhere.
+    #[test]
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    fn the_mt32_is_a_midi_source_only_while_it_is_the_destination() {
+        let mut s = MachineSetup {
+            midi_out: Some(crate::config::MIDI_OUT_MT32.to_string()),
+            ..MachineSetup::default()
+        };
+        assert!(s.midi_out_is_mt32());
+
+        // With no host sources at all, the module is still there to pick.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(
+            s.value_label(LauncherField::MidiIn),
+            crate::midi::MIDI_OUT_MT32_LABEL
+        );
+
+        // Moving the output off the module takes the input with it:
+        // nothing reaches it, so it has nothing left to answer. The module
+        // rides at the end of the output list, so one step wraps to None.
+        s.cycle(LauncherField::MidiOut, true);
+        assert!(!s.midi_out_is_mt32());
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
+
+        // And it is no longer among the sources to cycle onto.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
+    }
+
+    #[test]
+    fn the_mt32_rows_appear_only_when_it_is_the_midi_output() {
+        let midi_rows = |out: Option<&str>| {
+            let s = MachineSetup {
+                midi_out: out.map(str::to_string),
+                ..MachineSetup::default()
+            };
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                SerialMode::Midi,
+                s.midi_out_is_mt32(),
+            )
+            .iter()
+            .map(|r| r.field)
+            .collect::<Vec<_>>()
+        };
+
+        // A host endpoint: the ROM pair and the panel are nothing to do with
+        // it, so they are not offered.
+        let host = midi_rows(Some("Some USB Interface"));
+        assert!(host.contains(&LauncherField::MidiOut));
+        assert!(!host.contains(&LauncherField::Mt32ControlRom));
+        assert!(!host.contains(&LauncherField::Mt32Panel));
+
+        // The built-in synth: both ROMs and the panel.
+        let mt32 = midi_rows(Some(crate::config::MIDI_OUT_MT32));
+        assert!(mt32.contains(&LauncherField::Mt32ControlRom));
+        assert!(mt32.contains(&LauncherField::Mt32PcmRom));
+        assert!(mt32.contains(&LauncherField::Mt32Panel));
+    }
+
+    #[test]
+    fn the_mt32_rom_pair_and_panel_round_trip_through_raw() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.to_raw().serial.mt32_control_rom, None);
+
+        s.set_path(
+            LauncherField::Mt32ControlRom,
+            std::path::PathBuf::from("MT32_CONTROL.ROM"),
+        );
+        s.set_path(
+            LauncherField::Mt32PcmRom,
+            std::path::PathBuf::from("MT32_PCM.ROM"),
+        );
+        s.toggle(LauncherField::Mt32Panel);
+        assert!(s.toggle_value(LauncherField::Mt32Panel));
+
+        let raw = s.to_raw();
+        assert_eq!(
+            raw.serial.mt32_control_rom.as_deref(),
+            Some("MT32_CONTROL.ROM")
+        );
+        assert_eq!(raw.serial.mt32_pcm_rom.as_deref(), Some("MT32_PCM.ROM"));
+        assert_eq!(raw.serial.mt32_panel, Some(true));
+
+        let reloaded = MachineSetup::from_raw(&raw).expect("valid raw");
+        assert_eq!(
+            reloaded.path(LauncherField::Mt32PcmRom),
+            Some(std::path::Path::new("MT32_PCM.ROM"))
+        );
+        assert!(reloaded.toggle_value(LauncherField::Mt32Panel));
+    }
+
     #[test]
     fn menu_scale_round_trips_through_raw() {
         let mut s = MachineSetup::default();
@@ -5232,6 +5471,7 @@ mod tests {
             LauncherTab::Storage,
             ParallelDevice::None,
             SerialMode::default(),
+            false,
         );
         assert_eq!(
             storage.first().map(|r| r.field),
@@ -5245,7 +5485,7 @@ mod tests {
             (LauncherTab::Cd, LauncherField::CdImage),
             (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
         ] {
-            let page = rows(tab, ParallelDevice::None, SerialMode::default());
+            let page = rows(tab, ParallelDevice::None, SerialMode::default(), false);
             assert!(page.iter().any(|r| r.field == marker));
         }
     }
@@ -5280,7 +5520,7 @@ mod tests {
         assert!(!LauncherTab::System.has_top_nav());
 
         // Each category shows only its own settings; the default is Audio.
-        let page = |t| rows(t, ParallelDevice::None, SerialMode::default());
+        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false);
         let audio = page(LauncherTab::AvAudio);
         assert!(audio.iter().any(|r| r.field == F::AudioDevice));
         assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
@@ -5436,7 +5676,12 @@ mod tests {
     #[cfg(feature = "midi")]
     #[test]
     fn io_ports_tab_groups_serial_parallel_and_ethernet_under_headers() {
-        let r = rows(LauncherTab::IoPorts, ParallelDevice::None, SerialMode::Midi);
+        let r = rows(
+            LauncherTab::IoPorts,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+        );
         let headers: Vec<_> = r
             .iter()
             .filter(|x| x.kind == RowKind::SectionHeader)
@@ -5601,7 +5846,7 @@ mod tests {
     #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default())
+            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
                 .iter()
                 .any(|r| r.field == LauncherField::SamplerInput)
         };
@@ -5614,7 +5859,7 @@ mod tests {
     #[test]
     fn midi_rows_appear_only_in_midi_mode() {
         let has = |mode| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode)
+            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
                 .iter()
                 .any(|r| r.field == LauncherField::MidiOut)
         };
@@ -5639,7 +5884,7 @@ mod tests {
         let mut s = MachineSetup::default();
         // The Output file row shows only when the printer is selected.
         let has_output = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default())
+            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
                 .iter()
                 .any(|r| r.field == LauncherField::ParallelOutput)
         };
@@ -6164,6 +6409,7 @@ mod tests {
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Stdout,
+            false,
         );
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiOut));
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiIn));

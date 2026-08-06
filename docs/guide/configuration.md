@@ -48,13 +48,12 @@ range checks as the equivalent TOML fields:
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
-| `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `drawbridge`, `greaseweazle`, `supercardpro`, `off` |
+| `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `greaseweazle`, or `off` |
 | `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
 | `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (IBM PC cable) or `0`-`3` (Shugart) |
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
-| `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
-| `--floppy-bridge-auto-cache DFN` | `[floppy.dfN] bridge_auto_cache = true` | cache disk data while the drive is idle |
+| `--floppy-replay-speed DFN SPEED` | `[floppy.dfN] replay_speed` | replay already-captured tracks at `fast` (the default, double speed) or `normal` (the platter's own) |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
@@ -81,7 +80,8 @@ profile in a config file.
 The audio, serial, parallel, and network surface has matching per-run flags
 too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
 `--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
-`--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
+`--mt32-control-rom`, `--mt32-pcm-rom`, `--mt32-panel`, `--parallel`,
+`--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
 `--a2065-interface`, `--hostsocket-net`, `--hostsocket-interface` --
 described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
 `[hostsocket]` keys below.
@@ -1011,8 +1011,8 @@ button.
 ```toml
 [serial]
 mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
-# midi_out = "FluidSynth"  # midi mode: host destination, substring match
-# midi_in = "Keystation"   # midi mode: host source, substring match
+# midi_out = "FluidSynth"  # midi mode: host destination, or "mt32"
+# midi_in = "Keystation"   # midi mode: host source, or "mt32"
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 ```
@@ -1026,7 +1026,10 @@ Paula's serial in/out is connected:
 - `midi` -- serial in/out is bridged to host MIDI endpoints. Needs a build
   with the `midi` feature (the default); `midi_out`/`midi_in` name the
   endpoints by case-insensitive substring (a USB interface or a virtual
-  port). `--list-midi` prints the host endpoints.
+  port). `--list-midi` prints the host endpoints. Either may instead be
+  `"mt32"`, which is Copperline's own emulated MT-32 rather than anything
+  on the host, and brings its own `mt32_*` keys with it; see
+  [the MT-32 chapter](mt32.md).
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
   device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
@@ -1134,18 +1137,27 @@ emulators: the operating system and most loaders tolerate them, but
 software that times its own loading against the beam, CIA timers, or music
 playback can break. The setting can be changed live from the runtime menu
 ("Floppy Speed") without restarting the machine. It applies to image-backed
-bays only; a physical drive has its own `bridge_speed`.
+bays only; a physical drive has its own `replay_speed`.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
-read-only SCP flux images. DMS, gzip, and SCP images are decoded at load time
-and always treated as write-protected; set `write_protected = false` on a plain
-ADF to allow write-through updates to the image file.
+read-only IPF and SCP images. DMS, gzip, IPF, and SCP images are decoded at
+load time and always treated as write-protected; set `write_protected = false`
+on a plain ADF to allow write-through updates to the image file.
 
-The loader deliberately rejects IPF/CAPS images. Useful support would require
-either a direct IPF parser or an optional SPS/CAPS library, with its licensing,
-platform packaging, and dynamic-loading strategy settled before it becomes a
-dependency. The browser frontend shares this decoder, so it rejects IPF too.
+IPF (the SPS/CAPS preservation format) is decoded by Copperline itself rather
+than through the closed-source `capsimg` library, so every build reads IPF on
+every platform with nothing to install. Because an IPF preserves the encoded
+track -- sync marks, gaps, and sector headers, not just sector contents -- it
+carries the custom trackloaders and copy protections that an ADF cannot
+express. Each track is decoded to the revolution of MFM the head would pass
+over and read back through the same path as a flux capture. Two limits are
+worth knowing: tracks recorded with a variable cell *rate* (the Copylock,
+Speedlock, and Brierley density models) are decoded with uniform 2 us cells,
+which is logged at load time and leaves a protection that measures cell timing
+seeing the wrong answer; and weak ("flakey") bits are replayed as the single
+deterministic revolution the file stores rather than varying per revolution.
+The browser frontend shares this decoder, so it reads IPF too.
 
 A `paths` playlist lets multi-disk software that only drives DF0: run
 without a second drive: the first entry is the boot disk and the disk-swap
@@ -1155,30 +1167,30 @@ swap button cycles to the next image, wrapping around.
 ### A real drive on a bay
 
 A bay can be given a physical 3.5" drive instead of an image, over a
-DrawBridge, Greaseweazle, or Supercard Pro:
+Greaseweazle:
 
 ```toml
 [floppy.df0]
-bridge = "greaseweazle"      # drawbridge/greaseweazle/supercardpro/off
+bridge = "greaseweazle"      # or "off"
 write_protected = true       # emulator-level protection, on top of the tab
 # bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
-# bridge_mode = "compatible"     # compatible/stalling
-# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
-# bridge_auto_cache = false      # read tracks ahead while the drive is idle
+# bridge_mode = "normal"         # normal/compatible/stalling
+# replay_speed = "fast"          # or "normal"; fast is the default
 ```
 
 A bay takes either a bridge or an image, never both: the disk in the drive
 is its media, and naming a `path` alongside is an error. `bridge = "off"`
 returns the bay to images and keeps the other bridge settings for later.
 
-Nothing needs installing -- Rob Smith's FloppyBridge is built into Copperline
--- but it changes how the machine runs in several ways -- writes need both the disk's tab and
-`write_protected = false`, the status bar's eject and swap do nothing for
-that bay, and a machine with a physical drive is paced to wall-clock time and is
-not reproducible. [](floppybridge) covers the whole feature: installing the
-library on each platform, what each option does, and what to expect of it.
+Nothing needs installing -- the pure-Rust FluxBridge library is built into
+Copperline -- but a physical drive changes how the machine runs in several
+ways: writes need both the disk's tab and `write_protected = false`, the
+status bar's eject and swap do nothing for that bay, and a machine with a
+physical drive is paced to wall-clock time and is not reproducible.
+[](fluxbridge) covers the whole feature: what each option does, which mode
+suits which disks, and what to expect of it.
 
 ## `[ide]` -- IDE hard disks
 

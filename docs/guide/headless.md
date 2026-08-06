@@ -11,7 +11,7 @@ without one: SSH sessions, CI runners, and sandboxes that block
 window-server access.
 
 The one exception to both is a machine with a physical floppy drive attached
-(see [](floppybridge)): its platter turns in wall-clock time, so such a run
+(see [](fluxbridge)): its platter turns in wall-clock time, so such a run
 is paced to real time rather than unthrottled, and it is not reproducible.
 
 ## Screenshots

@@ -664,9 +664,6 @@ pub fn open(
         log::info!("midi: input connected from {:?}", ep.name);
         *control.current.lock().unwrap() = Some(ep);
     }
-    if dest.is_none() && control.current.lock().unwrap().is_none() {
-        log::warn!("[serial] mode = midi but no midi_out/midi_in endpoint selected; MIDI is inert");
-    }
 
     let input_thread = {
         let control = Arc::clone(&control);

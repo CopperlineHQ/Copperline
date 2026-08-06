@@ -36,11 +36,11 @@ pub mod emulator;
 pub mod envcfg;
 pub mod filesys;
 pub mod floppy;
-// Physical floppy drives over a DrawBridge/Greaseweazle/Supercard Pro, through
-// the vendored FloppyBridge. Gated because it compiles C++ and talks to a
-// serial port, neither of which a wasm32 browser build can do.
-#[cfg(feature = "floppybridge")]
-pub mod floppybridge;
+// Physical floppy drives over a Greaseweazle, through the pure-Rust
+// FluxBridge library. Gated because it talks to a serial port, which a
+// wasm32 browser build cannot do.
+#[cfg(feature = "fluxbridge")]
+pub mod fluxbridge;
 #[cfg(feature = "frontend")]
 pub mod gamepad;
 pub mod gary;
@@ -52,6 +52,7 @@ pub mod hostsocket;
 pub mod ide_a4000;
 pub mod inputrec;
 pub mod inputsched;
+pub mod ipf;
 // Host-keyboard controller bindings: a frontend concern (it speaks winit key
 // codes and produces the same `JoystickState` the gamepad reader does), so it
 // rides the same feature gate as `gamepad`. The autofire policy that pairs
@@ -61,6 +62,8 @@ pub mod keymap;
 pub mod memory;
 #[cfg(feature = "midi")]
 pub mod midi;
+#[cfg(feature = "mt32")]
+pub mod mt32;
 pub mod net;
 pub mod parallel;
 pub mod paths;

@@ -30,7 +30,8 @@ project:
         - file: guide/getting-started.md
         - file: guide/configuration.md
         - file: guide/ui.md
-        - file: guide/floppybridge.md
+        - file: guide/fluxbridge.md
+        - file: guide/mt32.md
         - file: guide/headless.md
         - file: guide/browser.md
     - title: Extending
@@ -65,7 +66,7 @@ project:
         - guide/getting-started.md
         - guide/configuration.md
         - guide/ui.md
-        - guide/floppybridge.md
+        - guide/fluxbridge.md
         - guide/headless.md
         - guide/browser.md
         - zorro.md
