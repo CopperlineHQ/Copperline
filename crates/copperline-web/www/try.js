@@ -63,10 +63,13 @@ let framesThisSecond = 0;
 // cadence, with the machine still stepping in real time.
 let ticksThisSecond = 0;
 let presentsThisSecond = 0;
-// Set when a step renders a frame the canvas has not blitted yet, cleared
+// Set when a step produced a frame the canvas has not shown yet, cleared
 // by the blit that shows it. Steps can happen off the rAF tick (hidden
-// background running, the starved-rAF fallback), so "shown" counts blits
-// of fresh pictures rather than assuming step and blit share a tick.
+// background running, the starved-rAF fallback) with the wasm-side
+// render deferred; the next rendering run repaints before the blit, so
+// the flag still marks a genuinely fresh picture, and "shown" counts
+// blits of fresh pictures rather than assuming step and blit share a
+// tick.
 let presentDirty = false;
 let audioUnderruns = 0;
 let lastStatUpdate = 0;
@@ -521,12 +524,17 @@ async function boot() {
       // unfocused window on a power-saving host), they keep the machine
       // and its audio real time between the rAF ticks that still arrive,
       // each of which blits the newest frame; only the displayed rate
-      // degrades to whatever the compositor manages.
+      // degrades to whatever the compositor manages. Both cases defer
+      // the wasm-side frame render: the blit waits on the next rAF tick
+      // regardless, and rendering per queue report would spend exactly
+      // the headroom a starving host is not giving us.
       if (running && !paused && emu) {
         const nowMs = performance.now();
-        if (keepRunningHidden) stepMachine(nowMs, true);
-        else if (!document.hidden && nowMs - lastRafMs > RAF_STARVED_MS) {
-          stepMachine(nowMs, false);
+        if (
+          keepRunningHidden ||
+          (!document.hidden && nowMs - lastRafMs > RAF_STARVED_MS)
+        ) {
+          stepMachine(nowMs, true);
         }
       }
     };
@@ -578,6 +586,11 @@ async function boot() {
     );
     overlay.style.display = 'none';
     showBugLink(false);
+    // Primed before running flips on: the starvation fallback is gated
+    // on running, so no queue report can read the epoch (or a previous
+    // machine's stamp) as an already-starved rAF before the first
+    // animation frame lands.
+    lastRafMs = performance.now();
     running = true;
     // A reboot from a paused machine must not start the new one paused.
     paused = false;
@@ -592,9 +605,6 @@ async function boot() {
     // is a machine to type into: raised at page load it would cover half
     // the boot overlay with nothing behind it to receive the keys.
     if (HAS_KEY_RAW && storedPref(KB_OPEN_STORAGE_KEY) === 'on') openKeyboard();
-    // Prime the starvation clock: until the first animation frame lands,
-    // the worklet must not read the epoch as an already-starved rAF.
-    lastRafMs = performance.now();
     requestAnimationFrame(tick);
   } catch (e) {
     setLoadStatus(`boot failed: ${e.message ?? e}`);
@@ -676,13 +686,15 @@ function presentFrame() {
 // the half of a tick shared by the visible rAF loop and the worklet's
 // off-tick stepping (hidden background running, the starved-rAF
 // fallback). Returns false when the machine crashed and the caller's loop
-// must stop. Hidden stepping skips the wasm-side frame render (nobody can
-// see it); the first visible run repaints unconditionally after that.
-function stepMachine(nowMs, hidden) {
+// must stop. Off-tick steps defer the wasm-side frame render (a hidden
+// page never blits, a starved one not before its next rAF tick); the
+// first rendering run repaints even when it steps nothing itself, so a
+// deferred picture is never blitted stale.
+function stepMachine(nowMs, deferRender) {
   try {
     const max = maxFramesForQueue();
     const stepped =
-      hidden && typeof emu.run_hidden === 'function'
+      deferRender && typeof emu.run_hidden === 'function'
         ? emu.run_hidden(nowMs, max)
         : emu.run(nowMs, max);
     framesThisSecond += stepped;
