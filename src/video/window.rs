@@ -5715,12 +5715,12 @@ impl App {
                                     }
                                 );
                             }
-                            let places: Vec<String> =
-                                disks.iter().map(|d| d.attach.label()).collect();
+                            let places: Vec<_> = disks.iter().map(|d| d.attach).collect();
+                            let where_to = crate::config::HostDiskAttach::describe_all(&places);
                             StatusMessage::ok(if disks.len() == 1 {
-                                format!("Host disk attached to {}", places[0])
+                                format!("Host disk attached to {where_to}")
                             } else {
-                                format!("Host disks attached to {}", places.join(", "))
+                                format!("Host disks attached to {where_to}")
                             })
                         }
                         Err(reason) => {

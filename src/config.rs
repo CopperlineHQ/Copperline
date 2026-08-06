@@ -1320,6 +1320,37 @@ impl HostDiskAttach {
         all
     }
 
+    /// Name a set of attachment points as one phrase.
+    ///
+    /// SCSI units collapse into a single "SCSI Unit 0,1,2": four disks on one
+    /// controller are four addresses on one bus, and spelling the controller
+    /// out four times says less, not more. One unit reads exactly as its own
+    /// label does.
+    pub fn describe_all(points: &[Self]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut units: Vec<u8> = Vec::new();
+        // The SCSI group sits where the first SCSI disk came, so the phrase
+        // follows the order the disks were given.
+        let mut group = None;
+        for point in points {
+            match point {
+                Self::Scsi(unit) => {
+                    if group.is_none() {
+                        group = Some(parts.len());
+                        parts.push(String::new());
+                    }
+                    units.push(*unit);
+                }
+                other => parts.push(other.label()),
+            }
+        }
+        if let Some(at) = group {
+            let units: Vec<String> = units.iter().map(u8::to_string).collect();
+            parts[at] = format!("SCSI Unit {}", units.join(","));
+        }
+        parts.join(", ")
+    }
+
     /// The point a configuration token names.
     pub fn from_token(token: &str) -> Option<Self> {
         Self::all()
@@ -5631,6 +5662,30 @@ mod tests {
     fn parse_config(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text)?;
         raw.try_into()
+    }
+
+    /// Where several disks went, said once. A single point reads as its own
+    /// label; several units on the one controller collapse rather than
+    /// repeating the controller for each.
+    #[test]
+    fn attachment_points_are_named_as_one_phrase() {
+        use HostDiskAttach as A;
+        assert_eq!(A::describe_all(&[A::Scsi(3)]), "SCSI Unit 3");
+        assert_eq!(A::describe_all(&[A::IdeMaster]), "IDE Master");
+        assert_eq!(
+            A::describe_all(&[A::Scsi(0), A::Scsi(1), A::Scsi(4)]),
+            "SCSI Unit 0,1,4"
+        );
+        assert_eq!(
+            A::describe_all(&[A::IdeMaster, A::IdeSlave]),
+            "IDE Master, IDE Slave"
+        );
+        // Mixed: the SCSI group sits where its first disk came.
+        assert_eq!(
+            A::describe_all(&[A::Scsi(2), A::IdeMaster, A::Scsi(5)]),
+            "SCSI Unit 2,5, IDE Master"
+        );
+        assert_eq!(A::describe_all(&[]), "");
     }
 
     /// Build a config from CLI overrides only (no file), exercising the same
