@@ -488,10 +488,15 @@ async function load() {
 // closes the previous stack first so it cannot keep playing alongside
 // the new one (a reboot after an emulator error, an iOS audio-session
 // revival); the generation counter makes overlapping builds settle on
-// the newest one.
+// the newest one. suspendForPause is the caller's intent for a machine
+// that is paused right now: a foreground recovery passes the live
+// paused flag to keep the pause contract that audio stays suspended,
+// while boot always builds a running stack - it starts the new machine
+// unpaused, and clears the paused flag itself without going through
+// the unpause path that would otherwise resume the context.
 let audioBuildGeneration = 0;
 
-async function buildAudioStack() {
+async function buildAudioStack(suspendForPause) {
   const gen = ++audioBuildGeneration;
   if (audioCtx) {
     audioNode?.disconnect();
@@ -500,11 +505,23 @@ async function buildAudioStack() {
     audioNode = null;
   }
   const ctx = new AudioContext({ sampleRate: 44100 });
-  await ctx.audioWorklet.addModule('./audio-worklet.js');
-  if (gen !== audioBuildGeneration) {
-    // A newer build superseded this one while its module loaded.
+  let node;
+  try {
+    await ctx.audioWorklet.addModule('./audio-worklet.js');
+    if (gen !== audioBuildGeneration) {
+      // A newer build superseded this one while its module loaded.
+      ctx.close().catch(() => {});
+      return;
+    }
+    node = new AudioWorkletNode(ctx, 'copperline-audio', {
+      outputChannelCount: [2],
+    });
+  } catch (e) {
+    // The old stack is already gone; do not leak the half-built one on
+    // top. The globals stay null, which recoverAudio treats as "retry
+    // the build on the next foreground return".
     ctx.close().catch(() => {});
-    return;
+    throw e;
   }
   // The queue/underrun readouts belong to the worklet that reports them.
   // Carried across a rebuild, a stale queuedMs over the pacing threshold
@@ -515,9 +532,6 @@ async function buildAudioStack() {
   queuedMs = 0;
   audioUnderruns = 0;
   audioGateClosed = false;
-  const node = new AudioWorkletNode(ctx, 'copperline-audio', {
-    outputChannelCount: [2],
-  });
   node.port.onmessage = (e) => {
     lastAudioReportMs = performance.now();
     if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
@@ -551,7 +565,7 @@ async function buildAudioStack() {
   audioCtx = ctx;
   audioNode = node;
   window.__audioCtx = ctx; // for debugging/automation, like __emu
-  if (paused) {
+  if (suspendForPause) {
     // Rebuilt mid-pause (an iOS foreground return): keep the pause
     // contract that audio stays suspended; unpausing resumes it.
     ctx.suspend().catch(() => {});
@@ -588,7 +602,7 @@ async function boot() {
     const machine = new WebEmu(machineModel ?? undefined, videoStandard ?? undefined);
     if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
-    await buildAudioStack();
+    await buildAudioStack(false);
     presentDirty = false;
 
     // A fresh machine boots with an empty drive: DF0 holds the pending disk
@@ -883,9 +897,18 @@ const AUDIO_REVIVE_CHECK_MS = 600;
 // liveness check, and a context that stays silent after its resume gets
 // the same rebuild.
 function recoverAudio() {
-  if (!audioCtx) return;
+  if (!audioCtx) {
+    // A running machine with no stack at all means a previous rebuild
+    // failed mid-flight; retry rather than leaving the session silent
+    // for good. With no machine there is nothing to revive - the next
+    // boot builds its own stack.
+    if (running) {
+      buildAudioStack(paused).catch((e) => console.error('audio rebuild', e));
+    }
+    return;
+  }
   if (IOS_WEBKIT && running) {
-    buildAudioStack().catch(() => {});
+    buildAudioStack(paused).catch((e) => console.error('audio rebuild', e));
     return;
   }
   // A paused machine's context stays suspended by the pause contract;
@@ -896,7 +919,7 @@ function recoverAudio() {
   setTimeout(() => {
     if (!audioCtx || !emu || !running || paused || document.hidden) return;
     if (lastAudioReportMs >= resumedAt) return;
-    buildAudioStack().catch(() => {});
+    buildAudioStack(false).catch((e) => console.error('audio rebuild', e));
   }, AUDIO_REVIVE_CHECK_MS);
 }
 
@@ -904,8 +927,11 @@ document.addEventListener('visibilitychange', () => {
   // The browser drops a screen wake lock when the page hides; re-request
   // it when a still-running machine comes back into view.
   syncWakeLock();
-  if (!audioCtx) return;
   if (document.hidden) {
+    // No stack, nothing to suspend. The show path takes no such guard:
+    // recoverAudio must run for a running machine whose stack is gone
+    // (a rebuild that failed mid-flight), or it could never come back.
+    if (!audioCtx) return;
     // The toggle is read through the DOM rather than its const, which is
     // declared further down the file: a handler must not couple to
     // evaluation order (with the box not built yet, this reads unticked).
