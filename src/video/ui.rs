@@ -758,12 +758,10 @@ pub enum UiControl {
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
     LauncherZorroRemove(usize),
-    /// Ask the host for the access raw disks need, or give it up.
-    LauncherHostDiskPrivileged,
     /// Tick one disk in the Host Disk table.
     LauncherHostDiskSelect(usize),
-    /// Flip one disk between read-only and writable.
-    LauncherHostDiskReadOnly(usize),
+    /// Flip one disk between writable and protected.
+    LauncherHostDiskWritable(usize),
     /// Step one disk through the attachment points.
     LauncherHostDiskAttach(usize),
     /// Give a real disk back to the host, from the drive row holding it.
@@ -4285,22 +4283,6 @@ fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
     }
 }
 
-/// The Privileged-mode button, sitting beside Back on the nav row.
-///
-/// Wider than a nav chip because its label is long and because it is a state,
-/// not a link: it should not read as another page to visit.
-const HOST_DISK_PRIV_W: usize = LAUNCH_SIDEBAR_W + 24;
-
-fn host_disk_privileged_button_rect(rect: Rect) -> Rect {
-    let back = launcher_back_button_rect(rect);
-    Rect {
-        x: back.x + back.w + 8,
-        y: back.y,
-        w: HOST_DISK_PRIV_W,
-        h: back.h,
-    }
-}
-
 /// Geometry of the Host Disk table: the framed box listing what the host has.
 const HOST_DISK_ROW_H: usize = 14;
 const HOST_DISK_HEADER_H: usize = 16;
@@ -4312,8 +4294,8 @@ const HOST_DISK_COL_DISK: usize = 8;
 const HOST_DISK_COL_VOLUME: usize = 70;
 const HOST_DISK_COL_SIZE: usize = 250;
 const HOST_DISK_COL_ATTACH: usize = 326;
-const HOST_DISK_COL_RO: usize = 424;
-const HOST_DISK_COL_TICK: usize = 476;
+const HOST_DISK_COL_WRITABLE: usize = 418;
+const HOST_DISK_COL_TICK: usize = 490;
 /// Width of the two columns that are clicked rather than read, so a click
 /// lands on the cell and not merely on its text.
 const HOST_DISK_CELL_W: usize = 92;
@@ -4351,11 +4333,11 @@ fn host_disk_attach_cell(rect: Rect, index: usize) -> Rect {
     }
 }
 
-/// The read-only cell of one row.
-fn host_disk_read_only_cell(rect: Rect, index: usize) -> Rect {
+/// The Writable cell of one row.
+fn host_disk_writable_cell(rect: Rect, index: usize) -> Rect {
     let row = host_disk_row_rect(rect, index);
     Rect {
-        x: row.x + HOST_DISK_COL_RO,
+        x: row.x + HOST_DISK_COL_WRITABLE,
         y: row.y,
         w: 40,
         h: row.h,
@@ -4828,20 +4810,15 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     // The top nav row: a page's sibling links (the Storage and A/V sub-pages),
     // or a Back button.
     if state.tab == LauncherTab::HostDisk {
-        if host_disk_privileged_button_rect(rect).contains(pos) {
-            return Some(UiControl::LauncherHostDiskPrivileged);
-        }
-        // Ticking a disk is the act that needs the host's permission, so it
-        // is refused until that has been granted.
-        if state.setup.host_disk_privileged() {
+        {
             for i in 0..state.setup.host_disks().len().min(HOST_DISK_VISIBLE_ROWS) {
                 // The cells that are their own answer come first: clicking
                 // Attach or R/O sets that, rather than picking the row.
                 if host_disk_attach_cell(rect, i).contains(pos) {
                     return Some(UiControl::LauncherHostDiskAttach(i));
                 }
-                if host_disk_read_only_cell(rect, i).contains(pos) {
-                    return Some(UiControl::LauncherHostDiskReadOnly(i));
+                if host_disk_writable_cell(rect, i).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskWritable(i));
                 }
                 if host_disk_row_rect(rect, i).contains(pos) {
                     return Some(UiControl::LauncherHostDiskSelect(i));
@@ -4873,43 +4850,6 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     None
 }
 
-/// A button that stays down while it is on.
-///
-/// The bevel is drawn the other way up when pressed -- light along the bottom
-/// and right instead of the top and left -- so the face reads as pushed into
-/// the panel rather than standing off it. It is the same treatment the MT-32
-/// front panel gives its latching buttons, and it says "this is a state you
-/// are in", which a button that merely looks clicked does not.
-fn draw_latching_button(
-    frame: &mut [u8],
-    rect: Rect,
-    label: &str,
-    on: bool,
-    hover: bool,
-    scale: usize,
-) {
-    // The flipped bevel is what says "on"; the face only follows the pointer,
-    // so the state stays readable when the mouse is elsewhere.
-    let face = if hover {
-        BUTTON_FACE_HOVER
-    } else {
-        BUTTON_FACE
-    };
-    let scaled = scale_rect(rect, scale);
-    fill_rect(frame, scaled, face, scale);
-    if on {
-        draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
-    } else {
-        draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-    }
-    let text_w = label.chars().count() * font::GLYPH_W;
-    let x = rect.x + rect.w.saturating_sub(text_w) / 2;
-    let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
-    // A pressed button's label shifts with the face, the way a real one does.
-    let nudge = usize::from(on);
-    draw_panel_text(frame, x + nudge, y + nudge, label, BUTTON_TEXT, 1, scale);
-}
-
 /// The Host Disk page: what the host has, and which of it to attach.
 fn draw_host_disk_page(
     frame: &mut [u8],
@@ -4919,7 +4859,6 @@ fn draw_host_disk_page(
     scale: usize,
 ) {
     let setup = &state.setup;
-    let privileged = setup.host_disk_privileged();
     let table = host_disk_table_rect(rect);
 
     // The box, sunk into the panel like an entry field so it reads as
@@ -4953,7 +4892,7 @@ fn draw_host_disk_page(
         (HOST_DISK_COL_VOLUME, "Volume"),
         (HOST_DISK_COL_SIZE, "Size"),
         (HOST_DISK_COL_ATTACH, "Attach"),
-        (HOST_DISK_COL_RO, "R/O"),
+        (HOST_DISK_COL_WRITABLE, "Writable"),
         (HOST_DISK_COL_TICK, "Enabled"),
     ] {
         draw_panel_text(
@@ -4996,24 +4935,15 @@ fn draw_host_disk_page(
     for (i, disk) in disks.iter().take(HOST_DISK_VISIBLE_ROWS).enumerate() {
         let row = host_disk_row_rect(rect, i);
         let ticked = setup.host_disk_selected() == Some(disk.id.as_str());
-        if ticked || (privileged && hover == Some(UiControl::LauncherHostDiskSelect(i))) {
+        if ticked || hover == Some(UiControl::LauncherHostDiskSelect(i)) {
             fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
         // A disk the host is using cannot simply be taken, so say so where
         // the reason is visible rather than only when Mount fails.
         // Listing needs nothing of the host, so the disks are always shown --
-        // seeing what is attached is how somebody knows privileged mode is
-        // worth granting. Choosing one is what needs the access, so until it
-        // is granted the rows read as inert. A disk the host has mounted is
-        // *not* dimmed: it used to be a reason the disk could not be taken,
-        // and is not one any more, since mounting takes it from the host
-        // first. Dimming it would say unusable about a disk that works.
-        let colour = if privileged {
-            PANEL_TEXT
-        } else {
-            PANEL_TEXT_DIM
-        };
+        // A disk the host has mounted is not dimmed: mounting takes it from
+        // the host first, so being in use is not a reason it cannot be had.
         let volume = truncate_to_width(&disk.volume, HOST_DISK_COL_SIZE - HOST_DISK_COL_VOLUME - 8);
         for (offset, text) in [
             (HOST_DISK_COL_DISK, disk.id.clone()),
@@ -5021,20 +4951,20 @@ fn draw_host_disk_page(
             (HOST_DISK_COL_SIZE, disk.size.clone()),
             (HOST_DISK_COL_ATTACH, disk.attach.label().to_string()),
         ] {
-            draw_panel_text(frame, row.x + offset, text_y, &text, colour, 1, scale);
+            draw_panel_text(frame, row.x + offset, text_y, &text, PANEL_TEXT, 1, scale);
         }
-        // Read-only is a tick like the selection, because it is the same kind
-        // of answer: on or off for this disk. Ticked is the safe state, so a
-        // disk the guest can write to is the one that looks different.
+        // Writable is a tick like the selection: the same kind of answer, on
+        // or off for this disk. On by default -- a disk given to a machine is
+        // normally meant to be used -- so unticking it is what protects it.
         let ro_box = Rect {
-            x: row.x + HOST_DISK_COL_RO + 6,
+            x: row.x + HOST_DISK_COL_WRITABLE + 6,
             y: row.y + 2,
             w: 10,
             h: 10,
         };
         fill_rect(frame, scale_rect(ro_box, scale), ENTRY_BG, scale);
         draw_outline(frame, ro_box, BUTTON_EDGE_LIGHT, scale);
-        if disk.read_only {
+        if disk.writable {
             fill_rect(
                 frame,
                 scale_rect(
@@ -5046,23 +4976,7 @@ fn draw_host_disk_page(
                     },
                     scale,
                 ),
-                if privileged {
-                    PANEL_TEXT
-                } else {
-                    PANEL_TEXT_DIM
-                },
-                scale,
-            );
-        } else if privileged {
-            // An unticked box is a disk the guest can change, which is worth
-            // more than the absence of a tick to say.
-            draw_panel_text(
-                frame,
-                row.x + HOST_DISK_COL_RO + 20,
-                text_y,
-                "rw",
-                PANEL_TEXT_ACCENT,
-                1,
+                PANEL_TEXT,
                 scale,
             );
         }
@@ -5086,11 +5000,7 @@ fn draw_host_disk_page(
                     },
                     scale,
                 ),
-                if privileged {
-                    PANEL_TEXT_HILIGHT
-                } else {
-                    PANEL_TEXT_DIM
-                },
+                PANEL_TEXT_HILIGHT,
                 scale,
             );
         }
@@ -5104,7 +5014,7 @@ fn draw_host_disk_page(
         // Mounting needs both a disk to mount and the access to open it;
         // Refresh only ever looks, so it stays live.
         let enabled = match control {
-            UiControl::LauncherHostDiskMount => privileged && setup.host_disk_selected().is_some(),
+            UiControl::LauncherHostDiskMount => setup.host_disk_selected().is_some(),
             _ => true,
         };
         draw_text_button(
@@ -5124,9 +5034,7 @@ fn draw_host_disk_page(
         .host_disks()
         .iter()
         .find(|d| Some(d.id.as_str()) == setup.host_disk_selected());
-    let note = if !privileged {
-        "Choose Privileged Mode to let Copperline open real disks.".to_string()
-    } else {
+    let note = {
         match chosen {
             None => "Tick a disk to attach it to the machine.".to_string(),
             // A disk the host is using will be taken from it, which is worth
@@ -5140,10 +5048,10 @@ fn draw_host_disk_page(
                 "Mount attaches {} to {}{}.",
                 disk.id,
                 disk.attach.label(),
-                if disk.read_only {
-                    ""
-                } else {
+                if disk.writable {
                     ", which the guest can write to"
+                } else {
+                    ""
                 }
             ),
         }
@@ -5716,22 +5624,12 @@ fn draw_launcher_row(
             // do with it here is give it back. Browse and Clear make way for
             // one Unmount spanning both.
             if let Some(disk) = setup.host_disk_on_row(r.field) {
-                // The row's own label already says master or slave, so
-                // repeating it here would crowd out the one thing this column
-                // is for: which disk it is. The volume gives way when the
-                // space runs out, never the note saying what kind of thing
-                // this is -- a clipped name is still recognisable, "(Host
-                // Di~" is not.
-                let suffix = if disk.read_only {
-                    " (Host Disk)".to_string()
-                } else {
-                    " (Host Disk)  rw".to_string()
-                };
-                let avail = browse.x.saturating_sub(value_x + 8);
-                let room = avail.saturating_sub(suffix.chars().count() * font::GLYPH_W);
-                let text = format!(
-                    "{}{suffix}",
-                    truncate_to_width(&setup.host_disk_volume(&disk.device), room)
+                // Just the volume. The row's own label already says which
+                // drive this is, and Unmount beside it already says the disk
+                // is a real one.
+                let text = truncate_to_width(
+                    &setup.host_disk_volume(&disk.device),
+                    browse.x.saturating_sub(value_x + 8),
                 );
                 draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
                 let unmount = Rect {
@@ -6107,18 +6005,6 @@ fn draw_launcher(
                 hover == Some(UiControl::LauncherTab(parent)),
                 scale,
             );
-            // Host Disk carries its privilege state beside Back, because it
-            // governs the whole page rather than any one control on it.
-            if state.tab == LauncherTab::HostDisk {
-                draw_latching_button(
-                    frame,
-                    host_disk_privileged_button_rect(rect),
-                    "Privileged Mode",
-                    state.setup.host_disk_privileged(),
-                    hover == Some(UiControl::LauncherHostDiskPrivileged),
-                    scale,
-                );
-            }
         } else {
             for (slot, &(label, target)) in options.iter().enumerate() {
                 draw_launcher_chip(
@@ -8840,13 +8726,12 @@ mod tests {
         {
             let mut setup = launcher::MachineSetup::default();
             setup.select_model(Some(crate::config::MachineModel::A1200));
-            setup.set_host_disk_privileged(true);
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
                 id: "disk4".to_string(),
                 volume: "SanDisk".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
-                read_only: true,
+                writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
             }]);
             setup.select_host_disk(0);
@@ -8876,14 +8761,13 @@ mod tests {
         {
             let mut frame = vec![0u8; w * h * 4];
             let mut setup = launcher::MachineSetup::default();
-            setup.set_host_disk_privileged(true);
             setup.set_host_disks_for_test(vec![
                 launcher::HostDiskRow {
                     id: "disk4".to_string(),
                     volume: "SanDisk Extreme SD".to_string(),
                     size: "31.9 GB".to_string(),
                     mounted: Vec::new(),
-                    read_only: true,
+                    writable: true,
                     attach: crate::config::HostDiskAttach::IdeMaster,
                 },
                 launcher::HostDiskRow {
@@ -8891,7 +8775,7 @@ mod tests {
                     volume: "Kingston DataTraveler".to_string(),
                     size: "3.9 GB".to_string(),
                     mounted: vec!["/Volumes/UNTITLED".to_string()],
-                    read_only: false,
+                    writable: false,
                     attach: crate::config::HostDiskAttach::IdeSlave,
                 },
             ]);
@@ -8915,7 +8799,7 @@ mod tests {
                 volume: "SanDisk Extreme SD".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
-                read_only: true,
+                writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
             }]);
             let mut state = LauncherState::new(setup);
@@ -8934,13 +8818,12 @@ mod tests {
             let mut setup = launcher::MachineSetup::default();
             // A machine that actually has IDE, so the rows are live.
             setup.select_model(Some(crate::config::MachineModel::A1200));
-            setup.set_host_disk_privileged(true);
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
                 id: "disk4".to_string(),
                 volume: "SanDisk Extreme SD".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
-                read_only: true,
+                writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
             }]);
             setup.select_host_disk(0);

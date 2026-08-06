@@ -5641,33 +5641,15 @@ impl App {
                     state.status = None;
                 }
             }
-            UiControl::LauncherHostDiskPrivileged => {
-                if let Some(state) = self.launcher_state_mut() {
-                    // Asking the host for raw-disk access is the platform's
-                    // business and its prompt, not a dialog of ours. Until
-                    // that is wired up the button records the intent, which is
-                    // what the rest of the page keys off.
-                    let on = !state.setup.host_disk_privileged();
-                    state.setup.set_host_disk_privileged(on);
-                    if on {
-                        state.setup.refresh_host_disks();
-                    }
-                    state.status = Some(StatusMessage::ok(if on {
-                        "Privileged mode on: real disks can be opened"
-                    } else {
-                        "Privileged mode off"
-                    }));
-                }
-            }
             UiControl::LauncherHostDiskSelect(index) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.select_host_disk(index);
                     state.status = None;
                 }
             }
-            UiControl::LauncherHostDiskReadOnly(index) => {
+            UiControl::LauncherHostDiskWritable(index) => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.setup.toggle_host_disk_read_only(index);
+                    state.setup.toggle_host_disk_writable(index);
                     state.status = None;
                 }
             }
@@ -5705,10 +5687,10 @@ impl App {
                             "{} attached to {}{}",
                             disk.device,
                             disk.attach.label(),
-                            if disk.read_only {
-                                ""
-                            } else {
+                            if disk.writable {
                                 " -- the guest can write to it"
+                            } else {
+                                ""
                             }
                         )),
                         Err(reason) => StatusMessage::err(reason),

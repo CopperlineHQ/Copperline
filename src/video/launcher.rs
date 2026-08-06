@@ -998,7 +998,7 @@ fn raw_host_disks(raw: &RawConfig) -> Vec<crate::config::HostDiskConfig> {
                         .find(|a| a.token().eq_ignore_ascii_case(token))
                 })
                 .unwrap_or_default(),
-            read_only: entry.read_only.unwrap_or(true),
+            writable: !entry.read_only.unwrap_or(false),
         })
         .collect()
 }
@@ -1020,9 +1020,9 @@ pub struct HostDiskRow {
     /// Where the host currently has this disk mounted, if anywhere. Shown so
     /// somebody can see why a disk cannot simply be taken.
     pub mounted: Vec<String>,
-    /// Keep the guest from writing to it. On by default: a real disk is
-    /// somebody's only copy, and the write is the part that cannot be undone.
-    pub read_only: bool,
+    /// Whether the guest may write to it. On by default; unticking it is
+    /// what protects the disk.
+    pub writable: bool,
     /// Where the machine would see this disk.
     pub attach: crate::config::HostDiskAttach,
 }
@@ -1047,7 +1047,7 @@ fn sample_host_disks() -> Vec<HostDiskRow> {
             size: device.size_label(),
             mounted: device.mounted.clone(),
             id: device.id,
-            read_only: true,
+            writable: true,
             attach: crate::config::HostDiskAttach::default(),
         })
         .collect()
@@ -1385,10 +1385,6 @@ pub struct MachineSetup {
     /// Held in the configuration's own shape: this is a setting that
     /// persists, not a fact about this session.
     host_disks_attached: Vec<crate::config::HostDiskConfig>,
-    /// Whether the host has granted the access raw disks need. Real media is
-    /// privileged on every supported platform, so the page stays read-only
-    /// until this is asked for and given.
-    host_disk_privileged: bool,
     // Hard disk. Each drive's optional volume-name override (directory mounts
     // only) sits in the matching `*_name` slot, paralleling the path slot. Boot
     // priority is edited on the Boot Priority sub-page and split across two
@@ -1601,7 +1597,6 @@ impl MachineSetup {
             host_disks: Vec::new(),
             host_disk_selected: None,
             host_disks_attached: raw_host_disks(raw),
-            host_disk_privileged: false,
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
             ide_master_bootpri: boot_priority_of(raw.ide.master.as_ref().and_then(|d| d.bootpri)),
@@ -2014,7 +2009,8 @@ impl MachineSetup {
             .map(|disk| RawHostDisk {
                 device: disk.device.clone(),
                 attach: Some(disk.attach.token().to_string()),
-                read_only: (!disk.read_only).then_some(false),
+                // Only a protected disk needs saying: absent means writable.
+                read_only: (!disk.writable).then_some(true),
             })
             .collect();
         // CD
@@ -3776,7 +3772,7 @@ impl MachineSetup {
         self.host_disks = sample_host_disks();
         for row in &mut self.host_disks {
             if let Some(old) = previous.iter().find(|p| p.id == row.id) {
-                row.read_only = old.read_only;
+                row.writable = old.writable;
                 row.attach = old.attach;
             }
         }
@@ -3807,10 +3803,10 @@ impl MachineSetup {
         }
     }
 
-    /// Flip one disk between read-only and writable.
-    pub fn toggle_host_disk_read_only(&mut self, index: usize) {
+    /// Flip one disk between writable and protected.
+    pub fn toggle_host_disk_writable(&mut self, index: usize) {
         if let Some(row) = self.host_disks.get_mut(index) {
-            row.read_only = !row.read_only;
+            row.writable = !row.writable;
         }
     }
 
@@ -3889,7 +3885,7 @@ impl MachineSetup {
         let entry = crate::config::HostDiskConfig {
             device: row.id.clone(),
             attach: row.attach,
-            read_only: row.read_only,
+            writable: row.writable,
         };
         self.host_disks_attached
             .retain(|d| d.attach != entry.attach);
@@ -3917,16 +3913,6 @@ impl MachineSetup {
             .iter()
             .position(|d| d.attach == attach)?;
         Some(self.host_disks_attached.remove(at).device)
-    }
-
-    /// Whether the host has granted what raw disk access needs.
-    pub fn host_disk_privileged(&self) -> bool {
-        self.host_disk_privileged
-    }
-
-    /// Record that privilege was granted (or given up).
-    pub fn set_host_disk_privileged(&mut self, on: bool) {
-        self.host_disk_privileged = on;
     }
 
     pub fn set_bridge_edit_drive(&mut self, idx: usize) {
@@ -4750,14 +4736,13 @@ mod tests {
     #[test]
     fn a_mounted_host_disk_round_trips_through_the_configuration() {
         let mut setup = MachineSetup::default();
-        setup.set_host_disk_privileged(true);
         setup.set_host_disks_for_test(vec![
             HostDiskRow {
                 id: "disk4".to_string(),
                 volume: "SanDisk".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
-                read_only: false,
+                writable: true,
                 attach: crate::config::HostDiskAttach::IdeSlave,
             },
             HostDiskRow {
@@ -4765,7 +4750,7 @@ mod tests {
                 volume: "Kingston".to_string(),
                 size: "3.9 GB".to_string(),
                 mounted: Vec::new(),
-                read_only: true,
+                writable: false,
                 attach: crate::config::HostDiskAttach::IdeMaster,
             },
         ]);
@@ -4775,7 +4760,7 @@ mod tests {
         let mounted = setup.mount_host_disk().expect("a ticked disk mounts");
         assert_eq!(mounted.device, "disk4");
         assert_eq!(mounted.attach, crate::config::HostDiskAttach::IdeSlave);
-        assert!(!mounted.read_only, "the choice not to protect it carries");
+        assert!(mounted.writable, "the choice to allow writing carries");
         // Ticking is cleared by mounting: the disk is attached now, and
         // leaving it ticked would invite mounting it twice.
         assert_eq!(setup.host_disk_selected(), None);
@@ -4789,26 +4774,26 @@ mod tests {
         assert_eq!(raw.host_disk.len(), 1);
         assert_eq!(raw.host_disk[0].device, "disk4");
         assert_eq!(raw.host_disk[0].attach.as_deref(), Some("ide-slave"));
-        assert_eq!(raw.host_disk[0].read_only, Some(false));
+        // Writable is the default, so nothing is written down for it.
+        assert_eq!(raw.host_disk[0].read_only, None);
 
         let reloaded = MachineSetup::from_raw(&raw).expect("the written configuration reads back");
         let back = reloaded
             .host_disk_at(crate::config::HostDiskAttach::IdeSlave)
             .expect("the attachment survives being written and read");
         assert_eq!(back.device, "disk4");
-        assert!(!back.read_only);
+        assert!(back.writable);
 
         // A machine with no IDE port refuses rather than configuring a disk
         // it could never reach.
         let mut no_ide = MachineSetup::default();
         no_ide.select_model(Some(MachineModel::A500));
-        no_ide.set_host_disk_privileged(true);
         no_ide.set_host_disks_for_test(vec![HostDiskRow {
             id: "disk4".to_string(),
             volume: "SanDisk".to_string(),
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
-            read_only: true,
+            writable: false,
             attach: crate::config::HostDiskAttach::IdeMaster,
         }]);
         no_ide.select_host_disk(0);

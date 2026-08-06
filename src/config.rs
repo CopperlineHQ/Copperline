@@ -1312,9 +1312,10 @@ pub struct HostDiskConfig {
     pub device: String,
     /// Where the machine sees it.
     pub attach: HostDiskAttach,
-    /// Read-only unless deliberately cleared. This is somebody's real disk,
-    /// and the guest writing to it is the thing that cannot be undone.
-    pub read_only: bool,
+    /// Whether the guest may write to the disk. On by default, matching the
+    /// launcher's Writable column: a disk given to a machine is normally
+    /// meant to be used, and protecting it is the deliberate choice.
+    pub writable: bool,
 }
 
 impl Default for HostDiskConfig {
@@ -1322,7 +1323,7 @@ impl Default for HostDiskConfig {
         Self {
             device: String::new(),
             attach: HostDiskAttach::default(),
-            read_only: true,
+            writable: true,
         }
     }
 }
@@ -2212,6 +2213,12 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
+    /// Real host disks given to the machine (`--hdd DEVICE [ATTACH]`), in
+    /// command-line order. Each is `(device, attachment point)`, the second
+    /// unset meaning the first free IDE position.
+    pub host_disks: Vec<(String, Option<String>)>,
+    /// Devices named by `--hdd-read-only`, which protects them.
+    pub host_disks_read_only: Vec<String>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -2262,6 +2269,8 @@ impl ConfigOverrides {
             && self.floppy_bridge_density.iter().all(Option::is_none)
             && self.floppy_bridge_speed.iter().all(Option::is_none)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
+            && self.host_disks.is_empty()
+            && self.host_disks_read_only.is_empty()
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
             && self.mouse_capture.is_none()
@@ -2335,6 +2344,20 @@ impl ConfigOverrides {
         }
         if let Some(speed) = self.floppy_speed {
             raw.floppy.speed = Some(speed);
+        }
+        // Real host disks named on the command line are added to whatever the
+        // file already asked for; the parser is what refuses two disks, or a
+        // disk and an image, on one attachment point.
+        for (device, attach) in &self.host_disks {
+            raw.host_disk.push(RawHostDisk {
+                device: device.clone(),
+                attach: attach.clone(),
+                read_only: self
+                    .host_disks_read_only
+                    .iter()
+                    .any(|protected| protected == device)
+                    .then_some(true),
+            });
         }
         for idx in 0..4 {
             if self.floppy_bridge[idx].is_none()
@@ -2676,7 +2699,9 @@ pub(crate) struct RawHostDisk {
     /// Where the machine sees it: `ide-master` (the default) or `ide-slave`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attach: Option<String>,
-    /// Let the guest write to the disk. Absent means read-only.
+    /// Protect the disk from the guest. Absent means writable, which is what
+    /// a disk given to a machine is normally for; protecting it is the
+    /// deliberate choice, so it is the one that has to be written down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_only: Option<bool>,
 }
@@ -5260,7 +5285,7 @@ fn parse_host_disks(raw: &[RawHostDisk], ide: &IdeConfig) -> Result<Vec<HostDisk
         disks.push(HostDiskConfig {
             device: device.to_string(),
             attach,
-            read_only: entry.read_only.unwrap_or(true),
+            writable: !entry.read_only.unwrap_or(false),
         });
     }
     Ok(disks)

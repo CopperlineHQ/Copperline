@@ -2493,17 +2493,17 @@ pub fn build_machine(
             // the machine boots with that slot empty, as it would if the drive
             // had been unplugged. Only a disk that is present is opened, so a
             // missing one never raises the host's permission prompt.
-            match crate::ata::IdeDrive::open_host_disk(&disk.device, !disk.read_only) {
+            match crate::ata::IdeDrive::open_host_disk(&disk.device, disk.writable) {
                 Ok(drive) => {
                     gayle.attach_drive(slot, drive);
                     info!(
                         "ide: {} is host disk {}{}",
                         disk.attach.label(),
                         disk.device,
-                        if disk.read_only {
-                            " (read-only)"
-                        } else {
+                        if disk.writable {
                             " (WRITABLE)"
+                        } else {
+                            " (read-only)"
                         }
                     );
                 }
