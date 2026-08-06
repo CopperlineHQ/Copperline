@@ -532,7 +532,9 @@ async function boot() {
         const nowMs = performance.now();
         if (
           keepRunningHidden ||
-          (!document.hidden && nowMs - lastRafMs > RAF_STARVED_MS)
+          (!document.hidden &&
+            nowMs - lastRafMs > RAF_STARVED_MS &&
+            avgStepMs < STEP_OVERLOAD_MS)
         ) {
           stepMachine(nowMs, true);
         }
@@ -654,6 +656,17 @@ let lastRafMs = 0;
 // step regardless, which simply leaves the behavior they always had.
 const RENDER_SKIP_ENTER_MS = 15;
 const RENDER_SKIP_EXIT_MS = 11;
+// The starved-rAF fallback exists for a THROTTLED host: animation frames
+// withheld from a machine that is cheap to step. On an OVERLOADED host -
+// the machine itself eating more than the worklet's ~29 ms report
+// interval per step - stepping on every report leaves the main thread no
+// idle at all: the page (input, the stat line, devtools) freezes solid
+// while emulated time barely gains, because the wall-paced core cannot
+// exceed the host's throughput however often it is called. Past this
+// step cost the fallback stands down and rAF alone drives the machine,
+// keeping the page usable through the worst stretches (a 68020 decrunch
+// on a slow host) at whatever rate the host can actually sustain.
+const STEP_OVERLOAD_MS = 25;
 let avgStepMs = 0;
 let renderSkipActive = false;
 let renderDeferredLastTick = false;
