@@ -703,6 +703,7 @@ async function boot() {
     rustRenderMsThisSecond = 0;
     uploadMsThisSecond = 0;
     shaderMsThisSecond = 0;
+    resetRenderStrideController();
 
     // A fresh machine boots with an empty drive: DF0 holds the pending disk
     // or nothing, never a name left over from before the reboot (a crash
@@ -719,6 +720,8 @@ async function boot() {
     else if (configMonoAudio !== null) machine.set_mono_audio(configMonoAudio);
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     if (overscanMode !== null) machine.set_overscan?.(overscanMode);
+    machine.set_deinterlace?.(deinterlaceEnabled);
+    machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
     window.__emu = emu; // for debugging/automation
     lastFddTrack = null; // a new machine starts the track latch over
@@ -793,21 +796,25 @@ let audioGateClosed = false;
 const RAF_STARVED_MS = 50;
 let lastRafMs = 0;
 
-// Adaptive render stride for hosts that cannot afford a frame render
-// every emulated frame. The wasm-side presentation render is a large
-// share of a step's cost (about 45% on an Ice Lake laptop), and a host
-// saturated by it drops animation frames until the pacer starts
-// forgiving deficits - slow motion, the worst possible degradation.
-// When the moving average of a step's cost nears the 60 Hz frame
-// budget, alternate ticks step with the render deferred (the same
-// run_hidden + stale-repaint path the off-tick clocks use), trading
-// display rate for guaranteed real-time emulation and audio. The
-// hysteresis keeps the mode from flapping on the threshold, and the
-// stride never exceeds every-other-tick, so the picture keeps at least
-// half the tick rate. Old bundles without run_hidden render every
-// step regardless, which simply leaves the behavior they always had.
-const RENDER_SKIP_ENTER_MS = 15;
-const RENDER_SKIP_EXIT_MS = 11;
+// Adaptive render stride for hosts that cannot afford a frame render on
+// every visible tick. One browser call can advance several of the core's
+// fixed 60 Hz pacing slices after rAF arrives late; its whole-call duration
+// is therefore not a per-frame cost. Treating a two-slice catch-up as one
+// frame used to trip the fallback on an Ice Lake Mac even while full
+// rendering still held real time.
+//
+// The controller uses cost per stepped pacing slice, requires sustained
+// pressure before changing mode, and keeps a smaller time-based hysteresis
+// for recovery. A genuinely overloaded host still alternates run_hidden
+// with rendering runs, trading display rate for real-time emulation and
+// audio; a catch-up burst no longer leaves it stuck there. Old bundles
+// without run_hidden render every step regardless, preserving their
+// existing behaviour.
+const RENDER_SKIP_ENTER_MS = 16;
+const RENDER_SKIP_EXIT_MS = 14.5;
+const RENDER_SKIP_ENTER_HOLD_MS = 500;
+const RENDER_SKIP_EXIT_HOLD_MS = 2000;
+const RENDER_SKIP_SAMPLE_WEIGHT = 0.2;
 // The starved-rAF fallback exists for a THROTTLED host: animation frames
 // withheld from a machine that is cheap to step. On an OVERLOADED host -
 // the machine itself eating more than the worklet's ~29 ms report
@@ -819,9 +826,58 @@ const RENDER_SKIP_EXIT_MS = 11;
 // keeping the page usable through the worst stretches (a 68020 decrunch
 // on a slow host) at whatever rate the host can actually sustain.
 const STEP_OVERLOAD_MS = 25;
+// Raw whole-call cost remains the correct signal for the starved-rAF
+// fallback: it decides whether another call right now would monopolise the
+// main thread, not whether one emulated pacing slice is affordable.
 let avgStepMs = 0;
+let avgFrameStepMs = 0;
 let renderSkipActive = false;
+let renderSkipTransitionSinceMs = null;
 let renderDeferredLastTick = false;
+
+function cancelRenderStrideTransition() {
+  renderSkipTransitionSinceMs = null;
+}
+
+function resetRenderStrideController() {
+  avgStepMs = 0;
+  avgFrameStepMs = 0;
+  renderSkipActive = false;
+  cancelRenderStrideTransition();
+  renderDeferredLastTick = false;
+}
+
+function updateRenderStrideController(nowMs, stepElapsed, stepped) {
+  avgStepMs = avgStepMs * 0.9 + stepElapsed * 0.1;
+
+  // `run` advances fixed 1/60-second pacing slices, not necessarily one
+  // hardware video field. Normalize catch-up calls by the work completed;
+  // an idle call pulls the average down because it proves the host caught up.
+  const frameStepMs = stepped > 0 ? stepElapsed / stepped : 0;
+  if (avgFrameStepMs === 0 && frameStepMs > 0) {
+    avgFrameStepMs = frameStepMs;
+  } else {
+    avgFrameStepMs =
+      avgFrameStepMs * (1 - RENDER_SKIP_SAMPLE_WEIGHT) +
+      frameStepMs * RENDER_SKIP_SAMPLE_WEIGHT;
+  }
+
+  const threshold = renderSkipActive ? RENDER_SKIP_EXIT_MS : RENDER_SKIP_ENTER_MS;
+  const nextActive = avgFrameStepMs > threshold;
+  if (nextActive === renderSkipActive) {
+    renderSkipTransitionSinceMs = null;
+    return;
+  }
+  if (renderSkipTransitionSinceMs === null) {
+    renderSkipTransitionSinceMs = nowMs;
+    return;
+  }
+  const holdMs = nextActive ? RENDER_SKIP_ENTER_HOLD_MS : RENDER_SKIP_EXIT_HOLD_MS;
+  if (nowMs - renderSkipTransitionSinceMs >= holdMs) {
+    renderSkipActive = nextActive;
+    renderSkipTransitionSinceMs = null;
+  }
+}
 
 function maxFramesForQueue() {
   const limit = audioGateClosed ? AUDIO_GATE_OPEN_MS : AUDIO_GATE_CLOSE_MS;
@@ -899,10 +955,7 @@ function stepMachine(nowMs, deferRender) {
         ? emu.run_hidden(nowMs, max)
         : emu.run(nowMs, max);
     const stepElapsed = performance.now() - stepStart;
-    // Rolling cost of a step, the render-stride controller's signal.
-    // Idle steps (nothing to advance) pull it down, which is right:
-    // they mean the host is keeping up.
-    avgStepMs = avgStepMs * 0.9 + stepElapsed * 0.1;
+    updateRenderStrideController(nowMs, stepElapsed, stepped);
     if (
       typeof emu.last_run_core_ms === 'function' &&
       typeof emu.last_run_render_ms === 'function'
@@ -914,9 +967,6 @@ function stepMachine(nowMs, deferRender) {
       // preserve a useful total under "core" until the split getters arrive.
       coreMsThisSecond += stepElapsed;
     }
-    renderSkipActive = renderSkipActive
-      ? avgStepMs > RENDER_SKIP_EXIT_MS
-      : avgStepMs > RENDER_SKIP_ENTER_MS;
     framesThisSecond += stepped;
     if (stepped > 0) presentDirty = true;
   } catch (e) {
@@ -1062,6 +1112,11 @@ function recoverAudio() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  // A hide/show boundary is not evidence of sustained pressure or recovery:
+  // discard a pending transition so inactive wall time cannot satisfy its
+  // hold duration. Keep the active stride and averages; background running
+  // still supplies real samples and a foreground return can reassess them.
+  cancelRenderStrideTransition();
   // The browser drops a screen wake lock when the page hides; re-request
   // it when a still-running machine comes back into view.
   syncWakeLock();
@@ -3387,6 +3442,9 @@ function setPauseLabel() {
 function setPaused(next) {
   if (!emu || !running || next === paused) return;
   paused = next;
+  // Paused wall time must not count toward the controller's sustained
+  // enter/exit hold when stepping resumes.
+  cancelRenderStrideTransition();
   setPauseLabel();
   syncWakeLock();
   if (paused) {
@@ -3649,6 +3707,9 @@ function restoreState(bytes, source) {
     setLoadStatus(`${source} failed to load: ${e.message ?? e}`);
     return false;
   }
+  // A timeline jump invalidates both the old workload average and a pending
+  // stride transition. Judge the restored scene on its own sustained cost.
+  resetRenderStrideController();
   // Host-side settings are not part of the machine, so the page's own
   // choices are re-applied over the restored one; the state's idea of them
   // came from whatever session saved it.
@@ -3659,6 +3720,8 @@ function restoreState(bytes, source) {
   else if (configMonoAudio !== null) emu.set_mono_audio(configMonoAudio);
   if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
   if (overscanMode !== null) emu.set_overscan?.(overscanMode);
+  emu.set_deinterlace?.(deinterlaceEnabled);
+  emu.set_phosphor?.(phosphorPersistence);
   // Port fittings live on the machine, so the pads plugged into the host go
   // back into the restored one, exactly as after a boot. Port 1 is the
   // mouse socket first: a state saved while a pad occupied it would
@@ -4455,7 +4518,7 @@ videoSel.addEventListener('change', () => {
   }
 });
 
-// --- display: overscan and screen tint -----------------------------------
+// --- display: overscan, deinterlace, phosphor and screen tint -------------
 // Presentation-only choices, so unlike the machine and video standard they
 // are remembered per browser (localStorage) and re-applied on the next
 // visit: nothing the guest can observe changes, only what the glass shows.
@@ -4517,6 +4580,71 @@ function setOverscanMode(mode, remember) {
   }
 }
 overscanSel.addEventListener('change', () => setOverscanMode(overscanSel.value, true));
+
+// Motion-adaptive deinterlacing and phosphor decay both retain and process
+// frame history. They are useful CRT presentation effects, but opt-in in the
+// browser so the default path keeps maximum emulation headroom. Ordinary
+// progressive output is pixel-identical with deinterlacing off; only LACE
+// fields switch from motion-adaptive weaving to inexpensive line doubling.
+const DEINTERLACE_STORAGE_KEY = 'copperline-deinterlace';
+const deinterlaceShellToggle = $('deinterlace');
+const deinterlaceToggle =
+  deinterlaceShellToggle ?? buildToggleControl('deinterlace', 'Deinterlace');
+deinterlaceToggle.checked = false;
+deinterlaceToggle.title =
+  'Motion-adaptive LACE field merging. Off uses faster line doubling.';
+let deinterlaceEnabled = false;
+if (typeof WebEmu.prototype?.set_deinterlace !== 'function') {
+  (deinterlaceShellToggle ?? deinterlaceToggle.parentElement).hidden = true;
+}
+
+function setDeinterlaceEnabled(enabled, remember) {
+  deinterlaceEnabled = Boolean(enabled);
+  deinterlaceToggle.checked = deinterlaceEnabled;
+  if (remember) {
+    storePref(DEINTERLACE_STORAGE_KEY, deinterlaceEnabled ? 'on' : 'off');
+  }
+  if (emu) {
+    emu.set_deinterlace?.(deinterlaceEnabled);
+    if (running && paused) presentFrame();
+  }
+}
+deinterlaceToggle.addEventListener('change', () => {
+  setDeinterlaceEnabled(deinterlaceToggle.checked, true);
+});
+
+const PHOSPHOR_STORAGE_KEY = 'copperline-phosphor';
+const DEFAULT_PHOSPHOR_PERSISTENCE = 0.4;
+const phosphorShellToggle = $('phosphor');
+const phosphorToggle =
+  phosphorShellToggle ?? buildToggleControl('phosphor', 'Phosphor persistence');
+phosphorToggle.checked = false;
+phosphorToggle.title =
+  'Retain 40% of the previous frame for CRT decay. Off avoids the history blend.';
+let phosphorPersistence = 0.0;
+let preferredPhosphorPersistence = DEFAULT_PHOSPHOR_PERSISTENCE;
+if (typeof WebEmu.prototype?.set_phosphor !== 'function') {
+  (phosphorShellToggle ?? phosphorToggle.parentElement).hidden = true;
+}
+
+function setPhosphorPersistence(value, remember) {
+  const persistence = Number(value);
+  if (!Number.isFinite(persistence)) return;
+  phosphorPersistence = Math.min(0.95, Math.max(0, persistence));
+  if (phosphorPersistence > 0) preferredPhosphorPersistence = phosphorPersistence;
+  phosphorToggle.checked = phosphorPersistence > 0;
+  if (remember) storePref(PHOSPHOR_STORAGE_KEY, String(phosphorPersistence));
+  if (emu) {
+    emu.set_phosphor?.(phosphorPersistence);
+    if (running && paused) presentFrame();
+  }
+}
+phosphorToggle.addEventListener('change', () => {
+  setPhosphorPersistence(
+    phosphorToggle.checked ? preferredPhosphorPersistence : 0.0,
+    true,
+  );
+});
 
 const TINT_STORAGE_KEY = 'copperline-tint';
 // Phosphor approximations: grayscale first so the sepia+hue chain works
@@ -5527,6 +5655,8 @@ function bugReportHref() {
       `present = "${presentSize.width}x${presentSize.rows}"`,
       `canvas = "${canvas.width}x${canvas.height}"`,
       `monitor = ${toml(monitorGl ? monitorMode : '2d fallback')}`,
+      `deinterlace = ${deinterlaceEnabled}`,
+      `phosphor = ${phosphorPersistence}`,
       `running = ${running}`,
     ].join('\n'),
     logs: `status: ${loadStatus.textContent}\nstats: ${statLine.textContent || '-'}`,
@@ -5660,6 +5790,10 @@ const pageParams = new URLSearchParams(location.search);
 //     "monitor": "plain",            starting monitor presentation
 //                                    (1084|crt|bezel|plain, default 1084);
 //                                    same visitor rule
+//     "deinterlace": true,           motion-adaptive LACE field merging;
+//                                    off by default for throughput
+//     "phosphor": 0.4,               CRT persistence (0.0..0.95); off by
+//                                    default, same visitor rule
 //     "joy": "keys",                 off|keys|cd32|touch
 //     "background_run": true,        starting run-in-background choice;
 //                                    same visitor rule
@@ -5757,6 +5891,22 @@ async function startup() {
     storedPref(MONITOR_STORAGE_KEY) ??
     (typeof cfg.monitor === 'string' ? cfg.monitor.trim() : null);
   if (monitorPref) setMonitorMode(monitorPref, false);
+  // History-dependent display effects are opt-in for browser throughput.
+  // A visitor's saved choice wins over the site's suggested starting point.
+  const deinterlacePref = storedPref(DEINTERLACE_STORAGE_KEY);
+  if (deinterlacePref !== null) {
+    setDeinterlaceEnabled(deinterlacePref === 'on', false);
+  } else if (typeof cfg.deinterlace === 'boolean') {
+    setDeinterlaceEnabled(cfg.deinterlace, false);
+  }
+  const phosphorPref = storedPref(PHOSPHOR_STORAGE_KEY);
+  if (phosphorPref !== null) {
+    setPhosphorPersistence(phosphorPref, false);
+  } else if (typeof cfg.phosphor === 'number') {
+    setPhosphorPersistence(cfg.phosphor, false);
+  } else if (typeof cfg.phosphor === 'boolean') {
+    setPhosphorPersistence(cfg.phosphor ? DEFAULT_PHOSPHOR_PERSISTENCE : 0.0, false);
+  }
   // Which A600 the visitor owns, for the keycap legends. Nothing the guest
   // can observe changes - the rawkeys are the same either way, only what is
   // printed on the caps.

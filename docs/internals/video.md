@@ -363,10 +363,12 @@ start emulating frame N+1 while the worker renders frame N.
 Each render thread also retains a `RenderScratch` arena across calls. The
 per-row base palettes and control state, their nested segment vectors, the
 playfield/collision canvases, horizontal-window rows, DMA-output origins and
-manual-HAM selector buffer are cleared and resized in place. This preserves
-their allocations across changing frames and avoids rebuilding several large
-temporary buffers at field rate; thread-local ownership keeps the synchronous
-browser/native paths and the desktop worker independent without locking.
+manual-HAM selector buffer are cleared and resized in place. The merged
+palette-event journals, sprite lines, attached-pair beam lists and full-frame
+sprite collision mask live there too. This preserves their allocations across
+changing frames and avoids rebuilding several large temporary buffers at
+field rate; thread-local ownership keeps the synchronous browser/native paths
+and the desktop worker independent without locking.
 
 `window.rs` starts a persistent `copperline-render` worker by default.
 `COPPERLINE_THREADED_RENDER=0` (also `false`, `off`, or `no`) disables the
@@ -413,6 +415,17 @@ changes such as a resize, tint, monitor mode or WebGL context restoration can
 force a draw of the held texture without pretending the emulated picture
 changed.
 
+For a progressive frame without phosphor persistence, presentation writes
+directly into the frontend-owned buffer instead of first filling the
+deinterlacer's full woven buffer. The browser's standard-TV path goes one step
+further: it maps the captured aperture's destination rows straight back to
+the source field, combining line doubling, PAL/NTSC vertical presentation
+scaling and cropping in one copy. LACE fields and phosphor persistence keep
+the history-dependent weave/blend path and then crop its output. The
+deinterlacer grows its weave, motion-mask and phosphor buffers lazily, so a
+frontend that disables both effects pays neither their frame cost nor their
+multi-frame scratch allocation.
+
 After post-processing and deinterlacing, the frontend compares the complete
 active presentation buffer and its geometry with the current one. This is a
 word-for-word comparison, not a hash. An exact repeat keeps the current
@@ -442,6 +455,10 @@ frame. Interlaced and phosphor-blended frames retain the history buffer.
 `[display] deinterlace = false` (or the `COPPERLINE_DEINTERLACE=0` env
 override) falls back to plain line doubling; like phosphor, the setting
 travels in every render job.
+The browser deliberately starts with both history-dependent effects off for
+throughput and exposes live controls for pages that prefer their CRT
+presentation. Desktop defaults are unchanged: motion-adaptive deinterlacing
+remains on and phosphor persistence remains off.
 In the default threaded pipeline the worker owns this history; the
 synchronous fallback keeps it on the window `App`. The worker drops its
 history whenever the render generation changes (machine swap, reset,

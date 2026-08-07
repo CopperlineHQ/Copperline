@@ -27,5 +27,8 @@ console_error_panic_hook = "0.1"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# The emulator's hot path crosses the web wrapper, CPU, bus and chipset
+# crates. Fat LTO is about 4% faster than thin LTO in the controlled Chrome
+# AROS workload; the longer release link is worthwhile for the shipped bundle.
+lto = "fat"
 codegen-units = 1

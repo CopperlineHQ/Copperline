@@ -2065,10 +2065,44 @@ impl M68kMachine {
             || (!self.fpu_enabled && self.cpu.cpu_type == CpuType::M68040))
     }
 
+    /// Select the diagnostic-capable precise loop once per slice instead of
+    /// asking the same inactive questions after every retired instruction.
+    /// The const-generic split below gives LLVM a branch-free normal build
+    /// while preserving the exact existing path whenever any hook is armed.
+    #[inline]
+    fn precise_debug_hooks_active(&self) -> bool {
+        self.dbg.is_some()
+            || self.dbg_pc_on
+            || self.dbg_crash_on
+            || self.dbg_sched_on
+            || self.dbg_fc_addr.is_some()
+            || self.dbg_ipl_on
+            || self.dbg_spren_on
+            || self.bus.dbg_memw_addr.is_some()
+            || self.ui_breaks.armed()
+            || self.ui_stop.is_some()
+            || self.ui_pc_history_enabled
+            || self.ui_trace.is_some()
+            || self.bus.bus.wave_pc_trigger
+            || self.bus.bus.smc.is_some()
+            || diag_cpu_sync_on()
+    }
+
     pub fn step_slice(&mut self, count: usize) -> Result<CpuStepSlice> {
         if self.jit_enabled && self.jit_fast_path_ok() {
             return self.step_slice_jit(count);
         }
+        if self.precise_debug_hooks_active() {
+            self.step_slice_precise::<true>(count)
+        } else {
+            self.step_slice_precise::<false>(count)
+        }
+    }
+
+    fn step_slice_precise<const DEBUG_HOOKS: bool>(
+        &mut self,
+        count: usize,
+    ) -> Result<CpuStepSlice> {
         self.bus.bus.begin_cpu_slice();
         self.bus.bus.slice_preempted = false;
         self.bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -2091,7 +2125,7 @@ impl M68kMachine {
                 // An interrupt dispatch can land the PC on a breakpoint or
                 // a caught vector; stop before the handler's first
                 // instruction executes.
-                if self.ui_breaks.armed() {
+                if DEBUG_HOOKS && self.ui_breaks.armed() {
                     let pc = self.cpu.pc & self.cpu.address_mask;
                     if let Some(vector) = self.cpu.last_exception_vector.take() {
                         let vector = vector.min(u32::from(u16::MAX)) as u16;
@@ -2113,17 +2147,21 @@ impl M68kMachine {
                 cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(34));
             } else {
                 let dbg_pc_before = self.cpu.pc;
-                let dbg_ipl_before = (self.cpu.get_sr() >> 8) & 7;
-                if self.dbg_pc_on {
+                let dbg_ipl_before = if DEBUG_HOOKS {
+                    (self.cpu.get_sr() >> 8) & 7
+                } else {
+                    0
+                };
+                if DEBUG_HOOKS && self.dbg_pc_on {
                     self.dbg_record_pc();
                 }
-                if self.dbg_crash_on {
+                if DEBUG_HOOKS && self.dbg_crash_on {
                     self.dbg_record_crash_path();
                 }
-                if self.dbg_sched_on {
+                if DEBUG_HOOKS && self.dbg_sched_on {
                     self.debug_check_sched(dbg_pc_before);
                 }
-                let dbg_watch_snapshot = if self.dbg.is_some() {
+                let dbg_watch_snapshot = if DEBUG_HOOKS && self.dbg.is_some() {
                     self.debug_before_step()
                 } else {
                     None
@@ -2138,7 +2176,7 @@ impl M68kMachine {
                     .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
                 {
                     StepResult::Ok { cycles } => {
-                        if self.bus.bus.smc.is_some() {
+                        if DEBUG_HOOKS && self.bus.bus.smc.is_some() {
                             // Mark the instruction just retired as code.
                             // Its own span is the honest answer: the
                             // prefetch queue also reads a word past the
@@ -2161,34 +2199,36 @@ impl M68kMachine {
                         cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(cycles));
                         cpu_cck =
                             cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(cycles));
-                        if let Some(snapshot) = dbg_watch_snapshot {
-                            self.debug_after_step(snapshot);
-                        }
-                        self.debug_check_spren_clear();
-                        self.debug_check_frame_counter();
-                        self.debug_check_memw();
-                        if self.ui_pc_history_enabled {
-                            self.ui_pc_history[self.ui_pc_history_next] = dbg_pc_before;
-                            self.ui_pc_history_next =
-                                (self.ui_pc_history_next + 1) % UI_PC_HISTORY_CAP;
-                            self.ui_pc_history_len =
-                                (self.ui_pc_history_len + 1).min(UI_PC_HISTORY_CAP);
-                        }
-                        if self.ui_trace.is_some() {
-                            self.ui_trace_record(dbg_pc_before);
-                        }
-                        if self.bus.bus.wave_pc_trigger {
-                            self.bus
-                                .bus
-                                .wave_note_pc(dbg_pc_before & self.cpu.address_mask);
-                        }
-                        self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
-                        if self.ui_breaks.armed() {
-                            self.ui_check_breaks_after_step();
-                        }
-                        if self.dbg_pc_on && self.dbg_in_window {
-                            *self.dbg_pc_cyc.entry(dbg_pc_before).or_insert(0) +=
-                                u64::from(positive_cpu_cycles(cycles));
+                        if DEBUG_HOOKS {
+                            if let Some(snapshot) = dbg_watch_snapshot {
+                                self.debug_after_step(snapshot);
+                            }
+                            self.debug_check_spren_clear();
+                            self.debug_check_frame_counter();
+                            self.debug_check_memw();
+                            if self.ui_pc_history_enabled {
+                                self.ui_pc_history[self.ui_pc_history_next] = dbg_pc_before;
+                                self.ui_pc_history_next =
+                                    (self.ui_pc_history_next + 1) % UI_PC_HISTORY_CAP;
+                                self.ui_pc_history_len =
+                                    (self.ui_pc_history_len + 1).min(UI_PC_HISTORY_CAP);
+                            }
+                            if self.ui_trace.is_some() {
+                                self.ui_trace_record(dbg_pc_before);
+                            }
+                            if self.bus.bus.wave_pc_trigger {
+                                self.bus
+                                    .bus
+                                    .wave_note_pc(dbg_pc_before & self.cpu.address_mask);
+                            }
+                            self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
+                            if self.ui_breaks.armed() {
+                                self.ui_check_breaks_after_step();
+                            }
+                            if self.dbg_pc_on && self.dbg_in_window {
+                                *self.dbg_pc_cyc.entry(dbg_pc_before).or_insert(0) +=
+                                    u64::from(positive_cpu_cycles(cycles));
+                            }
                         }
                     }
                     StepResult::Stopped => {
@@ -2221,7 +2261,7 @@ impl M68kMachine {
                     .bus
                     .slice_bus_advanced_cck()
                     .saturating_sub(bus_before);
-                if diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.cpu.pc) {
+                if DEBUG_HOOKS && diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.cpu.pc) {
                     eprintln!(
                         "CPUSYNC boundary pc={:08x} cpu_cck={} bus_cck={} rem_cck={} v={:03x} h={:02x}",
                         self.cpu.pc,
@@ -2239,7 +2279,7 @@ impl M68kMachine {
 
             // Stop the slice at an interactive breakpoint/watch hit; the
             // emulator ends the frame early and the window pauses.
-            if self.ui_stop.is_some() {
+            if DEBUG_HOOKS && self.ui_stop.is_some() {
                 break;
             }
 

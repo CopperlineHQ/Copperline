@@ -1904,12 +1904,22 @@ impl VideoPipelineStats {
     /// evaluations. The recorded duration is later scaled back up by `rate`
     /// in `add_sampled_duration`, so the estimate stays unbiased as long as
     /// every potential sample point calls this exactly once.
+    #[inline(always)]
     fn probe_timing_sample(probes: &mut u64, rate: u128) -> Option<Instant> {
-        let due = probes.is_multiple_of(rate as u64);
-        *probes = probes.wrapping_add(1);
-        due.then(Instant::now)
+        #[cfg(feature = "profile-stats")]
+        {
+            let due = probes.is_multiple_of(rate as u64);
+            *probes = probes.wrapping_add(1);
+            due.then(Instant::now)
+        }
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = (probes, rate);
+            None
+        }
     }
 
+    #[cfg(feature = "profile-stats")]
     fn add_sampled_duration(total: &mut u128, elapsed: Option<(Duration, u128)>) {
         if let Some((elapsed, sample_rate)) = elapsed {
             *total = total.saturating_add(elapsed.as_nanos().saturating_mul(sample_rate));
@@ -2440,16 +2450,33 @@ impl Default for PollStats {
 }
 
 impl PollStats {
+    #[inline(always)]
     pub fn tick_read(&mut self, which: &str, reg: usize) {
-        match which {
-            "cia_a" => self.cia_a[reg & 0xF] += 1,
-            "cia_b" => self.cia_b[reg & 0xF] += 1,
-            _ => {}
+        #[cfg(feature = "profile-stats")]
+        {
+            match which {
+                "cia_a" => self.cia_a[reg & 0xF] += 1,
+                "cia_b" => self.cia_b[reg & 0xF] += 1,
+                _ => {}
+            }
+        }
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = (which, reg);
         }
     }
+
+    #[inline(always)]
     pub fn tick_read_custom(&mut self, off: u16) {
-        if let Some(count) = self.custom.get_mut((off >> 1) as usize) {
-            *count += 1;
+        #[cfg(feature = "profile-stats")]
+        {
+            if let Some(count) = self.custom.get_mut((off >> 1) as usize) {
+                *count += 1;
+            }
+        }
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = off;
         }
     }
     /// Dump the busiest polled registers, for working out what a stuck
@@ -4301,38 +4328,47 @@ impl Bus {
         self.poll_stats = PollStats::default();
     }
 
+    #[inline(always)]
     pub(crate) fn record_video_render_frame(&mut self, timing: VideoRenderFrameTiming) {
-        let stats = &mut self.video_pipeline_stats;
-        stats.render_frames = stats.render_frames.saturating_add(1);
-        stats.render_events = stats.render_events.saturating_add(timing.events);
-        stats.render_control_segments = stats
-            .render_control_segments
-            .saturating_add(timing.control_segments);
-        stats.render_playfield_pixels = stats
-            .render_playfield_pixels
-            .saturating_add(timing.playfield_pixels);
-        stats.render_manual_bpl_segments = stats
-            .render_manual_bpl_segments
-            .saturating_add(timing.manual_bpl_segments);
-        stats.render_sprite_lines = stats
-            .render_sprite_lines
-            .saturating_add(timing.sprite_lines);
-        stats.render_total_nanos = stats.render_total_nanos.saturating_add(timing.total_nanos);
-        stats.render_event_nanos = stats.render_event_nanos.saturating_add(timing.event_nanos);
-        stats.render_background_nanos = stats
-            .render_background_nanos
-            .saturating_add(timing.background_nanos);
-        stats.render_playfield_nanos = stats
-            .render_playfield_nanos
-            .saturating_add(timing.playfield_nanos);
-        stats.render_manual_bpl_nanos = stats
-            .render_manual_bpl_nanos
-            .saturating_add(timing.manual_bpl_nanos);
-        stats.render_sprite_nanos = stats
-            .render_sprite_nanos
-            .saturating_add(timing.sprite_nanos);
+        #[cfg(feature = "profile-stats")]
+        {
+            let stats = &mut self.video_pipeline_stats;
+            stats.render_frames = stats.render_frames.saturating_add(1);
+            stats.render_events = stats.render_events.saturating_add(timing.events);
+            stats.render_control_segments = stats
+                .render_control_segments
+                .saturating_add(timing.control_segments);
+            stats.render_playfield_pixels = stats
+                .render_playfield_pixels
+                .saturating_add(timing.playfield_pixels);
+            stats.render_manual_bpl_segments = stats
+                .render_manual_bpl_segments
+                .saturating_add(timing.manual_bpl_segments);
+            stats.render_sprite_lines = stats
+                .render_sprite_lines
+                .saturating_add(timing.sprite_lines);
+            stats.render_total_nanos = stats.render_total_nanos.saturating_add(timing.total_nanos);
+            stats.render_event_nanos = stats.render_event_nanos.saturating_add(timing.event_nanos);
+            stats.render_background_nanos = stats
+                .render_background_nanos
+                .saturating_add(timing.background_nanos);
+            stats.render_playfield_nanos = stats
+                .render_playfield_nanos
+                .saturating_add(timing.playfield_nanos);
+            stats.render_manual_bpl_nanos = stats
+                .render_manual_bpl_nanos
+                .saturating_add(timing.manual_bpl_nanos);
+            stats.render_sprite_nanos = stats
+                .render_sprite_nanos
+                .saturating_add(timing.sprite_nanos);
+        }
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = timing;
+        }
     }
 
+    #[inline(always)]
     fn record_bitplane_fetch_timing(
         &mut self,
         slots: usize,
@@ -4340,39 +4376,55 @@ impl Bus {
         rows_completed: usize,
         elapsed: Option<(Duration, u128)>,
     ) {
-        if slots == 0 && rows_started == 0 && rows_completed == 0 {
-            return;
+        #[cfg(feature = "profile-stats")]
+        {
+            if slots == 0 && rows_started == 0 && rows_completed == 0 {
+                return;
+            }
+            let stats = &mut self.video_pipeline_stats;
+            stats.bitplane_fetch_calls = stats.bitplane_fetch_calls.saturating_add(1);
+            stats.bitplane_fetch_slots = stats.bitplane_fetch_slots.saturating_add(slots as u64);
+            stats.bitplane_fetch_rows_started = stats
+                .bitplane_fetch_rows_started
+                .saturating_add(rows_started as u64);
+            stats.bitplane_fetch_rows_completed = stats
+                .bitplane_fetch_rows_completed
+                .saturating_add(rows_completed as u64);
+            VideoPipelineStats::add_sampled_duration(&mut stats.bitplane_fetch_nanos, elapsed);
         }
-        let stats = &mut self.video_pipeline_stats;
-        stats.bitplane_fetch_calls = stats.bitplane_fetch_calls.saturating_add(1);
-        stats.bitplane_fetch_slots = stats.bitplane_fetch_slots.saturating_add(slots as u64);
-        stats.bitplane_fetch_rows_started = stats
-            .bitplane_fetch_rows_started
-            .saturating_add(rows_started as u64);
-        stats.bitplane_fetch_rows_completed = stats
-            .bitplane_fetch_rows_completed
-            .saturating_add(rows_completed as u64);
-        VideoPipelineStats::add_sampled_duration(&mut stats.bitplane_fetch_nanos, elapsed);
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = (slots, rows_started, rows_completed, elapsed);
+        }
     }
 
+    #[inline(always)]
     fn record_sprite_fetch_timing(
         &mut self,
         pair_slots: usize,
         lines: usize,
         elapsed: Option<(Duration, u128)>,
     ) {
-        if pair_slots == 0 {
-            return;
+        #[cfg(feature = "profile-stats")]
+        {
+            if pair_slots == 0 {
+                return;
+            }
+            let stats = &mut self.video_pipeline_stats;
+            stats.sprite_fetch_calls = stats.sprite_fetch_calls.saturating_add(1);
+            stats.sprite_fetch_pair_slots = stats
+                .sprite_fetch_pair_slots
+                .saturating_add(pair_slots as u64);
+            stats.sprite_fetch_lines = stats.sprite_fetch_lines.saturating_add(lines as u64);
+            VideoPipelineStats::add_sampled_duration(&mut stats.sprite_fetch_nanos, elapsed);
         }
-        let stats = &mut self.video_pipeline_stats;
-        stats.sprite_fetch_calls = stats.sprite_fetch_calls.saturating_add(1);
-        stats.sprite_fetch_pair_slots = stats
-            .sprite_fetch_pair_slots
-            .saturating_add(pair_slots as u64);
-        stats.sprite_fetch_lines = stats.sprite_fetch_lines.saturating_add(lines as u64);
-        VideoPipelineStats::add_sampled_duration(&mut stats.sprite_fetch_nanos, elapsed);
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = (pair_slots, lines, elapsed);
+        }
     }
 
+    #[inline(always)]
     fn record_live_collision_timing(
         &mut self,
         pixels: u64,
@@ -4380,19 +4432,26 @@ impl Bus {
         full_line_scan: bool,
         elapsed: Option<(Duration, u128)>,
     ) {
-        if pixels == 0 {
-            return;
+        #[cfg(feature = "profile-stats")]
+        {
+            if pixels == 0 {
+                return;
+            }
+            let stats = &mut self.video_pipeline_stats;
+            stats.collision_calls = stats.collision_calls.saturating_add(1);
+            stats.collision_pixels = stats.collision_pixels.saturating_add(pixels);
+            stats.collision_control_segments = stats
+                .collision_control_segments
+                .saturating_add(control_segments as u64);
+            if full_line_scan {
+                stats.collision_full_line_scans = stats.collision_full_line_scans.saturating_add(1);
+            }
+            VideoPipelineStats::add_sampled_duration(&mut stats.collision_nanos, elapsed);
         }
-        let stats = &mut self.video_pipeline_stats;
-        stats.collision_calls = stats.collision_calls.saturating_add(1);
-        stats.collision_pixels = stats.collision_pixels.saturating_add(pixels);
-        stats.collision_control_segments = stats
-            .collision_control_segments
-            .saturating_add(control_segments as u64);
-        if full_line_scan {
-            stats.collision_full_line_scans = stats.collision_full_line_scans.saturating_add(1);
+        #[cfg(not(feature = "profile-stats"))]
+        {
+            let _ = (pixels, control_segments, full_line_scan, elapsed);
         }
-        VideoPipelineStats::add_sampled_duration(&mut stats.collision_nanos, elapsed);
     }
 
     fn ensure_current_collision_control_index(&mut self) {
