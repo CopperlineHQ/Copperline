@@ -97,11 +97,11 @@ pub(super) struct BezelUniforms {
     /// zw size.
     opening: [f32; 4],
     /// x: 1 = frame-only (leave the opening interior to the preset that
-    /// painted it), 0 = full. y: the active preset's face curvature,
-    /// faded in with its strength -- the chamfer follows the bowed glass
-    /// contour it implies, 0 = flat rounded opening. z: the radius that
-    /// preset clips its face to, faded the same way, which the aperture
-    /// opens to when it is the wider. w: reserved.
+    /// painted it), 0 = full. y: the active preset's face curvature, raw
+    /// -- the chamfer follows the bowed glass contour it implies, 0 = flat
+    /// rounded opening. z: the radius that preset clips its face to, faded
+    /// by strength as the preset fades it, which the aperture opens to
+    /// when it is the wider. w: that strength, to fade the bow by.
     params: [f32; 4],
 }
 
@@ -164,22 +164,29 @@ pub(super) fn uniforms_from(
         src_rect: crt.src_rect,
         size: crt.size,
         opening: [(ox - vx) / w, (oy - vy) / h, ow / w, oh / h],
-        // The preset's bowed face rides along so the moulding can seat
-        // it: its curvature, and the radius it clips its corners to.
-        // `crt.wgsl` fades both in with strength, so both are faded here
-        // too -- at half strength the moulding must follow a half-bowed
-        // face, not the full one. Curvature is non-zero for exactly the
-        // one preset that clips a face at all; a flat preset, or none,
-        // carries zeroes and leaves the aperture's own corners to govern.
+        // The preset's bowed face rides along so the moulding can seat it
+        // at any strength: its curvature, the radius it clips its corners
+        // to, and the strength itself.
+        //
+        // The two fade differently, so both go over as the preset states
+        // them. `crt.wgsl` fades its corner radius linearly, so that one
+        // arrives pre-faded; it fades the bow by mixing *coordinates*
+        // (`mix(uv, warp(uv, k), strength)`), which is not the same curve
+        // as warping by a faded `k` -- `warp` is rational in `k` -- so the
+        // curvature goes over raw and each bezel source mixes the same way.
+        //
+        // Curvature is non-zero for exactly the one preset that clips a
+        // face at all; a flat preset, or none, carries zeroes and leaves
+        // the aperture's own corners to govern.
         params: [
             if frame_only { 1.0 } else { 0.0 },
-            crt.params[3] * strength,
+            crt.params[3],
             if crt.params[3] > 0.0 {
                 crt_shader::FACE_CORNER_RADIUS * strength
             } else {
                 0.0
             },
-            0.0,
+            strength,
         ],
     }
 }
@@ -331,7 +338,7 @@ mod tests {
 
     #[test]
     fn every_bezel_source_validates() {
-        for style in BezelStyle::MENU_ORDER {
+        for style in drawn_styles() {
             if let Err(e) = crt_shader::validate_wgsl_source(source(style)) {
                 panic!("{} bezel shader failed validation:\n{e}", style.label());
             }
@@ -342,7 +349,7 @@ mod tests {
     /// markers, or the contract test would be expected to cover it.
     #[test]
     fn no_bezel_source_is_a_contract_preset() {
-        for style in BezelStyle::MENU_ORDER {
+        for style in drawn_styles() {
             assert!(
                 !source(style).contains("--- begin shared contract ---"),
                 "{} carries the preset contract",
@@ -479,6 +486,14 @@ mod tests {
     }
 
     // --- offscreen render (needs a GPU adapter) -------------------------
+
+    /// The styles that actually draw a frame, which is what the source
+    /// contracts below are about. [`BezelStyle::None`] draws nothing and
+    /// borrows a source to keep [`source`] total, so including it would
+    /// check one file twice and name it "off" when it failed.
+    fn drawn_styles() -> impl Iterator<Item = BezelStyle> {
+        BezelStyle::MENU_ORDER.into_iter().filter(|s| s.is_on())
+    }
 
     /// A scalar constant as a shader source states it. Parsed rather than
     /// pinned to an exact substring, so only semantic drift fails a test,
@@ -662,6 +677,7 @@ mod tests {
         src: &wgpu::Texture,
         style: BezelStyle,
         crt_kind: Option<ShaderKind>,
+        strength: f32,
     ) -> (Vec<[u8; 4]>, u32, u32) {
         let dim = TEX * SCALE;
         let rows = DISPLAY_ROWS * SCALE;
@@ -705,7 +721,7 @@ mod tests {
         }));
         let (crt_uniforms, viewport) = crt_shader::uniforms_for(
             crt_kind.unwrap_or(ShaderKind::None),
-            1.0,
+            strength,
             (0, 0, dim, dim),
             DISPLAY_ROWS as usize,
             TEX as usize,
@@ -778,7 +794,7 @@ mod tests {
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None, 1.0);
         for y in 0..rows {
             for x in 0..dim {
                 let p = at(&px, dim, x, y);
@@ -808,7 +824,7 @@ mod tests {
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None, 1.0);
 
         // Centre of the opening: the flat grey source, resampled 1:1 in
         // colour terms.
@@ -874,7 +890,7 @@ mod tests {
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None, 1.0);
 
         // The chin as the shader lays it out: the model badge at 0.068 of
         // the cabinet width, the logotype centred at 0.47, both on the
@@ -937,6 +953,7 @@ mod tests {
             &src,
             BezelStyle::Model1084,
             Some(ShaderKind::Scanlines),
+            1.0,
         );
 
         let (ox, oy, ow, oh) =
@@ -988,6 +1005,15 @@ mod tests {
     /// and an all-black source.
     #[test]
     fn the_frame_only_join_does_not_leak_the_picture() {
+        // Full strength, and half: the moulding has to seat the preset's
+        // face at every strength, and the bow and the face's corner radius
+        // fade by different curves on the way there.
+        for strength in [1.0, 0.5] {
+            frame_only_join_is_source_independent(strength);
+        }
+    }
+
+    fn frame_only_join_is_source_independent(strength: f32) {
         let Some(gpu) = gpu() else {
             return;
         };
@@ -1001,6 +1027,7 @@ mod tests {
             &src,
             BezelStyle::Model1084,
             Some(ShaderKind::Crt),
+            strength,
         );
         let dark = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &black);
         let (px_dark, dim_dark, rows_dark) = render_bezel(
@@ -1009,6 +1036,7 @@ mod tests {
             &dark,
             BezelStyle::Model1084,
             Some(ShaderKind::Crt),
+            strength,
         );
         assert_eq!((dim, rows), (dim_dark, rows_dark));
 
@@ -1020,7 +1048,7 @@ mod tests {
             opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
         let k = crt_shader::uniforms_for(
             ShaderKind::Crt,
-            1.0,
+            strength,
             (0, 0, dim, rows),
             rows as usize,
             rows as usize,
@@ -1031,15 +1059,19 @@ mod tests {
         .params[3];
         let (hx, hy) = (ow * 0.5, oh * 0.5);
         let fa = hy / hx;
-        let rc = effective_aperture(BezelStyle::Model1084);
+        // The aperture opens to the preset's faded face when that is the
+        // wider, exactly as the shader does.
+        let rc = shader_constant(M1084_WGSL, "APERTURE_RADIUS", "bezel_1084.wgsl")
+            .max(crt_shader::FACE_CORNER_RADIUS * strength);
         let opening_d = |x: u32, y: u32| {
             let cx = (x as f32 + 0.5 - ox - hx) / hx;
             let cy = (y as f32 + 0.5 - oy - hy) / hy;
             let q = k * 0.25;
             let r2 = cx * cx + cy * cy * fa * fa;
             let bow = 1.0 + q * r2;
-            let wx = cx * bow / (1.0 + q);
-            let wy = cy * bow / (1.0 + q * fa * fa) * fa;
+            // Faded by mixing coordinates, as the shader and crt.wgsl do.
+            let wx = cx + (cx * bow / (1.0 + q) - cx) * strength;
+            let wy = (cy + (cy * bow / (1.0 + q * fa * fa) - cy) * strength) * fa;
             let qx = wx.abs() - 1.0 + rc;
             let qy = wy.abs() - fa + rc;
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
@@ -1075,6 +1107,54 @@ mod tests {
         );
     }
 
+    /// WGSL leaves `smoothstep` undefined when the first edge is not below
+    /// the second, and backends disagree there, so a reversed interval is a
+    /// portability bug that looks fine on the machine it was written on.
+    /// Every edge pair a source states in comparable terms must ascend.
+    #[test]
+    fn every_smoothstep_interval_ascends() {
+        /// An edge as a coefficient and the symbol it scales, so
+        /// `0.26 * h` and `0.10 * h` can be compared and a pair in
+        /// unrelated terms can be skipped rather than guessed at.
+        fn edge(text: &str) -> Option<(f32, &str)> {
+            let (num, sym) = match text.split_once('*') {
+                Some((n, s)) => (n.trim(), s.trim()),
+                None => (text.trim(), ""),
+            };
+            Some((num.parse().ok()?, sym))
+        }
+        for style in drawn_styles() {
+            let src = source(style);
+            for (at, _) in src.match_indices("smoothstep(") {
+                let open = at + "smoothstep(".len();
+                let rest = &src[open..];
+                // Split the call's own arguments: the edges are the first
+                // two, and neither contains a nested call in these sources.
+                let end = rest.find(')').expect("terminated smoothstep");
+                let args: Vec<&str> = rest[..end].split(',').collect();
+                assert!(
+                    args.len() >= 3,
+                    "{}: smoothstep needs 3 arguments",
+                    style.label()
+                );
+                let (Some((lo, lo_sym)), Some((hi, hi_sym))) = (edge(args[0]), edge(args[1]))
+                else {
+                    continue;
+                };
+                if lo_sym != hi_sym {
+                    continue;
+                }
+                assert!(
+                    lo < hi,
+                    "{}: smoothstep({}, {}, ..) is a reversed interval",
+                    style.label(),
+                    args[0].trim(),
+                    args[1].trim()
+                );
+            }
+        }
+    }
+
     /// The moulding must cover the preset's face: `crt.wgsl` states the
     /// radius it clips that face to and `crt_shader` mirrors it for the
     /// bezel to open to, so the two must agree -- and the bezel's own
@@ -1097,7 +1177,7 @@ mod tests {
         // off-face black showing in the opening's corners, so every source
         // takes the wider of the two -- and every source must therefore
         // state an aperture for that `max()` to reach.
-        for style in BezelStyle::MENU_ORDER {
+        for style in drawn_styles() {
             let src = source(style);
             let aperture = shader_constant(src, "APERTURE_RADIUS", style.label());
             assert!(
@@ -1108,6 +1188,15 @@ mod tests {
             assert!(
                 src.contains("max(APERTURE_RADIUS, u.params.z)"),
                 "{}: does not open its aperture to the preset's face",
+                style.label()
+            );
+            // The bow is faded by mixing coordinates, as crt.wgsl fades
+            // it. Warping by a faded curvature is a different curve --
+            // `warp` is rational in the curvature -- so a source that
+            // pre-fades it drifts off the face between strengths.
+            assert!(
+                src.contains("mix(cn, cn * (1.0 + q * r2) / m, u.params.w)"),
+                "{}: does not fade the bow the way crt.wgsl does",
                 style.label()
             );
             assert!(

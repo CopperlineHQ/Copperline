@@ -38,13 +38,13 @@ struct BezelUniforms {
     opening: vec4<f32>,
     // x: 1 = frame-only (a CRT preset has already painted the opening;
     // leave its interior untouched), 0 = full (paint the picture too).
-    // y: the active preset's face curvature, faded in with its strength;
-    // the chamfer follows the bowed glass contour it implies, and 0 keeps
-    // the flat rounded opening.
-    // z: the corner radius that preset clips its face to, faded the same
-    // way; the aperture opens to at least this so the moulding covers the
-    // face's own edge. 0 for a preset that does not clip one, or none.
-    // w: reserved, zero.
+    // y: the active preset's face curvature, raw; the chamfer follows the
+    // bowed glass contour it implies, and 0 keeps the flat rounded opening.
+    // z: the corner radius that preset clips its face to, already faded by
+    // its strength (crt.wgsl fades that one linearly); the aperture opens
+    // to at least this so the moulding covers the face's own edge. 0 for a
+    // preset that does not clip one, or none.
+    // w: that strength, which the bow is faded by here.
     params: vec4<f32>,
 };
 
@@ -249,7 +249,7 @@ fn copper(t: f32) -> vec3<f32> {
     let mid = vec3<f32>(0.2519, 0.0578, 0.0168);
     let lo = vec3<f32>(0.0759, 0.0168, 0.0048);
     if t < 0.40 {
-        return mix(top, sheen, smoothstep(0.40, 0.24, t));
+        return mix(top, sheen, 1.0 - smoothstep(0.24, 0.40, t));
     }
     if t < 0.60 {
         return mix(sheen, mid, smoothstep(0.40, 0.60, t));
@@ -453,7 +453,7 @@ fn chin(
     // edge catching light just below it.
     let below = px.y - top;
     col *= mix(0.46, 1.0, smoothstep(0.0, 0.085 * h, below));
-    col *= 1.0 + 0.07 * smoothstep(0.26 * h, 0.10 * h, below);
+    col *= 1.0 + 0.07 * (1.0 - smoothstep(0.10 * h, 0.26 * h, below));
 
     // Vertical joints: the real front is moulded in sections. The power
     // panel's outer joint meets the tube's own right edge, so the two read
@@ -590,13 +590,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // half-width turns source half-width units into approximate pixels;
     // the warp's local scale varies a few percent around the perimeter, as
     // a real moulding gap does.
+    // Faded by mixing coordinates, exactly as crt.wgsl fades its own warp
+    // -- warping by a faded curvature is a different curve, so the two
+    // would drift apart between strengths 0 and 1.
     let k = u.params.y;
     let fa = o_half.y / max(o_half.x, 1.0);
     let cn = p / o_half;
     let q = k * 0.25;
     let r2 = cn.x * cn.x + cn.y * cn.y * fa * fa;
     let m = vec2<f32>(1.0 + q, 1.0 + q * fa * fa);
-    let wc = cn * (1.0 + q * r2) / m;
+    let wc = mix(cn, cn * (1.0 + q * r2) / m, u.params.w);
     let fh = vec2<f32>(1.0, fa);
     let gp = wc * fh;
     let r_aperture = max(APERTURE_RADIUS, u.params.z);
@@ -658,7 +661,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         // moulding drops into: a fine dark line, with the cabinet's own
         // edge catching light just outside it.
         frame = case_plastic * mix(0.50, 1.0, smoothstep(0.0, 1.8, d_moulding - 0.6));
-        frame *= 1.0 + 0.06 * smoothstep(4.0, 1.8, d_moulding);
+        frame *= 1.0 + 0.06 * (1.0 - smoothstep(1.8, 4.0, d_moulding));
     } else {
         // Crossing the moulding is measured as a fraction, glass (0) to
         // gap (1), so the short run below the tube compresses the way the

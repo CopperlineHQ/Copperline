@@ -35,13 +35,13 @@ struct BezelUniforms {
     opening: vec4<f32>,
     // x: 1 = frame-only (a CRT preset has already painted the opening;
     // leave its interior untouched), 0 = full (paint the picture too).
-    // y: the active preset's face curvature, faded in with its strength;
-    // the insert follows the bowed glass contour it implies, and 0 keeps
-    // the flat rounded opening.
-    // z: the corner radius that preset clips its face to, faded the same
-    // way; the opening takes at least this so the plastic covers the
-    // face's own edge. 0 for a preset that does not clip one, or none.
-    // w: reserved, zero.
+    // y: the active preset's face curvature, raw; the insert follows the
+    // bowed glass contour it implies, and 0 keeps the flat rounded opening.
+    // z: the corner radius that preset clips its face to, already faded by
+    // its strength (crt.wgsl fades that one linearly); the opening takes at
+    // least this so the plastic covers the face's own edge. 0 for a preset
+    // that does not clip one, or none.
+    // w: that strength, which the bow is faded by here.
     params: vec4<f32>,
 };
 
@@ -190,13 +190,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // into approximate pixels for the trim widths; the warp's local
     // scale varies a few percent around the perimeter, as a real
     // moulding gap does.
+    // Faded by mixing coordinates, exactly as crt.wgsl fades its own warp
+    // -- warping by a faded curvature is a different curve, so the two
+    // would drift apart between strengths 0 and 1.
     let k = u.params.y;
     let fa = o_half.y / max(o_half.x, 1.0);
     let cn = p / o_half;
     let q = k * 0.25;
     let r2 = cn.x * cn.x + cn.y * cn.y * fa * fa;
     let m = vec2<f32>(1.0 + q, 1.0 + q * fa * fa);
-    let wc = cn * (1.0 + q * r2) / m;
+    let wc = mix(cn, cn * (1.0 + q * r2) / m, u.params.w);
     let fh = vec2<f32>(1.0, fa);
     let d = rounded_rect(wc * fh, fh, max(APERTURE_RADIUS, u.params.z)) * o_half.x;
     let aa = max(fwidth(d), 1e-4);
