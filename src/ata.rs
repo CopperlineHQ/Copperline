@@ -701,21 +701,6 @@ impl AtaBus {
             u32::from(self.sector_count)
         };
         match cmd {
-            // EXECUTE DEVICE DIAGNOSTIC. Both devices self-test and device 0
-            // reports for the bus: diagnostic code 0x01 in the error register
-            // ("device 0 passed"), the ATA signature in the task file, and
-            // the completion interrupt. AROS's ata.device probes every bus
-            // with this before it will believe a drive is there, so aborting
-            // it reads as an empty cable however present the drive is.
-            0x90 => {
-                self.error = 0x01;
-                self.sector_count = 0x01;
-                self.sector_number = 0x01;
-                self.cyl_low = 0x00;
-                self.cyl_high = 0x00;
-                self.drive_head = 0x00;
-                self.raise_irq();
-            }
             // IDENTIFY DEVICE
             0xEC => {
                 self.buf = self.drive().map(|d| d.identify_block()).unwrap_or_default();

@@ -5,12 +5,10 @@
 //! $DA8000-$DAA000, and empty-slot PCMCIA status.
 //!
 //! Decode and register layout follow the Commodore schematics as captured by
-//! the Linux `gayle.c` IDE driver: the IDE task file has a 4-byte stride
-//! with byte registers on the even (D15-D8) half, and the control block one
-//! A12 page above it. A13 is not decoded, so the pair of blocks appears at
-//! $DA0000/$DA1018 and again at $DA2000/$DA3018 -- Kickstart's scsi.device
-//! drives the second image, AROS's ata.device the first, and hardware
-//! answers both. None of this is on the chip bus; the CPU reaches it through
+//! the Linux `gayle.c` IDE driver and the ROM scsi.device: the IDE task
+//! file lives at $DA2000 with a 4-byte stride (byte registers on the odd
+//! word half, offset base+4*reg+2), and the control block register at
+//! base+$101A. None of this is on the chip bus; the CPU reaches it through
 //! `cpu_external_access`.
 //!
 //! The drives, the task file, and the command engine are the shared ATA core
@@ -221,21 +219,14 @@ impl Gayle {
         }
     }
 
-    /// A600/A1200 IDE decode: task file with a 4-byte stride, byte registers
-    /// on the even (D15-D8) byte, the 16-bit data port at the base, and the
-    /// control block one A12 page up (+$1018).
-    ///
-    /// Gayle does not decode A13 inside this window, so the pair of blocks
-    /// appears at $DA0000/$DA1018 and again at $DA2000/$DA3018. Both images
-    /// are used in the wild: Kickstart's scsi.device drives the $DA2000 one
-    /// (verified against ROM 40.063 boot probes), AROS's ata.device the
-    /// $DA0000 one -- its drive-presence probe writes the sector-number and
-    /// cylinder registers there and reads them back, and a machine answering
-    /// only at $DA2000 convinces it the bus is empty.
+    /// A600/A1200 IDE decode, as the ROM scsi.device drives it (verified
+    /// against ROM 40.063 boot probes): task file at $DA2000 with a 4-byte
+    /// stride, byte registers on the even (D15-D8) byte, the 16-bit data
+    /// port at $DA2000, and the control block one A12 page up ($DA3018).
     fn ide_reg(addr: u32) -> Option<IdeReg> {
-        match addr & 0x5FFF {
-            off @ 0x0000..=0x001F => task_file_reg(off),
-            0x1018 | 0x101A => Some(IdeReg::AltStatusDevCtl),
+        match addr & 0x7FFF {
+            off @ 0x2000..=0x201F => task_file_reg(off - 0x2000),
+            0x3018 | 0x301A => Some(IdeReg::AltStatusDevCtl),
             _ => None,
         }
     }
@@ -418,38 +409,6 @@ mod tests {
         a1200.write(GAYLE_ID_REG, 1, 0);
         let bits: Vec<u32> = (0..8).map(|_| a1200.read(GAYLE_ID_REG, 1)).collect();
         assert_eq!(bits, [0x80, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80]);
-    }
-
-    /// The $DA0000 image of the task file answers exactly as the $DA2000 one:
-    /// Gayle leaves A13 undecoded, and AROS's ata.device probes for a drive
-    /// there -- writing the scratch registers and reading them back -- where
-    /// Kickstart's scsi.device uses the $DA2000 image. A machine answering
-    /// only at one of them loses the other OS's disks.
-    #[test]
-    fn the_task_file_answers_at_both_of_gayle_s_images() {
-        let (mut g, path) = gayle_with_drive(16 * 32 * 2);
-        // AROS's presence probe, at the base image.
-        g.write(0x00DA_0018, 1, 0xE0);
-        g.write(0x00DA_000C, 1, 0x55);
-        g.write(0x00DA_0010, 1, 0xAA);
-        assert_eq!(g.read(0x00DA_000C, 1), 0x55);
-        assert_eq!(g.read(0x00DA_0010, 1), 0xAA);
-        assert_eq!(
-            g.read(0x00DA_001C, 1) as u8,
-            ST_DRDY | ST_DSC,
-            "a present master answers ready at the base image"
-        );
-        // What one image writes, the other reads: they are the same register.
-        g.write(0x00DA_200C, 1, 0x77);
-        assert_eq!(g.read(0x00DA_000C, 1), 0x77);
-        // And the diagnostic the probe ends with passes: code 0x01 in the
-        // error register, no ERR in status.
-        g.write(0x00DA_001C, 1, 0x90);
-        assert_eq!(g.read(0x00DA_001C, 1) as u8, ST_DRDY | ST_DSC);
-        assert_eq!(g.read(0x00DA_0004, 1), 0x01, "device 0 passed");
-        // And the control block aliases the same way ($DA1018 / $DA3018).
-        assert_eq!(g.read(0x00DA_1018, 1), g.read(0x00DA_3018, 1));
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
