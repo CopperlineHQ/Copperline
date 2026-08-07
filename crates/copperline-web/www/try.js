@@ -502,19 +502,73 @@ let audioBuildGeneration = 0;
 // rebuilds while the policy holds contexts suspended cannot stack
 // listeners, and firing resumes whatever stack is current rather than
 // the one that happened to be live when the listener was armed.
+//
+// The triggers are pointerup and keydown, never pointerdown, because
+// of how user activation is granted (HTML spec, "activation triggering
+// input event"): a mouse grants it on the down, but a touch grants it
+// at the END of the gesture - a finger's pointerdown carries no
+// activation, so a resume issued there is refused. With the old
+// once-listeners that single refusal also disarmed the unlock, which
+// left an iPhone permanently silent after an iOS audio-session
+// interruption while every desktop test passed (mice activate on the
+// down). By pointerup both input kinds hold activation. The listeners
+// now stay armed until a resume verifiably lands, so a refused attempt
+// never burns the arming.
+//
+// If an in-gesture resume settles with the context still not running,
+// that context is beyond resuming (an iOS session wedge), and the next
+// gesture escalates: it rebuilds the whole stack inside its activation
+// window - the same shape as the boot click, which starts audio
+// reliably even right after an interruption.
+let audioUnlockRebuild = false;
+
 function audioUnlock() {
-  window.removeEventListener('pointerdown', audioUnlock);
-  window.removeEventListener('keydown', audioUnlock);
-  audioCtx?.resume().catch(() => {});
+  // The pause contract holds on this path too: a paused machine's
+  // context stays suspended, and unpausing owns the resume. Returning
+  // WITHOUT disarming keeps the ladder ready for the first unpaused
+  // gesture - which cannot be the unpause tap itself (its pointerup
+  // precedes the click that clears the flag), but setPaused resumes
+  // inside that same activation window, and a resume it cannot land is
+  // exactly what the still-armed ladder is for.
+  if (paused) return;
+  if (!audioCtx || audioUnlockRebuild) {
+    audioUnlockRebuild = false;
+    buildAudioStack(false).catch((e) => console.error('audio rebuild', e));
+    return;
+  }
+  const ctx = audioCtx;
+  ctx.resume().then(
+    () => {
+      if (audioCtx !== ctx) return; // superseded while settling
+      if (ctx.state === 'running') disarmAudioUnlock();
+      // A suspended reading here can be the Pause tap's own doing: its
+      // pointerup fires this handler while still unpaused, and the
+      // click's suspend lands before the resume settles. That is the
+      // pause contract at work, not a context beyond resuming, so it
+      // must not arm the escalation.
+      else if (!paused) audioUnlockRebuild = true;
+    },
+    () => {
+      if (audioCtx === ctx && !paused) audioUnlockRebuild = true;
+    },
+  );
 }
 
 function armAudioUnlock() {
-  window.addEventListener('pointerdown', audioUnlock);
+  window.addEventListener('pointerup', audioUnlock);
   window.addEventListener('keydown', audioUnlock);
+}
+
+function disarmAudioUnlock() {
+  window.removeEventListener('pointerup', audioUnlock);
+  window.removeEventListener('keydown', audioUnlock);
 }
 
 async function buildAudioStack(suspendForPause) {
   const gen = ++audioBuildGeneration;
+  // A fresh build restarts the unlock ladder from its first rung: the
+  // escalation verdict belonged to the context being replaced.
+  audioUnlockRebuild = false;
   if (audioCtx) {
     audioNode?.disconnect();
     // Deliberately not awaited: on iOS the context being replaced may be
@@ -596,8 +650,16 @@ async function buildAudioStack(suspendForPause) {
   // Autoplay policies can leave the context suspended, and resume() may
   // not settle without a qualifying gesture; never let that block the
   // boot. Video runs regardless, and the next real interaction unlocks
-  // the sound.
-  ctx.resume().catch(() => {});
+  // the sound. A resume that verifiably lands clears any armed unlock;
+  // the synchronous state check below arms it in the meantime (the
+  // resume is still settling then, and a no-op unlock firing on a
+  // context that made it on its own is harmless).
+  ctx
+    .resume()
+    .then(() => {
+      if (audioCtx === ctx && ctx.state === 'running') disarmAudioUnlock();
+    })
+    .catch(() => {});
   if (ctx.state !== 'running') armAudioUnlock();
 }
 
