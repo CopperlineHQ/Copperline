@@ -17,8 +17,8 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-07-31 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit c04970801d,
+Built from source on 2026-08-07 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit f51ea232b1,
 with no local patches. Fixes Copperline contributed or depends on, all
 in master:
 
@@ -51,6 +51,18 @@ in master:
   BltBitMap path, pattern/template fill masks, blitter edge- and
   write-mask handling in the Amiga driver, and a blitter-matching line
   tie-break.
+- the follow-up batch merged 2026-08-01 to 2026-08-06: further
+  graphics.library blit semantics (the minterm applied over pens rather
+  than resolved colours, the plane mask applied to source pens, FRST_DOT
+  polyline complement handling, COMPLEMENT JAM2 pattern fills, bitmaps
+  freed with their allocated size), amigavideo taking BltPattern's word
+  masks from the mask and flushing the pixel cache before plane
+  readback, three exec fixes (task registration without preempting the
+  creator, named callers in bad-free alerts, C runtime taken from the
+  static linklib), a con-handler rework (served over a device rather
+  than a console window, clean ACTION_DIE shutdown, no requesters
+  without a window), DOS treating a short read as a failure, afs/fat
+  filesystem hardening, and a new Paula serial hidd for m68k-amiga.
 
 Master also includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
