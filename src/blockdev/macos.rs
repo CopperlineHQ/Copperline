@@ -774,6 +774,14 @@ impl Drop for Held {
 /// cost one dialog between them -- though while [`authorize_open`] is
 /// dormant (see its docs), `authopen` asks per disk itself.
 pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
+    // Validate every path before unmounting the first volume. A later path
+    // failure must not strand earlier authorization candidates unmounted.
+    for (device, _) in wanted {
+        device
+            .path
+            .to_str()
+            .with_context(|| format!("device path is not UTF-8: {}", device.path.display()))?;
+    }
     let mut taken = Vec::new();
     let mut ask: Vec<(HostDevice, bool, bool)> = Vec::new();
     for (device, write) in wanted {
@@ -791,7 +799,7 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
                 return Err(error);
             }
         }
-        let path = device.path.to_str().context("device path is not UTF-8")?;
+        let path = device.path.to_str().expect("device paths validated above");
         match direct_open(path, open_flags(*write)) {
             Ok(file) => taken.push((
                 device.id.clone(),
@@ -806,6 +814,11 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
                 if !denied {
                     if remount {
                         remount_whole_disk(&device.id);
+                    }
+                    for (pending, _, should_remount) in &ask {
+                        if *should_remount {
+                            remount_whole_disk(&pending.id);
+                        }
                     }
                     return Err(error).with_context(|| format!("opening {path}"));
                 }
@@ -828,7 +841,7 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
             .collect();
         let authorized = authorize_open(&request);
         for (device, write, remount) in &ask {
-            let path = device.path.to_str().context("device path is not UTF-8")?;
+            let path = device.path.to_str().expect("device paths validated above");
             let file = match authopen(path, open_flags(*write), authorized.as_ref())
                 .with_context(|| format!("opening {path} with authorization"))
             {

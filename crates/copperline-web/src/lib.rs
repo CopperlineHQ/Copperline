@@ -459,7 +459,8 @@ impl WebEmu {
     /// the shared present_common helpers: render the completed hardware
     /// frame, post-process, deinterlace, and copy out the woven rows.
     fn render_completed_frame(&mut self) {
-        self.render_completed_frame_elapsed(1);
+        let elapsed_fields = elapsed_fields_for_immediate_render(&mut self.deferred_fields);
+        self.render_completed_frame_elapsed(elapsed_fields);
     }
 
     fn render_completed_frame_elapsed(&mut self, elapsed_fields: u32) {
@@ -949,8 +950,10 @@ impl WebEmu {
         // The reuse detector's snapshot belongs to the replaced machine;
         // the repaint below must render, not match against it.
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
-        self.render_completed_frame();
+        // Deferred fields belong to the replaced timeline and must not age
+        // the restored frame's presentation history.
         self.deferred_fields = 0;
+        self.render_completed_frame();
         Ok(())
     }
 
@@ -1091,5 +1094,26 @@ impl WebEmu {
 
     pub fn emulated_seconds(&self) -> f64 {
         self.emu.bus().emulated_seconds()
+    }
+}
+
+/// Account for every field skipped by render stride exactly once when a
+/// presentation-setting change forces an immediate repaint. The repaint
+/// steps no new field, so a pending count is not incremented; with no pending
+/// fields it still represents the current completed field once.
+fn elapsed_fields_for_immediate_render(deferred_fields: &mut u32) -> u32 {
+    std::mem::take(deferred_fields).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elapsed_fields_for_immediate_render;
+
+    #[test]
+    fn immediate_render_consumes_deferred_fields_without_double_aging() {
+        let mut deferred = 3;
+        assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 3);
+        assert_eq!(deferred, 0);
+        assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 1);
     }
 }

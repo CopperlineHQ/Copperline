@@ -650,43 +650,54 @@ fn reserved() -> std::sync::MutexGuard<'static, Vec<Reservation>> {
 /// fails, preserving `apply_state`'s all-or-nothing contract.
 #[derive(Debug)]
 pub(crate) struct ReservationTransaction {
-    before: Vec<(String, bool)>,
-    wanted: Vec<(String, bool)>,
+    before: Vec<(String, String, bool)>,
+    wanted: Vec<(String, String, bool)>,
     active: bool,
+}
+
+fn validate_reservation_transaction(
+    before: &[(String, String, bool)],
+    wanted: &[(String, String, bool)],
+) -> anyhow::Result<()> {
+    for (id, fingerprint, write) in wanted {
+        if before
+            .iter()
+            .any(|(held_id, held_fingerprint, _)| held_id == id && held_fingerprint != fingerprint)
+        {
+            anyhow::bail!(
+                "a different host disk is already reserved as {id}; stop the machine or release that disk before loading a state that replaces it"
+            );
+        }
+        if before.iter().any(|(_, held_fingerprint, held_write)| {
+            held_fingerprint == fingerprint && held_write != write
+        }) {
+            anyhow::bail!(
+                "a host disk is already reserved with different access; stop the machine before loading a state that changes its write access"
+            );
+        }
+    }
+    for (index, (_, fingerprint, _)) in wanted.iter().enumerate() {
+        if wanted[..index]
+            .iter()
+            .any(|(_, earlier, _)| earlier == fingerprint)
+        {
+            anyhow::bail!("the state attaches one physical host disk to more than one guest slot");
+        }
+    }
+    Ok(())
 }
 
 impl ReservationTransaction {
     pub(crate) fn begin(wanted: &[(String, String, bool)]) -> anyhow::Result<Self> {
         let held = reserved();
-        for (_, fingerprint, write) in wanted {
-            if held
-                .iter()
-                .any(|entry| entry.fingerprint == *fingerprint && entry.write != *write)
-            {
-                anyhow::bail!(
-                    "a host disk is already reserved with different access; stop the machine before loading a state that changes its write access"
-                );
-            }
-        }
-        for (index, (_, fingerprint, _)) in wanted.iter().enumerate() {
-            if wanted[..index]
-                .iter()
-                .any(|(_, earlier, _)| earlier == fingerprint)
-            {
-                anyhow::bail!(
-                    "the state attaches one physical host disk to more than one guest slot"
-                );
-            }
-        }
+        let before: Vec<_> = held
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.fingerprint.clone(), entry.write))
+            .collect();
+        validate_reservation_transaction(&before, wanted)?;
         Ok(Self {
-            before: held
-                .iter()
-                .map(|entry| (entry.fingerprint.clone(), entry.write))
-                .collect(),
-            wanted: wanted
-                .iter()
-                .map(|(_, fingerprint, write)| (fingerprint.clone(), *write))
-                .collect(),
+            before,
+            wanted: wanted.to_vec(),
             active: true,
         })
     }
@@ -702,11 +713,11 @@ impl ReservationTransaction {
         let before = &self.before;
         let wanted = &self.wanted;
         reserved().retain(|entry| {
-            let existed = before.iter().any(|(fingerprint, write)| {
-                fingerprint == &entry.fingerprint && *write == entry.write
+            let existed = before.iter().any(|(id, fingerprint, write)| {
+                id == &entry.id && fingerprint == &entry.fingerprint && *write == entry.write
             });
-            let belongs_to_transaction = wanted.iter().any(|(fingerprint, write)| {
-                fingerprint == &entry.fingerprint && *write == entry.write
+            let belongs_to_transaction = wanted.iter().any(|(id, fingerprint, write)| {
+                id == &entry.id && fingerprint == &entry.fingerprint && *write == entry.write
             });
             existed || !belongs_to_transaction
         });
@@ -1218,6 +1229,16 @@ mod tests {
             .expect_err("duplicate hardware identity must be refused")
             .to_string();
         assert!(error.contains("more than one guest slot"), "{error}");
+    }
+
+    #[test]
+    fn save_state_cannot_replace_a_live_reservation_in_place() {
+        let before = vec![("disk4".to_string(), "original".to_string(), false)];
+        let wanted = vec![("disk4".to_string(), "replacement".to_string(), false)];
+        let error = validate_reservation_transaction(&before, &wanted)
+            .expect_err("a transaction cannot discard a live reservation before commit")
+            .to_string();
+        assert!(error.contains("different host disk"), "{error}");
     }
 
     #[test]

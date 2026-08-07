@@ -724,6 +724,9 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
             Err(error) if is_denial(&error) => ask.push((device.clone(), *write, remount)),
             Err(error) => {
                 remount_volumes(&remount);
+                for (_, _, nodes) in &ask {
+                    remount_volumes(nodes);
+                }
                 return Err(explain(&error, device));
             }
         }
@@ -1629,8 +1632,8 @@ mod tests {
         );
         // ...and the machine gets it anyway, because it is lent the one that
         // is already open rather than opening its own.
-        let disk =
-            crate::blockdev::open_device(&device, false).expect("the machine is lent the disk");
+        let disk = crate::blockdev::open_device(&device, false, true)
+            .expect("the machine is lent the disk");
         assert_eq!(disk.total_sectors(), device.guest_sectors());
         // Stopping the machine must not hand the disk back on its own: the
         // launcher still shows it as attached, and the consent was given once.
