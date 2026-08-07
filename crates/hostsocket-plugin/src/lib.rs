@@ -1588,9 +1588,11 @@ impl Board {
         // Host-socket backend (see `Board::host_backend`'s own comment):
         // `[config] transport = "host"`. Independent of `resolver` above
         // and of whatever `net` backend this module's own smoltcp
-        // interface is still using -- only `do_socket`'s own TCP branch
-        // reads this; UDP/ICMP/DNS keep going through smoltcp exactly as
-        // before either way.
+        // interface is still using -- `do_socket`'s own routing reads
+        // this for both TCP and UDP (`do_socket_host` creates either
+        // kind); ICMP and DNS are the ones that keep going through
+        // smoltcp exactly as before either way (`do_socket_host` never
+        // creates an ICMP socket at all).
         self.host_backend =
             config_get_string("transport").is_some_and(|s| s.eq_ignore_ascii_case("host"));
 

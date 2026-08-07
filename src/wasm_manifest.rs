@@ -33,10 +33,22 @@ pub struct WasmCaps {
     /// connect, and read/write real host OS sockets directly, instead of
     /// implementing TCP/IP itself over `net`. This is a materially bigger
     /// grant than `net` -- a plugin holding it can reach anything the host
-    /// process can reach, on the host's own network identity -- so it is
-    /// only ever set for the bundled HostSocket board's `net = "host"`
-    /// mode, never a default for third-party plugin manifests. Like `net`
-    /// and `resolve`, using it makes a board non-deterministic.
+    /// process can reach, on the host's own network identity. Granted
+    /// unconditionally to the bundled HostSocket board regardless of its
+    /// own transport (`net = "loopback"`/`"nat"`/`"bridge"`/`"host"` all
+    /// get it, not only `"host"` mode): the plugin module always imports
+    /// the `sock_*` functions, used or not, so an ungranted capability
+    /// would fail wasmtime instantiation outright rather than just go
+    /// unused (`crate::hostsocket::board_config`'s own comment on this) --
+    /// same reasoning `dma`/`int2`/`resolve` above are unconditional for.
+    /// Not exclusive to the bundled board either: a third-party `[[zorro]]
+    /// type = "wasm"` manifest can opt in explicitly via its own
+    /// `host_sockets = true` key (`RawBoardMeta::host_sockets`'s own doc
+    /// comment in `src/zorro.rs`). This field is therefore not, on its
+    /// own, evidence that host-socket *transport* (`net = "host"`) is
+    /// active -- see `Board::host_backend` in the plugin crate for that
+    /// distinction. Like `net` and `resolve`, using it makes a board
+    /// non-deterministic.
     pub host_sockets: bool,
 }
 

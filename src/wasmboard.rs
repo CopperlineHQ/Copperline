@@ -304,6 +304,17 @@ impl WasmRuntime {
             .context("restoring WASM plugin memory")?;
         Ok(())
     }
+
+    /// The host-socket handle counter (see `HostCtx::next_socket_id`'s own
+    /// doc comment) -- read at snapshot time and restored afterward so it
+    /// stays monotonic across a save/load round trip.
+    fn next_socket_id(&self) -> i32 {
+        self.store.data().next_socket_id
+    }
+
+    fn set_next_socket_id(&mut self, id: i32) {
+        self.store.data_mut().next_socket_id = id;
+    }
 }
 
 /// Load the file resources a manifest's file-typed config values name. Like the
@@ -1031,6 +1042,14 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             "env",
             "sock_dup",
             |mut caller: Caller<'_, HostCtx>, handle: i32| -> Result<i32> {
+                // Same cap `sock_open`/`sock_accept` enforce -- without it,
+                // repeated `ReleaseCopyOfSocket` calls (each moving one more
+                // duplicate into the plugin's own unbounded pool, see that
+                // LVO's own doc comment) could grow this table past the
+                // limit those two are supposed to guarantee.
+                if caller.data().sockets.len() >= MAX_OPEN_HOST_SOCKETS {
+                    return Ok(-EMFILE);
+                }
                 let Some(socket) = caller.data().sockets.get(&handle) else {
                     return Ok(-EBADF);
                 };
@@ -1235,9 +1254,9 @@ const SO_KEEPALIVE: i32 = 0x0008;
 const TCP_NODELAY: i32 = 0x01;
 
 /// Whether a non-blocking `connect()` is still in progress: `WouldBlock` on
-/// every platform's `io::ErrorKind`, or the raw `EINPROGRESS` errno on unix
-/// (the kind Rust's std maps it to is not consistent enough across
-/// platforms/versions to rely on alone).
+/// every platform's `io::ErrorKind`, or the raw `EINPROGRESS`/`WSAEINPROGRESS`
+/// errno on unix/Windows respectively (the kind Rust's std maps it to is not
+/// consistent enough across platforms/versions to rely on alone).
 fn is_connect_in_progress(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::WouldBlock {
         return true;
@@ -1246,16 +1265,18 @@ fn is_connect_in_progress(e: &std::io::Error) -> bool {
     {
         e.raw_os_error() == Some(libc::EINPROGRESS)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(WSAEINPROGRESS)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }
 }
 
 /// The host's native errno for `raw`, translated to this module's BSD-style
-/// constant -- unix only, since the mapping is platform-native-errno ->
-/// BSD-numbering and Windows sockets use WSA error codes rather than errno
-/// at all (non-unix falls back to [`translate_errno`]'s `ErrorKind` match).
+/// constant.
 #[cfg(unix)]
 fn from_raw_errno(raw: i32) -> Option<i32> {
     Some(match raw {
@@ -1278,7 +1299,80 @@ fn from_raw_errno(raw: i32) -> Option<i32> {
     })
 }
 
-#[cfg(not(unix))]
+// Winsock (WSA*) error codes -- stable, documented Win32 API constants (MSDN
+// `WSAGetLastError`), not available as named constants in `libc` on this
+// target the way unix's own errno family is, so hand-listed here. Mapping
+// these matters: `do_connect_host`'s retry loop (plugin crate) re-issues
+// `sock_connect` on every retry and specifically checks for `EALREADY`
+// (still pending) vs `EISCONN` (now connected) vs anything else (hard
+// failure) -- without this table, every one of those raw WSA codes fell
+// through to a generic `EIO` (no `ErrorKind` in `translate_errno`'s own
+// fallback match captures them precisely either), and a retry loop that
+// never sees its own expected `EALREADY` bails out as a hard failure on
+// the very first retry. Found running this crate's own host-backend test
+// suite for real on Windows CI for the first time (every test issuing a
+// guest-side non-blocking TCP `connect()` failed outright; UDP `connect()`
+// -- synchronous at the OS level, no retry loop involved -- and pure
+// accept()-side tests were unaffected, isolating the fault to exactly
+// this retry path).
+#[cfg(windows)]
+const WSAEWOULDBLOCK: i32 = 10035;
+#[cfg(windows)]
+const WSAEINPROGRESS: i32 = 10036;
+#[cfg(windows)]
+const WSAEALREADY: i32 = 10037;
+#[cfg(windows)]
+const WSAENOTSOCK: i32 = 10038;
+#[cfg(windows)]
+const WSAEOPNOTSUPP: i32 = 10045;
+#[cfg(windows)]
+const WSAEADDRINUSE: i32 = 10048;
+#[cfg(windows)]
+const WSAENETUNREACH: i32 = 10051;
+#[cfg(windows)]
+const WSAECONNRESET: i32 = 10054;
+#[cfg(windows)]
+const WSAEISCONN: i32 = 10056;
+#[cfg(windows)]
+const WSAENOTCONN: i32 = 10057;
+#[cfg(windows)]
+const WSAESHUTDOWN: i32 = 10058;
+#[cfg(windows)]
+const WSAETIMEDOUT: i32 = 10060;
+#[cfg(windows)]
+const WSAECONNREFUSED: i32 = 10061;
+#[cfg(windows)]
+const WSAEHOSTUNREACH: i32 = 10065;
+#[cfg(windows)]
+const WSAEMFILE: i32 = 10024;
+
+#[cfg(windows)]
+fn from_raw_errno(raw: i32) -> Option<i32> {
+    Some(match raw {
+        _ if raw == WSAEWOULDBLOCK => EAGAIN,
+        _ if raw == WSAEINPROGRESS => EINPROGRESS,
+        _ if raw == WSAEALREADY => EALREADY,
+        _ if raw == WSAENOTSOCK => ENOTSOCK,
+        _ if raw == WSAENOTCONN => ENOTCONN,
+        _ if raw == WSAECONNREFUSED => ECONNREFUSED,
+        // No distinct WSA "broken pipe" -- a write past a local shutdown or
+        // a torn-down connection surfaces as WSAESHUTDOWN/WSAECONNRESET,
+        // matching real BSD EPIPE/ECONNRESET closely enough for this ABI's
+        // own error-reporting granularity.
+        _ if raw == WSAESHUTDOWN => EPIPE,
+        _ if raw == WSAECONNRESET => ECONNRESET,
+        _ if raw == WSAEADDRINUSE => EADDRINUSE,
+        _ if raw == WSAEOPNOTSUPP => EOPNOTSUPP,
+        _ if raw == WSAEMFILE => EMFILE,
+        _ if raw == WSAETIMEDOUT => ETIMEDOUT,
+        _ if raw == WSAENETUNREACH => ENETUNREACH,
+        _ if raw == WSAEHOSTUNREACH => EHOSTUNREACH,
+        _ if raw == WSAEISCONN => EISCONN,
+        _ => return None,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn from_raw_errno(_raw: i32) -> Option<i32> {
     None
 }
@@ -1367,7 +1461,16 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
         mask |= SOCK_READABLE;
     }
     if pfd.revents & libc::POLLHUP != 0 {
-        mask |= SOCK_READABLE | SOCK_HUP;
+        // A hung-up fd is done in both directions, not just readable: a
+        // pending or future write would fail immediately (EPIPE/ECONNRESET),
+        // so real select()/poll() convention reports it write-ready too --
+        // otherwise a blocked send(), a WaitSelect(writefds), or SO_EVENTMASK's
+        // own FD_CONNECT/FD_WRITE edge (both keyed on this same bit, see
+        // `scan_select`'s and `sample_event_level_host`'s own write_ready
+        // checks in the plugin crate) would never retry and discover the
+        // real failure, the same livelock shape `do_connect_host`'s own
+        // retry loop was fixed for (see this file's own comment on that).
+        mask |= SOCK_READABLE | SOCK_WRITABLE | SOCK_HUP;
     }
     if pfd.revents & libc::POLLOUT != 0 {
         mask |= SOCK_WRITABLE;
@@ -1386,16 +1489,36 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
         Ok(0) => mask |= SOCK_READABLE | SOCK_HUP,
         Ok(_) => mask |= SOCK_READABLE,
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        // A listening socket's own `peek()` fails with `NotConnected` (it
+        // is not a connected data socket at all to peek from) -- not a
+        // real error and not evidence of anything readable, unlike every
+        // other `peek()` failure. Treating it the same as a genuine error
+        // (the old behavior here) made every listening socket poll as
+        // permanently accept-ready, spuriously firing
+        // `WaitSelect(readfds)`/`SO_EVENTMASK`'s `FD_ACCEPT` even with
+        // nothing pending. Skipped entirely, at the cost of the same
+        // "cannot detect accept-readiness on a listening socket" gap this
+        // module's own doc comment on `poll_socket_mask` already
+        // documents for non-unix.
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {}
         Err(_) => mask |= SOCK_READABLE | SOCK_ERROR,
     }
-    match socket.take_error() {
-        Ok(Some(_)) => mask |= SOCK_ERROR,
-        Ok(None) => {
-            if socket.peer_addr().is_ok() {
-                mask |= SOCK_WRITABLE;
-            }
-        }
-        Err(_) => mask |= SOCK_ERROR,
+    // Deliberately not `take_error()` here: that call is destructive (it
+    // clears the pending `SO_ERROR`, real BSD `getsockopt(SO_ERROR)`
+    // semantics), and this function runs on every readiness poll --
+    // `WaitSelect()`, `SO_EVENTMASK`'s tick-driven sampling, every
+    // `do_connect_host` retry -- far more often than the one place that's
+    // actually supposed to consume it, the guest's own real
+    // `getsockopt(SO_ERROR)` (`sock_getopt`'s own `SO_ERROR` arm, which
+    // does call `take_error()`, correctly). Calling it here too raced
+    // that real query and could silently clear the error first, making a
+    // later `getsockopt(SO_ERROR)` report `0` for a connection that
+    // genuinely failed. `peer_addr()` alone is enough for write-readiness
+    // (only succeeds once actually connected), and a failed connect still
+    // surfaces as `SOCK_ERROR` above: a broken socket's own `peek()`
+    // fails too, just not with `NotConnected`.
+    if socket.peer_addr().is_ok() {
+        mask |= SOCK_WRITABLE;
     }
     mask
 }
@@ -1621,6 +1744,22 @@ struct WasmBoardState {
     manifest: WasmManifest,
     pages: u64,
     bytes: Vec<u8>,
+    /// `HostCtx::next_socket_id` at snapshot time (default 0 so an old save
+    /// file without this field still deserializes). `sockets` itself is a
+    /// host resource and never serialized (every handle the plugin
+    /// remembers in `bytes` above is deliberately stale after a restore,
+    /// see `sockets`'s own doc comment) -- but the *counter* has to
+    /// survive anyway: `Deserialize` below builds a brand new `HostCtx`
+    /// via `WasmBoard::from_file`, whose own counter starts back at 0. If
+    /// left there, the very next `sock_open`/`sock_accept`/`sock_dup`
+    /// after a restore could hand out a low handle that collides with a
+    /// stale one still sitting in the restored `host_fds` table -- the old
+    /// (and now-unrelated) guest fd would silently start operating on the
+    /// new socket instead of the intended clean `EBADF`. Restoring this
+    /// value keeps the id sequence monotonic across the round trip, so no
+    /// value handed out before the save is ever handed out again after.
+    #[serde(default)]
+    next_socket_id: i32,
 }
 
 impl Serialize for WasmBoard {
@@ -1632,6 +1771,7 @@ impl Serialize for WasmBoard {
             manifest: rt.manifest.clone(),
             pages,
             bytes,
+            next_socket_id: rt.next_socket_id(),
         };
         state.serialize(serializer)
     }
@@ -1642,11 +1782,11 @@ impl<'de> Deserialize<'de> for WasmBoard {
         let state = WasmBoardState::deserialize(deserializer)?;
         let board = WasmBoard::from_file(&state.module_path, state.manifest)
             .map_err(serde::de::Error::custom)?;
-        board
-            .rt
-            .borrow_mut()
-            .restore(state.pages, &state.bytes)
+        let mut rt = board.rt.borrow_mut();
+        rt.restore(state.pages, &state.bytes)
             .map_err(serde::de::Error::custom)?;
+        rt.set_next_socket_id(state.next_socket_id);
+        drop(rt);
         Ok(board)
     }
 }
@@ -3308,6 +3448,78 @@ mod tests {
         assert!(
             fresh_fd > 0,
             "a restored board must still be able to open new sockets"
+        );
+
+        // The real regression this guards: the restored board's own host
+        // handle counter used to restart at 0 (a fresh `HostCtx`, see
+        // `WasmBoardState::next_socket_id`'s own comment), the exact same
+        // value the very first socket ever opened (the now-torn `fd`
+        // above) originally got. `fresh_fd` above is real evidence the
+        // counter *was* reused this way pre-fix -- but the collision only
+        // actually manifests once the *old* fd is touched again
+        // afterward: connect `fresh_fd` to a second, distinct listener and
+        // confirm `fd` still cleanly fails EBADF rather than silently
+        // operating on `fresh_fd`'s own real connection (the failure mode
+        // this test would not have caught otherwise, since everything
+        // above happens while the restored socket table is still empty).
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        let server2 = std::thread::spawn(move || {
+            let (mut stream, _) = listener2.accept().unwrap();
+            let mut buf = [0u8; 4];
+            std::io::Read::read_exact(&mut stream, &mut buf).unwrap();
+            assert_eq!(
+                &buf, b"PONG",
+                "fresh_fd's own real connection must see its own send"
+            );
+        });
+        let mut sockaddr2 = [0u8; 16];
+        sockaddr2[2..4].copy_from_slice(&port2.to_be_bytes());
+        sockaddr2[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        const SOCKADDR2_ADDR: u32 = 0x400;
+        let base = SOCKADDR2_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr2);
+        let rc = hs_call_blocking(
+            &mut restored,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fresh_fd, SOCKADDR2_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0, "fresh_fd must connect for real");
+
+        const SEND2_BUF_ADDR: u32 = 0x500;
+        let base = SEND2_BUF_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 4].copy_from_slice(b"PONG");
+        let rc = hs_call(
+            &mut restored,
+            &mut host,
+            task,
+            HS_CALL_SEND,
+            [fresh_fd, SEND2_BUF_ADDR as i32, 4, 0, 0, 0, 0],
+        );
+        assert_eq!(rc, 4, "fresh_fd's own real send must succeed");
+        server2.join().unwrap();
+
+        // Now the actual regression check: the torn pre-restore fd, tried
+        // again now that a real socket exists at whatever host handle it
+        // used to hold.
+        let rc = hs_call(
+            &mut restored,
+            &mut host,
+            task,
+            HS_CALL_SEND,
+            [fd, SEND_BUF_ADDR as i32, 4, 0, 0, 0, 0],
+        );
+        assert_eq!(
+            rc, -1,
+            "the pre-restore fd must still fail even after a new socket exists"
+        );
+        let errno = hs_call(&mut restored, &mut host, task, HS_CALL_ERRNO, [0; 7]);
+        assert_eq!(
+            errno, EBADF,
+            "and specifically EBADF, not silently operating on fresh_fd's real socket"
         );
 
         server.join().unwrap();

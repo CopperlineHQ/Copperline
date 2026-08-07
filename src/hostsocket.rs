@@ -109,13 +109,12 @@ pub fn board_config(
         config.insert("resolver".to_string(), resolver.to_string());
     }
     // Absent means the plugin's own default (smoltcp, unchanged) -- "host"
-    // selects the Amiberry-style host-socket backend for new TCP sockets
-    // (see the plugin's own `Board::host_backend`). No CLI/TOML surface
-    // wired up to this yet (`[hostsocket] net = "host"`/`--hostsocket-net
-    // host` is HOSTSOCKET-HOST-BACKEND-PLAN.md's own later "configuration
-    // plumbing" phase) -- both current callers pass `None`, so this has no
-    // effect on real boards yet; it exists so the plugin-dispatch wiring
-    // itself is independently testable first.
+    // selects the Amiberry-style host-socket backend for new TCP and UDP
+    // sockets (see the plugin's own `Board::host_backend`). Reached from
+    // `[hostsocket] net = "host"`/`--hostsocket-net host` (`src/config.rs`,
+    // which validates "host" against the resolved net backend before this
+    // is ever called) and from the launcher's own HostSocket board picker
+    // (`src/video/launcher.rs`, the "Host" choice).
     if let Some(transport) = transport {
         config.insert("transport".to_string(), transport.to_string());
     }

@@ -138,10 +138,10 @@ once from one small guest-side fix).
 
 ## Host backend (`net = "host"`)
 
-A second, structurally different backend (`HOSTSOCKET-HOST-BACKEND-PLAN.md`
-at the repo root): instead of terminating TCP/IP on this plugin's own
-embedded smoltcp stack, each socket operation delegates straight to a real
-host OS socket (the Amiberry/WinUAE approach). Run against the loopback
+A second, structurally different backend: instead of terminating TCP/IP on
+this plugin's own embedded smoltcp stack, each socket operation delegates
+straight to a real host OS socket (the Amiberry/WinUAE approach). Run
+against the loopback
 tier the same way as the table above, same rig (`net = "host"` swapped in
 for `net = "loopback"` in `machine.toml`'s `[hostsocket]` section, nothing
 else changed).
