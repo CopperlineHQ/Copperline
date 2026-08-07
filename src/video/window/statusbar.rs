@@ -232,6 +232,11 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
         cd_load: None,
         cd_eject: None,
     };
+    // Pixel aspect is process-global but a layout must use one coherent
+    // origin even if a test changes it concurrently. Live callers are on the
+    // main thread; caching it also avoids re-reading the atomic for every
+    // connected drive.
+    let bar_top = status_bar_top();
     // At most 4 drives, so track membership/position without allocating a
     // Vec on every call (this runs on every mouse-move and frame redraw).
     let connected_count = (0..4).filter(|&idx| media.drives[idx].connected).count();
@@ -261,13 +266,13 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
             let row = pos / 2;
             (
                 MEDIA_CLUSTER_X + col * (MEDIA_CLUSTER_W + MEDIA_CLUSTER_GAP),
-                status_bar_top() + MEDIA_STACKED_ROW0_Y + row * MEDIA_STACKED_PITCH,
+                bar_top + MEDIA_STACKED_ROW0_Y + row * MEDIA_STACKED_PITCH,
                 MEDIA_STACKED_H,
             )
         } else {
             (
                 MEDIA_CLUSTER_X + pos * (MEDIA_CLUSTER_W + MEDIA_CLUSTER_GAP),
-                status_bar_top() + STATUS_CONTROL_Y,
+                bar_top + STATUS_CONTROL_Y,
                 STATUS_CONTROL_H,
             )
         };
@@ -287,7 +292,7 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
         };
         // The CD cluster is load plus eject only; eject takes the slot a
         // drive cluster gives to swap.
-        let (load, eject, _) = cluster(x, status_bar_top() + STATUS_CONTROL_Y, STATUS_CONTROL_H);
+        let (load, eject, _) = cluster(x, bar_top + STATUS_CONTROL_Y, STATUS_CONTROL_H);
         layout.cd_load = Some(load);
         layout.cd_eject = Some(eject);
     }
