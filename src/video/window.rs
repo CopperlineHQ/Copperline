@@ -5725,7 +5725,7 @@ impl App {
                     state.setup.refresh_host_disks();
                     let found = state.setup.host_disks().len();
                     state.status = Some(StatusMessage::ok(match found {
-                        0 => "No removable disks found".to_string(),
+                        0 => "No supported disks found on the host system".to_string(),
                         1 => "1 disk found".to_string(),
                         n => format!("{n} disks found"),
                     }));

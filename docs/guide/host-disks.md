@@ -25,7 +25,8 @@ you need to know before choosing it:
 ```text
 Host disks (name one to --host-disk, or as [[host_disk]] device):
   sdb        Generic MassStorageClass (31.9 GB)
-  sda        ATA Ubuntu Linux-0 S (68.7 GB) [system disk, mounted: /]  -- cannot be used
+  sdc        ATA Samsung SSD 870 (500.1 GB) [internal]
+  sda        ATA Ubuntu Linux-0 S (68.7 GB) [system disk, internal, mounted: /]  -- cannot be used
 ```
 
 Listing reads nothing from any medium. It cannot spin up a sleeping drive,
@@ -40,15 +41,19 @@ Three rules decide what you may have:
   again by the privileged half of the opener where one runs. It is still
   *shown* by `--list-disks`, marked `cannot be used`, because a disk that
   silently vanished from the list would just look like a bug.
-- **Internal fixed disks are hidden, not refused.** An Amiga disk reaches a
-  modern computer through a card reader or a USB adapter, so internal storage
-  is almost never what you want; it is left out of the launcher's list but can
-  still be named deliberately.
+- **Everything else is offered.** An Amiga disk usually arrives in a card
+  reader, but a drive on a SATA port is as usable as one on USB, and the
+  emulator is in no position to decide which one you meant. Disks on an
+  internal bus are labelled `internal` and sorted below the removable ones,
+  not withheld.
 - **Nothing is invented over unfamiliar bytes.** No RDB is synthesised over a
   real disk. An Amiga disk carries its own partition table, and a disk that
   does not have one is a disk Copperline will not pretend to understand.
 
-The "which disk is the host's" question is harder than it looks, because the
+Which disk that is, is worked out afresh on every run, from the host itself
+-- the mount serving `/` on macOS and Linux, the volume holding the Windows
+directory on Windows -- so it follows your machine's layout rather than any
+assumption about it. And the question is harder than it looks, because the
 running system is rarely served by a plain partition. On Linux, `/` is often
 on LVM or LUKS; Copperline traces the root filesystem through however many
 device-mapper and MD layers sit under it, and a volume group spanning several

@@ -19,10 +19,11 @@
 //!   list. (WinUAE has no such check at all -- it infers "this is your
 //!   Windows disk" from the presence of an NTFS volume -- and Amiberry's
 //!   equivalent is dead code that is never called.)
-//! - Internal fixed disks are classified [`Safety::Internal`] and hidden
-//!   unless deliberately asked for. An Amiga disk reaches a modern host
-//!   through a card reader or a USB bridge, so the useful device is nearly
-//!   always removable or external.
+//! - Every other whole device is offered. An Amiga disk usually arrives in a
+//!   card reader, but a drive on a SATA port is as usable as one on USB and
+//!   the emulator is in no position to say which somebody meant; internal
+//!   ones are labelled, not withheld. The system disk is the case that is
+//!   never right, and it is the one that is refused.
 //! - Enumeration never opens anything, so listing devices cannot disturb
 //!   them, cannot spin up a sleeping drive, and needs no privileges.
 //!
@@ -72,25 +73,25 @@ pub use broker_protocol::BROKER_FLAG;
 #[cfg(any(windows, target_os = "linux"))]
 pub use platform::serve_broker_request;
 
-/// How safe a device is to hand to the emulated machine.
+/// Whether a device may be handed to the emulated machine at all.
 ///
-/// Ordered by how much protection the device needs, not by preference.
+/// One question, and deliberately only one: an emulator cannot tell a drive
+/// somebody means to use from one they do not, and guessing costs them the
+/// use of their own hardware. What it *can* tell is the disk the host is
+/// running from, which is never the right answer.
+///
+/// Ordered so the safe ones sort first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Safety {
-    /// Nothing in the way: removable or external media the host is not
-    /// relying on.
+    /// A whole device the host is not running from.
     Offerable,
-    /// An internal fixed disk. Probably the host's own storage, but not
-    /// provably so, so it is hidden rather than refused: a genuine Amiga
-    /// drive on an internal bus is a real, if rare, setup.
-    Internal,
     /// The disk the host is running from. Never offered and never opened,
     /// whatever else asks for it.
     SystemDisk,
 }
 
 impl Safety {
-    /// Whether a device may be listed to the user by default.
+    /// Whether a device may be listed to the user.
     pub const fn listable(self) -> bool {
         matches!(self, Self::Offerable)
     }
@@ -100,12 +101,10 @@ impl Safety {
         !matches!(self, Self::SystemDisk)
     }
 
-    /// Short tag for a picker, saying *why* a device is held back. Naming the
-    /// reason lets somebody decide for themselves; a bare absence does not.
+    /// Short tag for a picker, saying why a device is held back.
     pub const fn tag(self) -> &'static str {
         match self {
             Self::Offerable => "",
-            Self::Internal => "internal",
             Self::SystemDisk => "system disk",
         }
     }
@@ -172,6 +171,12 @@ impl HostDevice {
         let mut notes = Vec::new();
         if !self.safety.tag().is_empty() {
             notes.push(self.safety.tag().to_string());
+        }
+        // Worth saying, not worth withholding for: a disk on an internal bus
+        // is usually the host's own, and is offered anyway because sometimes
+        // it is not.
+        if self.internal {
+            notes.push("internal".to_string());
         }
         if !self.writable {
             notes.push("write protected".to_string());
@@ -786,17 +791,19 @@ mod broker_protocol {
     }
 }
 
-/// Every whole device the host can see, including ones held back for safety
-/// (each carries its [`Safety`], so a caller can show or hide them).
+/// Every whole device the host can see, the system disk included -- it
+/// carries [`Safety::SystemDisk`], so a caller can show it as unusable
+/// rather than leaving an unexplained gap in the list.
 ///
 /// Opens nothing. Sorted with the devices most likely to be wanted first:
-/// offerable before internal, and larger media before smaller, since an Amiga
-/// disk is usually the odd small one on a modern host.
+/// usable before the system disk, then media on a port before the host's own
+/// internal storage, then larger before smaller.
 pub fn list_devices() -> anyhow::Result<Vec<HostDevice>> {
     let mut devices = platform::list_devices()?;
     devices.sort_by(|a, b| {
         a.safety
             .cmp(&b.safety)
+            .then(a.internal.cmp(&b.internal))
             .then(b.size_bytes.cmp(&a.size_bytes))
             .then(a.id.cmp(&b.id))
     });
@@ -831,32 +838,38 @@ mod tests {
     }
 
     /// The system disk is never openable, however it is reached. This is the
-    /// one guarantee the whole module exists to make.
+    /// one guarantee the whole module exists to make -- and the only one, so
+    /// everything else the host has is both listed and openable.
     #[test]
     fn the_system_disk_can_never_be_opened() {
         assert!(!Safety::SystemDisk.openable());
         assert!(!Safety::SystemDisk.listable());
-        // And an internal disk is merely hidden, not forbidden.
-        assert!(Safety::Internal.openable());
-        assert!(!Safety::Internal.listable());
+        assert!(Safety::Offerable.openable());
         assert!(Safety::Offerable.listable());
     }
 
-    /// A label has to say enough to choose by, including the reasons a device
-    /// is held back -- an unexplained omission is worse than a warning.
+    /// A label has to say enough to choose by, including the reason a device
+    /// cannot be had -- an unexplained omission is worse than a warning.
     #[test]
     fn a_label_names_what_matters_before_choosing() {
         let mut d = device("disk4", 4_000_000_000, Safety::Offerable);
         d.model = Some("SanDisk Cruzer".to_string());
         assert_eq!(d.label(), "SanDisk Cruzer (4.0 GB)");
 
-        d.safety = Safety::Internal;
+        d.internal = true;
         d.writable = false;
         d.mounted = vec!["/Volumes/UNTITLED".to_string()];
         assert_eq!(
             d.label(),
             "SanDisk Cruzer (4.0 GB) [internal, write protected, mounted: /Volumes/UNTITLED]"
         );
+
+        // The system disk says so first, being the one thing that decides
+        // whether the disk can be had at all.
+        d.safety = Safety::SystemDisk;
+        assert!(d
+            .label()
+            .starts_with("SanDisk Cruzer (4.0 GB) [system disk, internal,"));
 
         // With no model, the identifier is what the user has to go on.
         let bare = device("disk9", 512_000_000, Safety::Offerable);
@@ -892,13 +905,13 @@ mod tests {
     /// ```
     ///
     /// A VHD is not on a bus anything removable arrives on, so it lists as
-    /// `internal`: hidden from the launcher, still reachable by name here,
-    /// which is what this wants.
+    /// `internal` -- sorted below the removable media, and usable like any
+    /// other disk, which is what this wants.
     ///
     /// On Linux the disposable disk is a `scsi_debug` one, which appears as a
-    /// whole SCSI disk of its own and lists as `internal` for the same reason.
-    /// A loop device is *not* the equivalent: loop devices are deliberately
-    /// left out of enumeration, so one cannot be reached by name here.
+    /// whole SCSI disk of its own. A loop device is *not* the equivalent:
+    /// loop devices are deliberately left out of enumeration, so one cannot
+    /// be reached by name here.
     /// `sector_size` is the useful knob -- it is the only way most machines
     /// have of exercising the read-modify-write path on media whose blocks are
     /// larger than a guest sector.

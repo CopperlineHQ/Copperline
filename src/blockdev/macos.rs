@@ -614,14 +614,6 @@ fn describe(media: io_registry_entry_t, mounts: &[(String, String)]) -> Option<H
         .map(|(_, on)| on.clone())
         .collect();
 
-    // Which disks are the running system's is settled by the caller, which
-    // can see every disk at once; here a disk is only internal or offerable.
-    let safety = if internal && !removable && !ejectable {
-        Safety::Internal
-    } else {
-        Safety::Offerable
-    };
-
     Some(HostDevice {
         // The unbuffered character device: transfers go straight to the
         // caller's buffer instead of through the buffer cache, which is what
@@ -635,7 +627,10 @@ fn describe(media: io_registry_entry_t, mounts: &[(String, String)]) -> Option<H
         internal,
         writable,
         mounted,
-        safety,
+        // Which disks the running system needs is settled by the caller,
+        // which can see every disk at once and so can follow a synthesized
+        // one down to the hardware it lives on.
+        safety: Safety::Offerable,
     })
 }
 

@@ -4975,7 +4975,7 @@ fn draw_host_disk_page(
             frame,
             table.x + HOST_DISK_COL_DISK,
             table.y + HOST_DISK_HEADER_H + 4,
-            "No removable disks found -- attach one and choose Refresh",
+            "No supported disks found on the host system.",
             PANEL_TEXT_DIM,
             1,
             scale,

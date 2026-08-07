@@ -586,11 +586,11 @@ fn model_of(vendor: Option<String>, product: Option<String>) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
-/// Whether a bus is one the host's own storage hangs off.
+/// Whether a bus is one the host's own storage usually hangs off.
 ///
-/// An Amiga disk reaches a modern machine through a card reader or a USB
-/// bridge, so those buses are where a usable disk turns up; a disk on any
-/// other bus is the host's own until something says otherwise.
+/// An Amiga disk most often arrives through a card reader or a USB bridge,
+/// so a disk on any other bus is more likely the host's own. This only
+/// labels and sorts -- every disk but the system's is offered either way.
 const fn bus_is_internal(bus_type: u32) -> bool {
     !matches!(
         bus_type,
@@ -598,12 +598,11 @@ const fn bus_is_internal(bus_type: u32) -> bool {
     )
 }
 
-/// How much protection a disk needs, from what was learned about it.
-const fn classify(internal: bool, removable: bool, is_system: bool) -> Safety {
+/// Whether a disk may be handed to a machine: everything but the one the
+/// host is running from.
+const fn classify(is_system: bool) -> Safety {
     if is_system {
         Safety::SystemDisk
-    } else if internal && !removable {
-        Safety::Internal
     } else {
         Safety::Offerable
     }
@@ -996,7 +995,7 @@ fn describe(interface: &str, volumes: &[Volume], system: &[u32]) -> Option<HostD
         internal,
         writable: hardware_writable(&device),
         mounted,
-        safety: classify(internal, removable, system.contains(&number)),
+        safety: classify(system.contains(&number)),
     })
 }
 
@@ -1571,16 +1570,12 @@ mod tests {
         }
     }
 
-    /// The system disk outranks everything else it could be, and removable
-    /// media on an internal bus -- a card reader on a SATA bridge, an eSATA
-    /// dock -- is still media somebody can take out and hand to an Amiga.
+    /// The disk the host runs from is the one refusal, and it is the only
+    /// one: a drive on a SATA port is as usable as one in a card reader.
     #[test]
-    fn the_running_system_outranks_every_other_reason() {
-        assert_eq!(classify(true, false, true), Safety::SystemDisk);
-        assert_eq!(classify(false, true, true), Safety::SystemDisk);
-        assert_eq!(classify(true, false, false), Safety::Internal);
-        assert_eq!(classify(true, true, false), Safety::Offerable);
-        assert_eq!(classify(false, false, false), Safety::Offerable);
+    fn only_the_running_system_s_disk_is_refused() {
+        assert_eq!(classify(true), Safety::SystemDisk);
+        assert_eq!(classify(false), Safety::Offerable);
     }
 
     /// Both halves of a name are used, because devices disagree about which

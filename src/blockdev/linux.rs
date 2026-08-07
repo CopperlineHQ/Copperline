@@ -399,7 +399,8 @@ fn root_of(mounts: &[Mount]) -> Root {
 }
 
 /// Whether a device hangs off a bus that media arrives on rather than one the
-/// host's own storage is fixed to.
+/// host's own storage is fixed to. Labels and sorts only -- every disk but
+/// the system's is offered either way.
 ///
 /// Read from the device's place in the tree: a card reader is reached through
 /// a USB or MMC host controller, and a laptop's built-in SD slot -- which is
@@ -484,7 +485,6 @@ fn enumerate(kernel: &Kernel) -> Result<Vec<HostDevice>> {
         let safety = match &root {
             Root::Untraceable => Safety::SystemDisk,
             Root::Disks(disks) if disks.contains(&id) => Safety::SystemDisk,
-            _ if internal => Safety::Internal,
             _ => Safety::Offerable,
         };
 
