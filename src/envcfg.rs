@@ -14,22 +14,18 @@
 //! start-up knobs, so that is the intended behaviour. Code that needs a runtime
 //! "do this once" toggle must use its own latch, not `remove_var`.
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::sync::OnceLock;
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn snapshot() -> &'static HashMap<OsString, OsString> {
     static SNAPSHOT: OnceLock<HashMap<OsString, OsString>> = OnceLock::new();
-    // The browser has no process environment and std::env::vars_os() panics
-    // there ("not supported on this platform"); every knob reads as unset.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        SNAPSHOT.get_or_init(HashMap::new)
-    }
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        SNAPSHOT.get_or_init(|| std::env::vars_os().collect())
-    }
+    SNAPSHOT.get_or_init(|| std::env::vars_os().collect())
 }
 
 /// Whether any `COPPERLINE_*` variable is present at all. Every knob this
@@ -40,6 +36,7 @@ fn snapshot() -> &'static HashMap<OsString, OsString> {
 /// default SipHasher millions of times a second only to miss. Cache the
 /// "are any of our knobs set?" answer once and short-circuit the common
 /// no-knobs case to a single bool read.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn any_copperline_var() -> bool {
     static ANY: OnceLock<bool> = OnceLock::new();
     *ANY.get_or_init(|| {
@@ -53,37 +50,72 @@ fn any_copperline_var() -> bool {
 /// True when `name` is one of our knobs and we already know none are set, so
 /// the caller can skip the snapshot hash entirely.
 #[inline]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn definitely_unset(name: &str) -> bool {
     name.starts_with("COPPERLINE") && !any_copperline_var()
 }
 
 /// Whether the variable is set (presence check), like `var_os(..).is_some()`.
-#[inline]
+///
+/// A browser WASM build has no process environment. Its implementation is a
+/// compile-time `false`, rather than a lookup in an empty snapshot, so release
+/// optimization can erase diagnostic branches from per-cycle hot paths.
+#[inline(always)]
 pub fn flag(name: &str) -> bool {
-    if definitely_unset(name) {
-        return false;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let _ = name;
+        false
     }
-    snapshot().contains_key(OsStr::new(name))
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if definitely_unset(name) {
+            return false;
+        }
+        snapshot().contains_key(OsStr::new(name))
+    }
 }
 
 /// The variable's raw value, like `std::env::var_os`.
-#[inline]
+///
+/// Browser WASM returns `None` at compile time for the same reason as
+/// [`flag`].
+#[inline(always)]
 pub fn var_os(name: &str) -> Option<OsString> {
-    if definitely_unset(name) {
-        return None;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let _ = name;
+        None
     }
-    snapshot().get(OsStr::new(name)).cloned()
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if definitely_unset(name) {
+            return None;
+        }
+        snapshot().get(OsStr::new(name)).cloned()
+    }
 }
 
 /// The variable's value as UTF-8, like `std::env::var(..).ok()`.
-#[inline]
+///
+/// Browser WASM returns `None` at compile time for the same reason as
+/// [`flag`].
+#[inline(always)]
 pub fn var(name: &str) -> Option<String> {
-    if definitely_unset(name) {
-        return None;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let _ = name;
+        None
     }
-    snapshot()
-        .get(OsStr::new(name))
-        .and_then(|v| v.to_str().map(str::to_owned))
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        if definitely_unset(name) {
+            return None;
+        }
+        snapshot()
+            .get(OsStr::new(name))
+            .and_then(|v| v.to_str().map(str::to_owned))
+    }
 }
 
 /// Parse a diagnostic integer value, accepting decimal or `0x`-prefixed hex.

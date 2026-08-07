@@ -1443,7 +1443,10 @@ pub struct BeamChipRamWrite {
 
 impl BeamChipRamWrite {
     fn from_cpu_write(vpos: u32, hpos: u32, offset: usize, size: usize, value: u32) -> Self {
-        debug_assert!(matches!(size, 1 | 2 | 4));
+        // A 68020+ three-byte operand can cross chip RAM as one dynamically
+        // sized plain-memory transfer. The four-byte record stores that width
+        // directly just like byte, word, and long writes.
+        debug_assert!((1..=4).contains(&size));
         let mut bytes = [0; 4];
         let len = size.min(bytes.len());
         for (idx, byte) in bytes.iter_mut().enumerate().take(len) {

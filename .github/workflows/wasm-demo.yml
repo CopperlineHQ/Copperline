@@ -87,8 +87,15 @@ jobs:
           cat > pkg-smoke.mjs <<'SMOKE'
           import { readFileSync } from 'fs';
           import init, { WebEmu } from './pkg-smoke-glue.mjs';
-          await init(readFileSync('./pkg/copperline_web_bg.wasm'));
+          await init({ module_or_path: readFileSync('./pkg/copperline_web_bg.wasm') });
           const emu = new WebEmu('A500', 'PAL');
+          if (emu.presentation_revision() !== 0) {
+            throw new Error('fresh presentation revision is not zero');
+          }
+          emu.run(0, 0);
+          if (!Number.isFinite(emu.last_run_core_ms()) || emu.last_run_render_ms() !== 0) {
+            throw new Error('invalid browser host-timing split');
+          }
           console.log('bundle loads:', emu.machine_summary());
           SMOKE
           node pkg-smoke.mjs

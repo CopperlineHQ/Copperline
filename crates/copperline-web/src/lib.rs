@@ -23,6 +23,7 @@ use copperline::config::{
 };
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
+use copperline::timebase::Instant;
 use copperline::video::deinterlace::Deinterlacer;
 use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_CANVAS_PIXELS};
 use wasm_bindgen::prelude::*;
@@ -208,6 +209,10 @@ pub struct WebEmu {
     present: Vec<u32>,
     present_width: usize,
     present_rows: usize,
+    /// Wrapping generation of `present`. The page compares this with the last
+    /// revision it uploaded, so an emulated frame that the exact-reuse
+    /// detector matched does not cross the JS/WebGL presentation path again.
+    presentation_revision: u32,
     /// Emulated field lines the presentation buffer shows, for the page's
     /// CRT shader pass; 0 while no frame has rendered or the scan carries
     /// no 15 kHz line structure (a programmable scan). See
@@ -248,6 +253,11 @@ pub struct WebEmu {
     /// render at all. Replaced whenever the machine or the presentation
     /// settings change under it.
     repeated_frame_detector: bitplane::RepeatedFrameDetector,
+    /// Host timings for the most recent `run`/`run_hidden` call. They split
+    /// the page's existing whole-call timer without requiring a second core
+    /// traversal or a profiler-only build.
+    last_run_core_ms: f64,
+    last_run_render_ms: f64,
 }
 
 #[wasm_bindgen]
@@ -295,6 +305,7 @@ impl WebEmu {
             present: Vec::new(),
             present_width: FB_WIDTH,
             present_rows: 0,
+            presentation_revision: 0,
             present_crt_lines: 0.0,
             last_rendered_frame: None,
             presentation_stale: false,
@@ -305,6 +316,8 @@ impl WebEmu {
             overscan: Overscan::Tv,
             presentation_latch: present_common::PresentationLatch::default(),
             repeated_frame_detector: bitplane::RepeatedFrameDetector::default(),
+            last_run_core_ms: 0.0,
+            last_run_render_ms: 0.0,
         })
     }
 
@@ -399,11 +412,14 @@ impl WebEmu {
     }
 
     fn run_paced(&mut self, now_ms: f64, max_frames: u32, render: bool) -> Result<u32, JsValue> {
+        self.last_run_core_ms = 0.0;
+        self.last_run_render_ms = 0.0;
         let (anchor_wall, anchor_emu) = *self
             .anchor
             .get_or_insert((now_ms, self.emu.bus().emulated_seconds()));
         let target = anchor_emu + (now_ms - anchor_wall) / 1000.0;
         let mut stepped = 0u32;
+        let core_started = Instant::now();
         while self.emu.bus().emulated_seconds() < target && stepped < max_frames {
             self.drain_pending_mouse();
             self.emu.step_frame().map_err(js_err)?;
@@ -414,12 +430,15 @@ impl WebEmu {
         if stepped == 0 {
             self.drain_pending_mouse();
         }
+        self.last_run_core_ms = core_started.elapsed().as_secs_f64() * 1000.0;
         if target - self.emu.bus().emulated_seconds() > MAX_CATCHUP_SECONDS {
             self.anchor = Some((now_ms, self.emu.bus().emulated_seconds()));
         }
         if render {
             if stepped > 0 || self.presentation_stale {
+                let render_started = Instant::now();
                 self.render_completed_frame();
+                self.last_run_render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
                 self.presentation_stale = false;
             }
         } else if stepped > 0 {
@@ -539,6 +558,7 @@ impl WebEmu {
             };
         }
         self.last_rendered_frame = Some(emulated_frame);
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
     }
 
     /// Presentation buffer: RGBA bytes in memory order, `present_width() x
@@ -548,6 +568,14 @@ impl WebEmu {
     /// every frame.
     pub fn present_ptr(&self) -> *const u32 {
         self.present.as_ptr()
+    }
+
+    /// Generation of the current presentation buffer. It advances when the
+    /// renderer writes a non-reused presentation, not merely because the
+    /// emulated machine stepped, so a browser can skip exact-reuse canvas
+    /// uploads and draws without comparing the framebuffer itself.
+    pub fn presentation_revision(&self) -> u32 {
+        self.presentation_revision
     }
 
     pub fn present_rows(&self) -> u32 {
@@ -571,6 +599,20 @@ impl WebEmu {
     /// can change between frames like `present_width`.
     pub fn present_crt_lines(&self) -> f32 {
         self.present_crt_lines
+    }
+
+    /// Host milliseconds spent advancing the emulated machine in the most
+    /// recent `run`/`run_hidden` call, excluding the Rust presentation
+    /// renderer.
+    pub fn last_run_core_ms(&self) -> f64 {
+        self.last_run_core_ms
+    }
+
+    /// Host milliseconds spent in the Rust presentation renderer in the most
+    /// recent `run` call. `run_hidden`, an idle run, and a call that needed no
+    /// repaint report zero.
+    pub fn last_run_render_ms(&self) -> f64 {
+        self.last_run_render_ms
     }
 
     /// Drain the mixed audio: interleaved stereo f32 at 44.1 kHz, one PAL

@@ -1896,8 +1896,10 @@ fn bar_layout_stacks_three_or_more_drives_two_up() {
     assert!(df0.x >= fdd_track_counter_rect().x + fdd_track_counter_rect().w);
     let cd_eject = stacked.cd_eject.unwrap();
     assert!(cd_eject.x + cd_eject.w <= VOLUME_GLYPH_X);
-    // Stacked buttons stay inside the status bar.
-    assert!(df2.y + df2.h <= present_height() + super::STATUS_BAR_HEIGHT);
+    // Stacked buttons stay inside the same status-bar origin used to build
+    // this layout; another parallel test may change the global pixel aspect.
+    let layout_bar_top = df0.y - super::MEDIA_STACKED_ROW0_Y;
+    assert!(df2.y + df2.h <= layout_bar_top + super::STATUS_BAR_HEIGHT);
 }
 
 #[test]

@@ -475,13 +475,6 @@ pub(super) struct HWindowRow {
 }
 
 impl HWindowRow {
-    fn full() -> Self {
-        Self {
-            open_runs: vec![(0, FB_WIDTH)],
-            comparator_anchor: None,
-        }
-    }
-
     /// Envelope for consumers that only handle a single span (sprite
     /// windows, scroll bookkeeping): first open edge to last close edge.
     pub(super) fn span(&self) -> (usize, usize) {
@@ -740,15 +733,21 @@ fn scan_h_window_line(
     }
 }
 
-fn compute_h_window_rows(
+fn compute_h_window_rows_into(
+    out: &mut Vec<HWindowRow>,
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
     visible_line0: i32,
-) -> Vec<HWindowRow> {
+) {
     let rows = base_controls.len();
-    let mut out = vec![HWindowRow::default(); rows];
+    out.resize_with(rows, HWindowRow::default);
+    out.truncate(rows);
+    for row in out.iter_mut() {
+        row.open_runs.clear();
+        row.comparator_anchor = None;
+    }
     if rows == 0 {
-        return out;
+        return;
     }
     let is_ecs = base_controls[0].agnus_revision.is_ecs();
     // Vertical sync leaves the flip-flop set (vAmiga vsyncHandler). The
@@ -761,26 +760,34 @@ fn compute_h_window_rows(
     }
     for y in 0..rows {
         let beam_line = visible_line0 + y as i32;
-        let mut row = HWindowRow::default();
         scan_h_window_line(
             &mut flop,
             beam_line,
             is_ecs,
             base_controls[y],
             &control_segments[y],
-            Some(&mut row),
+            Some(&mut out[y]),
         );
         // Software that never programs DIW keeps the pragmatic whole-
         // framebuffer window (matching display_window_x).
         if display_window_unprogrammed(base_controls[y].diwstrt, base_controls[y].diwstop)
             && control_segments[y].is_empty()
         {
-            out[y] = HWindowRow::full();
-        } else {
-            out[y] = row;
+            out[y].open_runs.clear();
+            out[y].open_runs.push((0, FB_WIDTH));
+            out[y].comparator_anchor = None;
         }
     }
-    out
+}
+
+fn compute_h_window_rows(
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    visible_line0: i32,
+) -> Vec<HWindowRow> {
+    let mut rows = Vec::new();
+    compute_h_window_rows_into(&mut rows, base_controls, control_segments, visible_line0);
+    rows
 }
 
 /// Repaint the horizontal window's closed intervals with border pixels
@@ -4137,6 +4144,25 @@ pub struct RenderResult {
     pub(crate) chip_ram_reads: Option<Vec<ChipRamReadDependency>>,
 }
 
+/// Large renderer work buffers retained per host thread. The browser calls
+/// the synchronous renderer on every presented frame; rebuilding the
+/// row-palette/control grids and the two full collision canvases otherwise
+/// allocates several megabytes per second even though their dimensions are
+/// almost always unchanged.
+#[derive(Default)]
+struct RenderScratch {
+    base_palettes: Vec<Palette>,
+    palette_segments: Vec<Vec<PaletteSegment>>,
+    base_controls: Vec<ControlState>,
+    control_segments: Vec<Vec<ControlSegment>>,
+    manual_bpl_segments: Vec<ManualBplSegment>,
+    playfield_mask: Vec<u8>,
+    collision_pixels: Vec<CollisionPixel>,
+    dma_output_start_x_by_line: Vec<Option<usize>>,
+    h_window_rows: Vec<HWindowRow>,
+    ham_select_pixels: Vec<u8>,
+}
+
 /// Paint the just-finished frame through the synchronous compatibility path.
 /// The render itself is a pure function of the owned snapshot
 /// (`render_from_input`); this wrapper owns the remaining bus coupling.
@@ -4368,6 +4394,22 @@ fn render_from_input_impl(
     fb: &mut [u32],
     track_read_dependencies: bool,
 ) -> RenderResult {
+    thread_local! {
+        static RENDER_SCRATCH: std::cell::RefCell<RenderScratch> =
+            std::cell::RefCell::new(RenderScratch::default());
+    }
+    RENDER_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        render_from_input_with_scratch(input, fb, track_read_dependencies, &mut scratch)
+    })
+}
+
+fn render_from_input_with_scratch(
+    input: &RenderInput,
+    fb: &mut [u32],
+    track_read_dependencies: bool,
+    scratch: &mut RenderScratch,
+) -> RenderResult {
     let render_started = Instant::now();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
     ACTIVE_CANVAS_SHIFT_H.with(|shift| {
@@ -4522,11 +4564,26 @@ fn render_from_input_impl(
         &input.held_sprites,
         &manual_sprite_lines,
     );
-    let mut base_palettes = vec![state.palette; rows];
-    let mut palette_segments = vec![Vec::new(); rows];
-    let mut base_controls = vec![frame_start_control; rows];
-    let mut control_segments = vec![Vec::new(); rows];
-    let mut manual_bpl_segments = Vec::new();
+    let mut base_palettes = std::mem::take(&mut scratch.base_palettes);
+    base_palettes.resize(rows, state.palette);
+    base_palettes.fill(state.palette);
+    let mut palette_segments = std::mem::take(&mut scratch.palette_segments);
+    palette_segments.resize_with(rows, Vec::new);
+    palette_segments.truncate(rows);
+    for segments in &mut palette_segments {
+        segments.clear();
+    }
+    let mut base_controls = std::mem::take(&mut scratch.base_controls);
+    base_controls.resize(rows, frame_start_control);
+    base_controls.fill(frame_start_control);
+    let mut control_segments = std::mem::take(&mut scratch.control_segments);
+    control_segments.resize_with(rows, Vec::new);
+    control_segments.truncate(rows);
+    for segments in &mut control_segments {
+        segments.clear();
+    }
+    let mut manual_bpl_segments = std::mem::take(&mut scratch.manual_bpl_segments);
+    manual_bpl_segments.clear();
     #[cfg(any(test, debug_assertions, feature = "display-plan-trace"))]
     let mut display_frame_plan =
         crate::envcfg::var_os("COPPERLINE_TRACE_DISPLAY_PLAN").map(|_| DisplayFramePlan::new());
@@ -4609,14 +4666,27 @@ fn render_from_input_impl(
     let mut next_bitplane_pointer_event = 0usize;
     let mut bpldat = frame_start_bpldat;
     let mut next_bitplane_data_event = 0usize;
-    let mut playfield_mask = vec![0u8; FB_WIDTH * rows];
-    let mut collision_pixels = vec![CollisionPixel::default(); FB_WIDTH * rows];
+    let collision_len = FB_WIDTH * rows;
+    let mut playfield_mask = std::mem::take(&mut scratch.playfield_mask);
+    playfield_mask.resize(collision_len, 0);
+    playfield_mask.fill(0);
+    let mut collision_pixels = std::mem::take(&mut scratch.collision_pixels);
+    collision_pixels.resize(collision_len, CollisionPixel::default());
+    collision_pixels.fill(CollisionPixel::default());
     let mut collision_lookup = CollisionLookup::new();
     let mut clxdat = 0u16;
-    let mut dma_output_start_x_by_line = vec![None; rows];
+    let mut dma_output_start_x_by_line = std::mem::take(&mut scratch.dma_output_start_x_by_line);
+    dma_output_start_x_by_line.resize(rows, None);
+    dma_output_start_x_by_line.fill(None);
 
     let background_started = Instant::now();
-    let h_window_rows = compute_h_window_rows(&base_controls, &control_segments, visible_line0);
+    let mut h_window_rows = std::mem::take(&mut scratch.h_window_rows);
+    compute_h_window_rows_into(
+        &mut h_window_rows,
+        &base_controls,
+        &control_segments,
+        visible_line0,
+    );
     fill_background_with_visible_line0(
         fb,
         &base_palettes,
@@ -5095,7 +5165,8 @@ fn render_from_input_impl(
         visible_line0,
     );
     render_timing.manual_bpl_segments = manual_bpl_segments.len() as u64;
-    render_manual_bpl_segments_with_visible_line0(
+    let mut ham_select_pixels = std::mem::take(&mut scratch.ham_select_pixels);
+    render_manual_bpl_segments_with_visible_line0_and_scratch(
         &manual_bpl_segments,
         fb,
         &mut playfield_mask,
@@ -5106,6 +5177,7 @@ fn render_from_input_impl(
         &base_controls,
         &control_segments,
         &dma_output_start_x_by_line,
+        &mut ham_select_pixels,
         visible_line0,
         input.emulated_seconds,
         input.emulated_frames,
@@ -5205,6 +5277,16 @@ fn render_from_input_impl(
     );
     render_timing.total_nanos = render_started.elapsed().as_nanos();
     let chip_ram_reads = ram.into_read_dependencies();
+    scratch.base_palettes = base_palettes;
+    scratch.palette_segments = palette_segments;
+    scratch.base_controls = base_controls;
+    scratch.control_segments = control_segments;
+    scratch.manual_bpl_segments = manual_bpl_segments;
+    scratch.playfield_mask = playfield_mask;
+    scratch.collision_pixels = collision_pixels;
+    scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
+    scratch.h_window_rows = h_window_rows;
+    scratch.ham_select_pixels = ham_select_pixels;
     RenderResult {
         timing: render_timing,
         clxdat,
@@ -6150,10 +6232,47 @@ fn render_manual_bpl_segments_with_visible_line0(
     emulated_seconds: f64,
     emulated_frames: u64,
 ) {
+    let mut ham_select_pixels = Vec::new();
+    render_manual_bpl_segments_with_visible_line0_and_scratch(
+        segments,
+        fb,
+        playfield_mask,
+        collision_pixels,
+        clxdat,
+        base_palettes,
+        palette_segments,
+        base_controls,
+        control_segments,
+        dma_output_start_x_by_line,
+        &mut ham_select_pixels,
+        visible_line0,
+        emulated_seconds,
+        emulated_frames,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_manual_bpl_segments_with_visible_line0_and_scratch(
+    segments: &[ManualBplSegment],
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    collision_pixels: &mut [CollisionPixel],
+    clxdat: &mut u16,
+    base_palettes: &[Palette],
+    palette_segments: &[Vec<PaletteSegment>],
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    dma_output_start_x_by_line: &[Option<usize>],
+    ham_select_pixels: &mut Vec<u8>,
+    visible_line0: i32,
+    emulated_seconds: f64,
+    emulated_frames: u64,
+) {
     if segments.is_empty() {
         return;
     }
-    let mut ham_select_pixels = vec![0u8; fb.len()];
+    ham_select_pixels.resize(fb.len(), 0);
+    ham_select_pixels.fill(0);
     for seg in segments {
         if seg.line >= base_controls.len() {
             continue;
@@ -6166,7 +6285,7 @@ fn render_manual_bpl_segments_with_visible_line0(
             base_controls,
             control_segments,
         );
-        let mut ham_select = manual_bpl_ham_seed_select(seg, &ham_select_pixels);
+        let mut ham_select = manual_bpl_ham_seed_select(seg, ham_select_pixels);
         let beam_y = visible_line0 + seg.line as i32;
         let diag = manual_bpl_pixel_diag_spec().filter(|spec| {
             spec.beam_y == beam_y && emulated_seconds >= spec.after && emulated_seconds < spec.until
@@ -6184,7 +6303,7 @@ fn render_manual_bpl_segments_with_visible_line0(
             dma_output_start_x_by_line,
             &mut ham_color,
             &mut ham_select,
-            &mut ham_select_pixels,
+            ham_select_pixels,
             visible_line0,
             emulated_seconds,
             emulated_frames,

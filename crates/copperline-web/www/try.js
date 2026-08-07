@@ -82,6 +82,20 @@ let presentsThisSecond = 0;
 // blits of fresh pictures rather than assuming step and blit share a
 // tick.
 let presentDirty = false;
+// Presentation generation exported by current wasm bundles. Unlike
+// presentDirty, this advances only when Rust writes a non-reused
+// presentation, so exact-reuse frames need no canvas upload or monitor
+// draw. Null also forces the first frame of a new machine through.
+let lastPresentationRevision = null;
+// Cumulative host work behind the once-per-second stat line. Rust supplies
+// the core/render split; the page measures the buffer upload and monitor
+// shader submission around the browser calls themselves. Dividing by the
+// emulated frames stepped in the interval makes all four figures directly
+// comparable with the PAL/NTSC frame budget.
+let coreMsThisSecond = 0;
+let rustRenderMsThisSecond = 0;
+let uploadMsThisSecond = 0;
+let shaderMsThisSecond = 0;
 let audioUnderruns = 0;
 let lastStatUpdate = 0;
 // Size of the last presented frame in emulated pixels. Under the monitor
@@ -684,6 +698,11 @@ async function boot() {
 
     await buildAudioStack(false);
     presentDirty = false;
+    lastPresentationRevision = null;
+    coreMsThisSecond = 0;
+    rustRenderMsThisSecond = 0;
+    uploadMsThisSecond = 0;
+    shaderMsThisSecond = 0;
 
     // A fresh machine boots with an empty drive: DF0 holds the pending disk
     // or nothing, never a name left over from before the reboot (a crash
@@ -821,30 +840,46 @@ function maxFramesForQueue() {
 // tick, and again after a save state is loaded: that repaints the restored
 // screen straight away, so a load into a paused machine shows where it
 // resumes instead of the frame from before the load.
-function presentFrame() {
+function presentFrame(force = false) {
   const rows = emu.present_rows();
-  if (rows === 0) return;
+  if (rows === 0) return false;
+  const hasPresentationRevision = typeof emu.presentation_revision === 'function';
+  const revision = hasPresentationRevision ? emu.presentation_revision() : null;
+  const changed = hasPresentationRevision
+    ? revision !== lastPresentationRevision
+    : presentDirty;
+  // An older cached bundle has no revision to prove that its held
+  // presentation is unchanged. Preserve the old page's unconditional
+  // copy/upload behaviour, including repaint-only load-state and overscan
+  // calls, while `changed` still keeps the "shown" counter meaningful.
+  if (hasPresentationRevision && !changed && !force) return false;
   // The presentation size follows the emulated display (the cropped TV
   // aperture for a standard PAL screen, the full overscan framebuffer
-  // otherwise), so track both dimensions every frame.
+  // otherwise), so track both dimensions whenever the buffer changes or
+  // an external display change forces a redraw.
   const width = emu.present_width();
   presentSize = { width, rows };
   if (monitorGl) {
-    presentFrameMonitor(width, rows);
-    return;
+    presentFrameMonitor(width, rows, changed || !hasPresentationRevision);
+  } else {
+    const uploadStart = performance.now();
+    if (canvas.width !== width || canvas.height !== rows) {
+      canvas.width = width;
+      canvas.height = rows;
+    }
+    // The view must be rebuilt after every changed presentation: wasm memory
+    // may grow and the present buffer may reallocate. A forced 2D redraw
+    // (resize while paused) needs the same copy even when the revision held.
+    const view = new Uint8ClampedArray(
+      wasm.memory.buffer,
+      emu.present_ptr(),
+      width * rows * 4,
+    );
+    ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
+    uploadMsThisSecond += performance.now() - uploadStart;
   }
-  if (canvas.width !== width || canvas.height !== rows) {
-    canvas.width = width;
-    canvas.height = rows;
-  }
-  // The view must be rebuilt every frame: wasm memory may grow and the
-  // present buffer may reallocate.
-  const view = new Uint8ClampedArray(
-    wasm.memory.buffer,
-    emu.present_ptr(),
-    width * rows * 4,
-  );
-  ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
+  if (hasPresentationRevision) lastPresentationRevision = revision;
+  return changed;
 }
 
 // Advance the machine to nowMs and ship what it produced (audio, serial):
@@ -863,10 +898,22 @@ function stepMachine(nowMs, deferRender) {
       deferRender && typeof emu.run_hidden === 'function'
         ? emu.run_hidden(nowMs, max)
         : emu.run(nowMs, max);
+    const stepElapsed = performance.now() - stepStart;
     // Rolling cost of a step, the render-stride controller's signal.
     // Idle steps (nothing to advance) pull it down, which is right:
     // they mean the host is keeping up.
-    avgStepMs = avgStepMs * 0.9 + (performance.now() - stepStart) * 0.1;
+    avgStepMs = avgStepMs * 0.9 + stepElapsed * 0.1;
+    if (
+      typeof emu.last_run_core_ms === 'function' &&
+      typeof emu.last_run_render_ms === 'function'
+    ) {
+      coreMsThisSecond += emu.last_run_core_ms();
+      rustRenderMsThisSecond += emu.last_run_render_ms();
+    } else {
+      // Compatibility with a page served briefly against an older bundle:
+      // preserve a useful total under "core" until the split getters arrive.
+      coreMsThisSecond += stepElapsed;
+    }
     renderSkipActive = renderSkipActive
       ? avgStepMs > RENDER_SKIP_EXIT_MS
       : avgStepMs > RENDER_SKIP_ENTER_MS;
@@ -896,15 +943,26 @@ function stepMachine(nowMs, deferRender) {
   pumpSerial();
 
   if (nowMs - lastStatUpdate >= 1000) {
+    const timedFrames = Math.max(1, framesThisSecond);
     statLine.textContent =
       `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
       `audio ${queuedMs.toFixed(0)} ms` +
       (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '') +
-      (renderSkipActive ? ' | render 1/2' : '');
+      (renderSkipActive ? ' | render 1/2' : '') +
+      ` | host ${[
+        `core ${(coreMsThisSecond / timedFrames).toFixed(1)}`,
+        `render ${(rustRenderMsThisSecond / timedFrames).toFixed(1)}`,
+        `upload ${(uploadMsThisSecond / timedFrames).toFixed(1)}`,
+        `shader ${(shaderMsThisSecond / timedFrames).toFixed(1)}`,
+      ].join(' + ')} ms/frame`;
     framesThisSecond = 0;
     ticksThisSecond = 0;
     presentsThisSecond = 0;
+    coreMsThisSecond = 0;
+    rustRenderMsThisSecond = 0;
+    uploadMsThisSecond = 0;
+    shaderMsThisSecond = 0;
     lastStatUpdate = nowMs;
     updateStatusDisks();
   }
@@ -928,11 +986,11 @@ function tick(nowMs) {
   const deferRender = renderSkipActive && !renderDeferredLastTick;
   if (!stepMachine(nowMs, deferRender)) return;
   renderDeferredLastTick = deferRender;
-  presentFrame();
+  const presentedFresh = presentFrame();
   // A deferred tick blits the previous picture again; the flag rides
   // through to the rendering tick whose blit really shows something
   // new, so "shown" stays the count of fresh pictures on the canvas.
-  if (presentDirty && !deferRender) {
+  if (presentedFresh && !deferRender) {
     presentsThisSecond++;
     presentDirty = false;
   }
@@ -4503,9 +4561,9 @@ function setTintMode(mode, remember) {
   // passes too, so the bezel plastic never turns phosphor-green. A CSS
   // filter on the element would tint frame and all.
   canvas.style.filter = monitorGl ? '' : tintFilter();
-  // A running page picks the shader tint up next tick; a paused one has
-  // no ticking loop to repaint, so repaint here.
-  if (monitorGl && emu && running && paused) presentFrame();
+  // The emulated picture did not change, so the revision-driven tick would
+  // skip it; redraw the held monitor texture with the new uniform now.
+  if (monitorGl && emu && running) presentFrame(true);
 }
 tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 
@@ -4928,33 +4986,61 @@ void main() {
     // blank canvas until its next tick. The rebuild reset the cached
     // texture size, so this re-uploads the frame it re-presents. With no
     // machine, the powered-off monitor comes back instead.
-    if (emu && running) presentFrame();
+    if (emu && running) presentFrame(true);
     else if (!emu) presentMonitorOff();
   });
   return renderer;
 }
 
-// Present one frame through the monitor renderer: upload the emulator's
-// presentation buffer and draw it as the selected monitor.
-function presentFrameMonitor(width, rows) {
+// Present one frame through the monitor renderer. A changed Rust
+// presentation uploads new texture bytes; a display-only change (monitor
+// mode, tint, resize, context restoration) redraws the existing texture.
+function presentFrameMonitor(width, rows, changed) {
   const gl = monitorGl.gl;
-  // The view must be rebuilt every frame (wasm memory may grow); the
-  // texture reallocates only when the presentation size changes.
-  const view = new Uint8Array(wasm.memory.buffer, emu.present_ptr(), width * rows * 4);
   gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
-  if (monitorGl.texW !== width || monitorGl.texH !== rows) {
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, view);
-    monitorGl.texW = width;
-    monitorGl.texH = rows;
-  } else {
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, rows, gl.RGBA, gl.UNSIGNED_BYTE, view);
+  const resized = monitorGl.texW !== width || monitorGl.texH !== rows;
+  if (changed || resized) {
+    const uploadStart = performance.now();
+    // Rebuild the view only for a real upload: wasm memory may grow and the
+    // presentation Vec may reallocate between revisions.
+    const view = new Uint8Array(wasm.memory.buffer, emu.present_ptr(), width * rows * 4);
+    if (resized) {
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.SRGB8_ALPHA8,
+        width,
+        rows,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        view,
+      );
+      monitorGl.texW = width;
+      monitorGl.texH = rows;
+    } else {
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        width,
+        rows,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        view,
+      );
+    }
+    uploadMsThisSecond += performance.now() - uploadStart;
   }
   // The CRT pass suspends when the scan has no 15 kHz line structure to
   // draw (a programmable scan; 0 from the getter), like the desktop's
   // preset, leaving the bezel - which frames any scan - or the plain
   // blit. An older wasm bundle has no getter; half the presented rows is
   // the standard-scan line count.
+  const shaderStart = performance.now();
   monitorDraw(width, rows, emu.present_crt_lines?.() ?? rows / 2);
+  shaderMsThisSecond += performance.now() - shaderStart;
 }
 
 // Draw the selected monitor with a dark, unlit screen: what the page
@@ -5076,10 +5162,9 @@ function setMonitorMode(mode, remember) {
   monitorSel.value = mode;
   if (remember) storePref(MONITOR_STORAGE_KEY, mode);
   syncShellChrome();
-  // A running page picks the mode up next tick; a paused one has no
-  // ticking loop to repaint, so repaint here, and with no machine at all
-  // the choice previews on the powered-off monitor.
-  if (emu && running && paused) presentFrame();
+  // The emulated picture did not change, so redraw the held texture now;
+  // with no machine at all the choice previews on the powered-off monitor.
+  if (emu && running) presentFrame(true);
   else if (!emu) presentMonitorOff();
 }
 monitorSel.addEventListener('change', () => setMonitorMode(monitorSel.value, true));
@@ -5100,8 +5185,8 @@ function syncShellChrome() {
 // The powered-off monitor fronts the page from the start: drawn now (the
 // module runs with the DOM ready), again on load in case the stylesheet
 // laid the canvas out late, and on resizes while no machine exists. A
-// paused machine repaints on resize too - its loop is not ticking, and
-// the stretched backing store would otherwise blur the frozen picture.
+// running machine redraws its held texture too: repeated emulated frames
+// deliberately skip the ordinary presentation path now.
 syncShellChrome();
 presentMonitorOff();
 window.addEventListener('load', () => {
@@ -5110,7 +5195,7 @@ window.addEventListener('load', () => {
 window.addEventListener('resize', () => {
   if (!monitorGl) return;
   if (!emu) presentMonitorOff();
-  else if (running && paused) presentFrame();
+  else if (running) presentFrame(true);
 });
 
 // --- status bar --------------------------------------------------------
