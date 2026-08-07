@@ -1039,12 +1039,13 @@ pub struct HostDiskRow {
 /// The disks the Host Disk page will offer.
 ///
 /// Only media the emulator could genuinely use is listed. The disk the host
-/// is running from is excluded, and so is internal fixed storage: an Amiga
-/// disk reaches a modern computer through a card reader or a USB adapter, and
-/// on a machine whose system volume is synthesised (an APFS container, an LVM
-/// volume) the *physical* disk underneath it is not always identifiable --
-/// so offering internal disks at all would risk offering the one holding the
-/// running system under another name.
+/// is running from is excluded outright, and internal fixed storage is
+/// hidden besides: an Amiga disk reaches a modern computer through a card
+/// reader or a USB adapter, so an internal disk is almost never what anybody
+/// wants -- and keeping the host's own storage out of a list of things to
+/// hand to an Amiga is cheap insurance on top of the system-disk tracing
+/// (`blockdev` follows a synthesized root -- APFS container, LVM -- down to
+/// the hardware it lives on, but a belt still wants braces).
 #[cfg(not(target_arch = "wasm32"))]
 fn sample_host_disks() -> Vec<HostDiskRow> {
     crate::blockdev::list_devices()

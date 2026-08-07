@@ -5,10 +5,12 @@
 //! $DA8000-$DAA000, and empty-slot PCMCIA status.
 //!
 //! Decode and register layout follow the Commodore schematics as captured by
-//! the Linux `gayle.c` IDE driver and the ROM scsi.device: the IDE task
-//! file lives at $DA2000 with a 4-byte stride (byte registers on the odd
-//! word half, offset base+4*reg+2), and the control block register at
-//! base+$101A. None of this is on the chip bus; the CPU reaches it through
+//! the Linux `gayle.c` IDE driver: the IDE task file has a 4-byte stride
+//! with byte registers on the even (D15-D8) half, and the control block one
+//! A12 page above it. A13 is not decoded, so the pair of blocks appears at
+//! $DA0000/$DA1018 and again at $DA2000/$DA3018 -- Kickstart's scsi.device
+//! drives the second image, AROS's ata.device the first, and hardware
+//! answers both. None of this is on the chip bus; the CPU reaches it through
 //! `cpu_external_access`.
 //!
 //! The drives, the task file, and the command engine are the shared ATA core

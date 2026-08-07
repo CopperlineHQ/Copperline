@@ -9,11 +9,12 @@
 //! prompt comes later, only for the device actually chosen.
 //!
 //! Two details of the registry shape the code. Whole disks are `IOMedia`
-//! objects with `Whole` set, which is what we want and what excludes both
-//! partitions and the synthesized APFS containers that `diskutil` shows as
-//! separate disks. But the model name and whether the bus is internal live
-//! on an *ancestor* of the media object, the block-storage device, so those
-//! are fetched by searching up the service plane rather than read directly.
+//! objects with `Whole` set, which keeps partitions out of the list --
+//! though not the synthesized APFS containers, which are whole disks in
+//! their own right and are listed (and traced to their stores) like any
+//! other. And the model name and whether the bus is internal live on an
+//! *ancestor* of the media object, the block-storage device, so those are
+//! fetched by searching up the service plane rather than read directly.
 //!
 //! Mounted volumes come from `getfsstat`, matching each mount's device
 //! against the disk it belongs to. That is also where finding the running
@@ -43,9 +44,9 @@
 //! - `fsync` on `/dev/rdiskN` is `ENOTTY` -- the raw node has no buffer
 //!   cache to empty. `DKIOCSYNCHRONIZECACHE` is the call that asks the disk
 //!   itself, and is answered.
-//! - `AuthorizationCreate` returns -60008 from
-//!   this unbundled binary, so the pre-authorized path is dormant and the
-//!   prompt is titled `authopen`; see [`authorize_open`].
+//! - `AuthorizationCreate` returns -60008 from this unbundled binary, so
+//!   the pre-authorized path is dormant and the prompt is titled `authopen`;
+//!   see [`authorize_open`].
 
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;

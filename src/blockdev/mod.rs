@@ -691,9 +691,10 @@ pub fn release_device(id: &str) -> bool {
 /// device, so Copperline is one for itself: the same binary run once with
 /// privilege, opening what it was asked to and handing the result back. How
 /// the handles travel is each host's affair; what is said is not, and lives
-/// here so the two halves cannot drift apart -- and so the tests of it run
-/// on every host, not only the one that uses it.
-#[cfg(any(windows, target_os = "linux"))]
+/// here so the two halves cannot drift apart. Compiled on every host -- it
+/// is a handful of pure string functions -- so its tests run wherever the
+/// suite does, not only on the two hosts that speak it.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod broker_protocol {
     use anyhow::Result;
 

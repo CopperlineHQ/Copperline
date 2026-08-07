@@ -4292,9 +4292,10 @@ const HOST_DISK_ROW_H: usize = 14;
 const HOST_DISK_HEADER_H: usize = 16;
 /// Rows drawn inside the box at once. A longer list scrolls.
 pub(crate) const HOST_DISK_VISIBLE_ROWS: usize = 8;
-/// Column starts, as offsets from the inside edge of the box. Each is wide
-/// enough for what actually goes in it: a device identifier runs to
-/// `PhysicalDrive11` on Windows, and an attachment point to `SCSI Unit 0`.
+/// Column starts, as offsets from the inside edge of the box. Volume gets
+/// the widest cell -- model strings are the longest text on the page -- and
+/// every cell clips at the next column, so a Windows `PhysicalDrive11` reads
+/// truncated in Disk rather than running into its neighbour.
 const HOST_DISK_COL_DISK: usize = 8;
 const HOST_DISK_COL_VOLUME: usize = 112;
 const HOST_DISK_COL_SIZE: usize = 272;
