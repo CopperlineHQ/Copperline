@@ -269,10 +269,13 @@ slow = "512K"
 # HostSocket: bsdsocket.library backed by a host-side TCP/IP stack -- socket
 # networking for guest applications with no guest TCP/IP stack to install or
 # boot (the library autoboots from the board's ROM). Same net backends as
-# [a2065], but the guest needs no IP configuration at all: "nat" gives
-# applications outbound internet, "loopback" gives deterministic self-talk
-# (127.0.0.1), "none" a dead wire. Don't fit this alongside a real guest
-# TCP/IP stack -- both would add a bsdsocket.library.
+# [a2065] plus one more: "nat" gives applications outbound internet,
+# "loopback" gives deterministic self-talk (127.0.0.1), "none" a dead wire,
+# and "host" (Amiberry-style) hands each socket operation straight to a real
+# host OS socket instead of an emulated stack -- zero configuration (no
+# interface address, no gateway, no privileges), sockets go out on the
+# host's own network identity. Don't fit this alongside a real guest TCP/IP
+# stack -- both would add a bsdsocket.library.
 # [hostsocket]
 # net = "nat"
 # interface = "en0"       # required only for net = "bridge"
@@ -282,13 +285,18 @@ slow = "512K"
 #                             # address, meaningless on a real LAN. No DHCP,
 #                             # so pick a static address the same way you
 #                             # would for any other device on that network.
+#                             # Rejected outright under net = "host" (which
+#                             # has no interface address of its own at all).
 # gateway = "192.168.1.1"     # default gateway; net = "bridge" only, same
-#                             # reasoning as address above
-# gethostbyname() just works under net = "nat"/"bridge" with no further
-# config: it defaults to asking Copperline's own process to resolve via the
-# host OS resolver on a background thread (rejected under "loopback": it
-# would defeat that backend's whole point of byte-identical determinism).
-# Override only to target a *specific* DNS server instead of the host's:
+#                             # reasoning (and net = "host" rejection) as
+#                             # address above
+# gethostbyname() just works under net = "nat"/"bridge"/"host" with no
+# further config: it defaults to asking Copperline's own process to resolve
+# via the host OS resolver on a background thread (rejected under
+# "loopback": it would defeat that backend's whole point of byte-identical
+# determinism). Override only to target a *specific* DNS server instead of
+# the host's (meaningless under "host", whose own underlying interface is
+# hardcoded to "loopback" and couldn't reach one):
 # resolver = "dns"        # query dns_server directly instead of the host resolver
 # dns_server = "10.0.2.3" # only used when resolver = "dns"
 

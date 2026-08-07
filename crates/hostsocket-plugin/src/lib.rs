@@ -86,6 +86,33 @@ extern "C" {
     fn resolve_start(name_ptr: i32, name_len: i32) -> i32;
     fn resolve_poll(id: i32, out_ptr: i32) -> i32;
 
+    // Host-socket passthrough (the `host_sockets` capability): direct,
+    // non-blocking access to a real host OS socket, the Amiberry-style
+    // alternative to this module's own smoltcp stack. Only actually used
+    // when `[config] transport = "host"` selects it at init() -- see
+    // `Board::host_backend` and `HOSTSOCKET-HOST-BACKEND-PLAN.md`. Return
+    // values match `src/wasmboard.rs`'s own doc comment on these imports
+    // exactly (a handle or a negative BSD-style errno from this same
+    // numbering, e.g. `EAGAIN`/`EINPROGRESS` below); kept in sync with that
+    // file by hand, the same convention this file's own errno table above
+    // already follows.
+    fn sock_open(domain: i32, type_: i32) -> i32;
+    fn sock_connect(handle: i32, ip: i32, port: i32) -> i32;
+    fn sock_send(handle: i32, ptr: i32, len: i32) -> i32;
+    fn sock_recv(handle: i32, ptr: i32, cap: i32) -> i32;
+    fn sock_poll(handle: i32) -> i32;
+    fn sock_close(handle: i32);
+    fn sock_bind(handle: i32, ip: i32, port: i32) -> i32;
+    fn sock_listen(handle: i32, backlog: i32) -> i32;
+    fn sock_accept(handle: i32) -> i32;
+    fn sock_local_addr(handle: i32, out_ptr: i32) -> i32;
+    fn sock_peer_addr(handle: i32, out_ptr: i32) -> i32;
+    fn sock_sendto(handle: i32, ptr: i32, len: i32, ip: i32, port: i32) -> i32;
+    fn sock_recvfrom(handle: i32, ptr: i32, cap: i32, out_addr_ptr: i32) -> i32;
+    fn sock_setopt(handle: i32, level: i32, optname: i32, value: i32) -> i32;
+    fn sock_getopt(handle: i32, level: i32, optname: i32, out_ptr: i32) -> i32;
+    fn sock_dup(handle: i32) -> i32;
+
     fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32;
     fn resource_len(key_ptr: i32, key_len: i32) -> i32;
     // Matches the host's real signature (src/wasmboard.rs, docs/zorro.md):
@@ -117,6 +144,52 @@ mod native_host_stubs {
         -1
     }
     pub unsafe fn resolve_poll(id: i32, out_ptr: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_open(domain: i32, type_: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_connect(handle: i32, ip: i32, port: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_send(handle: i32, ptr: i32, len: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_recv(handle: i32, ptr: i32, cap: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_poll(handle: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_close(handle: i32) {}
+    pub unsafe fn sock_bind(handle: i32, ip: i32, port: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_listen(handle: i32, backlog: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_accept(handle: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_local_addr(handle: i32, out_ptr: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_peer_addr(handle: i32, out_ptr: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_sendto(handle: i32, ptr: i32, len: i32, ip: i32, port: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_recvfrom(handle: i32, ptr: i32, cap: i32, out_addr_ptr: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_setopt(handle: i32, level: i32, optname: i32, value: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_getopt(handle: i32, level: i32, optname: i32, out_ptr: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_dup(handle: i32) -> i32 {
         -1
     }
     pub unsafe fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
@@ -341,6 +414,12 @@ const ECONNRESET: i32 = 54;
 const EADDRINUSE: i32 = 48;
 const EOPNOTSUPP: i32 = 45;
 const EMFILE: i32 = 24;
+// Only ever produced by the host-socket backend's `do_connect_host` (a
+// second non-blocking `connect()` on an already-connected socket -- a real
+// POSIX success signal, not an error; see that function's own comment).
+// The smoltcp path has no equivalent: it tracks connection state directly
+// rather than by re-issuing `connect()`.
+const EISCONN: i32 = 56;
 
 // h_errno values (netdb.h, /opt/amiga/m68k-amigaos/sys-include/netdb.h,
 // not guessed) -- do_gethostbyname's own failure/success paths, via
@@ -774,6 +853,80 @@ enum SockKind {
     // silently treated it as SockKind::Tcp.
     Icmp,
 }
+
+// -- Host-socket backend (`[config] transport = "host"`) -------------------
+//
+// A separate, much smaller sibling of the smoltcp fd table above: a TCP or
+// UDP fd opened while `Board::host_backend` is set lives in
+// `Board::host_fds` instead of `Board::fds`, and is driven directly through
+// the `sock_*` host imports rather than this module's own smoltcp
+// `Interface`. Deliberately NOT folded into `FdSlot` itself -- that struct
+// is threaded through ~60 call sites (bind/listen/accept/Dup2Socket/
+// ObtainSocket/WaitSelect/event sampling/setsockopt and more), all of it
+// tuned against specific bsdsocktest failures (see FdSlot's own field
+// comments). Grafting a second transport into it risks silently regressing
+// that hard-won behaviour for zero benefit, since this backend only
+// implements a subset of LVOs so far (see
+// HOSTSOCKET-HOST-BACKEND-PLAN.md's phased scope) -- every unimplemented
+// call (setsockopt/WaitSelect on some ops/Dup2Socket/...) on a host-backed
+// fd is simply absent from `fds`, so `fd_index` reports it as
+// no-such-descriptor (ENOTSOCK/EBADF) exactly like any other invalid fd,
+// with no risk to the existing smoltcp path at all. `HostFdSlot.kind`
+// *does* reuse `SockKind`'s plain enum (just its `Tcp`/`Udp` discriminants,
+// not `FdSlot` itself) rather than defining a near-duplicate. `Copy`
+// (unlike `FdSlot`, which holds an `Rc<()>` refcount for Dup2Socket
+// aliasing -- this backend doesn't support that yet): every field here is
+// plain data, so functions needing a snapshot of it (e.g.
+// `do_getsockopt_host`) can just copy it out instead of juggling borrows
+// against `self.host_fds`.
+#[derive(Clone, Copy)]
+struct HostFdSlot {
+    // The host-side handle `sock_open` returned; passed back to every
+    // other `sock_*` import unchanged.
+    handle: i32,
+    kind: SockKind,
+    nonblocking: bool,
+    // Mirrors `FdSlot::connect_started`: `do_connect_host` re-issues
+    // `sock_connect` on every retry (real non-blocking BSD connect()
+    // semantics -- a second call on the same socket reports EISCONN once
+    // it succeeded, or the original failure again once it didn't, see
+    // `do_connect_host`'s own comment), so this only gates whether the
+    // *first* attempt should be treated as fresh (0/EINPROGRESS) or a
+    // retry (EALREADY on still-pending, in non-blocking mode). Also
+    // covers UDP `connect()`, which always completes immediately at the
+    // OS level (no handshake) -- `sock_connect` still reports `0` on the
+    // very first call, so this never actually gates a real wait there,
+    // just keeps the bookkeeping uniform across both kinds.
+    connect_started: bool,
+    opts: HostSockOpts,
+}
+
+// The setsockopt() options this backend can't hand straight to
+// `sock_setopt`/`sock_getopt` (see those imports' own doc comments in
+// src/wasmboard.rs for why): SO_LINGER's own two-field struct doesn't fit
+// that single-`value` ABI, and SO_RCVTIMEO/SO_SNDTIMEO have no real effect
+// on a socket this backend always keeps OS-level non-blocking. Plain
+// roundtrip storage, same reasoning (and the same real-BSD-numbering
+// layout) as `SockOpts`'s own identical fields on the smoltcp path -- kept
+// as a separate, smaller struct rather than reusing `SockOpts` wholesale,
+// since every *other* field there (SO_REUSEADDR/SO_KEEPALIVE/SO_RCVBUF/
+// SO_SNDBUF/TCP_NODELAY/SO_EVENTMASK) either goes to the real host socket
+// on this backend instead, or (SO_EVENTMASK) isn't supported here at all.
+#[derive(Clone, Copy, Default)]
+struct HostSockOpts {
+    linger_onoff: i32,
+    linger_secs: i32,
+    rcvtimeo: (i32, i32),
+    sndtimeo: (i32, i32),
+}
+
+// `sock_poll`'s readiness bitmask (src/wasmboard.rs's own doc comment on
+// that import) -- hand-kept in sync with that file, same convention this
+// file's own BSD errno table above already follows for `translate_errno`'s
+// output.
+const SOCK_READABLE: i32 = 1;
+const SOCK_WRITABLE: i32 = 2;
+const SOCK_ERROR: i32 = 4;
 
 // Per-fd setsockopt()/getsockopt() state (Board::do_setsockopt/
 // do_getsockopt). None of these actually change smoltcp's own behaviour
@@ -1226,6 +1379,21 @@ struct Board {
     // not itself guaranteed unused (that's what the pool lookup in
     // `resolve_pool_id` is for).
     next_pool_id: i32,
+    // Host-socket-backed fds (see `HostFdSlot`'s own comment) -- disjoint
+    // from `fds`: a given index is occupied in at most one of the two
+    // tables at a time (`do_socket`'s own allocation loop checks both).
+    host_fds: [Option<HostFdSlot>; MAX_FDS],
+    // `[config] transport = "host"`, cached at init() time: whether a new
+    // TCP/UDP `do_socket` should open a host-backed fd instead of a
+    // smoltcp one. ICMP/DNS are unaffected either way -- see
+    // `HostFdSlot`'s own comment for what this backend does and doesn't
+    // cover.
+    host_backend: bool,
+    // `socket_pool`'s host-backend counterpart -- disjoint from it, same
+    // "two different element types, two tables" pattern `fds`/`host_fds`
+    // already follows. `resolve_pool_id` (id allocation) is shared
+    // between both pools via `next_pool_id`.
+    host_socket_pool: HashMap<i32, HostFdSlot>,
 }
 
 impl Board {
@@ -1267,6 +1435,10 @@ impl Board {
             interface_addr: INTERFACE_ADDR,
             socket_pool: HashMap::new(),
             next_pool_id: 0,
+            host_fds: [const { None }; MAX_FDS],
+            // Overwritten by init() with the real configured value.
+            host_backend: false,
+            host_socket_pool: HashMap::new(),
         }
     }
 
@@ -1371,6 +1543,15 @@ impl Board {
         // keeps the existing behavior.
         self.resolver_host =
             config_get_string("resolver").is_some_and(|s| s.eq_ignore_ascii_case("host"));
+
+        // Host-socket backend (see `Board::host_backend`'s own comment):
+        // `[config] transport = "host"`. Independent of `resolver` above
+        // and of whatever `net` backend this module's own smoltcp
+        // interface is still using -- only `do_socket`'s own TCP branch
+        // reads this; UDP/ICMP/DNS keep going through smoltcp exactly as
+        // before either way.
+        self.host_backend =
+            config_get_string("transport").is_some_and(|s| s.eq_ignore_ascii_case("host"));
 
         // gethostbyaddr()'s own reverse-DNS socket (see `ptr_socket`'s own
         // comment for why this is a plain UDP socket, not another
@@ -1685,6 +1866,23 @@ impl Board {
         self.fd_index(fd).map(|i| self.fds[i].as_ref().unwrap())
     }
 
+    // `fd_index`'s counterpart for the host-socket backend (`host_fds`) --
+    // see `HostFdSlot`'s own comment for why these are two separate
+    // tables rather than one.
+    fn host_fd_index(&self, fd: i32) -> Option<usize> {
+        let idx = usize::try_from(fd.checked_sub(1)?).ok()?;
+        (idx < MAX_FDS && self.host_fds[idx].is_some()).then_some(idx)
+    }
+
+    // `sock_poll`'s readiness bitmask for a host-backed fd, or `None` if
+    // `fd` isn't one -- lets `process_waiters` fall back to the existing
+    // smoltcp readiness checks unchanged when it isn't.
+    fn host_socket_mask(&self, fd: i32) -> Option<i32> {
+        let idx = self.host_fd_index(fd)?;
+        let handle = self.host_fds[idx].as_ref()?.handle;
+        Some(unsafe { sock_poll(handle) })
+    }
+
     // Parses a big-endian sockaddr_in (same layout as the 68k -- see
     // PROPOSAL.md's "Struct marshaling scope") out of Amiga memory.
     fn parse_sockaddr(&self, addr: u32, namelen: i32) -> (Ipv4Address, u16) {
@@ -1789,9 +1987,18 @@ impl Board {
                 return -1;
             }
         };
+        if self.host_backend && matches!(kind, SockKind::Tcp | SockKind::Udp) {
+            return self.do_socket_host(task, kind);
+        }
         let sockets = self.sockets.as_mut().expect("init() has run");
         for (i, slot) in self.fds.iter_mut().enumerate() {
-            if slot.is_none() {
+            // `host_fds[i]` too, not just this table: the two share one
+            // fd-number space (see `HostFdSlot`'s own comment), so under
+            // `host_backend` an ICMP socket (the one kind that still
+            // reaches this smoltcp allocator even then, TCP/UDP having
+            // already routed to `do_socket_host` above) must not pick an
+            // index a host-backed fd already occupies.
+            if slot.is_none() && self.host_fds[i].is_none() {
                 let handle = match kind {
                     SockKind::Tcp => sockets.add(tcp::Socket::new(
                         RingBuffer::new(vec![0u8; SOCKET_BUF_LEN]),
@@ -1843,6 +2050,40 @@ impl Board {
         -1
     }
 
+    // do_socket's host-backend branch (`Board::host_backend`, TCP only --
+    // see `HostFdSlot`'s own comment): claims a fd index free in *both*
+    // tables (so a later plain do_socket() reusing this index never
+    // collides with a live host_fds entry) and opens a real host socket
+    // via `sock_open`. `sock_open`'s own failure return is already a
+    // negative value in this crate's own BSD errno numbering (see the
+    // `sock_*` import block's own comment), so it can be reported via
+    // `set_errno` directly with no separate translation step.
+    fn do_socket_host(&mut self, task: u32, kind: SockKind) -> i32 {
+        let Some(idx) = (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+        else {
+            self.set_errno(task, EMFILE);
+            return -1;
+        };
+        let type_ = match kind {
+            SockKind::Tcp => SOCK_STREAM,
+            SockKind::Udp => SOCK_DGRAM,
+            SockKind::Icmp => unreachable!("do_socket's own caller only routes Tcp/Udp here"),
+        };
+        let handle = unsafe { sock_open(AF_INET, type_) };
+        if handle < 0 {
+            self.set_errno(task, -handle);
+            return -1;
+        }
+        self.host_fds[idx] = Some(HostFdSlot {
+            handle,
+            kind,
+            nonblocking: false,
+            connect_started: false,
+            opts: HostSockOpts::default(),
+        });
+        (idx + 1) as i32
+    }
+
     // connect(sock, name, namelen): on a UDP fd, this just records a
     // default peer (real BSD semantics -- no handshake) and returns
     // immediately. On a TCP fd: `name` is the Amiga address of a
@@ -1852,6 +2093,9 @@ impl Board {
     // -1/EINPROGRESS (first call) or -1/EALREADY (later calls) instead of
     // the blocking-loop registration below.
     fn do_connect(&mut self, task: u32, fd: i32, name_addr: u32, namelen: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_connect_host(task, fd, name_addr, namelen);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -1930,6 +2174,49 @@ impl Board {
         }
     }
 
+    // do_connect's host-backend branch. Real non-blocking BSD connect()
+    // semantics make this simpler than the smoltcp path above: every call
+    // (first attempt or a retry) just re-issues `sock_connect` and reads
+    // its result -- a second `connect()` on a socket whose first attempt
+    // already succeeded reports EISCONN (a real success, not an error;
+    // POSIX guarantees this), and a second call on one that's still
+    // pending or already failed reports EINPROGRESS/EALREADY or the
+    // original failure again. So unlike `do_connect`, there's no need to
+    // separately track "was this ever Established" here -- the host
+    // kernel's own socket state already is that record, and `sock_poll`
+    // (used only by `process_waiters`, to decide whether to wake a
+    // blocked waiter at all -- see its own comment) doesn't need to be
+    // authoritative for the same reason: this function re-validates for
+    // real on every call regardless of what woke it.
+    fn do_connect_host(&mut self, task: u32, fd: i32, name_addr: u32, namelen: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+        let first_attempt = !slot.connect_started;
+        self.host_fds[idx].as_mut().unwrap().connect_started = true;
+
+        let (ip, port) = self.parse_sockaddr(name_addr, namelen);
+        let packed_ip = u32::from_be_bytes(ip.octets()) as i32;
+        let rc = unsafe { sock_connect(handle, packed_ip, port as i32) };
+
+        if rc == 0 || rc == -EISCONN {
+            return 0;
+        }
+        if rc == -EINPROGRESS || rc == -EALREADY {
+            if nonblocking {
+                self.set_errno(task, if first_attempt { EINPROGRESS } else { EALREADY });
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Connect { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
     // send(sock, buf, len, flags): on a UDP fd, delegates to sendto() using
     // the peer connect() recorded (arg addr 0 = "use the recorded peer",
     // see do_sendto) -- a UDP write is one atomic datagram, no blocking-
@@ -1953,6 +2240,9 @@ impl Board {
     // reporting -1/EWOULDBLOCK when literally nothing could be queued
     // (previously returned a bare 0, which for TCP is not the same thing).
     fn do_send(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_send_host(task, fd, buf_addr, len, flags);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -1999,6 +2289,79 @@ impl Board {
             };
             data
         })
+    }
+
+    // do_send's host-backend branch. Reuses `send_progress` (already
+    // task-keyed, not smoltcp-specific) for the same partial-queue resume
+    // `send_tcp_stream` needs -- see that function's own comment for why a
+    // blocking send() can't just return whatever fit on the first
+    // short write. Unlike the smoltcp path, no hand-rolled
+    // ECONNREFUSED-vs-EPIPE-vs-ECONNRESET tracking is needed here: the
+    // host kernel's own `write()` already reports the right one of those
+    // (via `sock_send`'s own errno translation, see src/wasmboard.rs), so
+    // any negative `sock_send` result other than `-EAGAIN` is simply
+    // passed straight through.
+    fn do_send_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
+        if flags & MSG_OOB != 0 {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+
+        let n = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let already = self
+            .send_progress
+            .remove(&task)
+            .filter(|&(pfd, _)| pfd == fd)
+            .map_or(0, |(_, sent)| sent);
+        if already >= n {
+            return n as i32; // a previous retry already queued it all
+        }
+
+        let remaining = n - already;
+        let mut data = vec![0u8; remaining];
+        // Safety: reading the guest's send buffer out of Amiga memory,
+        // offset by whatever a previous retry already queued.
+        unsafe {
+            dma_read(
+                (buf_addr as usize + already) as i32,
+                data.as_mut_ptr() as i32,
+                remaining as i32,
+            )
+        };
+        let rc = unsafe { sock_send(handle, data.as_ptr() as i32, data.len() as i32) };
+
+        if rc >= 0 {
+            let total = already + rc as usize;
+            if total >= n {
+                return n as i32;
+            }
+            if nonblocking {
+                return total as i32;
+            }
+            self.send_progress.insert(task, (fd, total));
+            self.last_pending.insert(task, WaitKind::Send { fd });
+            return RES_PENDING;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                if already > 0 {
+                    return already as i32;
+                }
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.send_progress.insert(task, (fd, already));
+            self.last_pending.insert(task, WaitKind::Send { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     // Shared blocking/partial-progress TCP send logic behind both do_send
@@ -2123,6 +2486,9 @@ impl Board {
     // expects `recv(MSG_OOB)` to fail even on real bsdsocket.library
     // implementations, so there's no conformance reason to build it).
     fn do_recv(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_recv_host(task, fd, buf_addr, len, flags);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2186,6 +2552,51 @@ impl Board {
         // Safety: writing into the guest's receive buffer in Amiga memory.
         unsafe { dma_write(buf_addr as i32, data.as_ptr() as i32, n as i32) };
         n as i32
+    }
+
+    // do_recv's host-backend branch. Unlike the smoltcp path, no
+    // ECONNRESET-vs-plain-EOF tracking is needed: `sock_recv` returning
+    // `0` genuinely means EOF on a real host socket (read() semantics),
+    // and a real error already comes back as the right negative errno
+    // (see src/wasmboard.rs's own errno translation). MSG_PEEK isn't
+    // implemented yet (the `sock_*` import surface has no peek operation
+    // -- see HOSTSOCKET-HOST-BACKEND-PLAN.md) -- rejected explicitly
+    // rather than silently falling through to a consuming recv, which
+    // would corrupt a caller's own "peek then recv the same bytes again"
+    // expectation instead of just failing cleanly.
+    fn do_recv_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
+        if flags & (MSG_OOB | MSG_PEEK) != 0 {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+
+        let cap = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let mut data = vec![0u8; cap];
+        let rc = unsafe { sock_recv(handle, data.as_mut_ptr() as i32, data.len() as i32) };
+
+        if rc >= 0 {
+            let n = rc as usize;
+            // Safety: writing into the guest's receive buffer in Amiga
+            // memory.
+            unsafe { dma_write(buf_addr as i32, data.as_ptr() as i32, n as i32) };
+            return n as i32;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Recv { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     // sendmsg(sock, msg, flags): TCP-only (nothing in bsdsocktest's own
@@ -2313,6 +2724,12 @@ impl Board {
     }
 
     fn do_close(&mut self, task: u32, fd: i32) -> i32 {
+        if let Some(idx) = self.host_fd_index(fd) {
+            let handle = self.host_fds[idx].take().unwrap().handle;
+            unsafe { sock_close(handle) };
+            self.scrub_stale_waits(fd);
+            return 0;
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, EBADF);
             return -1;
@@ -2431,6 +2848,9 @@ impl Board {
     // here, since nothing in bsdsocktest's own loopback tier exercises
     // either for UDP.
     fn do_bind(&mut self, task: u32, fd: i32, addr: u32, namelen: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_bind_host(task, fd, addr, namelen);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2481,12 +2901,40 @@ impl Board {
         }
     }
 
+    // do_bind's host-backend branch: a plain passthrough to `sock_bind`.
+    // No EADDRINUSE bookkeeping of its own is needed here (unlike the
+    // smoltcp path's own duplicate-bind scan) -- the host kernel already
+    // enforces that for real, and `sock_bind`'s own errno translation
+    // reports it exactly as any other `sock_bind` failure. A port of `0`
+    // is passed straight through too (the OS picks a real ephemeral one);
+    // unlike the smoltcp path, that choice doesn't need caching anywhere
+    // for `getsockname()` to resolve it later -- `do_getsockname_host`
+    // just asks `sock_local_addr` fresh each time, which always reports
+    // whatever the OS actually bound the socket to, live.
+    fn do_bind_host(&mut self, task: u32, fd: i32, addr: u32, namelen: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let handle = self.host_fds[idx].as_ref().unwrap().handle;
+        let (ip, port) = self.parse_sockaddr(addr, namelen);
+        let packed_ip = u32::from_be_bytes(ip.octets()) as i32;
+        let rc = unsafe { sock_bind(handle, packed_ip, port as i32) };
+        if rc == 0 {
+            return 0;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
     // listen(sock, backlog): puts the fd's TCP socket into Listen on
     // whatever port bind() recorded (or a fresh ephemeral one if bind()
     // was never called). `backlog` is accepted but not enforced -- smoltcp
     // has no connection-queue depth to bound (see PROPOSAL.md's Phase 3
     // design notes).
     fn do_listen(&mut self, task: u32, fd: i32, _backlog: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_listen_host(task, fd, _backlog);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2511,6 +2959,32 @@ impl Board {
         0
     }
 
+    // do_listen's host-backend branch: a plain passthrough to
+    // `sock_listen`. No `is_listener`/replacement-socket bookkeeping is
+    // needed on this path at all -- see `do_accept_host`'s own comment
+    // for why a real host listening socket doesn't need the smoltcp
+    // path's "swap in a fresh listener on every accept" trick.
+    fn do_listen_host(&mut self, task: u32, fd: i32, backlog: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        // Same explicit rejection the smoltcp path's own do_listen gives
+        // a UDP fd -- real listen()/accept() are TCP-only concepts, and
+        // an explicit EINVAL here is a clearer answer than whatever a
+        // real OS's own listen(2) on SOCK_DGRAM happens to report.
+        if slot.kind != SockKind::Tcp {
+            self.set_errno(task, EINVAL);
+            return -1;
+        }
+        let rc = unsafe { sock_listen(slot.handle, backlog) };
+        if rc == 0 {
+            return 0;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
     // accept(sock, addr, addrlen): smoltcp's tcp::Socket has no accept() --
     // a Listen-state socket transitions itself directly into the
     // connection once a SYN arrives. So: if the listener is still
@@ -2520,6 +2994,9 @@ impl Board {
     // a *new* fd, and put a *fresh* socket back in Listen on the same port
     // under the *original* fd so it keeps accepting more connections.
     fn do_accept(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_accept_host(task, fd, addr_out, len_ptr);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2612,6 +3089,77 @@ impl Board {
         (new_idx + 1) as i32
     }
 
+    // do_accept's host-backend branch. Simpler than the smoltcp path
+    // above: a real host listening socket keeps listening for more
+    // connections on its own after `accept()` returns one, so there is no
+    // "swap in a fresh listener" dance to do here -- `sock_accept` is
+    // just called again on the *same* handle every time, exactly like
+    // `do_connect_host`/`do_send_host`/`do_recv_host` re-issue their own
+    // `sock_*` call on every retry.
+    fn do_accept_host(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let listener_handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+
+        let rc = unsafe { sock_accept(listener_handle) };
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Accept { fd });
+            return RES_PENDING;
+        }
+        if rc < 0 {
+            self.set_errno(task, -rc);
+            return -1;
+        }
+        let new_handle = rc;
+
+        let Some(new_idx) =
+            (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+        else {
+            unsafe { sock_close(new_handle) };
+            self.set_errno(task, EMFILE);
+            return -1;
+        };
+        self.host_fds[new_idx] = Some(HostFdSlot {
+            handle: new_handle,
+            // accept() is TCP-only (a listening socket is always
+            // SockKind::Tcp -- do_listen_host has no UDP path to have
+            // ever produced one).
+            kind: SockKind::Tcp,
+            nonblocking: false,
+            // Already connected via accept(), not do_connect_host() --
+            // moot either way (nothing re-issues sock_connect on this
+            // fd), but true is the accurate description, same reasoning
+            // as the smoltcp path's own identical comment just above.
+            connect_started: true,
+            opts: HostSockOpts::default(),
+        });
+
+        // A `sock_peer_addr` failure (rare -- the connection would have
+        // to have already died between `accept()` returning it and this
+        // very next call) reports 0.0.0.0:0 rather than failing the whole
+        // accept() -- the new fd is real and usable regardless of whether
+        // its address could be queried.
+        let mut buf = [0u8; 6];
+        let (peer_ip, peer_port) =
+            if unsafe { sock_peer_addr(new_handle, buf.as_mut_ptr() as i32) } == 0 {
+                (
+                    Ipv4Address::new(buf[0], buf[1], buf[2], buf[3]),
+                    u16::from_be_bytes([buf[4], buf[5]]),
+                )
+            } else {
+                (Ipv4Address::new(0, 0, 0, 0), 0)
+            };
+        self.write_sockaddr_out(addr_out, len_ptr, peer_ip, peer_port);
+        (new_idx + 1) as i32
+    }
+
     // sendto(sock, buf, len, flags, to, tolen): on a TCP fd, behaves like
     // send() (real systems allow sendto() on a connected stream socket).
     // On UDP, `to_addr == 0` means "use the peer connect() recorded"
@@ -2627,6 +3175,9 @@ impl Board {
         to_addr: u32,
         tolen: i32,
     ) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_sendto_host(task, fd, buf_addr, len, to_addr, tolen);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2685,6 +3236,72 @@ impl Board {
         }
     }
 
+    // do_sendto's host-backend branch. `to_addr == 0` (real UDP
+    // send()-without-explicit-destination semantics, on a connected
+    // socket) and a TCP fd both delegate to `do_send_host` -- a connected
+    // host socket's plain `sock_send` already sends to the peer
+    // `sock_connect` recorded, so there is no separate `udp_peer`
+    // bookkeeping to maintain here the way the smoltcp path's own
+    // `FdSlot::udp_peer` needs (real BSD `connect()` on the *host* kernel
+    // already does that recording for us). A non-zero `to_addr` is the
+    // real new path: an explicit per-call destination via `sock_sendto`,
+    // no prior `connect()` needed.
+    fn do_sendto_host(
+        &mut self,
+        task: u32,
+        fd: i32,
+        buf_addr: u32,
+        len: i32,
+        to_addr: u32,
+        tolen: i32,
+    ) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        if slot.kind == SockKind::Tcp || to_addr == 0 {
+            return self.do_send_host(task, fd, buf_addr, len, 0);
+        }
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+        let (ip, port) = self.parse_sockaddr(to_addr, tolen);
+
+        let n = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let mut data = vec![0u8; n];
+        // Safety: reading the guest's send buffer out of Amiga memory.
+        unsafe { dma_read(buf_addr as i32, data.as_mut_ptr() as i32, n as i32) };
+        let packed_ip = u32::from_be_bytes(ip.octets()) as i32;
+        let rc = unsafe {
+            sock_sendto(
+                handle,
+                data.as_ptr() as i32,
+                data.len() as i32,
+                packed_ip,
+                port as i32,
+            )
+        };
+
+        if rc >= 0 {
+            return rc;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            // Real UDP has no per-connection flow control, so this
+            // almost never actually happens -- kept for correctness
+            // (a momentarily full local send buffer is still possible)
+            // rather than assumed away. No `send_progress` bookkeeping
+            // needed here unlike TCP's own blocking send: a datagram is
+            // sent whole or not at all, never partially.
+            self.last_pending.insert(task, WaitKind::Send { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
     // sendto() on a raw ICMP socket: the caller supplies just the ICMP
     // message itself (type/code/checksum/ident/seq/payload -- real BSD
     // raw-socket write semantics without IP_HDRINCL, matching
@@ -2735,6 +3352,9 @@ impl Board {
         addr_out: u32,
         len_ptr: u32,
     ) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_recvfrom_host(task, fd, buf_addr, len, addr_out, len_ptr);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2784,6 +3404,68 @@ impl Board {
         };
         self.write_sockaddr_out(addr_out, len_ptr, ip, port);
         n as i32
+    }
+
+    // do_recvfrom's host-backend branch: a TCP fd delegates to
+    // `do_recv_host` (the sender is always the connected peer, nothing
+    // extra to report -- same reasoning as the smoltcp path's own
+    // identical delegation above). A UDP fd calls `sock_recvfrom`
+    // directly, which always reports the sender's address regardless of
+    // whether the guest asked for it (cheap -- the host kernel returns it
+    // as part of the same `recvfrom(2)` call either way); it's simply not
+    // forwarded when `addr_out == 0` (`write_sockaddr_out`'s existing
+    // convention).
+    fn do_recvfrom_host(
+        &mut self,
+        task: u32,
+        fd: i32,
+        buf_addr: u32,
+        len: i32,
+        addr_out: u32,
+        len_ptr: u32,
+    ) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        if slot.kind == SockKind::Tcp {
+            return self.do_recv_host(task, fd, buf_addr, len, 0);
+        }
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+
+        let cap = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let mut data = vec![0u8; cap];
+        let mut addr_buf = [0u8; 6];
+        let rc = unsafe {
+            sock_recvfrom(
+                handle,
+                data.as_mut_ptr() as i32,
+                data.len() as i32,
+                addr_buf.as_mut_ptr() as i32,
+            )
+        };
+
+        if rc >= 0 {
+            let n = rc as usize;
+            // Safety: writing into the guest's receive buffer in Amiga
+            // memory.
+            unsafe { dma_write(buf_addr as i32, data.as_ptr() as i32, n as i32) };
+            let ip = Ipv4Address::new(addr_buf[0], addr_buf[1], addr_buf[2], addr_buf[3]);
+            let port = u16::from_be_bytes([addr_buf[4], addr_buf[5]]);
+            self.write_sockaddr_out(addr_out, len_ptr, ip, port);
+            return n as i32;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Recv { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     // recv()/recvfrom() on a raw ICMP socket: real BSD raw sockets deliver
@@ -2893,6 +3575,9 @@ impl Board {
         optval: u32,
         optlen: i32,
     ) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_setsockopt_host(task, fd, level, optname, optval, optlen);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2947,6 +3632,63 @@ impl Board {
         0
     }
 
+    // do_setsockopt's host-backend branch: SO_LINGER/SO_RCVTIMEO/
+    // SO_SNDTIMEO stay plugin-side roundtrip storage in `HostFdSlot::opts`
+    // (see that type's own doc comment for why); everything else is a
+    // real `sock_setopt` call applied directly to the host socket.
+    fn do_setsockopt_host(
+        &mut self,
+        task: u32,
+        fd: i32,
+        level: i32,
+        optname: i32,
+        optval: u32,
+        optlen: i32,
+    ) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let read_i32 = |addr: u32| -> i32 {
+            let mut raw = [0u8; 4];
+            unsafe { dma_read(addr as i32, raw.as_mut_ptr() as i32, 4) };
+            i32::from_be_bytes(raw)
+        };
+        let read_pair = |addr: u32| -> (i32, i32) {
+            let mut raw = [0u8; 8];
+            unsafe { dma_read(addr as i32, raw.as_mut_ptr() as i32, 8) };
+            (
+                i32::from_be_bytes(raw[0..4].try_into().unwrap()),
+                i32::from_be_bytes(raw[4..8].try_into().unwrap()),
+            )
+        };
+        match (level, optname) {
+            (SOL_SOCKET, SO_LINGER) if optlen >= 8 => {
+                let (onoff, secs) = read_pair(optval);
+                let opts = &mut self.host_fds[idx].as_mut().unwrap().opts;
+                opts.linger_onoff = onoff;
+                opts.linger_secs = secs;
+                return 0;
+            }
+            (SOL_SOCKET, SO_RCVTIMEO) if optlen >= 8 => {
+                self.host_fds[idx].as_mut().unwrap().opts.rcvtimeo = read_pair(optval);
+                return 0;
+            }
+            (SOL_SOCKET, SO_SNDTIMEO) if optlen >= 8 => {
+                self.host_fds[idx].as_mut().unwrap().opts.sndtimeo = read_pair(optval);
+                return 0;
+            }
+            _ => {}
+        }
+        let handle = self.host_fds[idx].as_ref().unwrap().handle;
+        let value = read_i32(optval);
+        let rc = unsafe { sock_setopt(handle, level, optname, value) };
+        if rc == 0 {
+            return 0;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
     // getsockopt: SOL_SOCKET/SO_ERROR is the one option real programs
     // actually poll after a failed non-blocking operation -- reading it
     // clears the task's last errno, matching real SO_ERROR semantics
@@ -2963,6 +3705,9 @@ impl Board {
         optval: u32,
         optlen_ptr: u32,
     ) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_getsockopt_host(task, fd, level, optname, optval, optlen_ptr);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -3037,7 +3782,93 @@ impl Board {
         0
     }
 
+    // do_getsockopt's host-backend branch: SO_TYPE reads the fd's real
+    // kind, SO_LINGER/SO_RCVTIMEO/SO_SNDTIMEO read back
+    // `HostFdSlot::opts`'s roundtrip storage (see that type's own doc
+    // comment), and everything else -- including SO_ERROR, which here is
+    // a *real* "get pending error and clear" via the host socket's own
+    // `SO_ERROR` (see `sock_getopt`'s own doc comment in
+    // src/wasmboard.rs), not the smoltcp path's task-level-errno proxy --
+    // is a real `sock_getopt` call against the host socket.
+    fn do_getsockopt_host(
+        &mut self,
+        task: u32,
+        fd: i32,
+        level: i32,
+        optname: i32,
+        optval: u32,
+        optlen_ptr: u32,
+    ) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = *self.host_fds[idx].as_ref().unwrap();
+
+        let declared_len = if optlen_ptr != 0 {
+            let mut raw = [0u8; 4];
+            unsafe { dma_read(optlen_ptr as i32, raw.as_mut_ptr() as i32, 4) };
+            i32::from_be_bytes(raw).max(0) as usize
+        } else {
+            usize::MAX
+        };
+        let write_capped = |bytes: &[u8]| {
+            let n = bytes.len().min(declared_len);
+            if n > 0 {
+                unsafe { dma_write(optval as i32, bytes.as_ptr() as i32, n as i32) };
+            }
+            if optlen_ptr != 0 {
+                let out = (n as i32).to_be_bytes();
+                unsafe { dma_write(optlen_ptr as i32, out.as_ptr() as i32, 4) };
+            }
+        };
+        let write_i32 = |value: i32| write_capped(&value.to_be_bytes());
+
+        if level == SOL_SOCKET && optname == SO_TYPE {
+            write_i32(match slot.kind {
+                SockKind::Tcp => SOCK_STREAM,
+                SockKind::Udp => SOCK_DGRAM,
+                SockKind::Icmp => unreachable!("do_socket_host only ever creates Tcp/Udp"),
+            });
+            return 0;
+        }
+        match (level, optname) {
+            (SOL_SOCKET, SO_LINGER) => {
+                let mut bytes = [0u8; 8];
+                bytes[0..4].copy_from_slice(&slot.opts.linger_onoff.to_be_bytes());
+                bytes[4..8].copy_from_slice(&slot.opts.linger_secs.to_be_bytes());
+                write_capped(&bytes);
+                return 0;
+            }
+            (SOL_SOCKET, SO_RCVTIMEO) => {
+                let mut bytes = [0u8; 8];
+                bytes[0..4].copy_from_slice(&slot.opts.rcvtimeo.0.to_be_bytes());
+                bytes[4..8].copy_from_slice(&slot.opts.rcvtimeo.1.to_be_bytes());
+                write_capped(&bytes);
+                return 0;
+            }
+            (SOL_SOCKET, SO_SNDTIMEO) => {
+                let mut bytes = [0u8; 8];
+                bytes[0..4].copy_from_slice(&slot.opts.sndtimeo.0.to_be_bytes());
+                bytes[4..8].copy_from_slice(&slot.opts.sndtimeo.1.to_be_bytes());
+                write_capped(&bytes);
+                return 0;
+            }
+            _ => {}
+        }
+        let mut buf = [0u8; 4];
+        let rc = unsafe { sock_getopt(slot.handle, level, optname, buf.as_mut_ptr() as i32) };
+        if rc != 0 {
+            self.set_errno(task, -rc);
+            return -1;
+        }
+        write_capped(&buf);
+        0
+    }
+
     fn do_getsockname(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_getsockname_host(task, fd, addr_out, len_ptr);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -3071,6 +3902,9 @@ impl Board {
     }
 
     fn do_getpeername(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_getpeername_host(task, fd, addr_out, len_ptr);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -3103,6 +3937,52 @@ impl Board {
         0
     }
 
+    // do_getsockname's host-backend branch: a plain passthrough to
+    // `sock_local_addr`. No `bind_port`/`bind_addr` fallback bookkeeping
+    // is needed the way the smoltcp path above has to maintain (a real
+    // host `getsockname()` already reports the wildcard 0.0.0.0:0 for a
+    // never-bound socket, and the real bound address -- including
+    // whatever real port the OS picked for a `bind()` to port `0` --
+    // once one exists, live and always current with no caching needed).
+    fn do_getsockname_host(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let handle = self.host_fds[idx].as_ref().unwrap().handle;
+        let mut buf = [0u8; 6];
+        let rc = unsafe { sock_local_addr(handle, buf.as_mut_ptr() as i32) };
+        if rc != 0 {
+            self.set_errno(task, -rc);
+            return -1;
+        }
+        let ip = Ipv4Address::new(buf[0], buf[1], buf[2], buf[3]);
+        let port = u16::from_be_bytes([buf[4], buf[5]]);
+        self.write_sockaddr_out(addr_out, len_ptr, ip, port);
+        0
+    }
+
+    // do_getpeername's host-backend branch: a plain passthrough to
+    // `sock_peer_addr`, which itself reports the real OS errno (normally
+    // `ENOTCONN`, via `sock_peer_addr`'s own `translate_errno`) for an
+    // unconnected socket -- no separate `udp_peer`-style bookkeeping or
+    // port-0 special case needed, unlike the smoltcp path above.
+    fn do_getpeername_host(&mut self, task: u32, fd: i32, addr_out: u32, len_ptr: u32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let handle = self.host_fds[idx].as_ref().unwrap().handle;
+        let mut buf = [0u8; 6];
+        let rc = unsafe { sock_peer_addr(handle, buf.as_mut_ptr() as i32) };
+        if rc != 0 {
+            self.set_errno(task, -rc);
+            return -1;
+        }
+        let ip = Ipv4Address::new(buf[0], buf[1], buf[2], buf[3]);
+        let port = u16::from_be_bytes([buf[4], buf[5]]);
+        self.write_sockaddr_out(addr_out, len_ptr, ip, port);
+        0
+    }
+
     // Dup2Socket(fd, newfd): the "any new fd" form (newfd < 0) is the only
     // one load-bearing for conformance (bsdsocktest's own test_transfer.c
     // accepts a plain -1 for the specific-target form too, scoring it a
@@ -3114,6 +3994,9 @@ impl Board {
     // handled before that close-then-recreate path so it can't drop the
     // very socket it's supposed to be duplicating.
     fn do_dup2socket(&mut self, task: u32, fd: i32, newfd: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_dup2socket_host(task, fd, newfd);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -3137,18 +4020,70 @@ impl Board {
             // first (dropping only *that* fd's own reference -- the
             // underlying socket stays alive if some other fd still
             // aliases it, same `Rc<()>` refcount `do_close` already
-            // uses for the `-1`/"any new fd" form).
-            if self.fds[target_idx].is_some() {
+            // uses for the `-1`/"any new fd" form). Checks `host_fds` too
+            // (via the generic `do_close` dispatcher, not this table's
+            // own removal): the target fd number could currently belong
+            // to either table.
+            if self.fds[target_idx].is_some() || self.host_fds[target_idx].is_some() {
                 self.do_close(task, (target_idx + 1) as i32);
             }
             target_idx
         } else {
-            let Some(target_idx) = self.fds.iter().position(Option::is_none) else {
+            let Some(target_idx) =
+                (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+            else {
                 return -1;
             };
             target_idx
         };
         self.fds[target_idx] = Some(self.alias_fd_slot(idx));
+        (target_idx + 1) as i32
+    }
+
+    // do_dup2socket's host-backend branch: real dup2() semantics via a
+    // real `sock_dup` (see that import's own doc comment in
+    // src/wasmboard.rs for why no manual refcounting is needed here the
+    // way `alias_fd_slot`'s own `Rc<()>` is for the smoltcp path) --
+    // mirrors `do_dup2socket`'s own shape exactly, just producing a
+    // fresh *handle* per alias instead of a fresh fd aliasing the same
+    // handle.
+    fn do_dup2socket_host(&mut self, task: u32, fd: i32, newfd: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let target_idx = if newfd >= 0 {
+            let Some(target_idx) = usize::try_from(newfd - 1).ok().filter(|&i| i < MAX_FDS) else {
+                self.set_errno(task, EINVAL);
+                return -1;
+            };
+            if target_idx == idx {
+                return newfd;
+            }
+            if self.fds[target_idx].is_some() || self.host_fds[target_idx].is_some() {
+                self.do_close(task, (target_idx + 1) as i32);
+            }
+            target_idx
+        } else {
+            let Some(target_idx) =
+                (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+            else {
+                return -1;
+            };
+            target_idx
+        };
+        let slot = *self.host_fds[idx].as_ref().unwrap();
+        let new_handle = unsafe { sock_dup(slot.handle) };
+        if new_handle < 0 {
+            self.set_errno(task, -new_handle);
+            return -1;
+        }
+        self.host_fds[target_idx] = Some(HostFdSlot {
+            handle: new_handle,
+            kind: slot.kind,
+            nonblocking: false,
+            connect_started: slot.connect_started,
+            opts: slot.opts,
+        });
         (target_idx + 1) as i32
     }
 
@@ -3191,7 +4126,13 @@ impl Board {
         loop {
             let candidate = self.next_pool_id;
             self.next_pool_id = self.next_pool_id.wrapping_add(1).max(0);
-            if !self.socket_pool.contains_key(&candidate) {
+            // Both pools share one `id` namespace from the guest's own
+            // point of view (ObtainSocket() doesn't say which pool to
+            // look in), so a freshly assigned id must be unused in
+            // either.
+            if !self.socket_pool.contains_key(&candidate)
+                && !self.host_socket_pool.contains_key(&candidate)
+            {
                 return candidate;
             }
         }
@@ -3208,6 +4149,9 @@ impl Board {
     // for exactly that reason, just without actually destroying the
     // underlying socket the way do_close does.
     fn do_release_socket(&mut self, task: u32, fd: i32, id: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_release_socket_host(fd, id);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, EBADF);
             return -1;
@@ -3219,12 +4163,30 @@ impl Board {
         key
     }
 
+    // do_release_socket's host-backend branch: pure Rust-side data
+    // movement, no `sock_*` import needed at all -- the host handle
+    // itself doesn't change, only which table (`host_fds` ->
+    // `host_socket_pool`) owns the `HostFdSlot` struct that names it.
+    fn do_release_socket_host(&mut self, fd: i32, id: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let key = self.resolve_pool_id(id);
+        let slot = self.host_fds[idx].take().unwrap();
+        self.host_socket_pool.insert(key, slot);
+        self.scrub_stale_waits(fd);
+        key
+    }
+
     // ReleaseCopyOfSocket(sock, id): same pool insertion as
     // do_release_socket, but `sock` stays valid and usable in the
     // caller's own fd table afterward -- so this inserts an *alias*
     // (`alias_fd_slot`, the same underlying-socket-sharing construction
     // do_dup2socket uses) into the pool instead of moving the original.
     fn do_release_copy_of_socket(&mut self, task: u32, fd: i32, id: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_release_copy_of_socket_host(task, fd, id);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, EBADF);
             return -1;
@@ -3232,6 +4194,34 @@ impl Board {
         let key = self.resolve_pool_id(id);
         let alias = self.alias_fd_slot(idx);
         self.socket_pool.insert(key, alias);
+        key
+    }
+
+    // do_release_copy_of_socket's host-backend branch: unlike
+    // do_release_socket_host, this genuinely needs `sock_dup` (a real
+    // `dup(2)`) -- the original fd must keep working *and* the pool
+    // needs an independently valid, independently closeable copy.
+    fn do_release_copy_of_socket_host(&mut self, task: u32, fd: i32, id: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = *self.host_fds[idx].as_ref().unwrap();
+        let new_handle = unsafe { sock_dup(slot.handle) };
+        if new_handle < 0 {
+            self.set_errno(task, -new_handle);
+            return -1;
+        }
+        let key = self.resolve_pool_id(id);
+        self.host_socket_pool.insert(
+            key,
+            HostFdSlot {
+                handle: new_handle,
+                kind: slot.kind,
+                nonblocking: false,
+                connect_started: slot.connect_started,
+                opts: slot.opts,
+            },
+        );
         key
     }
 
@@ -3259,6 +4249,13 @@ impl Board {
             self.set_errno(task, EINVAL);
             return -1;
         }
+        // The two pools share one `id` namespace from the guest's own
+        // point of view (see `resolve_pool_id`'s own comment) -- check
+        // `host_socket_pool` first since it's the cheaper lookup, and
+        // route there if that's where the id actually is.
+        if self.host_socket_pool.contains_key(&id) {
+            return self.do_obtain_socket_host(task, id, type_, protocol);
+        }
         let Some(slot) = self.socket_pool.get(&id) else {
             self.set_errno(task, EINVAL);
             return -1;
@@ -3278,7 +4275,9 @@ impl Board {
             self.set_errno(task, EINVAL);
             return -1;
         }
-        let Some(target_idx) = self.fds.iter().position(Option::is_none) else {
+        let Some(target_idx) =
+            (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+        else {
             // No free fd for it -- same EMFILE do_accept's own identical
             // case reports (this used to report EINVAL here instead, the
             // wrong errno for "no descriptor slots left" and inconsistent
@@ -3287,6 +4286,42 @@ impl Board {
             return -1;
         };
         self.fds[target_idx] = self.socket_pool.remove(&id);
+        (target_idx + 1) as i32
+    }
+
+    // do_obtain_socket's host-backend branch: same `type_`/`protocol`
+    // validation against `HostFdSlot::kind` (only `Tcp`/`Udp` are ever
+    // pooled here -- `do_socket_host` never creates an ICMP one), then
+    // pure Rust-side data movement into a fresh `host_fds` slot, no
+    // `sock_*` import needed (mirrors `do_release_socket_host`'s own
+    // reasoning: the host handle itself doesn't change).
+    fn do_obtain_socket_host(&mut self, task: u32, id: i32, type_: i32, protocol: i32) -> i32 {
+        let slot = *self
+            .host_socket_pool
+            .get(&id)
+            .expect("caller already checked host_socket_pool");
+        let expected_type = match slot.kind {
+            SockKind::Tcp => SOCK_STREAM,
+            SockKind::Udp => SOCK_DGRAM,
+            SockKind::Icmp => unreachable!("do_socket_host only ever creates Tcp/Udp"),
+        };
+        let protocol_ok = protocol == 0
+            || match slot.kind {
+                SockKind::Tcp => protocol == IPPROTO_TCP,
+                SockKind::Udp => true,
+                SockKind::Icmp => unreachable!("do_socket_host only ever creates Tcp/Udp"),
+            };
+        if type_ != expected_type || !protocol_ok {
+            self.set_errno(task, EINVAL);
+            return -1;
+        }
+        let Some(target_idx) =
+            (0..MAX_FDS).find(|&i| self.fds[i].is_none() && self.host_fds[i].is_none())
+        else {
+            self.set_errno(task, EMFILE);
+            return -1;
+        };
+        self.host_fds[target_idx] = self.host_socket_pool.remove(&id);
         (target_idx + 1) as i32
     }
 
@@ -3959,6 +4994,20 @@ impl Board {
     // datagram's size (UDP) available to read right now without
     // blocking, via smoltcp's own `recv_queue()` on either socket kind.
     fn do_ioctl_socket(&mut self, task: u32, fd: i32, request: u32, argp: u32) -> i32 {
+        if let Some(idx) = self.host_fd_index(fd) {
+            // FIONREAD has no host-backend equivalent yet (`sock_*` has no
+            // "bytes pending" query) -- EOPNOTSUPP rather than a fake 0,
+            // which would misreport "no data" instead of "unknown".
+            if request != FIONBIO {
+                self.set_errno(task, EOPNOTSUPP);
+                return -1;
+            }
+            let mut raw = [0u8; 4];
+            unsafe { dma_read(argp as i32, raw.as_mut_ptr() as i32, 4) };
+            let nonblocking = i32::from_be_bytes(raw) != 0;
+            self.host_fds[idx].as_mut().unwrap().nonblocking = nonblocking;
+            return 0;
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -4155,7 +5204,26 @@ impl Board {
         let mut ready_write = 0u32;
         for fd in 1..nfds.min(SELECT_MAX_FD) {
             let bit = 1u32 << fd;
-            let Some(slot) = self.fds[(fd - 1) as usize].as_ref() else {
+            let idx = (fd - 1) as usize;
+            // Host-backed fds live in a separate table (see `HostFdSlot`'s
+            // own comment) -- `sock_poll` is a real `poll(2)` on that
+            // side (src/wasmboard.rs's `poll_socket_mask`), so this is
+            // exactly as correct for a listening/connecting/connected
+            // host socket as the smoltcp checks below are for their own
+            // fds, including accept-readiness on a host-backed listener.
+            if let Some(hslot) = self.host_fds[idx].as_ref() {
+                let mask = unsafe { sock_poll(hslot.handle) };
+                let read_ready = mask & (SOCK_READABLE | SOCK_ERROR) != 0;
+                let write_ready = mask & (SOCK_WRITABLE | SOCK_ERROR) != 0;
+                if read_mask & bit != 0 && read_ready {
+                    ready_read |= bit;
+                }
+                if write_mask & bit != 0 && write_ready {
+                    ready_write |= bit;
+                }
+                continue;
+            }
+            let Some(slot) = self.fds[idx].as_ref() else {
                 continue;
             };
             // `sockets.get` panics if the handle's actual stored type
@@ -4617,19 +5685,49 @@ impl Board {
         let waiters = std::mem::take(&mut self.waiters);
         for w in waiters {
             let ready = match w.kind {
-                WaitKind::Connect { fd } => self.fd_slot(fd).is_none_or(|slot| {
-                    let sockets = self.sockets.as_ref().expect("init() has run");
-                    let st = sockets.get::<tcp::Socket>(slot.socket).state();
-                    !matches!(st, tcp::State::SynSent | tcp::State::SynReceived)
-                }),
-                WaitKind::Recv { fd } => self
-                    .socket_can_recv(fd)
-                    .is_none_or(|(can_recv, may_recv)| can_recv || !may_recv),
-                WaitKind::Send { fd } => self.fd_slot(fd).is_none_or(|slot| {
-                    let sockets = self.sockets.as_ref().expect("init() has run");
-                    let socket = sockets.get::<tcp::Socket>(slot.socket);
-                    socket.can_send() || !socket.may_send()
-                }),
+                // Each arm checks the host-socket backend first (see
+                // `host_socket_mask`'s own comment): a host-backed fd
+                // never has a `fd_slot`/`socket_can_recv` entry (it isn't
+                // in `fds` at all), so falling through to those unchanged
+                // would wrongly read as "fd is gone" and fire immediately.
+                // `sock_poll`'s mask only has to be an approximate
+                // "should I wake this waiter" signal here -- whichever
+                // `do_connect_host`/`do_send_host`/`do_recv_host` call
+                // this wakeup lets the guest retry is what authoritatively
+                // re-checks and reports the real result.
+                WaitKind::Connect { fd } => match self.host_socket_mask(fd) {
+                    Some(mask) => mask & (SOCK_WRITABLE | SOCK_ERROR) != 0,
+                    None => self.fd_slot(fd).is_none_or(|slot| {
+                        let sockets = self.sockets.as_ref().expect("init() has run");
+                        let st = sockets.get::<tcp::Socket>(slot.socket).state();
+                        !matches!(st, tcp::State::SynSent | tcp::State::SynReceived)
+                    }),
+                },
+                WaitKind::Recv { fd } => match self.host_socket_mask(fd) {
+                    Some(mask) => mask & (SOCK_READABLE | SOCK_ERROR) != 0,
+                    None => self
+                        .socket_can_recv(fd)
+                        .is_none_or(|(can_recv, may_recv)| can_recv || !may_recv),
+                },
+                WaitKind::Send { fd } => match self.host_socket_mask(fd) {
+                    Some(mask) => mask & (SOCK_WRITABLE | SOCK_ERROR) != 0,
+                    None => self.fd_slot(fd).is_none_or(|slot| {
+                        let sockets = self.sockets.as_ref().expect("init() has run");
+                        let socket = sockets.get::<tcp::Socket>(slot.socket);
+                        socket.can_send() || !socket.may_send()
+                    }),
+                },
+                // `sock_poll`'s READABLE bit on a *listening* socket means
+                // exactly "a connection is ready to accept" (real POSIX
+                // `poll(2)` semantics, see src/wasmboard.rs's own
+                // `poll_socket_mask`) -- so this is a real, cheap
+                // readiness check, not the busy-poll approximation an
+                // earlier version of this arm used before `sock_poll` was
+                // upgraded from a `peek()`-based heuristic to a real
+                // `poll(2)` call.
+                WaitKind::Accept { fd } if self.host_fd_index(fd).is_some() => self
+                    .host_socket_mask(fd)
+                    .is_some_and(|mask| mask & (SOCK_READABLE | SOCK_ERROR) != 0),
                 WaitKind::Accept { fd } => self.fd_slot(fd).is_none_or(|slot| {
                     let sockets = self.sockets.as_ref().expect("init() has run");
                     !sockets.get::<tcp::Socket>(slot.socket).is_listening()

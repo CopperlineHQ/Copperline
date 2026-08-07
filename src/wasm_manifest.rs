@@ -29,6 +29,15 @@ pub struct WasmCaps {
     /// to speak DNS wire format itself over its own `net` traffic. Like
     /// `net`, using it makes a board non-deterministic.
     pub resolve: bool,
+    /// Host-socket passthrough (`sock_*` imports): lets the plugin open,
+    /// connect, and read/write real host OS sockets directly, instead of
+    /// implementing TCP/IP itself over `net`. This is a materially bigger
+    /// grant than `net` -- a plugin holding it can reach anything the host
+    /// process can reach, on the host's own network identity -- so it is
+    /// only ever set for the bundled HostSocket board's `net = "host"`
+    /// mode, never a default for third-party plugin manifests. Like `net`
+    /// and `resolve`, using it makes a board non-deterministic.
+    pub host_sockets: bool,
 }
 
 /// A plugin's non-autoconfig metadata: its display name, capabilities, and (for

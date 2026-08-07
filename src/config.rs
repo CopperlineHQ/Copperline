@@ -2112,7 +2112,8 @@ pub struct ConfigOverrides {
     /// Host adapter for bridged A2065 networking (`--a2065-interface`).
     pub a2065_interface: Option<String>,
     /// HostSocket bsdsocket.library backend (`--hostsocket-net`): "none",
-    /// "loopback", "nat", or "bridge".
+    /// "loopback", "nat", "bridge", or "host" (the Amiberry-style
+    /// host-socket backend -- see `[hostsocket] net`'s own doc comment).
     /// Same parser as `[hostsocket] net`; setting it fits the board.
     pub hostsocket_net: Option<String>,
     /// Host adapter for bridged HostSocket networking
@@ -2868,8 +2869,13 @@ pub(crate) struct RawA2065 {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawHostSocket {
-    /// Host network backend: "loopback", "nat", "bridge", or "none" for a
-    /// board with a dead wire. Absent means no HostSocket board is fitted.
+    /// Host network backend: "loopback", "nat", "bridge", "host" (the
+    /// Amiberry-style host-socket backend -- see
+    /// `crate::hostsocket::board_config`'s own `transport` parameter, and
+    /// this crate's config-resolution code for what it implies:
+    /// `interface`/`address`/`gateway` are rejected, and `resolver`
+    /// defaults to `"host"`), or "none" for a board with a dead wire.
+    /// Absent means no HostSocket board is fitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) net: Option<String>,
     /// Host adapter identifier used by `net = "bridge"`.
@@ -2886,23 +2892,28 @@ pub(crate) struct RawHostSocket {
     /// Interface address ("a.b.c.d" or "a.b.c.d/prefix"), meaningful only
     /// under `net = "bridge"`: the default (Copperline NAT's own virtual
     /// address) is meaningless on a real LAN, where this must match one.
+    /// Rejected under `net = "host"` (which has no interface address of
+    /// its own at all).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) address: Option<String>,
     /// Default gateway, meaningful only under `net = "bridge"`; same
-    /// reasoning as `address` above.
+    /// reasoning as `address` above, including rejection under
+    /// `net = "host"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gateway: Option<String>,
     /// `gethostbyname()`'s resolver strategy: "host" asks Copperline's own
     /// process to resolve via the host OS resolver on a background
     /// thread, ignoring `dns_server` entirely; "dns" queries `dns_server`
     /// directly over the board's own network backend instead. Defaults to
-    /// "host" under `net = "nat"`/`"bridge"` when left unset -- the thing
-    /// that works without a `dns_server` hand-matched to the backend; set
-    /// "dns" explicitly (with `dns_server`) to opt back into a specific
-    /// resolver. Explicit "host" is rejected under `"loopback"`/`"none"`,
-    /// where it would silently break the backend's own determinism
-    /// guarantee (there is no sane default there either, so those
-    /// backends simply get no resolver key at all).
+    /// "host" under `net = "nat"`/`"bridge"`/`"host"` when left unset --
+    /// the thing that works without a `dns_server` hand-matched to the
+    /// backend (and `net = "host"`'s own underlying smoltcp interface is
+    /// hardcoded to "loopback", which couldn't reach a real one anyway);
+    /// set "dns" explicitly (with `dns_server`) to opt back into a
+    /// specific resolver. Explicit "host" is rejected under
+    /// `"loopback"`/`"none"`, where it would silently break the backend's
+    /// own determinism guarantee (there is no sane default there either,
+    /// so those backends simply get no resolver key at all).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<String>,
 }
@@ -3768,36 +3779,72 @@ impl TryFrom<RawConfig> for Config {
 
         // `[hostsocket]` expands to the bundled WASM plugin board (see
         // crate::hostsocket), appended after any [[zorro]] metadata boards.
-        let hostsocket_net = match (&raw.hostsocket.net, &raw.hostsocket.interface) {
-            (None, None) => None,
-            (None, Some(_)) => {
-                return Err(anyhow!(
-                    "[hostsocket] interface needs net = \"bridge\" (or use \
-                     --hostsocket-interface)"
-                ));
-            }
-            (Some(s), interface) => {
-                let config = crate::net::parse_net_config(s, interface.as_deref())
-                    .map_err(|error| anyhow::anyhow!("[hostsocket] {error}"))?;
-                if interface.is_some() && !matches!(&config, crate::net::NetConfig::Bridge { .. }) {
+        // `net = "host"` is not one of `crate::net::NetConfig`'s own
+        // backends at all -- it selects the Amiberry-style host-socket
+        // backend (`crate::hostsocket::board_config`'s own `transport`
+        // parameter) instead of routing TCP/UDP through this board's
+        // smoltcp stack. The underlying smoltcp interface still needs a
+        // real (if now mostly unused -- ICMP and DNS-over-`net` are the
+        // only things still on it, see `resolver` below) `net` backend of
+        // its own, hardcoded to `"loopback"` under `"host"`: keeping this
+        // mode's whole zero-config premise (no interface address, no
+        // gateway, no pcap/TAP privileges) means it can't be user-picked
+        // here the way `"bridge"`'s own address/gateway are.
+        let (hostsocket_net, hostsocket_transport) =
+            match (&raw.hostsocket.net, &raw.hostsocket.interface) {
+                (None, None) => (None, None),
+                (None, Some(_)) => {
                     return Err(anyhow!(
-                        "[hostsocket] interface applies only to net = \"bridge\""
+                        "[hostsocket] interface needs net = \"bridge\" (or use \
+                         --hostsocket-interface)"
                     ));
                 }
-                Some(config)
-            }
-        };
+                (Some(s), interface) if s.trim().eq_ignore_ascii_case("host") => {
+                    if interface.is_some() {
+                        return Err(anyhow!(
+                            "[hostsocket] interface applies only to net = \"bridge\""
+                        ));
+                    }
+                    if raw.hostsocket.address.is_some() || raw.hostsocket.gateway.is_some() {
+                        return Err(anyhow!(
+                            "[hostsocket] address/gateway don't apply to net = \"host\" (it \
+                             has no interface address of its own -- sockets go out on the \
+                             host's own network identity, see docs/guide/configuration.md)"
+                        ));
+                    }
+                    (
+                        Some(crate::net::NetConfig::Loopback),
+                        Some("host".to_string()),
+                    )
+                }
+                (Some(s), interface) => {
+                    let config = crate::net::parse_net_config(s, interface.as_deref())
+                        .map_err(|error| anyhow::anyhow!("[hostsocket] {error}"))?;
+                    if interface.is_some()
+                        && !matches!(&config, crate::net::NetConfig::Bridge { .. })
+                    {
+                        return Err(anyhow!(
+                            "[hostsocket] interface applies only to net = \"bridge\""
+                        ));
+                    }
+                    (Some(config), None)
+                }
+            };
         let hostsocket_resolver = match raw.hostsocket.resolver.as_deref() {
             // No explicit choice: default to the host OS resolver under
-            // net = "nat"/"bridge" -- the thing that works without any
-            // dns_server hand-configured to match the backend (bridge's
-            // own default dns_server is NAT's virtual forwarder address,
-            // unreachable on a real LAN). Set resolver = "dns" explicitly
-            // (with dns_server, if a specific one is wanted) to opt back
-            // into the board's own DNS-over-net query. Loopback/none have
-            // no sane default here ("host" is rejected there below), so
-            // they get no resolver key at all -- gethostbyname() stays
-            // whatever it already was for those backends.
+            // net = "nat"/"bridge"/"host" -- the thing that works without
+            // any dns_server hand-configured to match the backend
+            // (bridge's own default dns_server is NAT's virtual forwarder
+            // address, unreachable on a real LAN; "host" mode's own
+            // smoltcp interface is hardcoded to "loopback", which
+            // wouldn't reach a real dns_server at all). Set
+            // resolver = "dns" explicitly (with dns_server, if a specific
+            // one is wanted) to opt back into the board's own
+            // DNS-over-net query. Plain loopback/none have no sane
+            // default here ("host" is rejected there below), so they get
+            // no resolver key at all -- gethostbyname() stays whatever it
+            // already was for those backends.
+            None if hostsocket_transport.as_deref() == Some("host") => Some("host".to_string()),
             None => match &hostsocket_net {
                 Some(crate::net::NetConfig::Nat) | Some(crate::net::NetConfig::Bridge { .. }) => {
                     Some("host".to_string())
@@ -3812,6 +3859,7 @@ impl TryFrom<RawConfig> for Config {
                     ));
                 }
                 if normalized == "host"
+                    && hostsocket_transport.as_deref() != Some("host")
                     && !matches!(
                         &hostsocket_net,
                         Some(crate::net::NetConfig::Nat)
@@ -3819,8 +3867,9 @@ impl TryFrom<RawConfig> for Config {
                     )
                 {
                     return Err(anyhow!(
-                        "[hostsocket] resolver = \"host\" needs net = \"nat\" or \"bridge\" \
-                         (it would silently defeat \"loopback\"'s own determinism guarantee)"
+                        "[hostsocket] resolver = \"host\" needs net = \"nat\", \"bridge\", or \
+                         \"host\" (it would silently defeat \"loopback\"'s own determinism \
+                         guarantee)"
                     ));
                 }
                 Some(normalized)
@@ -3834,6 +3883,7 @@ impl TryFrom<RawConfig> for Config {
                 raw.hostsocket.address.as_deref(),
                 raw.hostsocket.gateway.as_deref(),
                 hostsocket_resolver.as_deref(),
+                hostsocket_transport.as_deref(),
             ));
         }
 
@@ -8958,7 +9008,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("needs net = \"nat\" or \"bridge\""),
+                .contains("needs net = \"nat\", \"bridge\", or \"host\""),
             "{err:#}"
         );
 
@@ -9027,6 +9077,109 @@ mod tests {
         assert_eq!(
             Config::try_from(raw)?.wasm_boards[0].manifest.net,
             crate::net::NetConfig::Nat
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostsocket_net_host_selects_the_host_socket_backend() -> Result<()> {
+        let cfg = parse_config("[hostsocket]\nnet = \"host\"\n")?;
+        let board = &cfg.wasm_boards[0];
+        // The underlying smoltcp interface is hardcoded to loopback under
+        // "host" -- ICMP/DNS-over-net are the only things still on it,
+        // and this mode's whole premise is zero-config, so it isn't
+        // user-selectable here the way "bridge" picks a real backend.
+        assert_eq!(board.manifest.net, crate::net::NetConfig::Loopback);
+        assert!(board.manifest.caps.host_sockets);
+        assert_eq!(
+            board.manifest.config.get("transport").map(String::as_str),
+            Some("host")
+        );
+        // resolver defaults to "host" here too (loopback's own smoltcp
+        // interface couldn't reach a real dns_server anyway).
+        assert_eq!(
+            board.manifest.config.get("resolver").map(String::as_str),
+            Some("host")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostsocket_net_host_rejects_interface_address_and_gateway() {
+        let err = parse_config("[hostsocket]\nnet = \"host\"\ninterface = \"en0\"\n").unwrap_err();
+        assert!(err.to_string().contains("applies only to net"), "{err:#}");
+
+        let err = parse_config(
+            r#"
+            [hostsocket]
+            net = "host"
+            address = "192.168.1.50/24"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("address/gateway don't apply"),
+            "{err:#}"
+        );
+
+        let err = parse_config(
+            r#"
+            [hostsocket]
+            net = "host"
+            gateway = "192.168.1.1"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("address/gateway don't apply"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn hostsocket_net_host_accepts_an_explicit_resolver_override() -> Result<()> {
+        // "host" is the default under net = "host" too, but an explicit
+        // choice (either value) is still honoured, same as nat/bridge.
+        let cfg = parse_config("[hostsocket]\nnet = \"host\"\nresolver = \"dns\"\n")?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("dns")
+        );
+
+        let cfg = parse_config("[hostsocket]\nnet = \"host\"\nresolver = \"host\"\n")?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("host")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostsocket_net_host_reachable_from_the_cli_override() -> Result<()> {
+        let overrides = ConfigOverrides {
+            hostsocket_net: Some("host".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(
+            cfg.wasm_boards[0].manifest.net,
+            crate::net::NetConfig::Loopback
+        );
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("transport")
+                .map(String::as_str),
+            Some("host")
         );
         Ok(())
     }

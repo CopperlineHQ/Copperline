@@ -84,6 +84,7 @@ pub fn board_config(
     address: Option<&str>,
     gateway: Option<&str>,
     resolver: Option<&str>,
+    transport: Option<&str>,
 ) -> WasmBoardConfig {
     let mut config = BTreeMap::new();
     config.insert("rom".to_string(), BUNDLED_HOSTSOCKET_ROM.to_string());
@@ -107,6 +108,17 @@ pub fn board_config(
     if let Some(resolver) = resolver {
         config.insert("resolver".to_string(), resolver.to_string());
     }
+    // Absent means the plugin's own default (smoltcp, unchanged) -- "host"
+    // selects the Amiberry-style host-socket backend for new TCP sockets
+    // (see the plugin's own `Board::host_backend`). No CLI/TOML surface
+    // wired up to this yet (`[hostsocket] net = "host"`/`--hostsocket-net
+    // host` is HOSTSOCKET-HOST-BACKEND-PLAN.md's own later "configuration
+    // plumbing" phase) -- both current callers pass `None`, so this has no
+    // effect on real boards yet; it exists so the plugin-dispatch wiring
+    // itself is independently testable first.
+    if let Some(transport) = transport {
+        config.insert("transport".to_string(), transport.to_string());
+    }
     let spec = BoardSpec::hostsocket();
     WasmBoardConfig {
         manifest: WasmManifest {
@@ -128,6 +140,12 @@ pub fn board_config(
                 // an ungranted-but-imported host function would fail
                 // instantiation outright, not just go unused.
                 resolve: true,
+                // The plugin module always imports sock_open/sock_connect/
+                // sock_send/sock_recv/sock_poll/sock_close now too (used
+                // only when `transport` above selects the host-socket
+                // backend), so this is granted unconditionally, same
+                // reasoning as `resolve` just above.
+                host_sockets: true,
             },
             net,
             config,

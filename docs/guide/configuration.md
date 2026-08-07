@@ -1477,7 +1477,7 @@ NAT's limitations.
 
 ```toml
 [hostsocket]
-net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
+net = "nat"   # or "bridge", "loopback", "host"; "none" for a dead wire
 # interface = "en0"       # required for "bridge"
 # dns_server = "10.0.2.3" # only used when resolver = "dns" (see below)
 # hostname = "amiga"      # gethostname() return value (cosmetic)
@@ -1485,7 +1485,7 @@ net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
 # gateway = "192.168.1.1"     # default gateway; only for "bridge" (see below)
 # resolver = "dns"            # gethostbyname() via dns_server directly instead
 #                             # of the host's own resolver (the default under
-#                             # "nat"/"bridge"); see below
+#                             # "nat"/"bridge"/"host"); see below
 ```
 
 Fits the bundled HostSocket board: `bsdsocket.library` for the guest, backed
@@ -1506,11 +1506,31 @@ host-side stack owns addressing -- so under `"nat"` sockets simply reach the
 outside world, and under `"loopback"` the guest can talk to itself
 (`127.0.0.1`) with fully deterministic behavior, which also makes
 `"loopback"` the right backend for reproducible headless test runs of
-socket-using software. `gethostbyname()` just works under `"nat"`/`"bridge"`
-with no further configuration (see `resolver` below for why); under
-`"loopback"` lookups return failure (nothing is listening, and nothing
-should be -- see `resolver`'s own note on why loopback never routes through
-a real resolver).
+socket-using software. `gethostbyname()` just works under
+`"nat"`/`"bridge"`/`"host"` with no further configuration (see `resolver`
+below for why); under `"loopback"` lookups return failure (nothing is
+listening, and nothing should be -- see `resolver`'s own note on why
+loopback never routes through a real resolver).
+
+`net = "host"` is a fourth, different kind of backend, not a `crate::net`
+one at all: instead of terminating TCP/UDP on this board's own embedded
+TCP/IP stack and pushing frames through a NAT/bridge/loopback backend, each
+socket operation (`socket`/`connect`/`send`/`recv`/`bind`/`listen`/
+`accept`/`sendto`/`recvfrom`/`getsockname`/`getpeername`) delegates
+directly to a real host OS socket, the same approach Amiberry/WinUAE's own
+bsdsocket emulation uses. The guest ends up sharing the host's network
+identity rather than getting an address of its own: outbound connections
+work with zero configuration (no interface address, no gateway, no
+pcap/TAP privileges, nothing to pick), and a `bind()`/`listen()`/`accept()`
+server is a plain host port bind. This is not true bridging -- the Amiga
+gets no LAN IP -- but it covers the common reason people reach for bridge
+mode, with none of bridge's setup. `interface`/`address`/`gateway` (below)
+are all rejected outright under `"host"`, since none of them mean anything
+when there is no interface of the board's own to configure. Raw ICMP
+(ping) is unaffected by any of this -- `"host"` only touches TCP and UDP --
+and still goes through the underlying (hardcoded to `"loopback"` under
+`"host"`) smoltcp interface exactly as it would under a literal
+`net = "loopback"`.
 
 `address` and `gateway` matter only under `"bridge"`. The default interface
 address/gateway (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own
@@ -1521,38 +1541,47 @@ both to match the LAN `interface` is bridged to (e.g. `address =
 "192.168.1.50/24"`, `gateway = "192.168.1.1"`) -- there is no DHCP client,
 so the address is always static, picked the same way you would pick one for
 any other statically-configured device on that network. Leave both unset
-for `"nat"` and `"loopback"`.
+for `"nat"` and `"loopback"`; they are rejected outright (not merely
+ignored) under `"host"`.
 
 `resolver` picks how `gethostbyname()` itself works, independent of the
 addressing above. Left unset, it defaults to `"host"` under `"nat"`/
-`"bridge"`: Copperline's own process resolves the name via the host OS's
-resolver on a background thread -- the same mechanism `[a2065]`'s NAT
-backend already uses internally for its own DNS forwarding, now available
-directly to this board -- which is why `gethostbyname()` just works out of
-the box under both backends with no `dns_server` to hand-configure, on
-`"bridge"` in particular where nothing else would know which resolver the
-LAN actually offers. Set `resolver = "dns"` explicitly to opt back into
-the board's own DNS query: its own smoltcp stack sends a real DNS request
-to `dns_server` over whichever backend is fitted, which is the one way to
-target a *specific* resolver rather than whatever the host happens to be
-configured to use (a corporate/internal-only DNS server on a bridged LAN,
-for instance). Explicit `resolver = "host"` is rejected under `"loopback"`/
-`"none"` (there is no sane default there either, so those backends simply
-get no resolver at all): routing through a real host resolver would
-silently defeat loopback's whole reason for existing, byte-identical
-deterministic replay. Reverse lookups (`gethostbyaddr()`) are unaffected by
-this setting -- they always use the `"dns"` path's PTR query against
-`dns_server`.
+`"bridge"`/`"host"`: Copperline's own process resolves the name via the
+host OS's resolver on a background thread -- the same mechanism
+`[a2065]`'s NAT backend already uses internally for its own DNS
+forwarding, now available directly to this board -- which is why
+`gethostbyname()` just works out of the box under all three backends with
+no `dns_server` to hand-configure (`net = "host"`'s own underlying smoltcp
+interface is hardcoded to `"loopback"`, which couldn't reach a real
+`dns_server` even if one were set). Set `resolver = "dns"` explicitly to
+opt back into the board's own DNS query: its own smoltcp stack sends a
+real DNS request to `dns_server` over whichever backend is fitted (or
+`"loopback"` under `net = "host"`, where it will simply never get an
+answer -- there is nothing to opt back into there in practice), which is
+the one way to target a *specific* resolver rather than whatever the host
+happens to be configured to use (a corporate/internal-only DNS server on a
+bridged LAN, for instance). Explicit `resolver = "host"` is rejected under
+`"loopback"`/`"none"` (there is no sane default there either, so those
+backends simply get no resolver at all): routing through a real host
+resolver would silently defeat loopback's whole reason for existing,
+byte-identical deterministic replay. Reverse lookups (`gethostbyaddr()`)
+are unaffected by this setting -- they always use the `"dns"` path's PTR
+query against `dns_server`.
 
 Do not fit this board and also boot a real guest TCP/IP stack (AmiTCP,
 Roadshow, ...) in the same session -- both would add a `bsdsocket.library`,
 and which one an application opens is undefined. Use `[a2065]` for testing
 real stacks and SANA-II drivers; use `[hostsocket]` for running or testing
 the applications above them. The determinism note on `[a2065]` applies here
-too: `"nat"` and `"bridge"` traffic arrives on the host's schedule and
-breaks byte-identical replay, while `"loopback"` and `"none"` stay
-deterministic. The board state (open sockets included) rides in save
-states, but live TCP peers do not survive a restore on the host side.
+too: `"nat"`, `"bridge"`, and `"host"` traffic all arrive on the host's
+schedule and break byte-identical replay, while `"loopback"` and `"none"`
+stay deterministic. The board state (open sockets included) rides in save
+states, but live TCP/UDP peers do not survive a restore on the host side --
+under `"host"` in particular, every socket a save state remembers comes
+back closed (real host OS socket handles are never themselves part of the
+snapshot), so the guest sees each one as if the connection had simply
+dropped, the same as a resumed `"nat"`/`"bridge"` session already does for
+its own live traffic.
 
 Implemented as a bundled WASM plugin board (see [](../zorro)); its
 verification record against the external bsdsocktest conformance suite
