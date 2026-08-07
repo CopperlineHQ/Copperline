@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The optional monitor-bezel pass: a procedural plastic front frame in
-//! the spirit of the 1084, drawn over the display rect on the GPU with
-//! the picture re-sampled into the rounded opening the frame leaves.
+//! The optional monitor-bezel pass: a procedural monitor front drawn over
+//! the display rect on the GPU, with the picture re-sampled into the
+//! rounded opening the frame leaves.
+//!
+//! One [`BezelStyle`] per frame, each a `shaders/bezel_*.wgsl` source and
+//! the opening it leaves ([`opening_rect`]). They share this pass, its
+//! uniform block and its pipeline cache, so adding a style is a shader
+//! file and two match arms.
 //!
 //! Runs inside the `pixels` `render_with` pass after the scaling
 //! renderer, on the same viewport the CRT pass uses (the display sub-rect
@@ -13,8 +18,8 @@
 //! picture first, re-aimed at the opening's bounding box
 //! ([`super::crt_shader::CrtUniforms::with_viewport`]), and the bezel
 //! follows in frame-only mode, discarding the opening interior: the
-//! plastic overlaps the tube face like the real moulding, so the frame's
-//! rounded corners and recess clip the preset's square viewport rather
+//! moulding overlaps the tube face like the real part, so the frame's
+//! rounded corners and chamfer clip the preset's square viewport rather
 //! than being buried under it.
 //!
 //! Purely a presentation stage, like the CRT pass: screenshots, frame
@@ -26,27 +31,59 @@ use pixels::wgpu;
 use zerocopy::{Immutable, IntoBytes};
 
 use super::crt_shader;
+use crate::config::BezelStyle;
 
-/// The bezel WGSL source, embedded like the preset sources.
-const BEZEL_WGSL: &str = include_str!("shaders/bezel.wgsl");
+/// One WGSL source per style, embedded like the preset sources. A new
+/// style is a file here, an arm in [`source`] and one in [`opening_rect`];
+/// nothing else in the window needs to know it exists.
+const M1084_WGSL: &str = include_str!("shaders/bezel_1084.wgsl");
+const CLASSIC_WGSL: &str = include_str!("shaders/bezel_classic.wgsl");
 
-/// Fraction of the display rect the picture keeps when the bezel is on;
-/// the rest becomes the plastic frame. Both axes scale by this one
-/// factor, so the picture keeps its aspect.
-pub(super) const OPENING_SCALE: f32 = 0.85;
+/// The shader a style draws with. [`BezelStyle::None`] draws nothing, so
+/// the pass is skipped before this is reached; it answers with the default
+/// style's source rather than widening every caller's return type.
+fn source(style: BezelStyle) -> &'static str {
+    match style {
+        BezelStyle::Model1084 | BezelStyle::None => M1084_WGSL,
+        BezelStyle::Classic => CLASSIC_WGSL,
+    }
+}
 
-/// How the freed height splits around the opening: the top margin takes
-/// this share and the bottom band the rest, so the bottom comes out
-/// wider than the top like the 1084's face.
-const TOP_SHARE: f32 = 0.42;
+/// The cabinet's proportions, in units of the picture opening's height:
+/// the moulding is that thick around the tube, measured off a straight-on
+/// photograph of a real 1084. [`FRAME_WEIGHT`] scales all of them
+/// together, trading faithfulness against how much of the window the
+/// picture keeps -- at 1.0 the frame is the real one's and the picture
+/// holds 68% of the window's width; at 0.62 it holds 78%.
+///
+/// These three place the opening. `shaders/bezel_1084.wgsl` reads them
+/// back to place everything else on the front, along with the two below,
+/// so the two sources must agree; a test pins them together.
+const FRAME_WEIGHT: f32 = 0.62;
+const FRAME_TOP: f32 = 0.1905 * FRAME_WEIGHT;
+/// Below the glass, down to the seam the chin panel starts at.
+const FRAME_WELL_BOTTOM: f32 = 0.1293 * FRAME_WEIGHT;
+/// The chin panel: model badge, logotype, power lamp.
+const FRAME_CHIN: f32 = 0.1497 * FRAME_WEIGHT;
+/// The design's side margin, and the cabinet band above the moulding.
+/// Only the shader draws with these: the cabinet fills the viewport, which
+/// leaves more room beside the tube than the design asks for, so the side
+/// margin is not what places the opening (the vertical three do that) and
+/// [`FRAME_SIDE`] only sets how far the moulding reaches beside the glass.
+/// They are here to be pinned to the shader's copies, and to let a test
+/// place what the shader does put there.
+#[cfg(test)]
+const FRAME_SIDE: f32 = 0.2313 * FRAME_WEIGHT;
+#[cfg(test)]
+const FRAME_BAND: f32 = 0.064 * FRAME_WEIGHT;
 
 /// Size of the uniform block, in bytes. The shared bind group layout pins
 /// its `min_binding_size` to the CRT block's 64 bytes, so this block must
 /// stay the same size to build against it.
 const UNIFORM_BYTES: u64 = std::mem::size_of::<BezelUniforms>() as u64;
 
-/// The uniform block `shaders/bezel.wgsl` sees. Mirrors the WGSL struct
-/// exactly; `#[repr(C)]` with 16-byte-aligned members only.
+/// The uniform block every `shaders/bezel_*.wgsl` sees. Mirrors the WGSL
+/// struct exactly; `#[repr(C)]` with 16-byte-aligned members only.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, IntoBytes, Immutable)]
 pub(super) struct BezelUniforms {
@@ -60,20 +97,50 @@ pub(super) struct BezelUniforms {
     /// zw size.
     opening: [f32; 4],
     /// x: 1 = frame-only (leave the opening interior to the preset that
-    /// painted it), 0 = full. y: the active preset's face curvature --
-    /// the insert follows the bowed glass contour it implies, 0 = flat
-    /// rounded opening. zw: reserved.
+    /// painted it), 0 = full. y: the active preset's face curvature,
+    /// faded in with its strength -- the chamfer follows the bowed glass
+    /// contour it implies, 0 = flat rounded opening. z: the radius that
+    /// preset clips its face to, faded the same way, which the aperture
+    /// opens to when it is the wider. w: reserved.
     params: [f32; 4],
 }
 
-/// The picture opening the bezel leaves inside a display viewport rect
-/// (physical surface pixels): scaled by [`OPENING_SCALE`] about both
-/// axes, centred horizontally, sitting high by [`TOP_SHARE`].
-pub(super) fn opening_rect(viewport: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+/// Fraction of the display rect the Classic frame leaves to the picture,
+/// and how the freed height splits around it: the top margin takes this
+/// share and the bottom band the rest. Both axes scale by the one factor,
+/// so the picture keeps its aspect.
+const CLASSIC_OPENING_SCALE: f32 = 0.85;
+const CLASSIC_TOP_SHARE: f32 = 0.42;
+
+/// The picture opening a style leaves inside a display viewport rect
+/// (physical surface pixels), keeping the picture's aspect.
+///
+/// The 1084's cabinet fills the viewport, as a monitor's front fills the
+/// window it stands in. Its shape is a little taller in proportion than
+/// the picture -- a real one's is -- so it cannot hold every margin at the
+/// design's weight at once. The vertical budget wins, because the deep
+/// chin is what the front is recognised by; the slack that leaves goes
+/// into the side pillars, which is where a real cabinet carries it.
+///
+/// Classic scales the rect about both axes instead and sits the opening
+/// high, which is all its frame needs to know.
+pub(super) fn opening_rect(
+    style: BezelStyle,
+    viewport: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = viewport;
-    let ow = w * OPENING_SCALE;
-    let oh = h * OPENING_SCALE;
-    (x + (w - ow) * 0.5, y + (h - oh) * TOP_SHARE, ow, oh)
+    match style {
+        BezelStyle::Classic => {
+            let ow = w * CLASSIC_OPENING_SCALE;
+            let oh = h * CLASSIC_OPENING_SCALE;
+            (x + (w - ow) * 0.5, y + (h - oh) * CLASSIC_TOP_SHARE, ow, oh)
+        }
+        BezelStyle::Model1084 | BezelStyle::None => {
+            let oh = h / (1.0 + FRAME_TOP + FRAME_WELL_BOTTOM + FRAME_CHIN);
+            let ow = oh * (w / h.max(1.0));
+            (x + (w - ow) * 0.5, y + FRAME_TOP * oh, ow, oh)
+        }
+    }
 }
 
 /// Build the bezel uniforms for one presented frame from the CRT pass's
@@ -92,23 +159,42 @@ pub(super) fn uniforms_from(
     let (ox, oy, ow, oh) = opening;
     let w = vw.max(1.0);
     let h = vh.max(1.0);
+    let strength = crt.params[0].clamp(0.0, 1.0);
     BezelUniforms {
         src_rect: crt.src_rect,
         size: crt.size,
         opening: [(ox - vx) / w, (oy - vy) / h, ow / w, oh / h],
-        // The preset's curvature rides along so the insert can follow
-        // the bowed glass; a flat preset (or none) carries 0 there and
-        // keeps the straight-edged opening.
-        params: [if frame_only { 1.0 } else { 0.0 }, crt.params[3], 0.0, 0.0],
+        // The preset's bowed face rides along so the moulding can seat
+        // it: its curvature, and the radius it clips its corners to.
+        // `crt.wgsl` fades both in with strength, so both are faded here
+        // too -- at half strength the moulding must follow a half-bowed
+        // face, not the full one. Curvature is non-zero for exactly the
+        // one preset that clips a face at all; a flat preset, or none,
+        // carries zeroes and leaves the aperture's own corners to govern.
+        params: [
+            if frame_only { 1.0 } else { 0.0 },
+            crt.params[3] * strength,
+            if crt.params[3] > 0.0 {
+                crt_shader::FACE_CORNER_RADIUS * strength
+            } else {
+                0.0
+            },
+            0.0,
+        ],
     }
 }
 
-/// The bezel pass: one fixed pipeline and the bindings it needs.
+/// The bezel pass: the bindings every style shares, and a pipeline for
+/// each style drawn so far.
 pub(super) struct BezelShader {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
-    pipeline: wgpu::RenderPipeline,
+    target_format: wgpu::TextureFormat,
+    /// One pipeline per style drawn so far. Compiling a shader costs
+    /// milliseconds, so a run pays only for the styles it actually picks,
+    /// and a style switch mid-run pays once.
+    pipelines: Vec<(BezelStyle, wgpu::RenderPipeline)>,
     bind_group: Option<wgpu::BindGroup>,
     /// The texture the current bind group views, compared by identity:
     /// `pixels` recreates its backing texture on a buffer resize, and the
@@ -119,13 +205,6 @@ pub(super) struct BezelShader {
 impl BezelShader {
     pub(super) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let bind_group_layout = crt_shader::shader_bind_group_layout(device);
-        let pipeline = crt_shader::build_pipeline(
-            device,
-            &bind_group_layout,
-            BEZEL_WGSL,
-            "bezel_shader",
-            target_format,
-        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("bezel_shader_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -145,11 +224,28 @@ impl BezelShader {
         Self {
             bind_group_layout,
             sampler,
+            target_format,
             uniforms,
-            pipeline,
+            pipelines: Vec::new(),
             bind_group: None,
             bound_texture: None,
         }
+    }
+
+    /// The pipeline for a style, compiling its shader the first time.
+    fn pipeline_for(&mut self, device: &wgpu::Device, style: BezelStyle) -> &wgpu::RenderPipeline {
+        if let Some(at) = self.pipelines.iter().position(|(s, _)| *s == style) {
+            return &self.pipelines[at].1;
+        }
+        let pipeline = crt_shader::build_pipeline(
+            device,
+            &self.bind_group_layout,
+            source(style),
+            "bezel_shader",
+            self.target_format,
+        );
+        self.pipelines.push((style, pipeline));
+        &self.pipelines.last().expect("just pushed").1
     }
 
     /// Draw the bezel over the `(x, y, w, h)` viewport rect of `target`
@@ -164,12 +260,16 @@ impl BezelShader {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         viewport: (f32, f32, f32, f32),
+        style: BezelStyle,
         uniforms: BezelUniforms,
     ) {
         let (x, y, w, h) = viewport;
-        if w < 1.0 || h < 1.0 {
+        if w < 1.0 || h < 1.0 || !style.is_on() {
             return;
         }
+        // Resolve the pipeline first: it may compile a shader, and it
+        // borrows self mutably, which the bind group below does not allow.
+        let _ = self.pipeline_for(device, style);
         if self.bound_texture.as_ref() != Some(src_texture) {
             let view = src_texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -192,7 +292,10 @@ impl BezelShader {
             }));
             self.bound_texture = Some(src_texture.clone());
         }
-        let Some(bind_group) = &self.bind_group else {
+        let (Some(bind_group), Some((_, pipeline))) = (
+            &self.bind_group,
+            self.pipelines.iter().find(|(s, _)| *s == style),
+        ) else {
             return;
         };
         queue.write_buffer(&self.uniforms, 0, uniforms.as_bytes());
@@ -212,7 +315,7 @@ impl BezelShader {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
         pass.draw(0..3, 0..1);
@@ -227,17 +330,25 @@ mod tests {
     // --- WGSL validation and geometry (no GPU) --------------------------
 
     #[test]
-    fn the_bezel_source_validates() {
-        if let Err(e) = crt_shader::validate_wgsl_source(BEZEL_WGSL) {
-            panic!("bezel shader failed validation:\n{e}");
+    fn every_bezel_source_validates() {
+        for style in BezelStyle::MENU_ORDER {
+            if let Err(e) = crt_shader::validate_wgsl_source(source(style)) {
+                panic!("{} bezel shader failed validation:\n{e}", style.label());
+            }
         }
     }
 
     /// The bezel is not a preset: it must not carry the preset contract
     /// markers, or the contract test would be expected to cover it.
     #[test]
-    fn the_bezel_is_not_a_contract_preset() {
-        assert!(!BEZEL_WGSL.contains("--- begin shared contract ---"));
+    fn no_bezel_source_is_a_contract_preset() {
+        for style in BezelStyle::MENU_ORDER {
+            assert!(
+                !source(style).contains("--- begin shared contract ---"),
+                "{} carries the preset contract",
+                style.label()
+            );
+        }
     }
 
     /// The shared bind group layout pins `min_binding_size` to the CRT
@@ -253,27 +364,62 @@ mod tests {
 
     #[test]
     fn the_opening_keeps_the_picture_aspect_and_sits_high() {
-        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, 716.0, 537.0));
+        let (vw, vh) = (716.0_f32, 537.0_f32);
+        let (ox, oy, ow, oh) = opening_rect(BezelStyle::Model1084, (0.0, 0.0, vw, vh));
         // Both axes scale by the one factor, so the picture is not
         // stretched.
-        assert!((ow / 716.0 - OPENING_SCALE).abs() < 1e-6);
-        assert!((oh / 537.0 - OPENING_SCALE).abs() < 1e-6);
-        // Centred horizontally, with the bottom band wider than the top
-        // margin like the 1084's face.
-        assert!((ox - (716.0 - ow) * 0.5).abs() < 1e-3);
+        assert!((ow / oh - vw / vh).abs() < 1e-4, "aspect drifted");
+        // The frame is a frame: the picture keeps most of the window but
+        // not nearly all of it.
+        let kept = ow / vw;
+        assert!((0.6..0.9).contains(&kept), "picture keeps {kept} of width");
+        // Centred, with the chin deeper than the top margin like the
+        // 1084's face.
+        assert!((ox - (vw - ow) * 0.5).abs() < 1e-3);
         let top = oy;
-        let bottom = 537.0 - (oy + oh);
+        let bottom = vh - (oy + oh);
         assert!(top > 0.0, "top margin missing: {top}");
         assert!(
             bottom > top,
-            "bottom band ({bottom}) not wider than top ({top})"
+            "bottom margin ({bottom}) not deeper than top ({top})"
         );
+    }
+
+    /// The cabinet fills the display rect exactly: the vertical margins
+    /// account for the whole height, and the opening leaves a side pillar
+    /// wide enough to draw at every window shape.
+    #[test]
+    fn the_cabinet_fills_the_viewport() {
+        for (w, h) in [
+            (716.0, 537.0),
+            (1920.0, 1080.0),
+            (640.0, 512.0),
+            (97.0, 61.0),
+        ] {
+            let (ox, oy, ow, oh) = opening_rect(BezelStyle::Model1084, (0.0, 0.0, w, h));
+            let used = oy + oh + (FRAME_WELL_BOTTOM + FRAME_CHIN) * oh;
+            assert!(
+                (used - h).abs() < 1e-3,
+                "vertical margins leave {} of {h} unaccounted",
+                h - used
+            );
+            assert!(ox > 0.0, "no side pillar at {w}x{h}");
+            assert!(
+                (ox + ow - (w - ox)).abs() < 1e-3,
+                "pillars uneven at {w}x{h}"
+            );
+            // The moulding sits inside the pillar, not through it.
+            assert!(
+                ox - (FRAME_SIDE - FRAME_BAND) * oh > 0.0,
+                "moulding overruns the cabinet at {w}x{h}"
+            );
+        }
     }
 
     #[test]
     fn a_letterboxed_viewport_offsets_the_opening() {
-        let flat = opening_rect((0.0, 0.0, 640.0, 480.0));
-        let off = opening_rect((12.0, 34.0, 640.0, 480.0));
+        let flat = opening_rect(BezelStyle::Model1084, (0.0, 0.0, 640.0, 480.0));
+        let off = opening_rect(BezelStyle::Model1084, (12.0, 34.0, 640.0, 480.0));
         assert_eq!(off.0, flat.0 + 12.0);
         assert_eq!(off.1, flat.1 + 34.0);
         assert_eq!(off.2, flat.2);
@@ -291,15 +437,17 @@ mod tests {
             (716, 581),
             537.0,
         );
-        let opening = opening_rect(viewport);
+        let opening = opening_rect(BezelStyle::Model1084, viewport);
         let u = uniforms_from(&crt, viewport, opening, false);
         assert_eq!(u.src_rect, crt.src_rect);
         assert_eq!(u.size, crt.size);
         // The opening is expressed relative to the viewport, so the
         // letterbox offset must cancel out.
-        assert!((u.opening[0] - (1.0 - OPENING_SCALE) * 0.5).abs() < 1e-6);
-        assert!((u.opening[2] - OPENING_SCALE).abs() < 1e-6);
-        assert!((u.opening[3] - OPENING_SCALE).abs() < 1e-6);
+        let flat = opening_rect(BezelStyle::Model1084, (0.0, 0.0, viewport.2, viewport.3));
+        assert!((u.opening[0] - flat.0 / viewport.2).abs() < 1e-6);
+        assert!((u.opening[1] - flat.1 / viewport.3).abs() < 1e-6);
+        assert!((u.opening[2] - flat.2 / viewport.2).abs() < 1e-6);
+        assert!((u.opening[3] - flat.3 / viewport.3).abs() < 1e-6);
         assert_eq!(u.params[0], 0.0);
         // Frame-only mode differs in nothing but the flag.
         let frame = uniforms_from(&crt, viewport, opening, true);
@@ -321,7 +469,7 @@ mod tests {
             (716, 581),
             537.0,
         );
-        let opening = opening_rect(viewport);
+        let opening = opening_rect(BezelStyle::Model1084, viewport);
         let re = crt.with_viewport(opening);
         assert_eq!(re.src_rect, crt.src_rect);
         assert_eq!(re.params, crt.params);
@@ -332,14 +480,40 @@ mod tests {
 
     // --- offscreen render (needs a GPU adapter) -------------------------
 
+    /// A scalar constant as a shader source states it. Parsed rather than
+    /// pinned to an exact substring, so only semantic drift fails a test,
+    /// not formatting -- and so a test's replica of the geometry cannot
+    /// drift from the shader it is checking.
+    fn shader_constant(src: &str, name: &str, what: &str) -> f32 {
+        let key = format!("const {name}: f32 =");
+        let at = src
+            .find(&key)
+            .unwrap_or_else(|| panic!("{what}: no {name} constant"));
+        let rest = &src[at + key.len()..];
+        let end = rest.find(';').expect("terminated constant");
+        rest[..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("{what}: unparsable {name}: {e}"))
+    }
+
+    /// The radius a style's opening actually carries when a preset is
+    /// clipping its picture to a tube face at full strength: every source
+    /// opens to the wider of its own aperture and that face.
+    fn effective_aperture(style: BezelStyle) -> f32 {
+        shader_constant(source(style), "APERTURE_RADIUS", style.label())
+            .max(crt_shader::FACE_CORNER_RADIUS)
+    }
+
     const TEX: u32 = 64;
     const DISPLAY_ROWS: u32 = 48;
     const GREY: u8 = 128;
     /// Magnification of the render target over the source, as a real
-    /// window magnifies the composited buffer. Big enough that the frame's
-    /// trim zones (recess, bevel, plastic band) are pixels wide and the
-    /// bottom band is deep enough for the badge lettering to draw.
-    const SCALE: u32 = 6;
+    /// window magnifies the composited buffer. Big enough that the case
+    /// band, the moulding and its chamfer are all pixels wide and the chin
+    /// panel is deep enough for both lines of lettering to draw (the
+    /// shader drops each below the height it would stop resolving at).
+    const SCALE: u32 = 8;
     const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
     /// Target clear colour; pure blue survives the sRGB encode exactly,
     /// so any surviving sentinel pixel inside the viewport means the pass
@@ -486,6 +660,7 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         src: &wgpu::Texture,
+        style: BezelStyle,
         crt_kind: Option<ShaderKind>,
     ) -> (Vec<[u8; 4]>, u32, u32) {
         let dim = TEX * SCALE;
@@ -538,7 +713,7 @@ mod tests {
             DISPLAY_ROWS as f32,
         );
         assert_eq!(viewport, (0.0, 0.0, dim as f32, rows as f32));
-        let opening = opening_rect(viewport);
+        let opening = opening_rect(style, viewport);
         if let Some(kind) = crt_kind {
             let mut crt = crt_shader::CrtShader::new(device, FORMAT);
             crt.render(
@@ -560,6 +735,7 @@ mod tests {
             &mut encoder,
             &view,
             viewport,
+            style,
             uniforms_from(&crt_uniforms, viewport, opening, crt_kind.is_some()),
         );
         (
@@ -573,6 +749,27 @@ mod tests {
         px[(y * dim + x) as usize]
     }
 
+    /// The cabinet rect and the chin seam for a viewport. The cabinet is
+    /// the viewport; only the seam is derived from the opening, exactly as
+    /// `shaders/bezel_1084.wgsl` derives it.
+    fn cabinet_of(dim: u32, rows: u32) -> (f32, f32, f32, f32, f32) {
+        let oh = opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32)).3;
+        (
+            0.0,
+            0.0,
+            dim as f32,
+            rows as f32,
+            rows as f32 - FRAME_CHIN * oh,
+        )
+    }
+
+    /// The moulding's left edge, which the model badge is flush with.
+    fn moulding_left(dim: u32, rows: u32) -> f32 {
+        let (ox, _, _, oh) =
+            opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
+        ox - (FRAME_SIDE - FRAME_BAND) * oh
+    }
+
     #[test]
     fn the_bezel_covers_the_display_rect_and_nothing_below() {
         let Some(gpu) = gpu() else {
@@ -581,7 +778,7 @@ mod tests {
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
         for y in 0..rows {
             for x in 0..dim {
                 let p = at(&px, dim, x, y);
@@ -604,18 +801,19 @@ mod tests {
     }
 
     #[test]
-    fn the_picture_fills_the_opening_and_the_frame_is_plastic() {
+    fn the_picture_fills_the_opening_and_the_frame_is_two_tone_plastic() {
         let Some(gpu) = gpu() else {
             return;
         };
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
 
         // Centre of the opening: the flat grey source, resampled 1:1 in
         // colour terms.
-        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
+        let (ox, oy, ow, oh) =
+            opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
         let centre = at(&px, dim, (ox + ow * 0.5) as u32, (oy + oh * 0.5) as u32);
         for (c, v) in centre[..3].iter().enumerate() {
             assert!(
@@ -624,93 +822,107 @@ mod tests {
             );
         }
 
-        // Middle of the left band: warm plastic, not the grey source and
-        // not black. Warm means the red channel clearly leads the blue.
-        let band = at(&px, dim, 10, (oy + oh * 0.5) as u32);
+        // The front is two-tone: a pale cool cabinet with a distinctly
+        // darker moulding clipped into it. Sample the middle of each run
+        // to the left of the tube.
+        let (cx, _, _, _, chin_top) = cabinet_of(dim, rows);
+        let mid_y = (oy + oh * 0.5) as u32;
+        let cabinet = at(&px, dim, (cx + 3.0) as u32, mid_y);
+        let moulding = at(&px, dim, ((cx + ox) * 0.5) as u32, mid_y);
         assert!(
-            band[0] > band[2] + 6,
-            "left band is not warm plastic: {band:?}"
+            cabinet[2] > cabinet[0] + 4,
+            "cabinet is not the cool grey it should be: {cabinet:?}"
         );
         assert!(
-            (120..=245).contains(&band[0]),
-            "left band brightness out of range: {band:?}"
+            (120..=245).contains(&cabinet[0]),
+            "cabinet brightness out of range: {cabinet:?}"
+        );
+        assert!(
+            cabinet[1] > moulding[1] + 20,
+            "moulding ({moulding:?}) is not darker than the cabinet ({cabinet:?})"
         );
 
-        // The case corners are rounded off to the letterbox black.
+        // Outside the cabinet is the letterbox black it is centred in.
         for (x, y) in [(0, 0), (dim - 1, 0), (0, rows - 1), (dim - 1, rows - 1)] {
             let p = at(&px, dim, x, y);
             assert!(
                 p[0] < 16 && p[1] < 16 && p[2] < 16,
-                "case corner at ({x}, {y}) is not dark: {p:?}"
+                "outside the cabinet at ({x}, {y}) is not dark: {p:?}"
             );
         }
 
-        // The power LED glows green on the bottom band, right of centre.
-        let led_x = (0.91 * dim as f32) as i32;
-        let led_y = ((oy + oh + rows as f32) * 0.5) as i32;
+        // The power lamp glows red, in the narrow panel the tube's own
+        // right edge closes: the shader puts that panel's outer joint on
+        // `ox + ow` and the lamp halfway across it.
+        let (_, _, case_w, _, _) = cabinet_of(dim, rows);
+        let led_x = (ox + ow - 0.033 * case_w) as i32;
+        let led_y = (chin_top + 0.24 * (rows as f32 - chin_top)) as i32;
         let found = (-3..=3).any(|dy| {
             (-3..=3).any(|dx| {
                 let p = at(&px, dim, (led_x + dx) as u32, (led_y + dy) as u32);
-                p[1] > p[0].saturating_add(50) && p[1] > p[2].saturating_add(50)
+                p[0] > p[1].saturating_add(60) && p[0] > p[2].saturating_add(60)
             })
         });
-        assert!(found, "no green power LED near ({led_x}, {led_y})");
+        assert!(found, "no red power lamp near ({led_x}, {led_y})");
     }
 
     #[test]
-    fn the_badge_prints_on_the_left_of_the_bottom_band() {
+    fn the_badges_print_on_the_chin_panel() {
         let Some(gpu) = gpu() else {
             return;
         };
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, None);
+        let (px, dim, rows) = render_bezel(device, queue, &src, BezelStyle::Model1084, None);
 
-        // The badge rect as the shader lays it out: left-aligned with the
-        // opening, vertically centred in the bottom band, 59x8 font pixels
-        // at 0.34 of the band height. The recess replica is the shader's
-        // insert chamfer, which is where the case face (and the band)
-        // takes over now that no seat ring sits inside it.
-        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
-        let recess = (0.030 * ow.min(oh)).max(4.0);
-        let band_top = oy + oh + recess;
-        let badge_h = 0.34 * (rows as f32 - band_top);
+        // The chin as the shader lays it out: the model badge at 0.068 of
+        // the cabinet width, the logotype centred at 0.47, both on the
+        // panel's own middle.
+        let (case_x, _, case_w, _, chin_top) = cabinet_of(dim, rows);
+        let chin_h = rows as f32 - chin_top;
         assert!(
-            badge_h >= 5.0,
-            "test target too small for the badge lettering: {badge_h}"
+            chin_h * 0.38 >= 7.0,
+            "test target too small for the chin lettering: {chin_h}"
         );
-        let badge_w = 59.0 * badge_h / 8.0;
-        let band_mid = (band_top + rows as f32) * 0.5;
-        let dark = |x0: u32, x1: u32| {
+        let mid = chin_top + chin_h * 0.5;
+        let ink = |x0: f32, x1: f32| {
             let mut n = 0;
-            for y in (band_mid - 0.5 * badge_h) as u32..=(band_mid + 0.5 * badge_h) as u32 {
-                for x in x0..=x1 {
+            for y in (mid - 0.28 * chin_h) as u32..=(mid + 0.28 * chin_h) as u32 {
+                for x in x0.max(0.0) as u32..=x1.min(dim as f32 - 1.0) as u32 {
                     let p = at(&px, dim, x, y);
-                    if p[0] < 150 && p[1] < 150 && p[2] < 150 {
+                    // Blue ink on pale plastic: the logotype's saturated
+                    // blue and the badge's paler one both read as clearly
+                    // blue and darker than the case around them.
+                    if p[0] < 170 && p[2] > p[0] + 20 {
                         n += 1;
                     }
                 }
             }
             n
         };
-        let ink = dark(ox as u32, (ox + badge_w).ceil() as u32);
-        assert!(
-            ink >= 15,
-            "badge lettering missing from the bottom band: {ink} dark pixels"
-        );
-        // The stretch between the badge and the power LED stays plain
-        // plastic: the lettering must not smear across the band.
-        let plain = dark(
-            (ox + badge_w).ceil() as u32 + 10,
-            (0.85 * dim as f32) as u32,
-        );
-        assert_eq!(plain, 0, "ink east of the badge: {plain} dark pixels");
+        // The badge as the shader lays it out: 43 cells of lettering, the
+        // first of which carries no ink, in a frame with a margin of 1.56
+        // half-caps either side.
+        let bs = chin_h * 0.38 / 13.0;
+        let bcap = 0.5 * 13.0 * bs;
+        let badge_x = moulding_left(dim, rows);
+        let badge_w = (43.0 - 1.0) * bs + 2.0 * bcap * 1.56;
+        let badge = ink(badge_x, badge_x + badge_w);
+        assert!(badge >= 12, "model badge missing: {badge} ink pixels");
+        let mark_w = chin_h * 0.27 * (67.0 / 9.0 + 2.0 * 1.28 * 0.62 + 0.42 * 0.62);
+        let mark_x = case_x + 0.47 * case_w - mark_w * 0.5;
+        let mark = ink(mark_x, mark_x + mark_w);
+        assert!(mark >= 20, "logotype missing: {mark} ink pixels");
+        // The stretch between them stays plain plastic: neither may smear
+        // across the panel.
+        let plain = ink(badge_x + badge_w + 6.0, mark_x - 6.0);
+        assert_eq!(plain, 0, "ink between the badge and the logotype: {plain}");
     }
 
     /// The window pairs the bezel with a preset by re-aiming the preset at
-    /// the opening; the combined result must still be framed (plastic band
-    /// intact) with the preset's scanline structure inside the opening.
+    /// the opening; the combined result must still be framed (the
+    /// moulding intact) with the preset's scanline structure inside it.
     #[test]
     fn a_crt_preset_lands_inside_the_opening() {
         let Some(gpu) = gpu() else {
@@ -719,9 +931,16 @@ mod tests {
         let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Scanlines));
+        let (px, dim, rows) = render_bezel(
+            device,
+            queue,
+            &src,
+            BezelStyle::Model1084,
+            Some(ShaderKind::Scanlines),
+        );
 
-        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
+        let (ox, oy, ow, oh) =
+            opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
         // Scanlines modulate the opening interior: one column of it must
         // not be flat.
         let x = (ox + ow * 0.5) as u32;
@@ -738,11 +957,12 @@ mod tests {
             "no scanline structure inside the opening (min {min}, max {max})"
         );
 
-        // The plastic band survives the preset pass untouched.
-        let band = at(&px, dim, 10, (oy + oh * 0.5) as u32);
+        // The frame survives the preset pass untouched.
+        let (cx, _, _, _, _) = cabinet_of(dim, rows);
+        let band = at(&px, dim, ((cx + ox) * 0.5) as u32, (oy + oh * 0.5) as u32);
         assert!(
-            band[0] > band[2] + 6,
-            "left band lost its plastic after the preset pass: {band:?}"
+            band[1] > 60 && band[1] > band[0] + 2 && band[1] > band[2] + 2,
+            "left moulding lost its plastic after the preset pass: {band:?}"
         );
 
         // The frame is drawn on top of the preset: at the opening's
@@ -752,7 +972,7 @@ mod tests {
         // frame-only pass exists for: the moulding overlaps the tube.
         let corner = at(&px, dim, ox as u32, oy as u32);
         assert!(
-            corner[0] > 100 && corner[0] > corner[2] + 6,
+            corner[1] > 60 && corner[1] > corner[0] + 2 && corner[1] > corner[2] + 2,
             "opening corner shows the preset instead of the frame: {corner:?}"
         );
     }
@@ -761,11 +981,11 @@ mod tests {
     /// must blend toward the preset's off-face black, not the raw
     /// picture: a bright source used to smear a picture-coloured
     /// hairline around the opening, over the preset output the pass
-    /// discards its interior for. With the insert chamfer meeting the
-    /// picture directly (no unlit seat ring), "no leak" is exactly
-    /// source-independence: everything past the join's half-pixel blend
-    /// must render identically whatever the picture holds, so the frame
-    /// is compared between an all-white and an all-black source.
+    /// discards its interior for. With the chamfer meeting the picture
+    /// directly, "no leak" is exactly source-independence: everything
+    /// past the join's half-pixel blend must render identically whatever
+    /// the picture holds, so the frame is compared between an all-white
+    /// and an all-black source.
     #[test]
     fn the_frame_only_join_does_not_leak_the_picture() {
         let Some(gpu) = gpu() else {
@@ -775,17 +995,29 @@ mod tests {
         let white = |_x: u32, _y: u32| [255, 255, 255, 255];
         let black = |_x: u32, _y: u32| [0, 0, 0, 255];
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &white);
-        let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Crt));
+        let (px, dim, rows) = render_bezel(
+            device,
+            queue,
+            &src,
+            BezelStyle::Model1084,
+            Some(ShaderKind::Crt),
+        );
         let dark = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &black);
-        let (px_dark, dim_dark, rows_dark) =
-            render_bezel(device, queue, &dark, Some(ShaderKind::Crt));
+        let (px_dark, dim_dark, rows_dark) = render_bezel(
+            device,
+            queue,
+            &dark,
+            BezelStyle::Model1084,
+            Some(ShaderKind::Crt),
+        );
         assert_eq!((dim, rows), (dim_dark, rows_dark));
 
         // The shader's glass-contour distance at a pixel centre: the same
         // warp and rounded rectangle the preset's face uses, driven by
         // the preset's own curvature so the replica tracks the shader
         // whatever value the preset table carries.
-        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
+        let (ox, oy, ow, oh) =
+            opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
         let k = crt_shader::uniforms_for(
             ShaderKind::Crt,
             1.0,
@@ -799,7 +1031,7 @@ mod tests {
         .params[3];
         let (hx, hy) = (ow * 0.5, oh * 0.5);
         let fa = hy / hx;
-        let rc = 0.0826f32;
+        let rc = effective_aperture(BezelStyle::Model1084);
         let opening_d = |x: u32, y: u32| {
             let cx = (x as f32 + 0.5 - ox - hx) / hx;
             let cy = (y as f32 + 0.5 - oy - hy) / hy;
@@ -843,28 +1075,89 @@ mod tests {
         );
     }
 
-    /// The insert must seat the preset's face exactly: both shaders
-    /// derive the glass contour from the same corner radius, so the two
-    /// sources must carry the same constant.
+    /// The moulding must cover the preset's face: `crt.wgsl` states the
+    /// radius it clips that face to and `crt_shader` mirrors it for the
+    /// bezel to open to, so the two must agree -- and the bezel's own
+    /// aperture must be the tighter of the pair for opening to it to mean
+    /// anything.
     #[test]
-    fn the_bezel_and_the_crt_preset_agree_on_the_corner_radius() {
-        // Parse the value rather than pinning an exact source substring,
-        // so only semantic drift fails the test, not formatting.
-        fn corner_radius_of(src: &str, what: &str) -> f32 {
-            let key = "const CORNER_RADIUS: f32 =";
-            let at = src
-                .find(key)
-                .unwrap_or_else(|| panic!("{what}: no CORNER_RADIUS constant"));
-            let rest = &src[at + key.len()..];
-            let end = rest.find(';').expect("terminated constant");
-            rest[..end]
-                .trim()
-                .parse()
-                .unwrap_or_else(|e| panic!("{what}: unparsable CORNER_RADIUS: {e}"))
+    fn the_aperture_is_never_tighter_than_the_face_it_covers() {
+        let face = shader_constant(
+            include_str!("shaders/crt.wgsl"),
+            "CORNER_RADIUS",
+            "crt.wgsl",
+        );
+        assert_eq!(
+            face,
+            crt_shader::FACE_CORNER_RADIUS,
+            "crt.wgsl's face radius and the constant the bezel opens to drifted apart"
+        );
+        // The plastic overlaps the glass. An aperture tighter than the
+        // face it covers would cut inside it and leave the preset's own
+        // off-face black showing in the opening's corners, so every source
+        // takes the wider of the two -- and every source must therefore
+        // state an aperture for that `max()` to reach.
+        for style in BezelStyle::MENU_ORDER {
+            let src = source(style);
+            let aperture = shader_constant(src, "APERTURE_RADIUS", style.label());
+            assert!(
+                aperture > 0.0,
+                "{}: aperture must be a real radius",
+                style.label()
+            );
+            assert!(
+                src.contains("max(APERTURE_RADIUS, u.params.z)"),
+                "{}: does not open its aperture to the preset's face",
+                style.label()
+            );
+            assert!(
+                effective_aperture(style) >= face,
+                "{}: opening cuts inside the face it covers",
+                style.label()
+            );
         }
-        let bezel = corner_radius_of(BEZEL_WGSL, "bezel.wgsl");
-        let crt = corner_radius_of(include_str!("shaders/crt.wgsl"), "crt.wgsl");
-        assert_eq!(bezel, crt, "insert and face corner radii drifted apart");
+    }
+
+    /// The shader derives the whole cabinet back from the opening this
+    /// module placed, using its own copy of the frame proportions. If the
+    /// two copies drift the frame stops matching its own opening: the
+    /// picture would sit off-centre in a cabinet of the wrong size.
+    #[test]
+    fn the_frame_proportions_match_the_shader() {
+        fn constant(name: &str) -> f32 {
+            let key = format!("const {name}: f32 =");
+            let at = M1084_WGSL
+                .find(&key)
+                .unwrap_or_else(|| panic!("bezel_1084.wgsl: no {name}"));
+            let rest = &M1084_WGSL[at + key.len()..];
+            let end = rest.find(';').expect("terminated constant");
+            // Written as `ratio * FRAME_WEIGHT`, or bare for the weight.
+            rest[..end]
+                .split('*')
+                .map(|t| {
+                    let t = t.trim();
+                    if t == "FRAME_WEIGHT" {
+                        constant("FRAME_WEIGHT")
+                    } else {
+                        t.parse().unwrap_or_else(|e| panic!("{name}: {e}"))
+                    }
+                })
+                .product()
+        }
+        for (name, ours) in [
+            ("FRAME_WEIGHT", FRAME_WEIGHT),
+            ("FRAME_SIDE", FRAME_SIDE),
+            ("FRAME_TOP", FRAME_TOP),
+            ("FRAME_WELL_BOTTOM", FRAME_WELL_BOTTOM),
+            ("FRAME_CHIN", FRAME_CHIN),
+            ("FRAME_BAND", FRAME_BAND),
+        ] {
+            let theirs = constant(name);
+            assert!(
+                (ours - theirs).abs() < 1e-6,
+                "{name}: bezel.rs has {ours}, bezel_1084.wgsl has {theirs}"
+            );
+        }
     }
 
     /// Not a check: renders the bezel (optionally with the CRT preset the
@@ -876,7 +1169,8 @@ mod tests {
     /// Setting COPPERLINE_BEZEL_PREVIEW_SHADER (to any value) adds the
     /// preset pass; COPPERLINE_BEZEL_PREVIEW_BARE instead renders the
     /// preset alone over the full frame, no bezel, for eyeballing the
-    /// preset's own face geometry.
+    /// preset's own face geometry. COPPERLINE_BEZEL_PREVIEW_STYLE names
+    /// the front to draw, defaulting to 1084.
     #[test]
     #[ignore = "preview dump; set COPPERLINE_BEZEL_PREVIEW_OUT"]
     fn dump_bezel_preview_png() {
@@ -889,6 +1183,10 @@ mod tests {
         };
         let (device, queue) = (gpu.device(), gpu.queue());
         let with_crt = std::env::var("COPPERLINE_BEZEL_PREVIEW_SHADER").is_ok();
+        let style = std::env::var("COPPERLINE_BEZEL_PREVIEW_STYLE")
+            .ok()
+            .and_then(|s| crate::config::parse_bezel(&s).ok())
+            .unwrap_or(BezelStyle::Model1084);
         let bare = std::env::var("COPPERLINE_BEZEL_PREVIEW_BARE").is_ok();
         let (src, w, h) = match std::env::var("COPPERLINE_BEZEL_PREVIEW_SRC") {
             Ok(path) => {
@@ -959,7 +1257,7 @@ mod tests {
             (w, h),
             (h / 2) as f32,
         );
-        let opening = opening_rect(viewport);
+        let opening = opening_rect(style, viewport);
         if bare {
             let mut crt = crt_shader::CrtShader::new(device, FORMAT);
             crt.render(
@@ -994,6 +1292,7 @@ mod tests {
                 &mut encoder,
                 &view,
                 viewport,
+                style,
                 uniforms_from(&crt_uniforms, viewport, opening, with_crt),
             );
         }

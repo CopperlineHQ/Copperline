@@ -19,8 +19,8 @@ import { TelnetSession } from './serial-telnet.js';
 
 const $ = (id) => document.getElementById(id);
 let canvas = $('screen');
-// The monitor presentation - the 1084 CRT shader pass and bezel of the
-// desktop window, on by default (see the display settings section) -
+// The monitor presentation - the desktop window's 1084 CRT shader pass and
+// its Classic bezel, on by default (see the display settings section) -
 // renders through WebGL2; without it the page keeps the plain 2D blit it
 // always had. Decided once here, before anything else touches the canvas:
 // a canvas can only ever hold one kind of context.
@@ -4673,13 +4673,15 @@ tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 // --- display: monitor (CRT shader + bezel) -------------------------------
 // The desktop window's 1084 monitor look, ported to WebGL2: the CRT preset
 // (bowed tube face, scanlines, aperture grille, corner vignette - the
-// window's `[display] shader = "crt"`) and the procedural plastic bezel
-// (`[display] bezel`), composed exactly as the desktop composes them: the
-// preset paints the picture into the bezel opening's bounding box first
-// and the bezel frames it on top in frame-only mode, so the moulding's
-// rounded corners and recess clip the preset's square viewport. The GLSL
-// sources in initMonitorGl are line-for-line ports of the desktop's WGSL
-// (src/video/window/shaders/{crt,bezel}.wgsl); keep them in step.
+// window's `[display] shader = "crt"`) and a procedural plastic bezel,
+// composed exactly as the desktop composes them: the preset paints the
+// picture into the bezel opening's bounding box first and the bezel frames
+// it on top in frame-only mode, so the moulding's rounded corners and
+// recess clip the preset's square viewport. The GLSL sources in
+// initMonitorGl are line-for-line ports of the desktop's WGSL
+// (src/video/window/shaders/{crt,bezel_classic}.wgsl); keep them in step.
+// The desktop has since grown a second bezel style (`[display] bezel =
+// "1084"`), which this page does not offer - the port here is Classic.
 //
 // On by default, like nothing else here, because it is the page's face: a
 // visitor's first frame looks like the monitor the Amiga shipped with.
@@ -4888,7 +4890,7 @@ void main() {
 }
 `;
 
-  // The bezel, ported from shaders/bezel.wgsl: the 1084-style plastic
+  // The bezel, ported from shaders/bezel_classic.wgsl: the plastic
   // front frame, with the picture seated in a rounded opening by a
   // moulded insert, the power LED on the bottom band and the Copperline
   // logotype printed on its left. Two modes via u_params.x, exactly as on

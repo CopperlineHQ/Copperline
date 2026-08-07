@@ -2017,7 +2017,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 24] = [
     ("B", "Debugger", true),
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
-    ("M", "Monitor bezel on/off", true),
+    ("M", "Monitor bezel off/on", true),
     ("Shift+A", "Cycle audio output", true),
     ("F", "Fullscreen on/off", true),
     ("Shift+F", "Status bar on/off", true),
@@ -8764,6 +8764,7 @@ mod tests {
         let rows = menu::build(&menu::MenuState {
             fullscreen: false,
             status_bar_hidden: false,
+            bezel: crate::config::BezelStyle::None,
             perf_overlay: false,
             warp: false,
             warp_speed: WarpSpeed::Max,

@@ -261,13 +261,10 @@ pub struct Config {
     /// (the preset's full effect, the default). A single knob for every
     /// preset so the effect can be dialled back without editing shaders.
     pub shader_strength: f32,
-    /// Draw a monitor-style front bezel around the window picture
-    /// (`[display] bezel`): the display shrinks into the rounded opening of
-    /// a procedural plastic frame in the spirit of the 1084 the Amiga
-    /// shipped with. Independent of `shader`, and a presentation stage like
-    /// it: screenshots, frame dumps, recordings and headless runs never
-    /// include the bezel.
-    pub bezel: bool,
+    /// Which monitor front the window frames the picture with at start
+    /// (`[display] bezel`). The `Cmd+M` / `Alt+M` toggle turns it off and
+    /// back on live without affecting this start-up value.
+    pub bezel: BezelStyle,
     /// Show the performance overlay at start (`[display] perf_overlay`, or
     /// `--perf-overlay`): a live emulation-performance readout in the
     /// top-right of the display. The `Cmd+P` / `Alt+P` toggle flips it live
@@ -484,6 +481,58 @@ impl ShaderKind {
             ShaderKind::Crt => "CRT (1084)",
             ShaderKind::Custom => "Custom",
         }
+    }
+}
+
+/// Which monitor front the window frames the picture with (`[display]
+/// bezel`): the display shrinks into the rounded opening of a procedural
+/// frame drawn on the GPU. Independent of [`ShaderKind`], and a
+/// presentation stage like it: screenshots, frame dumps, recordings and
+/// headless runs never include the bezel.
+///
+/// A style is a shader source plus the opening it leaves, so adding one is
+/// a `.wgsl` file beside the others and an arm here; nothing outside
+/// `video::window::bezel` needs to learn its name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BezelStyle {
+    /// No frame; the picture fills the display rect. The default. Spelled
+    /// "none" or "off" in the config, and `false` still works.
+    #[default]
+    None,
+    /// The 1084 the Amiga shipped with: a two-tone cabinet with the tube
+    /// sunk into its moulding, model badge, logotype and power lamp.
+    Model1084,
+    /// The plain rounded frame Copperline drew before the 1084 arrived.
+    Classic,
+}
+
+impl BezelStyle {
+    /// Every style, in the order a picker offers them.
+    pub const MENU_ORDER: [BezelStyle; 3] =
+        [BezelStyle::None, BezelStyle::Model1084, BezelStyle::Classic];
+
+    /// Config name, which round-trips through [`parse_bezel`].
+    pub fn label(self) -> &'static str {
+        match self {
+            BezelStyle::None => "off",
+            BezelStyle::Model1084 => "1084",
+            BezelStyle::Classic => "classic",
+        }
+    }
+
+    /// What a picker shows the user. Both pickers read this, so they
+    /// cannot drift apart.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            BezelStyle::None => "Disabled",
+            BezelStyle::Model1084 => "1084",
+            BezelStyle::Classic => "Classic",
+        }
+    }
+
+    /// Whether a frame is drawn at all.
+    pub fn is_on(self) -> bool {
+        self != BezelStyle::None
     }
 }
 
@@ -2047,7 +2096,7 @@ impl Default for Config {
             phosphor: 0.0,
             shader: ShaderMode::None,
             shader_strength: 1.0,
-            bezel: false,
+            bezel: BezelStyle::None,
             perf_overlay: false,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
@@ -2717,6 +2766,26 @@ impl RawConfig {
     }
 }
 
+/// `[display] bezel` as it may be written. It named a single frame to turn
+/// on before there was a choice of them, so the boolean it took then is
+/// still accepted: `true` means whichever style that was.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawBezel {
+    On(bool),
+    Named(String),
+}
+
+impl RawBezel {
+    fn resolve(&self) -> Result<BezelStyle> {
+        match self {
+            RawBezel::On(true) => Ok(BezelStyle::Model1084),
+            RawBezel::On(false) => Ok(BezelStyle::None),
+            RawBezel::Named(s) => parse_bezel(s),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDisplay {
@@ -2745,9 +2814,11 @@ pub(crate) struct RawDisplay {
     /// Shader mix, 0.0 (invisible) to 1.0 (full effect, the default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shader_strength: Option<f32>,
-    /// Monitor-style front bezel around the window picture (default false).
+    /// Monitor front around the window picture: "off" (default), "1084" or
+    /// "classic". `true`/`false` are still taken, from when there was only
+    /// the one frame to turn on.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) bezel: Option<bool>,
+    pub(crate) bezel: Option<RawBezel>,
     /// Performance overlay in the top-right of the display (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) perf_overlay: Option<bool>,
@@ -3775,7 +3846,16 @@ impl TryFrom<RawConfig> for Config {
                 defaults.shader_strength
             }
         };
-        let bezel = raw.display.bezel.unwrap_or(defaults.bezel);
+        let bezel = match &raw.display.bezel {
+            None => defaults.bezel,
+            Some(raw) => match raw.resolve() {
+                Ok(style) => style,
+                Err(e) => {
+                    errors.push(e);
+                    defaults.bezel
+                }
+            },
+        };
         let perf_overlay = raw.display.perf_overlay.unwrap_or(defaults.perf_overlay);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
@@ -4473,6 +4553,19 @@ pub(crate) fn parse_shader(s: &str) -> Result<ShaderMode> {
             "[display] shader must be \"none\", \"scanlines\", \"mask\", \"crt\", \
              or a \".wgsl\" file path, got {:?}",
             s
+        )),
+    }
+}
+
+/// Parse a `[display] bezel` name ("off" is accepted for "none", so
+/// [`BezelStyle::label`] round-trips).
+pub(crate) fn parse_bezel(s: &str) -> Result<BezelStyle> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Ok(BezelStyle::None),
+        "1084" => Ok(BezelStyle::Model1084),
+        "classic" => Ok(BezelStyle::Classic),
+        other => Err(anyhow!(
+            "[display] bezel must be \"off\", \"1084\" or \"classic\", got {other:?}"
         )),
     }
 }
@@ -5657,16 +5750,18 @@ pub fn resolve_shader_strength(from_config: f32) -> f32 {
     }
 }
 
-/// Resolve the monitor bezel: the `COPPERLINE_BEZEL` env var (0/false/off/no
-/// disables, anything else enables) overrides the `[display] bezel` config
-/// for one run.
-pub fn resolve_bezel(from_config: bool) -> bool {
-    match crate::envcfg::var("COPPERLINE_BEZEL") {
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        None => from_config,
+/// Resolve the monitor bezel: the `COPPERLINE_BEZEL` env var (a style name,
+/// or the 0/1-style on-off spellings it took when there was only one frame)
+/// overrides the `[display] bezel` config for one run. An unreadable value
+/// leaves the config's choice alone.
+pub fn resolve_bezel(from_config: BezelStyle) -> BezelStyle {
+    let Some(v) = crate::envcfg::var("COPPERLINE_BEZEL") else {
+        return from_config;
+    };
+    match v.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" | "none" => BezelStyle::None,
+        "1" | "true" | "on" | "yes" => BezelStyle::Model1084,
+        other => parse_bezel(other).unwrap_or(from_config),
     }
 }
 
@@ -6646,15 +6741,24 @@ mod tests {
     }
 
     #[test]
-    fn display_bezel_parses_and_defaults_to_off() -> Result<()> {
-        assert!(!parse_config("")?.bezel);
-        let cfg = parse_config(
-            r#"
-            [display]
-            bezel = true
-            "#,
-        )?;
-        assert!(cfg.bezel);
+    fn display_bezel_names_a_style_and_defaults_to_off() -> Result<()> {
+        assert_eq!(parse_config("")?.bezel, BezelStyle::None);
+        for (written, want) in [
+            ("\"1084\"", BezelStyle::Model1084),
+            ("\"classic\"", BezelStyle::Classic),
+            ("\"off\"", BezelStyle::None),
+            // The boolean from when there was only one frame to turn on.
+            ("true", BezelStyle::Model1084),
+            ("false", BezelStyle::None),
+        ] {
+            let cfg = parse_config(&format!("[display]\nbezel = {written}\n"))?;
+            assert_eq!(cfg.bezel, want, "bezel = {written}");
+        }
+        // Every style's config name is what it round-trips as.
+        for style in BezelStyle::MENU_ORDER {
+            assert_eq!(parse_bezel(style.label())?, style);
+        }
+        assert!(parse_config("[display]\nbezel = \"1084s\"\n").is_err());
         Ok(())
     }
 

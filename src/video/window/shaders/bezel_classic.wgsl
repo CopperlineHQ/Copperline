@@ -35,9 +35,13 @@ struct BezelUniforms {
     opening: vec4<f32>,
     // x: 1 = frame-only (a CRT preset has already painted the opening;
     // leave its interior untouched), 0 = full (paint the picture too).
-    // y: the active preset's face curvature; the insert follows the
-    // bowed glass contour it implies, and 0 keeps the flat rounded
-    // opening. zw: reserved, zero.
+    // y: the active preset's face curvature, faded in with its strength;
+    // the insert follows the bowed glass contour it implies, and 0 keeps
+    // the flat rounded opening.
+    // z: the corner radius that preset clips its face to, faded the same
+    // way; the opening takes at least this so the plastic covers the
+    // face's own edge. 0 for a preset that does not clip one, or none.
+    // w: reserved, zero.
     params: vec4<f32>,
 };
 
@@ -86,11 +90,13 @@ fn grain(p: vec2<f32>) -> f32 {
 // The front-face plastic, a warm Commodore grey (linear light).
 const PLASTIC: vec3<f32> = vec3<f32>(0.585, 0.560, 0.500);
 
-// Rounded screen corners as a fraction of the display half-width, the
-// 1084 tube's R 11,6 mm arcs on its 280,8 mm screen. Must match
-// crt.wgsl's CORNER_RADIUS so the insert seats the preset's face
-// exactly; a test pins the two sources together.
-const CORNER_RADIUS: f32 = 0.0826;
+// The opening's corners as a fraction of the display half-width: the 1084
+// tube's R 11,6 mm arcs on its 280,8 mm screen, which is also the radius
+// crt.wgsl clips its face to. Where a preset clips one, the opening takes
+// the wider of the two -- the plastic overlaps the glass, so it must never
+// cut inside the face and leave its edge showing in the corners. A test
+// holds every bezel source to that.
+const APERTURE_RADIUS: f32 = 0.0826;
 
 // "Copperline" logotype for the bottom band: 5x8-pixel glyphs one column
 // apart (baseline row 6, the p descenders on row 7), 59x8 bits in all.
@@ -192,7 +198,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let m = vec2<f32>(1.0 + q, 1.0 + q * fa * fa);
     let wc = cn * (1.0 + q * r2) / m;
     let fh = vec2<f32>(1.0, fa);
-    let d = rounded_rect(wc * fh, fh, CORNER_RADIUS) * o_half.x;
+    let d = rounded_rect(wc * fh, fh, max(APERTURE_RADIUS, u.params.z)) * o_half.x;
     let aa = max(fwidth(d), 1e-4);
 
     // Frame-only pass: a CRT preset has already painted the opening

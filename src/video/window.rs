@@ -14,7 +14,9 @@ use super::{
 };
 use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
-use crate::config::{Config, DisplayScaling, Overscan, PixelAspect, RawConfig, WarpSpeed};
+use crate::config::{
+    BezelStyle, Config, DisplayScaling, Overscan, PixelAspect, RawConfig, WarpSpeed,
+};
 use crate::emulator::Emulator;
 use crate::heatmap;
 use crate::keymap;
@@ -377,6 +379,18 @@ const WINDOW_TITLE: &str = concat!("Copperline ", env!("COPPERLINE_DISPLAY_VERSI
 const COPPERLINE_LOGO_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-logo.png");
 const COPPERLINE_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-icon.png");
 const MOUSE_MOTION_SCALE: f64 = 1.0;
+
+/// Which front `Cmd/Alt+M` should switch back on for a starting style: the
+/// style itself when one is chosen, and otherwise the default front, so the
+/// shortcut has something to turn on from a session that starts with the
+/// bezel off.
+fn last_bezel_style(style: BezelStyle) -> BezelStyle {
+    if style.is_on() {
+        style
+    } else {
+        BezelStyle::Model1084
+    }
+}
 
 /// Whether a window's logical inner size equals the presentation canvas
 /// (FB_WIDTH x `canvas_height`) within a small rounding tolerance -- i.e. the
@@ -916,6 +930,9 @@ pub struct App {
     /// platform-clamped result is not counted as the user's resize. Bounded
     /// because a window manager may ignore the request entirely.
     snap_request_deadline: Option<Instant>,
+    /// A canvas change that could not size the window because it was
+    /// fullscreen, waiting for the window to come back.
+    snap_when_windowed: bool,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
@@ -983,9 +1000,15 @@ pub struct App {
     /// How strongly the shader pass is mixed in, 0.0 to 1.0 ([display]
     /// shader_strength).
     shader_strength: f32,
-    /// Monitor-bezel pass in effect ([display] bezel, Cmd/Alt+M).
-    /// Presentation only, like the shader pass: captures never include it.
-    bezel: bool,
+    /// Which monitor front the bezel pass draws, if any ([display] bezel,
+    /// Video Settings). Presentation only, like the shader pass: captures
+    /// never include it.
+    bezel: BezelStyle,
+    /// The style `Cmd/Alt+M` switches back on, so the shortcut is an
+    /// on-off for whichever front was chosen rather than a third way of
+    /// choosing one. Never [`BezelStyle::None`]: turning the bezel off
+    /// leaves this pointing at what was on.
+    bezel_last: BezelStyle,
     /// Performance overlay in effect ([display] perf_overlay, Cmd/Alt+P):
     /// a live emulation-performance readout in the top-right of the
     /// display. Presentation only, like the OSD: captures never include it.
@@ -1173,7 +1196,8 @@ struct Render {
     crt_shader: crt_shader::CrtShader,
     /// The optional monitor-bezel pass drawn under the CRT pass (see
     /// [`bezel`]). Built with the window whatever the setting, like the
-    /// CRT pass, so the Cmd/Alt+M toggle works live.
+    /// CRT pass, so switching style or turning it off works live; each
+    /// style's shader is compiled the first time that style is drawn.
     bezel_shader: bezel::BezelShader,
     /// True while the host window is minimized (Windows delivers a 0x0
     /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
@@ -1406,7 +1430,7 @@ impl App {
         phosphor: f32,
         shader: crate::config::ShaderMode,
         shader_strength: f32,
-        bezel: bool,
+        bezel: BezelStyle,
         perf_overlay: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
@@ -1553,6 +1577,7 @@ impl App {
             main_window_focused: false,
             window_manually_sized: false,
             snap_request_deadline: None,
+            snap_when_windowed: false,
             cursor_pos: None,
             last_display_cursor_pos: None,
             last_cursor_phys: None,
@@ -1582,6 +1607,7 @@ impl App {
             },
             shader_strength,
             bezel,
+            bezel_last: last_bezel_style(bezel),
             perf_overlay,
             perf: PerfOverlay::default(),
             tint,
@@ -3356,7 +3382,7 @@ impl ApplicationHandler for App {
                     // through its own texture, which this pass does not
                     // sample.
                     let bezel_active =
-                        self.bezel && !self.ui.active() && self.rtg_present_dims.is_none();
+                        self.bezel.is_on() && !self.ui.active() && self.rtg_present_dims.is_none();
                     if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
                         r.rtg_texture.upload(
                             r.pixels.device(),
@@ -3456,7 +3482,7 @@ impl ApplicationHandler for App {
                         // the picture into the opening first and the bezel
                         // frames it on top in frame-only mode -- the plastic
                         // overlaps the tube face, so the frame's rounded
-                        // corners and recess clip the preset's square viewport
+                        // corners and chamfer clip the preset's square viewport
                         // rather than being buried under it. One CRT beam pass
                         // per emulated field line the copy above actually
                         // shows.
@@ -3472,6 +3498,7 @@ impl ApplicationHandler for App {
                         );
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
+                        let bezel_style = self.bezel;
                         // The closure is FnOnce and captures `r`, so the
                         // shaders have to be split out of it as separate
                         // borrows rather than reached through `r` inside.
@@ -3489,7 +3516,7 @@ impl ApplicationHandler for App {
                                 scanlines,
                             );
                             if bezel_active {
-                                let opening = bezel::opening_rect(viewport);
+                                let opening = bezel::opening_rect(bezel_style, viewport);
                                 if crt_active {
                                     crt.render(
                                         &ctx.device,
@@ -3509,6 +3536,7 @@ impl ApplicationHandler for App {
                                     encoder,
                                     target,
                                     viewport,
+                                    bezel_style,
                                     bezel::uniforms_from(&uniforms, viewport, opening, crt_active),
                                 );
                             } else {
@@ -4766,6 +4794,7 @@ impl App {
         let state = MenuState {
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
+            bezel: self.bezel,
             perf_overlay: self.perf_overlay,
             warp: !self.emu.paced(),
             warp_speed: self.warp_speed,
@@ -4960,6 +4989,7 @@ impl App {
             }
             A::ToggleFullscreen => self.toggle_fullscreen(),
             A::ToggleStatusBar => self.toggle_status_bar(),
+            A::SetBezel(style) => self.set_bezel(style),
             A::TogglePerfOverlay => self.toggle_perf_overlay(),
 
             A::SetPortDevice(port, device) => {
@@ -5173,9 +5203,7 @@ impl App {
         let was_canvas_sized = self.window_is_canvas_sized();
         crate::video::set_mt32_panel_shown(shown);
         if self.resync_canvas_height() {
-            if was_canvas_sized {
-                self.snap_window_to_canvas();
-            }
+            self.follow_canvas_change(was_canvas_sized);
         } else {
             crate::video::set_mt32_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -7238,6 +7266,7 @@ impl App {
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         self.bezel = crate::config::resolve_bezel(cfg.bezel);
+        self.bezel_last = last_bezel_style(self.bezel);
         self.perf_overlay = crate::config::resolve_perf_overlay(cfg.perf_overlay);
         self.perf = PerfOverlay::default();
         self.set_tint(crate::config::resolve_tint(cfg.tint));
@@ -9888,6 +9917,25 @@ impl App {
         }
     }
 
+    /// Follow a canvas-height change with the window, or arrange to when
+    /// fullscreen gives the window back.
+    ///
+    /// `was_canvas_sized` is the verdict taken before the change, so a
+    /// window the user has resized keeps its size. Fullscreen is the other
+    /// way a window is not the canvas's to size, and there the snap cannot
+    /// happen now: the request resizes nothing, and on the way out the
+    /// window returns at the *old* canvas's size, which would then be read
+    /// as a drag and strand it letterboxed for the rest of the run. So it
+    /// is remembered and taken when the window is the canvas's again.
+    fn follow_canvas_change(&mut self, was_canvas_sized: bool) {
+        if was_canvas_sized {
+            self.snap_window_to_canvas();
+        } else if !self.window_manually_sized {
+            // Not the user's, so only fullscreen can be holding it.
+            self.snap_when_windowed = true;
+        }
+    }
+
     /// Classify a resize of the main window: the user's own drag, or the
     /// window following a canvas change.
     ///
@@ -9907,6 +9955,13 @@ impl App {
         };
         // Fullscreen sizes the window itself; leave the standing verdict.
         if fullscreen {
+            return;
+        }
+        // The window is back from fullscreen with a canvas change owing:
+        // this size is the old canvas's, not a drag. Take the snap instead
+        // of classifying it, or the stale size is what gets remembered.
+        if std::mem::take(&mut self.snap_when_windowed) {
+            self.snap_window_to_canvas();
             return;
         }
         let logical_w = f64::from(size.width) / scale;
@@ -9938,14 +9993,27 @@ impl App {
         !self.window_manually_sized
     }
 
-    /// Cmd/Alt+M: toggle the monitor-bezel pass for the rest of the run
-    /// (the config file default is unchanged; set `[display] bezel` to
-    /// make it stick).
+    /// Cmd/Alt+M: turn the monitor bezel off, or back on to whichever
+    /// front was last chosen. Picking a style is the menu's job; this is
+    /// the on-off for the one already picked, so it never changes which.
     fn toggle_bezel(&mut self) {
-        self.bezel = !self.bezel;
-        let label = if self.bezel { "on" } else { "off" };
-        info!("monitor bezel: {label}");
-        self.show_osd(format!("Monitor bezel: {label}"));
+        let style = if self.bezel.is_on() {
+            BezelStyle::None
+        } else {
+            self.bezel_last
+        };
+        self.set_bezel(style);
+    }
+
+    /// Draw a given monitor front for the rest of the run (the config file
+    /// default is unchanged; set `[display] bezel` to make it stick).
+    fn set_bezel(&mut self, style: BezelStyle) {
+        self.bezel = style;
+        if style.is_on() {
+            self.bezel_last = style;
+        }
+        info!("monitor bezel: {}", style.label());
+        self.show_osd(format!("Monitor bezel: {}", style.menu_label()));
         self.request_redraw();
     }
 
@@ -10085,9 +10153,7 @@ impl App {
                 self.apply_tool_surface_size(kind, applied);
             }
         }
-        if was_canvas_sized {
-            self.snap_window_to_canvas();
-        }
+        self.follow_canvas_change(was_canvas_sized);
         self.request_redraw();
     }
 
@@ -10172,9 +10238,7 @@ impl App {
         }
         // Only snap an unresized window to the new canvas size; a resized window
         // keeps its dimensions and the display reflows into it.
-        if was_canvas_sized {
-            self.snap_window_to_canvas();
-        }
+        self.follow_canvas_change(was_canvas_sized);
         self.request_redraw();
         if hidden {
             self.show_osd(format!(

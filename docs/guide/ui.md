@@ -24,7 +24,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
-| `Cmd+M` | `Alt+M` | Toggle the 1084-style monitor bezel around the picture (`[display] bezel` sets the start-up value) |
+| `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings > Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also *Audio Settings > Audio Output*) |
 | `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also *Audio Settings > Audio Filter*) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also *Parallel Port > Sampler Gain*) |
@@ -266,6 +266,16 @@ tool window or overlay.
   needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+- **Monitor Bezel**: which monitor front the picture sits inside instead
+  of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
+  the tube sunk into its moulding, and the model badge, the Copperline name
+  and the power lamp along the bottom), or **Classic** (the plainer rounded
+  frame Copperline drew first). The picture gets a little smaller to make
+  room for either. `Cmd+M` / `Alt+M` turns the chosen front off and back
+  on; it never changes which. Session-only; the start-up value is
+  `[display] bezel` (see [Configuration](configuration.md)). A window
+  effect only, like the shader: screenshots, frame dumps and recordings
+  never include it.
 - **Performance** (also `Cmd+P` / `Alt+P`): show or hide the
   [performance overlay](#performance-overlay). Session-only; the start-up
   value is `[display] perf_overlay` (see
@@ -445,7 +455,8 @@ The layout is:
   WASM plugin board's declared options),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
-  sounds and volume), **Video** (start fullscreen, status bar, monitor bezel,
+  sounds and volume), **Video** (start fullscreen, status bar, monitor bezel
+  style,
   perf overlay, menu size, overscan, pixel aspect, scaling, deinterlace,
   screen tint, phosphor, CRT shader and shader strength),
   and **Emulation**

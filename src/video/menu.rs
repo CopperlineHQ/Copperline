@@ -16,7 +16,8 @@
 use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
 use crate::config::{
-    AudioFilterMode, DisplayScaling, MenuScale, PixelAspect, ShaderKind, Tint, WarpSpeed,
+    AudioFilterMode, BezelStyle, DisplayScaling, MenuScale, PixelAspect, ShaderKind, Tint,
+    WarpSpeed,
 };
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
@@ -44,6 +45,7 @@ pub enum MenuAction {
     SetShader(ShaderKind),
     SetTint(Tint),
     SetMenuScale(MenuScale),
+    SetBezel(BezelStyle),
     ToggleFullscreen,
     ToggleStatusBar,
     TogglePerfOverlay,
@@ -394,6 +396,8 @@ impl MenuNav {
 pub struct MenuState<'a> {
     pub fullscreen: bool,
     pub status_bar_hidden: bool,
+    /// Which monitor front the bezel pass is drawing, if any.
+    pub bezel: BezelStyle,
     pub perf_overlay: bool,
     pub warp: bool,
     pub warp_speed: WarpSpeed,
@@ -576,6 +580,11 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         .map(|t| MenuRow::choice(t.menu_label(), MenuAction::SetTint(*t), s.tint == *t))
         .collect();
 
+    let bezels = BezelStyle::MENU_ORDER
+        .iter()
+        .map(|b| MenuRow::choice(b.menu_label(), MenuAction::SetBezel(*b), s.bezel == *b))
+        .collect();
+
     let sizes = MenuScale::MENU_ORDER
         .iter()
         .map(|m| MenuRow::choice(m.label(), MenuAction::SetMenuScale(*m), s.menu_scale == *m))
@@ -593,6 +602,10 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ToggleStatusBar,
             !s.status_bar_hidden,
         ),
+        // No value on the row: the tick in the child list already says
+        // which front is on, and naming it here widens every row in the
+        // category to fit the longest style name.
+        MenuRow::submenu("Monitor Bezel", bezels),
         MenuRow::toggle("Performance", MenuAction::TogglePerfOverlay, s.perf_overlay),
     ]
 }
@@ -993,6 +1006,7 @@ mod tests {
         MenuState {
             fullscreen: false,
             status_bar_hidden: false,
+            bezel: BezelStyle::None,
             perf_overlay: false,
             warp: false,
             warp_speed: WarpSpeed::Max,
@@ -1289,6 +1303,27 @@ mod tests {
         let video = find(&rows, "Video Settings").expect("video");
         let video = video.children().expect("children");
         assert!(!find(video, "Fullscreen").expect("fullscreen").closes_menu());
+        // Every window toggle with a keyboard shortcut is reachable from
+        // the menu too: the shortcut is the shortcut, not the only way.
+        for label in ["Status Bar", "Performance"] {
+            let row = find(video, label).unwrap_or_else(|| panic!("{label} missing"));
+            assert!(row.marks_state(), "{label} is not a toggle");
+            assert!(!row.closes_menu(), "picking {label} closed the menu");
+        }
+        // The bezel's shortcut is an on-off, but the menu picks the front,
+        // so it offers every style with the one in force marked. The row
+        // itself shows no value: the tick says it, and a value column here
+        // would widen the whole category.
+        let bezel = find(video, "Monitor Bezel").expect("monitor bezel");
+        assert_eq!(bezel.value, None, "the bezel row widens its category");
+        let styles = bezel.children().expect("bezel styles");
+        assert_eq!(styles.len(), BezelStyle::MENU_ORDER.len());
+        for (row, style) in styles.iter().zip(BezelStyle::MENU_ORDER) {
+            assert_eq!(row.label, style.menu_label());
+            assert_eq!(row.menu_action(), Some(&MenuAction::SetBezel(style)));
+            assert!(!row.closes_menu(), "picking a bezel style closed the menu");
+        }
+        assert!(styles[0].marked(), "the style in force is not marked");
         let tint = find(video, "Screen Tint").expect("tint");
         for row in tint.children().expect("tints") {
             assert!(!row.closes_menu(), "picking {} closed the menu", row.label);

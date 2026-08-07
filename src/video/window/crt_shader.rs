@@ -81,6 +81,13 @@ impl CrtUniforms {
 }
 
 /// Preset pipeline slots, in the order [`CrtShader::presets`] holds them.
+/// The corner arcs `shaders/crt.wgsl` clips its tube face to, as a
+/// fraction of the display half-width. Mirrored here so the bezel can open
+/// its aperture wide enough to cover that face -- a moulding narrower than
+/// the glass it overlaps would leave the face's own edge showing in the
+/// corners. A test pins this to the shader's own constant.
+pub(super) const FACE_CORNER_RADIUS: f32 = 0.0826;
+
 const PRESET_SCANLINES: usize = 0;
 const PRESET_MASK: usize = 1;
 const PRESET_CRT: usize = 2;
