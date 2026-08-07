@@ -758,6 +758,22 @@ pub enum UiControl {
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
     LauncherZorroRemove(usize),
+    /// Tick one disk in the Host Disk table.
+    LauncherHostDiskSelect(usize),
+    /// Flip one disk between writable and protected.
+    LauncherHostDiskWritable(usize),
+    /// Step one disk through the attachment points.
+    LauncherHostDiskAttach(usize),
+    /// Give a real disk back to the host, from the drive row holding it.
+    LauncherHostDiskUnmount(LauncherField),
+    /// Move the disk list's window up or down one row.
+    LauncherHostDiskScroll(isize),
+    /// Look at the host's storage again.
+    LauncherHostDiskRefresh,
+    /// Attach the ticked disks to the machine.
+    LauncherHostDiskMount,
+    /// Take the ticked disks that the machine has back off it.
+    LauncherHostDiskUnmountSelected,
     /// Plugin config: step an enum/int option of a Zorro board.
     LauncherBoardCycle {
         board: usize,
@@ -4271,6 +4287,117 @@ fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
     }
 }
 
+/// Geometry of the Host Disk table: the framed box listing what the host has.
+const HOST_DISK_ROW_H: usize = 14;
+const HOST_DISK_HEADER_H: usize = 16;
+/// Rows drawn inside the box at once. A longer list scrolls.
+pub(crate) const HOST_DISK_VISIBLE_ROWS: usize = 8;
+/// Column starts, as offsets from the inside edge of the box. Volume gets
+/// the widest cell -- model strings are the longest text on the page -- and
+/// every cell clips at the next column, so a Windows `PhysicalDrive11` reads
+/// truncated in Disk rather than running into its neighbour.
+const HOST_DISK_COL_DISK: usize = 8;
+const HOST_DISK_COL_VOLUME: usize = 112;
+const HOST_DISK_COL_SIZE: usize = 272;
+const HOST_DISK_COL_ATTACH: usize = 344;
+const HOST_DISK_COL_WRITABLE: usize = 440;
+/// The last column ends before the scroll arrows, which sit inside the frame.
+const HOST_DISK_COL_TICK: usize = 472;
+
+fn host_disk_table_rect(rect: Rect) -> Rect {
+    let x = launcher_pane_x(rect);
+    Rect {
+        x,
+        y: launcher_content_top(rect) + LAUNCH_NAV_BLOCK_H + 18,
+        w: rect.w.saturating_sub(x - rect.x + 16),
+        h: HOST_DISK_HEADER_H + HOST_DISK_VISIBLE_ROWS * HOST_DISK_ROW_H + 4,
+    }
+}
+
+/// One row inside the table, by index.
+fn host_disk_row_rect(rect: Rect, index: usize) -> Rect {
+    let table = host_disk_table_rect(rect);
+    Rect {
+        x: table.x + 2,
+        y: table.y + HOST_DISK_HEADER_H + index * HOST_DISK_ROW_H,
+        w: table.w.saturating_sub(4),
+        h: HOST_DISK_ROW_H,
+    }
+}
+
+/// The scroll arrows, up at the top right of the box and down at the bottom
+/// right. Inside the frame rather than beside it, so the box keeps its shape
+/// whether or not the list overflows.
+const HOST_DISK_ARROW: usize = 12;
+
+fn host_disk_arrow_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let table = host_disk_table_rect(rect);
+    let x = table.x + table.w - HOST_DISK_ARROW - 3;
+    [
+        (
+            UiControl::LauncherHostDiskScroll(-1),
+            Rect {
+                x,
+                y: table.y + 2,
+                w: HOST_DISK_ARROW,
+                h: HOST_DISK_ARROW,
+            },
+        ),
+        (
+            UiControl::LauncherHostDiskScroll(1),
+            Rect {
+                x,
+                y: table.y + table.h - HOST_DISK_ARROW - 2,
+                w: HOST_DISK_ARROW,
+                h: HOST_DISK_ARROW,
+            },
+        ),
+    ]
+}
+
+/// The Attach cell of one row: clicked to step through where the machine
+/// would see the disk.
+fn host_disk_attach_cell(rect: Rect, index: usize) -> Rect {
+    let row = host_disk_row_rect(rect, index);
+    Rect {
+        x: row.x + HOST_DISK_COL_ATTACH,
+        y: row.y,
+        // Up to the next column, so a click near the edge cannot land on
+        // both this cell and the one beside it.
+        w: HOST_DISK_COL_WRITABLE - HOST_DISK_COL_ATTACH,
+        h: row.h,
+    }
+}
+
+/// The R/W cell of one row.
+fn host_disk_writable_cell(rect: Rect, index: usize) -> Rect {
+    let row = host_disk_row_rect(rect, index);
+    Rect {
+        x: row.x + HOST_DISK_COL_WRITABLE,
+        y: row.y,
+        w: HOST_DISK_COL_TICK - HOST_DISK_COL_WRITABLE,
+        h: row.h,
+    }
+}
+
+/// The buttons under the table, left to right: the two acts on the ticked
+/// disks first, then Refresh, which only looks.
+fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
+    let table = host_disk_table_rect(rect);
+    let y = table.y + table.h + 10;
+    let button = |slot: usize| Rect {
+        x: table.x + slot * 96,
+        y,
+        w: 88,
+        h: LAUNCH_TAB_H,
+    };
+    [
+        (UiControl::LauncherHostDiskMount, button(0)),
+        (UiControl::LauncherHostDiskUnmountSelected, button(1)),
+        (UiControl::LauncherHostDiskRefresh, button(2)),
+    ]
+}
+
 /// A sub-page's Back button, on the nav row.
 fn launcher_back_button_rect(rect: Rect) -> Rect {
     launcher_nav_button_rect(rect, 0)
@@ -4685,11 +4812,26 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 }
                 RowKind::Drive => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
-                    if browse.contains(pos) {
-                        return Some(UiControl::LauncherBrowse(r.field));
-                    }
-                    if clear.contains(pos) {
-                        return Some(UiControl::LauncherClear(r.field));
+                    // A real disk replaces both buttons with one. Only this
+                    // row's buttons change: everything else on the panel must
+                    // still be reachable, so nothing returns early here.
+                    if state.setup.host_disk_on_row(r.field).is_some() {
+                        let unmount = Rect {
+                            x: browse.x,
+                            y: browse.y,
+                            w: clear.x + clear.w - browse.x,
+                            h: browse.h,
+                        };
+                        if unmount.contains(pos) {
+                            return Some(UiControl::LauncherHostDiskUnmount(r.field));
+                        }
+                    } else {
+                        if browse.contains(pos) {
+                            return Some(UiControl::LauncherBrowse(r.field));
+                        }
+                        if clear.contains(pos) {
+                            return Some(UiControl::LauncherClear(r.field));
+                        }
                     }
                     // The volume name only matters once an image is chosen
                     // (and never for a CD image).
@@ -4705,6 +4847,38 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     }
     // The top nav row: a page's sibling links (the Storage and A/V sub-pages),
     // or a Back button.
+    if state.tab == LauncherTab::HostDisk {
+        let disks = state.setup.host_disks().len();
+        if disks > HOST_DISK_VISIBLE_ROWS {
+            for (control, arrow) in host_disk_arrow_rects(rect) {
+                if arrow.contains(pos) {
+                    return Some(control);
+                }
+            }
+        }
+        {
+            let scroll = state.setup.host_disk_scroll().min(disks);
+            for slot in 0..disks.saturating_sub(scroll).min(HOST_DISK_VISIBLE_ROWS) {
+                let i = scroll + slot;
+                // The cells that are their own answer come first: clicking
+                // Attach or R/O sets that, rather than picking the row.
+                if host_disk_attach_cell(rect, slot).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskAttach(i));
+                }
+                if host_disk_writable_cell(rect, slot).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskWritable(i));
+                }
+                if host_disk_row_rect(rect, slot).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskSelect(i));
+                }
+            }
+        }
+        for (control, button) in host_disk_button_rects(rect) {
+            if button.contains(pos) {
+                return Some(control);
+            }
+        }
+    }
     if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherTab(parent));
@@ -4722,6 +4896,345 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     }
     None
+}
+
+/// The Host Disk page: what the host has, and which of it to attach.
+fn draw_host_disk_page(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let setup = &state.setup;
+    let table = host_disk_table_rect(rect);
+
+    // The box, sunk into the panel like an entry field so it reads as
+    // something to look into rather than a raised control. The outline comes
+    // first and goes all the way round: the inset shading alone is nearly the
+    // panel's own colour, so on its own only the lit edges show and the box
+    // looks bevelled on two sides rather than recessed.
+    let scaled = scale_rect(table, scale);
+    fill_rect(frame, scaled, ENTRY_BG, scale);
+    draw_outline(frame, table, BUTTON_EDGE_LIGHT, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(
+            Rect {
+                x: table.x + 1,
+                y: table.y + 1,
+                w: table.w.saturating_sub(2),
+                h: table.h.saturating_sub(2),
+            },
+            scale,
+        ),
+        BUTTON_EDGE_DARK,
+        ENTRY_BG,
+        scale,
+    );
+
+    // Column headings, then a rule under them.
+    let head_y = table.y + 4;
+    for (offset, title) in [
+        (HOST_DISK_COL_DISK, "Disk"),
+        (HOST_DISK_COL_VOLUME, "Volume"),
+        (HOST_DISK_COL_SIZE, "Size"),
+        (HOST_DISK_COL_ATTACH, "Attach"),
+        (HOST_DISK_COL_WRITABLE, "R/W"),
+        (HOST_DISK_COL_TICK, "Enable"),
+    ] {
+        draw_panel_text(
+            frame,
+            table.x + offset,
+            head_y,
+            title,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    fill_rect(
+        frame,
+        scale_rect(
+            Rect {
+                x: table.x + 2,
+                y: table.y + HOST_DISK_HEADER_H - 2,
+                w: table.w.saturating_sub(4),
+                h: 1,
+            },
+            scale,
+        ),
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+
+    let disks = setup.host_disks();
+    let scroll = setup.host_disk_scroll().min(disks.len());
+    if disks.is_empty() {
+        draw_panel_text(
+            frame,
+            table.x + HOST_DISK_COL_DISK,
+            table.y + HOST_DISK_HEADER_H + 4,
+            "No supported disks found on the host system.",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    for (slot, disk) in disks
+        .iter()
+        .skip(scroll)
+        .take(HOST_DISK_VISIBLE_ROWS)
+        .enumerate()
+    {
+        // The list index, not the row on screen: everything that acts on a
+        // disk names the disk, so a scrolled list still ticks the right one.
+        let i = scroll + slot;
+        let row = host_disk_row_rect(rect, slot);
+        let ticked = setup.host_disk_is_selected(&disk.id);
+        // A disk the machine has keeps the highlight whether or not it is
+        // ticked right now: in a long list, what is in use should be
+        // findable at a glance.
+        if ticked
+            || setup.host_disk_is_attached(&disk.id)
+            || hover == Some(UiControl::LauncherHostDiskSelect(i))
+        {
+            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
+        }
+        let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
+        // A disk the host has mounted is not dimmed: mounting takes it from
+        // the host first, so being in use is not a reason it cannot be had.
+        // Every column is clipped to the space before the next one: a long
+        // device name or volume must not run into its neighbour.
+        for (offset, next, text) in [
+            (HOST_DISK_COL_DISK, HOST_DISK_COL_VOLUME, disk.id.clone()),
+            (
+                HOST_DISK_COL_VOLUME,
+                HOST_DISK_COL_SIZE,
+                disk.volume.clone(),
+            ),
+            (HOST_DISK_COL_SIZE, HOST_DISK_COL_ATTACH, disk.size.clone()),
+            (
+                HOST_DISK_COL_ATTACH,
+                HOST_DISK_COL_WRITABLE,
+                // Blank until the disk is ticked: an unticked disk is going
+                // nowhere, and ticking is what gives it a place.
+                disk.attach.map(|attach| attach.label()).unwrap_or_default(),
+            ),
+        ] {
+            let text = truncate_to_width(&text, next - offset - 8);
+            draw_panel_text(frame, row.x + offset, text_y, &text, PANEL_TEXT, 1, scale);
+        }
+        // Two ticks, the same kind of answer either way: may the guest write
+        // to this disk, and is it going to the machine at all. Writing is on
+        // by default -- a disk given to a machine is normally meant to be
+        // used -- so unticking R/W is what protects it.
+        draw_tick_box(
+            frame,
+            row.x + HOST_DISK_COL_WRITABLE + 6,
+            row.y + 2,
+            disk.writable,
+            PANEL_TEXT,
+            scale,
+        );
+        draw_tick_box(
+            frame,
+            row.x + HOST_DISK_COL_TICK + 12,
+            row.y + 2,
+            ticked,
+            PANEL_TEXT_HILIGHT,
+            scale,
+        );
+    }
+
+    // Arrows only when there is somewhere to go, and each greys at its end
+    // of the list so the box says where the window is.
+    if disks.len() > HOST_DISK_VISIBLE_ROWS {
+        for (control, arrow) in host_disk_arrow_rects(rect) {
+            let up = control == UiControl::LauncherHostDiskScroll(-1);
+            let live = if up {
+                scroll > 0
+            } else {
+                scroll + HOST_DISK_VISIBLE_ROWS < disks.len()
+            };
+            let scaled = scale_rect(arrow, scale);
+            fill_rect(frame, scaled, BUTTON_FACE, scale);
+            draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+            let colour = if !live {
+                BUTTON_TEXT_DISABLED
+            } else if hover == Some(control) {
+                PANEL_TEXT_HILIGHT
+            } else {
+                BUTTON_TEXT
+            };
+            // A triangle, drawn as stacked runs: three rows is enough to read
+            // as an arrow at this size, and it needs no glyph.
+            for step in 0..3usize {
+                let width = 1 + step * 2;
+                // Widening downwards is an up arrow (narrow tip at the top);
+                // widening upwards is a down arrow.
+                let y = if up {
+                    arrow.y + 4 + step
+                } else {
+                    arrow.y + 4 + (2 - step)
+                };
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: arrow.x + HOST_DISK_ARROW / 2 - width / 2 - 1,
+                            y,
+                            w: width,
+                            h: 1,
+                        },
+                        scale,
+                    ),
+                    colour,
+                    scale,
+                );
+            }
+        }
+    }
+
+    for (control, button) in host_disk_button_rects(rect) {
+        let label = match control {
+            UiControl::LauncherHostDiskMount => "Mount",
+            UiControl::LauncherHostDiskUnmountSelected => "Unmount",
+            _ => "Refresh",
+        };
+        // Mount needs a disk to mount; Unmount a ticked disk the machine
+        // actually has; Refresh only ever looks, so it stays live.
+        let enabled = match control {
+            UiControl::LauncherHostDiskMount => !setup.host_disks_selected().is_empty(),
+            UiControl::LauncherHostDiskUnmountSelected => setup
+                .host_disks_selected()
+                .iter()
+                .any(|id| setup.host_disk_is_attached(id)),
+            _ => true,
+        };
+        draw_text_button(
+            frame,
+            button,
+            label,
+            enabled,
+            enabled && hover == Some(control),
+            scale,
+        );
+    }
+
+    // What Mount will do, one line per ticked disk, under the buttons so the
+    // greyed Mount button is never a mystery and two ticks are never a
+    // surprise about where the second disk went. Same shape as the Input
+    // page's summary: a dimmed heading over the lines it introduces. With
+    // nothing ticked the block instead says the one thing worth knowing
+    // before ticking anything -- on hosts where attaching will raise the
+    // system's privilege prompt, that it will; elsewhere, what to do next.
+    let summary_top = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
+    let chosen: Vec<&crate::video::launcher::HostDiskRow> = setup
+        .host_disks()
+        .iter()
+        .filter(|d| setup.host_disk_is_selected(&d.id))
+        .collect();
+    let warn_privilege = chosen.is_empty() && crate::blockdev::attaching_needs_privilege();
+    draw_panel_text(
+        frame,
+        table.x,
+        summary_top,
+        if warn_privilege {
+            "Warning:"
+        } else {
+            "With these settings:"
+        },
+        if warn_privilege {
+            PANEL_TEXT_ACCENT
+        } else {
+            PANEL_TEXT_DIM
+        },
+        1,
+        scale,
+    );
+    if chosen.is_empty() {
+        if warn_privilege {
+            draw_panel_text(
+                frame,
+                table.x + 8,
+                summary_top + 16,
+                "Attaching a host drive requires elevated privileges.",
+                PANEL_TEXT_ACCENT,
+                1,
+                scale,
+            );
+        } else {
+            draw_panel_text(
+                frame,
+                table.x + 8,
+                summary_top + 16,
+                "Select a disk to attach it to the machine",
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
+    // A disk gets two lines if it needs them. The sentence ends with where the
+    // disk is going, and on a long model name that is exactly the half a
+    // single clipped line loses -- leaving a summary that says everything
+    // except the thing it was written to say. Past two lines it is truncated,
+    // because the summary cannot keep growing without reaching the panel edge.
+    // Both lines start at the same edge: the wrap is one sentence running on,
+    // not a list with sub-items, and stepping the second line in makes it read
+    // as something subordinate to the first.
+    let width_px = table.w.saturating_sub(8);
+    let bottom = rect.y + rect.h;
+    let mut y = summary_top + 16;
+    for disk in &chosen {
+        let access = if disk.writable {
+            "read/write"
+        } else {
+            "read only"
+        };
+        let place = disk
+            .attach
+            .expect("a ticked disk has an attachment point")
+            .label();
+        let text = format!(
+            "{} ({}): attached {access} to {place}",
+            disk.id, disk.volume
+        );
+        let chars = width_px / font::GLYPH_W;
+        let mut lines = wrap_text(&text, chars, chars);
+        if lines.len() > 2 {
+            let overflow = lines[1..].join(" ");
+            lines.truncate(1);
+            lines.push(truncate_to_width(&overflow, width_px));
+        }
+        for line in &lines {
+            // Out of panel is not somewhere to draw: the rest of the page is
+            // below this and would be written over.
+            if y + HOST_DISK_ROW_H > bottom {
+                return;
+            }
+            draw_panel_text(frame, table.x + 8, y, line, PANEL_TEXT, 1, scale);
+            y += HOST_DISK_ROW_H;
+        }
+    }
+}
+
+/// A small square box, filled when set. The fill colour distinguishes what
+/// is being answered: one page can carry more than one kind of tick.
+fn draw_tick_box(frame: &mut [u8], x: usize, y: usize, set: bool, colour: u32, scale: usize) {
+    let outer = Rect { x, y, w: 10, h: 10 };
+    fill_rect(frame, scale_rect(outer, scale), ENTRY_BG, scale);
+    draw_outline(frame, outer, BUTTON_EDGE_LIGHT, scale);
+    if set {
+        let inner = Rect {
+            x: x + 2,
+            y: y + 2,
+            w: 6,
+            h: 6,
+        };
+        fill_rect(frame, scale_rect(inner, scale), colour, scale);
+    }
 }
 
 /// Truncate `text` (already a short file name) to fit `avail_px`, appending a
@@ -5284,6 +5797,36 @@ fn draw_launcher_row(
         RowKind::Drive => {
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
+            // A slot holding a real disk is not something to browse for: the
+            // disk was chosen from what the host has, and the only thing to
+            // do with it here is give it back. Browse and Clear make way for
+            // one Unmount spanning both.
+            if let Some(disk) = setup.host_disk_on_row(r.field) {
+                // The device and the volume on it: the device name is what
+                // the Host Disk page and the host itself call it, and the
+                // volume is what makes it recognisable.
+                let text = truncate_to_width(
+                    &setup.host_disk_label(&disk.device),
+                    browse.x.saturating_sub(value_x + 8),
+                );
+                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+                let unmount = Rect {
+                    x: browse.x,
+                    y: browse.y,
+                    w: clear.x + clear.w - browse.x,
+                    h: browse.h,
+                };
+                draw_text_button(
+                    frame,
+                    unmount,
+                    "Unmount",
+                    true,
+                    hover == Some(UiControl::LauncherHostDiskUnmount(r.field)),
+                    scale,
+                );
+                return;
+            }
+
             // The volume-name box only appears once an image is chosen (a name
             // has nothing to label otherwise, and never labels a CD image);
             // until then the row reads like a plain path row and the path text
@@ -5654,6 +6197,9 @@ fn draw_launcher(
             }
         }
     }
+    if state.tab == LauncherTab::HostDisk {
+        draw_host_disk_page(frame, rect, state, hover, scale);
+    }
     // The Input tab spells out what the chosen wiring means: which host
     // input source ends up driving each port, live as the values cycle.
     if state.tab == LauncherTab::Input {
@@ -5780,11 +6326,16 @@ fn draw_launcher(
         } else {
             PANEL_TEXT_HILIGHT
         };
+        // Kept inside the panel. A failure explains itself at whatever length
+        // it needs to, and one long enough to run past the edge is drawn over
+        // the window either side of it -- so it is clipped here, with the log
+        // holding the whole of what went wrong.
+        let text = truncate_to_width(&status.text, rect.w.saturating_sub(20));
         draw_panel_text(
             frame,
             rect.x + 10,
             launcher_status_y(rect),
-            &status.text,
+            &text,
             color,
             1,
             scale,
@@ -8348,6 +8899,168 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
+
+        // A drive row holding a real disk must not swallow the rest of the
+        // panel. The Unmount button replaces that row's own two buttons and
+        // nothing else: Run, Defaults, Load, Save and the page links all kept
+        // working before, and an early return here quietly killed every one
+        // of them until the disk was cleared.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut setup = launcher::MachineSetup::default();
+            setup.select_model(Some(crate::config::MachineModel::A1200));
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            }]);
+            setup.select_host_disk(0);
+            setup.mount_host_disks().expect("A1200 has IDE");
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::Storage;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let Panel::Launcher(state) = &panel else {
+                unreachable!()
+            };
+            for (control, button) in launcher_action_rects(rect) {
+                let centre = (
+                    (button.x + button.w / 2) as i32,
+                    (button.y + button.h / 2) as i32,
+                );
+                assert_eq!(
+                    launcher_control_at(rect, state, centre),
+                    Some(control),
+                    "a mounted disk must not block {control:?}"
+                );
+            }
+        }
+
+        // The Host Disk page with two disks ticked: the table, the second
+        // disk landing beside the first, and a line each saying where they go.
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_host_disks_for_test(vec![
+                launcher::HostDiskRow {
+                    id: "disk4".to_string(),
+                    volume: "SanDisk Extreme SD".to_string(),
+                    size: "31.9 GB".to_string(),
+                    mounted: Vec::new(),
+                    writable: true,
+                    attach: None,
+                },
+                launcher::HostDiskRow {
+                    id: "disk6".to_string(),
+                    volume: "Kingston DataTraveler".to_string(),
+                    size: "3.9 GB".to_string(),
+                    mounted: vec!["/Volumes/UNTITLED".to_string()],
+                    writable: false,
+                    attach: None,
+                },
+                launcher::HostDiskRow {
+                    id: "PhysicalDrive11".to_string(),
+                    volume: "Generic USB3.0 CRW-SD/MS Multi-Card Reader".to_string(),
+                    size: "512 MB".to_string(),
+                    mounted: Vec::new(),
+                    writable: true,
+                    attach: None,
+                },
+            ]);
+            setup.select_model(Some(crate::config::MachineModel::A1200));
+            setup.select_host_disk(0);
+            setup.select_host_disk(1);
+            setup.select_host_disk(2);
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::HostDisk;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-host-disk");
+
+            // The same page with nothing ticked: Mount is greyed, and the
+            // page says what it is waiting for.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk Extreme SD".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            }]);
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::HostDisk;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-host-disk-locked");
+
+            // A list longer than the box: the arrows appear, and the window
+            // is part way down so both are live.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_host_disks_for_test(
+                (0..14)
+                    .map(|i| launcher::HostDiskRow {
+                        id: format!("disk{i}"),
+                        volume: format!("Pretend Media {i}"),
+                        size: format!("{}.0 GB", i % 9 + 1),
+                        mounted: Vec::new(),
+                        writable: true,
+                        attach: None,
+                    })
+                    .collect(),
+            );
+            setup.scroll_host_disks(3, HOST_DISK_VISIBLE_ROWS);
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::HostDisk;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-host-disk-scrolled");
+
+            // Storage, with a real disk on IDE master: the row names the disk
+            // and offers Unmount where an image would offer Browse/Clear.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            // A machine that actually has IDE, so the rows are live.
+            setup.select_model(Some(crate::config::MachineModel::A1200));
+            setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
+                id: "disk4".to_string(),
+                volume: "SanDisk Extreme SD".to_string(),
+                size: "31.9 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            }]);
+            setup.select_host_disk(0);
+            setup
+                .mount_host_disks()
+                .expect("the fixture machine has IDE");
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::Storage;
+            let ui = UiState {
+                menu_open: false,
+                panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-storage-host-disk");
+        }
 
         // The FluxBridge settings page reached from Configure, with an
         // interface selected, which is the state its rows are drawn live in.

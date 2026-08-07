@@ -1340,6 +1340,32 @@ control protocol's `media.cd.insert` all eject the current disc, run the
 tray for a second of emulated time, and mount the new one with a
 medium-change unit attention for the guest's filesystem to notice.
 
+## `[[host_disk]]` -- a real disk of the host's
+
+Give the machine a real disk of this computer's instead of an image -- a card
+in a reader, a USB drive, a drive on a SATA port. The medium is used exactly
+as it is, with its own RDB, partitions, and filesystem.
+
+```toml
+[[host_disk]]
+device = "sdb"            # as `--list-disks` prints it
+attach = "ide-master"     # ide-master (default), ide-slave, or scsi0..scsi6
+read_only = true          # absent means writable
+```
+
+`device` is the host's stable identifier for the hardware -- `sdb` on Linux,
+`disk4` on macOS, `PhysicalDrive1` on Windows -- rather than a node path,
+which belongs to this boot and not to the disk. `copperline --list-disks`
+prints them, and `--host-disk DEVICE [ATTACH]` (or `--host-disk-read-only`)
+is the command-line equivalent. A disk named here that is not plugged in
+leaves that drive slot empty and the machine starts anyway.
+
+The disk this computer is running from is never offered and never opened,
+whatever is written here, and no RDB is synthesised over a disk that has
+none. Opening a real disk asks for permission the first time, and the host's
+volumes on it are unmounted while the machine has it. Attach read-only the
+first time: [](host-disks) covers the whole of it.
+
 ## `[[filesys]]` -- host directories as live volumes
 
 ```toml

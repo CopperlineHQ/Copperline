@@ -129,6 +129,11 @@ impl A2091 {
         self.wd.first_cd_mut()
     }
 
+    /// Let go of any real disk of the host's, and say how many went.
+    pub fn release_host_disks(&mut self) -> usize {
+        self.wd.release_host_disks()
+    }
+
     /// System reset: clear the DMAC and SBIC but keep the mounted drives.
     pub fn reset(&mut self) {
         self.wd.reset();

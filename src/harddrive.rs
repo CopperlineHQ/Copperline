@@ -33,6 +33,11 @@ const RDB_LOCATION_LIMIT: usize = 16;
 enum Backing {
     File(File),
     Memory(Vec<u8>),
+    /// A real disk attached to the host. Presents 512-byte sectors like the
+    /// others; the block size the media actually uses, and the privilege the
+    /// open needed, are the device's own business.
+    #[cfg(not(target_arch = "wasm32"))]
+    Device(Box<crate::blockdev::BlockDevice>),
 }
 
 pub struct HardDriveImage {
@@ -64,6 +69,21 @@ struct HardDriveImageState {
     rdb_overlay: Option<Vec<u8>>,
     overlay_write_warned: bool,
     scsi_bus: bool,
+    /// The real disk this drive is, if it is one: the identifier a
+    /// configuration names it by, and whether the guest may write to it.
+    ///
+    /// Both are needed, and neither is recoverable from `path`. Without the
+    /// identifier the node path would be reopened as an ordinary file, which
+    /// walks past the rules that refuse the host's own disk and loses the
+    /// sector translation; without the access, a disk attached read-only
+    /// would come back writable.
+    host_device: Option<HostDiskState>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HostDiskState {
+    id: String,
+    writable: bool,
 }
 
 impl serde::Serialize for HardDriveImage {
@@ -72,12 +92,24 @@ impl serde::Serialize for HardDriveImage {
             path: self.path.clone(),
             memory: match &self.backing {
                 Backing::Memory(image) => Some(image.clone()),
-                Backing::File(_) => None,
+                // A physical disk is not ours to capture: the medium lives
+                // outside the emulator and can be swapped while a state is
+                // saved. What it is gets recorded instead, and resuming
+                // takes the disk again on the same terms.
+                _ => None,
             },
             total_sectors: self.total_sectors,
             rdb_overlay: self.rdb_overlay.clone(),
             overlay_write_warned: self.overlay_write_warned,
             scsi_bus: self.bus_name == "scsi",
+            host_device: match &self.backing {
+                #[cfg(not(target_arch = "wasm32"))]
+                Backing::Device(device) => Some(HostDiskState {
+                    id: device.id().to_string(),
+                    writable: device.writable(),
+                }),
+                _ => None,
+            },
         }
         .serialize(serializer)
     }
@@ -86,6 +118,25 @@ impl serde::Serialize for HardDriveImage {
 impl<'de> serde::Deserialize<'de> for HardDriveImage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let state = HardDriveImageState::deserialize(deserializer)?;
+        let bus_name = if state.scsi_bus { "scsi" } else { "ide" };
+        // A real disk goes back through the door every other attach uses, so
+        // resuming a state cannot reach a disk that attaching one could not:
+        // the host's own disk is refused here as anywhere, the session's
+        // hold is honoured rather than opened around, and the access it was
+        // saved with is the access it comes back with.
+        if let Some(disk) = &state.host_device {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                return Self::open_device(&disk.id, bus_name, disk.writable).map_err(|e| {
+                    serde::de::Error::custom(format!("reopening host disk {}: {e:#}", disk.id))
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
+            return Err(serde::de::Error::custom(format!(
+                "this state has host disk {} attached, which this build cannot open",
+                disk.id
+            )));
+        }
         let backing = match state.memory {
             Some(image) => Backing::Memory(image),
             None => Backing::File(
@@ -107,7 +158,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             total_sectors: state.total_sectors,
             rdb_overlay: state.rdb_overlay,
             overlay_write_warned: state.overlay_write_warned,
-            bus_name: if state.scsi_bus { "scsi" } else { "ide" },
+            bus_name,
         })
     }
 }
@@ -212,6 +263,58 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) ->
 }
 
 impl HardDriveImage {
+    /// Attach a real host disk in place of an image.
+    ///
+    /// The device is identified the way a configuration names it (`disk4`,
+    /// `sdb`, `PhysicalDrive1`) rather than by node path, because a node path
+    /// belongs to this boot and the hardware does not. Opening may ask the
+    /// user for permission; the disk the host is running from is refused
+    /// before that point, by [`crate::blockdev::open_device`].
+    ///
+    /// Unlike an image, nothing here synthesizes an RDB. A disk out of an
+    /// Amiga carries its own partition table, and inventing one over the top
+    /// of unfamiliar bytes is exactly how real media gets damaged: if it is
+    /// not an Amiga disk, the guest should be told so, not handed a fiction.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_device(id: &str, bus_name: &'static str, writable: bool) -> anyhow::Result<Self> {
+        let device = crate::blockdev::find_device(id)?
+            .ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+        // A disk the host has mounted is not refused: taking it is the point,
+        // and the platform layer asks the host to let go before opening it.
+        // Say which volumes are going, because the user may have something
+        // open on one of them.
+        if !device.mounted.is_empty() {
+            log::info!(
+                "{bus_name}: {id} is mounted ({}); taking it from the host",
+                device.mounted.join(", ")
+            );
+        }
+        let opened = crate::blockdev::open_device(&device, writable)?;
+        let total_sectors = opened.total_sectors();
+        if total_sectors == 0 {
+            anyhow::bail!("{id} reports no capacity");
+        }
+        log::info!(
+            "{bus_name}: {} attached as a physical disk: {}, {} sectors, {}",
+            id,
+            device.label(),
+            total_sectors,
+            if writable {
+                "WRITABLE -- the guest can change this disk"
+            } else {
+                "read-only"
+            }
+        );
+        Ok(Self {
+            path: PathBuf::from(&device.path),
+            backing: Backing::Device(Box::new(opened)),
+            total_sectors,
+            rdb_overlay: None,
+            overlay_write_warned: false,
+            bus_name,
+        })
+    }
+
     /// Open a drive image. `device_name` is the DOS device name (e.g.
     /// "DH0") a synthesized RDB advertises; `bus_name` ("ide"/"scsi") tags
     /// log messages; `disk_label` fills the RDSK vendor/product identity.
@@ -267,6 +370,8 @@ impl HardDriveImage {
                 .map_err(|e| anyhow::anyhow!("stat {bus_name} image {}: {e}", path.display()))?
                 .len(),
             Backing::Memory(image) => image.len() as u64,
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Device(device) => device.total_sectors() * SECTOR_SIZE as u64,
         };
         if len == 0 || len % SECTOR_SIZE as u64 != 0 {
             anyhow::bail!(
@@ -288,6 +393,14 @@ impl HardDriveImage {
                 .read_exact(&mut head)
                 .map_err(|e| anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display()))?,
             Backing::Memory(image) => head.copy_from_slice(&image[..sniff_len]),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Device(device) => {
+                for (lba, sector) in head.chunks_mut(SECTOR_SIZE).enumerate() {
+                    device.read_sector(lba as u64, sector).map_err(|e| {
+                        anyhow::anyhow!("reading {bus_name} device {}: {e}", path.display())
+                    })?;
+                }
+            }
         }
         let has_rdsk = head
             .chunks(SECTOR_SIZE)
@@ -354,6 +467,22 @@ impl HardDriveImage {
         &self.path
     }
 
+    /// Whether this drive is a real disk of the host's rather than an image.
+    ///
+    /// Only a real disk cares: an image file can be opened again by anyone at
+    /// any time, but a physical disk is held exclusively, and while it is held
+    /// the host cannot have it back and nothing else can open it.
+    pub fn is_host_disk(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            matches!(self.backing, Backing::Device(_))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     pub fn total_sectors(&self) -> u64 {
         self.total_sectors
     }
@@ -385,6 +514,8 @@ impl HardDriveImage {
                 buf[..SECTOR_SIZE].copy_from_slice(&image[off..off + SECTOR_SIZE]);
                 Ok(())
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Device(device) => device.read_sector(file_lba, buf),
         }
     }
 
@@ -416,10 +547,21 @@ impl HardDriveImage {
                 image[off..off + SECTOR_SIZE].copy_from_slice(&buf[..SECTOR_SIZE]);
                 Ok(())
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Device(device) => device.write_sector(file_lba, buf),
         }
     }
 
     pub fn flush(&mut self) {
+        // A real disk can be pulled out of its reader, so anything still held
+        // back is a hazard an image file does not have.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Backing::Device(device) = &mut self.backing {
+            if let Err(e) = device.flush() {
+                log::warn!("{}: {}: flush failed: {e}", self.bus_name, device.id());
+            }
+            return;
+        }
         if let Backing::File(file) = &mut self.backing {
             if let Err(e) = file.flush() {
                 log::warn!(

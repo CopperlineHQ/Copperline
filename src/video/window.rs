@@ -5596,6 +5596,15 @@ impl App {
             UiControl::LauncherTab(tab) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.tab = tab;
+                    // A message reports what the page just did, so it belongs
+                    // to that page: leaving clears it.
+                    state.status = None;
+                    // Opening the Host Disk page is the moment to look at the
+                    // host's storage: a card pushed in since the launcher
+                    // opened should be there when the page is.
+                    if tab == crate::video::launcher::LauncherTab::HostDisk {
+                        state.setup.refresh_host_disks();
+                    }
                 }
             }
             UiControl::LauncherCycle { field, forward } => {
@@ -5633,6 +5642,178 @@ impl App {
                     let on = !state.setup.drive_bridged(bay);
                     state.setup.set_drive_bridged(bay, on);
                     state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskSelect(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.select_host_disk(index);
+                    // A refused tick reports itself on the status line, where
+                    // every other warning is looked for.
+                    state.status = state.setup.host_disk_warning().map(StatusMessage::err);
+                }
+            }
+            UiControl::LauncherHostDiskWritable(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.toggle_host_disk_writable(index);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskAttach(index) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.cycle_host_disk_attach(index, true);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherHostDiskUnmount(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    let attach = crate::video::launcher::MachineSetup::host_disk_attach_of(field);
+                    let removed = attach.and_then(|a| state.setup.unmount_host_disk(a));
+                    state.status = Some(match (removed, attach) {
+                        (Some(device), Some(attach)) => {
+                            // Off the machine and back to the host in one act.
+                            // Mounting took the disk, so letting go has to
+                            // close what that opened, or the host would be
+                            // told it may have a disk this process still
+                            // holds.
+                            let released = crate::blockdev::release_device(&device);
+                            log::info!("host disk: {device} taken off {}", attach.label());
+                            StatusMessage::ok(if released {
+                                format!("{device} released")
+                            } else {
+                                // The setting is gone either way, but a
+                                // machine already running with this disk holds
+                                // it in its own right, and saying "released"
+                                // of a disk still locked is how somebody ends
+                                // up wondering why they cannot have it back.
+                                format!(
+                                    "{device} released; a running machine keeps it until it stops"
+                                )
+                            })
+                        }
+                        _ => StatusMessage::err("Nothing to unmount"),
+                    });
+                }
+            }
+            UiControl::LauncherHostDiskUnmountSelected => {
+                if let Some(state) = self.launcher_state_mut() {
+                    let released = state.setup.unmount_selected_host_disks();
+                    state.status = Some(if released.is_empty() {
+                        StatusMessage::err("Nothing to unmount")
+                    } else {
+                        // Off the machine and back to the host in one act,
+                        // exactly as the Storage rows' Unmount does it.
+                        for device in &released {
+                            crate::blockdev::release_device(device);
+                            log::info!("host disk: {device} taken off the machine");
+                        }
+                        StatusMessage::ok(match released.as_slice() {
+                            [device] => format!("{device} released"),
+                            many => format!("{} released", many.join(", ")),
+                        })
+                    });
+                }
+            }
+            UiControl::LauncherHostDiskScroll(delta) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state
+                        .setup
+                        .scroll_host_disks(delta, crate::video::ui::HOST_DISK_VISIBLE_ROWS);
+                }
+            }
+            UiControl::LauncherHostDiskRefresh => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.refresh_host_disks();
+                    let found = state.setup.host_disks().len();
+                    state.status = Some(StatusMessage::ok(match found {
+                        0 => "No supported disks found on the host system".to_string(),
+                        1 => "1 disk found".to_string(),
+                        n => format!("{n} disks found"),
+                    }));
+                }
+            }
+            UiControl::LauncherHostDiskMount => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // Mounting rearranges the machine -- a disk takes a slot,
+                    // and whatever image was in it goes. If the host then
+                    // refuses the disk, none of that should have happened, so
+                    // the whole setup is put back rather than unpicked
+                    // step by step and one step forgotten.
+                    let before = state.setup.clone();
+                    let status = match state.setup.mount_host_disks() {
+                        Ok(disks) => {
+                            // The host gives the disk up here, not when the
+                            // machine starts. A real disk needs permission on
+                            // some hosts, and this is where somebody has just
+                            // asked for one -- a dialog minutes later, behind
+                            // a machine booting, belongs to nothing they did.
+                            // Every disk the machine is set up to have, not
+                            // only the ones just ticked: this says which disks
+                            // are wanted, and anything held that is not on the
+                            // list goes back to the host.
+                            let asked: Vec<(String, bool)> = state
+                                .setup
+                                .host_disks_attached()
+                                .iter()
+                                .map(|disk| (disk.device.clone(), disk.writable))
+                                .collect();
+                            let refused = match crate::blockdev::reserve_devices(&asked) {
+                                Ok(()) => {
+                                    for disk in &disks {
+                                        log::info!(
+                                            "host disk: {} attached to {} ({})",
+                                            disk.device,
+                                            disk.attach.label(),
+                                            if disk.writable {
+                                                "read/write"
+                                            } else {
+                                                "read only"
+                                            }
+                                        );
+                                    }
+                                    None
+                                }
+                                Err(error) => {
+                                    // The outermost sentence only. These are
+                                    // written to be read, and flattening the
+                                    // chain onto one line ends in a raw OS
+                                    // code with the useful half cut out of the
+                                    // middle. The log keeps all of it.
+                                    log::warn!("host disk: not attached: {error:#}");
+                                    Some(error.to_string())
+                                }
+                            };
+                            match refused {
+                                Some(reason) => {
+                                    // Nothing stays attached that the host did
+                                    // not give up, including the disks taken
+                                    // before the one that failed: a machine
+                                    // must not start expecting a disk that was
+                                    // refused here.
+                                    for disk in &disks {
+                                        crate::blockdev::release_device(&disk.device);
+                                    }
+                                    state.setup = before;
+                                    log::warn!("host disk: not attached: {reason}");
+                                    StatusMessage::err(reason)
+                                }
+                                None => {
+                                    let places: Vec<_> = disks.iter().map(|d| d.attach).collect();
+                                    let where_to =
+                                        crate::config::HostDiskAttach::describe_all(&places);
+                                    StatusMessage::ok(if disks.len() == 1 {
+                                        format!("Host disk attached to {where_to}")
+                                    } else {
+                                        format!("Host disks attached to {where_to}")
+                                    })
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            log::warn!("host disk: not attached: {reason}");
+                            StatusMessage::err(reason)
+                        }
+                    };
+                    state.status = Some(status);
                 }
             }
             UiControl::LauncherBridgeConfigure(bay) => {
@@ -6600,9 +6781,17 @@ impl App {
     /// last-applied) machine so it reflects the current settings.
     pub fn open_launcher(&mut self) {
         self.ui.menu_open = false;
-        self.ui.panel = Some(Panel::Launcher(Box::new(LauncherState::from_raw(
-            &self.machine_config,
-        ))));
+        let mut state = LauncherState::from_raw(&self.machine_config);
+        // A machine set up with a real disk names it on the Storage page, and
+        // naming it properly means knowing what is on it. Looking is otherwise
+        // put off until the Host Disk page opens, so a launcher that never
+        // goes there never touches the host's disks -- but a configuration
+        // already naming one has spent that cost, and without this the same
+        // disk reads by its bare device name here and by its volume there.
+        if !state.setup.host_disks_attached().is_empty() {
+            state.setup.refresh_host_disks();
+        }
+        self.ui.panel = Some(Panel::Launcher(Box::new(state)));
         self.request_redraw();
     }
 
@@ -10209,6 +10398,9 @@ impl App {
             self.sync_live_audio_suspension();
             #[cfg(feature = "fluxbridge")]
             self.attach_configured_bridges();
+            // The lent disks powering off gave up, lent again -- the session
+            // still holds them, so no permission is asked twice.
+            self.attach_configured_host_disks();
             info!("power button: machine powered on (cold boot)");
         }
         self.request_redraw();
@@ -10236,6 +10428,30 @@ impl App {
         let floppy = &mut self.emu.bus_mut().floppy;
         if let Err(e) = crate::emulator::attach_floppy_bridges(floppy, &cfg) {
             warn!("physical floppy drive not available: {e:#}");
+        }
+    }
+
+    /// Put the real disks back on the machine's cables after a power cycle.
+    ///
+    /// Powering off hands them to the host, so powering on has to take them
+    /// again or the machine comes back up with the slot empty. Nothing is
+    /// asked of the user: the disks were taken from the host once and are
+    /// still held, so this only puts them back where the guest looks for them.
+    fn attach_configured_host_disks(&mut self) {
+        let raw = self.machine_config.clone();
+        let cfg = match crate::config::Config::try_from(raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("could not re-read the configuration to open the real disks: {e:#}");
+                return;
+            }
+        };
+        if cfg.host_disks.is_empty() {
+            return;
+        }
+        let back = self.emu.bus_mut().attach_host_disks(&cfg);
+        if back > 0 {
+            info!("power button: {back} host disk(s) back on with the machine");
         }
     }
 
@@ -10270,6 +10486,16 @@ impl App {
         // could open it.
         #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
+        // A real hard disk is different: the machine only ever borrowed it
+        // from the session's own hold, which the launcher still shows as
+        // attached. The machine's copies go -- an off machine holds nothing
+        // -- but the disk stays taken, so powering back on lends it again
+        // without a second permission prompt, and only the launcher's
+        // Unmount (or quitting) actually hands it back to the host.
+        let released = self.emu.bus_mut().release_host_disks();
+        if released > 0 {
+            info!("power button: {released} host disk(s) off with the machine, still held for it");
+        }
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
         self.control_complete_pending("pause", "power state changed");

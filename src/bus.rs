@@ -3877,6 +3877,135 @@ impl Bus {
         self.cdtv.is_some() || self.akiko.is_some() || self.scsi_cd_ref().is_some()
     }
 
+    /// Let go of every real disk of the host's, wherever it hangs, and say how
+    /// many went.
+    ///
+    /// A drive is powered by the machine: with the Amiga off it stops, and an
+    /// off machine holds nothing. What it lets go of is only its borrowed
+    /// copy -- the session's own hold (`blockdev`'s reservation) stays, so
+    /// the disk is still taken from the host and powering on lends it again
+    /// without a second permission prompt. Image-backed drives are untouched:
+    /// a file is held against nobody.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        if let Some(gayle) = self.gayle.as_mut() {
+            released += gayle.release_host_disks();
+        }
+        if let Some(ide) = self.ide_a4000.as_mut() {
+            released += ide.release_host_disks();
+        }
+        if let Some(sdmac) = self.sdmac.as_mut() {
+            released += sdmac.release_host_disks();
+        }
+        for device in &mut self.devices {
+            released += match device {
+                crate::zorro_device::BoardDevice::A2091(board) => board.release_host_disks(),
+                crate::zorro_device::BoardDevice::A4091(board) => board.release_host_disks(),
+                _ => 0,
+            };
+        }
+        released
+    }
+
+    /// Open the configured real disks again and give them back to the machine,
+    /// saying how many went back on.
+    ///
+    /// The counterpart to [`Self::release_host_disks`], and the reason that one
+    /// is safe: a machine powered on borrows its drives again, exactly as the
+    /// physical floppy drives are taken back. Nothing is asked of the user --
+    /// the disks are still held by the session's reservation, having only been
+    /// taken off the emulated cable -- and a disk that has since been
+    /// unplugged is reported and skipped, leaving that slot empty as it would
+    /// be on real hardware.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn attach_host_disks(&mut self, cfg: &crate::config::Config) -> usize {
+        let mut attached = 0;
+        for disk in &cfg.host_disks {
+            let slot = match disk.attach {
+                crate::config::HostDiskAttach::IdeMaster => Some(0),
+                crate::config::HostDiskAttach::IdeSlave => Some(1),
+                crate::config::HostDiskAttach::Scsi(_) => None,
+            };
+            let opened = match slot {
+                Some(slot) if self.gayle.is_some() || self.ide_a4000.is_some() => {
+                    match crate::ata::IdeDrive::open_host_disk(&disk.device, disk.writable) {
+                        Ok(drive) => {
+                            if let Some(gayle) = self.gayle.as_mut() {
+                                gayle.attach_drive(slot, drive);
+                            } else if let Some(ide) = self.ide_a4000.as_mut() {
+                                ide.attach_drive(slot, drive);
+                            }
+                            true
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "ide: {} asked for host disk {}, which is not available: {error}",
+                                disk.attach.label(),
+                                disk.device
+                            );
+                            false
+                        }
+                    }
+                }
+                Some(_) => false,
+                None => {
+                    let crate::config::HostDiskAttach::Scsi(unit) = disk.attach else {
+                        continue;
+                    };
+                    let unit = usize::from(unit);
+                    // Which controller is to have it, settled before the disk
+                    // is opened: a drive is moved into one place, so there is
+                    // no second place to try once it exists.
+                    let board = self.devices.iter().position(|device| {
+                        matches!(
+                            device,
+                            crate::zorro_device::BoardDevice::A2091(_)
+                                | crate::zorro_device::BoardDevice::A4091(_)
+                        )
+                    });
+                    if self.sdmac.is_none() && board.is_none() {
+                        continue;
+                    }
+                    match crate::scsi::ScsiDisk::open_host_disk(&disk.device, disk.writable) {
+                        Ok(drive) => {
+                            if let Some(sdmac) = self.sdmac.as_mut() {
+                                sdmac.attach_drive(unit, drive);
+                            } else if let Some(at) = board {
+                                match &mut self.devices[at] {
+                                    crate::zorro_device::BoardDevice::A2091(board) => {
+                                        board.attach_drive(unit, drive);
+                                    }
+                                    crate::zorro_device::BoardDevice::A4091(board) => {
+                                        board.attach_drive(unit, drive);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            true
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "scsi: unit {unit} asked for host disk {}, which is not \
+                                 available: {error}",
+                                disk.device
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+            if opened {
+                attached += 1;
+                log::info!(
+                    "{}: host disk {} back on with the machine",
+                    disk.attach.label(),
+                    disk.device
+                );
+            }
+        }
+        attached
+    }
+
     /// The first SCSI CD-ROM drive across the machine's SCSI buses (the
     /// A3000 motherboard SCSI, then the Zorro boards), when one is fitted.
     pub fn scsi_cd_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {

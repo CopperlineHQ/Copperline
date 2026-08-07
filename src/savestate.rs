@@ -166,7 +166,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      plugin boards -- the bundled HostSocket board's default resolver),
 //      changing the bincode layout of every serialized WASM board's
 //      manifest (same class of change as 42's NetConfig::Bridge)
-pub const STATE_VERSION: u32 = 48;
+//  49: HardDriveImage records a real host disk as one, rather than as a file
+//      at the device's path. Loading a 48 state that had one would reopen
+//      the raw node as an ordinary file -- read-write whatever it was
+//      attached as, and past the checks that refuse the host's own disk
+pub const STATE_VERSION: u32 = 49;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

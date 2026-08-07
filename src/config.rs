@@ -105,6 +105,9 @@ pub struct Config {
     /// AmigaDOS devices `HOSTFS0:`, `HOSTFS1:`, ... (experimental). Empty:
     /// no services board on the autoconfig chain.
     pub filesys: Vec<crate::filesys::MountSpec>,
+    /// `[[host_disk]]` real host disks attached to the machine. Empty is the
+    /// ordinary case: a machine with no real storage bolted to it.
+    pub host_disks: Vec<HostDiskConfig>,
     pub chipset: Chipset,
     /// Concrete chip revisions derived from the `[chipset] revision` preset,
     /// installed chip RAM, and the optional `agnus`/`denise` overrides.
@@ -1269,6 +1272,144 @@ impl Default for AudioConfig {
     }
 }
 
+/// Where on the emulated machine a host disk is attached.
+///
+/// An Amiga IDE channel carries two devices, so master and slave are
+/// positions on one bus rather than separate buses. A SCSI unit is a target
+/// address on whichever controller the machine has fitted, which is why the
+/// unit is a number here and the controller is not named: the machine has at
+/// most one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostDiskAttach {
+    #[default]
+    IdeMaster,
+    IdeSlave,
+    /// A unit on whichever SCSI controller the machine has fitted.
+    Scsi(u8),
+}
+
+/// SCSI units a controller addresses. Unit 7 is the controller itself.
+pub const SCSI_UNITS: u8 = 7;
+
+impl HostDiskAttach {
+    /// The spelling a configuration file uses.
+    pub fn token(self) -> String {
+        match self {
+            Self::IdeMaster => "ide-master".to_string(),
+            Self::IdeSlave => "ide-slave".to_string(),
+            Self::Scsi(unit) => format!("scsi{unit}"),
+        }
+    }
+
+    /// How the launcher and logs name it.
+    pub fn label(self) -> String {
+        match self {
+            Self::IdeMaster => "IDE Master".to_string(),
+            Self::IdeSlave => "IDE Slave".to_string(),
+            Self::Scsi(unit) => format!("SCSI Unit {unit}"),
+        }
+    }
+
+    /// What a machine with no way to attach a host disk at all is missing.
+    /// Said without naming a bus: an A500 could take a SCSI card, so telling
+    /// its owner "IDE needs an A600" reads as the wrong half of the answer.
+    pub fn no_port_requirement() -> &'static str {
+        "Host disk attach requires an A600, A1200, A4000 or SCSI controller"
+    }
+
+    /// What a machine must have for this point to exist at all. Both IDE
+    /// positions share one requirement, so they share one message.
+    pub fn requirement(self) -> &'static str {
+        match self {
+            Self::IdeMaster | Self::IdeSlave => "Attach to IDE requires an A600, A1200 or A4000",
+            Self::Scsi(_) => "Attach to SCSI requires a SCSI controller",
+        }
+    }
+
+    /// Whether this is a SCSI unit.
+    pub fn is_scsi(self) -> bool {
+        matches!(self, Self::Scsi(_))
+    }
+
+    /// Every attachment point, in the order a picker cycles them.
+    pub fn all() -> Vec<Self> {
+        let mut all = vec![Self::IdeMaster, Self::IdeSlave];
+        all.extend((0..SCSI_UNITS).map(Self::Scsi));
+        all
+    }
+
+    /// Name a set of attachment points as one phrase.
+    ///
+    /// SCSI units collapse into a single "SCSI Unit 0,1,2": four disks on one
+    /// controller are four addresses on one bus, and spelling the controller
+    /// out four times says less, not more. One unit reads exactly as its own
+    /// label does.
+    pub fn describe_all(points: &[Self]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut units: Vec<u8> = Vec::new();
+        // The SCSI group sits where the first SCSI disk came, so the phrase
+        // follows the order the disks were given.
+        let mut group = None;
+        for point in points {
+            match point {
+                Self::Scsi(unit) => {
+                    if group.is_none() {
+                        group = Some(parts.len());
+                        parts.push(String::new());
+                    }
+                    units.push(*unit);
+                }
+                other => parts.push(other.label()),
+            }
+        }
+        if let Some(at) = group {
+            let units: Vec<String> = units.iter().map(u8::to_string).collect();
+            parts[at] = format!("SCSI Unit {}", units.join(","));
+        }
+        parts.join(", ")
+    }
+
+    /// The point a configuration token names.
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|a| a.token().eq_ignore_ascii_case(token))
+    }
+}
+
+/// One real host disk given to the emulated machine, from `[[host_disk]]`.
+///
+/// Kept apart from the image configuration deliberately. A disk is not a file:
+/// it is chosen from what the host has attached, it needs the host's
+/// permission to open, it may have to be taken from the host first, and the
+/// operations that will grow around it -- preparing, partitioning -- have no
+/// counterpart for an image. Sharing a representation with image paths would
+/// mean every one of those concerns leaking into the image path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostDiskConfig {
+    /// The host's stable identifier for the disk (`disk4`, `sdb`,
+    /// `PhysicalDrive1`), never the node path: a node path belongs to one
+    /// boot of the host, the identifier belongs to the hardware.
+    pub device: String,
+    /// Where the machine sees it.
+    pub attach: HostDiskAttach,
+    /// Whether the guest may write to the disk. On by default, matching the
+    /// launcher's R/W column and the config's `read_only`: a disk given to a
+    /// machine is normally meant to be used, and protecting it is the
+    /// deliberate choice.
+    pub writable: bool,
+}
+
+impl Default for HostDiskConfig {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            attach: HostDiskAttach::default(),
+            writable: true,
+        }
+    }
+}
+
 /// Which FluxBridge driver backs a bridged drive.
 ///
 /// Named rather than indexed so a config file does not depend on the order the
@@ -1859,6 +2000,7 @@ impl Default for Config {
             wasm_boards: Vec::new(),
             identify_board: true,
             filesys: Vec::new(),
+            host_disks: Vec::new(),
             // The no-[machine] default models the most common and most-
             // targeted Amiga: the A500 Rev 6A (the ECS "Fatter" 8372A Agnus
             // with the original OCS 8362 Denise). Selecting `[chipset]
@@ -2155,6 +2297,9 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
+    /// Real host disks given to the machine (`--host-disk DEVICE [ATTACH]`, or
+    /// `--host-disk-read-only` for the protected form), in command-line order.
+    pub host_disks: Vec<HostDiskArg>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -2205,6 +2350,7 @@ impl ConfigOverrides {
             && self.floppy_bridge_density.iter().all(Option::is_none)
             && self.floppy_bridge_speed.iter().all(Option::is_none)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
+            && self.host_disks.is_empty()
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
             && self.mouse_capture.is_none()
@@ -2279,6 +2425,15 @@ impl ConfigOverrides {
         if let Some(speed) = self.floppy_speed {
             raw.floppy.speed = Some(speed);
         }
+        // Real host disks named on the command line are added to whatever the
+        // file already asked for; the parser is what refuses two disks, or a
+        // disk and an image, on one attachment point.
+        raw.host_disk
+            .extend(self.host_disks.iter().map(|disk| RawHostDisk {
+                device: disk.device.clone(),
+                attach: disk.attach.clone(),
+                read_only: disk.read_only.then_some(true),
+            }));
         for idx in 0..4 {
             if self.floppy_bridge[idx].is_none()
                 && self.floppy_bridge_port[idx].is_none()
@@ -2524,6 +2679,9 @@ pub struct RawConfig {
     /// `[[filesys]]` host-directory mount entries, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) filesys: Vec<RawFilesysMount>,
+    /// `[[host_disk]]` real host disks, in file order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) host_disk: Vec<RawHostDisk>,
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
@@ -2605,8 +2763,35 @@ pub(crate) struct RawDisplay {
     pub(crate) status_bar: Option<bool>,
 }
 
+/// A host disk named on the command line, before it is checked against the
+/// machine. The attachment point is the token form (`ide-slave`, `scsi3`);
+/// unset means the default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostDiskArg {
+    pub device: String,
+    pub attach: Option<String>,
+    pub read_only: bool,
+}
+
 /// One `[[filesys]]` entry (experimental): a host directory exported to the
 /// guest as the AmigaDOS device `HOSTFS<n>:` (n = position in the config).
+/// `[[host_disk]]`: a real disk of the host's, given to the machine.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawHostDisk {
+    /// The host's identifier for the disk, as `--list-disks` prints it.
+    pub(crate) device: String,
+    /// Where the machine sees it: `ide-master` (the default), `ide-slave`,
+    /// or `scsi0`..`scsi6`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attach: Option<String>,
+    /// Protect the disk from the guest. Absent means writable, which is what
+    /// a disk given to a machine is normally for; protecting it is the
+    /// deliberate choice, so it is the one that has to be written down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) read_only: Option<bool>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawFilesysMount {
@@ -4061,7 +4246,22 @@ impl TryFrom<RawConfig> for Config {
             None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
         };
 
+        // A SCSI unit exists when something answers on it: a Zorro board
+        // that was asked for, or the A3000's own controller with the silicon
+        // behind it. This mirrors what `build_machine` actually wires up, so
+        // a disk is never accepted onto a bus that will not be built.
+        let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
+            || (defaults.sdmac && scsi.controller == ScsiController::A3000);
+        let host_disks = parse_host_disks(&raw.host_disk, &ide, &scsi, has_ide_port, has_scsi)?;
+        // A real host disk is a drive on the port just as an image is, and
+        // the ROM's driver is what finds it and mounts what its RDB
+        // describes. Counting only images would cull that driver out from
+        // under a machine whose only drive is a real one -- which opens
+        // perfectly and is then never looked at.
+        let host_disk_on_ide = host_disks.iter().any(|disk| !disk.attach.is_scsi());
+        let host_disk_on_scsi = host_disks.iter().any(|disk| disk.attach.is_scsi());
         Ok(Config {
+            host_disks,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
             cpu,
             fpu,
@@ -4109,10 +4309,10 @@ impl TryFrom<RawConfig> for Config {
             // no scsi.device in ROM, so there is nothing to disable.
             rom_scsi_device_disable: raw.machine.rom_scsi_device_disable.unwrap_or({
                 let builtin_drives = (has_ide_port
-                    && (ide.master.is_some() || ide.slave.is_some()))
+                    && (ide.master.is_some() || ide.slave.is_some() || host_disk_on_ide))
                     || (defaults.sdmac
                         && scsi.controller == ScsiController::A3000
-                        && scsi.units.iter().any(Option::is_some));
+                        && (scsi.units.iter().any(Option::is_some) || host_disk_on_scsi));
                 (has_ide_port || defaults.sdmac) && !builtin_drives
             }),
             akiko: defaults.akiko,
@@ -5166,6 +5366,96 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
     })
 }
 
+/// Parse `[[host_disk]]` entries and check they can all be honoured.
+///
+/// Two things are refused here rather than at the point of use. A slot holds
+/// one thing, so two host disks cannot share an attachment point, and a slot
+/// already given an image cannot also be given a disk -- the same rule a
+/// floppy bay follows for a bridge and an image, and for the same reason:
+/// silently preferring one would leave the other quietly ignored.
+///
+/// Whether the disk is actually *there* is deliberately not checked. A
+/// configuration is written once and used on a machine whose card reader may
+/// be empty, so a missing disk is a condition to report when the machine is
+/// built, not a reason to refuse to read the file.
+fn parse_host_disks(
+    raw: &[RawHostDisk],
+    ide: &IdeConfig,
+    scsi: &ScsiConfig,
+    has_ide_port: bool,
+    has_scsi: bool,
+) -> Result<Vec<HostDiskConfig>> {
+    let mut disks: Vec<HostDiskConfig> = Vec::new();
+    for (index, entry) in raw.iter().enumerate() {
+        let device = entry.device.trim();
+        if device.is_empty() {
+            bail!("host_disk[{index}] has no device; name one as --list-disks prints it");
+        }
+        let attach = match entry.attach.as_deref().map(str::trim) {
+            None => HostDiskAttach::default(),
+            Some(token) => HostDiskAttach::from_token(token).ok_or_else(|| {
+                anyhow!(
+                    "host_disk[{index}] attach = \"{token}\" is not an attachment point ({})",
+                    HostDiskAttach::all()
+                        .iter()
+                        .map(|a| a.token())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?,
+        };
+        // A disk attached where the machine has no port is not a disk at
+        // all: nothing would ever look at it, so say so now rather than
+        // opening it and leaving it unreachable.
+        let fitted = if attach.is_scsi() {
+            has_scsi
+        } else {
+            has_ide_port
+        };
+        if !fitted {
+            bail!("host_disk[{index}]: {}", attach.requirement());
+        }
+        // The same medium on two buses is not two drives: the guest mounts
+        // and writes the one disk through both, each unaware of the other's
+        // cached blocks, which is how a filesystem is destroyed by a machine
+        // that never did anything wrong.
+        if disks.iter().any(|d| d.device == device) {
+            bail!(
+                "host_disk[{index}] names {device}, which is already attached to this \
+                 machine; one disk cannot be two drives"
+            );
+        }
+        if let Some(clash) = disks.iter().find(|d| d.attach == attach) {
+            bail!(
+                "host_disk[{index}] and {} are both attached to {}; a slot holds one disk",
+                clash.device,
+                attach.label()
+            );
+        }
+        let taken = match attach {
+            HostDiskAttach::IdeMaster => ide.master.is_some(),
+            HostDiskAttach::IdeSlave => ide.slave.is_some(),
+            HostDiskAttach::Scsi(unit) => scsi
+                .units
+                .get(usize::from(unit))
+                .is_some_and(Option::is_some),
+        };
+        if taken {
+            bail!(
+                "host_disk[{index}] is attached to {}, which already has an image; \
+                 a slot holds either a disk or an image",
+                attach.label()
+            );
+        }
+        disks.push(HostDiskConfig {
+            device: device.to_string(),
+            attach,
+            writable: !entry.read_only.unwrap_or(false),
+        });
+    }
+    Ok(disks)
+}
+
 fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
     const ADF_SIZE: u64 = 80 * 2 * 11 * 512;
     let meta = std::fs::metadata(path)
@@ -5452,6 +5742,76 @@ mod tests {
     fn parse_config(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text)?;
         raw.try_into()
+    }
+
+    /// One medium cannot be two drives. Two slots pointed at the same disk
+    /// would have the guest mount and write it through both buses at once,
+    /// each unaware of the other -- so the configuration is refused rather
+    /// than opened twice.
+    #[test]
+    fn one_disk_cannot_be_attached_twice() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let twice = [
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-master".to_string()),
+                read_only: None,
+            },
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-slave".to_string()),
+                read_only: None,
+            },
+        ];
+        let error = parse_host_disks(&twice, &ide, &scsi, true, false)
+            .expect_err("the same disk on two slots is refused")
+            .to_string();
+        assert!(error.contains("already attached"), "{error}");
+
+        // Two different disks on two slots is the ordinary case.
+        let separately = [
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-master".to_string()),
+                read_only: None,
+            },
+            RawHostDisk {
+                device: "sdc".to_string(),
+                attach: Some("ide-slave".to_string()),
+                read_only: None,
+            },
+        ];
+        assert_eq!(
+            parse_host_disks(&separately, &ide, &scsi, true, false)
+                .expect("two disks, two slots")
+                .len(),
+            2
+        );
+    }
+
+    /// Where several disks went, said once. A single point reads as its own
+    /// label; several units on the one controller collapse rather than
+    /// repeating the controller for each.
+    #[test]
+    fn attachment_points_are_named_as_one_phrase() {
+        use HostDiskAttach as A;
+        assert_eq!(A::describe_all(&[A::Scsi(3)]), "SCSI Unit 3");
+        assert_eq!(A::describe_all(&[A::IdeMaster]), "IDE Master");
+        assert_eq!(
+            A::describe_all(&[A::Scsi(0), A::Scsi(1), A::Scsi(4)]),
+            "SCSI Unit 0,1,4"
+        );
+        assert_eq!(
+            A::describe_all(&[A::IdeMaster, A::IdeSlave]),
+            "IDE Master, IDE Slave"
+        );
+        // Mixed: the SCSI group sits where its first disk came.
+        assert_eq!(
+            A::describe_all(&[A::Scsi(2), A::IdeMaster, A::Scsi(5)]),
+            "SCSI Unit 2,5, IDE Master"
+        );
+        assert_eq!(A::describe_all(&[]), "");
     }
 
     /// Build a config from CLI overrides only (no file), exercising the same

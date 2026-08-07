@@ -275,6 +275,30 @@ impl A4091 {
             .find_map(ScsiTarget::cd_mut)
     }
 
+    /// Let go of any real disk of the host's, and say how many went.
+    ///
+    /// This board keeps its own targets rather than a WD33C93's, so the same
+    /// rule is spelled out again here: a machine that is off holds no
+    /// physical disk, and images and CD-ROM drives are left alone.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        for (id, target) in self.targets.iter_mut().enumerate() {
+            let holds_disk = matches!(
+                target.as_ref(),
+                Some(ScsiTarget::Disk(disk)) if disk.disk.is_host_disk()
+            );
+            if !holds_disk {
+                continue;
+            }
+            *target = None;
+            released += 1;
+            log::info!(
+                "a4091: unit {id} released; the machine is off and the host has the disk back"
+            );
+        }
+        released
+    }
+
     /// Whether a target answers at the given SCSI ID.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn target_present(&self, id: usize) -> bool {

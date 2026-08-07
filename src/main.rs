@@ -134,6 +134,14 @@ pub struct CliArgs {
     pub list_audio_devices: bool,
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
     pub list_net_interfaces: bool,
+    pub list_disks: bool,
+    /// The privileged half of the host-disk opener, and everything the
+    /// unprivileged half wrote for it. What the words mean is private to those
+    /// two halves and differs by host -- Windows names a process and a file to
+    /// answer in, Linux a socket to answer down -- so they are kept as written
+    /// and handed to the backend to read. Set only by this same program, which
+    /// is why it is absent from `--help`.
+    pub host_disk_broker: Option<Vec<String>>,
     /// Linux companion helper setup action: install, uninstall, or status.
     pub net_helper_action: Option<String>,
     /// `--sampler-list-audio-inputs`: print the host audio input devices (for
@@ -333,6 +341,11 @@ where
     let mut list_midi = false;
     let mut list_audio_devices = false;
     let mut list_net_interfaces = false;
+    let mut list_disks = false;
+    // Only the hosts with a privileged half of their own ever fill this in;
+    // macOS has `authopen` and needs none.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(unused_mut))]
+    let mut host_disk_broker: Option<Vec<String>> = None;
     let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
@@ -350,6 +363,44 @@ where
             }
             "--list-net-interfaces" => {
                 list_net_interfaces = true;
+            }
+            "--list-disks" => {
+                list_disks = true;
+            }
+            // Copperline talking to itself across a privilege boundary, not an
+            // interface: the unprivileged half writes this command line, so
+            // everything after the flag belongs to the backend that will read
+            // it, and opening those disks is the whole of what this process
+            // does -- nothing else can follow.
+            #[cfg(any(windows, target_os = "linux"))]
+            copperline::blockdev::BROKER_FLAG => {
+                let rest: Vec<String> = args.by_ref().collect();
+                if rest.is_empty() {
+                    return Err(anyhow!(
+                        "{} is used by Copperline itself",
+                        copperline::blockdev::BROKER_FLAG
+                    ));
+                }
+                host_disk_broker = Some(rest);
+            }
+            "--host-disk" | "--host-disk-read-only" => {
+                let read_only = a == "--host-disk-read-only";
+                let usage = format!("{a} requires DEVICE (and optionally an attachment point)");
+                let device = args.next().ok_or_else(|| anyhow!(usage))?;
+                // The attachment point is optional and only ever one of a
+                // known set, so a following token that is not one is the next
+                // flag rather than a mistake.
+                let takes_attach = args.peek().is_some_and(|next| {
+                    copperline::config::HostDiskAttach::all()
+                        .iter()
+                        .any(|a| a.token().eq_ignore_ascii_case(next))
+                });
+                let attach = takes_attach.then(|| args.next().expect("peeked"));
+                overrides.host_disks.push(copperline::config::HostDiskArg {
+                    device,
+                    attach,
+                    read_only,
+                });
             }
             "--install-net-helper" => {
                 if net_helper_action.is_some() {
@@ -1101,6 +1152,8 @@ where
         list_midi,
         list_audio_devices,
         list_net_interfaces,
+        list_disks,
+        host_disk_broker,
         net_helper_action,
         list_sampler_inputs,
         overrides,
@@ -1129,8 +1182,9 @@ fn print_help() {
     // A build without the feature cannot attach a physical drive at all, so
     // the flags are not listed and not accepted.
     #[cfg(feature = "fluxbridge")]
-    let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
-    let floppy_bridge = format!(
+    let floppy_bridge = {
+        let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
+        format!(
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            {floppy_bridge_names}\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
@@ -1140,7 +1194,8 @@ fn print_help() {
          --floppy-replay-speed DFN SPEED  replay captured tracks at fast (default) or normal\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  "
-    );
+        )
+    };
     #[cfg(not(feature = "fluxbridge"))]
     let floppy_bridge = String::new();
     eprintln!(
@@ -1167,7 +1222,12 @@ fn print_help() {
          \x20                            CPUs), e.g. 0, 32M, 128M\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
-         {floppy_bridge}--rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
+         {floppy_bridge}--host-disk DEVICE [ATTACH]    give the machine one of the host's own disks\n  \
+         \x20                            (--list-disks names them); ATTACH is ide-master\n  \
+         \x20                            (default), ide-slave, or scsi0..scsi6\n  \
+         --host-disk-read-only DEVICE [ATTACH]\n  \
+         \x20                            the same, but the guest cannot write to the disk\n  \
+         --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
@@ -1245,6 +1305,8 @@ fn print_help() {
          --audio-stereo-separation PCT  stereo width 0-100 (100 default, 0 = mono)\n  \
          --list-audio-devices           list host audio output devices and exit\n  \
          --list-net-interfaces          list adapters usable for bridged Ethernet and exit\n  \
+         --list-disks                   list the host disks that can be given to a machine,\n  \
+         \x20                            and exit\n  \
          --install-net-helper           install Linux bridge helper (CAP_NET_RAW only)\n  \
          --uninstall-net-helper         remove the Linux bridge helper\n  \
          --net-helper-status            report Linux bridge-helper status\n  \
@@ -1655,6 +1717,35 @@ fn print_audio_output_devices() -> Result<()> {
 }
 
 /// Print exact adapter identifiers accepted by bridged networking.
+/// List the host's own disks, for `--host-disk`.
+///
+/// Enumeration opens nothing and needs no privileges, so this is safe to run
+/// at any time; the disk the host is running from is named but marked, since
+/// hiding it silently would just look like a missing device.
+#[cfg(not(target_arch = "wasm32"))]
+fn print_host_disks() -> Result<()> {
+    println!("Host disks (name one to --host-disk, or as [[host_disk]] device):");
+    let devices = copperline::blockdev::list_devices()?;
+    if devices.is_empty() {
+        println!("  (none found)");
+    }
+    for device in devices {
+        let usable = if device.safety.openable() {
+            ""
+        } else {
+            "  -- cannot be used"
+        };
+        println!("  {:<10} {}{usable}", device.id, device.label());
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn print_host_disks() -> Result<()> {
+    println!("Host disks: not available in this build");
+    Ok(())
+}
+
 fn print_net_interfaces() -> Result<()> {
     #[cfg(all(feature = "net-bridge", not(target_arch = "wasm32")))]
     {
@@ -1840,6 +1931,34 @@ fn main() -> Result<()> {
     }
     if cli.list_net_interfaces {
         return print_net_interfaces();
+    }
+    if cli.list_disks {
+        return print_host_disks();
+    }
+    // Before anything else this process might do: it exists only to open the
+    // disks for the Copperline that could not, and it must not open a window,
+    // read a configuration, or touch a machine on the way.
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(arguments) = &cli.host_disk_broker {
+        // Each host's two halves have their own private arrangement, so the
+        // backend reads what its own other half wrote.
+        #[cfg(windows)]
+        {
+            let usage = "the privileged half takes PID REPLY DEVICE:rw|ro...";
+            let parent: u32 = arguments
+                .first()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| anyhow!(usage))?;
+            let reply = PathBuf::from(arguments.get(1).ok_or_else(|| anyhow!(usage))?);
+            let disks = arguments.get(2..).filter(|disks| !disks.is_empty());
+            return copperline::blockdev::serve_broker_request(
+                disks.ok_or_else(|| anyhow!(usage))?,
+                parent,
+                &reply,
+            );
+        }
+        #[cfg(target_os = "linux")]
+        return copperline::blockdev::serve_broker_request(arguments);
     }
     if let Some(action) = cli.net_helper_action.as_deref() {
         return run_net_helper_setup(action);

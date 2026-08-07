@@ -194,6 +194,17 @@ impl ScsiDisk {
         })
     }
 
+    /// Open a SCSI unit backed by a real host disk. The disk carries its own
+    /// RDB, so nothing is synthesized over it and there is no device name or
+    /// boot priority to choose here.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
+        Ok(Self {
+            disk: HardDriveImage::open_device(device, "scsi", writable)?,
+            sense: [0u8; SENSE_LEN],
+        })
+    }
+
     fn set_sense(&mut self, key: u8, asc: u8) {
         self.sense = [0u8; SENSE_LEN];
         self.sense[0] = 0x70; // current error, fixed format
@@ -642,6 +653,30 @@ impl Wd33c93 {
 
     pub fn target_present(&self, id: usize) -> bool {
         self.targets.get(id).is_some_and(Option::is_some)
+    }
+
+    /// Let go of any real disk of the host's, and say how many went.
+    ///
+    /// The same rule as the IDE bus: a machine that is switched off does not
+    /// hold a physical disk, because holding it keeps the host from having it
+    /// back. Images and CD-ROM drives are untouched.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        for (id, target) in self.targets.iter_mut().enumerate() {
+            let holds_disk = matches!(
+                target.as_ref(),
+                Some(ScsiTarget::Disk(disk)) if disk.disk.is_host_disk()
+            );
+            if !holds_disk {
+                continue;
+            }
+            *target = None;
+            released += 1;
+            log::info!(
+                "scsi: unit {id} released; the machine is off and the host has the disk back"
+            );
+        }
+        released
     }
 
     /// The lowest-ID CD-ROM drive on the bus, when one is attached.

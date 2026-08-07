@@ -142,6 +142,32 @@ impl IdeDrive {
         })
     }
 
+    /// Open a real host disk as an IDE drive.
+    ///
+    /// The geometry comes from the disk's own capacity, exactly as it does
+    /// for an image: the guest's driver reads the RDB the disk already
+    /// carries, so nothing here invents a partition table over media that
+    /// came out of a real Amiga. That is also why there is no unit number to
+    /// pass -- it names the device a synthesized RDB advertises, and a real
+    /// disk brings its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
+        let disk = HardDriveImage::open_device(device, "ide", writable)?;
+        let heads = RDB_HEADS as u8;
+        let spt = RDB_SPT as u8;
+        let cylinders =
+            (disk.total_sectors() / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
+        Ok(Self {
+            disk,
+            default_heads: heads,
+            default_spt: spt,
+            cylinders,
+            heads,
+            spt,
+            multiple: 0,
+        })
+    }
+
     /// IDENTIFY DEVICE data. The Amiga IDE ports wire the drive's data bus
     /// byte-swapped relative to the 68000 (IDE D7-D0 land on CPU D15-D8), so
     /// the CPU reads every ATA word with its bytes exchanged. The ROM driver's
@@ -271,6 +297,32 @@ impl AtaBus {
 
     pub fn attach_drive(&mut self, slot: usize, drive: IdeDrive) {
         self.drives[slot.min(1)] = Some(drive);
+    }
+
+    /// Let go of any real disk of the host's, and say how many went.
+    ///
+    /// A drive is powered by the machine, so a machine that is switched off
+    /// does not hold one: the disk goes back to the host, where it can be
+    /// unmounted, taken out, or given to the next machine this window builds.
+    /// Image-backed drives stay exactly where they are -- a file is not held
+    /// against anybody.
+    pub fn release_host_disks(&mut self) -> usize {
+        let mut released = 0;
+        for (slot, drive) in self.drives.iter_mut().enumerate() {
+            if !drive
+                .as_ref()
+                .is_some_and(|drive| drive.disk.is_host_disk())
+            {
+                continue;
+            }
+            *drive = None;
+            released += 1;
+            log::info!(
+                "ide: {} released; the machine is off and the host has the disk back",
+                if slot == 0 { "master" } else { "slave" }
+            );
+        }
+        released
     }
 
     /// System reset: clear the register file and any in-flight transfer but

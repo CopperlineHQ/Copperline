@@ -31,6 +31,7 @@ project:
         - file: guide/configuration.md
         - file: guide/ui.md
         - file: guide/fluxbridge.md
+        - file: guide/host-disks.md
         - file: guide/mt32.md
         - file: guide/headless.md
         - file: guide/browser.md
@@ -67,6 +68,7 @@ project:
         - guide/configuration.md
         - guide/ui.md
         - guide/fluxbridge.md
+        - guide/host-disks.md
         - guide/headless.md
         - guide/browser.md
         - zorro.md
