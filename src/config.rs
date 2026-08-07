@@ -203,6 +203,17 @@ pub struct Config {
     /// resolved backend for surfaces (the launcher) that need to read it
     /// without digging the bundled entry back out of that list.
     pub hostsocket_net: Option<crate::net::NetConfig>,
+    /// HostSocket transport (`[hostsocket] net = "host"`): `Some("host")`
+    /// when the board bypasses `hostsocket_net`'s smoltcp backend entirely
+    /// for direct real-host-socket passthrough (`crate::hostsocket`'s own
+    /// doc comment) -- `None` otherwise. `hostsocket_net` alone can't tell
+    /// this apart from plain `net = "loopback"`: `"host"` mode still
+    /// resolves its underlying smoltcp interface to `Loopback` (ICMP/DNS
+    /// still ride it), so this field is the only place that distinction
+    /// survives past `Config::from_raw` -- needed so the launcher (and any
+    /// other surface reading `Config` back) doesn't silently downgrade a
+    /// saved `net = "host"` to `net = "loopback"` on the next round trip.
+    pub hostsocket_transport: Option<String>,
     /// RTG graphics card (`[rtg] card`): when set, the card autoconfigs on
     /// the Zorro chain and presents RTG screens (all pixel formats, core
     /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
@@ -1884,6 +1895,7 @@ impl Default for Config {
             scsi: ScsiConfig::default(),
             a2065_net: None,
             hostsocket_net: None,
+            hostsocket_transport: None,
             rtg: RtgCard::None,
             rtg_vram_bytes: 2 * 1024 * 1024,
             floppy: FloppyConfig::default(),
@@ -4136,6 +4148,7 @@ impl TryFrom<RawConfig> for Config {
             scsi,
             a2065_net,
             hostsocket_net,
+            hostsocket_transport,
             rtg,
             rtg_vram_bytes,
             floppy,
