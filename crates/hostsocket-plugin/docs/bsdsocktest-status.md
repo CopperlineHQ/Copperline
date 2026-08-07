@@ -16,15 +16,19 @@ tiers, and the new `net = "host"` backend (see its own section below).
 #   NETWORK=1 (both tiers):    135 passed,  3 failed, 0 known,  4 skipped (142 total)
 # host backend (net = "host"), after fixing a connect() livelock, five
 # real gaps (shutdown, MSG_PEEK, sendmsg/recvmsg, FIONREAD,
-# SO_EVENTMASK/GetSocketEvents):
-#   Loopback tier only:        125 passed,  1 failed, 0 known, 16 skipped (142 total)
+# SO_EVENTMASK/GetSocketEvents), and one real half-gap (send/recv(MSG_OOB),
+# see the table below for why only half of it panned out):
+#   Loopback tier only:        126 passed,  2 failed, 0 known, 14 skipped (142 total)
 #   NETWORK=1 (127.0.0.1, no NAT indirection needed):
-#                               134 passed,  4 failed, 0 known,  4 skipped (142 total)
+#                               135 passed,  5 failed, 0 known,  2 skipped (142 total)
 #   -- test 41 (inbound accept from a remote host) passes here, unlike
 #      the smoltcp/NAT backend, where it's a permanent structural skip.
-#   -- the only remaining failures on both tiers are the pre-existing
-#      ICMP knock-on effect (132, and 133-135 under NETWORK=1) -- see
-#      that row in the table below, unrelated to this session's fixes.
+#   -- test 27 (recv(MSG_OOB): urgent data delivery) also passes here,
+#      unlike the smoltcp backend, where it's a permanent structural skip.
+#   -- the failures are the pre-existing ICMP knock-on effect (132, and
+#      133-135 under NETWORK=1) plus test 64 (WaitSelect exceptfds), which
+#      turned out to be a *different*, unfixable gap than test 27 despite
+#      looking related -- see the MSG_OOB row in the table below.
 ```
 
 ("0 known" is expected, not a red flag — bsdsocktest's own known-failure
@@ -171,17 +175,17 @@ deliberate scope decisions:
 | 132 | ICMP echo: loopback | **Not a host-backend bug** — confirmed by running `bsdsocktest CATEGORY icmp` in isolation under `net = "host"`, which passes cleanly (`RTT=0.002ms`). ICMP was never routed to the host backend at all (`do_socket_host` only ever creates `Tcp`/`Udp`; a raw ICMP socket always goes through the same smoltcp path `net = "loopback"` uses, unmodified) — this is a knock-on effect from state one of the other failing tests leaves behind over the course of the full 142-test run, not a direct regression. Reproduced identically both before and after the four fixes above, so it isn't one of those four either. Not chased further: isolating which specific remaining failure causes it would take real additional investigation for a test that already passes on its own. |
 | 79, 80, 82, 83, 84, 85 | `SO_EVENTMASK`/`GetSocketEvents()` family | **Real gap, fixed.** `do_get_socket_events` itself (`GetSocketEvents()`) turned out to already be fully fd-agnostic -- it only ever reads the calling task's own `event_queues` entry, never touches `fds`/`host_fds` directly -- so the only work was getting `process_socket_events` to populate that queue for host fds too. Added `sample_event_level_host` (the host-backend counterpart of `sample_event_level`, built on a real `sock_poll` instead of smoltcp socket state), `HostFdSlot::is_listener` (set by `do_listen_host`, needed to tell a pending-accept listener apart from an ordinary readable fd the same way `sample_event_level` already does for smoltcp), and `HostSockOpts::eventmask`/`ev_prev` (mirroring `SockOpts`'s own fields) plus matching `SO_EVENTMASK` handling in `do_setsockopt_host`/`do_getsockopt_host`. The one real gap `sock_poll` had for this: no way to tell "there is real data" apart from "the peer hung up, a `recv()` here would just return EOF" without actually consuming anything -- needed for the `FD_CLOSE` edge (`may_recv` going false). Fixed by giving `sock_poll` a fourth bit, `SOCK_HUP` (set alongside `SOCK_READABLE` specifically on a real `POLLHUP`, or a zero-length `peek()` on the non-unix fallback), rather than folding hangup into plain readability the way it was before. `process_socket_events` itself gained a parallel `host_fds` arm (same edge-detection arithmetic, different sampling function and `opts` root) rather than being rewritten -- keeps the smoltcp arm's own already-verified logic untouched, consistent with every other `do_*_host` sibling function this backend has added. Verified against a real bsdsocktest run, not just native tests: all six tests pass. |
 | 87 | `WaitSelect` + signals stress test | Same class of gap as the smoltcp path's own documented signal-interruption limitation (hang #10 above): a signal delivered strictly *after* the guest has already parked in `Wait()` isn't observed until the next retry. Not specific to the host backend. |
+| 27 vs. 64 | `send`/`recv(MSG_OOB)` vs. `WaitSelect(exceptfds)` | **Half real gap, fixed; half tried and abandoned.** These look like the same feature (both gated behind bsdsocktest's own "MSG_OOB not supported" skip), but turned out to need two structurally different mechanisms. `send`/`recv(MSG_OOB)` (test 27): a real gap, fixed -- added `sock_send_oob`/`sock_recv_oob` (`socket2::Socket::send_out_of_band`/`recv_out_of_band`, real `send(2)`/`recv(2)` with `MSG_OOB`) and wired them into `do_send_host`/`do_recv_host`, blocking via a new `WaitKind::RecvOob` when nothing's pending yet. Genuinely works: a real host TCP socket supports this even though smoltcp's own `socket::tcp` has no urgent-pointer support to build it on at all (the same permanent gap `do_send`'s own `MSG_OOB` rejection already documented) -- one more case, like test 41, of the host backend doing something the smoltcp one structurally cannot. `WaitSelect(exceptfds)` (test 64): tried, found unreliable, reverted. The natural approach -- give `sock_poll` a `POLLPRI` bit so `scan_select` could report except-readiness non-consumingly -- was implemented, passed a hand-written native test... and then failed the real bsdsocktest run. Root-caused with a standalone `libc::poll` repro outside the whole plugin stack: on this project's own macOS dev host, `poll(2)` *never* reports `POLLPRI` for a genuine `MSG_OOB` send, in either direction (client→server or server→client), blocking or non-blocking -- but *did* report it once, spuriously, exactly coincident with an unrelated `POLLHUP` (the peer socket closing at the same instant), which is what made the native test pass: it was catching a connection-teardown artifact, not real urgent-data detection. Backed the `POLLPRI`/`SOCK_OOB` plumbing out entirely rather than ship a signal proven to fire on the wrong condition; `WaitSelect()`'s `exceptfds` on this backend now always reports empty, matching the smoltcp path's own permanent gap here. `WaitKind::RecvOob`'s own wakeup (needed for a *blocking* `recv(MSG_OOB)`, unaffected by this) was changed to not depend on `POLLPRI` either -- any readiness bit is treated as "go recheck" (same reasoning as the connect() livelock fix above), which in practice means "recheck every tick" since a connected socket's own writable bit is normally always set. |
 
-**After all five fixes: 125 passed, 1 failed, 0 known, 16 skipped
-(142 total)** in the loopback tier -- now matching the smoltcp backend's
-own loopback tally exactly. The signals stress test (87) also now passes
-(unclear whether that's causally related to the `SO_EVENTMASK` fix or
-just timing-sensitive, same caveat this doc's own test-81-before-the-fix
-note above already flags for this class of test -- not chased further,
-since it's a pass either way). Only the ICMP knock-on effect (loopback:
-132; `NETWORK=1`: also 133-135) is left unfixed anywhere, and it's
-confirmed unrelated to any of this session's changes (see that row's own
-comment).
+**After all five fixes plus the `MSG_OOB` half-fix: 126 passed, 2 failed,
+0 known, 14 skipped (142 total)** in the loopback tier -- two better than
+the smoltcp backend's own loopback tally (test 27 now a genuine pass
+instead of a skip), with one new genuine failure (64, an honest "doesn't
+work" rather than a skip) alongside the pre-existing ICMP knock-on (132).
+The signals stress test (87) also now passes (unclear whether that's
+causally related to the `SO_EVENTMASK` fix or just timing-sensitive, same
+caveat this doc's own test-81-before-the-fix note above already flags for
+this class of test -- not chased further, since it's a pass either way).
 
 ### `NETWORK=1` (real outbound *and inbound* access)
 
@@ -191,8 +195,8 @@ all (`net = "host"` gives the guest the host's own real network identity
 directly), so `bsdsocktest HOST 127.0.0.1 NOPAGE` just works —
 `127.0.0.1` *is* the same machine the helper is listening on.
 
-**Result (re-run after all five fixes above): 134 passed, 4 failed,
-0 known, 4 skipped (142 total).**
+**Result (re-run after all five fixes plus the `MSG_OOB` half-fix above):
+135 passed, 5 failed, 0 known, 2 skipped (142 total).**
 
 **Test 41 (`accept(): incoming connection from remote host`) passes.**
 This is the headline result: under the smoltcp/NAT backend this test is a
@@ -204,22 +208,26 @@ port, so the helper's own "connect back to whatever address the Amiga's
 control connection came from" mechanism reaches it directly. A case
 where this backend does something the smoltcp one structurally cannot.
 
-The remaining 4 skips are exactly the backend-independent structural
-gaps already known: MSG_OOB (27, 64), `FIOASYNC` (57, redundant with
-`SO_EVENTMASK`), and the fd>31 WaitSelect wire-protocol ceiling (70) --
-none specific to this backend, all already covered in the
-[Compatibility](#compatibility) section's own account of the smoltcp
-path's identical gaps.
+**Test 27 (`recv(MSG_OOB)`) also passes here**, another case the smoltcp
+backend can't match -- see the `MSG_OOB` row above for the full story,
+including why its sibling test 64 (`exceptfds`) does *not* similarly pass
+despite looking like the same feature.
 
-The 4 failures are the loopback-only run's one ICMP failure (132) plus
-3 newly-attempted network-tier ICMP tests (133, 134, 135 -- previously
-honest `SKIP`s with no helper connected, now real attempts). All four
-ICMP tests fail together in both runs (loopback-only *and* this one),
-while `bsdsocktest CATEGORY icmp` in isolation passes cleanly under
-`net = "host"` either way -- consistent with the loopback-only run's own
-finding that this is cumulative state from one of the other failing
-tests, not a direct ICMP-over-host-backend bug. Still not chased further
-without isolating the actual source.
+The remaining 2 skips are backend-independent structural gaps already
+known: `FIOASYNC` (57, redundant with `SO_EVENTMASK`) and the fd>31
+WaitSelect wire-protocol ceiling (70) -- neither specific to this
+backend, both already covered in the [Compatibility](#compatibility)
+section's own account of the smoltcp path's identical gaps.
+
+The 5 failures are the loopback-only run's own ICMP failure (132) and
+`exceptfds` failure (64) plus 3 newly-attempted network-tier ICMP tests
+(133, 134, 135 -- previously honest `SKIP`s with no helper connected, now
+real attempts). All four ICMP tests fail together in both runs
+(loopback-only *and* this one), while `bsdsocktest CATEGORY icmp` in
+isolation passes cleanly under `net = "host"` either way -- consistent
+with the loopback-only run's own finding that this is cumulative state
+from one of the other failing tests, not a direct ICMP-over-host-backend
+bug. Still not chased further without isolating the actual source.
 
 ## Fixed after the initial triage
 

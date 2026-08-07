@@ -1103,6 +1103,54 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             },
         )?;
 
+        // sock_send_oob(h, ptr, len) -> i32: like `sock_send`, but a real
+        // `send(MSG_OOB)` (`socket2::Socket::send_out_of_band`) -- backs
+        // `send(MSG_OOB)` on a host-backed fd. Unlike the smoltcp path
+        // (no urgent-pointer support in `socket::tcp` at all, a permanent
+        // structural gap), a real host TCP socket genuinely supports this.
+        linker.func_wrap(
+            "env",
+            "sock_send_oob",
+            |mut caller: Caller<'_, HostCtx>, handle: i32, ptr: i32, len: i32| -> Result<i32> {
+                let buf = read_wasm_bytes(&mut caller, ptr, len)?;
+                let Some(socket) = caller.data_mut().sockets.get_mut(&handle) else {
+                    return Ok(-EBADF);
+                };
+                match socket.send_out_of_band(&buf) {
+                    Ok(n) => Ok(n as i32),
+                    Err(e) => Ok(-translate_errno(&e)),
+                }
+            },
+        )?;
+
+        // sock_recv_oob(h, ptr, cap) -> i32: like `sock_recv`, but a real
+        // `recv(MSG_OOB)` (`socket2::Socket::recv_out_of_band`) -- backs
+        // `recv(MSG_OOB)`/`recvmsg(MSG_OOB)` on a host-backed fd, retrieving
+        // real urgent data a plain `sock_recv`/`sock_peek` never surfaces.
+        linker.func_wrap(
+            "env",
+            "sock_recv_oob",
+            |mut caller: Caller<'_, HostCtx>, handle: i32, ptr: i32, cap: i32| -> Result<i32> {
+                let mem_size = caller_memory(&mut caller)?.data_size(&caller);
+                let (_, cap) = checked_wasm_window(ptr, cap, mem_size)?;
+                let mut raw = vec![0u8; cap];
+                // SAFETY: same reasoning as `sock_peek`'s own identical
+                // cast -- `raw` is already fully initialized (zeroed).
+                let uninit: &mut [MaybeUninit<u8>] =
+                    unsafe { std::slice::from_raw_parts_mut(raw.as_mut_ptr().cast(), raw.len()) };
+                let Some(socket) = caller.data_mut().sockets.get_mut(&handle) else {
+                    return Ok(-EBADF);
+                };
+                match socket.recv_out_of_band(uninit) {
+                    Ok(n) => {
+                        write_wasm_bytes(&mut caller, ptr, &raw[..n])?;
+                        Ok(n as i32)
+                    }
+                    Err(e) => Ok(-translate_errno(&e)),
+                }
+            },
+        )?;
+
         // sock_nread(h) -> i32: bytes currently available to read without
         // blocking -- a real `ioctl(fd, FIONREAD, &n)`, backing
         // `IoctlSocket(FIONREAD)` on a host-backed fd (unix only; no
@@ -1279,6 +1327,17 @@ const SOCK_HUP: i32 = 8;
 /// `sock_poll` to schedule). `POLLHUP` counts as readable too: a
 /// readable-at-EOF socket is exactly what a real `recv()` returning `0`
 /// looks like, the same "readable" a data-bearing socket reports.
+///
+/// Deliberately does *not* surface `POLLPRI` (real TCP urgent/out-of-band
+/// data pending) as a bit here: tried, and found unreliable on this
+/// project's own macOS dev host -- `poll(2)` never reported it for a
+/// genuine `MSG_OOB` send in isolation, but *did* report it spuriously
+/// coincident with an unrelated `POLLHUP` (peer socket closing), which
+/// would have made `WaitSelect()`'s `exceptfds` fire on the wrong
+/// condition entirely. `recv(MSG_OOB)` itself (`sock_recv_oob`) works
+/// fine without this -- a real, edge-triggered `MSG_OOB` byte is
+/// retrievable directly, no polling needed -- only the non-consuming
+/// "is one pending" signal `exceptfds` would need is what's missing.
 ///
 /// Non-unix falls back to a cruder heuristic (`peek()` for readability,
 /// `SO_ERROR`/`peer_addr()` for write-readiness) that cannot detect
@@ -2213,6 +2272,7 @@ mod tests {
     const HS_CALL_RECVMSG: i32 = 34;
     const HS_FIONREAD: i32 = 0x4004667F;
     const HS_MSG_PEEK: i32 = 0x2;
+    const HS_MSG_OOB: i32 = 0x1;
     const HS_AF_INET: i32 = 2;
     const HS_SOCK_STREAM: i32 = 1;
     const HS_RES_PENDING: i32 = -2;
@@ -3972,6 +4032,95 @@ mod tests {
         );
         let base = RECV_BUF_ADDR as usize;
         assert_eq!(&host.memory_mut().chip_ram[base..base + 4], b"PING");
+
+        hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CLOSESOCKET,
+            [fd, 0, 0, 0, 0, 0, 0],
+        );
+        server.join().unwrap();
+    }
+
+    /// `recv(MSG_OOB)` on a host-backed fd retrieves real TCP urgent data
+    /// -- unlike the smoltcp path (a permanent `EOPNOTSUPP`, no
+    /// urgent-pointer support in `socket::tcp` at all), a real host socket
+    /// genuinely supports this. The peer sends the urgent byte with a raw
+    /// `libc::send(..., MSG_OOB)` (std's own `TcpStream` has no flags-aware
+    /// send), matching exactly how bsdsocktest's own test 27 drives this.
+    #[test]
+    fn hostsocket_plugin_host_backend_recv_msg_oob_gets_real_urgent_byte() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let raw = stream.as_raw_fd();
+            let byte = [0xABu8];
+            let n =
+                unsafe { libc::send(raw, byte.as_ptr() as *const libc::c_void, 1, libc::MSG_OOB) };
+            assert_eq!(n, 1, "libc::send(MSG_OOB) itself must succeed");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host"),
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let task = 0x2000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        let fd = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SOCKET,
+            [HS_AF_INET, HS_SOCK_STREAM, 0, 0, 0, 0, 0],
+        );
+        assert!(fd > 0);
+        const SOCKADDR_ADDR: u32 = 0x200;
+        let mut sockaddr = [0u8; 16];
+        sockaddr[2..4].copy_from_slice(&port.to_be_bytes());
+        sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let base = SOCKADDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr);
+        let rc = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fd, SOCKADDR_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0);
+
+        // recv(fd, buf, 1, MSG_OOB) -- must block/retry until the real
+        // urgent byte lands, then deliver exactly it.
+        const OOB_BUF_ADDR: u32 = 0x300;
+        let n = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_RECV,
+            [fd, OOB_BUF_ADDR as i32, 1, HS_MSG_OOB, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(
+            n, 1,
+            "recv(MSG_OOB) should retrieve exactly the urgent byte"
+        );
+        let base = OOB_BUF_ADDR as usize;
+        assert_eq!(host.memory_mut().chip_ram[base], 0xAB);
 
         hs_call(
             &mut board,

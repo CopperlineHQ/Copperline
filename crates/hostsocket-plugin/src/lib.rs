@@ -115,6 +115,8 @@ extern "C" {
     fn sock_shutdown(handle: i32, how: i32) -> i32;
     fn sock_peek(handle: i32, ptr: i32, cap: i32) -> i32;
     fn sock_nread(handle: i32) -> i32;
+    fn sock_send_oob(handle: i32, ptr: i32, len: i32) -> i32;
+    fn sock_recv_oob(handle: i32, ptr: i32, cap: i32) -> i32;
 
     fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32;
     fn resource_len(key_ptr: i32, key_len: i32) -> i32;
@@ -202,6 +204,12 @@ mod native_host_stubs {
         -1
     }
     pub unsafe fn sock_nread(handle: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_send_oob(handle: i32, ptr: i32, len: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_recv_oob(handle: i32, ptr: i32, cap: i32) -> i32 {
         -1
     }
     pub unsafe fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
@@ -1162,6 +1170,13 @@ enum WaitKind {
         fd: i32,
     },
     Recv {
+        fd: i32,
+    },
+    // Blocking recv(MSG_OOB) on a host-backed fd, waiting for real TCP
+    // urgent data to arrive -- host-backend only (see `do_recv_host`'s own
+    // MSG_OOB branch), since the smoltcp path has no urgent-data support
+    // to build this on at all.
+    RecvOob {
         fd: i32,
     },
     // Blocking send() on a TCP fd, once a short write has left `len` bytes
@@ -2330,8 +2345,7 @@ impl Board {
     // passed straight through.
     fn do_send_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
         if flags & MSG_OOB != 0 {
-            self.set_errno(task, EOPNOTSUPP);
-            return -1;
+            return self.do_send_oob_host(task, fd, buf_addr, len);
         }
         let n = (len.max(0) as usize).min(MAX_XFER_LEN);
         self.send_host_stream(task, fd, n, |already, remaining| {
@@ -2348,6 +2362,43 @@ impl Board {
             };
             data
         })
+    }
+
+    // send(MSG_OOB) on a host-backed fd: a real `send(2)` with `MSG_OOB`
+    // set (`sock_send_oob`, `socket2::Socket::send_out_of_band`) -- unlike
+    // the smoltcp path (`do_send`'s own MSG_OOB branch, a permanent
+    // `EOPNOTSUPP` since `socket::tcp` has no urgent-pointer support to
+    // build on at all), a real host TCP socket genuinely supports this.
+    // No partial-progress retry loop the way `send_host_stream` needs for
+    // an ordinary blocking send: a real urgent-data send is a single small
+    // atomic write (bsdsocktest's own coverage only ever sends 1 byte, and
+    // real BSD urgent-data semantics only support one outstanding OOB byte
+    // at a time regardless), so a plain retry-on-EAGAIN is enough.
+    fn do_send_oob_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+        let n = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let mut data = vec![0u8; n];
+        // Safety: reading the guest's send buffer out of Amiga memory.
+        unsafe { dma_read(buf_addr as i32, data.as_mut_ptr() as i32, n as i32) };
+        let rc = unsafe { sock_send_oob(handle, data.as_ptr() as i32, data.len() as i32) };
+        if rc >= 0 {
+            return rc;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Send { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     // Shared blocking/partial-progress host-socket send logic behind both
@@ -2613,8 +2664,7 @@ impl Board {
     // expectation.
     fn do_recv_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
         if flags & MSG_OOB != 0 {
-            self.set_errno(task, EOPNOTSUPP);
-            return -1;
+            return self.do_recv_oob_host(task, fd, buf_addr, len);
         }
         let idx = self
             .host_fd_index(fd)
@@ -2645,6 +2695,42 @@ impl Board {
                 return -1;
             }
             self.last_pending.insert(task, WaitKind::Recv { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
+    }
+
+    // recv(MSG_OOB) on a host-backed fd: a real `recv(2)` with `MSG_OOB`
+    // set (`sock_recv_oob`, `socket2::Socket::recv_out_of_band`), retrieving
+    // the real urgent byte a plain `recv`/`peek` never surfaces. Blocks
+    // (via `WaitKind::RecvOob`) until urgent data actually arrives, same
+    // shape as `do_recv_host`'s own blocking path -- but with no dedicated
+    // readiness bit to wait on (see that `WaitKind`'s own comment for why
+    // `sock_poll` can't reliably detect this).
+    fn do_recv_oob_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+        let cap = (len.max(0) as usize).min(MAX_XFER_LEN);
+        let mut data = vec![0u8; cap];
+        let rc = unsafe { sock_recv_oob(handle, data.as_mut_ptr() as i32, data.len() as i32) };
+        if rc >= 0 {
+            let n = rc as usize;
+            // Safety: writing into the guest's receive buffer in Amiga
+            // memory.
+            unsafe { dma_write(buf_addr as i32, data.as_ptr() as i32, n as i32) };
+            return n as i32;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::RecvOob { fd });
             return RES_PENDING;
         }
         self.set_errno(task, -rc);
@@ -5406,6 +5492,20 @@ impl Board {
     // anyway. Also bounded to `SELECT_MAX_FD` (32), independent of `nfds`
     // and `MAX_FDS` -- see that const's own comment for why fd 32+ can't be
     // represented in this wire format's single-ULONG bitmask at all.
+    // `WaitSelect()`'s `exceptfds` is *not* handled by this function --
+    // real TCP urgent (out-of-band) data pending is the only condition a
+    // real `exceptfds` would report, and there is no reliable way to
+    // detect it non-consumingly on a host-backed fd either: `poll(2)`'s
+    // `POLLPRI` was tried (`sock_poll` upgraded to surface it) and found
+    // unreliable on this project's own macOS dev host -- it never fired
+    // for a genuine `MSG_OOB` send in isolation, but *did* fire spuriously
+    // coincident with an unrelated `POLLHUP` (peer socket closing). Rather
+    // than ship a signal that fires on the wrong condition, `do_wait_select`
+    // always reports `exceptfds` empty, matching the smoltcp path's own
+    // permanent gap here (no urgent-pointer support in `socket::tcp` at
+    // all) -- see `do_send`'s own `MSG_OOB` comment. `recv(MSG_OOB)` itself
+    // (`do_recv_oob_host`) is unaffected: retrieving a real pending urgent
+    // byte works fine without polling for it first.
     fn scan_select(&self, read_mask: u32, write_mask: u32, nfds: u32) -> (u32, u32) {
         let sockets = self.sockets.as_ref().expect("init() has run");
         let mut ready_read = 0u32;
@@ -6007,6 +6107,22 @@ impl Board {
                         .socket_can_recv(fd)
                         .is_none_or(|(can_recv, may_recv)| can_recv || !may_recv),
                 },
+                // Host-only (see `WaitKind::RecvOob`'s own comment) --
+                // `host_socket_mask` returning `None` means the fd is gone
+                // (closed while waiting), not "fall back to smoltcp": wake
+                // up rather than block forever, the retry will report
+                // ENOTSOCK on its own. No dedicated bit to check readiness
+                // against (`sock_poll` can't reliably detect pending
+                // urgent data at all -- see `scan_select`'s own comment on
+                // why `POLLPRI` was tried and abandoned): any readiness
+                // bit is treated as "go recheck", same reasoning as
+                // `WaitKind::Connect`'s own identical `mask != 0` --
+                // `do_recv_oob_host`'s retry re-issues `sock_recv_oob` and
+                // trusts nothing from `sock_poll` either way. In practice
+                // this means "recheck every tick" for an otherwise-idle
+                // connected socket (its own `SOCK_WRITABLE` bit is
+                // normally always set), bounded and harmless.
+                WaitKind::RecvOob { fd } => self.host_socket_mask(fd).is_none_or(|mask| mask != 0),
                 WaitKind::Send { fd } => match self.host_socket_mask(fd) {
                     Some(mask) => mask & (SOCK_WRITABLE | SOCK_ERROR) != 0,
                     None => self.fd_slot(fd).is_none_or(|slot| {
