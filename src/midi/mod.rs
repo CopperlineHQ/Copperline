@@ -799,6 +799,53 @@ impl SerialSink for MidiSerialSink {
 mod tests {
     use super::*;
 
+    /// A host-independent backend for tests that exercise bridge state rather
+    /// than an operating-system MIDI connection. CI runners need not expose
+    /// ALSA sequencer hardware for an in-memory timeline-reset assertion.
+    struct TestBackend;
+
+    impl MidiBackend for TestBackend {
+        fn send(&mut self, _data: &[u8], _at: Instant) {}
+
+        fn set_output(&mut self, _endpoint: Option<&str>) {}
+
+        fn set_input(&mut self, _endpoint: Option<&str>) {}
+
+        fn current_output(&self) -> Option<String> {
+            None
+        }
+
+        fn current_input(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn test_sink() -> MidiSerialSink {
+        let (producer, input) = HeapRb::<u8>::new(INPUT_RING_BYTES).split();
+        drop(producer);
+        MidiSerialSink {
+            backend: Box::new(TestBackend),
+            anchor: None,
+            input,
+            framer: MidiFramer::default(),
+            debug: None,
+            #[cfg(feature = "mt32")]
+            mt32_roms: crate::mt32::Mt32Roms::default(),
+            #[cfg(feature = "mt32")]
+            mt32_version: None,
+            #[cfg(feature = "mt32")]
+            mt32: None,
+            #[cfg(feature = "mt32")]
+            mt32_selected: false,
+            #[cfg(feature = "mt32")]
+            mt32_fault: None,
+            #[cfg(feature = "mt32")]
+            mt32_input: false,
+            #[cfg(feature = "mt32")]
+            mt32_reply: std::collections::VecDeque::new(),
+        }
+    }
+
     /// Feed a byte stream through the framer, collecting the complete messages.
     fn frame(bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut framer = MidiFramer::default();
@@ -855,7 +902,7 @@ mod tests {
     fn timeline_jump_discards_host_midi_partial_state_and_mt32_replies() {
         use crate::serial::SerialSink;
 
-        let mut sink = MidiSerialSink::open(None, None).expect("MIDI sink");
+        let mut sink = test_sink();
         sink.anchor = Some(SerialTimeAnchor {
             host_epoch: Instant::now(),
             cck_per_second: 1.0,
