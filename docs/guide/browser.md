@@ -360,7 +360,10 @@ through wasm-bindgen; the page's JavaScript drives everything from
   does not switch shape across the blanks a screen change produces.
   A frame whose render input exactly matches the previous one skips the
   render pipeline entirely (the desktop render cache's reuse detector),
-  so a static screen costs no render work at all.
+  so a static screen costs no render work at all. The wasm wrapper exports
+  a presentation revision that advances only when those output bytes or
+  their geometry change; the page therefore also skips the typed-array
+  view, canvas/WebGL texture upload, and monitor draw for an exact repeat.
   There is no wgpu in the build, which keeps the wasm-opt'd wasm
   around 2.1 MiB (about 0.8 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
@@ -392,7 +395,14 @@ through wasm-bindgen; the page's JavaScript drives everything from
   60 Hz frame budget, alternate ticks step with the render deferred, so
   emulation and audio hold real time and only the displayed rate halves.
   The stat line shows `render 1/2` while this is active, and the mode
-  disengages (with hysteresis) as soon as the host keeps up again.
+  disengages (with hysteresis) as soon as the host keeps up again. Its
+  `host core + render + upload + shader` figures split the average host
+  milliseconds per emulated frame over the last reporting interval:
+  `core` is machine advancement, `render` is the Rust framebuffer and
+  presentation pipeline, `upload` is the browser-side canvas copy or WebGL
+  texture submission, and `shader` is the CPU time submitting the selected
+  monitor passes. WebGL commands are asynchronous, so `shader` is main-thread
+  submission cost rather than a synchronous GPU-completion measurement.
 - **Input**: `KeyboardEvent.code` strings map to Amiga raw keycodes with the
   same table as the desktop frontend (winit's `KeyCode` names *are* the W3C
   code strings); the mouse uses Pointer Lock for relative motion, with a
@@ -511,7 +521,10 @@ now forward to the port-taking calls. `reset()` power-cycles,
 from a pause does not sprint through the frames the pause "owed",
 `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
-exposes the guest clock for diagnostics.
+exposes the guest clock for diagnostics. `presentation_revision()` identifies
+the current presentation buffer without hashing it, while
+`last_run_core_ms()` and `last_run_render_ms()` split the host cost of the
+most recent paced call for page-side diagnostics.
 
 `save_state()` returns the whole emulated machine as a `Uint8Array` in the
 desktop's `.clstate` format, and `load_state(bytes)` restores one --

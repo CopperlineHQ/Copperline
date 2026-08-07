@@ -360,6 +360,14 @@ reuse.
 `render_from_input` consumes only this frozen bundle, so the main thread can
 start emulating frame N+1 while the worker renders frame N.
 
+Each render thread also retains a `RenderScratch` arena across calls. The
+per-row base palettes and control state, their nested segment vectors, the
+playfield/collision canvases, horizontal-window rows, DMA-output origins and
+manual-HAM selector buffer are cleared and resized in place. This preserves
+their allocations across changing frames and avoids rebuilding several large
+temporary buffers at field rate; thread-local ownership keeps the synchronous
+browser/native paths and the desktop worker independent without locking.
+
 `window.rs` starts a persistent `copperline-render` worker by default.
 `COPPERLINE_THREADED_RENDER=0` (also `false`, `off`, or `no`) disables the
 worker and uses the synchronous wrapper path. The default worker owns a
@@ -395,6 +403,15 @@ does not defeat reuse. A match skips replay and keeps the prior collision and
 presentation result. The two-frame arming step avoids deep-copying captured
 plane data on changing displays. Interlace, phosphor history, and
 time-dependent render diagnostics do not take this shortcut.
+
+The browser wrapper exposes a monotonically wrapping presentation revision.
+It advances only after a non-reused frame has completed post-processing and
+been copied into the page-facing presentation buffer. JavaScript remembers
+the last uploaded revision, so an exact pre-render reuse also suppresses the
+typed-array construction, texture upload and monitor draw. Display-only
+changes such as a resize, tint, monitor mode or WebGL context restoration can
+force a draw of the held texture without pretending the emulated picture
+changed.
 
 After post-processing and deinterlacing, the frontend compares the complete
 active presentation buffer and its geometry with the current one. This is a
