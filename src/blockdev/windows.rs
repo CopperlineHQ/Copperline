@@ -93,6 +93,7 @@ use std::ptr;
 
 use anyhow::{Context, Result};
 
+use super::broker_protocol::{self, BROKER_FLAG};
 use super::{HostDevice, Safety};
 
 // Only the calls this needs are declared, following `src/net/bridge/windows.rs`
@@ -1126,12 +1127,6 @@ fn close_in(target: Handle, handle: usize) {
     };
 }
 
-/// The flag that puts this program into its privileged half. Undocumented in
-/// `--help` on purpose: it is one process talking to another, not an
-/// interface, and its arguments only mean anything to the process that wrote
-/// them.
-pub const BROKER_FLAG: &str = "--host-disk-broker";
-
 /// Read what the privileged half said: `ok` and then a line per disk, naming
 /// it and the handles it opened for it, or the one reason it did none of it.
 ///
@@ -1144,21 +1139,12 @@ pub const BROKER_FLAG: &str = "--host-disk-broker";
 /// Every failure here means something is answering that is not the half this
 /// asked for, so none of them produce a handle: a number that is not one, an
 /// answer in no known shape, and an empty list are all refusals.
+/// Read each disk's line of the privileged half's answer: the identifier and
+/// then its handles, the disk's own first, as hexadecimal handle numbers in
+/// this process's table.
 fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
-    let mut lines = answer.lines();
-    match lines.next().map(str::trim) {
-        Some("ok") => {}
-        // A refusal it explained is passed on as it wrote it -- it knows why,
-        // and this side does not.
-        Some(line) => match line.split_once(' ') {
-            Some(("error", message)) => anyhow::bail!("{}", message.trim()),
-            _ => anyhow::bail!("the answer was in no shape this understands"),
-        },
-        None => anyhow::bail!("the answer was empty"),
-    }
-
     let mut opened = Vec::new();
-    for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
+    for line in broker_protocol::parse_answer(answer)? {
         let mut parts = line.split_whitespace();
         let id = parts
             .next()
@@ -1177,26 +1163,7 @@ fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
         }
         opened.push((id, handles));
     }
-    if opened.is_empty() {
-        anyhow::bail!("it opened nothing");
-    }
     Ok(opened)
-}
-
-/// How one disk is named on the privileged half's command line.
-fn broker_argument(id: &str, write: bool) -> String {
-    format!("{id}:{}", if write { "rw" } else { "ro" })
-}
-
-/// Read one back, refusing anything that is not in the shape written above.
-fn parse_broker_argument(argument: &str) -> Option<(String, bool)> {
-    let (id, mode) = argument.rsplit_once(':')?;
-    let write = match mode {
-        "rw" => true,
-        "ro" => false,
-        _ => return None,
-    };
-    (!id.is_empty()).then(|| (id.to_string(), write))
 }
 
 /// Ask for every disk at once, through a single moment of Administrator.
@@ -1217,12 +1184,12 @@ fn parse_broker_argument(argument: &str) -> Option<(String, bool)> {
 /// obvious alternative -- relaunching Copperline as Administrator -- would
 /// throw away the machine that is already running, which is exactly what
 /// somebody attaching a disk mid-session does not want.
-fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
+fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
     let exe = std::env::current_exe().context("finding this program to run again with consent")?;
     let reply = handoff_path();
     let asked: Vec<String> = wanted
         .iter()
-        .map(|(device, write)| broker_argument(&device.id, *write))
+        .map(|(device, write)| broker_protocol::argument(&device.id, *write))
         .collect();
     let parameters = format!(
         "{BROKER_FLAG} {} \"{}\" {}",
@@ -1291,17 +1258,16 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
         if device_number(&disk) != disk_number_of(&id) {
             anyhow::bail!("{id}: what came back is not that disk, so it will not be used");
         }
-        let write = wanted
-            .iter()
-            .find(|(device, _)| device.id == id)
-            .map(|(_, write)| *write)
-            .ok_or_else(|| anyhow::anyhow!("{id} was opened but never asked for"))?;
-        taken.push(Reserved {
+        if !wanted.iter().any(|(device, _)| device.id == id) {
+            anyhow::bail!("{id} was opened but never asked for");
+        }
+        taken.push((
             id,
-            write,
-            disk,
-            dismounted: handles.map(std::fs::File::from).collect(),
-        });
+            Held {
+                disk,
+                dismounted: handles.map(std::fs::File::from).collect(),
+            },
+        ));
     }
     Ok(taken)
 }
@@ -1321,7 +1287,7 @@ pub fn serve_broker_request(asked: &[String], parent_process_id: u32, reply: &Pa
     let outcome = asked
         .iter()
         .map(|argument| {
-            parse_broker_argument(argument)
+            broker_protocol::parse_argument(argument)
                 .ok_or_else(|| anyhow::anyhow!("{argument} does not name a disk"))
         })
         .collect::<Result<Vec<_>>>()
@@ -1352,21 +1318,15 @@ fn broker_open(
     // go back to the host as these handles drop on the way out.
     let mut opened = Vec::new();
     for (id, write) in asked {
-        // The safety rules are re-applied here rather than inherited: this
-        // half runs as Administrator, so it is the last place that can refuse
-        // the disk the host is running from, and it must not depend on the
-        // unprivileged half having asked nicely.
+        // Re-applied here rather than inherited: this half runs as
+        // Administrator, so it is the last place that can refuse the disk the
+        // host is running from, and it must not depend on the unprivileged
+        // half having asked nicely. It asks the same question that half does
+        // rather than a hand-copied likeness of it -- a rule added there has
+        // to reach the half that can actually damage the medium.
         let device = super::find_device(id)?
             .ok_or_else(|| anyhow::anyhow!("no host disk called {id} is attached"))?;
-        if !device.safety.openable() {
-            anyhow::bail!(
-                "{id} is the disk this computer is running from and cannot be used as an Amiga \
-                 drive"
-            );
-        }
-        if *write && !device.writable {
-            anyhow::bail!("{id} is write protected by the hardware");
-        }
+        super::refuse_if_unusable(&device, *write)?;
         let disk = open_disk_node(&device, *write)
             .map_err(|error| explain_open_failure(&error, &device))?;
         let number = disk_number_of(&device.id)
@@ -1420,28 +1380,13 @@ fn broker_open(
     Ok(handed)
 }
 
-/// One disk taken from the host before the machine that will use it exists.
-struct Reserved {
-    id: String,
-    write: bool,
+/// What a reservation keeps on Windows: the open disk, and the volume locks
+/// that must live exactly as long as it.
+///
+/// Dropping it closes every handle, which is what hands the disk back.
+pub(super) struct Held {
     disk: OwnedHandle,
     dismounted: Vec<std::fs::File>,
-}
-
-/// Disks the launcher has already taken.
-///
-/// Consent is asked for where the disk is asked for -- the Mount button --
-/// rather than minutes later when a machine starts and nobody is expecting a
-/// dialog. What is kept here is the open disk itself, so by the time Run is
-/// pressed the host has already let go and nothing is asked a second time.
-/// Dropping an entry closes the handles, which is what hands the disk back.
-static RESERVED: std::sync::Mutex<Vec<Reserved>> = std::sync::Mutex::new(Vec::new());
-
-fn reserved() -> std::sync::MutexGuard<'static, Vec<Reserved>> {
-    // A panic elsewhere must not make the disks unreachable: what is behind
-    // this lock is a list of open handles, and losing it would strand them
-    // until the process ends.
-    RESERVED.lock().unwrap_or_else(|held| held.into_inner())
 }
 
 /// Take a disk from the host: directly if this process may, and otherwise by
@@ -1455,7 +1400,7 @@ fn reserved() -> std::sync::MutexGuard<'static, Vec<Reserved>> {
 /// medium, under a guest that cannot account for it changing. A write
 /// additionally *needs* this -- since Vista the filesystem owns the sectors of
 /// a mounted volume and refuses one.
-fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
+pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
     let mut taken = Vec::new();
     let mut ask = Vec::new();
     for (device, write) in wanted {
@@ -1464,12 +1409,7 @@ fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
                 let number = disk_number_of(&device.id)
                     .with_context(|| format!("{} is not a physical disk name", device.id))?;
                 let dismounted = take_volumes(number, &device.id)?;
-                taken.push(Reserved {
-                    id: device.id.clone(),
-                    write: *write,
-                    disk,
-                    dismounted,
-                });
+                taken.push((device.id.clone(), Held { disk, dismounted }));
             }
             // Gathered rather than asked for one at a time, so however many
             // disks need Administrator they cost one dialog between them.
@@ -1483,73 +1423,6 @@ fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<Reserved>> {
         taken.extend(open_through_broker(&ask)?);
     }
     Ok(taken)
-}
-
-/// Take disks now and hold them until the machine asks for them.
-///
-/// All of them together, because the consent they may need is a dialog
-/// somebody has to read, and one is enough for however many disks were ticked.
-pub fn reserve_devices(wanted: &[(HostDevice, bool)]) -> Result<()> {
-    // These and only these. Anything else still held was taken for a machine
-    // that is no longer being set up, and holding it means Windows cannot have
-    // it back and the next attempt to take it meets its own stale lock.
-    let keep: Vec<&str> = wanted
-        .iter()
-        .map(|(device, _)| device.id.as_str())
-        .collect();
-    let stale: Vec<String> = reserved()
-        .iter()
-        .filter(|held| !keep.contains(&held.id.as_str()))
-        .map(|held| held.id.clone())
-        .collect();
-    for id in stale {
-        release_device(&id);
-    }
-
-    let mut needed = Vec::new();
-    for (device, write) in wanted {
-        // Already held on the same terms is not a second ask: it is somebody
-        // pressing Mount again, and the disk is already where they want it.
-        if reserved()
-            .iter()
-            .any(|held| held.id == device.id && held.write == *write)
-        {
-            continue;
-        }
-        // Held on other terms has to be taken again, the access a handle
-        // carries having been settled when it was opened -- so that one goes
-        // back to the host first, or the volume it still locks is one the new
-        // open cannot have.
-        release_device(&device.id);
-        needed.push((device.clone(), *write));
-    }
-    if needed.is_empty() {
-        return Ok(());
-    }
-
-    let taken = take_disks(&needed)?;
-    let names: Vec<&str> = taken.iter().map(|held| held.id.as_str()).collect();
-    log::info!(
-        "blockdev: {} taken from the host, ready for the machine",
-        names.join(", ")
-    );
-    reserved().extend(taken);
-    Ok(())
-}
-
-/// Hand a disk taken early back to the host.
-pub fn release_device(id: &str) -> bool {
-    let mut held = reserved();
-    let before = held.len();
-    // Dropping the entry closes the disk and every volume handle with it,
-    // which is what lets Windows mount the disk again.
-    held.retain(|entry| entry.id != id);
-    let released = held.len() != before;
-    drop(held);
-    if released {
-        log::info!("blockdev: {id} released back to the host");
-    }
-    released
 }
 
 /// Copy an open handle within this process, so two owners can hold the one
@@ -1574,66 +1447,24 @@ fn duplicate_here(source: RawHandle) -> Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(copy as RawHandle) })
 }
 
-/// Lend a disk the launcher took to a machine that is starting.
+/// Give a held disk to a machine.
 ///
-/// The machine gets handles of its own and the reservation keeps its own, so
-/// the disk stays taken from the host across a machine being stopped and
-/// started again. That matters twice over: consent was given once, at the
-/// Mount button, and Run must not ask for it afresh every time; and a machine
-/// that stops does not silently hand the disk back to Windows behind a
-/// launcher still showing it as attached.
-///
-/// Releasing the disk closes this side of it. A machine still running holds
-/// its own copy until it stops, which is why a disk cannot be taken back
-/// from underneath one.
-fn lend_reserved(id: &str, write: bool) -> Option<(OwnedHandle, Vec<std::fs::File>)> {
-    let held = reserved();
-    let entry = held
-        .iter()
-        .find(|entry| entry.id == id && entry.write == write)?;
-    let disk = duplicate_here(entry.disk.as_raw_handle())
-        .map_err(|error| log::warn!("blockdev: {id} could not be lent to the machine: {error:#}"))
-        .ok()?;
-    let dismounted = entry
+/// The machine gets handles of its own -- the disk, and the volume locks
+/// that must outlive any mounting Windows might otherwise do -- so the disk
+/// stays taken from the host across the machine being stopped and started.
+pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<super::BlockDevice> {
+    let disk = duplicate_here(held.disk.as_raw_handle())?;
+    let dismounted = held
         .dismounted
         .iter()
         .map(|volume| duplicate_here(volume.as_raw_handle()).map(std::fs::File::from))
         .collect::<Result<Vec<_>>>()
-        .map_err(|error| log::warn!("blockdev: {id}: a volume could not be lent: {error:#}"))
-        .ok()?;
-    Some((disk, dismounted))
-}
+        .context("lending a dismounted volume to the machine")?;
 
-/// Take a disk from the host and open it for the emulated machine.
-pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevice> {
-    // A disk the launcher already took is used as it stands. The consent for
-    // it was given there, and asking again would raise a dialog for something
-    // this process is already holding.
-    let (handle, dismounted) = match lend_reserved(&device.id, write) {
-        Some(held) => {
-            log::info!("blockdev: {} was already taken from the host", device.id);
-            held
-        }
-        None => {
-            // Nothing had taken it yet -- a machine run straight from a
-            // configuration, with nobody having pressed Mount. Take it and
-            // keep it, so this is the only time it is asked for: a machine
-            // stopped and started again finds the disk already in hand.
-            let taken = take_disks(std::slice::from_ref(&(device.clone(), write)))?;
-            reserved().extend(taken);
-            lend_reserved(&device.id, write).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} was taken from the host but could not be used",
-                    device.id
-                )
-            })?
-        }
-    };
-
-    // Now that there is a handle opened for reading, the disk can be asked its
-    // length outright; the listing had to infer it from the geometry, and a
-    // disk that reads as longer than it is would fail at the very end.
-    let size_bytes = exact_capacity(&handle).unwrap_or(device.size_bytes);
+    // Now that there is a handle opened for reading, the disk can be asked
+    // its length outright; the listing had to infer it from the geometry, and
+    // a disk that reads as longer than it is would fail at the very end.
+    let size_bytes = exact_capacity(&disk).unwrap_or(device.size_bytes);
     if size_bytes != device.size_bytes {
         log::debug!(
             "blockdev: {} is {size_bytes} bytes, not the {} the listing reported",
@@ -1643,7 +1474,7 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
     }
 
     Ok(super::BlockDevice::new(
-        std::fs::File::from(handle),
+        std::fs::File::from(disk),
         device.id.clone(),
         device.block_size,
         size_bytes,

@@ -42,10 +42,13 @@
 //! between the two is the backend's job, so the emulated machine sees the
 //! 512-byte device it expects whatever the media underneath is.
 
-// A platform backend supplies exactly two things: `list_devices` and
-// `open_device`. Each host's lives in its own file; one that has not been
-// written yet lists nothing and says so when asked to open, so every caller
-// works everywhere and simply finds no disks to offer.
+// A platform backend supplies three things: `list_devices`, `take_disks`
+// (get the host to give the named disks up, asking for whatever privilege
+// that costs, and return something that holds them), and `lend` (turn one
+// held disk into a [`BlockDevice`] for a machine, leaving the hold in
+// place). Everything above that -- the safety rules, which disks are held
+// and on what terms, when to ask and when a held disk is simply lent again
+// -- is decided here, once, so a rule added here reaches every host.
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
 mod platform;
@@ -65,7 +68,9 @@ use std::path::PathBuf;
 /// that speak it; see the [`platform`] module docs for why it is a separate
 /// process and what it will refuse.
 #[cfg(any(windows, target_os = "linux"))]
-pub use platform::{serve_broker_request, BROKER_FLAG};
+pub use broker_protocol::BROKER_FLAG;
+#[cfg(any(windows, target_os = "linux"))]
+pub use platform::serve_broker_request;
 
 /// How safe a device is to hand to the emulated machine.
 ///
@@ -209,6 +214,9 @@ pub struct BlockDevice {
     /// Whether a refused write has already been reported. The guest will keep
     /// trying, and one explanation is worth more than thousands.
     refusal_reported: bool,
+    /// Whether the medium has said it cannot flush. Some USB bridges have no
+    /// cache-flush command; the fact is worth one line, not one per write.
+    flush_unsupported: bool,
     /// Volumes the host had mounted from this disk, locked and dismounted for
     /// as long as the machine has it.
     ///
@@ -256,6 +264,7 @@ impl BlockDevice {
             writable,
             block: vec![0; block_size as usize],
             refusal_reported: false,
+            flush_unsupported: false,
             #[cfg(windows)]
             dismounted: Vec::new(),
         }
@@ -364,15 +373,31 @@ impl BlockDevice {
     /// Push everything to the medium. A physical disk can be pulled out, so
     /// buffered writes are a hazard an image file does not have.
     ///
-    /// `File::flush` is a no-op -- there is no userspace buffer to empty --
-    /// so this syncs, which is what actually reaches the platter. Harmless
-    /// on an unbuffered character device, and the difference between a
-    /// written disk and a lost one on a buffered block device.
+    /// What that takes differs by host. On Linux and Windows the handle is a
+    /// buffered block device, and `sync_data` empties the kernel's cache and
+    /// asks the device to empty its own. macOS's raw character device has no
+    /// kernel cache to empty and answers `fsync` with `ENOTTY`; what it does
+    /// answer is the disk ioctl asking the device itself to flush, so that is
+    /// what is used there. A medium that says it cannot flush at all -- some
+    /// USB bridges have no such command -- is recorded and not asked again:
+    /// the guest flushes after every write command, and one line says what
+    /// thousands would.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        if !self.writable {
+        if !self.writable || self.flush_unsupported {
             return Ok(());
         }
-        self.file.sync_data()
+        match flush_medium(&self.file) {
+            Ok(()) => Ok(()),
+            Err(error) if flush_says_unsupported(&error) => {
+                self.flush_unsupported = true;
+                log::info!(
+                    "blockdev: {} cannot flush its cache ({error}); writes go straight through",
+                    self.id
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -386,6 +411,38 @@ impl std::fmt::Debug for BlockDevice {
             .field("writable", &self.writable)
             .finish()
     }
+}
+
+/// Ask the medium to make everything written to it durable.
+///
+/// macOS's raw character device has its own way of saying this (`fsync`
+/// there is `ENOTTY`); everywhere else `sync_data` is exactly it.
+#[cfg(target_os = "macos")]
+fn flush_medium(file: &std::fs::File) -> std::io::Result<()> {
+    platform::flush_medium(file)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn flush_medium(file: &std::fs::File) -> std::io::Result<()> {
+    file.sync_data()
+}
+
+/// Whether a flush failure means "this medium has no such command" rather
+/// than "the flush failed". The first is a property of the hardware, said
+/// once; the second is an event, reported every time.
+#[cfg(unix)]
+fn flush_says_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOTTY) | Some(libc::ENOTSUP)
+    )
+}
+
+/// `ERROR_INVALID_FUNCTION` and `ERROR_NOT_SUPPORTED`, which are how a driver
+/// without a flush path answers `FlushFileBuffers`.
+#[cfg(windows)]
+fn flush_says_unsupported(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(1) | Some(50))
 }
 
 #[cfg(unix)]
@@ -458,13 +515,118 @@ fn refuse_if_unusable(device: &HostDevice, write: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One disk taken from the host and not yet given back.
+///
+/// What "taken" physically is belongs to the backend -- a descriptor whose
+/// `O_EXCL` outlives any machine, a Windows handle whose volume locks must be
+/// held -- and lives in its [`platform::Held`]. What is uniform is the terms:
+/// which disk, and whether it was taken for writing, because a descriptor's
+/// access is settled at open and a change of terms means taking it again.
+struct Reservation {
+    id: String,
+    write: bool,
+    held: platform::Held,
+}
+
+/// Disks taken from the host, held for the whole emulator session.
+///
+/// Taking happens where somebody asked for the disk -- the launcher's Mount
+/// button, or the first machine built from a configuration -- and whatever
+/// permission it costs is asked for then, once. A machine is *lent* the disk:
+/// powering off drops the machine's copy but not this one, so powering back
+/// on finds the disk still in hand rather than raising a second prompt, and
+/// the host stays excluded for exactly as long as the launcher says the disk
+/// is attached.
+static RESERVED: std::sync::Mutex<Vec<Reservation>> = std::sync::Mutex::new(Vec::new());
+
+fn reserved() -> std::sync::MutexGuard<'static, Vec<Reservation>> {
+    // A panic elsewhere must not make the disks unreachable: what is behind
+    // this lock is a list of open handles, and losing it would strand them --
+    // and the exclusion they hold over the host -- until the process ends.
+    RESERVED.lock().unwrap_or_else(|held| held.into_inner())
+}
+
+/// Lend a reserved disk to a machine, if one is held on exactly these terms.
+fn lend_reserved(device: &HostDevice, write: bool) -> Option<BlockDevice> {
+    let held = reserved();
+    let entry = held
+        .iter()
+        .find(|entry| entry.id == device.id && entry.write == write)?;
+    platform::lend(device, write, &entry.held)
+        .map_err(|error| {
+            log::warn!(
+                "blockdev: {} could not be lent to the machine: {error:#}",
+                device.id
+            );
+        })
+        .ok()
+}
+
+/// Take disks and keep them, resolving each identifier first.
+fn take_and_reserve(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
+    let mut needed = Vec::new();
+    for (device, write) in wanted {
+        // Already held on the same terms is not a second ask: it is somebody
+        // pressing Mount again, and the disk is already where they want it.
+        if reserved()
+            .iter()
+            .any(|held| held.id == device.id && held.write == *write)
+        {
+            continue;
+        }
+        // Held on other terms has to be taken again, since the access a
+        // handle carries was settled when it was opened -- and the old hold
+        // goes back first, or the new open meets the exclusion the old one
+        // is still enforcing.
+        release_device(&device.id);
+        needed.push((device.clone(), *write));
+    }
+    if needed.is_empty() {
+        return Ok(());
+    }
+    let taken = platform::take_disks(&needed)?;
+    let mut store = Vec::new();
+    for (id, held) in taken {
+        let write = needed
+            .iter()
+            .find(|(device, _)| device.id == id)
+            .map(|(_, write)| *write)
+            .ok_or_else(|| anyhow::anyhow!("{id} was taken but never asked for"))?;
+        store.push(Reservation { id, write, held });
+    }
+    let names: Vec<&str> = store.iter().map(|entry| entry.id.as_str()).collect();
+    log::info!(
+        "blockdev: {} taken from the host, ready for the machine",
+        names.join(", ")
+    );
+    reserved().extend(store);
+    Ok(())
+}
+
 /// Open a device for the emulated machine.
 ///
 /// Refuses the host's own system disk outright, before any platform code
 /// runs: that check is not something a backend gets to have an opinion on.
+///
+/// A disk the launcher already took is lent as it stands -- the permission
+/// for it was given at the Mount button, and asking again would raise a
+/// dialog for something this process is already holding. One nothing took
+/// yet (a machine run straight from a configuration) is taken now and kept,
+/// so this is the only time it is asked for: the machine stopping drops its
+/// copy, not the hold, and starting again finds the disk still in hand.
 pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
     refuse_if_unusable(device, write)?;
-    platform::open_device(device, write)
+    if let Some(lent) = lend_reserved(device, write) {
+        log::info!("blockdev: {} was already taken from the host", device.id);
+        return Ok(lent);
+    }
+    take_and_reserve(std::slice::from_ref(&(device.clone(), write)))?;
+    lend_reserved(device, write).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} was taken from the host but could not be used",
+            device.id
+        )
+    })
 }
 
 /// Take disks from the host now, ahead of the machine that will use them.
@@ -473,10 +635,9 @@ pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevi
 /// the permission a real disk needs is best asked for there -- where somebody
 /// has just asked for them -- rather than minutes later, behind a machine
 /// starting up. They are taken together because that permission is a dialog
-/// somebody has to read, and one is enough for however many disks were ticked.
-///
-/// A host with nothing to ask for does nothing here and opens as usual when
-/// the machine starts, which is why this is allowed to be a no-op.
+/// somebody has to read, and one is enough for however many disks were
+/// ticked. This is also the whole list: anything held that is not on it was
+/// taken for a machine that is no longer being set up, and goes back.
 pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
     let mut wanted = Vec::new();
     for (id, write) in disks {
@@ -484,27 +645,132 @@ pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
         refuse_if_unusable(&device, *write)?;
         wanted.push((device, *write));
     }
-    #[cfg(any(windows, target_os = "linux"))]
-    return platform::reserve_devices(&wanted);
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        let _ = wanted;
-        Ok(())
+    let stale: Vec<String> = reserved()
+        .iter()
+        .filter(|held| !wanted.iter().any(|(device, _)| device.id == held.id))
+        .map(|held| held.id.clone())
+        .collect();
+    for id in stale {
+        release_device(&id);
     }
+    take_and_reserve(&wanted)
 }
 
 /// Give a disk taken early back to the host, and say whether one was held.
 ///
-/// Nothing held is not a failure: a host that never took the disk early has
-/// nothing to hand back, and neither has one where the machine has since taken
-/// it for itself.
+/// Nothing held is not a failure: a disk named in a configuration that was
+/// never mounted has nothing to hand back. Dropping the hold is what lets
+/// the host have the disk again -- though a machine still running keeps its
+/// own lent copy until it stops, and the host waits for that too.
 pub fn release_device(id: &str) -> bool {
-    #[cfg(any(windows, target_os = "linux"))]
-    return platform::release_device(id);
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        let _ = id;
-        false
+    let mut held = reserved();
+    let before = held.len();
+    held.retain(|entry| entry.id != id);
+    let released = held.len() != before;
+    drop(held);
+    if released {
+        log::info!("blockdev: {id} released back to the host");
+    }
+    released
+}
+
+/// The wire format the Windows and Linux privileged halves share.
+///
+/// Each of those hosts has no broker of its own that hands back an opened
+/// device, so Copperline is one for itself: the same binary run once with
+/// privilege, opening what it was asked to and handing the result back. How
+/// the handles travel is each host's affair; what is said is not, and lives
+/// here so the two halves cannot drift apart -- and so the tests of it run
+/// on every host, not only the one that uses it.
+#[cfg(any(windows, target_os = "linux"))]
+mod broker_protocol {
+    use anyhow::Result;
+
+    /// The flag that puts this program into its privileged half. Undocumented
+    /// in `--help` on purpose: it is one process talking to another, not an
+    /// interface, and its arguments only mean anything to the process that
+    /// wrote them.
+    pub const BROKER_FLAG: &str = "--host-disk-broker";
+
+    /// How one disk is named on the privileged half's command line.
+    ///
+    /// The identifier is a kernel device name (`sdb`, `PhysicalDrive1`),
+    /// which never contains `:` -- and the parse splits on the *last* one,
+    /// so even an unexpected identifier round-trips whole.
+    pub fn argument(id: &str, write: bool) -> String {
+        format!("{id}:{}", if write { "rw" } else { "ro" })
+    }
+
+    /// Read one back, refusing anything not in the shape written above.
+    pub fn parse_argument(argument: &str) -> Option<(String, bool)> {
+        let (id, mode) = argument.rsplit_once(':')?;
+        let write = match mode {
+            "rw" => true,
+            "ro" => false,
+            _ => return None,
+        };
+        (!id.is_empty()).then(|| (id.to_string(), write))
+    }
+
+    /// Read the privileged half's answer: `ok` and then one line per disk it
+    /// opened, or the one reason it did none of it. What a disk's line says
+    /// after its identifier belongs to the host's own half.
+    pub fn parse_answer(answer: &str) -> Result<Vec<String>> {
+        let mut lines = answer.lines();
+        match lines.next().map(str::trim) {
+            Some("ok") => {}
+            // A refusal it explained is passed on as it wrote it -- it knows
+            // why, and this side does not.
+            Some(line) => match line.split_once(' ') {
+                Some(("error", message)) => anyhow::bail!("{}", message.trim()),
+                _ => anyhow::bail!("the answer was in no shape this understands"),
+            },
+            None => anyhow::bail!("the answer was empty"),
+        }
+        let opened: Vec<String> = lines
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        if opened.is_empty() {
+            anyhow::bail!("it opened nothing");
+        }
+        Ok(opened)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Both halves of the protocol live in this one place, so agreeing
+        /// with itself here is agreeing across the privilege boundary -- on
+        /// every host, not only the two that speak it.
+        #[test]
+        fn the_halves_agree_on_how_a_disk_is_named() {
+            for (id, write) in [("sdb", true), ("PhysicalDrive12", false), ("mmcblk0", true)] {
+                assert_eq!(
+                    parse_argument(&argument(id, write)),
+                    Some((id.to_string(), write))
+                );
+            }
+            assert_eq!(parse_argument("sdb:rx"), None);
+            assert_eq!(parse_argument(":rw"), None);
+            assert_eq!(parse_argument("sdb"), None);
+        }
+
+        /// A refusal comes back with the privileged half's own words, and a
+        /// malformed answer is refused rather than half-believed.
+        #[test]
+        fn an_answer_is_believed_only_in_shape() {
+            assert_eq!(parse_answer("ok\nsdb\nsdc\n").unwrap(), ["sdb", "sdc"]);
+            let error = parse_answer("error sdb is the disk this computer is running from")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("running from"), "{error}");
+            assert!(parse_answer("").is_err());
+            assert!(parse_answer("ok\n").is_err());
+            assert!(parse_answer("gibberish").is_err());
+        }
     }
 }
 

@@ -108,6 +108,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::broker_protocol::{self, BROKER_FLAG};
 use super::{HostDevice, Safety};
 
 /// Where the kernel's own answers are read from.
@@ -621,42 +622,48 @@ fn explain(error: &std::io::Error, device: &HostDevice) -> anyhow::Error {
     }
 }
 
-/// Take a disk from the host and open it for the emulated machine.
-pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevice> {
-    // A disk the launcher already took is not asked for again: the consent was
-    // given once, at the button somebody pressed, and taking it a second time
-    // would meet the exclusive claim the first one is still holding.
-    let file = match lend_reserved(&device.id, write) {
-        Some(file) => {
-            log::info!("blockdev: {} was already taken from the host", device.id);
-            file
+/// What a reservation keeps on Linux: the open descriptor itself.
+///
+/// Its `O_EXCL` is the claim -- the kernel refuses a mount while it is held
+/// -- and it lives exactly as long as the open file description, so it needs
+/// nothing else to hold it and is dropped by the same close that hands the
+/// disk back.
+pub(super) type Held = std::fs::File;
+
+/// Take disks from the host, asking for privilege only where it is needed.
+///
+/// A user in `disk`, a site udev rule, or a run as root all get the direct
+/// open without a prompt; a desktop user does not, and the denials are
+/// gathered so however many disks need privilege they cost one prompt
+/// between them.
+pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
+    let kernel = Kernel::live();
+    let mut taken = Vec::new();
+    let mut ask = Vec::new();
+    for (device, write) in wanted {
+        unmount_volumes(&kernel, &device.id)?;
+        match direct_open(&device.path, *write) {
+            Ok(file) => taken.push((device.id.clone(), file)),
+            Err(error) if is_denial(&error) => ask.push((device.clone(), *write)),
+            Err(error) => return Err(explain(&error, device)),
         }
-        None => {
-            // Held on other terms has to be taken again, since the access a
-            // descriptor carries was settled when it was opened. That one goes
-            // back to the host first, or the exclusive claim it is still
-            // holding is one this open cannot get past -- and the error would
-            // read as the host refusing a disk Copperline itself has.
-            release_device(&device.id);
-            // Nothing had taken it yet -- a machine run straight from a
-            // configuration, with nobody having pressed Mount. Take it and
-            // keep it, so this is the only time it is asked for: powering the
-            // machine off drops its copy but not this one, and powering it on
-            // again finds the disk still in hand rather than raising a
-            // password prompt behind a machine that is starting.
-            reserved().push(Taken {
-                id: device.id.clone(),
-                write,
-                file: take_disk(device, write)?,
-            });
-            lend_reserved(&device.id, write).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} was taken from the host but could not be used",
-                    device.id
-                )
-            })?
-        }
-    };
+    }
+    if !ask.is_empty() {
+        taken.extend(open_through_broker(&ask)?);
+    }
+    Ok(taken)
+}
+
+/// Give a held disk to a machine.
+///
+/// The copy and the reservation share one open file description, so the
+/// `O_EXCL` claim lasts until the last of them closes -- and they share a
+/// file offset, which is why everything [`super::BlockDevice`] does is
+/// positioned rather than seeking.
+pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<super::BlockDevice> {
+    let file = held
+        .try_clone()
+        .context("lending the disk to the machine")?;
     Ok(super::BlockDevice::new(
         file,
         device.id.clone(),
@@ -666,55 +673,8 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
     ))
 }
 
-fn take_disk(device: &HostDevice, write: bool) -> Result<std::fs::File> {
-    unmount_volumes(&Kernel::live(), &device.id)?;
-    match direct_open(&device.path, write) {
-        Ok(file) => Ok(file),
-        // A user in `disk`, a site udev rule, or a run as root all get here
-        // without a prompt; a desktop user does not, and asking them is the
-        // only way through.
-        Err(error) if is_denial(&error) => {
-            let mut opened = open_through_broker(&[(device.clone(), write)])?;
-            opened
-                .pop()
-                .map(|taken| taken.file)
-                .ok_or_else(|| anyhow::anyhow!("{} was not opened", device.id))
-        }
-        Err(error) => Err(explain(&error, device)),
-    }
-}
-
 fn is_denial(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM))
-}
-
-/// The flag that puts this program into its privileged half. Undocumented in
-/// `--help` on purpose: it is one process talking to another, not an
-/// interface, and its arguments only mean anything to the process that wrote
-/// them.
-pub const BROKER_FLAG: &str = "--host-disk-broker";
-
-/// A disk the privileged half opened and handed back.
-struct Taken {
-    id: String,
-    write: bool,
-    file: std::fs::File,
-}
-
-/// How one disk is named on the privileged half's command line.
-fn broker_argument(id: &str, write: bool) -> String {
-    format!("{id}:{}", if write { "rw" } else { "ro" })
-}
-
-/// Read one back, refusing anything not in the shape written above.
-fn parse_broker_argument(argument: &str) -> Option<(String, bool)> {
-    let (id, mode) = argument.rsplit_once(':')?;
-    let write = match mode {
-        "rw" => true,
-        "ro" => false,
-        _ => return None,
-    };
-    (!id.is_empty()).then(|| (id.to_string(), write))
 }
 
 /// Where the two halves meet: a socket in a directory only this user can enter.
@@ -787,7 +747,7 @@ fn socket_path() -> Result<PathBuf> {
 /// and relaunching Copperline through `pkexec` would both throw away a machine
 /// that may already be running and leave the whole emulator running as root,
 /// which is a far larger thing to be than one open descriptor.
-fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Taken>> {
+fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
     use std::os::unix::net::UnixListener;
 
     let exe =
@@ -800,7 +760,7 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Taken>> {
 
     let asked: Vec<String> = wanted
         .iter()
-        .map(|(device, write)| broker_argument(&device.id, *write))
+        .map(|(device, write)| broker_protocol::argument(&device.id, *write))
         .collect();
     let names: Vec<&str> = wanted
         .iter()
@@ -838,7 +798,7 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Taken>> {
     // Mount pressed, and none of them are ever waited for anywhere else.
     let _ = child.wait();
     let (answer, files) = received?;
-    let opened = parse_answer(&answer)?;
+    let opened = broker_protocol::parse_answer(&answer)?;
     if opened.len() != files.len() {
         anyhow::bail!(
             "{} disks were named but {} descriptors came back",
@@ -860,23 +820,18 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<Taken>> {
     let kernel = Kernel::live();
     let mut taken = Vec::new();
     for (id, file) in opened.into_iter().zip(files) {
-        let (device, write) = wanted
-            .iter()
-            .find(|(device, _)| device.id == id)
-            .ok_or_else(|| anyhow::anyhow!("{id} was opened but never asked for"))?;
+        if !wanted.iter().any(|(device, _)| device.id == id) {
+            anyhow::bail!("{id} was opened but never asked for");
+        }
         // A descriptor arriving over a socket is a claim about what it is.
         // The kernel's own answer for what it points at is the only check
         // worth making, and it is cheap.
-        let expected = device_number(&kernel, &device.id)
+        let expected = device_number(&kernel, &id)
             .ok_or_else(|| anyhow::anyhow!("{id} has no device number"))?;
         if stat_rdev(&file)? != expected {
             anyhow::bail!("{id}: what came back is not that disk, so it will not be used");
         }
-        taken.push(Taken {
-            id,
-            write: *write,
-            file,
-        });
+        taken.push((id, file));
     }
     Ok(taken)
 }
@@ -1034,32 +989,6 @@ fn stat_rdev(file: &std::fs::File) -> Result<u64> {
     Ok(about.rdev())
 }
 
-/// Read what the privileged half said: `ok` and then a line per disk it
-/// opened, in the order its descriptors were sent, or the one reason it did
-/// none of it.
-fn parse_answer(answer: &str) -> Result<Vec<String>> {
-    let mut lines = answer.lines();
-    match lines.next().map(str::trim) {
-        Some("ok") => {}
-        // A refusal it explained is passed on as it wrote it -- it knows why,
-        // and this side does not.
-        Some(line) => match line.split_once(' ') {
-            Some(("error", message)) => anyhow::bail!("{}", message.trim()),
-            _ => anyhow::bail!("the answer was in no shape this understands"),
-        },
-        None => anyhow::bail!("the answer was empty"),
-    }
-    let opened: Vec<String> = lines
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
-    if opened.is_empty() {
-        anyhow::bail!("it opened nothing");
-    }
-    Ok(opened)
-}
-
 /// Open disks on behalf of a Copperline that was refused, and hand them back.
 ///
 /// This is the privileged half. It is reached by a command line, and a command
@@ -1085,7 +1014,7 @@ pub fn serve_broker_request(arguments: &[String]) -> Result<()> {
     let outcome = asked
         .iter()
         .map(|argument| {
-            parse_broker_argument(argument)
+            broker_protocol::parse_argument(argument)
                 .ok_or_else(|| anyhow::anyhow!("{argument} does not name a disk"))
         })
         .collect::<Result<Vec<_>>>()
@@ -1168,135 +1097,6 @@ fn send_disks(
         return Err(std::io::Error::last_os_error()).context("handing the disks back");
     }
     Ok(())
-}
-
-/// Disks the launcher has already taken.
-///
-/// The prompt is asked for where the disk is asked for -- the Mount button --
-/// rather than minutes later when a machine starts and nobody is expecting a
-/// dialog. Windows reached this conclusion first and Linux has the same
-/// reason: `pkexec` uses `org.freedesktop.policykit.exec`, which is
-/// `auth_admin` and not `auth_admin_keep`, so without this every disk costs
-/// its own password at the moment the machine is trying to boot.
-///
-/// It also settles a question the exclusive open would otherwise raise. What
-/// is kept here is the open disk itself, so by the time Run is pressed the
-/// host has already let go; a second open would meet the `O_EXCL` claim this
-/// one is holding and fail.
-static RESERVED: std::sync::Mutex<Vec<Taken>> = std::sync::Mutex::new(Vec::new());
-
-fn reserved() -> std::sync::MutexGuard<'static, Vec<Taken>> {
-    // A panic elsewhere must not make the disks unreachable: what is behind
-    // this lock is a list of open descriptors, and losing it would strand them
-    // until the process ends.
-    RESERVED.lock().unwrap_or_else(|held| held.into_inner())
-}
-
-/// Lend a disk the launcher took to a machine that is starting.
-///
-/// The copy and the reservation refer to the same open file description, so
-/// the `O_EXCL` claim behind it lasts until the last of them closes: stopping
-/// the machine does not silently hand the disk back to the host behind a
-/// launcher still showing it as attached. They share a file offset too, which
-/// is why everything [`super::BlockDevice`] does is positioned rather than
-/// seeking.
-fn lend_reserved(id: &str, write: bool) -> Option<std::fs::File> {
-    let held = reserved();
-    let taken = held
-        .iter()
-        .find(|taken| taken.id == id && taken.write == write)?;
-    taken
-        .file
-        .try_clone()
-        .map_err(|error| log::warn!("blockdev: {id} could not be lent to the machine: {error:#}"))
-        .ok()
-}
-
-/// Take disks now and hold them until the machine asks for them.
-///
-/// All of them together, because the permission they need is a dialog somebody
-/// has to read, and one is enough for however many disks were ticked.
-pub fn reserve_devices(wanted: &[(HostDevice, bool)]) -> Result<()> {
-    // These and only these. Anything else still held was taken for a machine
-    // that is no longer being set up, and holding it means the host cannot
-    // have it back and the next attempt to take it meets its own stale claim.
-    let keep: Vec<&str> = wanted
-        .iter()
-        .map(|(device, _)| device.id.as_str())
-        .collect();
-    let stale: Vec<String> = reserved()
-        .iter()
-        .filter(|held| !keep.contains(&held.id.as_str()))
-        .map(|held| held.id.clone())
-        .collect();
-    for id in stale {
-        release_device(&id);
-    }
-
-    let mut needed = Vec::new();
-    for (device, write) in wanted {
-        // Already held on the same terms is not a second ask: it is somebody
-        // pressing Mount again, and the disk is already where they want it.
-        if reserved()
-            .iter()
-            .any(|held| held.id == device.id && held.write == *write)
-        {
-            continue;
-        }
-        // Held on other terms has to be taken again, the access a descriptor
-        // carries having been settled when it was opened -- so that one goes
-        // back to the host first, or the exclusive claim it still holds is one
-        // the new open cannot get past.
-        release_device(&device.id);
-        needed.push((device.clone(), *write));
-    }
-    if needed.is_empty() {
-        return Ok(());
-    }
-
-    let kernel = Kernel::live();
-    let mut taken = Vec::new();
-    let mut ask = Vec::new();
-    for (device, write) in &needed {
-        unmount_volumes(&kernel, &device.id)?;
-        match direct_open(&device.path, *write) {
-            Ok(file) => taken.push(Taken {
-                id: device.id.clone(),
-                write: *write,
-                file,
-            }),
-            // Gathered rather than asked for one at a time, so however many
-            // disks need privilege they cost one prompt between them.
-            Err(error) if is_denial(&error) => ask.push((device.clone(), *write)),
-            Err(error) => return Err(explain(&error, device)),
-        }
-    }
-    if !ask.is_empty() {
-        taken.extend(open_through_broker(&ask)?);
-    }
-
-    let names: Vec<&str> = taken.iter().map(|held| held.id.as_str()).collect();
-    log::info!(
-        "blockdev: {} taken from the host, ready for the machine",
-        names.join(", ")
-    );
-    reserved().extend(taken);
-    Ok(())
-}
-
-/// Hand a disk taken early back to the host.
-pub fn release_device(id: &str) -> bool {
-    let mut held = reserved();
-    let before = held.len();
-    // Dropping the entry closes the descriptor, and with it the `O_EXCL` claim
-    // that is stopping the host from mounting the disk again.
-    held.retain(|taken| taken.id != id);
-    let released = held.len() != before;
-    drop(held);
-    if released {
-        log::info!("blockdev: {id} released back to the host");
-    }
-    released
 }
 
 #[cfg(test)]
@@ -1654,7 +1454,10 @@ mod tests {
         let borrowed: Vec<&std::fs::File> = files.iter().collect();
         send_disks(&theirs, "ok\nsdb\nsdc\n", &borrowed).expect("send");
         let (answer, mut received) = receive_disks(&ours, 2).expect("receive");
-        assert_eq!(parse_answer(&answer).expect("parse"), ["sdb", "sdc"]);
+        assert_eq!(
+            broker_protocol::parse_answer(&answer).expect("parse"),
+            ["sdb", "sdc"]
+        );
         assert_eq!(received.len(), 2, "one descriptor per disk named");
 
         // What came back must be the same open files, not merely two numbers.
@@ -1674,24 +1477,8 @@ mod tests {
         send_disks(&theirs, "error sdb is write protected", &[]).expect("send");
         let (answer, received) = receive_disks(&ours, 1).expect("receive");
         assert!(received.is_empty(), "a refusal carries no descriptor");
-        let error = parse_answer(&answer).expect_err("a refusal is not a success");
+        let error = broker_protocol::parse_answer(&answer).expect_err("a refusal is not a success");
         assert!(error.to_string().contains("write protected"), "{error}");
-    }
-
-    /// The command line the two halves speak is positional and unforgiving,
-    /// so what one writes the other must read back exactly.
-    #[test]
-    fn the_halves_agree_on_how_a_disk_is_named() {
-        for (id, write) in [("sdb", true), ("nvme0n1", false), ("mmcblk0", true)] {
-            let argument = broker_argument(id, write);
-            assert_eq!(
-                parse_broker_argument(&argument),
-                Some((id.to_string(), write))
-            );
-        }
-        for bad in ["sdb", "sdb:", ":rw", "sdb:rx", ""] {
-            assert_eq!(parse_broker_argument(bad), None, "{bad} names no disk");
-        }
     }
 
     /// A disk taken at the Mount button has to still be gettable when the
@@ -1714,7 +1501,8 @@ mod tests {
             .expect("enumerate")
             .unwrap_or_else(|| panic!("no device {id}"));
 
-        reserve_devices(&[(device.clone(), false)]).expect("the launcher takes the disk");
+        crate::blockdev::reserve_devices(&[(id.clone(), false)])
+            .expect("the launcher takes the disk");
         // Proof the reservation really is exclusive: opening the node again is
         // what the machine must not do, and this is what it would meet.
         assert_eq!(
@@ -1737,11 +1525,14 @@ mod tests {
             "a machine stopping must not release a disk the launcher still holds"
         );
 
-        assert!(release_device(&id), "the launcher hands it back");
+        assert!(
+            crate::blockdev::release_device(&id),
+            "the launcher hands it back"
+        );
         // And now, and only now, the host can have it.
         drop(direct_open(&device.path, false).expect("released back to the host"));
         assert!(
-            !release_device(&id),
+            !crate::blockdev::release_device(&id),
             "releasing twice is not a second release"
         );
     }

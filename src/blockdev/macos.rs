@@ -16,9 +16,36 @@
 //! are fetched by searching up the service plane rather than read directly.
 //!
 //! Mounted volumes come from `getfsstat`, matching each mount's device
-//! against the disk it belongs to. That is also how the running system's own
-//! disk is identified: whatever serves `/` is the one device that must never
-//! be offered.
+//! against the disk it belongs to. That is also where finding the running
+//! system's disk *starts* -- but on APFS it must not stop there. `/` is
+//! served by a snapshot of a volume inside a **synthesized container**
+//! (`disk3s1s1` on this machine), and the container is a whole `IOMedia` of
+//! its own with no medium under it: the bytes live on one or more *physical
+//! stores* (`disk0s2`), which are partitions of the real disk. Marking only
+//! `disk3` as the system's would leave `disk0` -- the actual hardware the
+//! running system is written on -- looking like anybody's to take. So every
+//! synthesized whole disk is traced to its stores by walking the media
+//! object's providers in the IO registry, and each disk underneath is the
+//! system's too. The answer is a set, because a Fusion Drive container spans
+//! two physical disks and both of them carry the running system.
+//!
+//! # What was measured, and where
+//!
+//! macOS 26 (Darwin 25.6.0), ordinary user, August 2026:
+//!
+//! - `/dev/rdisk4` (SD card, USB reader): `open(O_RDONLY)` and `O_RDWR` both
+//!   `EPERM`. The node is `root:operator 0640`, and the privacy gate
+//!   ("Removable Volumes") is separate from the POSIX one -- **root does not
+//!   pass it**; a root LaunchDaemon gets the same `EPERM`.
+//! - `/usr/libexec/authopen -stdoutpipe -o 2 /dev/rdisk4` succeeds after its
+//!   prompt, and the descriptor keeps working after the tool exits. Its `-w`
+//!   flag truncates what it opens and must never be used on a disk.
+//! - `fsync` on `/dev/rdiskN` is `ENOTTY` -- the raw node has no buffer
+//!   cache to empty. `DKIOCSYNCHRONIZECACHE` is the call that asks the disk
+//!   itself, and is answered.
+//! - `AuthorizationCreate` returns -60008 from
+//!   this unbundled binary, so the pre-authorized path is dormant and the
+//!   prompt is titled `authopen`; see [`authorize_open`].
 
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
@@ -80,6 +107,19 @@ unsafe extern "C" {
         allocator: CFAllocatorRef,
         options: u32,
     ) -> CFTypeRef;
+    fn IORegistryEntryCreateCFProperty(
+        entry: io_registry_entry_t,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        options: u32,
+    ) -> CFTypeRef;
+    fn IORegistryEntryGetParentIterator(
+        entry: io_registry_entry_t,
+        plane: *const libc::c_char,
+        iterator: *mut io_iterator_t,
+    ) -> kern_return_t;
+    // CoreFoundation's `Boolean` again, not Rust's bool.
+    fn IOObjectConformsTo(object: io_object_t, class_name: *const libc::c_char) -> u8;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -155,38 +195,54 @@ unsafe extern "C" {
     fn AuthorizationFree(authorization: AuthorizationRef, flags: u32) -> OSStatus;
 }
 
-/// Ask the user for the right to open one device, as Copperline.
+/// Ask the user for the right to open the named devices, as Copperline.
 ///
 /// `authopen` will present its own dialog if left to it, and that dialog
 /// names `authopen` -- which tells the user nothing about who is asking or
 /// why. Building the authorization here instead means the prompt is raised by
-/// this process, so it is attributed to Copperline, and `authopen` is handed
-/// the result rather than asking again.
+/// this process, so it is attributed to Copperline; every device goes in the
+/// one request, so one dialog covers however many disks were taken; and each
+/// `authopen` is handed the result rather than asking again.
 ///
-/// Returns the external form to write to its stdin, or `None` if the user
+/// Returns the external form to write to their stdin, or `None` if the user
 /// declined or the request failed -- in which case the caller lets `authopen`
-/// ask in its own name rather than failing outright.
+/// ask in its own name rather than refusing to open at all.
 ///
-/// Known limitation: `AuthorizationCreate` currently fails from this
-/// binary, so the fallback runs and the prompt is titled `authopen`. Likely
-/// wants a signed application bundle; revisit then.
-fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]> {
-    // The right is per-path, which is what keeps a granted open from being
-    // turned on any other device.
-    let right = CString::new(format!(
-        "sys.openfile.{}.{path}",
-        if write { "readwrite" } else { "readonly" }
-    ))
-    .ok()?;
-    let mut item = AuthorizationItem {
-        name: right.as_ptr(),
-        value_length: 0,
-        value: std::ptr::null_mut(),
-        flags: 0,
-    };
+/// Known limitation: `AuthorizationCreate` currently fails from this binary
+/// (-60008), so the fallback runs and the prompt is titled `authopen`, once
+/// per disk. Likely wants a signed application bundle; revisit then.
+fn authorize_open(
+    wanted: &[(HostDevice, bool)],
+) -> Option<[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]> {
+    // One right per path, read-or-write by what was asked: a granted open
+    // cannot be turned on any other device, nor writing on a disk granted
+    // for reading.
+    let rights: Vec<CString> = wanted
+        .iter()
+        .filter_map(|(device, write)| {
+            let path = device.path.to_str()?;
+            CString::new(format!(
+                "sys.openfile.{}.{path}",
+                if *write { "readwrite" } else { "readonly" }
+            ))
+            .ok()
+        })
+        .collect();
+    if rights.len() != wanted.len() {
+        return None;
+    }
+    let mut items: Vec<AuthorizationItem> = rights
+        .iter()
+        .map(|right| AuthorizationItem {
+            name: right.as_ptr(),
+            value_length: 0,
+            value: std::ptr::null_mut(),
+            flags: 0,
+        })
+        .collect();
     let rights = AuthorizationRights {
-        count: 1,
-        items: &mut item,
+        count: items.len() as u32,
+        items: items.as_mut_ptr(),
     };
 
     let mut auth: AuthorizationRef = std::ptr::null_mut();
@@ -207,12 +263,15 @@ fn authorize_open(path: &str, write: bool) -> Option<[u8; AUTHORIZATION_EXTERNAL
         )
     };
     if granted != 0 {
-        log::debug!("blockdev: {right:?} was not granted ({granted})");
+        log::debug!("blockdev: the open rights were not granted ({granted})");
         unsafe { AuthorizationFree(auth, 0) };
         return None;
     }
     let mut external = [0u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH];
     let made = unsafe { AuthorizationMakeExternalForm(auth, external.as_mut_ptr()) };
+    // The default free keeps the granted rights alive for the children that
+    // internalize the external form; only `kAuthorizationFlagDestroyRights`
+    // would revoke them.
     unsafe { AuthorizationFree(auth, 0) };
     if made != 0 {
         log::debug!("blockdev: AuthorizationMakeExternalForm failed ({made})");
@@ -314,6 +373,14 @@ fn inherited(entry: io_registry_entry_t, key: &str) -> Option<CfOwned> {
     (!value.is_null()).then_some(CfOwned(value))
 }
 
+/// One property of this entry alone, no ancestors searched.
+fn own_string(entry: io_registry_entry_t, key: &str) -> Option<String> {
+    let key = cfstr(key)?;
+    let value = unsafe { IORegistryEntryCreateCFProperty(entry, key.0, std::ptr::null(), 0) };
+    let value = (!value.is_null()).then_some(CfOwned(value))?;
+    read_string(value.0)
+}
+
 /// A property of the device dictionary that hangs off an ancestor, e.g. the
 /// product name inside "Device Characteristics".
 fn inherited_dict_string(entry: io_registry_entry_t, dict_key: &str, key: &str) -> Option<String> {
@@ -368,6 +435,62 @@ fn whole_disk_of(slice: &str) -> String {
     }
 }
 
+/// The whole disks whose media this object is ultimately stored on.
+///
+/// A synthesized whole disk -- an APFS container, a disk image -- has no
+/// medium of its own: its provider chain in the IO registry passes through
+/// the scheme that synthesizes it and lands on the real media underneath.
+/// Walking the parents and keeping every `IOMedia` BSD name found gives the
+/// physical stores; a Fusion Drive container has two. A disk that is its own
+/// medium finds nothing above it and comes back empty.
+fn backing_disks_of(media: io_registry_entry_t) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_parent_media(media, 0, &mut found);
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Walk up the provider chain collecting the media it passes through.
+///
+/// A provider chain is a handful of levels deep; a walk still going at eight
+/// is reading a registry that is changing underneath it.
+fn collect_parent_media(entry: io_registry_entry_t, depth: usize, found: &mut Vec<String>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(plane) = CString::new("IOService") else {
+        return;
+    };
+    let Ok(class) = CString::new("IOMedia") else {
+        return;
+    };
+    let mut iterator: io_iterator_t = 0;
+    if unsafe { IORegistryEntryGetParentIterator(entry, plane.as_ptr(), &mut iterator) }
+        != KERN_SUCCESS
+    {
+        return;
+    }
+    let iterator = IoOwned(iterator);
+    loop {
+        let parent = unsafe { IOIteratorNext(iterator.0) };
+        if parent == 0 {
+            break;
+        }
+        let parent = IoOwned(parent);
+        if unsafe { IOObjectConformsTo(parent.0, class.as_ptr()) } != 0 {
+            // The media above a synthesized disk is a partition of the real
+            // one, whose own chain ends at hardware -- so the name is the
+            // answer and there is nothing further up worth walking to.
+            if let Some(name) = own_string(parent.0, "BSD Name") {
+                found.push(whole_disk_of(&name));
+            }
+        } else {
+            collect_parent_media(parent.0, depth + 1, found);
+        }
+    }
+}
+
 /// Every whole device in the IO registry.
 pub fn list_devices() -> Result<Vec<HostDevice>> {
     let matching = unsafe {
@@ -386,33 +509,75 @@ pub fn list_devices() -> Result<Vec<HostDevice>> {
     let iterator = IoOwned(iterator);
 
     let mounts = mounted_volumes();
-    // Whatever serves the root filesystem is the running system's disk.
-    let system_disk = mounts
-        .iter()
-        .find(|(_, on)| on == "/")
-        .map(|(disk, _)| disk.clone());
-
     let mut devices = Vec::new();
+    // Which whole disks each whole disk is stored on, for the synthesized
+    // ones. Collected during the walk so the system set can be settled after
+    // it, when every disk has been seen.
+    let mut backing: Vec<(String, Vec<String>)> = Vec::new();
     loop {
         let media = unsafe { IOIteratorNext(iterator.0) };
         if media == 0 {
             break;
         }
         let media = IoOwned(media);
-        if let Some(device) = describe(media.0, &mounts, system_disk.as_deref()) {
+        if let Some(device) = describe(media.0, &mounts) {
+            backing.push((device.id.clone(), backing_disks_of(media.0)));
             devices.push(device);
+        }
+    }
+
+    for id in system_disk_ids(&mounts, &backing) {
+        if let Some(device) = devices.iter_mut().find(|device| device.id == id) {
+            device.safety = Safety::SystemDisk;
         }
     }
     Ok(devices)
 }
 
+/// Every disk the running system cannot spare, from the mount on `/` and the
+/// map of which whole disks each synthesized whole disk is stored on.
+///
+/// Closed in both directions, to a fixed point. Downward: the mount on `/`
+/// names a synthesized APFS container, and the machine actually runs from
+/// the container's physical stores -- a Fusion container has two, and both
+/// carry the system. Upward: any other synthesized disk stored on that same
+/// hardware (the Apple Silicon boot containers, say) is a window onto the
+/// system disk's own partitions, and writing to it raw is writing to them.
+fn system_disk_ids(mounts: &[(String, String)], backing: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut system: Vec<String> = mounts
+        .iter()
+        .filter(|(_, on)| on == "/")
+        .map(|(disk, _)| disk.clone())
+        .collect();
+    loop {
+        let mut more: Vec<String> = backing
+            .iter()
+            .filter(|(id, _)| system.contains(id))
+            .flat_map(|(_, stores)| stores.iter())
+            .filter(|store| !system.contains(store))
+            .cloned()
+            .collect();
+        more.extend(
+            backing
+                .iter()
+                .filter(|(id, stores)| {
+                    !system.contains(id) && stores.iter().any(|store| system.contains(store))
+                })
+                .map(|(id, _)| id.clone()),
+        );
+        more.sort();
+        more.dedup();
+        if more.is_empty() {
+            break;
+        }
+        system.extend(more);
+    }
+    system
+}
+
 /// Turn one `IOMedia` object into a device, or nothing if it is not a whole
 /// disk worth offering.
-fn describe(
-    media: io_registry_entry_t,
-    mounts: &[(String, String)],
-    system_disk: Option<&str>,
-) -> Option<HostDevice> {
+fn describe(media: io_registry_entry_t, mounts: &[(String, String)]) -> Option<HostDevice> {
     let mut raw: CFMutableDictionaryRef = std::ptr::null_mut();
     let rc = unsafe { IORegistryEntryCreateCFProperties(media, &mut raw, std::ptr::null(), 0) };
     if rc != KERN_SUCCESS || raw.is_null() {
@@ -448,9 +613,9 @@ fn describe(
         .map(|(_, on)| on.clone())
         .collect();
 
-    let safety = if system_disk == Some(id.as_str()) {
-        Safety::SystemDisk
-    } else if internal && !removable && !ejectable {
+    // Which disks are the running system's is settled by the caller, which
+    // can see every disk at once; here a disk is only internal or offerable.
+    let safety = if internal && !removable && !ejectable {
         Safety::Internal
     } else {
         Safety::Offerable
@@ -509,7 +674,16 @@ pub fn unmount_whole_disk(id: &str) -> Result<()> {
     anyhow::bail!("{id} could not be unmounted: {}", combined.trim());
 }
 
-/// Open a device, asking the system for permission only if it has to.
+/// What a reservation keeps on macOS: the open descriptor itself.
+///
+/// `authopen` hands back a descriptor with no lasting claim of its own on
+/// the media, so the descriptor is the whole of what there is to hold; its
+/// `O_EXCL` (on writable opens) is what keeps the host from mounting a
+/// volume underneath the machine, and it lasts until the last copy closes.
+pub(super) type Held = std::fs::File;
+
+/// Take disks from the host, asking the system for permission only where it
+/// has to.
 ///
 /// Two things stand between a process and `/dev/rdiskN`, and they are
 /// independent. The node is `root:operator 0640`, and macOS additionally
@@ -526,40 +700,72 @@ pub fn unmount_whole_disk(id: &str) -> Result<()> {
 /// descriptor back, then exits; the descriptor keeps working afterwards,
 /// because permission is decided once, at open, and travels with it.
 ///
-/// A direct open is tried first: media that already belongs to the user (a
-/// card reader on some setups, an attached image) needs no prompt at all, and
-/// asking when nothing is in the way would be rude.
-pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevice> {
-    let path = device.path.to_str().context("device path is not UTF-8")?;
-    // O_EXCL on a device node claims the media, which stops the system
-    // mounting a volume underneath the emulator mid-session. Without it the
-    // claim is advisory only.
-    let flags = if write {
+/// A direct open is tried first: media that already belongs to the user (an
+/// attached disk image, say) needs no prompt at all, and asking when nothing
+/// is in the way would be rude. The authorization for everything that was
+/// refused is asked for in one request, so however many disks need it they
+/// cost one dialog between them -- though while [`authorize_open`] is
+/// dormant (see its docs), `authopen` asks per disk itself.
+pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
+    let mut taken = Vec::new();
+    let mut ask = Vec::new();
+    for (device, write) in wanted {
+        // The host must let go before the machine can take hold: a mounted
+        // volume keeps the kernel's claim on the media and the open would
+        // fail with EBUSY.
+        if !device.mounted.is_empty() {
+            unmount_whole_disk(&device.id)?;
+        }
+        let path = device.path.to_str().context("device path is not UTF-8")?;
+        match direct_open(path, open_flags(*write)) {
+            Ok(file) => taken.push((device.id.clone(), file)),
+            Err(error) => {
+                let denied = matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES));
+                if !denied {
+                    return Err(error).with_context(|| format!("opening {path}"));
+                }
+                ask.push((device.clone(), *write));
+            }
+        }
+    }
+    if !ask.is_empty() {
+        let names: Vec<&str> = ask.iter().map(|(device, _)| device.id.as_str()).collect();
+        log::info!(
+            "blockdev: {} needs permission; asking through authopen",
+            names.join(", ")
+        );
+        let authorized = authorize_open(&ask);
+        for (device, write) in &ask {
+            let path = device.path.to_str().context("device path is not UTF-8")?;
+            let file = authopen(path, open_flags(*write), authorized.as_ref())
+                .with_context(|| format!("opening {path} with authorization"))?;
+            taken.push((device.id.clone(), file));
+        }
+    }
+    Ok(taken)
+}
+
+/// `O_EXCL` on a device node claims the media, which stops the system
+/// mounting a volume underneath the emulator mid-session. Without it the
+/// claim is advisory only.
+fn open_flags(write: bool) -> i32 {
+    if write {
         libc::O_RDWR | libc::O_EXCL
     } else {
         libc::O_RDONLY
-    };
-
-    // The host must let go before the machine can take hold: a mounted volume
-    // keeps the kernel's claim on the media and the open below would fail.
-    if !device.mounted.is_empty() {
-        unmount_whole_disk(&device.id)?;
     }
-    let file = match direct_open(path, flags) {
-        Ok(file) => file,
-        Err(error) => {
-            let denied = matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES));
-            if !denied {
-                return Err(error).with_context(|| format!("opening {path}"));
-            }
-            log::info!(
-                "blockdev: {} needs permission; asking through authopen",
-                device.id
-            );
-            authopen(path, flags).with_context(|| format!("opening {path} with authorization"))?
-        }
-    };
+}
 
+/// Give a held disk to a machine.
+///
+/// The copy and the reservation share one open file description, so the
+/// exclusive claim lasts until the last of them closes -- and they share a
+/// file offset, which is why everything [`super::BlockDevice`] does is
+/// positioned rather than seeking.
+pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<super::BlockDevice> {
+    let file = held
+        .try_clone()
+        .context("lending the disk to the machine")?;
     Ok(super::BlockDevice::new(
         file,
         device.id.clone(),
@@ -567,6 +773,21 @@ pub fn open_device(device: &HostDevice, write: bool) -> Result<super::BlockDevic
         device.size_bytes,
         write,
     ))
+}
+
+/// Ask the disk itself to make everything written durable.
+///
+/// The raw character device has no buffer cache, so `fsync` on it is
+/// `ENOTTY`; the disk ioctl is the call that reaches the device's own cache.
+pub(super) fn flush_medium(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    /// `DKIOCSYNCHRONIZECACHE`: `_IO('d', 22)`.
+    const DKIOCSYNCHRONIZECACHE: libc::c_ulong = 0x2000_6416;
+    if unsafe { libc::ioctl(file.as_raw_fd(), DKIOCSYNCHRONIZECACHE) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn direct_open(path: &str, flags: i32) -> std::io::Result<std::fs::File> {
@@ -583,7 +804,11 @@ fn direct_open(path: &str, flags: i32) -> std::io::Result<std::fs::File> {
 ///
 /// The descriptor arrives as ancillary data on a socket standing in for the
 /// tool's standard output, which is what its `-stdoutpipe` mode expects.
-fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
+fn authopen(
+    path: &str,
+    flags: i32,
+    authorized: Option<&[u8; AUTHORIZATION_EXTERNAL_FORM_LENGTH]>,
+) -> Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     // Deliberately `-o <flags>` and never `-w`: the `-w` mode truncates the
@@ -595,18 +820,9 @@ fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
     let ours = unsafe { OwnedFd::from_raw_fd(pair[0]) };
     let theirs = unsafe { OwnedFd::from_raw_fd(pair[1]) };
 
-    // Ask for the right ourselves so the prompt is raised by, and named
-    // after, Copperline. If that does not happen -- the user declines, or the
-    // request fails -- fall back to letting the tool ask in its own name
-    // rather than refusing to open at all.
-    let external = authorize_open(path, flags != libc::O_RDONLY);
-    log::debug!(
-        "blockdev: authorization obtained here: {}",
-        external.is_some()
-    );
     let mut command = std::process::Command::new("/usr/libexec/authopen");
     command.arg("-stdoutpipe");
-    if external.is_some() {
+    if authorized.is_some() {
         command.arg("-extauth");
     }
     command
@@ -614,16 +830,16 @@ fn authopen(path: &str, flags: i32) -> Result<std::fs::File> {
         .arg(flags.to_string())
         .arg(path)
         .stdout(std::process::Stdio::from(theirs));
-    if external.is_some() {
+    if authorized.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
     let mut child = command.spawn().context("running /usr/libexec/authopen")?;
     // The authorization is read before anything else on stdin.
-    if let Some(form) = external {
+    if let Some(form) = authorized {
         use std::io::Write;
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
-                .write_all(&form)
+                .write_all(form)
                 .context("handing over the authorization")?;
             stdin.flush().ok();
         }
@@ -720,25 +936,74 @@ mod tests {
         assert_eq!(whole_disk_of("disk12s1"), "disk12");
     }
 
+    /// The system set is closed in both directions: a synthesized root is
+    /// traced down to the hardware it is stored on, and any other
+    /// synthesized disk on that hardware is caught coming back up.
+    #[test]
+    fn the_system_is_every_disk_its_root_touches() {
+        let mounts = vec![("disk3".to_string(), "/".to_string())];
+        // disk3 (the root container) and disk1 (a boot container) are both
+        // stored on disk0; disk6 is a container on a plugged-in card, disk5.
+        let backing = vec![
+            ("disk3".to_string(), vec!["disk0".to_string()]),
+            ("disk1".to_string(), vec!["disk0".to_string()]),
+            ("disk0".to_string(), Vec::new()),
+            ("disk6".to_string(), vec!["disk5".to_string()]),
+            ("disk5".to_string(), Vec::new()),
+        ];
+        let mut system = system_disk_ids(&mounts, &backing);
+        system.sort();
+        assert_eq!(system, ["disk0", "disk1", "disk3"]);
+
+        // A Fusion root spans two stores, and both carry the system.
+        let fusion = vec![
+            (
+                "disk3".to_string(),
+                vec!["disk0".to_string(), "disk1".to_string()],
+            ),
+            ("disk0".to_string(), Vec::new()),
+            ("disk1".to_string(), Vec::new()),
+        ];
+        let mut system = system_disk_ids(&mounts, &fusion);
+        system.sort();
+        assert_eq!(system, ["disk0", "disk1", "disk3"]);
+    }
+
     /// Enumeration must work with no privileges and no hardware attached:
     /// it is reached from config validation and from the launcher on
     /// machines that have never seen a real Amiga disk.
     #[test]
     fn enumeration_is_safe_with_nothing_attached() {
         let devices = list_devices().expect("IOKit enumeration works unprivileged");
-        // Every host has at least the disk it booted from, and exactly one of
-        // them is that disk.
+        // The disk serving `/` must be marked, and on APFS so must the
+        // physical stores its container is written on -- which is why there
+        // are usually at least two and never a fixed count: `/` names the
+        // synthesized container, and the machine actually runs from the
+        // hardware underneath it.
+        let root = mounted_volumes()
+            .into_iter()
+            .find(|(_, on)| on == "/")
+            .map(|(disk, _)| disk)
+            .expect("something serves /");
+        let system: Vec<&str> = devices
+            .iter()
+            .filter(|d| d.safety == Safety::SystemDisk)
+            .map(|d| d.id.as_str())
+            .collect();
         assert!(
-            devices.iter().any(|d| d.safety == Safety::SystemDisk),
-            "the running system's disk must be identified: {devices:#?}"
+            system.contains(&root.as_str()),
+            "{root} serves / and must be marked: {devices:#?}"
         );
+        // A synthesized root without its physical store marked is exactly the
+        // hole this enumeration exists to close: the container itself has no
+        // medium, so a machine whose only SystemDisk is synthesized has left
+        // the real one open to being taken.
+        let physical_system = devices
+            .iter()
+            .any(|d| d.safety == Safety::SystemDisk && d.model.is_some());
         assert!(
-            devices
-                .iter()
-                .filter(|d| d.safety == Safety::SystemDisk)
-                .count()
-                == 1,
-            "exactly one device serves the root filesystem"
+            physical_system,
+            "no physical disk is marked as the system's: {devices:#?}"
         );
         for device in &devices {
             assert!(!device.id.is_empty());
