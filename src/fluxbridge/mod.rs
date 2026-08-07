@@ -42,9 +42,10 @@
 //! # Where it comes from
 //!
 //! [FluxBridge](https://github.com/CopperlineHQ/FluxBridge) is a pure-Rust
-//! library, pinned by revision in `Cargo.toml`. There is no C or C++ in the
-//! build, nothing vendored, and nothing for a user to install: a build that
-//! says it supports a physical drive can drive one.
+//! library tracked from `main` in `Cargo.toml` and pinned to an exact revision
+//! by `Cargo.lock`. There is no C or C++ in the build, nothing vendored, and
+//! nothing for a user to install: a build that says it supports a physical
+//! drive can drive one.
 //!
 //! FluxBridge grew from a Rust port of the runtime parts of Rob Smith's
 //! [FloppyDriveBridge](https://github.com/RobSmithDev/FloppyDriveBridge), and
@@ -502,7 +503,7 @@ impl Bridge {
     /// Returns whether the write was accepted, not whether the platter took it.
     /// FluxBridge lays the cells down on its own thread as the disk turns,
     /// exactly as a real drive does, and reports the outcome afterwards through
-    /// [`Bridge::take_write_failure`] -- because waiting here would stop the
+    /// [`Bridge::poll_write_outcomes`] -- because waiting here would stop the
     /// emulated machine for as long as the write takes, which is the one thing
     /// a real drive never does to a real Amiga.
     ///

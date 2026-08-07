@@ -109,6 +109,14 @@ pub trait SerialSink: Send {
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
 
+    /// Discard host-side state tied to an emulated timeline that has just
+    /// been abandoned by save-state load or rewind.
+    ///
+    /// Ordinary byte sinks have nothing to do. Stateful devices that cannot
+    /// be serialized must restart rather than silently continuing from the
+    /// future that was just left behind.
+    fn reset_after_timeline_jump(&mut self) {}
+
     /// The MIDI sink, when this is one, for runtime device switching. `None`
     /// for every other sink.
     #[cfg(feature = "midi")]

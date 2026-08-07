@@ -478,14 +478,14 @@ impl App {
                     }
                     match crate::debugger::WatchSource::parse(token) {
                         Some(_) if filter.is_some() => {
-                            return ConsoleOutcome::error("watch class given more than once")
+                            return ConsoleOutcome::error("watch class given more than once");
                         }
                         Some(source) => filter = Some(source),
                         None => {
                             return ConsoleOutcome::error(
                                 "watch class is CPU, BLITTER, DISK, COPPER, or a DMA \
                                  channel (BPL1..BPL8, SPR0..SPR7, AUD0..AUD3)",
-                            )
+                            );
                         }
                     }
                 }

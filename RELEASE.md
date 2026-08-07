@@ -11,7 +11,7 @@ crates.io library, so the root package remains marked `publish = false`.
 
    ```sh
    git status --short
-   git ls-files | rg -n '\.(rom|ROM|adf|ADF|adz|ADZ|dms|DMS|hdf|HDF|scp|SCP|cue|CUE|bin|BIN|iso|ISO|u12|U12|u13|U13|png|jpg|jpeg|gif|pdf|zip|7z|lha|lzx)$'
+   git ls-files | rg -n '\.(rom|ROM|adf|ADF|adz|ADZ|dms|DMS|hdf|HDF|scp|SCP|cue|CUE|bin|BIN|iso|ISO|u12|U12|u13|U13|wasm|WASM|png|jpg|jpeg|gif|pdf|zip|7z|lha|lzx)$'
    ```
 
    Expected tracked binary files are:
@@ -22,10 +22,18 @@ crates.io library, so the root package remains marked `publish = false`.
      (APL-licensed; see `assets/aros/README.md`)
    - `assets/services/services_rom.bin`, the guest-side host-filesystem
      handler built from `guest/services/`
+   - `assets/a4091/a4091_cdfs.rom`, the upstream A4091 v42.39 autoboot ROM
+     (mixed redistribution notices and an exact component inventory are in
+     `assets/a4091/THIRD_PARTY_NOTICES.txt`)
+   - `assets/hostsocket/hostsocket_rom.bin` and
+     `assets/hostsocket/hostsocket_plugin.wasm`, the bundled HostSocket board
+     artifacts built from `guest/hostsocket/` and `crates/hostsocket-plugin/`
    - `docs/images/*.png`; review provenance before release when these change
-   - `timing-test/*.bin` probe programs (`boot.bin`, `test.bin`, the
-     `ddfprobe-*`/`bltprobe-*`/`audprobe-*`/`clxprobe`/`regprobe-*`/
-     `sprprobe-*` bootblocks), each built from its adjacent `.asm`
+   - `timing-test/*.bin` probe programs: `boot.bin`, `test.bin`,
+     `audprobe-*`, `bfprobe`, `bltprobe-*`, `bplprobe-*`, `clxprobe`,
+     `dblpal-*`, `ddfprobe-*`, `fwdprobe`, `hamprobe-*`, `probesrv`,
+     `rdprobe`, `regprobe-*`, and `sprprobe-*`; each is built from its
+     adjacent `.asm`
    - `timing-test/golden/*.png`, the blessed golden renders for
      `tests/probe_golden.rs`
 3. Confirm local assets are still ignored:
@@ -36,15 +44,17 @@ crates.io library, so the root package remains marked `publish = false`.
 
 ## Version bump
 
-`crates/copperline-web` and `crates/cputest-runner` are separate workspaces
-with their own committed `Cargo.lock` files, so a root build never refreshes
-them. The web crate pins the root `copperline` version by path, while the
-cputest runner independently pins the published `m68k` dependency. If a
-manifest changes without regenerating its matching nested lock, every
-`cargo build --locked` in that crate fails at the release tag, and tags are
-immutable so the breakage cannot be fixed after the fact (issue #219: the
-`v0.12.0` tag shipped `crates/copperline-web/Cargo.lock` still pinning
-`copperline 0.11.0`).
+`crates/copperline-web`, `crates/cputest-runner`, and
+`crates/hostsocket-plugin` are separate workspaces with their own committed
+`Cargo.lock` files, so a root build never refreshes them. The web crate pins
+the root `copperline` version by path, the cputest runner independently pins
+the published `m68k` dependency, and the HostSocket workspace pins the
+dependency graph used to build the committed
+`assets/hostsocket/hostsocket_plugin.wasm`. If a manifest changes without
+regenerating its matching nested lock, every `cargo build --locked` in that
+crate fails at the release tag, and tags are immutable so the breakage cannot
+be fixed after the fact (issue #219: the `v0.12.0` tag shipped
+`crates/copperline-web/Cargo.lock` still pinning `copperline 0.11.0`).
 
 In the same commit as any version bump, resync the affected nested locks
 and commit them:
@@ -52,6 +62,7 @@ and commit them:
 ```sh
 (cd crates/copperline-web && cargo update -p copperline) # root version bump
 (cd crates/cputest-runner && cargo update -p m68k)       # m68k requirement change
+(cd crates/hostsocket-plugin && cargo update)            # its manifest/dependencies change
 ```
 
 The `Lockfile sync` workflow (`.github/workflows/locks.yml`) runs these
@@ -78,6 +89,7 @@ missed one; see "Version bump" above):
 ```sh
 (cd crates/copperline-web && cargo tree --locked > /dev/null)
 (cd crates/cputest-runner && cargo tree --locked > /dev/null)
+(cd crates/hostsocket-plugin && cargo tree --locked > /dev/null)
 ```
 
 Build the documentation:

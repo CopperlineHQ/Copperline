@@ -3955,7 +3955,12 @@ impl Bus {
             };
             let opened = match slot {
                 Some(slot) if self.gayle.is_some() || self.ide_a4000.is_some() => {
-                    match crate::ata::IdeDrive::open_host_disk(&disk.device, disk.writable) {
+                    match crate::ata::IdeDrive::open_host_disk(
+                        &disk.device,
+                        disk.fingerprint.as_deref(),
+                        disk.identity_confirmed,
+                        disk.writable,
+                    ) {
                         Ok(drive) => {
                             if let Some(gayle) = self.gayle.as_mut() {
                                 gayle.attach_drive(slot, drive);
@@ -3993,7 +3998,12 @@ impl Bus {
                     if self.sdmac.is_none() && board.is_none() {
                         continue;
                     }
-                    match crate::scsi::ScsiDisk::open_host_disk(&disk.device, disk.writable) {
+                    match crate::scsi::ScsiDisk::open_host_disk(
+                        &disk.device,
+                        disk.fingerprint.as_deref(),
+                        disk.identity_confirmed,
+                        disk.writable,
+                    ) {
                         Ok(drive) => {
                             if let Some(sdmac) = self.sdmac.as_mut() {
                                 sdmac.attach_drive(unit, drive);
@@ -4183,7 +4193,13 @@ impl Bus {
                 board.reattach_backend()?;
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.materialize_saved_host_disks()?;
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
+        // A host sink is not serialized. Give a stateful one one explicit
+        // timeline-jump boundary after it moves, so it cannot retain data
+        // from the abandoned future.
+        self.paula.serial.reset_after_timeline_jump();
         std::mem::swap(
             &mut self.paula.serial_observer,
             &mut live.paula.serial_observer,
@@ -4194,6 +4210,73 @@ impl Bus {
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
+        Ok(())
+    }
+
+    /// Acquire physical disks named by a fully decoded state. Deserialization
+    /// itself only creates placeholders; doing the fallible host work here
+    /// prevents malformed trailing state from unmounting media. The reservation
+    /// transaction and explicit drive removal make a multi-disk failure atomic.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn materialize_saved_host_disks(&mut self) -> anyhow::Result<()> {
+        let mut pending = Vec::new();
+        if let Some(gayle) = &self.gayle {
+            gayle.pending_host_disks(&mut pending);
+        }
+        if let Some(ide) = &self.ide_a4000 {
+            ide.pending_host_disks(&mut pending);
+        }
+        if let Some(sdmac) = &self.sdmac {
+            sdmac.wd.pending_host_disks(&mut pending);
+        }
+        for device in &self.devices {
+            match device {
+                crate::zorro_device::BoardDevice::A2091(board) => {
+                    board.wd.pending_host_disks(&mut pending);
+                }
+                crate::zorro_device::BoardDevice::A4091(board) => {
+                    board.pending_host_disks(&mut pending);
+                }
+                _ => {}
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut reservations = crate::blockdev::ReservationTransaction::begin(&pending)?;
+        let result = (|| {
+            if let Some(gayle) = &mut self.gayle {
+                gayle.materialize_host_disks()?;
+            }
+            if let Some(ide) = &mut self.ide_a4000 {
+                ide.materialize_host_disks()?;
+            }
+            if let Some(sdmac) = &mut self.sdmac {
+                sdmac.wd.materialize_host_disks()?;
+            }
+            for device in &mut self.devices {
+                match device {
+                    crate::zorro_device::BoardDevice::A2091(board) => {
+                        board.wd.materialize_host_disks()?;
+                    }
+                    crate::zorro_device::BoardDevice::A4091(board) => {
+                        board.materialize_host_disks()?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // Close every lent handle before dropping its reservation, so a
+            // backend can remount volumes immediately rather than racing the
+            // still-live candidate bus.
+            self.release_host_disks();
+            reservations.rollback();
+            return Err(error);
+        }
+        reservations.commit();
         Ok(())
     }
 

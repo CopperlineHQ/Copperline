@@ -437,6 +437,17 @@ fn model_of(kernel: &Kernel, name: &str) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
+/// The most stable identity sysfs exposes for the medium. Different transports
+/// publish it in different places; prefer the SCSI/NVMe WWID and fall back to
+/// the device serial used by simpler USB bridges.
+fn serial_of(kernel: &Kernel, name: &str) -> Option<String> {
+    ["device/wwid", "wwid", "device/serial"]
+        .into_iter()
+        .find_map(|attribute| kernel.attribute(name, attribute))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Every whole physical disk the host can see.
 pub fn list_devices() -> Result<Vec<HostDevice>> {
     enumerate(&Kernel::live())
@@ -491,6 +502,7 @@ fn enumerate(kernel: &Kernel) -> Result<Vec<HostDevice>> {
         devices.push(HostDevice {
             path: PathBuf::from("/dev").join(&id),
             model: model_of(kernel, &id),
+            serial: serial_of(kernel, &id),
             size_bytes,
             block_size: kernel
                 .number(&id, "queue/logical_block_size")
@@ -531,7 +543,7 @@ fn device_number(kernel: &Kernel, id: &str) -> Option<libc::dev_t> {
 /// machinery the file manager's eject button uses: unmounting the user's own
 /// removable disk is `allow_active: yes` in the shipped policy and so costs no
 /// prompt at all, and where a prompt is needed it is the one they already know.
-fn unmount_volumes(kernel: &Kernel, id: &str) -> Result<()> {
+fn unmount_volumes(kernel: &Kernel, id: &str) -> Result<Vec<String>> {
     // One entry per node, not per mount: a filesystem can be mounted at
     // several points at once -- btrfs subvolumes and bind mounts both do it --
     // and unmounting the node once takes all of them.
@@ -541,8 +553,9 @@ fn unmount_volumes(kernel: &Kernel, id: &str) -> Result<()> {
         .filter_map(|mount| mount.source)
         .collect();
     if nodes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let mut unmounted = Vec::new();
     for node in &nodes {
         let node = format!("/dev/{node}");
         let output = std::process::Command::new("udisksctl")
@@ -562,7 +575,7 @@ fn unmount_volumes(kernel: &Kernel, id: &str) -> Result<()> {
                     "blockdev: {id} is mounted and udisksctl could not be run ({error}); \
                      unmount it by hand if taking the disk fails"
                 );
-                return Ok(());
+                return Ok(unmounted);
             }
         };
         let said = format!(
@@ -573,12 +586,39 @@ fn unmount_volumes(kernel: &Kernel, id: &str) -> Result<()> {
         // Already unmounted is the state this was asked to reach, however it
         // got there -- another process may have done it a moment ago.
         if output.status.success() || said.contains("NotMounted") {
+            if output.status.success() {
+                unmounted.push(node);
+            }
             continue;
         }
+        remount_volumes(&unmounted);
         anyhow::bail!("{node} could not be unmounted: {}", said.trim());
     }
     log::info!("blockdev: {id} is no longer mounted by the host");
-    Ok(())
+    Ok(unmounted)
+}
+
+fn remount_volumes(nodes: &[String]) {
+    for node in nodes {
+        let output = std::process::Command::new("udisksctl")
+            .arg("mount")
+            .arg("-b")
+            .arg(node)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                log::info!("blockdev: {node} mounted again for the host");
+            }
+            Ok(output) => log::warn!(
+                "blockdev: {node} could not be mounted again: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => {
+                log::warn!("blockdev: could not run udisksctl to remount {node}: {error}")
+            }
+        }
+    }
 }
 
 /// Open the device node directly, exclusively.
@@ -639,7 +679,19 @@ pub(super) fn taking_needs_privilege() -> bool {
 /// -- and it lives exactly as long as the open file description, so it needs
 /// nothing else to hold it and is dropped by the same close that hands the
 /// disk back.
-pub(super) type Held = std::fs::File;
+pub(super) struct Held {
+    file: Option<std::fs::File>,
+    remount: Vec<String>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if !self.remount.is_empty() {
+            remount_volumes(&self.remount);
+        }
+    }
+}
 
 /// Take disks from the host, asking for privilege only where it is needed.
 ///
@@ -650,17 +702,60 @@ pub(super) type Held = std::fs::File;
 pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
     let kernel = Kernel::live();
     let mut taken = Vec::new();
-    let mut ask = Vec::new();
+    let mut ask: Vec<(HostDevice, bool, Vec<String>)> = Vec::new();
     for (device, write) in wanted {
-        unmount_volumes(&kernel, &device.id)?;
+        let remount = match unmount_volumes(&kernel, &device.id) {
+            Ok(remount) => remount,
+            Err(error) => {
+                for (_, _, nodes) in &ask {
+                    remount_volumes(nodes);
+                }
+                return Err(error);
+            }
+        };
         match direct_open(&device.path, *write) {
-            Ok(file) => taken.push((device.id.clone(), file)),
-            Err(error) if is_denial(&error) => ask.push((device.clone(), *write)),
-            Err(error) => return Err(explain(&error, device)),
+            Ok(file) => taken.push((
+                device.id.clone(),
+                Held {
+                    file: Some(file),
+                    remount,
+                },
+            )),
+            Err(error) if is_denial(&error) => ask.push((device.clone(), *write, remount)),
+            Err(error) => {
+                remount_volumes(&remount);
+                return Err(explain(&error, device));
+            }
         }
     }
     if !ask.is_empty() {
-        taken.extend(open_through_broker(&ask)?);
+        let request: Vec<(HostDevice, bool)> = ask
+            .iter()
+            .map(|(device, write, _)| (device.clone(), *write))
+            .collect();
+        let opened = match open_through_broker(&request) {
+            Ok(opened) => opened,
+            Err(error) => {
+                for (_, _, nodes) in &ask {
+                    remount_volumes(nodes);
+                }
+                return Err(error);
+            }
+        };
+        for (id, file) in opened {
+            let remount = ask
+                .iter_mut()
+                .find(|(device, _, _)| device.id == id)
+                .map(|(_, _, nodes)| std::mem::take(nodes))
+                .unwrap_or_default();
+            taken.push((
+                id.clone(),
+                Held {
+                    file: Some(file),
+                    remount,
+                },
+            ));
+        }
     }
     Ok(taken)
 }
@@ -673,11 +768,15 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
 /// positioned rather than seeking.
 pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<super::BlockDevice> {
     let file = held
+        .file
+        .as_ref()
+        .context("the reserved disk handle has already closed")?
         .try_clone()
         .context("lending the disk to the machine")?;
     Ok(super::BlockDevice::new(
         file,
         device.id.clone(),
+        device.fingerprint(),
         device.block_size,
         device.size_bytes,
         write,
@@ -758,7 +857,7 @@ fn socket_path() -> Result<PathBuf> {
 /// and relaunching Copperline through `pkexec` would both throw away a machine
 /// that may already be running and leave the whole emulator running as root,
 /// which is a far larger thing to be than one open descriptor.
-fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
+fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, std::fs::File)>> {
     use std::os::unix::net::UnixListener;
 
     let exe =
@@ -771,7 +870,7 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Hel
 
     let asked: Vec<String> = wanted
         .iter()
-        .map(|(device, write)| broker_protocol::argument(&device.id, *write))
+        .map(|(device, write)| broker_protocol::argument(&device.id, &device.fingerprint(), *write))
         .collect();
     let names: Vec<&str> = wanted
         .iter()
@@ -837,8 +936,14 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Hel
         // A descriptor arriving over a socket is a claim about what it is.
         // The kernel's own answer for what it points at is the only check
         // worth making, and it is cheap.
-        let expected = device_number(&kernel, &id)
-            .ok_or_else(|| anyhow::anyhow!("{id} has no device number"))?;
+        let expected_device = wanted
+            .iter()
+            .find(|(device, _)| device.id == id)
+            .ok_or_else(|| anyhow::anyhow!("{id} was opened but never asked for"))?;
+        let current =
+            super::resolve_device_for_attach(&id, Some(&expected_device.0.fingerprint()), true)?;
+        let expected = device_number(&kernel, &current.id)
+            .ok_or_else(|| anyhow::anyhow!("{} has no device number", current.id))?;
         if stat_rdev(&file)? != expected {
             anyhow::bail!("{id}: what came back is not that disk, so it will not be used");
         }
@@ -1050,20 +1155,19 @@ pub fn serve_broker_request(arguments: &[String]) -> Result<()> {
     }
 }
 
-fn broker_open(asked: &[(String, bool)]) -> Result<Vec<(String, std::fs::File)>> {
+fn broker_open(asked: &[(String, String, bool)]) -> Result<Vec<(String, std::fs::File)>> {
     let mut opened = Vec::new();
-    for (id, write) in asked {
+    for (id, fingerprint, write) in asked {
         // Re-applied here rather than inherited: this half runs as root, so it
         // is the last place that can refuse the disk the host is running from,
         // and it must not depend on the other half having asked nicely. It
         // asks the same question the unprivileged path does rather than a
         // hand-copied likeness of it -- a rule added to that one has to reach
         // the half that can actually damage the medium.
-        let device = super::find_device(id)?
-            .ok_or_else(|| anyhow::anyhow!("no host disk called {id} is attached"))?;
+        let device = super::resolve_device_for_attach(id, Some(fingerprint), true)?;
         super::refuse_if_unusable(&device, *write)?;
         let file = direct_open(&device.path, *write).map_err(|error| explain(&error, &device))?;
-        opened.push((device.id.clone(), file));
+        opened.push((id.clone(), file));
     }
     Ok(opened)
 }
@@ -1512,7 +1616,7 @@ mod tests {
             .expect("enumerate")
             .unwrap_or_else(|| panic!("no device {id}"));
 
-        crate::blockdev::reserve_devices(&[(id.clone(), false)])
+        crate::blockdev::reserve_devices(&[(id.clone(), None, false, true)])
             .expect("the launcher takes the disk");
         // Proof the reservation really is exclusive: opening the node again is
         // what the machine must not do, and this is what it would meet.

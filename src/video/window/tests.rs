@@ -1287,6 +1287,50 @@ fn canvas_sized_check_tolerates_rounding_but_not_a_resize() {
 }
 
 #[test]
+fn asynchronous_canvas_snap_owns_the_platform_clamped_resize_once() {
+    use super::resize_is_canvas_owned;
+    use std::time::{Duration, Instant};
+
+    let now = Instant::now();
+    let mut deadline = Some(now + Duration::from_secs(1));
+    assert!(resize_is_canvas_owned(
+        &mut deadline,
+        now,
+        640.0,
+        480.0,
+        600
+    ));
+    assert!(deadline.is_none(), "the asynchronous response is consumed");
+
+    // The same off-canvas dimensions later are a user resize, not a standing
+    // exemption left behind by the snap request.
+    assert!(!resize_is_canvas_owned(
+        &mut deadline,
+        now,
+        640.0,
+        480.0,
+        600
+    ));
+}
+
+#[test]
+fn ignored_canvas_snap_expires_before_a_later_user_resize() {
+    use super::resize_is_canvas_owned;
+    use std::time::{Duration, Instant};
+
+    let now = Instant::now();
+    let mut deadline = Some(now);
+    assert!(!resize_is_canvas_owned(
+        &mut deadline,
+        now + Duration::from_millis(1),
+        640.0,
+        480.0,
+        600
+    ));
+    assert!(deadline.is_none(), "the expired request is discarded");
+}
+
+#[test]
 fn status_bar_draws_hdd_led_only_on_ide_machines() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
@@ -4058,17 +4102,38 @@ fn opening_the_debugger_arms_reverse_and_step_reconstructs() {
 
 #[test]
 fn quick_save_slots_round_trip_and_report_empty_slots() {
-    // The slot directory comes from the per-user config location; skip on a
-    // host that has none (no HOME/APPDATA/XDG_CONFIG_HOME).
-    let Some(path) = crate::savestate::slot_path(7) else {
-        return;
-    };
-    let restore = std::fs::read(&path).ok();
-    let _ = std::fs::remove_file(&path);
+    struct TempSlotDir(PathBuf);
+
+    impl TempSlotDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static UNIQUE: AtomicU64 = AtomicU64::new(0);
+            let unique = UNIQUE.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "copperline-quick-save-test-{}-{nanos}-{unique}",
+                std::process::id(),
+            ));
+            std::fs::create_dir(&path).expect("create isolated quick-save root");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempSlotDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = TempSlotDir::new();
+    let path = crate::savestate::slot_path_in(&root.0, 7).expect("valid slot");
 
     let mut app = test_app();
     // An unwritten slot reports rather than failing the load.
-    app.quick_load_state(7, None);
+    app.quick_load_state_at(7, Some(path.clone()), None);
     assert_eq!(app.emu.bus().emulated_frames(), 0, "nothing was restored");
 
     for _ in 0..6 {
@@ -4076,7 +4141,7 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
     }
     let saved_frame = app.emu.bus().emulated_frames();
     let saved_pc = app.emu.machine.pc();
-    app.quick_save_state(7);
+    app.quick_save_state_at(7, Some(path.clone()));
     assert!(path.exists(), "slot 7 written to {}", path.display());
 
     // Run on, then load the slot back: the machine returns to the saved point.
@@ -4084,30 +4149,24 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
         app.emu.step_frame().expect("frame");
     }
     assert!(app.emu.bus().emulated_frames() > saved_frame);
-    app.quick_load_state(7, None);
+    app.quick_load_state_at(7, Some(path), None);
     assert_eq!(app.emu.bus().emulated_frames(), saved_frame);
     assert_eq!(app.emu.machine.pc(), saved_pc);
-
-    let _ = std::fs::remove_file(&path);
-    if let Some(bytes) = restore {
-        let _ = std::fs::write(&path, bytes);
-    }
 }
 
 #[test]
 fn every_slot_addresses_a_file_of_its_own() {
     // The menu and the hotkeys both name a slot outright, so all ten have to
     // resolve, and to ten different files.
+    let root = std::path::Path::new("isolated-state-slots");
     let paths: Vec<_> = (1..=crate::savestate::SLOT_COUNT)
-        .map(crate::savestate::slot_path)
+        .map(|slot| crate::savestate::slot_path_in(root, slot))
         .collect();
-    if paths[0].is_some() {
-        let mut unique = paths.clone();
-        unique.dedup();
-        assert_eq!(unique.len(), paths.len());
-    }
-    assert!(crate::savestate::slot_path(0).is_none());
-    assert!(crate::savestate::slot_path(crate::savestate::SLOT_COUNT + 1).is_none());
+    let mut unique = paths.clone();
+    unique.dedup();
+    assert_eq!(unique.len(), paths.len());
+    assert!(crate::savestate::slot_path_in(root, 0).is_none());
+    assert!(crate::savestate::slot_path_in(root, crate::savestate::SLOT_COUNT + 1).is_none());
 }
 
 #[test]

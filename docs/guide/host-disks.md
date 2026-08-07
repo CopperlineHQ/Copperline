@@ -61,16 +61,43 @@ Or in a configuration file:
 
 ```toml
 [[host_disk]]
-device = "sdb"            # "sdb" on Linux, "disk4" on macOS, "PhysicalDrive1" on Windows
-attach = "ide-master"     # ide-master (default), ide-slave, or scsi0..scsi6
-read_only = true          # absent means writable
+device = "sdb"                 # last name shown by --list-disks
+fingerprint = "v1-..."         # opaque identity written by the launcher
+attach = "ide-master"          # ide-master (default), ide-slave, or scsi0..scsi6
+read_only = true               # the default; false explicitly allows writes
 ```
 
-`device` is the host's stable name for the hardware, exactly as
-`--list-disks` prints it -- not a node path, which belongs to this boot
-rather than to the disk. A disk named here that is not plugged in leaves that
-drive slot empty and the machine starts anyway, as a real Amiga does with an
-absent drive.
+`device` is the host's current enumeration name, exactly as `--list-disks`
+prints it: `sdb` on Linux, `disk4` on macOS, or `PhysicalDrive1` on Windows.
+Those names can change when disks are attached in a different order. The
+launcher therefore saves `fingerprint`, an opaque identity made from the
+disk's reported serial/model and geometry. On the next run the fingerprint is
+authoritative: Copperline follows the same disk to a changed name only when
+exactly one attached disk matches it, and refuses a missing or ambiguous
+match rather than guessing. Keep the value the launcher wrote; do not invent
+or copy one between disks.
+
+Older and hand-written entries may omit `fingerprint`; they use an exact
+`device` lookup and cannot follow a renamed disk. To add one, select and mount
+the disk afresh in the launcher, then save or launch; merely opening and
+saving the old entry deliberately preserves the missing fingerprint. A disk
+that cannot be resolved leaves that drive slot empty and the machine starts
+anyway, as a real Amiga does with an absent drive.
+
+Persisted permission to write is deliberately narrower than fingerprint
+matching. Removable media is always treated as weak, even if its USB bridge
+reports a serial: that value often identifies the reader rather than the card
+inside it. The same is true of any fixed disk without a credible serial or
+WWN. A fingerprint can still resolve either kind for read-only use, but select
+and mount the physical disk afresh in the launcher before every writable
+session. Only a fixed, non-removable disk with a credible serial/WWN may reopen
+writable from persisted configuration.
+
+Omitting `read_only` is safe: it now means read-only. This intentionally makes
+older configs that omitted the key read-only too; set `read_only = false`
+only after checking the selected disk. The command-line flags describe a
+choice made for this run, so `--host-disk` is explicitly read-write and
+`--host-disk-read-only` is protected.
 
 ## Read-only first
 
@@ -87,7 +114,7 @@ write error, and the log names the same block:
 
 ```text
 blockdev: sdb is attached read-only, so the guest's write to sector 1026146
-          was refused; tick R/W (or drop `read_only`) to let it write
+          was refused; tick R/W (or set `read_only = false`) to let it write
 ```
 
 That proves the read path end to end. Attach it read-write and it should
@@ -107,6 +134,13 @@ starts), and stays taken for the rest of the session. Powering the emulated
 machine off and on again does not ask for permission a second time.
 **Unmount** -- on the Host Disk page, or beside the drive on the Storage page
 -- hands the disk back, and so does quitting.
+
+Save states carry the same fingerprint. Loading one re-enumerates the host and
+reattaches only one unambiguous match; a changed `sdb`/`disk4`/
+`PhysicalDrive1` ordinal alone never authorises a writable reopen. The same
+weak-identity rule applies: removable media and disks without a credible
+serial/WWN may return read-only on one unambiguous fingerprint match, but are
+refused writable until freshly selected.
 
 Writes are flushed to the medium rather than left in the host's cache,
 because a card can be pulled out of a reader at any moment.

@@ -994,6 +994,8 @@ fn raw_host_disks(raw: &RawConfig) -> Vec<crate::config::HostDiskConfig> {
         .filter(|entry| !entry.device.trim().is_empty())
         .map(|entry| crate::config::HostDiskConfig {
             device: entry.device.trim().to_string(),
+            fingerprint: entry.fingerprint.clone(),
+            identity_confirmed: false,
             attach: entry
                 .attach
                 .as_deref()
@@ -1005,7 +1007,7 @@ fn raw_host_disks(raw: &RawConfig) -> Vec<crate::config::HostDiskConfig> {
                         .find(|a| a.token().eq_ignore_ascii_case(token))
                 })
                 .unwrap_or_default(),
-            writable: !entry.read_only.unwrap_or(false),
+            writable: !entry.read_only.unwrap_or(true),
         })
         .collect()
 }
@@ -1020,6 +1022,8 @@ pub struct HostDiskRow {
     /// The identifier the host and the configuration both use: `disk4`,
     /// `sdb`, `PhysicalDrive1`.
     pub id: String,
+    /// Opaque hardware identity, when this is a real enumerated disk.
+    pub fingerprint: Option<String>,
     /// What the hardware calls itself, or the volume on it.
     pub volume: String,
     /// Capacity, already rounded for reading.
@@ -1027,8 +1031,8 @@ pub struct HostDiskRow {
     /// Where the host currently has this disk mounted, if anywhere. Shown so
     /// somebody can see why a disk cannot simply be taken.
     pub mounted: Vec<String>,
-    /// Whether the guest may write to it. On by default; unticking it is
-    /// what protects the disk.
+    /// Whether the guest may write to it. Off by default; writable real-media
+    /// access is an explicit choice.
     pub writable: bool,
     /// Where the machine would see this disk -- and only while it is ticked.
     /// An unticked disk is going nowhere, and its cell reads blank rather
@@ -1051,11 +1055,12 @@ fn sample_host_disks() -> Vec<HostDiskRow> {
         .into_iter()
         .filter(|device| device.safety.listable())
         .map(|device| HostDiskRow {
+            fingerprint: Some(device.fingerprint()),
             volume: device.model.clone().unwrap_or_else(|| device.id.clone()),
             size: device.size_label(),
             mounted: device.mounted.clone(),
             id: device.id,
-            writable: true,
+            writable: false,
             attach: None,
         })
         .chain(fake_host_disks())
@@ -1079,10 +1084,11 @@ fn fake_host_disks() -> Vec<HostDiskRow> {
     (0..count.min(64))
         .map(|i| HostDiskRow {
             id: format!("fakedisk{i}"),
+            fingerprint: None,
             volume: format!("Pretend Media {i}"),
             size: format!("{}.0 GB", i % 9 + 1),
             mounted: Vec::new(),
-            writable: true,
+            writable: false,
             attach: None,
         })
         .collect()
@@ -2054,16 +2060,19 @@ impl MachineSetup {
             .chain(self.filesys_extra.iter().cloned())
             .collect();
         // Real host disks. Emitted in attachment order so the file reads the
-        // way the page does, and read_only only when it has been cleared:
-        // protected is the default, so an untouched entry stays as written.
+        // way the page does. Access is always explicit; older entries with no
+        // read_only field remain protected by the parser's safe default.
         raw.host_disk = crate::config::HostDiskAttach::all()
             .iter()
             .filter_map(|attach| self.host_disk_at(*attach))
             .map(|disk| RawHostDisk {
                 device: disk.device.clone(),
+                fingerprint: disk.fingerprint.clone(),
+                identity_confirmed: false,
                 attach: Some(disk.attach.token().to_string()),
-                // Only a protected disk needs saying: absent means writable.
-                read_only: (!disk.writable).then_some(true),
+                // Always state the access mode. Older hand-written entries with
+                // no field stay safely read-only.
+                read_only: Some(!disk.writable),
             })
             .collect();
         // CD
@@ -3896,26 +3905,61 @@ impl MachineSetup {
         // keeps the read-only and attachment it was given.
         let previous = std::mem::take(&mut self.host_disks);
         self.host_disks = sample_host_disks();
+        self.reconcile_host_disk_rows(&previous);
+    }
+
+    fn reconcile_host_disk_rows(&mut self, previous: &[HostDiskRow]) {
+        let selected_before: Vec<(&str, Option<&str>)> = previous
+            .iter()
+            .filter(|row| self.host_disk_selected.contains(&row.id))
+            .map(|row| (row.id.as_str(), row.fingerprint.as_deref()))
+            .collect();
         // A shorter list must not leave the window past its end.
         self.host_disk_scroll = self.host_disk_scroll.min(self.host_disks.len());
         for row in &mut self.host_disks {
-            if let Some(old) = previous.iter().find(|p| p.id == row.id) {
+            if let Some(old) = previous.iter().find(|old| {
+                match (row.fingerprint.as_deref(), old.fingerprint.as_deref()) {
+                    (Some(new), Some(old)) => new == old,
+                    _ => old.id == row.id,
+                }
+            }) {
                 row.writable = old.writable;
                 row.attach = old.attach;
             }
         }
         // A disk that has gone (unplugged between looks) cannot stay ticked.
-        self.host_disk_selected
-            .retain(|id| self.host_disks.iter().any(|d| &d.id == id));
+        self.host_disk_selected = self
+            .host_disks
+            .iter()
+            .filter(|row| {
+                selected_before.iter().any(|(old_id, old_fingerprint)| {
+                    match (row.fingerprint.as_deref(), *old_fingerprint) {
+                        (Some(new), Some(old)) => new == old,
+                        _ => row.id == *old_id,
+                    }
+                })
+            })
+            .map(|row| row.id.clone())
+            .collect();
         // The page shows the machine as it stands: a disk already given to it
         // is ticked, sitting where it was put.
-        for attached in &self.host_disks_attached {
-            if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == attached.device) {
+        for attached in &mut self.host_disks_attached {
+            if let Some(row) = self.host_disks.iter_mut().find(|row| {
+                attached
+                    .fingerprint
+                    .as_ref()
+                    .zip(row.fingerprint.as_ref())
+                    .is_some_and(|(saved, current)| saved == current)
+                    || ((attached.fingerprint.is_none() || row.fingerprint.is_none())
+                        && row.id == attached.device)
+            }) {
+                attached.device = row.id.clone();
+                attached.fingerprint = row.fingerprint.clone();
                 row.attach = Some(attached.attach);
                 row.writable = attached.writable;
-            }
-            if !self.host_disk_selected.contains(&attached.device) {
-                self.host_disk_selected.push(attached.device.clone());
+                if !self.host_disk_selected.contains(&attached.device) {
+                    self.host_disk_selected.push(attached.device.clone());
+                }
             }
         }
     }
@@ -4128,6 +4172,8 @@ impl MachineSetup {
         for (row, attach) in chosen {
             let entry = crate::config::HostDiskConfig {
                 device: row.id.clone(),
+                fingerprint: row.fingerprint.clone(),
+                identity_confirmed: true,
                 attach,
                 writable: row.writable,
             };
@@ -5137,6 +5183,7 @@ mod tests {
         setup.set_host_disks_for_test(vec![
             HostDiskRow {
                 id: "disk4".to_string(),
+                fingerprint: None,
                 volume: "SanDisk".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
@@ -5145,6 +5192,7 @@ mod tests {
             },
             HostDiskRow {
                 id: "disk9".to_string(),
+                fingerprint: None,
                 volume: "Kingston".to_string(),
                 size: "3.9 GB".to_string(),
                 mounted: Vec::new(),
@@ -5197,9 +5245,9 @@ mod tests {
         assert_eq!(raw.host_disk.len(), 2);
         assert_eq!(raw.host_disk[0].device, "disk4");
         assert_eq!(raw.host_disk[0].attach.as_deref(), Some("ide-master"));
-        // Writable is the default, so nothing is written down for it; the
-        // read-only one says so.
-        assert_eq!(raw.host_disk[0].read_only, None);
+        // Physical-disk access is always explicit in a saved configuration;
+        // older entries with no field safely load read-only.
+        assert_eq!(raw.host_disk[0].read_only, Some(false));
         assert_eq!(raw.host_disk[1].read_only, Some(true));
 
         let reloaded = MachineSetup::from_raw(&raw).expect("the written configuration reads back");
@@ -5215,6 +5263,7 @@ mod tests {
         no_ide.select_model(Some(MachineModel::A500));
         no_ide.set_host_disks_for_test(vec![HostDiskRow {
             id: "disk4".to_string(),
+            fingerprint: None,
             volume: "SanDisk".to_string(),
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
@@ -5243,6 +5292,83 @@ mod tests {
         assert_eq!(reloaded.to_raw().host_disk.len(), 1);
     }
 
+    #[test]
+    fn a_fingerprinted_disk_survives_an_os_ordinal_change() {
+        let mut setup = MachineSetup {
+            host_disks_attached: vec![crate::config::HostDiskConfig {
+                device: "disk4".to_string(),
+                fingerprint: Some("v1-stable".to_string()),
+                identity_confirmed: false,
+                attach: crate::config::HostDiskAttach::IdeMaster,
+                writable: false,
+            }],
+            host_disk_selected: vec!["disk4".to_string()],
+            host_disks: vec![HostDiskRow {
+                id: "disk9".to_string(),
+                fingerprint: Some("v1-stable".to_string()),
+                volume: "same medium".to_string(),
+                size: "4.0 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            }],
+            ..Default::default()
+        };
+
+        setup.reconcile_host_disk_rows(&[]);
+
+        assert_eq!(setup.host_disks_attached[0].device, "disk9");
+        assert!(setup.host_disk_is_selected("disk9"));
+        assert_eq!(
+            setup.host_disks[0].attach,
+            Some(crate::config::HostDiskAttach::IdeMaster)
+        );
+    }
+
+    #[test]
+    fn a_same_ordinal_replacement_inherits_no_disk_authority() {
+        let mut setup = MachineSetup {
+            host_disks_attached: vec![crate::config::HostDiskConfig {
+                device: "disk4".to_string(),
+                fingerprint: Some("v1-original".to_string()),
+                identity_confirmed: true,
+                attach: crate::config::HostDiskAttach::IdeMaster,
+                writable: true,
+            }],
+            host_disk_selected: vec!["disk4".to_string()],
+            ..Default::default()
+        };
+        let previous = vec![HostDiskRow {
+            id: "disk4".to_string(),
+            fingerprint: Some("v1-original".to_string()),
+            volume: "original".to_string(),
+            size: "4.0 GB".to_string(),
+            mounted: Vec::new(),
+            writable: true,
+            attach: Some(crate::config::HostDiskAttach::IdeMaster),
+        }];
+        setup.host_disks = vec![HostDiskRow {
+            id: "disk4".to_string(),
+            fingerprint: Some("v1-replacement".to_string()),
+            volume: "replacement".to_string(),
+            size: "4.0 GB".to_string(),
+            mounted: Vec::new(),
+            writable: false,
+            attach: None,
+        }];
+
+        setup.reconcile_host_disk_rows(&previous);
+
+        assert!(!setup.host_disk_is_selected("disk4"));
+        assert!(!setup.host_disks[0].writable);
+        assert_eq!(setup.host_disks[0].attach, None);
+        assert_eq!(setup.host_disks_attached[0].device, "disk4");
+        assert_eq!(
+            setup.host_disks_attached[0].fingerprint.as_deref(),
+            Some("v1-original")
+        );
+    }
+
     /// A disk has a place only while it is ticked. Ticking assigns the first
     /// free point (IDE Master leads), unticking blanks it again, a choice
     /// stepped on a ticked row survives other disks coming and going, and
@@ -5255,6 +5381,7 @@ mod tests {
             (0..n)
                 .map(|i| HostDiskRow {
                     id: format!("disk{i}"),
+                    fingerprint: None,
                     volume: format!("Card {i}"),
                     size: "4.0 GB".to_string(),
                     mounted: Vec::new(),
@@ -5313,6 +5440,7 @@ mod tests {
         setup.select_model(Some(MachineModel::A3000));
         setup.set_host_disks_for_test(vec![HostDiskRow {
             id: "disk4".to_string(),
+            fingerprint: None,
             volume: "SanDisk".to_string(),
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
@@ -5358,6 +5486,7 @@ mod tests {
         setup.select_model(Some(MachineModel::A1200));
         setup.set_host_disks_for_test(vec![HostDiskRow {
             id: "disk4".to_string(),
+            fingerprint: None,
             volume: "SanDisk".to_string(),
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),

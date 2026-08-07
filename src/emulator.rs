@@ -516,9 +516,10 @@ impl Emulator {
         self.bus_mut().set_live_audio_suspended(suspended);
     }
 
-    /// Discard live-output samples queued for an emulated timeline that has
-    /// just been abandoned. This is host presentation state only; Paula's
-    /// serialized DMA/mixer state is left untouched.
+    /// Discard host audio queued for an emulated timeline that has just been
+    /// abandoned. Paula's serialized DMA and mixer state is left untouched;
+    /// the serial sink is handled once, while host resources are adopted by
+    /// the restored bus.
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
         self.bus_mut().reset_live_audio_after_timeline_jump();
     }
@@ -1307,9 +1308,9 @@ impl Emulator {
                 rec.frame,
                 rec.cck,
             ),
-            ReverseOutcome::NotFound => log::info!(
-                "DBG RWATCH ${addr:06X}: no write to it found in recorded history"
-            ),
+            ReverseOutcome::NotFound => {
+                log::info!("DBG RWATCH ${addr:06X}: no write to it found in recorded history")
+            }
             ReverseOutcome::BeyondHistory => log::warn!(
                 "DBG RWATCH ${addr:06X}: the last write predates retained snapshots; \
                  raise COPPERLINE_DBG_RR_BUDGET_MB or lower COPPERLINE_DBG_RR_INTERVAL"
@@ -2051,8 +2052,6 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
     }
 }
 
-/// Open a `[scsi]` unit entry as a bus target: a CD image (cue/ISO) becomes
-/// a CD-ROM drive, anything else a hard disk. Logs the fitted unit.
 /// Attach every real host disk the config puts on an IDE position, whichever
 /// interface the machine has -- Gayle's or the A4000's.
 ///
@@ -2070,7 +2069,12 @@ fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata:
             crate::config::HostDiskAttach::IdeSlave => 1,
             crate::config::HostDiskAttach::Scsi(_) => continue,
         };
-        match crate::ata::IdeDrive::open_host_disk(&disk.device, disk.writable) {
+        match crate::ata::IdeDrive::open_host_disk(
+            &disk.device,
+            disk.fingerprint.as_deref(),
+            disk.identity_confirmed,
+            disk.writable,
+        ) {
             Ok(drive) => {
                 attach(slot, drive);
                 info!(
@@ -2110,7 +2114,12 @@ fn attach_scsi_host_disks(
             continue;
         };
         let unit = usize::from(unit);
-        match crate::scsi::ScsiDisk::open_host_disk(&disk.device, disk.writable) {
+        match crate::scsi::ScsiDisk::open_host_disk(
+            &disk.device,
+            disk.fingerprint.as_deref(),
+            disk.identity_confirmed,
+            disk.writable,
+        ) {
             Ok(drive) => {
                 attach(unit, drive.into());
                 attached += 1;

@@ -219,10 +219,11 @@ pub struct WebEmu {
     /// [`Self::present_crt_lines`].
     present_crt_lines: f32,
     last_rendered_frame: Option<u64>,
-    /// Frames were stepped by `run_hidden` (which renders nothing) since
-    /// the last render, so the presentation buffer is behind the machine.
-    /// The next rendering `run` repaints even if it steps no frames.
-    presentation_stale: bool,
+    /// Fields stepped since the last presentation by `run_hidden`, which
+    /// renders nothing. The next rendering `run` repaints even if it steps
+    /// no fields itself and advances phosphor decay across every deferred
+    /// field rather than leaving a stale trail at foreground return.
+    deferred_fields: u32,
     /// Wall-clock/emulated-time pair the pacer chases from; None until the
     /// first `run` call after (re)boot.
     anchor: Option<(f64, f64)>,
@@ -312,7 +313,7 @@ impl WebEmu {
             presentation_revision: 0,
             present_crt_lines: 0.0,
             last_rendered_frame: None,
-            presentation_stale: false,
+            deferred_fields: 0,
             anchor: None,
             mouse_remainder: (0.0, 0.0),
             mouse_pending: (0, 0),
@@ -393,6 +394,7 @@ impl WebEmu {
     pub fn load_rom(&mut self, rom: Vec<u8>, ext: Option<Vec<u8>>) -> Result<(), JsValue> {
         self.emu.reload_rom(rom, ext).map_err(js_err)?;
         self.anchor = None;
+        self.deferred_fields = 0;
         self.deinterlacer.reset_history();
         Ok(())
     }
@@ -440,14 +442,15 @@ impl WebEmu {
             self.anchor = Some((now_ms, self.emu.bus().emulated_seconds()));
         }
         if render {
-            if stepped > 0 || self.presentation_stale {
+            if stepped > 0 || self.deferred_fields > 0 {
                 let render_started = Instant::now();
-                self.render_completed_frame();
+                let elapsed_fields = self.deferred_fields.saturating_add(stepped).max(1);
+                self.render_completed_frame_elapsed(elapsed_fields);
                 self.last_run_render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
-                self.presentation_stale = false;
+                self.deferred_fields = 0;
             }
         } else if stepped > 0 {
-            self.presentation_stale = true;
+            self.deferred_fields = self.deferred_fields.saturating_add(stepped);
         }
         Ok(stepped)
     }
@@ -456,6 +459,10 @@ impl WebEmu {
     /// the shared present_common helpers: render the completed hardware
     /// frame, post-process, deinterlace, and copy out the woven rows.
     fn render_completed_frame(&mut self) {
+        self.render_completed_frame_elapsed(1);
+    }
+
+    fn render_completed_frame_elapsed(&mut self, elapsed_fields: u32) {
         if !self.emu.bus().frame_render_available() {
             return;
         }
@@ -530,33 +537,36 @@ impl WebEmu {
             // fill the same 4:3 glass -- so a 60 Hz crop's rows scale onto
             // the 50 Hz aperture's native row count (whole-row selection,
             // like the desktop present copy).
-            (self.present_rows, self.present_width) = self.deinterlacer.present_field_region_into(
-                &self.fb,
-                field_rows,
-                canvas_width,
-                lace,
-                base.long_field,
-                double_rows,
-                present_common::TV_CAPTURED_SOURCE_X,
-                present_common::TV_PRESENT_SOURCE_Y,
-                aperture_rows,
-                present_common::TV_CAPTURED_WIDTH,
-                present_common::TV_GLASS_PRESENT_ROWS,
-                &mut self.present,
-            );
+            (self.present_rows, self.present_width) =
+                self.deinterlacer.present_field_region_into_elapsed(
+                    &self.fb,
+                    field_rows,
+                    canvas_width,
+                    lace,
+                    base.long_field,
+                    double_rows,
+                    present_common::TV_CAPTURED_SOURCE_X,
+                    present_common::TV_PRESENT_SOURCE_Y,
+                    aperture_rows,
+                    present_common::TV_CAPTURED_WIDTH,
+                    present_common::TV_GLASS_PRESENT_ROWS,
+                    elapsed_fields,
+                    &mut self.present,
+                );
             // Two woven rows per emulated field line, and the aperture's
             // rows fill the glass exactly, so the aperture is the line
             // count whatever row count it was scaled onto (the desktop's
             // crt_scanline_count, without its bezel-padding rescale).
             self.present_crt_lines = (aperture_rows / 2).max(1) as f32;
         } else {
-            (self.present_rows, self.present_width) = self.deinterlacer.present_field_into(
+            (self.present_rows, self.present_width) = self.deinterlacer.present_field_into_elapsed(
                 &self.fb,
                 field_rows,
                 canvas_width,
                 lace,
                 base.long_field,
                 double_rows,
+                elapsed_fields,
                 &mut self.present,
             );
             // A programmable scan has no 15 kHz line structure for a CRT
@@ -940,7 +950,7 @@ impl WebEmu {
         // the repaint below must render, not match against it.
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
-        self.presentation_stale = false;
+        self.deferred_fields = 0;
         Ok(())
     }
 
@@ -948,6 +958,7 @@ impl WebEmu {
     pub fn reset(&mut self) -> Result<(), JsValue> {
         self.emu.power_on_reset().map_err(js_err)?;
         self.anchor = None;
+        self.deferred_fields = 0;
         // Motion buffered against the old machine must not replay into the
         // fresh one, and the presentation latch starts over with it.
         self.mouse_remainder = (0.0, 0.0);

@@ -43,6 +43,16 @@ impl IdeA4000 {
         self.ata.attach_drive(slot, drive);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
+        self.ata.pending_host_disks(out);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disks(&mut self) -> anyhow::Result<()> {
+        self.ata.materialize_host_disks()
+    }
+
     /// Let go of any real disk of the host's, and say how many went.
     pub fn release_host_disks(&mut self) -> usize {
         self.ata.release_host_disks()

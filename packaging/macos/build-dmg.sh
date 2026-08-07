@@ -94,8 +94,12 @@ for f in \
 done
 
 # Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
-# without naming a ROM); romsearch.rs resolves Contents/Resources/a4091.
-cp "assets/a4091/a4091_cdfs.rom" "$app/Contents/Resources/a4091/a4091_cdfs.rom"
+# without naming a ROM); romsearch.rs resolves Contents/Resources/a4091. Keep
+# its exact provenance, component inventory, and redistribution notices beside
+# the binary artifact.
+for f in a4091_cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
+  cp "assets/a4091/$f" "$app/Contents/Resources/a4091/$f"
+done
 
 echo "==> Ad-hoc signing $app_name"
 # --deep so the nested executable is signed too; "-" selects the ad-hoc

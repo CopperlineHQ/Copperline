@@ -9,7 +9,7 @@ ARTIFACT = ../../assets/hostsocket/hostsocket_plugin.wasm
 
 all:
 	cargo build --release --locked --target wasm32-unknown-unknown
-	cp target/wasm32-unknown-unknown/release/hostsocket_plugin.wasm $(ARTIFACT)
+	install -m 0644 target/wasm32-unknown-unknown/release/hostsocket_plugin.wasm $(ARTIFACT)
 
 clean:
 	cargo clean

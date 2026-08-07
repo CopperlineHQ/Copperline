@@ -55,7 +55,9 @@ foreach ($f in @(
 # without naming a ROM); romsearch.rs probes a sibling a4091\ next to the exe.
 $a4091Dir = Join-Path $stage "a4091"
 New-Item -ItemType Directory -Force -Path $a4091Dir | Out-Null
-Copy-Item "assets\a4091\a4091_cdfs.rom" (Join-Path $a4091Dir "a4091_cdfs.rom")
+foreach ($f in @("a4091_cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
+    Copy-Item (Join-Path "assets\a4091" $f) (Join-Path $a4091Dir $f)
+}
 
 # Top-level docs and an example config to get users started.
 Copy-Item "copperline.example.toml" $stage

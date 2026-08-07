@@ -2185,7 +2185,7 @@ impl Mt32Panel {
                 return Some(format!("Master Tune :{hz:5.1}Hz"));
             }
             Mode::Chord(Chord::ReverbMode) => {
-                return Some(format!("** Reverb mode  : {}", self.reverb_mode))
+                return Some(format!("** Reverb mode  : {}", self.reverb_mode));
             }
             Mode::Chord(Chord::UnitNumber) => return Some("Unit Number :    1".to_string()),
             Mode::Chord(_) => return None,

@@ -378,7 +378,7 @@ pub enum DisplayScaling {
     /// fits the window, centred in black borders and point-sampled, so
     /// every canvas pixel is the same square block of host pixels. Falls
     /// back to the smooth fit when the window is too small for even 1x,
-    /// which crops rather than shrinks.
+    /// which shrinks rather than crops.
     Integer,
 }
 
@@ -1385,29 +1385,26 @@ impl HostDiskAttach {
 /// operations that will grow around it -- preparing, partitioning -- have no
 /// counterpart for an image. Sharing a representation with image paths would
 /// mean every one of those concerns leaking into the image path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HostDiskConfig {
-    /// The host's stable identifier for the disk (`disk4`, `sdb`,
-    /// `PhysicalDrive1`), never the node path: a node path belongs to one
-    /// boot of the host, the identifier belongs to the hardware.
+    /// The host's current enumeration name (`disk4`, `sdb`,
+    /// `PhysicalDrive1`). It is a useful label and lookup fallback, not a
+    /// persistent hardware identity; the `fingerprint` field provides that.
     pub device: String,
+    /// Opaque hardware fingerprint captured when Copperline last saw the disk.
+    /// This revalidates a persisted attachment when the host gives it a
+    /// different `diskN`, `sdX`, or `PhysicalDriveN` name; weak/removable
+    /// fingerprints are read-only guards, not persisted write authority.
+    pub fingerprint: Option<String>,
+    /// This process has just shown this exact disk to the user and received an
+    /// explicit selection. Runtime-only: persisted attachments must revalidate
+    /// against stable hardware identity before writable access.
+    pub identity_confirmed: bool,
     /// Where the machine sees it.
     pub attach: HostDiskAttach,
-    /// Whether the guest may write to the disk. On by default, matching the
-    /// launcher's R/W column and the config's `read_only`: a disk given to a
-    /// machine is normally meant to be used, and protecting it is the
-    /// deliberate choice.
+    /// Whether the guest may write to the disk. Persisted and hand-written
+    /// entries default to read-only; writable access must be explicit.
     pub writable: bool,
-}
-
-impl Default for HostDiskConfig {
-    fn default() -> Self {
-        Self {
-            device: String::new(),
-            attach: HostDiskAttach::default(),
-            writable: true,
-        }
-    }
 }
 
 /// Which FluxBridge driver backs a bridged drive.
@@ -2431,8 +2428,13 @@ impl ConfigOverrides {
         raw.host_disk
             .extend(self.host_disks.iter().map(|disk| RawHostDisk {
                 device: disk.device.clone(),
+                fingerprint: None,
+                identity_confirmed: true,
                 attach: disk.attach.clone(),
-                read_only: disk.read_only.then_some(true),
+                // A command-line disk is an explicit choice on this run. Both
+                // flags write the access mode down so the safe config default
+                // cannot silently turn --host-disk into read-only.
+                read_only: Some(disk.read_only),
             }));
         for idx in 0..4 {
             if self.floppy_bridge[idx].is_none()
@@ -2781,13 +2783,20 @@ pub struct HostDiskArg {
 pub(crate) struct RawHostDisk {
     /// The host's identifier for the disk, as `--list-disks` prints it.
     pub(crate) device: String,
+    /// Opaque identity written by the launcher. Optional for hand-written and
+    /// older configurations, which are resolved by exact device name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fingerprint: Option<String>,
+    /// Set only by a command-line override or live launcher selection. Never
+    /// serialized: reading a file is not fresh confirmation of attached media.
+    #[serde(skip)]
+    pub(crate) identity_confirmed: bool,
     /// Where the machine sees it: `ide-master` (the default), `ide-slave`,
     /// or `scsi0`..`scsi6`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attach: Option<String>,
-    /// Protect the disk from the guest. Absent means writable, which is what
-    /// a disk given to a machine is normally for; protecting it is the
-    /// deliberate choice, so it is the one that has to be written down.
+    /// Protect the disk from the guest. Absent means read-only: real media is
+    /// writable only when the user has said so explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_only: Option<bool>,
 }
@@ -3083,9 +3092,8 @@ pub(crate) struct RawHostSocket {
     /// Host adapter identifier used by `net = "bridge"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) interface: Option<String>,
-    /// `gethostbyname()`'s DNS resolver. Defaults to Copperline NAT's own
-    /// DNS forwarder (10.0.2.3); only meaningful to override under
-    /// `net = "bridge"`.
+    /// DNS server queried when `resolver = "dns"`. Defaults to Copperline
+    /// NAT's forwarder (10.0.2.3); ignored by the default host resolver.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dns_server: Option<String>,
     /// `gethostname()`'s return value. Purely cosmetic; defaults to "amiga".
@@ -3135,7 +3143,7 @@ pub(crate) struct RawRtg {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCd {
-    /// Path to a cue sheet (BIN/CUE).
+    /// Path to a CUE/BIN, bare ISO, or CHD CD image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) image: Option<String>,
     /// Insert the disc this many emulated seconds after power-on
@@ -3408,9 +3416,10 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) write_protected: Option<bool>,
-    /// Attach a real drive to this bay instead of an image, over a
-    /// DrawBridge/Greaseweazle/Supercard Pro: `drawbridge`, `greaseweazle`,
-    /// or `supercardpro` (aliases `arduino`, `gw`, `scp`).
+    /// Attach a real drive to this bay instead of an image. The parser knows
+    /// every FluxBridge driver name, then rejects any driver this build did
+    /// not compile; the standard build currently enables `greaseweazle`
+    /// (alias `gw`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge: Option<String>,
     /// Serial port the interface is on. Omitted, the driver finds its own
@@ -3430,8 +3439,8 @@ pub(crate) struct RawFloppyDrive {
     /// `0`..`3` (Shugart).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_cable: Option<String>,
-    /// Serve captured tracks at this percentage of real speed: 100,
-    /// 125 (the default), 150, 175, or 200.
+    /// Replay kept captures at real speed (`normal`/100) or double speed
+    /// (`fast`/200, the default).
     #[serde(
         skip_serializing_if = "Option::is_none",
         alias = "bridge_speed",
@@ -5419,7 +5428,16 @@ fn parse_host_disks(
         // and writes the one disk through both, each unaware of the other's
         // cached blocks, which is how a filesystem is destroyed by a machine
         // that never did anything wrong.
-        if disks.iter().any(|d| d.device == device) {
+        let repeats_identity = disks.iter().any(|disk| {
+            disk.device == device
+                || entry
+                    .fingerprint
+                    .as_deref()
+                    .filter(|fingerprint| !fingerprint.is_empty())
+                    .zip(disk.fingerprint.as_deref())
+                    .is_some_and(|(new, earlier)| new == earlier)
+        });
+        if repeats_identity {
             bail!(
                 "host_disk[{index}] names {device}, which is already attached to this \
                  machine; one disk cannot be two drives"
@@ -5449,8 +5467,10 @@ fn parse_host_disks(
         }
         disks.push(HostDiskConfig {
             device: device.to_string(),
+            fingerprint: entry.fingerprint.clone(),
+            identity_confirmed: entry.identity_confirmed,
             attach,
-            writable: !entry.read_only.unwrap_or(false),
+            writable: !entry.read_only.unwrap_or(true),
         });
     }
     Ok(disks)
@@ -5755,11 +5775,15 @@ mod tests {
         let twice = [
             RawHostDisk {
                 device: "sdb".to_string(),
+                fingerprint: None,
+                identity_confirmed: false,
                 attach: Some("ide-master".to_string()),
                 read_only: None,
             },
             RawHostDisk {
                 device: "sdb".to_string(),
+                fingerprint: None,
+                identity_confirmed: false,
                 attach: Some("ide-slave".to_string()),
                 read_only: None,
             },
@@ -5769,24 +5793,50 @@ mod tests {
             .to_string();
         assert!(error.contains("already attached"), "{error}");
 
+        let same_identity = [
+            RawHostDisk {
+                device: "old-ordinal".to_string(),
+                fingerprint: Some("v1-same-hardware".to_string()),
+                identity_confirmed: false,
+                attach: Some("ide-master".to_string()),
+                read_only: Some(true),
+            },
+            RawHostDisk {
+                device: "new-ordinal".to_string(),
+                fingerprint: Some("v1-same-hardware".to_string()),
+                identity_confirmed: false,
+                attach: Some("ide-slave".to_string()),
+                read_only: Some(true),
+            },
+        ];
+        let error = parse_host_disks(&same_identity, &ide, &scsi, true, false)
+            .expect_err("one fingerprint cannot become two guest drives")
+            .to_string();
+        assert!(error.contains("one disk cannot be two drives"), "{error}");
+
         // Two different disks on two slots is the ordinary case.
         let separately = [
             RawHostDisk {
                 device: "sdb".to_string(),
+                fingerprint: None,
+                identity_confirmed: false,
                 attach: Some("ide-master".to_string()),
                 read_only: None,
             },
             RawHostDisk {
                 device: "sdc".to_string(),
+                fingerprint: None,
+                identity_confirmed: false,
                 attach: Some("ide-slave".to_string()),
                 read_only: None,
             },
         ];
-        assert_eq!(
-            parse_host_disks(&separately, &ide, &scsi, true, false)
-                .expect("two disks, two slots")
-                .len(),
-            2
+        let parsed =
+            parse_host_disks(&separately, &ide, &scsi, true, false).expect("two disks, two slots");
+        assert_eq!(parsed.len(), 2);
+        assert!(
+            parsed.iter().all(|disk| !disk.writable),
+            "an omitted physical-disk access mode is safely read-only"
         );
     }
 
@@ -7712,9 +7762,9 @@ mod tests {
         Ok(())
     }
 
-    /// CD images (cue sheets and bare ISOs) are recognised by extension:
-    /// they attach as SCSI CD-ROM drives, and the ATA-only IDE port
-    /// rejects them.
+    /// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
+    /// they attach as SCSI CD-ROM drives, and the ATA-only IDE port rejects
+    /// them.
     #[test]
     fn cd_images_fit_scsi_units_but_not_the_ide_port() -> Result<()> {
         assert!(is_cd_image_path(Path::new("games/Disc.CUE")));

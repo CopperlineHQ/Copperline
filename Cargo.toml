@@ -92,8 +92,8 @@ net-nat = ["dep:smoltcp"]
 net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
-# Real floppy drives through FluxBridge (src/fluxbridge/): a DrawBridge,
-# Greaseweazle, or Supercard Pro standing in for a disk image on any drive.
+# Real floppy drives through FluxBridge (src/fluxbridge/): the Greaseweazle
+# driver enabled on the dependency below stands in for a disk image on any bay.
 # FluxBridge is a pure-Rust library, so there is nothing to install and no C++
 # in the build. Off, none of it is built, which is what browser builds
 # (--no-default-features) want.
@@ -134,7 +134,7 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # changing this is a savestate::STATE_VERSION bump, not a routine update.
 # Track an LTS line (24.x, 36.x, 48.x, ...): those keep receiving security
 # backports, which the line this was previously pinned to (27.x) did not.
-wasmtime = { version = "=36.0.12", default-features = false, features = ["cranelift", "runtime"], optional = true }
+wasmtime = { version = "=36.0.13", default-features = false, features = ["cranelift", "runtime"], optional = true }
 # Non-blocking connect + cross-platform socket options for the `host_sockets`
 # wasm-plugin capability (src/wasmboard.rs): the host-socket backend for the
 # bundled HostSocket board (`[hostsocket] net = "host"`). Pure Rust wrapper
@@ -182,6 +182,11 @@ pcap = { version = "2.4", optional = true }
 # from a trusted system directory only when selected, so NAT-only installs do
 # not acquire a runtime DLL dependency.
 libloading = { version = "0.8", optional = true }
+# HostSocket's direct host-socket backend uses WSAPoll for real listener and
+# connect/read/write readiness. This is the Windows counterpart of poll(2);
+# in particular it can report a queued connection on a listening socket,
+# which MSG_PEEK cannot.
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 # Optional realtime-priority feature: cross-platform thread scheduling control.
 # Only used off macOS -- the macOS path uses the libc pthread QoS API directly

@@ -69,6 +69,7 @@ project:
         - guide/ui.md
         - guide/fluxbridge.md
         - guide/host-disks.md
+        - guide/mt32.md
         - guide/headless.md
         - guide/browser.md
         - zorro.md

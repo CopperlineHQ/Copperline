@@ -64,6 +64,10 @@ install -Dm644 assets/aros/LICENSE \
 # without naming a ROM); romsearch.rs looks under share/copperline/a4091.
 install -Dm644 assets/a4091/a4091_cdfs.rom \
   "$appdir/usr/share/copperline/a4091/a4091_cdfs.rom"
+install -Dm644 assets/a4091/README.md \
+  "$appdir/usr/share/copperline/a4091/README.md"
+install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt \
+  "$appdir/usr/share/copperline/a4091/THIRD_PARTY_NOTICES.txt"
 
 # Desktop integration metadata, shared with the Flatpak build.
 install -Dm644 "$flatpak_meta/dev.copperline.Copperline.desktop" \

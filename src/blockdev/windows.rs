@@ -429,6 +429,8 @@ extern "system" {
         length: u32,
         returned: *mut u32,
     ) -> i32;
+    #[link_name = "SystemFunction036"]
+    fn RtlGenRandom(buffer: *mut c_void, length: u32) -> u8;
 }
 
 #[link(name = "cfgmgr32")]
@@ -960,11 +962,12 @@ fn describe(interface: &str, volumes: &[Volume], system: Option<&[u32]>) -> Opti
     // The strings sit past the end of the struct in the same buffer, so the
     // buffer has to be bigger than the struct.
     let mut descriptor = vec![0u8; 1024];
-    let (model, removable, bus_type) =
+    let (model, serial, removable, bus_type) =
         match query_property(&device, STORAGE_DEVICE_PROPERTY, &mut descriptor) {
             Ok(_) => {
                 let vendor_at = std::mem::offset_of!(StorageDeviceDescriptor, vendor_id_offset);
                 let product_at = std::mem::offset_of!(StorageDeviceDescriptor, product_id_offset);
+                let serial_at = std::mem::offset_of!(StorageDeviceDescriptor, serial_number_offset);
                 let removable_at = std::mem::offset_of!(StorageDeviceDescriptor, removable_media);
                 let bus_at = std::mem::offset_of!(StorageDeviceDescriptor, bus_type);
                 let offset = |at: usize| {
@@ -975,13 +978,14 @@ fn describe(interface: &str, volumes: &[Volume], system: Option<&[u32]>) -> Opti
                         descriptor_string(&descriptor, offset(vendor_at)),
                         descriptor_string(&descriptor, offset(product_at)),
                     ),
+                    descriptor_string(&descriptor, offset(serial_at)),
                     descriptor[removable_at] != 0,
                     u32::from_ne_bytes(descriptor[bus_at..bus_at + 4].try_into().expect("4 bytes")),
                 )
             }
             Err(error) => {
                 log::debug!("blockdev: {id} did not describe itself: {error}");
-                (None, false, 0)
+                (None, None, false, 0)
             }
         };
 
@@ -996,6 +1000,7 @@ fn describe(interface: &str, volumes: &[Volume], system: Option<&[u32]>) -> Opti
         id,
         path: PathBuf::from(path),
         model,
+        serial,
         size_bytes,
         block_size: logical_sector_size(&device),
         removable,
@@ -1108,17 +1113,52 @@ fn explain_open_failure(error: &std::io::Error, device: &HostDevice) -> anyhow::
 
 /// Where the privileged half leaves its answer.
 ///
-/// The handle numbers in it are meaningless anywhere but this process -- they
-/// name entries in *this* process's handle table, put there by the child --
-/// so the file carries nothing worth protecting.
-fn handoff_path() -> PathBuf {
-    let token = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    std::env::temp_dir().join(format!(
-        "copperline-hostdisk-{}-{token:x}.handoff",
-        std::process::id()
-    ))
+/// Handle numbers name entries in this process's table, so accepting a forged
+/// answer could close or misuse an unrelated live handle. The parent creates a
+/// unique file without replacement and authenticates its contents with a
+/// cryptographically random nonce before taking ownership of any number in it.
+fn handoff_file() -> Result<(PathBuf, String)> {
+    for _ in 0..8 {
+        let mut random = [0u8; 32];
+        if unsafe { RtlGenRandom(random.as_mut_ptr().cast(), random.len() as u32) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("creating a handoff nonce");
+        }
+        let nonce: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let path = std::env::temp_dir().join(format!(
+            "copperline-hostdisk-{}-{nonce}.handoff",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok((path, nonce)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!("could not create a unique privileged-disk handoff file")
+}
+
+struct HandoffFile(PathBuf);
+
+impl Drop for HandoffFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn authenticate_answer<'a>(answer: &'a str, nonce: &str) -> Result<&'a str> {
+    let (header, body) = answer
+        .split_once('\n')
+        .context("the privileged answer has no authentication header")?;
+    if header != format!("nonce {nonce}") {
+        anyhow::bail!("the privileged answer did not authenticate this request");
+    }
+    Ok(body)
 }
 
 /// Copy an open handle into another process, and say what it is called there.
@@ -1174,7 +1214,11 @@ fn close_in(target: Handle, handle: usize) {
 /// Read each disk's line of the privileged half's answer: the identifier and
 /// then its handles, the disk's own first, as hexadecimal handle numbers in
 /// this process's table.
-fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
+fn parse_answer_with<T>(
+    answer: &str,
+    mut adopt: impl FnMut(usize) -> Result<T>,
+) -> Result<Vec<(String, Vec<T>)>> {
+    let mut owned_raw = std::collections::BTreeSet::new();
     let mut opened = Vec::new();
     for line in broker_protocol::parse_answer(answer)? {
         let mut parts = line.split_whitespace();
@@ -1182,12 +1226,21 @@ fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
             .next()
             .context("a line of handles with no disk to belong to")?
             .to_string();
-        let handles: Vec<usize> = parts
-            .map(|value| {
-                usize::from_str_radix(value, 16)
-                    .map_err(|_| anyhow::anyhow!("{value} is not a handle"))
-            })
-            .collect::<Result<_>>()?;
+        let mut handles = Vec::new();
+        for value in parts {
+            let raw = usize::from_str_radix(value, 16)
+                .map_err(|_| anyhow::anyhow!("{value} is not a handle"))?;
+            if raw == 0 || raw == INVALID_HANDLE_VALUE as usize {
+                anyhow::bail!("{value} is not a valid handle");
+            }
+            if !owned_raw.insert(raw) {
+                anyhow::bail!("the same handle was returned more than once");
+            }
+            // Authentication is checked before this parser runs. Own each
+            // handle immediately so every later parse/validation error closes
+            // all numbers the child placed in this process's table.
+            handles.push(adopt(raw)?);
+        }
         // The disk itself is always the first handle, so a disk named with
         // none of them is an answer that cannot be acted on.
         if handles.is_empty() {
@@ -1196,6 +1249,12 @@ fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
         opened.push((id, handles));
     }
     Ok(opened)
+}
+
+fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<OwnedHandle>)>> {
+    parse_answer_with(answer, |raw| {
+        Ok(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+    })
 }
 
 /// Ask for every disk at once, through a single moment of Administrator.
@@ -1218,22 +1277,19 @@ fn parse_answer(answer: &str) -> Result<Vec<(String, Vec<usize>)>> {
 /// somebody attaching a disk mid-session does not want.
 fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
     let exe = std::env::current_exe().context("finding this program to run again with consent")?;
-    let reply = handoff_path();
+    let (reply, nonce) = handoff_file()?;
+    let _cleanup = HandoffFile(reply.clone());
     let asked: Vec<String> = wanted
         .iter()
-        .map(|(device, write)| broker_protocol::argument(&device.id, *write))
+        .map(|(device, write)| broker_protocol::argument(&device.id, &device.fingerprint(), *write))
         .collect();
     let parameters = format!(
-        "{BROKER_FLAG} {} \"{}\" {}",
+        "{BROKER_FLAG} {} \"{}\" {} {}",
         std::process::id(),
         reply.display(),
+        nonce,
         asked.join(" ")
     );
-
-    // Nothing of an earlier attempt may be left where the answer goes: a
-    // privileged half that dies before writing must read as silence, not as
-    // whatever was there before.
-    let _ = std::fs::remove_file(&reply);
 
     let verb = wide("runas");
     let file = wide(&exe.to_string_lossy());
@@ -1273,25 +1329,30 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Hel
              could open the disk"
         )
     })?;
-    let _ = std::fs::remove_file(&reply);
-    let opened = parse_answer(&answer)?;
+    let opened = parse_answer(authenticate_answer(&answer, &nonce)?)?;
+
+    if opened.len() != wanted.len() {
+        anyhow::bail!(
+            "{} disks were asked for but {} came back",
+            wanted.len(),
+            opened.len()
+        );
+    }
 
     let mut taken = Vec::new();
-    for (id, handles) in opened {
-        let mut handles = handles.into_iter().map(|raw| {
-            // Safe only because the numbers were put in this process's handle
-            // table by the child; what the first one names is checked below.
-            unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) }
-        });
+    for ((id, handles), (wanted_device, _)) in opened.into_iter().zip(wanted) {
+        if id != wanted_device.id {
+            anyhow::bail!("{id} was opened where {} was requested", wanted_device.id);
+        }
+        let mut handles = handles.into_iter();
         let disk = handles.next().expect("parse_answer refuses an empty list");
         // What came back is trusted only as far as it can be checked: these
         // are handle numbers read out of a file, and the first should name the
         // disk it was asked for.
-        if device_number(&disk) != disk_number_of(&id) {
+        let current =
+            super::resolve_device_for_attach(&id, Some(&wanted_device.fingerprint()), true)?;
+        if device_number(&disk) != disk_number_of(&current.id) {
             anyhow::bail!("{id}: what came back is not that disk, so it will not be used");
-        }
-        if !wanted.iter().any(|(device, _)| device.id == id) {
-            anyhow::bail!("{id} was opened but never asked for");
         }
         taken.push((
             id,
@@ -1315,7 +1376,12 @@ fn open_through_broker(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Hel
 /// One disk it will not open fails the whole request. They were asked for
 /// together, and half a machine's disks is not what anybody pressed the button
 /// for.
-pub fn serve_broker_request(asked: &[String], parent_process_id: u32, reply: &Path) -> Result<()> {
+pub fn serve_broker_request(
+    asked: &[String],
+    parent_process_id: u32,
+    reply: &Path,
+    nonce: &str,
+) -> Result<()> {
     let outcome = asked
         .iter()
         .map(|argument| {
@@ -1324,7 +1390,7 @@ pub fn serve_broker_request(asked: &[String], parent_process_id: u32, reply: &Pa
         })
         .collect::<Result<Vec<_>>>()
         .and_then(|wanted| broker_open(&wanted, parent_process_id));
-    let answer = match &outcome {
+    let body = match &outcome {
         Ok(opened) => {
             let mut answer = String::from("ok\n");
             for (id, handles) in opened {
@@ -1336,35 +1402,41 @@ pub fn serve_broker_request(asked: &[String], parent_process_id: u32, reply: &Pa
         }
         Err(error) => format!("error {error:#}"),
     };
-    std::fs::write(reply, answer)
+    let answer = format!("nonce {nonce}\n{body}");
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(reply)
+        .with_context(|| format!("opening the answer file {}", reply.display()))?;
+    file.write_all(answer.as_bytes())
         .with_context(|| format!("writing the answer to {}", reply.display()))?;
     outcome.map(|_| ())
 }
 
 fn broker_open(
-    asked: &[(String, bool)],
+    asked: &[(String, String, bool)],
     parent_process_id: u32,
 ) -> Result<Vec<(String, Vec<usize>)>> {
     // Every disk is opened before any of them is handed over, so a request
     // that cannot be met in full is refused having taken nothing: the volumes
     // go back to the host as these handles drop on the way out.
     let mut opened = Vec::new();
-    for (id, write) in asked {
+    for (id, fingerprint, write) in asked {
         // Re-applied here rather than inherited: this half runs as
         // Administrator, so it is the last place that can refuse the disk the
         // host is running from, and it must not depend on the unprivileged
         // half having asked nicely. It asks the same question that half does
         // rather than a hand-copied likeness of it -- a rule added there has
         // to reach the half that can actually damage the medium.
-        let device = super::find_device(id)?
-            .ok_or_else(|| anyhow::anyhow!("no host disk called {id} is attached"))?;
+        let device = super::resolve_device_for_attach(id, Some(fingerprint), true)?;
         super::refuse_if_unusable(&device, *write)?;
         let disk = open_disk_node(&device, *write)
             .map_err(|error| explain_open_failure(&error, &device))?;
         let number = disk_number_of(&device.id)
             .with_context(|| format!("{} is not a physical disk name", device.id))?;
         let volumes = take_volumes(number, &device.id)?;
-        opened.push((device.id.clone(), disk, volumes));
+        opened.push((id.clone(), disk, volumes));
     }
 
     let parent = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, parent_process_id) };
@@ -1535,6 +1607,7 @@ pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<supe
     Ok(super::BlockDevice::new(
         std::fs::File::from(disk),
         device.id.clone(),
+        device.fingerprint(),
         device.block_size,
         size_bytes,
         write,
@@ -1654,12 +1727,18 @@ mod tests {
     fn only_a_well_formed_answer_becomes_handles() {
         // One disk, and its volumes after it.
         assert_eq!(
-            parse_answer("ok\nPhysicalDrive1 1a4 2b8\n").unwrap(),
+            parse_answer_with("ok\nPhysicalDrive1 1a4 2b8\n", |raw| {
+                Ok::<usize, anyhow::Error>(raw)
+            })
+            .unwrap(),
             vec![("PhysicalDrive1".to_string(), vec![0x1a4, 0x2b8])]
         );
         // Several disks from the one consent, each on its own line.
         assert_eq!(
-            parse_answer("ok\nPhysicalDrive1 40\nPhysicalDrive3 50 60\n").unwrap(),
+            parse_answer_with("ok\nPhysicalDrive1 40\nPhysicalDrive3 50 60\n", |raw| {
+                Ok::<usize, anyhow::Error>(raw)
+            })
+            .unwrap(),
             vec![
                 ("PhysicalDrive1".to_string(), vec![0x40]),
                 ("PhysicalDrive3".to_string(), vec![0x50, 0x60]),
@@ -1667,8 +1746,11 @@ mod tests {
         );
 
         // A refusal it explained reaches the user in its own words.
-        let refused = parse_answer("error PhysicalDrive0 is the disk this computer runs from")
-            .expect_err("a refusal is not a success");
+        let refused = parse_answer_with(
+            "error PhysicalDrive0 is the disk this computer runs from",
+            |raw| Ok::<usize, anyhow::Error>(raw),
+        )
+        .expect_err("a refusal is not a success");
         assert!(refused.to_string().contains("runs from"), "{refused}");
 
         for nonsense in [
@@ -1683,10 +1765,19 @@ mod tests {
             "PhysicalDrive1 1a4",
         ] {
             assert!(
-                parse_answer(nonsense).is_err(),
+                parse_answer_with(nonsense, |raw| Ok::<usize, anyhow::Error>(raw)).is_err(),
                 "{nonsense:?} must not become a handle"
             );
         }
+        assert!(parse_answer_with("ok\nPhysicalDrive1 40 40\n", |raw| {
+            Ok::<usize, anyhow::Error>(raw)
+        })
+        .is_err());
+        assert_eq!(
+            authenticate_answer("nonce secret\nok\nPhysicalDrive1 40\n", "secret").unwrap(),
+            "ok\nPhysicalDrive1 40\n"
+        );
+        assert!(authenticate_answer("nonce forged\nok\n", "secret").is_err());
     }
 
     /// Enumeration must work unprivileged and with nothing plugged in: it is

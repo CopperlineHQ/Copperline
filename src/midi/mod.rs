@@ -756,6 +756,34 @@ impl SerialSink for MidiSerialSink {
         self.anchor = Some(anchor);
     }
 
+    fn reset_after_timeline_jump(&mut self) {
+        // Host MIDI is outside the serialized machine. Do not carry a
+        // half-framed output message or an old host-time anchor into the
+        // restored timeline. Incoming bytes are live host input, not emulated
+        // future state, so leave that queue connected.
+        self.anchor = None;
+        self.framer = MidiFramer::default();
+
+        #[cfg(feature = "mt32")]
+        {
+            // mt32-rs does not expose a snapshot of its voices, memory,
+            // display, MIDI parser, analogue filters or resampler. Carrying
+            // the live engine across a load is worse than restarting it: it
+            // keeps notes and edits made in the abandoned future. Preserve
+            // the host wiring and power choice, but power-cycle a running
+            // module and discard every pending reply.
+            let powered = self.mt32.take().is_some();
+            self.stop_answering();
+            if powered {
+                log::info!(
+                    "midi: timeline changed; power-cycling {MIDI_OUT_MT32_LABEL} \
+                     because synthesizer state is not serializable"
+                );
+                self.attach_mt32();
+            }
+        }
+    }
+
     fn as_midi(&mut self) -> Option<&mut MidiSerialSink> {
         Some(self)
     }
@@ -821,5 +849,51 @@ mod tests {
     #[test]
     fn stray_data_byte_without_status_is_dropped() {
         assert!(frame(&[0x3C, 0x64]).is_empty());
+    }
+
+    #[test]
+    fn timeline_jump_discards_host_midi_partial_state_and_mt32_replies() {
+        use crate::serial::SerialSink;
+
+        let mut sink = MidiSerialSink::open(None, None).expect("MIDI sink");
+        sink.anchor = Some(SerialTimeAnchor {
+            host_epoch: Instant::now(),
+            cck_per_second: 1.0,
+        });
+        let mut emitted = Vec::new();
+        sink.framer.push(0x90, Instant::now(), |msg, _| {
+            emitted.push(msg.to_vec());
+        });
+        assert!(emitted.is_empty(), "status alone is an incomplete message");
+
+        #[cfg(feature = "mt32")]
+        {
+            sink.mt32_selected = true;
+            sink.mt32_input = true;
+            sink.mt32_reply.extend([0xF0, 0xF7]);
+        }
+
+        sink.reset_after_timeline_jump();
+        assert!(sink.anchor.is_none(), "the old host-time anchor is gone");
+
+        emitted.clear();
+        sink.framer.push(0x3C, Instant::now(), |msg, _| {
+            emitted.push(msg.to_vec());
+        });
+        sink.framer.push(0x64, Instant::now(), |msg, _| {
+            emitted.push(msg.to_vec());
+        });
+        assert!(
+            emitted.is_empty(),
+            "data bytes cannot complete the abandoned timeline's message"
+        );
+
+        #[cfg(feature = "mt32")]
+        {
+            assert!(sink.mt32_selected, "host output selection survives");
+            assert!(sink.mt32_input, "host input wiring survives");
+            assert!(sink.mt32.is_none(), "a powered-off module stays off");
+            assert!(sink.mt32_reply.is_empty(), "old replies are discarded");
+        }
     }
 }

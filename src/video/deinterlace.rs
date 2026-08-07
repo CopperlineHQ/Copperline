@@ -210,10 +210,15 @@ impl Deinterlacer {
         self.out_width
     }
 
-    /// Decay the presented frame towards the freshly woven one: each
-    /// channel keeps `phosphor_alpha`/256 of its previous value, an
-    /// exponential trail like CRT phosphor persistence.
-    fn present_with_phosphor(&mut self) {
+    /// Decay the presented frame towards the freshly woven one across
+    /// `fields` elapsed fields. Each field keeps `phosphor_alpha`/256 of
+    /// its previous value, an exponential trail like CRT persistence.
+    /// Combining the exponent into one blend keeps a long-deferred browser
+    /// presentation O(pixels), not O(pixels * hidden fields).
+    fn present_with_phosphor_elapsed(&mut self, fields: u32) {
+        if fields == 0 {
+            return;
+        }
         let Some(presented) = &mut self.presented else {
             return;
         };
@@ -223,13 +228,17 @@ impl Deinterlacer {
             self.seed_presented = false;
             return;
         }
-        let a = self.phosphor_alpha;
+        let a = elapsed_phosphor_alpha(self.phosphor_alpha, fields);
         for (shown, &new) in presented[..active]
             .iter_mut()
             .zip(self.out[..active].iter())
         {
             *shown = blend_rgba(new, *shown, a);
         }
+    }
+
+    fn present_with_phosphor(&mut self) {
+        self.present_with_phosphor_elapsed(1);
     }
 
     /// Merge one rendered field of `rows` lines. `lace` and `long_field`
@@ -397,6 +406,35 @@ impl Deinterlacer {
         double_rows: bool,
         destination: &mut Vec<u32>,
     ) -> (usize, usize) {
+        self.present_field_into_elapsed(
+            field,
+            rows,
+            width,
+            lace,
+            long_field,
+            double_rows,
+            1,
+            destination,
+        )
+    }
+
+    /// [`Self::present_field_into`] with the number of emulated fields that
+    /// elapsed since the previous presentation. Frontends that deliberately
+    /// defer rendering use this to age phosphor persistence by every skipped
+    /// field while rendering only the newest image.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_field_into_elapsed(
+        &mut self,
+        field: &[u32],
+        rows: usize,
+        width: usize,
+        lace: bool,
+        long_field: bool,
+        double_rows: bool,
+        elapsed_fields: u32,
+        destination: &mut Vec<u32>,
+    ) -> (usize, usize) {
         let rows = rows.clamp(1, MAX_VISIBLE_LINES);
         debug_assert!(field.len() >= rows * width);
         let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
@@ -427,6 +465,7 @@ impl Deinterlacer {
         }
 
         self.push_field(field, rows, width, lace, long_field, double_rows);
+        self.present_with_phosphor_elapsed(elapsed_fields.max(1) - 1);
         let active = self.out_rows * self.out_width;
         destination.resize(active, 0);
         destination.copy_from_slice(&self.output()[..active]);
@@ -460,6 +499,43 @@ impl Deinterlacer {
         destination_rows: usize,
         destination: &mut Vec<u32>,
     ) -> (usize, usize) {
+        self.present_field_region_into_elapsed(
+            field,
+            rows,
+            width,
+            lace,
+            long_field,
+            double_rows,
+            source_x,
+            source_y,
+            source_rows,
+            destination_width,
+            destination_rows,
+            1,
+            destination,
+        )
+    }
+
+    /// [`Self::present_field_region_into`] with elapsed-field phosphor aging,
+    /// for a frontend that deferred intermediate presentations.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_field_region_into_elapsed(
+        &mut self,
+        field: &[u32],
+        rows: usize,
+        width: usize,
+        lace: bool,
+        long_field: bool,
+        double_rows: bool,
+        source_x: usize,
+        source_y: usize,
+        source_rows: usize,
+        destination_width: usize,
+        destination_rows: usize,
+        elapsed_fields: u32,
+        destination: &mut Vec<u32>,
+    ) -> (usize, usize) {
         let rows = rows.clamp(1, MAX_VISIBLE_LINES);
         debug_assert!(field.len() >= rows * width);
         let doubled = lace || double_rows;
@@ -479,6 +555,7 @@ impl Deinterlacer {
             self.out_width = width;
         } else {
             self.push_field(field, rows, width, lace, long_field, double_rows);
+            self.present_with_phosphor_elapsed(elapsed_fields.max(1) - 1);
         }
 
         destination.resize(destination_width * destination_rows, 0);
@@ -518,6 +595,15 @@ fn blend_rgba(new: u32, old: u32, a: u32) -> u32 {
     let ag =
         ((((new >> 8) & 0x00FF_00FF) * na + ((old >> 8) & 0x00FF_00FF) * a) >> 8) & 0x00FF_00FF;
     (ag << 8) | rb
+}
+
+/// Effective old-frame coefficient after `fields` identical persistence
+/// blends, kept in the deinterlacer's 8-bit fixed-point convention.
+fn elapsed_phosphor_alpha(alpha: u32, fields: u32) -> u32 {
+    if fields <= 1 {
+        return alpha;
+    }
+    (((alpha as f64 / 256.0).powf(f64::from(fields)) * 256.0).round() as u32).min(255)
 }
 
 #[cfg(test)]
@@ -838,6 +924,37 @@ mod tests {
         assert_eq!(out_row(&d, 10), 0x007F_7F7F);
         d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
         assert_eq!(out_row(&d, 10), 0x003F_3F3F);
+    }
+
+    #[test]
+    fn deferred_fields_advance_phosphor_before_the_latest_presentation() {
+        let mut d = Deinterlacer::with_options(true, 0.5);
+        let bright = field_filled_rows(|_| 0x00FF_FFFF);
+        let black = field_filled_rows(|_| 0);
+        let mut destination = Vec::new();
+
+        d.present_field_into_elapsed(
+            &bright,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            1,
+            &mut destination,
+        );
+        d.present_field_into_elapsed(
+            &black,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            3,
+            &mut destination,
+        );
+
+        assert_eq!(destination[10 * FB_WIDTH], 0x001F_1F1F);
     }
 
     #[test]

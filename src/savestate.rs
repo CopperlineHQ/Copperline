@@ -170,7 +170,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      at the device's path. Loading a 48 state that had one would reopen
 //      the raw node as an ordinary file -- read-write whatever it was
 //      attached as, and past the checks that refuse the host's own disk
-pub const STATE_VERSION: u32 = 49;
+//  50: HostDiskState gained a stable hardware fingerprint and defers raw-media
+//      acquisition until the complete state has decoded. Wasmtime also moved
+//      from 36.0.12 to the security-fixed 36.0.13; plugin snapshots replay
+//      through that runtime, so states from the older codegen are refused.
+pub const STATE_VERSION: u32 = 50;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -182,6 +186,16 @@ pub fn auto_filename() -> std::path::PathBuf {
 /// number-row keys `1`..`9`, `0`.
 pub const SLOT_COUNT: usize = 10;
 
+/// Resolve a numbered quick-save slot below an explicit state directory.
+/// Keeping this separate from host-directory discovery lets frontends and
+/// tests inject an isolated slot root without changing process-global path
+/// state.
+pub(crate) fn slot_path_in(dir: &Path, slot: usize) -> Option<std::path::PathBuf> {
+    (1..=SLOT_COUNT)
+        .contains(&slot)
+        .then(|| dir.join(format!("slot{slot}.clstate")))
+}
+
 /// File backing quick-save slot `slot` (1-based, `1..=SLOT_COUNT`). `None`
 /// when the host offers no per-user directory to keep them in.
 ///
@@ -192,10 +206,7 @@ pub const SLOT_COUNT: usize = 10;
 /// state carries its own [`MachineDescriptor`], so loading a slot saved from
 /// a different machine is caught and reported rather than silently wrong.
 pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
-    (1..=SLOT_COUNT)
-        .contains(&slot)
-        .then(|| crate::paths::state_slot_dir().map(|dir| dir.join(format!("slot{slot}.clstate"))))
-        .flatten()
+    crate::paths::state_slot_dir().and_then(|dir| slot_path_in(&dir, slot))
 }
 
 /// Write the machine's emulated state to `path`, stamped with `descriptor`

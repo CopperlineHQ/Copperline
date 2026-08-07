@@ -332,6 +332,9 @@ jobs:
         # step never reaches it.
         working-directory: crates/copperline-web
         run: cargo fmt --check
+      - name: Browser page controller tests
+        working-directory: crates/copperline-web/www
+        run: npm test
 
   docs:
     name: Docs build (HTML + PDF)

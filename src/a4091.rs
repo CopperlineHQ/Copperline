@@ -262,6 +262,24 @@ impl A4091 {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
+        out.extend(
+            self.targets
+                .iter()
+                .flatten()
+                .filter_map(ScsiTarget::pending_host_disk),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disks(&mut self) -> anyhow::Result<()> {
+        for target in self.targets.iter_mut().flatten() {
+            target.materialize_host_disk()?;
+        }
+        Ok(())
+    }
+
     /// The lowest-ID CD-ROM drive on the board's bus, when one is attached.
     pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)

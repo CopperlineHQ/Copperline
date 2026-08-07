@@ -1348,17 +1348,32 @@ as it is, with its own RDB, partitions, and filesystem.
 
 ```toml
 [[host_disk]]
-device = "sdb"            # as `--list-disks` prints it
-attach = "ide-master"     # ide-master (default), ide-slave, or scsi0..scsi6
-read_only = true          # absent means writable
+device = "sdb"                 # last name shown by `--list-disks`
+fingerprint = "v1-..."         # opaque identity written by the launcher
+attach = "ide-master"          # ide-master (default), ide-slave, or scsi0..scsi6
+read_only = true               # the default; false explicitly allows writes
 ```
 
-`device` is the host's stable identifier for the hardware -- `sdb` on Linux,
-`disk4` on macOS, `PhysicalDrive1` on Windows -- rather than a node path,
-which belongs to this boot and not to the disk. `copperline --list-disks`
-prints them, and `--host-disk DEVICE [ATTACH]` (or `--host-disk-read-only`)
-is the command-line equivalent. A disk named here that is not plugged in
-leaves that drive slot empty and the machine starts anyway.
+`device` is the host's current enumeration name -- `sdb` on Linux, `disk4` on
+macOS, `PhysicalDrive1` on Windows -- and `copperline --list-disks` prints it.
+Those names can change between boots. A launcher-saved `fingerprint` is
+authoritative and lets Copperline follow the same hardware to a changed name
+only when exactly one attached disk matches; a missing or ambiguous match is
+refused. Keep this opaque value as written. Older and hand-written entries
+without it retain exact `device` lookup. To record one, select and mount the
+disk afresh in the launcher, then save or launch; a plain open-and-save keeps
+the field absent. An unambiguous fingerprint is sufficient for read-only use.
+Persisted writable use additionally requires a fixed, non-removable disk with
+a credible serial/WWN: removable media is considered weak even when a USB
+bridge reports its own serial, and must be freshly selected for each writable
+session, as must a fixed disk without a credible serial/WWN.
+
+Absent `read_only` means read-only, including for older configurations that
+previously relied on the writable default. Set it to `false` explicitly to
+allow guest writes. The command-line equivalents make the access choice for
+the current run: `--host-disk DEVICE [ATTACH]` is read-write, while
+`--host-disk-read-only` is protected. An unresolved disk leaves that drive
+slot empty and the machine starts anyway.
 
 The disk this computer is running from is never offered and never opened,
 whatever is written here, and no RDB is synthesised over a disk that has

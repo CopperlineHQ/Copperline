@@ -115,14 +115,20 @@ impl Safety {
 /// Everything here is gathered without opening the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostDevice {
-    /// Stable platform identifier, as a configuration file names it
-    /// (`disk4` on macOS, `sdb` on Linux, `PhysicalDrive1` on Windows).
+    /// Current platform identifier (`disk4`, `sdb`, `PhysicalDrive1`). This is
+    /// useful for display and exact lookup, but the OS ordinal may change; use
+    /// [`Self::fingerprint`] for persisted identity.
     pub id: String,
     /// The node to open for raw access. Not necessarily `/dev/<id>`: macOS
     /// prefers the unbuffered character device, `/dev/rdisk4`.
     pub path: PathBuf,
     /// Model as the hardware reports it, when it reports one.
     pub model: Option<String>,
+    /// Hardware/transport serial when the device reports one. This is not a
+    /// display name: it is the stable part of the identity used to recognise a
+    /// configured or save-stated disk after volatile `diskN`/`sdX`/
+    /// `PhysicalDriveN` numbering changes.
+    pub serial: Option<String>,
     /// Capacity in bytes.
     pub size_bytes: u64,
     /// The media's own block size. Often 512, increasingly 4096. Transfers
@@ -143,6 +149,68 @@ pub struct HostDevice {
 }
 
 impl HostDevice {
+    /// An opaque hardware fingerprint suitable for a config file or save state.
+    ///
+    /// A serial is preferred, but not every card reader exposes the medium's
+    /// serial. Capacity, logical block size and model stay in the token too:
+    /// they often catch a different medium behind the same reader, and make
+    /// the serial-less fallback useful for read-only matching. Such weak
+    /// fingerprints never authorize persisted writes; resolution refuses an
+    /// ambiguous fallback rather than guessing between identical devices.
+    pub fn fingerprint(&self) -> String {
+        fn hex(bytes: &[u8]) -> String {
+            const DIGITS: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                out.push(DIGITS[usize::from(byte >> 4)] as char);
+                out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+            }
+            out
+        }
+
+        let normalize = |value: Option<&str>| {
+            value
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        };
+        let serial = normalize(self.serial.as_deref());
+        let model = normalize(self.model.as_deref());
+        format!(
+            "v1-{:x}-{:x}-{}-{}",
+            self.size_bytes,
+            self.block_size,
+            hex(serial.as_bytes()),
+            hex(model.as_bytes())
+        )
+    }
+
+    /// Whether this disk exposes an identity that distinguishes replacement
+    /// media of the same model and capacity. Model/geometry remain useful for
+    /// refusing a mismatch, but are not authorization to write after a restart.
+    pub fn has_stable_identity(&self) -> bool {
+        // A removable drive's serial commonly belongs to the USB reader, not
+        // the card inside it. It remains a useful read-only mismatch guard but
+        // can never authorize writing to replacement media after a restart.
+        if self.removable {
+            return false;
+        }
+        let Some(serial) = self.serial.as_deref() else {
+            return false;
+        };
+        let compact = serial
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        compact.len() >= 4
+            && !matches!(compact.as_str(), "unknown" | "none" | "na" | "notavailable")
+            && compact.chars().any(|character| character != '0')
+            && compact.chars().any(|character| character != 'f')
+    }
+
     /// Capacity rounded for display: `2.0 TB`, `3.7 GB`, `512 MB`.
     ///
     /// Decimal units, because that is what the hardware is sold and labelled
@@ -210,6 +278,7 @@ impl HostDevice {
 pub struct BlockDevice {
     file: std::fs::File,
     id: String,
+    fingerprint: String,
     /// The media's block size, which every transfer must be a whole number of.
     block_size: u32,
     size_bytes: u64,
@@ -256,6 +325,7 @@ impl BlockDevice {
     pub(crate) fn new(
         file: std::fs::File,
         id: String,
+        fingerprint: String,
         block_size: u32,
         size_bytes: u64,
         writable: bool,
@@ -264,6 +334,7 @@ impl BlockDevice {
         Self {
             file,
             id,
+            fingerprint,
             block_size,
             size_bytes,
             writable,
@@ -289,6 +360,13 @@ impl BlockDevice {
     /// Which device this is, for logs and errors.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Hardware fingerprint recorded in configurations and save states. Unlike
+    /// `id`, this does not depend on the host's enumeration order; callers still
+    /// distinguish weak/removable fingerprints before authorizing writes.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
     }
 
     /// Capacity in 512-byte guest sectors.
@@ -353,7 +431,7 @@ impl BlockDevice {
                 self.refusal_reported = true;
                 log::warn!(
                     "blockdev: {} is attached read-only, so the guest's write to sector {lba} \
-                     was refused; tick R/W (or drop `read_only`) to let it write",
+                     was refused; tick R/W (or set `read_only = false`) to let it write",
                     self.id
                 );
             }
@@ -411,6 +489,7 @@ impl std::fmt::Debug for BlockDevice {
         formatter
             .debug_struct("BlockDevice")
             .field("id", &self.id)
+            .field("fingerprint", &self.fingerprint)
             .field("block_size", &self.block_size)
             .field("sectors", &self.total_sectors())
             .field("writable", &self.writable)
@@ -520,6 +599,20 @@ fn refuse_if_unusable(device: &HostDevice, write: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn refuse_unconfirmed_weak_write(
+    device: &HostDevice,
+    write: bool,
+    identity_confirmed: bool,
+) -> anyhow::Result<()> {
+    if write && !identity_confirmed && !device.has_stable_identity() {
+        anyhow::bail!(
+            "{} has no stable medium identity (removable media and serial-less disks cannot be distinguished from replacements), so a persisted attachment cannot safely be reopened writable; select it again in the launcher or attach it read-only",
+            device.id
+        );
+    }
+    Ok(())
+}
+
 /// One disk taken from the host and not yet given back.
 ///
 /// What "taken" physically is belongs to the backend -- a descriptor whose
@@ -529,6 +622,7 @@ fn refuse_if_unusable(device: &HostDevice, write: bool) -> anyhow::Result<()> {
 /// access is settled at open and a change of terms means taking it again.
 struct Reservation {
     id: String,
+    fingerprint: String,
     write: bool,
     held: platform::Held,
 }
@@ -551,12 +645,87 @@ fn reserved() -> std::sync::MutexGuard<'static, Vec<Reservation>> {
     RESERVED.lock().unwrap_or_else(|held| held.into_inner())
 }
 
+/// Reservation guard used while a decoded save state acquires physical disks.
+/// New holds are discarded if any later acquisition or host-resource attach
+/// fails, preserving `apply_state`'s all-or-nothing contract.
+#[derive(Debug)]
+pub(crate) struct ReservationTransaction {
+    before: Vec<(String, bool)>,
+    wanted: Vec<(String, bool)>,
+    active: bool,
+}
+
+impl ReservationTransaction {
+    pub(crate) fn begin(wanted: &[(String, String, bool)]) -> anyhow::Result<Self> {
+        let held = reserved();
+        for (_, fingerprint, write) in wanted {
+            if held
+                .iter()
+                .any(|entry| entry.fingerprint == *fingerprint && entry.write != *write)
+            {
+                anyhow::bail!(
+                    "a host disk is already reserved with different access; stop the machine before loading a state that changes its write access"
+                );
+            }
+        }
+        for (index, (_, fingerprint, _)) in wanted.iter().enumerate() {
+            if wanted[..index]
+                .iter()
+                .any(|(_, earlier, _)| earlier == fingerprint)
+            {
+                anyhow::bail!(
+                    "the state attaches one physical host disk to more than one guest slot"
+                );
+            }
+        }
+        Ok(Self {
+            before: held
+                .iter()
+                .map(|entry| (entry.fingerprint.clone(), entry.write))
+                .collect(),
+            wanted: wanted
+                .iter()
+                .map(|(_, fingerprint, write)| (fingerprint.clone(), *write))
+                .collect(),
+            active: true,
+        })
+    }
+
+    pub(crate) fn commit(mut self) {
+        self.active = false;
+    }
+
+    pub(crate) fn rollback(&mut self) {
+        if !self.active {
+            return;
+        }
+        let before = &self.before;
+        let wanted = &self.wanted;
+        reserved().retain(|entry| {
+            let existed = before.iter().any(|(fingerprint, write)| {
+                fingerprint == &entry.fingerprint && *write == entry.write
+            });
+            let belongs_to_transaction = wanted.iter().any(|(fingerprint, write)| {
+                fingerprint == &entry.fingerprint && *write == entry.write
+            });
+            existed || !belongs_to_transaction
+        });
+        self.active = false;
+    }
+}
+
+impl Drop for ReservationTransaction {
+    fn drop(&mut self) {
+        self.rollback();
+    }
+}
+
 /// Lend a reserved disk to a machine, if one is held on exactly these terms.
 fn lend_reserved(device: &HostDevice, write: bool) -> Option<BlockDevice> {
     let held = reserved();
-    let entry = held
-        .iter()
-        .find(|entry| entry.id == device.id && entry.write == write)?;
+    let entry = held.iter().find(|entry| {
+        entry.id == device.id && entry.fingerprint == device.fingerprint() && entry.write == write
+    })?;
     platform::lend(device, write, &entry.held)
         .map_err(|error| {
             log::warn!(
@@ -571,12 +740,22 @@ fn lend_reserved(device: &HostDevice, write: bool) -> Option<BlockDevice> {
 fn take_and_reserve(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
     let mut needed = Vec::new();
     for (device, write) in wanted {
+        let alias = reserved()
+            .iter()
+            .find(|held| held.fingerprint == device.fingerprint() && held.id != device.id)
+            .map(|held| held.id.clone());
+        if let Some(alias) = alias {
+            anyhow::bail!(
+                "{} is indistinguishable from a disk already reserved as {}; release it before attaching this ordinal",
+                device.id,
+                alias
+            );
+        }
         // Already held on the same terms is not a second ask: it is somebody
         // pressing Mount again, and the disk is already where they want it.
-        if reserved()
-            .iter()
-            .any(|held| held.id == device.id && held.write == *write)
-        {
+        if reserved().iter().any(|held| {
+            held.id == device.id && held.fingerprint == device.fingerprint() && held.write == *write
+        }) {
             continue;
         }
         // Held on other terms has to be taken again, since the access a
@@ -597,7 +776,17 @@ fn take_and_reserve(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
             .find(|(device, _)| device.id == id)
             .map(|(_, write)| *write)
             .ok_or_else(|| anyhow::anyhow!("{id} was taken but never asked for"))?;
-        store.push(Reservation { id, write, held });
+        let fingerprint = needed
+            .iter()
+            .find(|(device, _)| device.id == id)
+            .map(|(device, _)| device.fingerprint())
+            .ok_or_else(|| anyhow::anyhow!("{id} was taken but never asked for"))?;
+        store.push(Reservation {
+            id,
+            fingerprint,
+            write,
+            held,
+        });
     }
     let names: Vec<&str> = store.iter().map(|entry| entry.id.as_str()).collect();
     log::info!(
@@ -605,6 +794,21 @@ fn take_and_reserve(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
         names.join(", ")
     );
     reserved().extend(store);
+    Ok(())
+}
+
+fn refuse_duplicate_identities(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
+    for (index, (device, _)) in wanted.iter().enumerate() {
+        if wanted[..index]
+            .iter()
+            .any(|(earlier, _)| earlier.fingerprint() == device.fingerprint())
+        {
+            anyhow::bail!(
+                "{} has the same hardware identity as another selected disk; indistinguishable media cannot be attached twice",
+                device.id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -626,12 +830,17 @@ pub fn attaching_needs_privilege() -> bool {
 ///
 /// A disk the launcher already took is lent as it stands -- the permission
 /// for it was given at the Mount button, and asking again would raise a
-/// dialog for something this process is already holding. One nothing took
+/// dialog for something this process is already holding. A disk not taken
 /// yet (a machine run straight from a configuration) is taken now and kept,
 /// so this is the only time it is asked for: the machine stopping drops its
 /// copy, not the hold, and starting again finds the disk still in hand.
-pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevice> {
+pub fn open_device(
+    device: &HostDevice,
+    write: bool,
+    identity_confirmed: bool,
+) -> anyhow::Result<BlockDevice> {
     refuse_if_unusable(device, write)?;
+    refuse_unconfirmed_weak_write(device, write, identity_confirmed)?;
     if let Some(lent) = lend_reserved(device, write) {
         log::info!("blockdev: {} was already taken from the host", device.id);
         return Ok(lent);
@@ -654,13 +863,15 @@ pub fn open_device(device: &HostDevice, write: bool) -> anyhow::Result<BlockDevi
 /// somebody has to read, and one is enough for however many disks were
 /// ticked. This is also the whole list: anything held that is not on it was
 /// taken for a machine that is no longer being set up, and goes back.
-pub fn reserve_devices(disks: &[(String, bool)]) -> anyhow::Result<()> {
+pub fn reserve_devices(disks: &[(String, Option<String>, bool, bool)]) -> anyhow::Result<()> {
     let mut wanted = Vec::new();
-    for (id, write) in disks {
-        let device = find_device(id)?.ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+    for (id, fingerprint, write, identity_confirmed) in disks {
+        let device = resolve_device_for_attach(id, fingerprint.as_deref(), *identity_confirmed)?;
         refuse_if_unusable(&device, *write)?;
+        refuse_unconfirmed_weak_write(&device, *write, *identity_confirmed)?;
         wanted.push((device, *write));
     }
+    refuse_duplicate_identities(&wanted)?;
     let stale: Vec<String> = reserved()
         .iter()
         .filter(|held| !wanted.iter().any(|(device, _)| device.id == held.id))
@@ -714,19 +925,21 @@ mod broker_protocol {
     /// The identifier is a kernel device name (`sdb`, `PhysicalDrive1`),
     /// which never contains `:` -- and the parse splits on the *last* one,
     /// so even an unexpected identifier round-trips whole.
-    pub fn argument(id: &str, write: bool) -> String {
-        format!("{id}:{}", if write { "rw" } else { "ro" })
+    pub fn argument(id: &str, fingerprint: &str, write: bool) -> String {
+        format!("{id}:{fingerprint}:{}", if write { "rw" } else { "ro" })
     }
 
     /// Read one back, refusing anything not in the shape written above.
-    pub fn parse_argument(argument: &str) -> Option<(String, bool)> {
-        let (id, mode) = argument.rsplit_once(':')?;
+    pub fn parse_argument(argument: &str) -> Option<(String, String, bool)> {
+        let (identity, mode) = argument.rsplit_once(':')?;
+        let (id, fingerprint) = identity.rsplit_once(':')?;
         let write = match mode {
             "rw" => true,
             "ro" => false,
             _ => return None,
         };
-        (!id.is_empty()).then(|| (id.to_string(), write))
+        (!id.is_empty() && !fingerprint.is_empty())
+            .then(|| (id.to_string(), fingerprint.to_string(), write))
     }
 
     /// Read the privileged half's answer: `ok` and then one line per disk it
@@ -772,13 +985,13 @@ mod broker_protocol {
                 ("nvme0n1", false),
             ] {
                 assert_eq!(
-                    parse_argument(&argument(id, write)),
-                    Some((id.to_string(), write))
+                    parse_argument(&argument(id, "v1-test", write)),
+                    Some((id.to_string(), "v1-test".to_string(), write))
                 );
             }
             // A mode that is neither, an absent mode, an absent identifier,
             // and no mode marker at all: none of them name a disk.
-            for nonsense in ["sdb:rx", "sdb:", ":rw", "sdb", ""] {
+            for nonsense in ["sdb:v1:rx", "sdb::rw", ":v1:rw", "sdb:rw", ""] {
                 assert_eq!(parse_argument(nonsense), None, "{nonsense:?} names no disk");
             }
         }
@@ -818,12 +1031,80 @@ pub fn list_devices() -> anyhow::Result<Vec<HostDevice>> {
     Ok(devices)
 }
 
-/// The device a configuration names, if the host still has it.
+/// The device with this current OS enumeration name, if the host still has it.
 ///
-/// Matched on the stable identifier rather than the node path, because a node
-/// path is a property of this boot, not of the hardware.
+/// This exact lookup is for a fresh launcher/CLI choice and for legacy config
+/// entries without a fingerprint. Persisted identities use [`resolve_device`].
 pub fn find_device(id: &str) -> anyhow::Result<Option<HostDevice>> {
     Ok(list_devices()?.into_iter().find(|device| device.id == id))
+}
+
+/// Resolve a persisted disk identity without trusting an OS-assigned ordinal.
+///
+/// Old hand-written configurations have no fingerprint, so they retain exact
+/// identifier lookup. Once a fingerprint has been persisted it is authoritative:
+/// the identifier is only a useful hint and a changed `diskN`, `sdX`, or
+/// `PhysicalDriveN` is accepted only when exactly one attached device has the
+/// same hardware identity.
+pub fn resolve_device(id: &str, fingerprint: Option<&str>) -> anyhow::Result<HostDevice> {
+    resolve_from_devices(list_devices()?, id, fingerprint, false)
+}
+
+/// Resolve a disk for an immediate attach. A live launcher/CLI selection may
+/// choose one exact current identifier among otherwise indistinguishable
+/// serial-less devices, but its fingerprint is still checked so a swap between
+/// listing and opening is refused. Persisted callers get unique-fingerprint
+/// resolution and may not rely on an OS ordinal.
+pub(crate) fn resolve_device_for_attach(
+    id: &str,
+    fingerprint: Option<&str>,
+    identity_confirmed: bool,
+) -> anyhow::Result<HostDevice> {
+    resolve_from_devices(list_devices()?, id, fingerprint, identity_confirmed)
+}
+
+fn resolve_from_devices(
+    devices: Vec<HostDevice>,
+    id: &str,
+    fingerprint: Option<&str>,
+    identity_confirmed: bool,
+) -> anyhow::Result<HostDevice> {
+    let Some(fingerprint) = fingerprint.filter(|value| !value.is_empty()) else {
+        return devices
+            .into_iter()
+            .find(|device| device.id == id)
+            .ok_or_else(|| anyhow::anyhow!("no host disk called {id}"));
+    };
+    if identity_confirmed {
+        let found = devices
+            .into_iter()
+            .find(|device| device.id == id)
+            .ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+        if found.fingerprint() != fingerprint {
+            anyhow::bail!(
+                "host disk {id} changed after it was selected; refresh the disk list and choose it again"
+            );
+        }
+        return Ok(found);
+    }
+    let mut matches = devices
+        .into_iter()
+        .filter(|device| device.fingerprint() == fingerprint);
+    let Some(found) = matches.next() else {
+        anyhow::bail!("host disk {id} is not attached (no disk has its saved hardware identity)");
+    };
+    if matches.next().is_some() {
+        anyhow::bail!(
+            "host disk {id} is ambiguous: more than one attached disk has its saved hardware identity"
+        );
+    }
+    if found.id != id {
+        log::info!(
+            "blockdev: saved host disk {id} is now called {}; matched its hardware identity",
+            found.id
+        );
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -835,6 +1116,7 @@ mod tests {
             id: id.to_string(),
             path: PathBuf::from(format!("/dev/r{id}")),
             model: None,
+            serial: None,
             size_bytes: size,
             block_size: 512,
             removable: true,
@@ -882,6 +1164,70 @@ mod tests {
         // With no model, the identifier is what the user has to go on.
         let bare = device("disk9", 512_000_000, Safety::Offerable);
         assert_eq!(bare.label(), "disk9 (512 MB)");
+    }
+
+    #[test]
+    fn identical_serial_less_replacement_is_never_persisted_write_authority() {
+        let original = device("disk4", 4_000_000_000, Safety::Offerable);
+        let replacement = device("disk9", 4_000_000_000, Safety::Offerable);
+        assert_eq!(original.fingerprint(), replacement.fingerprint());
+        assert!(refuse_unconfirmed_weak_write(&replacement, true, false).is_err());
+        assert!(refuse_unconfirmed_weak_write(&replacement, false, false).is_ok());
+        assert!(refuse_unconfirmed_weak_write(&replacement, true, true).is_ok());
+
+        let mut reader = replacement.clone();
+        reader.serial = Some("READER-1234".to_string());
+        assert!(
+            refuse_unconfirmed_weak_write(&reader, true, false).is_err(),
+            "a removable drive serial identifies the reader, not replacement media"
+        );
+        reader.removable = false;
+        assert!(refuse_unconfirmed_weak_write(&reader, true, false).is_ok());
+    }
+
+    #[test]
+    fn fresh_selection_disambiguates_identical_serial_less_disks_by_current_id() {
+        let first = device("disk4", 4_000_000_000, Safety::Offerable);
+        let second = device("disk9", 4_000_000_000, Safety::Offerable);
+        let fingerprint = first.fingerprint();
+        assert!(
+            resolve_from_devices(
+                vec![first.clone(), second.clone()],
+                "disk9",
+                Some(&fingerprint),
+                false,
+            )
+            .is_err(),
+            "a persisted weak identity is ambiguous"
+        );
+        assert_eq!(
+            resolve_from_devices(vec![first, second], "disk9", Some(&fingerprint), true,)
+                .unwrap()
+                .id,
+            "disk9"
+        );
+    }
+
+    #[test]
+    fn save_state_cannot_attach_one_medium_twice() {
+        let wanted = vec![
+            ("disk4".to_string(), "same".to_string(), false),
+            ("disk9".to_string(), "same".to_string(), false),
+        ];
+        let error = ReservationTransaction::begin(&wanted)
+            .expect_err("duplicate hardware identity must be refused")
+            .to_string();
+        assert!(error.contains("more than one guest slot"), "{error}");
+    }
+
+    #[test]
+    fn live_selection_cannot_attach_indistinguishable_media_twice() {
+        let first = device("disk4", 4_000_000_000, Safety::Offerable);
+        let second = device("disk9", 4_000_000_000, Safety::Offerable);
+        let error = refuse_duplicate_identities(&[(first, false), (second, false)])
+            .expect_err("identical fingerprints cannot become two guest drives")
+            .to_string();
+        assert!(error.contains("cannot be attached twice"), "{error}");
     }
 
     /// Read and write a real device end to end.
@@ -957,7 +1303,7 @@ mod tests {
             device.safety.tag()
         );
 
-        let mut disk = open_device(&device, true).expect("open for writing");
+        let mut disk = open_device(&device, true, true).expect("open for writing");
         assert_eq!(disk.total_sectors(), device.guest_sectors());
 
         let sector = crate::harddrive::SECTOR_SIZE;

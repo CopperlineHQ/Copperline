@@ -169,6 +169,16 @@ pub struct ScsiDisk {
 }
 
 impl ScsiDisk {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
+        self.disk.materialize_host_disk()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
+        self.disk.pending_host_disk()
+    }
+
     /// Open a SCSI unit. `unit` is the SCSI ID, which picks the DHn device
     /// name a synthesized RDB advertises (so a bare hardfile on unit 0
     /// boots as DH0 exactly as it would on the IDE bus). `volume_name`
@@ -198,9 +208,20 @@ impl ScsiDisk {
     /// RDB, so nothing is synthesized over it and there is no device name or
     /// boot priority to choose here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
+    pub fn open_host_disk(
+        device: &str,
+        fingerprint: Option<&str>,
+        identity_confirmed: bool,
+        writable: bool,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            disk: HardDriveImage::open_device(device, "scsi", writable)?,
+            disk: HardDriveImage::open_device(
+                device,
+                fingerprint,
+                identity_confirmed,
+                "scsi",
+                writable,
+            )?,
             sense: [0u8; SENSE_LEN],
         })
     }
@@ -417,7 +438,16 @@ impl ScsiDisk {
                 (ScsiExec::NoData, GOOD)
             }
             // SYNCHRONIZE CACHE(10)
-            0x35 => (ScsiExec::NoData, GOOD),
+            0x35 => match self.disk.flush() {
+                Ok(()) => (ScsiExec::NoData, GOOD),
+                Err(error) => {
+                    log::warn!(
+                        "scsi {}: synchronize cache: {error}",
+                        self.disk.path().display()
+                    );
+                    self.check(SK_HARDWARE_ERROR, 0x00)
+                }
+            },
             // READ DEFECT DATA(10): no defects.
             0x37 => (ScsiExec::DataIn(vec![0, cdb[2] & 0x1F, 0, 0]), GOOD),
             _ => {
@@ -486,8 +516,17 @@ impl ScsiDisk {
                         return CHECK_CONDITION;
                     }
                 }
-                self.disk.flush();
-                GOOD
+                match self.disk.flush() {
+                    Ok(()) => GOOD,
+                    Err(error) => {
+                        log::warn!(
+                            "scsi {}: flush after write: {error}",
+                            self.disk.path().display()
+                        );
+                        self.set_sense(SK_HARDWARE_ERROR, 0x00);
+                        CHECK_CONDITION
+                    }
+                }
             }
             // MODE SELECT / FORMAT UNIT parameter lists: accepted, ignored.
             _ => GOOD,
@@ -507,6 +546,22 @@ pub enum ScsiTarget {
 }
 
 impl ScsiTarget {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
+        match self {
+            ScsiTarget::Disk(disk) => disk.pending_host_disk(),
+            ScsiTarget::CdRom(_) => None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
+        match self {
+            ScsiTarget::Disk(disk) => disk.materialize_host_disk(),
+            ScsiTarget::CdRom(_) => Ok(()),
+        }
+    }
+
     /// Parse and execute a CDB up to (but not including) any data-out
     /// payload; see [`ScsiDisk::execute`].
     pub fn execute(&mut self, cdb: &[u8], lun: u8) -> (ScsiExec, u8) {
@@ -649,6 +704,24 @@ impl Wd33c93 {
 
     pub fn attach_target(&mut self, id: usize, target: impl Into<ScsiTarget>) {
         self.targets[id.min(7)] = Some(target.into());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
+        out.extend(
+            self.targets
+                .iter()
+                .flatten()
+                .filter_map(ScsiTarget::pending_host_disk),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disks(&mut self) -> anyhow::Result<()> {
+        for target in self.targets.iter_mut().flatten() {
+            target.materialize_host_disk()?;
+        }
+        Ok(())
     }
 
     pub fn target_present(&self, id: usize) -> bool {

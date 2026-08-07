@@ -38,6 +38,11 @@ enum Backing {
     /// open needed, are the device's own business.
     #[cfg(not(target_arch = "wasm32"))]
     Device(Box<crate::blockdev::BlockDevice>),
+    /// A physical disk named by a decoded save state, but not opened yet.
+    /// State parsing must be side-effect free: the bus materialises all of
+    /// these only after the complete state has decoded successfully.
+    #[cfg(not(target_arch = "wasm32"))]
+    PendingDevice(HostDiskState),
 }
 
 pub struct HardDriveImage {
@@ -80,9 +85,10 @@ struct HardDriveImageState {
     host_device: Option<HostDiskState>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct HostDiskState {
     id: String,
+    fingerprint: String,
     writable: bool,
 }
 
@@ -106,8 +112,11 @@ impl serde::Serialize for HardDriveImage {
                 #[cfg(not(target_arch = "wasm32"))]
                 Backing::Device(device) => Some(HostDiskState {
                     id: device.id().to_string(),
+                    fingerprint: device.fingerprint().to_string(),
                     writable: device.writable(),
                 }),
+                #[cfg(not(target_arch = "wasm32"))]
+                Backing::PendingDevice(device) => Some(device.clone()),
                 _ => None,
             },
         }
@@ -119,16 +128,16 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let state = HardDriveImageState::deserialize(deserializer)?;
         let bus_name = if state.scsi_bus { "scsi" } else { "ide" };
-        // A real disk goes back through the door every other attach uses, so
-        // resuming a state cannot reach a disk that attaching one could not:
-        // the host's own disk is refused here as anywhere, the session's
-        // hold is honoured rather than opened around, and the access it was
-        // saved with is the access it comes back with.
-        if let Some(disk) = &state.host_device {
+        if let Some(disk) = state.host_device {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                return Self::open_device(&disk.id, bus_name, disk.writable).map_err(|e| {
-                    serde::de::Error::custom(format!("reopening host disk {}: {e:#}", disk.id))
+                return Ok(Self {
+                    path: state.path,
+                    backing: Backing::PendingDevice(disk),
+                    total_sectors: state.total_sectors,
+                    rdb_overlay: state.rdb_overlay,
+                    overlay_write_warned: state.overlay_write_warned,
+                    bus_name,
                 });
             }
             #[cfg(target_arch = "wasm32")]
@@ -276,9 +285,15 @@ impl HardDriveImage {
     /// of unfamiliar bytes is exactly how real media gets damaged: if it is
     /// not an Amiga disk, the guest should be told so, not handed a fiction.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_device(id: &str, bus_name: &'static str, writable: bool) -> anyhow::Result<Self> {
-        let device = crate::blockdev::find_device(id)?
-            .ok_or_else(|| anyhow::anyhow!("no host disk called {id}"))?;
+    pub fn open_device(
+        id: &str,
+        fingerprint: Option<&str>,
+        identity_confirmed: bool,
+        bus_name: &'static str,
+        writable: bool,
+    ) -> anyhow::Result<Self> {
+        let device =
+            crate::blockdev::resolve_device_for_attach(id, fingerprint, identity_confirmed)?;
         // A disk the host has mounted is not refused: taking it is the point,
         // and the platform layer asks the host to let go before opening it.
         // Say which volumes are going, because the user may have something
@@ -289,7 +304,7 @@ impl HardDriveImage {
                 device.mounted.join(", ")
             );
         }
-        let opened = crate::blockdev::open_device(&device, writable)?;
+        let opened = crate::blockdev::open_device(&device, writable, identity_confirmed)?;
         let total_sectors = opened.total_sectors();
         if total_sectors == 0 {
             anyhow::bail!("{id} reports no capacity");
@@ -313,6 +328,36 @@ impl HardDriveImage {
             overlay_write_warned: false,
             bus_name,
         })
+    }
+
+    /// Open a physical disk deferred by save-state decoding. This is called
+    /// only after the entire bus has decoded, so malformed trailing state can
+    /// never unmount or reserve real media as a parsing side effect.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
+        let Backing::PendingDevice(saved) = &self.backing else {
+            return Ok(());
+        };
+        let saved = saved.clone();
+        let opened = Self::open_device(
+            &saved.id,
+            Some(&saved.fingerprint),
+            false,
+            self.bus_name,
+            saved.writable,
+        )?;
+        *self = opened;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
+        match &self.backing {
+            Backing::PendingDevice(saved) => {
+                Some((saved.id.clone(), saved.fingerprint.clone(), saved.writable))
+            }
+            _ => None,
+        }
     }
 
     /// Open a drive image. `device_name` is the DOS device name (e.g.
@@ -372,6 +417,10 @@ impl HardDriveImage {
             Backing::Memory(image) => image.len() as u64,
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.total_sectors() * SECTOR_SIZE as u64,
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::PendingDevice(_) => {
+                unreachable!("only save-state decoding creates pending disks")
+            }
         };
         if len == 0 || len % SECTOR_SIZE as u64 != 0 {
             anyhow::bail!(
@@ -400,6 +449,10 @@ impl HardDriveImage {
                         anyhow::anyhow!("reading {bus_name} device {}: {e}", path.display())
                     })?;
                 }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::PendingDevice(_) => {
+                unreachable!("only save-state decoding creates pending disks")
             }
         }
         let has_rdsk = head
@@ -475,7 +528,7 @@ impl HardDriveImage {
     pub fn is_host_disk(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            matches!(self.backing, Backing::Device(_))
+            matches!(self.backing, Backing::Device(_) | Backing::PendingDevice(_))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -516,6 +569,10 @@ impl HardDriveImage {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.read_sector(file_lba, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::PendingDevice(_) => Err(std::io::Error::other(
+                "physical disk has not been acquired after loading state",
+            )),
         }
     }
 
@@ -549,28 +606,24 @@ impl HardDriveImage {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.write_sector(file_lba, buf),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::PendingDevice(_) => Err(std::io::Error::other(
+                "physical disk has not been acquired after loading state",
+            )),
         }
     }
 
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> std::io::Result<()> {
         // A real disk can be pulled out of its reader, so anything still held
         // back is a hazard an image file does not have.
         #[cfg(not(target_arch = "wasm32"))]
         if let Backing::Device(device) = &mut self.backing {
-            if let Err(e) = device.flush() {
-                log::warn!("{}: {}: flush failed: {e}", self.bus_name, device.id());
-            }
-            return;
+            return device.flush();
         }
         if let Backing::File(file) = &mut self.backing {
-            if let Err(e) = file.flush() {
-                log::warn!(
-                    "{} image {}: flush failed: {e}",
-                    self.bus_name,
-                    self.path.display()
-                );
-            }
+            return file.flush();
         }
+        Ok(())
     }
 }
 
@@ -611,11 +664,36 @@ mod tests {
         // Writes through the restored handle land in the same backing file.
         let sector = vec![0x5A; SECTOR_SIZE];
         restored.write_sector(7, &sector).unwrap();
-        restored.flush();
+        restored.flush().unwrap();
         original.read_sector(7, &mut a).unwrap();
         assert_eq!(a, sector);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn serde_defers_physical_disk_acquisition() {
+        let state = HardDriveImageState {
+            path: PathBuf::from("/dev/definitely-not-opened"),
+            memory: None,
+            total_sectors: 1234,
+            rdb_overlay: None,
+            overlay_write_warned: false,
+            scsi_bus: false,
+            host_device: Some(HostDiskState {
+                id: "disk99".to_string(),
+                fingerprint: "v1-saved".to_string(),
+                writable: false,
+            }),
+        };
+        let bytes = bincode::serialize(&state).unwrap();
+        let image: HardDriveImage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(
+            image.pending_host_disk(),
+            Some(("disk99".to_string(), "v1-saved".to_string(), false))
+        );
+        assert_eq!(image.total_sectors(), 1234);
     }
 
     /// Read every sector of an image and return the FFS volume label found in

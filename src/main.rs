@@ -1185,7 +1185,7 @@ fn print_help() {
     let floppy_bridge = {
         let floppy_bridge_names = copperline::config::supported_bridge_drivers().join(", ");
         format!(
-        "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
+            "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            {floppy_bridge_names}\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
@@ -1716,7 +1716,6 @@ fn print_audio_output_devices() -> Result<()> {
     Ok(())
 }
 
-/// Print exact adapter identifiers accepted by bridged networking.
 /// List the host's own disks, for `--host-disk`.
 ///
 /// Enumeration opens nothing and needs no privileges, so this is safe to run
@@ -1944,17 +1943,19 @@ fn main() -> Result<()> {
         // backend reads what its own other half wrote.
         #[cfg(windows)]
         {
-            let usage = "the privileged half takes PID REPLY DEVICE:rw|ro...";
+            let usage = "the privileged half takes PID REPLY NONCE DEVICE:FINGERPRINT:rw|ro...";
             let parent: u32 = arguments
                 .first()
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| anyhow!(usage))?;
             let reply = PathBuf::from(arguments.get(1).ok_or_else(|| anyhow!(usage))?);
-            let disks = arguments.get(2..).filter(|disks| !disks.is_empty());
+            let nonce = arguments.get(2).ok_or_else(|| anyhow!(usage))?;
+            let disks = arguments.get(3..).filter(|disks| !disks.is_empty());
             return copperline::blockdev::serve_broker_request(
                 disks.ok_or_else(|| anyhow!(usage))?,
                 parent,
                 &reply,
+                nonce,
             );
         }
         #[cfg(target_os = "linux")]
@@ -2006,7 +2007,10 @@ fn main() -> Result<()> {
         cfg.denise_revision,
         cfg.video_standard,
         cfg.rom_path.display(),
-        cfg.floppy_connected.iter().filter(|&&connected| connected).count()
+        cfg.floppy_connected
+            .iter()
+            .filter(|&&connected| connected)
+            .count()
     );
 
     if matches!(cfg.chipset, Chipset::Aga) {
