@@ -1342,9 +1342,9 @@ medium-change unit attention for the guest's filesystem to notice.
 
 ## `[[host_disk]]` -- a real disk of the host's
 
-Give the machine a real disk instead of an image -- the CF or SD card an
-Amiga boots from, in a card reader. The medium is used exactly as it is,
-with its own RDB, partitions, and filesystem.
+Give the machine a real disk of this computer's instead of an image -- a card
+in a reader, a USB drive, a drive on a SATA port. The medium is used exactly
+as it is, with its own RDB, partitions, and filesystem.
 
 ```toml
 [[host_disk]]
@@ -1355,18 +1355,16 @@ read_only = true          # absent means writable
 
 `device` is the host's stable identifier for the hardware -- `sdb` on Linux,
 `disk4` on macOS, `PhysicalDrive1` on Windows -- rather than a node path,
-which is a property of this boot and not of the disk. `copperline
---list-disks` prints them, and `--host-disk DEVICE [ATTACH]` (or
-`--host-disk-read-only`) is the command-line equivalent. A disk named here
-that is not plugged in leaves that drive slot empty and the machine starts
-anyway, as a real Amiga does with an absent drive.
+which belongs to this boot and not to the disk. `copperline --list-disks`
+prints them, and `--host-disk DEVICE [ATTACH]` (or `--host-disk-read-only`)
+is the command-line equivalent. A disk named here that is not plugged in
+leaves that drive slot empty and the machine starts anyway.
 
 The disk this computer is running from is never offered and never opened,
 whatever is written here, and no RDB is synthesised over a disk that has
 none. Opening a real disk asks for permission the first time, and the host's
-volumes on it are unmounted for as long as the machine has it. Attach
-read-only the first time: [](host-disks) covers the whole of it, including
-what a correct read-only attach looks like.
+volumes on it are unmounted while the machine has it. Attach read-only the
+first time: [](host-disks) covers the whole of it.
 
 ## `[[filesys]]` -- host directories as live volumes
 
