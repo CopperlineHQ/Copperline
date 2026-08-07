@@ -26,11 +26,18 @@ default = [
     "fluxbridge",
     "mt32",
     "cpu-jit",
+    "profile-stats",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
 display-plan-trace = []
+# Detailed host-cost counters used by native diagnostics. The browser crate
+# builds the core with `default-features = false`, so its release hot paths do
+# not pay for MMIO poll counters, sampled pipeline clocks, or per-render-phase
+# `Instant` calls. The coarse browser core/render timers live in the web crate
+# and remain available in every web build.
+profile-stats = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
 # behavior is hardware-derived and reproducible.

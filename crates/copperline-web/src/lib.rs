@@ -301,7 +301,11 @@ impl WebEmu {
             emu,
             audio,
             fb: vec![0u32; MAX_CANVAS_PIXELS],
-            deinterlacer: Deinterlacer::new(),
+            // Browser defaults favour throughput: progressive output is
+            // already exact without history, while LACE fields fall back to
+            // line doubling until the page opts into motion-adaptive
+            // deinterlacing. Phosphor persistence is likewise opt-in.
+            deinterlacer: Deinterlacer::with_settings(false, 0.0),
             present: Vec::new(),
             present_width: FB_WIDTH,
             present_rows: 0,
@@ -389,6 +393,7 @@ impl WebEmu {
     pub fn load_rom(&mut self, rom: Vec<u8>, ext: Option<Vec<u8>>) -> Result<(), JsValue> {
         self.emu.reload_rom(rom, ext).map_err(js_err)?;
         self.anchor = None;
+        self.deinterlacer.reset_history();
         Ok(())
     }
 
@@ -491,16 +496,14 @@ impl WebEmu {
             h_shift,
             self.overscan,
         );
-        self.deinterlacer.push_field(
-            &self.fb,
-            field_rows,
-            FB_WIDTH * canvas_scale,
-            base.bplcon0 & 0x0004 != 0,
-            base.long_field,
-            !geometry.programmable,
-        );
-        let woven_rows = self.deinterlacer.output_rows();
-        let woven = self.deinterlacer.output();
+        let canvas_width = FB_WIDTH * canvas_scale;
+        let lace = base.bplcon0 & 0x0004 != 0;
+        let double_rows = !geometry.programmable;
+        let woven_rows = if lace || double_rows {
+            field_rows * 2
+        } else {
+            field_rows
+        };
         let tv_aperture_rows = if self.overscan == Overscan::Tv {
             self.presentation_latch
                 .resolve_tv_aperture(present_common::standard_tv_aperture_frame(
@@ -519,35 +522,36 @@ impl WebEmu {
             // fill the same 4:3 glass -- so a 60 Hz crop's rows scale onto
             // the 50 Hz aperture's native row count (whole-row selection,
             // like the desktop present copy).
-            self.present_width = present_common::TV_CAPTURED_WIDTH;
-            self.present_rows = present_common::TV_GLASS_PRESENT_ROWS;
+            (self.present_rows, self.present_width) =
+                self.deinterlacer.present_field_region_into(
+                    &self.fb,
+                    field_rows,
+                    canvas_width,
+                    lace,
+                    base.long_field,
+                    double_rows,
+                    present_common::TV_CAPTURED_SOURCE_X,
+                    present_common::TV_PRESENT_SOURCE_Y,
+                    aperture_rows,
+                    present_common::TV_CAPTURED_WIDTH,
+                    present_common::TV_GLASS_PRESENT_ROWS,
+                    &mut self.present,
+                );
             // Two woven rows per emulated field line, and the aperture's
             // rows fill the glass exactly, so the aperture is the line
             // count whatever row count it was scaled onto (the desktop's
             // crt_scanline_count, without its bezel-padding rescale).
             self.present_crt_lines = (aperture_rows / 2).max(1) as f32;
-            self.present
-                .resize(self.present_width * self.present_rows, 0);
-            for (y, dst) in self
-                .present
-                .chunks_exact_mut(present_common::TV_CAPTURED_WIDTH)
-                .enumerate()
-            {
-                let crop_y = copperline::screenshot::scaled_source_row(
-                    y,
-                    aperture_rows,
-                    present_common::TV_GLASS_PRESENT_ROWS,
-                );
-                let src = (present_common::TV_PRESENT_SOURCE_Y + crop_y) * FB_WIDTH
-                    + present_common::TV_CAPTURED_SOURCE_X;
-                dst.copy_from_slice(&woven[src..src + present_common::TV_CAPTURED_WIDTH]);
-            }
         } else {
-            self.present_width = self.deinterlacer.output_width();
-            self.present_rows = woven_rows;
-            let active = woven_rows * self.present_width;
-            self.present.resize(active, 0);
-            self.present.copy_from_slice(&woven[..active]);
+            (self.present_rows, self.present_width) = self.deinterlacer.present_field_into(
+                &self.fb,
+                field_rows,
+                canvas_width,
+                lace,
+                base.long_field,
+                double_rows,
+                &mut self.present,
+            );
             // A programmable scan has no 15 kHz line structure for a CRT
             // pass to draw (the desktop suspends its pass there too);
             // standard scans count two woven rows per emulated field line.
@@ -924,6 +928,7 @@ impl WebEmu {
         // timeline, so it starts over too.
         self.last_rendered_frame = None;
         self.presentation_latch.reset();
+        self.deinterlacer.reset_history();
         // The reuse detector's snapshot belongs to the replaced machine;
         // the repaint below must render, not match against it.
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
@@ -941,6 +946,7 @@ impl WebEmu {
         self.mouse_remainder = (0.0, 0.0);
         self.mouse_pending = (0, 0);
         self.presentation_latch.reset();
+        self.deinterlacer.reset_history();
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         Ok(())
     }
@@ -979,6 +985,45 @@ impl WebEmu {
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
+    }
+
+    /// Enable motion-adaptive LACE field merging. The browser defaults this
+    /// off for throughput, presenting interlaced fields by line doubling;
+    /// progressive displays are unchanged either way. Switching live drops
+    /// field history and re-presents the last completed frame.
+    pub fn set_deinterlace(&mut self, enabled: bool) {
+        if enabled == self.deinterlacer.deinterlace_enabled() {
+            return;
+        }
+        self.deinterlacer.set_deinterlace(enabled);
+        self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+        self.render_completed_frame();
+    }
+
+    /// Whether motion-adaptive LACE field merging is enabled.
+    pub fn deinterlace_enabled(&self) -> bool {
+        self.deinterlacer.deinterlace_enabled()
+    }
+
+    /// Set CRT phosphor persistence as the fraction of the previous
+    /// presented frame retained (0.0 = off, at most 0.95). The browser
+    /// defaults it off. Switching live seeds a fresh trail and re-presents
+    /// the last completed frame.
+    pub fn set_phosphor(&mut self, persistence: f32) {
+        let before = self.deinterlacer.phosphor();
+        self.deinterlacer.set_phosphor(persistence);
+        if self.deinterlacer.phosphor() == before {
+            return;
+        }
+        self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+        self.render_completed_frame();
+    }
+
+    /// The quantised CRT phosphor-persistence fraction currently in use.
+    pub fn phosphor(&self) -> f32 {
+        self.deinterlacer.phosphor()
     }
 
     pub fn set_volume_percent(&mut self, percent: u8) {

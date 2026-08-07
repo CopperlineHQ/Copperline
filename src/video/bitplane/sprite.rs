@@ -858,6 +858,7 @@ pub(super) fn flush_manual_sprite_lines(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub(super) fn render_sprites(
     state: &RenderState,
     ram: &[u8],
@@ -934,6 +935,7 @@ pub(super) fn render_sprites_with_manual_lines(
     )
 }
 
+#[cfg(test)]
 pub(super) fn render_sprites_with_manual_lines_and_writes(
     state: &RenderState,
     ram: &[u8],
@@ -951,6 +953,52 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
     visible_line0: i32,
 ) -> u16 {
+    let mut sprite_group_mask = Vec::new();
+    let mut sprite_lines = std::array::from_fn(|_| Vec::new());
+    let mut attached_beams = std::array::from_fn(|_| Vec::new());
+    render_sprites_with_manual_lines_and_writes_reusing_mask(
+        state,
+        ram,
+        fb,
+        clip,
+        base_palettes,
+        palette_segments,
+        base_controls,
+        control_segments,
+        sprite_display_enable_x_by_y,
+        playfield_mask,
+        collision_pixels,
+        &mut sprite_group_mask,
+        &mut sprite_lines,
+        &mut attached_beams,
+        captured_sprite_lines,
+        sprite_dma_observed,
+        manual_sprite_lines,
+        visible_line0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
+    state: &RenderState,
+    ram: &[u8],
+    fb: &mut [u32],
+    clip: SpriteClip,
+    base_palettes: &[Palette],
+    palette_segments: &[Vec<PaletteSegment>],
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    sprite_display_enable_x_by_y: &[Option<usize>],
+    playfield_mask: &[u8],
+    collision_pixels: &mut [CollisionPixel],
+    sprite_group_mask: &mut Vec<u8>,
+    sprite_lines: &mut [Vec<SpriteLine>; 8],
+    attached_beams: &mut [Vec<i32>; 4],
+    captured_sprite_lines: &[CapturedSpriteLine],
+    sprite_dma_observed: bool,
+    manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
+    visible_line0: i32,
+) -> u16 {
     #[cfg(feature = "internal-diagnostics")]
     if crate::envcfg::flag("COPPERLINE_EXP_NO_SPRITE_RENDER") {
         return 0;
@@ -961,17 +1009,19 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     }
 
     let mut clxdat = 0u16;
-    let mut sprite_group_mask = vec![0u8; fb.len()];
+    sprite_group_mask.resize(fb.len(), 0);
+    sprite_group_mask.fill(0);
     let use_captured_sprite_dma = sprite_dma_observed;
-    let sprite_lines: [Vec<SpriteLine>; 8] = std::array::from_fn(|sprite| {
-        collect_sprite_lines(
+    for (sprite, lines) in sprite_lines.iter_mut().enumerate() {
+        collect_sprite_lines_into(
             sprite,
             state,
             captured_sprite_lines,
             use_captured_sprite_dma,
             manual_sprite_lines,
-        )
-    });
+            lines,
+        );
+    }
 
     // Draw low-priority sprite pairs first so lower-numbered pairs
     // overwrite higher-numbered pairs, matching Denise's fixed sprite
@@ -981,13 +1031,14 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
         let odd_sprite = even_sprite + 1;
         let even_lines = &sprite_lines[even_sprite];
         let odd_lines = &sprite_lines[odd_sprite];
-        let attached_beams = pair_attached_beams(even_lines, odd_lines);
+        pair_attached_beams_into(even_lines, odd_lines, &mut attached_beams[pair]);
+        let pair_attached_beams = &attached_beams[pair];
 
         clxdat |= render_attached_sprite_pair_lines(
             even_sprite,
             even_lines,
             odd_lines,
-            &attached_beams,
+            pair_attached_beams,
             fb,
             clip,
             base_palettes,
@@ -997,14 +1048,14 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
             sprite_display_enable_x_by_y,
             playfield_mask,
             collision_pixels,
-            &mut sprite_group_mask,
+            sprite_group_mask,
             visible_line0,
         );
         clxdat |= render_unattached_sprite_pair_lines(
             even_sprite,
             even_lines,
             odd_lines,
-            &attached_beams,
+            pair_attached_beams,
             fb,
             clip,
             base_palettes,
@@ -1014,7 +1065,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
             sprite_display_enable_x_by_y,
             playfield_mask,
             collision_pixels,
-            &mut sprite_group_mask,
+            sprite_group_mask,
             visible_line0,
         );
     }
@@ -1025,16 +1076,21 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
 /// attached line. Computed once per pair: the per-line attach test is a
 /// binary search here instead of a rescan of every line of the pair
 /// (quadratic on sprite-multiplexing games, a measured render hot spot).
-pub(super) fn pair_attached_beams(even_lines: &[SpriteLine], odd_lines: &[SpriteLine]) -> Vec<i32> {
-    let mut beams: Vec<i32> = even_lines
-        .iter()
-        .chain(odd_lines.iter())
-        .filter(|line| line.attached)
-        .map(|line| line.beam_y)
-        .collect();
+fn pair_attached_beams_into(
+    even_lines: &[SpriteLine],
+    odd_lines: &[SpriteLine],
+    beams: &mut Vec<i32>,
+) {
+    beams.clear();
+    beams.extend(
+        even_lines
+            .iter()
+            .chain(odd_lines.iter())
+            .filter(|line| line.attached)
+            .map(|line| line.beam_y),
+    );
     beams.sort_unstable();
     beams.dedup();
-    beams
 }
 
 pub(super) fn render_unattached_sprite_pair_lines(
@@ -1317,29 +1373,6 @@ pub(super) fn sprite_line_pixel_bits_at(
     0
 }
 
-pub(super) fn collect_captured_sprite_lines(
-    sprite: usize,
-    captured_sprite_lines: &[CapturedSpriteLine],
-) -> Vec<SpriteLine> {
-    captured_sprite_lines
-        .iter()
-        .filter(|line| line.sprite == sprite)
-        .map(|line| SpriteLine {
-            hstart: line.hstart,
-            hsub_70ns: line.hsub_70ns,
-            beam_y: line.beam_y,
-            data: line.data,
-            datb: line.datb,
-            data_ext: line.data_ext,
-            datb_ext: line.datb_ext,
-            width_words: line.width_words,
-            attached: line.attached,
-            x_start: 0,
-            x_stop: FB_WIDTH,
-        })
-        .collect()
-}
-
 pub(super) fn clip_sprite_lines_around_register_lines(
     lines: &mut Vec<SpriteLine>,
     register_lines: &[SpriteLine],
@@ -1495,6 +1528,26 @@ pub(super) fn collect_sprite_lines(
     use_captured_sprite_dma: bool,
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
 ) -> Vec<SpriteLine> {
+    let mut lines = Vec::new();
+    collect_sprite_lines_into(
+        sprite,
+        state,
+        captured_sprite_lines,
+        use_captured_sprite_dma,
+        manual_sprite_lines,
+        &mut lines,
+    );
+    lines
+}
+
+fn collect_sprite_lines_into(
+    sprite: usize,
+    state: &RenderState,
+    captured_sprite_lines: &[CapturedSpriteLine],
+    use_captured_sprite_dma: bool,
+    manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
+    lines: &mut Vec<SpriteLine>,
+) {
     let sprite_dma_blocked_by_ddf = sprite_dma_disabled_by_bitplane_ddf(
         sprite,
         state.agnus_revision,
@@ -1505,37 +1558,47 @@ pub(super) fn collect_sprite_lines(
         state.ddfstop,
         state.harddis,
     );
-    let mut lines = Vec::new();
+    lines.clear();
 
     if use_captured_sprite_dma && !sprite_dma_blocked_by_ddf {
-        lines.extend(collect_captured_sprite_lines(sprite, captured_sprite_lines));
+        lines.extend(
+            captured_sprite_lines
+                .iter()
+                .filter(|line| line.sprite == sprite)
+                .map(|line| SpriteLine {
+                    hstart: line.hstart,
+                    hsub_70ns: line.hsub_70ns,
+                    beam_y: line.beam_y,
+                    data: line.data,
+                    datb: line.datb,
+                    data_ext: line.data_ext,
+                    datb_ext: line.datb_ext,
+                    width_words: line.width_words,
+                    attached: line.attached,
+                    x_start: 0,
+                    x_stop: FB_WIDTH,
+                }),
+        );
     }
 
     if let Some(register_lines) = manual_sprite_lines.and_then(|lines| lines.get(sprite)) {
-        clip_sprite_lines_around_register_lines(&mut lines, register_lines);
+        clip_sprite_lines_around_register_lines(lines, register_lines);
         lines.extend_from_slice(register_lines);
-        return lines;
+        return;
     }
 
     // With no captured sprite DMA for this frame, render any armed sprites
     // from their latched registers (CPU-driven sprites); captured DMA is the
     // source whenever Agnus actually fetched sprite data.
-    if !use_captured_sprite_dma {
-        lines.extend(register_latched_sprite_lines(sprite, state));
+    if !use_captured_sprite_dma && state.spr_hw_armed[sprite] {
+        let regs = BeamSpriteState::from_render_state(state, &[None; 8], true);
+        let pos = regs.sprpos[sprite];
+        let ctl = regs.sprctl[sprite];
+        lines.extend(
+            (sprite_vstart(pos, ctl)..sprite_vstop(ctl))
+                .filter_map(|beam_y| regs.line_for_sprite(sprite, beam_y, 0, FB_WIDTH)),
+        );
     }
-    lines
-}
-
-pub(super) fn register_latched_sprite_lines(sprite: usize, state: &RenderState) -> Vec<SpriteLine> {
-    if !state.spr_hw_armed[sprite] {
-        return Vec::new();
-    }
-    let regs = BeamSpriteState::from_render_state(state, &[None; 8], true);
-    let pos = regs.sprpos[sprite];
-    let ctl = regs.sprctl[sprite];
-    (sprite_vstart(pos, ctl)..sprite_vstop(ctl))
-        .filter_map(|beam_y| regs.line_for_sprite(sprite, beam_y, 0, FB_WIDTH))
-        .collect()
 }
 
 pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: ControlState) -> bool {

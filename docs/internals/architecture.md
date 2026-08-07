@@ -115,7 +115,12 @@ the frontend-independent presentation helpers (`video/present_common.rs`),
 with no desktop dependencies; that is the surface the browser (WebAssembly)
 frontend in `crates/copperline-web` wraps
 ([](../guide/browser.md)), and `cargo check --no-default-features` is the
-CI-enforced portability invariant.
+CI-enforced portability invariant. Native default builds also enable the
+`profile-stats` feature for detailed MMIO-poll and render-phase diagnostics.
+The browser dependency deliberately leaves it disabled: browser status still
+measures coarse core and render cost at the wrapper boundary, but the
+instruction and renderer hot paths do not maintain native-only counters or
+sample host clocks.
 
 The flow of a frame:
 
@@ -123,6 +128,10 @@ The flow of a frame:
    one instruction at a time through the published `m68k` core; every memory
    access the instruction makes is routed through the bus adapter and
    *billed in colour clocks* (CCK, 3.546895 MHz -- the chip bus clock).
+   The precise CPU loop selects its diagnostic-capable or branch-free normal
+   form once per slice. Arming a debugger, trace, watchpoint, waveform PC
+   trigger or diagnostic recorder selects the former; normal and browser
+   runs therefore do not retest every inactive hook after every instruction.
 2. Advancing the clock for a CPU access also advances everything else:
    Agnus beam counters, Copper fetches, blitter slots, Paula audio and disk
    DMA, CIA timers. The chip bus is arbitrated per colour clock, so a CPU

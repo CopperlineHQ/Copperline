@@ -24,10 +24,37 @@ use crate::chipset::denise::{
     color_register_value, rgb12_to_rgb24, rgb12_to_rgba8, rgb24_to_rgba8, BitplaneMode, DiwHigh,
     Palette, COLOR_RGB_MASK, COLOR_TRANSPARENCY_BIT,
 };
+#[cfg(feature = "profile-stats")]
 use crate::timebase::Instant;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+#[cfg(feature = "profile-stats")]
+type RenderTimingStart = Instant;
+#[cfg(not(feature = "profile-stats"))]
+type RenderTimingStart = ();
+
+#[inline(always)]
+fn render_timing_start() -> RenderTimingStart {
+    #[cfg(feature = "profile-stats")]
+    {
+        Instant::now()
+    }
+}
+
+#[inline(always)]
+fn render_timing_elapsed(started: RenderTimingStart) -> u128 {
+    #[cfg(feature = "profile-stats")]
+    {
+        started.elapsed().as_nanos()
+    }
+    #[cfg(not(feature = "profile-stats"))]
+    {
+        let _ = started;
+        0
+    }
+}
 
 // Beam-to-framebuffer conversion anchors for the pragmatic renderer.
 // They are derived from the OCS PAL display window/fetch positions
@@ -4156,8 +4183,14 @@ struct RenderScratch {
     base_controls: Vec<ControlState>,
     control_segments: Vec<Vec<ControlSegment>>,
     manual_bpl_segments: Vec<ManualBplSegment>,
+    frame_cpu_copper_palette_events: Vec<BeamRegisterWrite>,
+    current_cpu_copper_palette_events: Vec<BeamRegisterWrite>,
+    merged_render_events: Vec<BeamRegisterWrite>,
     playfield_mask: Vec<u8>,
     collision_pixels: Vec<CollisionPixel>,
+    sprite_group_mask: Vec<u8>,
+    sprite_lines: [Vec<SpriteLine>; 8],
+    attached_sprite_beams: [Vec<i32>; 4],
     dma_output_start_x_by_line: Vec<Option<usize>>,
     h_window_rows: Vec<HWindowRow>,
     ham_select_pixels: Vec<u8>,
@@ -4410,7 +4443,7 @@ fn render_from_input_with_scratch(
     track_read_dependencies: bool,
     scratch: &mut RenderScratch,
 ) -> RenderResult {
-    let render_started = Instant::now();
+    let render_started = render_timing_start();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
     ACTIVE_CANVAS_SHIFT_H.with(|shift| {
         shift.set(if input.geometry.programmable {
@@ -4441,13 +4474,21 @@ fn render_from_input_with_scratch(
         current_render_base.bplpt[0],
         current_render_events,
     );
-    let frame_cpu_copper_palette_events: Vec<_> = frame_render_events
-        .iter()
-        .copied()
-        .filter(is_cpu_copper_irq_palette_event)
-        .collect();
+    let mut frame_cpu_copper_palette_events =
+        std::mem::take(&mut scratch.frame_cpu_copper_palette_events);
+    frame_cpu_copper_palette_events.clear();
+    frame_cpu_copper_palette_events.extend(
+        frame_render_events
+            .iter()
+            .copied()
+            .filter(is_cpu_copper_irq_palette_event),
+    );
+    let mut current_cpu_copper_palette_events =
+        std::mem::take(&mut scratch.current_cpu_copper_palette_events);
+    current_cpu_copper_palette_events.clear();
     let bottom_palette_replay_events = input.bottom_palette_events.as_slice();
-    let mut merged_render_events = Vec::new();
+    let mut merged_render_events = std::mem::take(&mut scratch.merged_render_events);
+    merged_render_events.clear();
     let render_events = if should_inject_bottom_palette_replay_events_with_visible_line0(
         frame_render_events,
         &frame_cpu_copper_palette_events,
@@ -4485,11 +4526,12 @@ fn render_from_input_with_scratch(
         // where the palette truly changes. Use the raw beam-accurate writes.
         frame_render_events
     } else if frame_cpu_copper_palette_events.is_empty() && primary_buffer_carries_forward {
-        let current_cpu_copper_palette_events: Vec<_> = current_render_events
-            .iter()
-            .copied()
-            .filter(is_cpu_copper_irq_palette_event)
-            .collect();
+        current_cpu_copper_palette_events.extend(
+            current_render_events
+                .iter()
+                .copied()
+                .filter(is_cpu_copper_irq_palette_event),
+        );
         if !current_cpu_copper_palette_events.is_empty() {
             merged_render_events.extend_from_slice(frame_render_events);
             merged_render_events.extend_from_slice(&current_cpu_copper_palette_events);
@@ -4522,7 +4564,7 @@ fn render_from_input_with_scratch(
         &frame_start_bplpt,
         visible_line0,
     );
-    let event_started = Instant::now();
+    let event_started = render_timing_start();
     // Seed replay spans from beam-timed SPRx writes or DMA-established held
     // sprites. SPRxDATA latches remain armed across the frame boundary; when
     // captured DMA is the primary source they do not emit by themselves (a
@@ -4614,7 +4656,7 @@ fn render_from_input_with_scratch(
         &mut manual_bpl_segments,
         visible_line0,
     );
-    render_timing.event_nanos = event_started.elapsed().as_nanos();
+    render_timing.event_nanos = render_timing_elapsed(event_started);
     render_timing.events = render_events.len() as u64;
     render_timing.control_segments = control_segments
         .iter()
@@ -4679,7 +4721,7 @@ fn render_from_input_with_scratch(
     dma_output_start_x_by_line.resize(rows, None);
     dma_output_start_x_by_line.fill(None);
 
-    let background_started = Instant::now();
+    let background_started = render_timing_start();
     let mut h_window_rows = std::mem::take(&mut scratch.h_window_rows);
     compute_h_window_rows_into(
         &mut h_window_rows,
@@ -4696,7 +4738,7 @@ fn render_from_input_with_scratch(
         &h_window_rows,
         visible_line0,
     );
-    render_timing.background_nanos = background_started.elapsed().as_nanos();
+    render_timing.background_nanos = render_timing_elapsed(background_started);
 
     let any_bitplane_control = any_control_matching(&base_controls, &control_segments, |control| {
         control.nplanes() != 0
@@ -4706,7 +4748,7 @@ fn render_from_input_with_scratch(
             control.bitplane_dma_enabled() && control.nplanes() != 0
         });
 
-    let playfield_started = Instant::now();
+    let playfield_started = render_timing_start();
     if (has_captured_bitplane_rows || state.bplpt[0] != 0)
         && any_bitplane_control
         && (has_captured_bitplane_rows || any_bitplane_dma_control)
@@ -5145,7 +5187,7 @@ fn render_from_input_with_scratch(
             }
         }
     }
-    render_timing.playfield_nanos = playfield_started.elapsed().as_nanos();
+    render_timing.playfield_nanos = render_timing_elapsed(playfield_started);
     maybe_log_frame_pixel_samples(
         "after-playfield",
         input.emulated_seconds,
@@ -5154,7 +5196,7 @@ fn render_from_input_with_scratch(
         visible_line0,
     );
 
-    let manual_bpl_started = Instant::now();
+    let manual_bpl_started = render_timing_start();
     seed_manual_bpl_segments_from_latches(
         &mut manual_bpl_segments,
         frame_start_bpldat,
@@ -5182,7 +5224,7 @@ fn render_from_input_with_scratch(
         input.emulated_seconds,
         input.emulated_frames,
     );
-    render_timing.manual_bpl_nanos = manual_bpl_started.elapsed().as_nanos();
+    render_timing.manual_bpl_nanos = render_timing_elapsed(manual_bpl_started);
     maybe_log_frame_pixel_samples(
         "after-manual-bpl",
         input.emulated_seconds,
@@ -5190,8 +5232,11 @@ fn render_from_input_with_scratch(
         fb,
         visible_line0,
     );
-    let sprite_started = Instant::now();
-    clxdat |= render_sprites_with_manual_lines_and_writes(
+    let sprite_started = render_timing_start();
+    let mut sprite_group_mask = std::mem::take(&mut scratch.sprite_group_mask);
+    let mut sprite_lines = std::mem::take(&mut scratch.sprite_lines);
+    let mut attached_sprite_beams = std::mem::take(&mut scratch.attached_sprite_beams);
+    clxdat |= render_sprites_with_manual_lines_and_writes_reusing_mask(
         &state,
         frame_ram,
         fb,
@@ -5208,12 +5253,15 @@ fn render_from_input_with_scratch(
         sprite_display_enable_x_by_y,
         &playfield_mask,
         &mut collision_pixels,
+        &mut sprite_group_mask,
+        &mut sprite_lines,
+        &mut attached_sprite_beams,
         captured_sprite_lines,
         sprite_dma_observed,
         Some(&manual_sprite_lines),
         visible_line0,
     );
-    render_timing.sprite_nanos = sprite_started.elapsed().as_nanos();
+    render_timing.sprite_nanos = render_timing_elapsed(sprite_started);
     maybe_log_frame_pixel_samples(
         "after-sprites",
         input.emulated_seconds,
@@ -5275,15 +5323,21 @@ fn render_from_input_with_scratch(
         fb,
         visible_line0,
     );
-    render_timing.total_nanos = render_started.elapsed().as_nanos();
+    render_timing.total_nanos = render_timing_elapsed(render_started);
     let chip_ram_reads = ram.into_read_dependencies();
     scratch.base_palettes = base_palettes;
     scratch.palette_segments = palette_segments;
     scratch.base_controls = base_controls;
     scratch.control_segments = control_segments;
     scratch.manual_bpl_segments = manual_bpl_segments;
+    scratch.frame_cpu_copper_palette_events = frame_cpu_copper_palette_events;
+    scratch.current_cpu_copper_palette_events = current_cpu_copper_palette_events;
+    scratch.merged_render_events = merged_render_events;
     scratch.playfield_mask = playfield_mask;
     scratch.collision_pixels = collision_pixels;
+    scratch.sprite_group_mask = sprite_group_mask;
+    scratch.sprite_lines = sprite_lines;
+    scratch.attached_sprite_beams = attached_sprite_beams;
     scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
     scratch.h_window_rows = h_window_rows;
     scratch.ham_select_pixels = ham_select_pixels;

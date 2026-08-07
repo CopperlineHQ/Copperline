@@ -46,10 +46,6 @@ pub const OUT_HEIGHT: usize = FB_HEIGHT * 2;
 #[cfg(test)]
 pub const OUT_PIXELS: usize = FB_WIDTH * OUT_HEIGHT;
 
-/// Buffer capacity: the tallest supported scan, woven/doubled.
-const MAX_FIELD_PIXELS: usize = FB_WIDTH * MAX_VISIBLE_LINES;
-const MAX_OUT_PIXELS: usize = MAX_FIELD_PIXELS * 2;
-
 pub struct Deinterlacer {
     /// Woven presentation buffer for the history-dependent path; the
     /// direct [`Self::present_field_into`] path bypasses it.
@@ -116,19 +112,22 @@ impl Deinterlacer {
     fn with_options(enabled: bool, phosphor: f32) -> Self {
         let phosphor_alpha = (phosphor.clamp(0.0, 0.95) * 256.0) as u32;
         Self {
-            out: vec![0; MAX_OUT_PIXELS],
-            prev: [vec![0; MAX_FIELD_PIXELS], vec![0; MAX_FIELD_PIXELS]],
-            prev2: [vec![0; MAX_FIELD_PIXELS], vec![0; MAX_FIELD_PIXELS]],
+            // All of these are history-path scratch. Keep the common
+            // progressive/zero-phosphor path allocation-free, and grow them
+            // on the first frame that actually needs weaving or decay.
+            out: Vec::new(),
+            prev: [Vec::new(), Vec::new()],
+            prev2: [Vec::new(), Vec::new()],
             have: [false; 2],
             have2: [false; 2],
             field_rows: FB_HEIGHT,
             field_width: FB_WIDTH,
             out_rows: OUT_HEIGHT,
             out_width: FB_WIDTH,
-            moved: vec![false; FB_WIDTH],
+            moved: Vec::new(),
             enabled,
             phosphor_alpha,
-            presented: (phosphor_alpha > 0).then(|| vec![0; MAX_OUT_PIXELS]),
+            presented: (phosphor_alpha > 0).then(Vec::new),
             // Seed so the first frame presents at full brightness; the
             // threaded pipeline starts its worker at phosphor 0 and seeds
             // through set_phosphor, and the synchronous path must present
@@ -150,6 +149,11 @@ impl Deinterlacer {
         self.have2 = [false; 2];
     }
 
+    /// Whether motion-adaptive field merging is enabled.
+    pub fn deinterlace_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Change the persistence fraction (0.0..=0.95) live. Switching
     /// persistence on starts the trail from the next woven frame;
     /// switching it off drops the blend buffer so [`Self::output`]
@@ -168,6 +172,11 @@ impl Deinterlacer {
             self.presented = Some(vec![0; self.out.len()]);
             self.seed_presented = true;
         }
+    }
+
+    /// The quantised CRT persistence fraction currently in use.
+    pub fn phosphor(&self) -> f32 {
+        self.phosphor_alpha as f32 / 256.0
     }
 
     /// Drop the weave history and phosphor trail: the next field starts a
@@ -423,6 +432,75 @@ impl Deinterlacer {
         destination.copy_from_slice(&self.output()[..active]);
         (self.out_rows, self.out_width)
     }
+
+    /// Present a vertically scaled rectangular window of a field directly
+    /// into an owned frontend buffer.
+    ///
+    /// Standard browser TV presentation needs only the captured glass
+    /// aperture, not the full 716x570 woven buffer. On the common
+    /// progressive, zero-phosphor path this maps each destination row back
+    /// to the source field and writes the crop once, avoiding both the full
+    /// intermediate weave and the subsequent aperture copy. Interlaced or
+    /// phosphor-dependent frames retain [`Self::push_field`] and crop its
+    /// history-dependent result, so their pixels are unchanged.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_field_region_into(
+        &mut self,
+        field: &[u32],
+        rows: usize,
+        width: usize,
+        lace: bool,
+        long_field: bool,
+        double_rows: bool,
+        source_x: usize,
+        source_y: usize,
+        source_rows: usize,
+        destination_width: usize,
+        destination_rows: usize,
+        destination: &mut Vec<u32>,
+    ) -> (usize, usize) {
+        let rows = rows.clamp(1, MAX_VISIBLE_LINES);
+        debug_assert!(field.len() >= rows * width);
+        let doubled = lace || double_rows;
+        let full_rows = if doubled { rows * 2 } else { rows };
+        debug_assert!(source_x + destination_width <= width);
+        debug_assert!(source_y + source_rows <= full_rows);
+
+        let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
+        if direct {
+            if rows != self.field_rows || width != self.field_width {
+                self.field_rows = rows;
+                self.field_width = width;
+            }
+            self.have = [false; 2];
+            self.have2 = [false; 2];
+            self.out_rows = full_rows;
+            self.out_width = width;
+        } else {
+            self.push_field(field, rows, width, lace, long_field, double_rows);
+        }
+
+        destination.resize(destination_width * destination_rows, 0);
+        if direct {
+            for (y, dst) in destination.chunks_exact_mut(destination_width).enumerate() {
+                let woven_y = source_y
+                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
+                let source_row = if doubled { woven_y / 2 } else { woven_y };
+                let offset = source_row * width + source_x;
+                dst.copy_from_slice(&field[offset..offset + destination_width]);
+            }
+        } else {
+            let source = self.output();
+            for (y, dst) in destination.chunks_exact_mut(destination_width).enumerate() {
+                let source_row = source_y
+                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
+                let offset = source_row * width + source_x;
+                dst.copy_from_slice(&source[offset..offset + destination_width]);
+            }
+        }
+        (destination_rows, destination_width)
+    }
 }
 
 /// Channel-wise average of two packed RGBA pixels.
@@ -494,6 +572,89 @@ mod tests {
             destination,
             reference.output()[..reference.output_rows() * reference.output_width()]
         );
+    }
+
+    #[test]
+    fn direct_progressive_region_matches_crop_of_deinterlacer_output() {
+        let field: Vec<u32> = (0..FB_PIXELS).map(|idx| 0xFF00_0000 | idx as u32).collect();
+        let mut reference = Deinterlacer::with_options(true, 0.0);
+        reference.push_field(&field, FB_HEIGHT, FB_WIDTH, false, true, true);
+
+        let source_x = 19;
+        let source_y = 18;
+        let source_rows = 431;
+        let destination_width = 127;
+        let destination_rows = 263;
+        let mut expected = vec![0; destination_width * destination_rows];
+        for (y, row) in expected.chunks_exact_mut(destination_width).enumerate() {
+            let source_row =
+                source_y + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
+            let offset = source_row * FB_WIDTH + source_x;
+            row.copy_from_slice(&reference.output()[offset..offset + destination_width]);
+        }
+
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        let mut destination = Vec::new();
+        let dims = direct.present_field_region_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            source_x,
+            source_y,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+
+        assert_eq!(dims, (destination_rows, destination_width));
+        assert_eq!(destination, expected);
+    }
+
+    #[test]
+    fn interlaced_region_preserves_history_dependent_output() {
+        let long = field_filled_rows(|y| 0x1000 + y as u32);
+        let short = field_filled_rows(|y| 0x2000 + y as u32);
+        let mut reference = Deinterlacer::with_options(true, 0.0);
+        let mut cropped = Deinterlacer::with_options(true, 0.0);
+        for (field, long_field) in [(&long, true), (&short, false), (&long, true)] {
+            reference.push_field(field, FB_HEIGHT, FB_WIDTH, true, long_field, true);
+            cropped.push_field(field, FB_HEIGHT, FB_WIDTH, true, long_field, true);
+        }
+        reference.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+
+        let source_x = 11;
+        let source_y = 17;
+        let source_rows = 421;
+        let destination_width = 83;
+        let destination_rows = 271;
+        let mut expected = vec![0; destination_width * destination_rows];
+        for (y, row) in expected.chunks_exact_mut(destination_width).enumerate() {
+            let source_row =
+                source_y + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
+            let offset = source_row * FB_WIDTH + source_x;
+            row.copy_from_slice(&reference.output()[offset..offset + destination_width]);
+        }
+
+        let mut destination = Vec::new();
+        cropped.present_field_region_into(
+            &short,
+            FB_HEIGHT,
+            FB_WIDTH,
+            true,
+            false,
+            true,
+            source_x,
+            source_y,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+        assert_eq!(destination, expected);
     }
 
     #[test]
@@ -686,6 +847,48 @@ mod tests {
         d.push_field(&f, FB_HEIGHT, FB_WIDTH, false, true, true);
         assert_eq!(out_row(&d, 10), 0x0012_3456);
         assert!(d.presented.is_none(), "no blend buffer when disabled");
+    }
+
+    #[test]
+    fn disabled_effects_keep_history_scratch_unallocated() {
+        let mut d = Deinterlacer::with_settings(false, 0.0);
+        let field = field_filled_rows(|_| 0x0012_3456);
+        let mut destination = Vec::new();
+
+        d.present_field_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            &mut destination,
+        );
+
+        assert!(!d.deinterlace_enabled());
+        assert_eq!(d.phosphor(), 0.0);
+        assert!(d.out.is_empty());
+        assert!(d.prev.iter().all(Vec::is_empty));
+        assert!(d.prev2.iter().all(Vec::is_empty));
+        assert!(d.moved.is_empty());
+        assert!(d.presented.is_none());
+
+        // Enabling the effect itself is cheap; the buffers appear only
+        // when an interlaced field actually exercises it.
+        d.set_deinterlace(true);
+        assert!(d.prev.iter().all(Vec::is_empty));
+        d.present_field_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            true,
+            true,
+            true,
+            &mut destination,
+        );
+        assert!(!d.out.is_empty());
+        assert!(d.prev.iter().all(|buf| !buf.is_empty()));
+        assert!(!d.moved.is_empty());
     }
 
     #[test]

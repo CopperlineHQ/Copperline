@@ -43,7 +43,7 @@ visit boots it with no picker round trip -- the boot button simply reads
 [saved-states panel](#browser-save-states) shows what is remembered with
 a **Forget** button that puts the boot button back on AROS.
 
-Three more selects shape what the glass shows without touching the
+Five more controls shape what the glass shows without touching the
 machine. **Monitor** is the desktop window's 1084 presentation, on by
 default: the CRT shader preset (bowed tube face, scanlines, aperture
 grille, corner vignette -- the desktop's `[display] shader = "crt"`) with
@@ -68,7 +68,15 @@ black & white, green, amber, or sepia. Under the monitor path the tint is
 applied in the shader to the picture alone, so the bezel's plastic never
 turns phosphor-green (the desktop tints its buffer before the
 presentation passes too); on the 2D fallback it is a CSS filter on the
-canvas. All three are viewing
+canvas. **Deinterlace** opts interlaced (LACE) displays into the desktop's
+motion-adaptive field merging; off, those fields use cheaper line doubling.
+Progressive displays are identical either way. **Phosphor persistence**
+opts into a 40% previous-frame decay trail, useful for field-rate flicker
+effects but more expensive because every presented pixel is blended with
+retained history. Both history effects default off in the browser for
+maximum throughput.
+
+All five are viewing
 preferences rather than machine state, so the page remembers them in the
 browser and restores them on the next visit; the machine and video
 selects deliberately reset instead, because a shared `?df0=` link should
@@ -390,13 +398,15 @@ through wasm-bindgen; the page's JavaScript drives everything from
   that finds the last animation frame more than ~50 ms stale steps the
   machine itself, keeping emulation and audio real time while rAF is left
   to blit the newest frame at whatever rate the compositor manages.
-  On a host too slow to afford a frame render per emulated frame (the
-  render is roughly half a step's cost), the pacer degrades the picture
-  before it degrades the machine: when a step's rolling cost nears the
-  60 Hz frame budget, alternate ticks step with the render deferred, so
-  emulation and audio hold real time and only the displayed rate halves.
-  The stat line shows `render 1/2` while this is active, and the mode
-  disengages (with hysteresis) as soon as the host keeps up again. Its
+  On a host too slow to afford a frame render per emulated frame, the
+  pacer degrades the picture before it degrades the machine. It measures
+  host cost per fixed 60 Hz pacing slice (normalising a late animation
+  tick that catches up several slices), and only engages after sustained
+  pressure near the slice budget. Alternate ticks then step with the
+  render deferred, so emulation and audio hold real time and only the
+  displayed rate halves. The stat line shows `render 1/2` while this is
+  active; a sustained lower-cost interval disengages it without a
+  one-off catch-up burst making the mode flap. Its
   `host core + render + upload + shader` figures split the average host
   milliseconds per emulated frame over the last reporting interval:
   `core` is machine advancement, `render` is the Rust framebuffer and
@@ -526,6 +536,13 @@ exposes the guest clock for diagnostics. `presentation_revision()` identifies
 the current presentation-buffer generation without hashing it, while
 `last_run_core_ms()` and `last_run_render_ms()` split the host cost of the
 most recent paced call for page-side diagnostics.
+`set_deinterlace(on)` switches motion-adaptive LACE field merging live
+(`deinterlace_enabled()` reads it); the browser default is off, so LACE
+fields are line-doubled and the weave history stays unallocated.
+`set_phosphor(fraction)` selects CRT persistence from 0.0 (off, the browser
+default) through 0.95, with `phosphor()` returning the quantised value.
+Both setters re-present the held frame immediately and leave progressive,
+zero-persistence output on the direct copy path.
 
 `save_state()` returns the whole emulated machine as a `Uint8Array` in the
 desktop's `.clstate` format, and `load_state(bytes)` restores one --
