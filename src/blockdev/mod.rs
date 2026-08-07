@@ -764,15 +764,23 @@ mod broker_protocol {
         /// every host, not only the two that speak it.
         #[test]
         fn the_halves_agree_on_how_a_disk_is_named() {
-            for (id, write) in [("sdb", true), ("PhysicalDrive12", false), ("mmcblk0", true)] {
+            for (id, write) in [
+                ("sdb", true),
+                ("PhysicalDrive1", true),
+                ("PhysicalDrive12", false),
+                ("mmcblk0", true),
+                ("nvme0n1", false),
+            ] {
                 assert_eq!(
                     parse_argument(&argument(id, write)),
                     Some((id.to_string(), write))
                 );
             }
-            assert_eq!(parse_argument("sdb:rx"), None);
-            assert_eq!(parse_argument(":rw"), None);
-            assert_eq!(parse_argument("sdb"), None);
+            // A mode that is neither, an absent mode, an absent identifier,
+            // and no mode marker at all: none of them name a disk.
+            for nonsense in ["sdb:rx", "sdb:", ":rw", "sdb", ""] {
+                assert_eq!(parse_argument(nonsense), None, "{nonsense:?} names no disk");
+            }
         }
 
         /// A refusal comes back with the privileged half's own words, and a

@@ -1672,31 +1672,6 @@ mod tests {
         }
     }
 
-    /// The two halves meet over a command line, so what one writes the other
-    /// must read back exactly -- including a disk that may be written, which
-    /// is the difference between taking a disk and taking it apart.
-    #[test]
-    fn a_disk_survives_the_trip_between_the_two_halves() {
-        for (id, write) in [("PhysicalDrive1", true), ("PhysicalDrive12", false)] {
-            let argument = broker_argument(id, write);
-            assert_eq!(
-                parse_broker_argument(&argument),
-                Some((id.to_string(), write))
-            );
-        }
-        for nonsense in [
-            "PhysicalDrive1",
-            "PhysicalDrive1:",
-            ":rw",
-            "PhysicalDrive1:x",
-        ] {
-            assert!(
-                parse_broker_argument(nonsense).is_none(),
-                "{nonsense:?} must not name a disk"
-            );
-        }
-    }
-
     /// Enumeration must work unprivileged and with nothing plugged in: it is
     /// reached from config validation and from the launcher, on machines that
     /// have never seen an Amiga disk.
