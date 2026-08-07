@@ -35,6 +35,10 @@ class Copperline < Formula
     # boot ROM) where the binary looks for it: <prefix>/share/copperline/aros.
     # AROS is APL-licensed and freely redistributable, unlike a real Kickstart.
     (pkgshare/"aros").install Dir["assets/aros/*"]
+
+    # Install the bundled open-source A4091 autoboot ROM (default when a config
+    # fits an A4091 without naming a ROM): <prefix>/share/copperline/a4091.
+    (pkgshare/"a4091").install Dir["assets/a4091/*"]
   end
 
   test do

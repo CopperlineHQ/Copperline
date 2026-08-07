@@ -8221,3 +8221,214 @@ fn fetch_origin_below_hard_start_stays_linear_in_ddfstrt() {
     assert_eq!(mk(0x10).native_x_offset(false, 2), 80);
     assert_eq!(mk(0x10).fetch_start_native_x(false, 2), 0);
 }
+
+/// Differential regression oracle for the fast interior run: randomized
+/// planes, scroll, palette, collision enables, window edges, priorities,
+/// and mid-line control/palette segments, rendered by the production
+/// (fast-run) line renderer and the scalar per-pixel oracle, must agree
+/// byte for byte in every output the line renderer produces. HAM and
+/// dual-playfield cases ride along to prove the fallback stays engaged
+/// where the fast path must not.
+#[test]
+fn fast_playfield_interior_matches_scalar_oracle() {
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    const BPLCON0_POOL: [u16; 10] = [
+        0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000, // 1-6 planes, lores
+        0x9000, 0xC000, // 1 and 4 planes, hires
+        0x6400, // dual playfield, 6 planes
+        0x5800, // HAM6: the fallback must stay engaged and identical
+    ];
+    const DIW_POOL: [(u16, u16); 3] = [
+        (0x2C81, 0x2CC1), // standard PAL window
+        (0x2C91, 0x2CB1), // inset window
+        (0x2CA1, 0x2CA9), // very narrow window
+    ];
+    const BPLCON2_POOL: [u16; 4] = [0x0000, 0x0024, 0x0040, 0x0067];
+
+    for case in 0..400u32 {
+        let r = rand();
+        let bplcon0 = BPLCON0_POOL[(r as usize) % BPLCON0_POOL.len()];
+        let (diwstrt, diwstop) = DIW_POOL[((r >> 8) as usize) % DIW_POOL.len()];
+        let control = ControlState {
+            dmacon: DMACON_DMAEN | DMACON_BPLEN,
+            bplcon0,
+            bplcon1: ((r >> 24) & 0xFF) as u16,
+            bplcon2: BPLCON2_POOL[((r >> 32) as usize) % BPLCON2_POOL.len()],
+            clxcon: (r >> 16) as u16,
+            clxcon2: (r >> 40) as u16,
+            diwstrt,
+            diwstop,
+            ddfstrt: 0x0038,
+            ddfstop: 0x00D0,
+            ..ControlState::default()
+        };
+        let (x0, x1) = control.display_window_x();
+        let x1 = x1.min(FB_WIDTH);
+
+        let words = 10 + ((r >> 48) as usize % 12);
+        let fetched_pixels = words * 16;
+        let nplanes = control.nplanes().max(1);
+        let planes: Vec<Vec<u16>> = (0..nplanes)
+            .map(|_| (0..words).map(|_| rand() as u16).collect())
+            .collect();
+        let mut prepared = Vec::new();
+        prepare_planar_row_pixels(&planes, fetched_pixels, &mut prepared);
+
+        // Mid-line writes: a scroll change and a palette write make the
+        // renderer split the line into several runs, exercising the
+        // interior bounds against segment edges.
+        let mut control_segments = Vec::new();
+        if r & 0x1000_0000_0000_0000 != 0 {
+            let mut changed = control;
+            changed.bplcon1 = ((r >> 52) & 0xFF) as u16;
+            control_segments.push(ControlSegment {
+                x: x0 + 40 + (r as usize % 96),
+                control: changed,
+            });
+        }
+        let mut palette_segments = Vec::new();
+        if r & 0x2000_0000_0000_0000 != 0 {
+            palette_segments.push(PaletteSegment {
+                x: x0 + 24 + ((r >> 6) as usize % 128),
+                entry: ((r >> 12) & 0x1F) as u8,
+                loct: false,
+                value: (r >> 44) as u16 & 0x0FFF,
+            });
+        }
+
+        let mut palette = Palette::new();
+        for entry in 0..32 {
+            palette.write_ocs(entry, (rand() & 0x0FFF) as u16);
+        }
+        let suppress = r & 0x4000_0000_0000_0000 != 0;
+        let bpl_output_start_x = x0 + [0usize, 6, 34][((r >> 58) as usize) % 3];
+
+        let plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
+            0,
+            x0,
+            x1,
+            &planes,
+            &prepared,
+            fetched_pixels,
+        );
+
+        let render = |fast: bool| {
+            let mut fb = vec![0u32; FB_PIXELS];
+            let mut pf_mask = vec![0u8; FB_PIXELS];
+            let mut collisions = vec![CollisionPixel::default(); FB_PIXELS];
+            let mut clxdat = 0u16;
+            let f = if fast {
+                render_planned_playfield_line
+            } else {
+                render_planned_playfield_line_scalar
+            };
+            f(
+                &plan,
+                &mut fb,
+                &mut pf_mask,
+                &mut collisions,
+                &mut CollisionLookup::new(),
+                &mut IndexedOutputCache::default(),
+                &mut clxdat,
+                palette,
+                &palette_segments,
+                0,
+                control,
+                &control_segments,
+                0,
+                control.bplcon1,
+                control.bplcon0,
+                suppress,
+                bpl_output_start_x,
+                &h_row_for(control),
+                PAL_VISIBLE_LINE0,
+                0.0,
+                0,
+            );
+            (fb, pf_mask, collisions, clxdat)
+        };
+
+        let (fast_fb, fast_pf, fast_col, fast_clx) = render(true);
+        let (oracle_fb, oracle_pf, oracle_col, oracle_clx) = render(false);
+
+        assert_eq!(fast_clx, oracle_clx, "case {case}: clxdat diverged");
+        assert_eq!(fast_fb, oracle_fb, "case {case}: framebuffer diverged");
+        assert_eq!(fast_pf, oracle_pf, "case {case}: playfield mask diverged");
+        assert!(
+            fast_col
+                .iter()
+                .map(|c| c.0)
+                .eq(oracle_col.iter().map(|c| c.0)),
+            "case {case}: collision pixels diverged"
+        );
+    }
+}
+
+/// The oracle above would pass vacuously if the eligibility check always
+/// fell back to the scalar loop; a plain 4-plane lores screen must
+/// actually produce a fast interior covering most of its window.
+#[test]
+fn fast_playfield_interior_engages_for_standard_screens() {
+    let control = ControlState {
+        dmacon: DMACON_DMAEN | DMACON_BPLEN,
+        bplcon0: 0x4000,
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        ..ControlState::default()
+    };
+    let (x0, x1) = control.display_window_x();
+    let words = 20;
+    let fetched_pixels = words * 16;
+    let planes: Vec<Vec<u16>> = (0..4).map(|_| vec![0xA55A; words]).collect();
+    let mut prepared = Vec::new();
+    prepare_planar_row_pixels(&planes, fetched_pixels, &mut prepared);
+    let plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
+        0,
+        x0,
+        x1.min(FB_WIDTH),
+        &planes,
+        &prepared,
+        fetched_pixels,
+    );
+
+    let pixel_repeat = control.framebuffer_pixel_repeat();
+    let diw_h_start = control.diw_h_start();
+    let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
+    let interior = fast_playfield_run_interior(
+        &plan,
+        x0,
+        plan.x_stop,
+        x0,
+        pixel_repeat,
+        control.native_samples_per_framebuffer_pixel(),
+        control.fetch_start_native_x(diw_h_start, pixel_repeat),
+        control.native_x_offset(diw_h_start, pixel_repeat),
+        0,
+        &delays,
+        4,
+        false,
+        false,
+        1,
+        true,
+        false,
+        true,
+        true,
+        control,
+    );
+    let (fast_lo, fast_hi, _f0, mask) = interior.expect("standard screen must qualify");
+    assert_eq!(mask, 0x0F);
+    assert!(
+        fast_hi - fast_lo >= (plan.x_stop - x0) / 2,
+        "interior {fast_lo}..{fast_hi} should cover most of {x0}..{}",
+        plan.x_stop
+    );
+}

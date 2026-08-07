@@ -237,6 +237,13 @@ Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
 
+On an iPhone or iPad, leaving the browser for another app deactivates
+the page's audio output at the OS level, and coming back does not
+reliably reactivate it -- the pipeline can keep consuming samples with
+nothing reaching the speaker. The page rebuilds its audio pipeline
+whenever it returns to the foreground there, so the sound carries on;
+if iOS demands a fresh gesture first, the next tap brings it back.
+
 Hiding the tab normally puts the machine to sleep with the page, exactly
 where it was until the tab returns. Ticking **Run in background** keeps
 it running -- and audible -- the way a video tab keeps playing, so a long
@@ -245,6 +252,15 @@ choice is remembered per browser. Running hidden needs the sound to have
 been unlocked (any click or key press does it): the audio pipeline is
 what clocks the machine while the page cannot see it, so with audio still
 suspended the machine sleeps as before.
+
+A page that stays visible but is starved of animation frames -- an
+unfocused window on a host bent on saving power (Windows "efficiency
+mode" is the classic) -- keeps real time the same way, and needs no
+option: the audio pipeline steps the machine between whatever animation
+frames still arrive, so emulation and sound never slow down and only the
+displayed frame rate drops to what the browser delivers. This too needs
+unlocked audio; with the AudioContext still suspended there is no
+fallback clock, and a starved page slows down as the browser dictates.
 
 (browser-save-states)=
 ### Save states
@@ -342,8 +358,11 @@ through wasm-bindgen; the page's JavaScript drives everything from
   [the presentation internals](../internals/video.md)). Border-only frames
   keep the previous frame's geometry, as on the desktop, so the canvas
   does not switch shape across the blanks a screen change produces.
-  There is no wgpu in the build, which keeps the wasm
-  around 1.4 MiB (about 0.6 MiB over the wire).
+  A frame whose render input exactly matches the previous one skips the
+  render pipeline entirely (the desktop render cache's reuse detector),
+  so a static screen costs no render work at all.
+  There is no wgpu in the build, which keeps the wasm-opt'd wasm
+  around 2.1 MiB (about 0.8 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
   and posted to an `AudioWorklet` as transferred `Float32Array` chunks. The
   build is single threaded -- no SharedArrayBuffer, so no COOP/COEP headers
@@ -361,7 +380,19 @@ through wasm-bindgen; the page's JavaScript drives everything from
   (messages, which background tabs still receive; only timers are
   throttled) clock the machine in rAF's place: the real-time audio
   pipeline never stops, so the tab keeps running the way a video tab
-  keeps playing, skipping only the frame rendering nobody can see.
+  keeps playing, skipping only the frame rendering nobody can see. The
+  same clock backstops a visible page whose animation frames are being
+  throttled (an unfocused window under a power-saving OS): a queue report
+  that finds the last animation frame more than ~50 ms stale steps the
+  machine itself, keeping emulation and audio real time while rAF is left
+  to blit the newest frame at whatever rate the compositor manages.
+  On a host too slow to afford a frame render per emulated frame (the
+  render is roughly half a step's cost), the pacer degrades the picture
+  before it degrades the machine: when a step's rolling cost nears the
+  60 Hz frame budget, alternate ticks step with the render deferred, so
+  emulation and audio hold real time and only the displayed rate halves.
+  The stat line shows `render 1/2` while this is active, and the mode
+  disengages (with hysteresis) as soon as the host keeps up again.
 - **Input**: `KeyboardEvent.code` strings map to Amiga raw keycodes with the
   same table as the desktop frontend (winit's `KeyCode` names *are* the W3C
   code strings); the mouse uses Pointer Lock for relative motion, with a
@@ -674,7 +705,10 @@ elements, and pages without them are untouched:
   fullscreen overlay carries a copy of it labelled Type -- but only where
   there is a keyboard to raise. On a screen without touch, or a wasm bundle
   without `key_raw`, neither is built at all and a shell that provided the
-  button has it hidden. It shares `--cl-kbd-h` with `#keyboard`,
+  button has it hidden; a shell may also ship the button with the `hidden`
+  attribute already set, so a desktop never shows it even for the moment
+  before the glue loads, and the glue un-hides it on the touch screens it
+  serves. It shares `--cl-kbd-h` with `#keyboard`,
   publishing how much of the viewport the device keyboard covers. The
   off-screen field it focuses is built by the glue and lives inside
   `#shell`, so no input element is needed in the shell.
@@ -692,6 +726,14 @@ elements, and pages without them are untouched:
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the
   canvas shell. Either way it fills in once a machine boots.
+- `#build-info` (a container): filled once the wasm module loads with the
+  bundle's build identity -- the tag or branch and commit CI compiled it
+  from (`v0.14.0 (abc123def)`, the commit linked to its GitHub page), or
+  `dev build` for a bundle built outside CI -- so a page can show what is
+  deployed. The element is untouched until the module resolves, so a
+  shell can hide the empty state with `:empty`; without the element
+  nothing is inserted. The same string is what the bug-report link files
+  under its version field.
 - `data-default="keys"` on the `#joy` toggle: the joystick mode the page
   starts in -- `off`, `keys`, `cd32`, or `touch` (the config file's
   `joy` and then `?joy=` in the URL override it).

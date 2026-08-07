@@ -62,3 +62,32 @@ fn aros_pair_in(dir: &Path) -> Option<BundledAros> {
     let extended = dir.join(AROS_EXT_FILE);
     (main.is_file() && extended.is_file()).then_some(BundledAros { main, extended })
 }
+
+/// Bundled open-source A4091 autoboot ROM, used when a config fits an A4091
+/// without naming a ROM. From https://github.com/A4091/a4091-software .
+pub const A4091_ROM_FILE: &str = "a4091_cdfs.rom";
+
+/// Locate the bundled A4091 ROM, searching the same places as
+/// [`find_bundled_aros`] under an `a4091/` subdirectory.
+pub fn find_bundled_a4091() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = crate::envcfg::var("COPPERLINE_A4091_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("a4091"));
+            if let Some(parent) = bin_dir.parent() {
+                dirs.push(parent.join("Resources").join("a4091"));
+                dirs.push(parent.join("share").join("copperline").join("a4091"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("assets").join("a4091"));
+
+    dirs.into_iter()
+        .map(|dir| dir.join(A4091_ROM_FILE))
+        .find(|rom| rom.is_file())
+}

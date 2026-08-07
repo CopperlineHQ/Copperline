@@ -40,6 +40,14 @@ if (
 }
 
 const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+// iOS WebKit is every browser on an iPhone or iPad (iPadOS 13+ presents
+// itself as a Mac, but a Mac with a touch screen); it deactivates the
+// page's OS audio session whenever the app leaves the foreground, and a
+// context revived by the return can render into the dead session. See
+// recoverAudio().
+const IOS_WEBKIT =
+  /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1);
 // Touches on the canvas are emulator input, never page gestures: no
 // scrolling, no double-tap zoom, no long-press callout.
 canvas.style.touchAction = 'none';
@@ -51,17 +59,29 @@ let emu = null;
 let audioCtx = null;
 let audioNode = null;
 let queuedMs = 0;
+// performance.now() of the worklet's last queue report: proof of a live
+// audio render thread, which posts one every ~29 ms while it runs.
+let lastAudioReportMs = 0;
 let running = false;
 let paused = false;
 let framesThisSecond = 0;
-// Diagnostic split of the fps figure. fps counts frames *stepped*, but a
-// tick that steps more than one frame blits only the last, so "shown"
-// (ticks that stepped at least once, each blitting one new picture) is the
-// true output rate and "ticks" is the rAF callback rate. 60 fps with 30
-// shown over 60 ticks means the audio gate is duty-cycling production;
-// 30 shown over 30 ticks means the browser halved the rAF cadence.
+// Diagnostic split of the fps figure. fps counts frames *stepped*; a blit
+// shows only the newest of them, so "shown" (blits that had a fresh
+// picture to show) is the true output rate and "ticks" is the rAF
+// callback rate alone (audio-clock fallback steps are not ticks). 60 fps
+// with 30 shown over 60 ticks means the audio gate is duty-cycling
+// production; 30 shown over 30 ticks means the browser halved the rAF
+// cadence, with the machine still stepping in real time.
 let ticksThisSecond = 0;
 let presentsThisSecond = 0;
+// Set when a step produced a frame the canvas has not shown yet, cleared
+// by the blit that shows it. Steps can happen off the rAF tick (hidden
+// background running, the starved-rAF fallback) with the wasm-side
+// render deferred; the next rendering run repaints before the blit, so
+// the flag still marks a genuinely fresh picture, and "shown" counts
+// blits of fresh pictures rather than assuming step and blit share a
+// tick.
+let presentDirty = false;
 let audioUnderruns = 0;
 let lastStatUpdate = 0;
 // Size of the last presented frame in emulated pixels. Under the monitor
@@ -413,6 +433,7 @@ async function load() {
     setLoadStatus('loading emulator...');
     wasm = await init();
     buildInfo = WebEmu.build_info?.() ?? null;
+    showBuildInfo();
     populateMachineSelect();
     populateVideoSelect();
   } catch (e) {
@@ -462,6 +483,186 @@ async function load() {
   if (!bootBtn.disabled) bootBtn.focus({ preventScroll: true });
 }
 
+// --- audio stack ---------------------------------------------------------
+
+// Build (or rebuild) the AudioContext + worklet pipeline. A rebuild
+// closes the previous stack first so it cannot keep playing alongside
+// the new one (a reboot after an emulator error, an iOS audio-session
+// revival); the generation counter makes overlapping builds settle on
+// the newest one. suspendForPause is the caller's intent for a machine
+// that is paused right now: a foreground recovery passes the live
+// paused flag to keep the pause contract that audio stays suspended,
+// while boot always builds a running stack - it starts the new machine
+// unpaused, and clears the paused flag itself without going through
+// the unpause path that would otherwise resume the context.
+let audioBuildGeneration = 0;
+
+// One shared autoplay-unlock handler instead of a closure per build:
+// re-arming with the same function is an addEventListener no-op, so
+// rebuilds while the policy holds contexts suspended cannot stack
+// listeners, and firing resumes whatever stack is current rather than
+// the one that happened to be live when the listener was armed.
+//
+// The triggers are pointerup and keydown, never pointerdown, because
+// of how user activation is granted (HTML spec, "activation triggering
+// input event"): a mouse grants it on the down, but a touch grants it
+// at the END of the gesture - a finger's pointerdown carries no
+// activation, so a resume issued there is refused. With the old
+// once-listeners that single refusal also disarmed the unlock, which
+// left an iPhone permanently silent after an iOS audio-session
+// interruption while every desktop test passed (mice activate on the
+// down). By pointerup both input kinds hold activation. The listeners
+// now stay armed until a resume verifiably lands, so a refused attempt
+// never burns the arming.
+//
+// If an in-gesture resume settles with the context still not running,
+// that context is beyond resuming (an iOS session wedge), and the next
+// gesture escalates: it rebuilds the whole stack inside its activation
+// window - the same shape as the boot click, which starts audio
+// reliably even right after an interruption.
+let audioUnlockRebuild = false;
+
+function audioUnlock() {
+  // The pause contract holds on this path too: a paused machine's
+  // context stays suspended, and unpausing owns the resume. Returning
+  // WITHOUT disarming keeps the ladder ready for the first unpaused
+  // gesture - which cannot be the unpause tap itself (its pointerup
+  // precedes the click that clears the flag), but setPaused resumes
+  // inside that same activation window, and a resume it cannot land is
+  // exactly what the still-armed ladder is for.
+  if (paused) return;
+  if (!audioCtx || audioUnlockRebuild) {
+    audioUnlockRebuild = false;
+    buildAudioStack(false).catch((e) => console.error('audio rebuild', e));
+    return;
+  }
+  const ctx = audioCtx;
+  ctx.resume().then(
+    () => {
+      if (audioCtx !== ctx) return; // superseded while settling
+      if (ctx.state === 'running') disarmAudioUnlock();
+      // A suspended reading here can be the Pause tap's own doing: its
+      // pointerup fires this handler while still unpaused, and the
+      // click's suspend lands before the resume settles. That is the
+      // pause contract at work, not a context beyond resuming, so it
+      // must not arm the escalation.
+      else if (!paused) audioUnlockRebuild = true;
+    },
+    () => {
+      if (audioCtx === ctx && !paused) audioUnlockRebuild = true;
+    },
+  );
+}
+
+function armAudioUnlock() {
+  window.addEventListener('pointerup', audioUnlock);
+  window.addEventListener('keydown', audioUnlock);
+}
+
+function disarmAudioUnlock() {
+  window.removeEventListener('pointerup', audioUnlock);
+  window.removeEventListener('keydown', audioUnlock);
+}
+
+async function buildAudioStack(suspendForPause) {
+  const gen = ++audioBuildGeneration;
+  // A fresh build restarts the unlock ladder from its first rung: the
+  // escalation verdict belonged to the context being replaced.
+  audioUnlockRebuild = false;
+  if (audioCtx) {
+    audioNode?.disconnect();
+    // Deliberately not awaited: on iOS the context being replaced may be
+    // wedged in a dead audio session, and its teardown must never gate
+    // the stack that restores the sound. The transient second context is
+    // bounded - one per rebuild, with the close already under way.
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+    audioNode = null;
+    window.__audioCtx = null; // keep the debug surface truthful
+  }
+  const ctx = new AudioContext({ sampleRate: 44100 });
+  let node;
+  try {
+    await ctx.audioWorklet.addModule('./audio-worklet.js');
+    if (gen !== audioBuildGeneration) {
+      // A newer build superseded this one while its module loaded.
+      ctx.close().catch(() => {});
+      return;
+    }
+    node = new AudioWorkletNode(ctx, 'copperline-audio', {
+      outputChannelCount: [2],
+    });
+  } catch (e) {
+    // The old stack is already gone; do not leak the half-built one on
+    // top. The globals stay null, which recoverAudio treats as "retry
+    // the build on the next foreground return".
+    ctx.close().catch(() => {});
+    throw e;
+  }
+  // The queue/underrun readouts belong to the worklet that reports them.
+  // Carried across a rebuild, a stale queuedMs over the pacing threshold
+  // would gate the fresh machine's stepping until the new worklet's first
+  // report - which never comes while autoplay policy holds the context
+  // suspended - and old underruns would sit in the stat line as if the
+  // new stack had already stuttered.
+  queuedMs = 0;
+  audioUnderruns = 0;
+  audioGateClosed = false;
+  node.port.onmessage = (e) => {
+    lastAudioReportMs = performance.now();
+    if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
+    if (typeof e.data?.underruns === 'number') audioUnderruns = e.data.underruns;
+    // The worklet's queue reports (one every ~29 ms) are a clock the
+    // browser never throttles, and they step the machine whenever rAF
+    // cannot. Hidden with run-in-background on, they are the only clock:
+    // input pumps and presentation stay out, there is nothing to show
+    // and nobody at the controls, but audio plays on and the serial
+    // bridge keeps flowing. Visible but starved of animation frames (an
+    // unfocused window on a power-saving host), they keep the machine
+    // and its audio real time between the rAF ticks that still arrive,
+    // each of which blits the newest frame; only the displayed rate
+    // degrades to whatever the compositor manages. Both cases defer
+    // the wasm-side frame render: the blit waits on the next rAF tick
+    // regardless, and rendering per queue report would spend exactly
+    // the headroom a starving host is not giving us.
+    if (running && !paused && emu) {
+      const nowMs = performance.now();
+      if (
+        keepRunningHidden ||
+        (!document.hidden &&
+          nowMs - lastRafMs > RAF_STARVED_MS &&
+          avgStepMs < STEP_OVERLOAD_MS)
+      ) {
+        stepMachine(nowMs, true);
+      }
+    }
+  };
+  node.connect(ctx.destination);
+  audioCtx = ctx;
+  audioNode = node;
+  window.__audioCtx = ctx; // for debugging/automation, like __emu
+  if (suspendForPause) {
+    // Rebuilt mid-pause (an iOS foreground return): keep the pause
+    // contract that audio stays suspended; unpausing resumes it.
+    ctx.suspend().catch(() => {});
+    return;
+  }
+  // Autoplay policies can leave the context suspended, and resume() may
+  // not settle without a qualifying gesture; never let that block the
+  // boot. Video runs regardless, and the next real interaction unlocks
+  // the sound. A resume that verifiably lands clears any armed unlock;
+  // the synchronous state check below arms it in the meantime (the
+  // resume is still settling then, and a no-op unlock firing on a
+  // context that made it on its own is harmless).
+  ctx
+    .resume()
+    .then(() => {
+      if (audioCtx === ctx && ctx.state === 'running') disarmAudioUnlock();
+    })
+    .catch(() => {});
+  if (ctx.state !== 'running') armAudioUnlock();
+}
+
 // --- boot ----------------------------------------------------------------
 
 async function boot() {
@@ -481,50 +682,8 @@ async function boot() {
     const machine = new WebEmu(machineModel ?? undefined, videoStandard ?? undefined);
     if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
-    // A reboot after an emulator error builds a new audio stack; close the
-    // previous one so it cannot keep playing alongside.
-    if (audioCtx) {
-      audioNode?.disconnect();
-      audioCtx.close().catch(() => {});
-      audioNode = null;
-    }
-    // The queue/underrun readouts belong to the worklet that reports them.
-    // Carried across a rebuild, a stale queuedMs over the pacing threshold
-    // would gate the fresh machine's stepping until the new worklet's first
-    // report - which never comes while autoplay policy holds the context
-    // suspended - and old underruns would sit in the stat line as if the
-    // new stack had already stuttered.
-    queuedMs = 0;
-    audioUnderruns = 0;
-    audioGateClosed = false;
-    audioCtx = new AudioContext({ sampleRate: 44100 });
-    await audioCtx.audioWorklet.addModule('./audio-worklet.js');
-    audioNode = new AudioWorkletNode(audioCtx, 'copperline-audio', {
-      outputChannelCount: [2],
-    });
-    audioNode.port.onmessage = (e) => {
-      if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
-      if (typeof e.data?.underruns === 'number') audioUnderruns = e.data.underruns;
-      // Background running: while the page is hidden the worklet's queue
-      // reports (one every ~29 ms) are the clock that rAF stopped being.
-      // Input pumps and presentation stay out: there is nothing to show
-      // and nobody at the controls, but audio plays on and the serial
-      // bridge keeps flowing.
-      if (keepRunningHidden && running && !paused && emu) {
-        stepMachine(performance.now(), true);
-      }
-    };
-    audioNode.connect(audioCtx.destination);
-    // Autoplay policies can leave the context suspended, and resume() may
-    // not settle without a qualifying gesture; never let that block the
-    // boot. Video runs regardless, and the next real interaction unlocks
-    // the sound.
-    audioCtx.resume().catch(() => {});
-    if (audioCtx.state !== 'running') {
-      const unlock = () => audioCtx.resume().catch(() => {});
-      window.addEventListener('pointerdown', unlock, { once: true });
-      window.addEventListener('keydown', unlock, { once: true });
-    }
+    await buildAudioStack(false);
+    presentDirty = false;
 
     // A fresh machine boots with an empty drive: DF0 holds the pending disk
     // or nothing, never a name left over from before the reboot (a crash
@@ -562,6 +721,11 @@ async function boot() {
     );
     overlay.style.display = 'none';
     showBugLink(false);
+    // Primed before running flips on: the starvation fallback is gated
+    // on running, so no queue report can read the epoch (or a previous
+    // machine's stamp) as an already-starved rAF before the first
+    // animation frame lands.
+    lastRafMs = performance.now();
     running = true;
     // A reboot from a paused machine must not start the new one paused.
     paused = false;
@@ -600,6 +764,45 @@ async function boot() {
 const AUDIO_GATE_CLOSE_MS = 150;
 const AUDIO_GATE_OPEN_MS = 90;
 let audioGateClosed = false;
+
+// The starved-rAF fallback's threshold: how stale the last animation
+// frame may be before a worklet queue report steps the machine itself.
+// Above the ~33 ms gap of a merely halved (30 Hz) cadence, which the
+// normal tick absorbs by stepping twice; well under the ~100 ms deficit
+// the pacer forgives, past which lost wall time becomes lost emulated
+// time (the slow motion and underruns a starved window shows today).
+const RAF_STARVED_MS = 50;
+let lastRafMs = 0;
+
+// Adaptive render stride for hosts that cannot afford a frame render
+// every emulated frame. The wasm-side presentation render is a large
+// share of a step's cost (about 45% on an Ice Lake laptop), and a host
+// saturated by it drops animation frames until the pacer starts
+// forgiving deficits - slow motion, the worst possible degradation.
+// When the moving average of a step's cost nears the 60 Hz frame
+// budget, alternate ticks step with the render deferred (the same
+// run_hidden + stale-repaint path the off-tick clocks use), trading
+// display rate for guaranteed real-time emulation and audio. The
+// hysteresis keeps the mode from flapping on the threshold, and the
+// stride never exceeds every-other-tick, so the picture keeps at least
+// half the tick rate. Old bundles without run_hidden render every
+// step regardless, which simply leaves the behavior they always had.
+const RENDER_SKIP_ENTER_MS = 15;
+const RENDER_SKIP_EXIT_MS = 11;
+// The starved-rAF fallback exists for a THROTTLED host: animation frames
+// withheld from a machine that is cheap to step. On an OVERLOADED host -
+// the machine itself eating more than the worklet's ~29 ms report
+// interval per step - stepping on every report leaves the main thread no
+// idle at all: the page (input, the stat line, devtools) freezes solid
+// while emulated time barely gains, because the wall-paced core cannot
+// exceed the host's throughput however often it is called. Past this
+// step cost the fallback stands down and rAF alone drives the machine,
+// keeping the page usable through the worst stretches (a 68020 decrunch
+// on a slow host) at whatever rate the host can actually sustain.
+const STEP_OVERLOAD_MS = 25;
+let avgStepMs = 0;
+let renderSkipActive = false;
+let renderDeferredLastTick = false;
 
 function maxFramesForQueue() {
   const limit = audioGateClosed ? AUDIO_GATE_OPEN_MS : AUDIO_GATE_CLOSE_MS;
@@ -645,20 +848,30 @@ function presentFrame() {
 }
 
 // Advance the machine to nowMs and ship what it produced (audio, serial):
-// the half of a tick shared by the visible rAF loop and hidden background
-// stepping. Returns false when the machine crashed and the caller's loop
-// must stop. Hidden stepping skips the wasm-side frame render (nobody can
-// see it); the first visible run repaints unconditionally after that.
-function stepMachine(nowMs, hidden) {
-  ticksThisSecond++;
+// the half of a tick shared by the visible rAF loop and the worklet's
+// off-tick stepping (hidden background running, the starved-rAF
+// fallback). Returns false when the machine crashed and the caller's loop
+// must stop. Off-tick steps defer the wasm-side frame render (a hidden
+// page never blits, a starved one not before its next rAF tick); the
+// first rendering run repaints even when it steps nothing itself, so a
+// deferred picture is never blitted stale.
+function stepMachine(nowMs, deferRender) {
   try {
     const max = maxFramesForQueue();
+    const stepStart = performance.now();
     const stepped =
-      hidden && typeof emu.run_hidden === 'function'
+      deferRender && typeof emu.run_hidden === 'function'
         ? emu.run_hidden(nowMs, max)
         : emu.run(nowMs, max);
+    // Rolling cost of a step, the render-stride controller's signal.
+    // Idle steps (nothing to advance) pull it down, which is right:
+    // they mean the host is keeping up.
+    avgStepMs = avgStepMs * 0.9 + (performance.now() - stepStart) * 0.1;
+    renderSkipActive = renderSkipActive
+      ? avgStepMs > RENDER_SKIP_EXIT_MS
+      : avgStepMs > RENDER_SKIP_ENTER_MS;
     framesThisSecond += stepped;
-    if (stepped > 0) presentsThisSecond++;
+    if (stepped > 0) presentDirty = true;
   } catch (e) {
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
@@ -687,7 +900,8 @@ function stepMachine(nowMs, hidden) {
       `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
       `audio ${queuedMs.toFixed(0)} ms` +
-      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '');
+      (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '') +
+      (renderSkipActive ? ' | render 1/2' : '');
     framesThisSecond = 0;
     ticksThisSecond = 0;
     presentsThisSecond = 0;
@@ -700,13 +914,28 @@ function stepMachine(nowMs, hidden) {
 function tick(nowMs) {
   if (!running) return;
   if (paused) return; // resumePause() restarts the loop
+  lastRafMs = nowMs;
+  ticksThisSecond++;
   // Polled, not event-driven: the Gamepad API reports button state only
   // when asked, so this is where a controller reaches the machine.
   pumpGamepads();
   syncCapsLed();
   pumpHostKeys();
-  if (!stepMachine(nowMs, false)) return;
+  // Under sustained overload, defer the frame render on alternate ticks
+  // (see the render-stride notes above): the machine keeps real time on
+  // a host that cannot afford a render per frame, and only the shown
+  // rate degrades - never the emulation or its audio.
+  const deferRender = renderSkipActive && !renderDeferredLastTick;
+  if (!stepMachine(nowMs, deferRender)) return;
+  renderDeferredLastTick = deferRender;
   presentFrame();
+  // A deferred tick blits the previous picture again; the flag rides
+  // through to the rendering tick whose blit really shows something
+  // new, so "shown" stays the count of fresh pictures on the canvas.
+  if (presentDirty && !deferRender) {
+    presentsThisSecond++;
+    presentDirty = false;
+  }
   updateStatusLeds();
   requestAnimationFrame(tick);
 }
@@ -718,15 +947,71 @@ function tick(nowMs) {
 // browsers never throttle, so the worklet's queue reports (which arrive as
 // messages, not timers, and so keep flowing) clock the machine while rAF
 // is asleep. That needs a running AudioContext: with autoplay still
-// locked there is no clock, and the machine sleeps as before.
+// locked there is no clock, and the machine sleeps as before. (The
+// starved-rAF fallback in the report handler leans on the same clock for
+// a page that is visible but throttled; that one is not an option,
+// because nobody wants slow motion they can see.)
 let keepRunningHidden = false;
+
+// How long a foreground return may go without a worklet queue report
+// before the audio stack is declared dead and rebuilt. A live render
+// thread reports every ~29 ms; the slack covers a resume() still
+// settling.
+const AUDIO_REVIVE_CHECK_MS = 600;
+
+// Bring the sound back when the page returns to the foreground. On most
+// hosts resuming the suspended context is the whole job. iOS WebKit is
+// the exception: backgrounding the browser deactivates the page's OS
+// audio session, and on return the context can come back with its render
+// thread running and its output detached - state reads 'running', the
+// worklet keeps draining the queue (the stat line shows a live, low
+// buffer), and nothing reaches the speaker - while resume() on a
+// 'running' context is a no-op by spec, so it cannot repair that. The
+// context can equally come back in WebKit's non-standard 'interrupted'
+// state with resume() refused outside a gesture, or find the output
+// hardware reconfigured (a phone call rerouted the session). A fresh
+// context is the one move that covers all three, and the queue it
+// discards holds pre-switch audio nobody missed; if the return does not
+// count as a gesture, buildAudioStack's unlock listeners hand the job to
+// the next tap. Elsewhere the worklet's report stream doubles as a
+// liveness check, and a context that stays silent after its resume gets
+// the same rebuild.
+function recoverAudio() {
+  if (!audioCtx) {
+    // A running machine with no stack at all means a previous rebuild
+    // failed mid-flight; retry rather than leaving the session silent
+    // for good. With no machine there is nothing to revive - the next
+    // boot builds its own stack.
+    if (running) {
+      buildAudioStack(paused).catch((e) => console.error('audio rebuild', e));
+    }
+    return;
+  }
+  if (IOS_WEBKIT && running) {
+    buildAudioStack(paused).catch((e) => console.error('audio rebuild', e));
+    return;
+  }
+  // A paused machine's context stays suspended by the pause contract;
+  // unpausing owns the resume.
+  if (paused) return;
+  audioCtx.resume().catch(() => {});
+  const resumedAt = performance.now();
+  setTimeout(() => {
+    if (!audioCtx || !emu || !running || paused || document.hidden) return;
+    if (lastAudioReportMs >= resumedAt) return;
+    buildAudioStack(false).catch((e) => console.error('audio rebuild', e));
+  }, AUDIO_REVIVE_CHECK_MS);
+}
 
 document.addEventListener('visibilitychange', () => {
   // The browser drops a screen wake lock when the page hides; re-request
   // it when a still-running machine comes back into view.
   syncWakeLock();
-  if (!audioCtx) return;
   if (document.hidden) {
+    // No stack, nothing to suspend. The show path takes no such guard:
+    // recoverAudio must run for a running machine whose stack is gone
+    // (a rebuild that failed mid-flight), or it could never come back.
+    if (!audioCtx) return;
     // The toggle is read through the DOM rather than its const, which is
     // declared further down the file: a handler must not couple to
     // evaluation order (with the box not built yet, this reads unticked).
@@ -739,13 +1024,20 @@ document.addEventListener('visibilitychange', () => {
   } else {
     const kept = keepRunningHidden;
     keepRunningHidden = false;
-    audioCtx.resume();
+    recoverAudio();
     // A machine that slept through the hide starts pacing from now: the
     // guest owes the wall clock nothing, and catching up would burst
     // frames whose audio lands in a queue that never drained while
     // hidden, spiking it over the gate.
     if (!kept && emu && running && !paused) emu.resync_clock?.();
   }
+});
+
+// A restore from the back/forward cache is a return the visibility
+// handler never sees: the page reappears already visible, carrying an
+// AudioContext the cache entombed. Revive it the same way.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) recoverAudio();
 });
 
 // --- screen wake lock --------------------------------------------------
@@ -3047,6 +3339,9 @@ function setPaused(next) {
     // Nothing elapsed for the guest while paused; start pacing from now.
     emu.resync_clock?.();
     setLoadStatus('running');
+    // A queue report can beat the first animation frame; the pre-pause
+    // lastRafMs must not read as starvation.
+    lastRafMs = performance.now();
     requestAnimationFrame(tick);
   }
 }
@@ -3470,15 +3765,26 @@ const devKeyboardBtn = $('devkeyboard');
 pauseBtn?.addEventListener('click', togglePause);
 screenshotBtn?.addEventListener('click', copyScreenshot);
 // Hidden rather than degraded on a bundle that predates key_raw: the keys
-// are rawkeys, and there is no half of this that still works.
+// are rawkeys, and there is no half of this that still works. Inline as
+// well as by the attribute, for the same shell-stylesheet reason as the
+// device-keys button below.
 if (HAS_KEY_RAW) keyboardBtn?.addEventListener('click', toggleKeyboard);
-else if (keyboardBtn) keyboardBtn.hidden = true;
+else if (keyboardBtn) {
+  keyboardBtn.hidden = true;
+  keyboardBtn.style.display = 'none';
+}
 // The device keyboard is offered where there is one to offer. A screen
 // without touch already has the real thing plugged in, and routing it
 // through a text field would only lose every key the field cannot
 // describe -- which is most of an Amiga keyboard.
-if (HAS_KEY_RAW && hasTouch) devKeyboardBtn?.addEventListener('click', toggleHostKeyboard);
-else if (devKeyboardBtn) {
+if (HAS_KEY_RAW && hasTouch && devKeyboardBtn) {
+  // A shell can ship the button hidden so a desktop never shows it, not
+  // even for the moment before this module loads; the touch screens the
+  // button serves un-hide it here.
+  devKeyboardBtn.hidden = false;
+  devKeyboardBtn.style.display = '';
+  devKeyboardBtn.addEventListener('click', toggleHostKeyboard);
+} else if (devKeyboardBtn) {
   // Only a shell-provided button can reach here (the self-inserted one is
   // not built at all off a touch screen), and it goes away inline as well
   // as by the attribute: `[hidden]` is a user-agent rule, so a shell whose
@@ -5089,6 +5395,32 @@ $('kickurl')?.addEventListener('click', () => {
 const BUG_REPORT_URL = 'https://github.com/CopperlineHQ/Copperline/issues/new';
 let buildInfo = null; // the wasm build's tag and commit, known once init resolves
 
+// Optional page-shell hook: a #build-info element is filled with the
+// running bundle's identity once the wasm module is up, so a page can show
+// what is deployed. The "ref (commit)" shape CI bakes into build_info()
+// gets the commit linked to GitHub; anything else ("dev build", or
+// "unknown" for a bundle too old to carry build_info) stays plain text.
+// The element is untouched until the module resolves, so a shell can hide
+// the empty state with :empty.
+function showBuildInfo() {
+  const el = $('build-info');
+  if (!el) return;
+  const info = buildInfo ?? 'unknown';
+  el.textContent = '';
+  const m = /^.+ \(([0-9a-f]{6,40})\)$/.exec(info);
+  if (m) {
+    el.append('build: ');
+    const a = document.createElement('a');
+    a.href = `https://github.com/CopperlineHQ/Copperline/commit/${m[1]}`;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = info;
+    el.appendChild(a);
+  } else {
+    el.append(`build: ${info}`);
+  }
+}
+
 function bugReportHref() {
   const toml = (v) =>
     `"${String(v).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
@@ -5292,7 +5624,6 @@ async function startup() {
   const bgRunPref = storedPref(BG_RUN_STORAGE_KEY);
   if (bgRunPref !== null) bgRunToggle.checked = bgRunPref === 'on';
   else if (typeof cfg.background_run === 'boolean') bgRunToggle.checked = cfg.background_run;
-
   const fetches = [];
   const linkedDisk =
     pageParams.get('df0') ?? (typeof cfg.df0 === 'string' ? cfg.df0 : null);

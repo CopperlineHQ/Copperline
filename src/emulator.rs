@@ -2214,7 +2214,22 @@ pub fn build_machine(
                 crate::zorro_device::BoardDevice::A2091(board)
             }
             ScsiController::A4091 => {
-                let rom = crate::a4091::A4091::load_rom(rom_path)?;
+                // A save state carries the board's ROM image (a4091::A4091.rom
+                // is serialized), so an unavailable ROM here -- a missing file,
+                // or the still-unresolved <bundled-a4091> sentinel when the
+                // bundled ROM was not found -- is fine in --load-state mode:
+                // build with a placeholder the state replaces, as the main ROM
+                // does above.
+                let rom = if rom_optional && !rom_path.is_file() {
+                    info!(
+                        "--load-state: A4091 ROM {} is unavailable; building with \
+                         a placeholder the save state will replace",
+                        rom_path.display()
+                    );
+                    vec![0u8; 0x1_0000]
+                } else {
+                    crate::a4091::A4091::load_rom(rom_path)?
+                };
                 let mut board = crate::a4091::A4091::new(rom)?;
                 for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                     let Some(drive) = drive else { continue };

@@ -1271,7 +1271,7 @@ speaks plain ATA, not ATAPI. Attach CD-ROM drives as `[scsi]` units instead
 ```toml
 [scsi]
 # controller = "a2091"       # a2091 (default), a4091, or a3000
-rom = "a2091-v6.6.rom"       # boot ROM image (a2091/a4091; the a3000 needs none)
+rom = "a2091-v6.6.rom"       # boot ROM (a2091 needs one; a4091 defaults to bundled; a3000 none)
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
@@ -1290,9 +1290,11 @@ drives**. `controller` picks which one:
   also sidesteps the stock A600/A1200 `scsi.device` only probing the IDE
   master. `[ide]` remains available, and both can be used at once.
 - `"a4091"`: a Commodore A4091 (NCR 53C710 SCSI-2) as a Zorro III
-  autoconfig board, for machines with a 32-bit CPU. It needs a raw A4091
-  EPROM image (e.g. the open-source `a4091.rom`) as `rom`; it has a single
-  ROM, so `rom_odd` does not apply.
+  autoconfig board, for machines with a 32-bit CPU. `rom` is a raw A4091
+  EPROM image (single ROM, so `rom_odd` does not apply); omit it to use the
+  bundled open-source ROM from the [A4091 software
+  project](https://github.com/A4091/a4091-software). The ROM only autoboots
+  under AmigaOS -- Linux and NetBSD drive the board without it.
 - `"a3000"` (the default on the `A3000` profile): the A3000's motherboard
   SCSI -- the Super DMAC at `$DD0000` driving a WD33C93. It is silicon, not
   a card, so it needs no boot ROM: Kickstart's own `scsi.device` drives it

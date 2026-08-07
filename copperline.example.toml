@@ -325,8 +325,8 @@ slow = "512K"
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
 #             Needs an A590/A2091 boot ROM (6.6+, 16K/32K; rom_odd takes the
 #             odd half of a split even/odd EPROM dump).
-#   "a4091" - Zorro III, NCR 53C710. Needs a raw A4091 EPROM image (e.g. the
-#             open-source a4091.rom); single ROM, no rom_odd.
+#   "a4091" - Zorro III, NCR 53C710. The boot ROM is a raw A4091 EPROM image;
+#             omit to load the bundled open-source A4091 ROM.
 #   "a3000" - the A3000's built-in SCSI, and the default on that machine.
 #             Needs no ROM: the Kickstart carries its driver and autoboots
 #             from an RDB drive.

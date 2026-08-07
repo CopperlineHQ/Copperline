@@ -27,6 +27,10 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 /// `rom = "..."` or the CLI argument) always replaces it.
 pub const BUNDLED_AROS_ROM: &str = "<bundled-aros>";
 
+/// Sentinel `[scsi] rom` for an A4091 fitted without a named ROM: resolve to
+/// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
+pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
+
 /// A WASM plugin Zorro board resolved from config: its autoconfig identity
 /// (`spec`, with a placeholder device slot reassigned at build time), the
 /// `.wasm` module path, and the plugin manifest (name + capabilities).
@@ -950,8 +954,9 @@ pub struct ScsiConfig {
 }
 
 impl ScsiConfig {
-    /// Whether a `[scsi]` section asked for a board at all (a bare
-    /// `controller` with no ROM or drives fits nothing).
+    /// Whether a `[scsi]` section asked for a board at all. A bare
+    /// `controller` with no ROM or drives fits nothing -- except an A4091,
+    /// which validation gives the bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
     }
@@ -3708,7 +3713,7 @@ impl TryFrom<RawConfig> for Config {
             defaults.rtg_vram_bytes
         };
 
-        let scsi = ScsiConfig {
+        let mut scsi = ScsiConfig {
             controller: scsi_controller,
             rom: raw.scsi.rom.map(PathBuf::from),
             rom_odd: raw.scsi.rom_odd.map(PathBuf::from),
@@ -3722,13 +3727,17 @@ impl TryFrom<RawConfig> for Config {
                 raw.scsi.unit6.map(drive_image).transpose()?,
             ],
         };
+        // An explicitly-fitted A4091 with no ROM named defaults to the bundled
+        // one (resolved to a real path later). This also fits the board with no
+        // drives, exactly as naming a ROM always has -- the setup for booting a
+        // CD inserted at runtime.
+        if scsi.controller == ScsiController::A4091 && scsi.rom.is_none() {
+            scsi.rom = Some(PathBuf::from(BUNDLED_A4091_ROM));
+        }
         if scsi.enabled() && scsi.rom.is_none() && scsi.controller.is_zorro_board() {
-            let hint = match scsi.controller {
-                ScsiController::A4091 => "a raw A4091 EPROM image, e.g. the open-source a4091.rom",
-                _ => "an A590/A2091 6.x ROM image; its scsi.device drives the disks",
-            };
             errors.push(anyhow!(
-                "[scsi] drives need the boot ROM: set [scsi] rom = \"...\" ({hint})"
+                "[scsi] drives need the boot ROM: set [scsi] rom = \"...\" \
+                 (an A590/A2091 6.x ROM image; its scsi.device drives the disks)"
             ));
         }
         // The motherboard SCSI is silicon, not a card: it has no boot ROM (the
@@ -5374,6 +5383,8 @@ pub fn resolve_tint(from_config: Tint) -> Tint {
 /// downstream consumer (start-up banner, window title, save states) sees the
 /// real paths. An explicit `extended_rom` still wins over the AROS one.
 pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
+    // An A4091 may want its bundled ROM regardless of what Kickstart is in use.
+    resolve_bundled_a4091_rom(cfg)?;
     if cfg.rom_path != Path::new(BUNDLED_AROS_ROM) {
         return Ok(());
     }
@@ -5393,6 +5404,29 @@ pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     );
     cfg.rom_path = aros.main;
     cfg.extended_rom_path.get_or_insert(aros.extended);
+    Ok(())
+}
+
+/// Resolve a [`BUNDLED_A4091_ROM`] sentinel in `[scsi] rom` to the located
+/// bundled ROM, or fail telling the user where to install one.
+fn resolve_bundled_a4091_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.scsi.rom.as_deref() != Some(Path::new(BUNDLED_A4091_ROM)) {
+        return Ok(());
+    }
+    let rom = crate::romsearch::find_bundled_a4091().ok_or_else(|| {
+        anyhow!(
+            "[scsi] controller = \"a4091\" but no ROM was named and the bundled \
+             A4091 ROM was not found. Set [scsi] rom = \"...\" (a raw A4091 EPROM \
+             image), or install {} next to the binary or under \
+             share/copperline/a4091/.",
+            crate::romsearch::A4091_ROM_FILE
+        )
+    })?;
+    log::info!(
+        "no A4091 ROM specified; using bundled ROM ({})",
+        rom.display()
+    );
+    cfg.scsi.rom = Some(rom);
     Ok(())
 }
 
@@ -7398,6 +7432,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("no boot ROM"), "{err:#}");
+        Ok(())
+    }
+
+    /// An A4091 without a named ROM falls back to the bundled one: validation
+    /// leaves the sentinel in place, and resolution swaps in the real path.
+    #[test]
+    fn a4091_without_rom_defaults_to_the_bundled_rom() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [scsi]
+            controller = "a4091"
+            unit0 = "workbench.hdf"
+            "#,
+        )?;
+        assert_eq!(cfg.scsi.controller, ScsiController::A4091);
+        assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new(BUNDLED_A4091_ROM)));
+
+        // A bare `controller = "a4091"` (no drives, no ROM) still fits the
+        // board: the bundled ROM makes it enabled, as naming a ROM always did.
+        let mut cfg = parse_config(
+            r#"
+            [scsi]
+            controller = "a4091"
+            "#,
+        )?;
+        assert!(cfg.scsi.enabled());
+        assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new(BUNDLED_A4091_ROM)));
+
+        // Resolution finds the ROM bundled in the source tree (assets/a4091).
+        resolve_bundled_rom(&mut cfg)?;
+        let rom = cfg.scsi.rom.as_deref().expect("resolved A4091 rom");
+        assert!(rom.ends_with(crate::romsearch::A4091_ROM_FILE), "{rom:?}");
+        assert_ne!(rom, Path::new(BUNDLED_A4091_ROM));
+
+        // An explicit rom still wins.
+        let cfg = parse_config(
+            r#"
+            [scsi]
+            controller = "a4091"
+            rom = "custom-a4091.rom"
+            unit0 = "workbench.hdf"
+            "#,
+        )?;
+        assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new("custom-a4091.rom")));
+
+        // The A2091 has no bundled ROM, so it still errors without one.
+        let err = parse_config(
+            r#"
+            [scsi]
+            controller = "a2091"
+            unit0 = "workbench.hdf"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("boot ROM"), "{err:#}");
         Ok(())
     }
 

@@ -31,13 +31,13 @@
 *.[Bb][Ii][Nn]
 *.[Ii][Ss][Oo]
 
-# Exception: the AROS ROM is open-source (APL) and freely redistributable,
-# unlike the copyrighted Kickstart/CD ROMs above. It is the default boot ROM
-# and ships with the build, so it is committed despite the *.bin rule.
+# Exception: override the *.bin and *.rom rules for freely redistributable
+# ROMs used in default machine profiles.
 !/assets/aros/aros-amiga-m68k-rom.bin
 !/assets/aros/aros-amiga-m68k-ext.bin
 !/assets/services/services_rom.bin
 !/assets/hostsocket/hostsocket_rom.bin
+!/assets/a4091/a4091_cdfs.rom
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,
 # RTC battery-RAM backing files).
