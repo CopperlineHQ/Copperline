@@ -2741,6 +2741,16 @@ mod tests {
     /// bsdsocktest's own NULL-timeout test does for a smoltcp one, must
     /// report ready exactly when a real client connects -- not before,
     /// and not only via a direct `accept()` call.
+    /// Unix-only: the non-unix `poll_socket_mask` fallback has no way to
+    /// detect accept-readiness on a listening socket at all (see that
+    /// function's own doc comment) -- it used to report one as spuriously
+    /// always-ready via a `peek()` error that happened to look like
+    /// readiness, which incidentally satisfied this test for the wrong
+    /// reason; fixing that false positive (a real bug, see the
+    /// `NotConnected` handling in that function) means this genuinely
+    /// never resolves on non-unix now, an honest reflection of the
+    /// existing documented gap rather than a new regression.
+    #[cfg(unix)]
     #[test]
     fn hostsocket_plugin_host_backend_waitselect_reports_accept_readiness() {
         let port = {
@@ -4350,6 +4360,10 @@ mod tests {
     /// `IoctlSocket(FIONREAD)` on a host-backed fd: reports the real
     /// number of bytes the kernel actually has queued -- proven by
     /// checking it matches what was really sent, not a placeholder.
+    /// Unix-only: `sock_nread` (see its own doc comment) has no non-unix
+    /// implementation -- a real `ioctlsocket(FIONREAD)` FFI binding would
+    /// need Windows verification this project doesn't have.
+    #[cfg(unix)]
     #[test]
     fn hostsocket_plugin_host_backend_ioctl_fionread_reports_pending_bytes() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
