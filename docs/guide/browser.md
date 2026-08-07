@@ -361,9 +361,10 @@ through wasm-bindgen; the page's JavaScript drives everything from
   A frame whose render input exactly matches the previous one skips the
   render pipeline entirely (the desktop render cache's reuse detector),
   so a static screen costs no render work at all. The wasm wrapper exports
-  a presentation revision that advances only when those output bytes or
-  their geometry change; the page therefore also skips the typed-array
-  view, canvas/WebGL texture upload, and monitor draw for an exact repeat.
+  a presentation revision that advances whenever a non-reused frame is
+  copied into the presentation buffer; the page therefore also skips the
+  typed-array view, canvas/WebGL texture upload, and monitor draw when the
+  exact-reuse detector matches.
   There is no wgpu in the build, which keeps the wasm-opt'd wasm
   around 2.1 MiB (about 0.8 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
@@ -522,7 +523,7 @@ from a pause does not sprint through the frames the pause "owed",
 `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
 exposes the guest clock for diagnostics. `presentation_revision()` identifies
-the current presentation buffer without hashing it, while
+the current presentation-buffer generation without hashing it, while
 `last_run_core_ms()` and `last_run_render_ms()` split the host cost of the
 most recent paced call for page-side diagnostics.
 

@@ -82,10 +82,10 @@ let presentsThisSecond = 0;
 // blits of fresh pictures rather than assuming step and blit share a
 // tick.
 let presentDirty = false;
-// Exact identity exported by current wasm bundles. Unlike presentDirty,
-// this advances only when Rust changed the presentation bytes or geometry,
-// so repeated emulated frames need no canvas upload or monitor draw. Null
-// also forces the first frame of a new machine through.
+// Presentation generation exported by current wasm bundles. Unlike
+// presentDirty, this advances only when Rust writes a non-reused
+// presentation, so exact-reuse frames need no canvas upload or monitor
+// draw. Null also forces the first frame of a new machine through.
 let lastPresentationRevision = null;
 // Cumulative host work behind the once-per-second stat line. Rust supplies
 // the core/render split; the page measures the buffer upload and monitor
@@ -843,10 +843,16 @@ function maxFramesForQueue() {
 function presentFrame(force = false) {
   const rows = emu.present_rows();
   if (rows === 0) return false;
-  const revision =
-    typeof emu.presentation_revision === 'function' ? emu.presentation_revision() : null;
-  const changed = revision === null ? presentDirty : revision !== lastPresentationRevision;
-  if (!changed && !force) return false;
+  const hasPresentationRevision = typeof emu.presentation_revision === 'function';
+  const revision = hasPresentationRevision ? emu.presentation_revision() : null;
+  const changed = hasPresentationRevision
+    ? revision !== lastPresentationRevision
+    : presentDirty;
+  // An older cached bundle has no revision to prove that its held
+  // presentation is unchanged. Preserve the old page's unconditional
+  // copy/upload behaviour, including repaint-only load-state and overscan
+  // calls, while `changed` still keeps the "shown" counter meaningful.
+  if (hasPresentationRevision && !changed && !force) return false;
   // The presentation size follows the emulated display (the cropped TV
   // aperture for a standard PAL screen, the full overscan framebuffer
   // otherwise), so track both dimensions whenever the buffer changes or
@@ -854,7 +860,7 @@ function presentFrame(force = false) {
   const width = emu.present_width();
   presentSize = { width, rows };
   if (monitorGl) {
-    presentFrameMonitor(width, rows, changed);
+    presentFrameMonitor(width, rows, changed || !hasPresentationRevision);
   } else {
     const uploadStart = performance.now();
     if (canvas.width !== width || canvas.height !== rows) {
@@ -872,7 +878,7 @@ function presentFrame(force = false) {
     ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
     uploadMsThisSecond += performance.now() - uploadStart;
   }
-  if (revision !== null) lastPresentationRevision = revision;
+  if (hasPresentationRevision) lastPresentationRevision = revision;
   return changed;
 }
 

@@ -209,10 +209,9 @@ pub struct WebEmu {
     present: Vec<u32>,
     present_width: usize,
     present_rows: usize,
-    /// Monotonic identity of the bytes and geometry in `present`. The page
-    /// compares this with the last revision it uploaded, so an emulated frame
-    /// that the exact-reuse detector matched does not cross the JS/WebGL
-    /// presentation path again.
+    /// Wrapping generation of `present`. The page compares this with the last
+    /// revision it uploaded, so an emulated frame that the exact-reuse
+    /// detector matched does not cross the JS/WebGL presentation path again.
     presentation_revision: u32,
     /// Emulated field lines the presentation buffer shows, for the page's
     /// CRT shader pass; 0 while no frame has rendered or the scan carries
@@ -571,9 +570,9 @@ impl WebEmu {
         self.present.as_ptr()
     }
 
-    /// Identity of the current presentation bytes and geometry. It advances
-    /// only when the renderer writes a new presentation, not merely because
-    /// the emulated machine stepped, so a browser can skip redundant canvas
+    /// Generation of the current presentation buffer. It advances when the
+    /// renderer writes a non-reused presentation, not merely because the
+    /// emulated machine stepped, so a browser can skip exact-reuse canvas
     /// uploads and draws without comparing the framebuffer itself.
     pub fn presentation_revision(&self) -> u32 {
         self.presentation_revision
