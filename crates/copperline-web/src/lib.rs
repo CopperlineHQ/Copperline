@@ -4,7 +4,7 @@
 //! headless core. The page's JS drives everything: it fetches ROM bytes,
 //! constructs a [`WebEmu`], calls [`WebEmu::run`] from requestAnimationFrame,
 //! draws the presentation buffer to a canvas (a WebGL2 monitor pass with
-//! the desktop's CRT shader and 1084 bezel, or a plain ImageData blit
+//! the desktop's CRT shader and Classic bezel, or a plain ImageData blit
 //! without WebGL2), forwards keyboard/mouse events, and ships each frame's
 //! mixed audio to an AudioWorklet. No winit, wgpu, or cpal: the canvas is
 //! the display and the Web Audio API is the sound device, so the wasm

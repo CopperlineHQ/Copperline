@@ -2287,7 +2287,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_phosphor(0.0),
         config::resolve_shader(config::ShaderMode::None),
         config::resolve_shader_strength(1.0),
-        config::resolve_bezel(false),
+        config::resolve_bezel(config::BezelStyle::None),
         config::resolve_perf_overlay(false),
         config::resolve_tint(config::Tint::None),
         // The config-screen placeholder is always a normal windowed UI.

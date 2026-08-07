@@ -47,7 +47,8 @@ Five more controls shape what the glass shows without touching the
 machine. **Monitor** is the desktop window's 1084 presentation, on by
 default: the CRT shader preset (bowed tube face, scanlines, aperture
 grille, corner vignette -- the desktop's `[display] shader = "crt"`) with
-the picture seated in the moulded plastic bezel of `[display] bezel`,
+the picture seated in a moulded plastic bezel -- the desktop's Classic
+frame; the page does not offer its 1084 one --
 rendered through WebGL2 at display resolution. *CRT filter* and *Bezel*
 select either half alone, and *Plain* is the undecorated blit the page
 always had -- also what a browser without WebGL2 falls back to (the

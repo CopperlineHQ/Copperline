@@ -426,9 +426,11 @@ video = "PAL"
 # shader-processed, so captures stay comparable whatever is set here.
 # shader_strength: how strongly the shader is mixed in, 0.0-1.0 (default
 # 1.0, the preset's full effect); 0.0 leaves the picture visually untouched.
-# bezel: frame the picture with a 1084-style monitor front bezel (default
-# false; Cmd/Alt+M toggles it live). Composes with any shader setting, and
-# like it is a window-display effect only: captures never include the frame.
+# bezel: frame the picture with a monitor front: "off" (default), "1084"
+# (the monitor the Amiga shipped with) or "classic" (the plainer frame
+# Copperline drew first). Cmd/Alt+M turns the chosen one off and back on.
+# Composes with any shader setting, and like it is a window-display effect
+# only: captures never include the frame.
 # perf_overlay: show the performance overlay at start (default false; also
 # --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
 # factor, per-frame emulation cost, host utilisation, audio health, and
@@ -451,7 +453,7 @@ video = "PAL"
 # phosphor = 0.4
 # shader = "none"
 # shader_strength = 1.0
-# bezel = false
+# bezel = "off"
 # perf_overlay = false
 # tint = "none"
 # menu_scale = "1x"

@@ -637,21 +637,29 @@ frames coming from an RTG board's scanout (see `[rtg]` below), and for
 programmable multisync scan modes -- a 31 kHz scanout has no 15 kHz line
 structure to reproduce.
 
-`bezel` (default `false`) frames the window's picture with a monitor-style
-front bezel, also in the spirit of the 1084: the picture scales down into
-the rounded opening of a procedurally drawn plastic face -- warm-grey
-moulding, a dark recess around the tube face, rounded case corners, and the
-wider bottom band carrying the power LED and a printed Copperline logotype
-in the spot the 1084 kept its Commodore badge. The frame is drawn at the window's
-resolution, so it stays sharp at any size, and the picture keeps its aspect
-inside the opening. It is independent of `shader` and composes with any
-preset: with `"crt"` the bowed tube face sits inside the opening for the
-full monitor look. Cmd+M (macOS) / Alt+M toggles it live for the rest of
-the session without touching the config; the launcher's *Monitor bezel* row
-(*A/V & Emu*, *Video*) writes it, and `COPPERLINE_BEZEL=1|0` overrides the
-config for a single run.
+`bezel` frames the window's picture with a monitor front, drawn at the
+window's resolution so it stays sharp at any size, with the picture keeping
+its aspect inside the opening. Three settings:
 
-Like the shader pass, the bezel is presentation and nothing else: captures
+- `"off"` (the default) -- no frame; the picture fills the display.
+- `"1084"` -- the monitor the Amiga shipped with: a pale cabinet with a
+  darker moulding sunk around the tube, the model badge, the Copperline
+  name where the 1084 wore its maker's, and a red power lamp.
+- `"classic"` -- the plainer rounded frame Copperline drew before the 1084
+  arrived.
+
+`true` and `false` are still read, from when there was only the one frame
+to turn on; `true` means `"1084"`.
+
+The bezel is independent of `shader` and composes with any preset: with
+`"crt"` the bowed tube face sits inside the opening for the full monitor
+look. Cmd+M (macOS) / Alt+M turns it off and back on to whichever front is
+chosen, for the rest of the session and without touching the config;
+*Video Settings > Monitor Bezel* picks the front, the launcher's *Monitor
+bezel* row (*A/V & Emu*, *Video*) writes it, and `COPPERLINE_BEZEL` (a
+style name, or the old `1`/`0`) overrides the config for a single run.
+
+Like the shader pass, a bezel is presentation and nothing else: captures
 never include it, and it is skipped while a menu or overlay panel is open
 and for RTG scanout frames. Unlike the shader it does stay on for
 programmable multisync scans -- a frame has no line structure to get wrong.

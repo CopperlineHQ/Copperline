@@ -23,7 +23,7 @@ use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
-    format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
+    format_size, machine_profile_defaults, AudioFilterMode, BezelStyle, BridgeCable, BridgeDensity,
     BridgeDriver, BridgeReadMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
     FluxBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd, Overscan,
     PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
@@ -735,7 +735,7 @@ const ETHERNET_ROWS: [Row; 4] = [
 const VIDEO_ROWS: [Row; 13] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
-    row(F::Bezel, "Monitor bezel", Toggle),
+    row(F::Bezel, "Monitor bezel", Cycle),
     row(F::PerfOverlay, "Perf overlay", Toggle),
     row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
@@ -1551,8 +1551,8 @@ pub struct MachineSetup {
     shader_custom: Option<PathBuf>,
     /// Shader mix, 0.0 to 1.0 ([display] shader_strength).
     shader_strength: f32,
-    /// Monitor-style front bezel around the picture ([display] bezel).
-    bezel: bool,
+    /// Which monitor front frames the picture, if any ([display] bezel).
+    bezel: BezelStyle,
     /// Performance overlay in the top-right ([display] perf_overlay).
     perf_overlay: bool,
     /// The MT-32's two ROM images, whether its front panel starts up, and
@@ -2104,7 +2104,7 @@ impl MachineSetup {
             raw.display.shader_strength = Some(self.shader_strength);
         }
         if self.bezel != base.bezel {
-            raw.display.bezel = Some(self.bezel);
+            raw.display.bezel = Some(crate::config::RawBezel::Named(self.bezel.label().into()));
         }
         if self.perf_overlay != base.perf_overlay {
             raw.display.perf_overlay = Some(self.perf_overlay);
@@ -2695,7 +2695,6 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
-            F::Bezel => self.bezel,
             F::PerfOverlay => self.perf_overlay,
             F::Mt32Panel => self.mt32_panel,
             F::PowerOn => self.power_on,
@@ -2892,6 +2891,7 @@ impl MachineSetup {
             },
             F::Scaling => self.scaling.label().to_string(),
             F::Tint => self.tint.menu_label().to_string(),
+            F::Bezel => self.bezel.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Phosphor => {
@@ -3226,6 +3226,7 @@ impl MachineSetup {
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
+            F::Bezel => self.bezel = cycle_slice(&BezelStyle::MENU_ORDER, self.bezel, forward),
             F::MenuScale => {
                 self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
             }
@@ -3501,7 +3502,6 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
-            F::Bezel => self.bezel = !self.bezel,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
@@ -6237,20 +6237,34 @@ mod tests {
     }
 
     #[test]
-    fn bezel_round_trips_through_raw() {
+    fn every_bezel_style_round_trips_through_raw() {
         let mut s = MachineSetup::default();
         // Off is the baseline, so nothing is written for it.
-        assert!(!s.toggle_value(LauncherField::Bezel));
+        assert_eq!(
+            s.value_label(LauncherField::Bezel),
+            BezelStyle::None.menu_label()
+        );
         assert_eq!(s.to_raw().display.bezel, None);
 
-        s.toggle(LauncherField::Bezel);
-        assert!(s.toggle_value(LauncherField::Bezel));
-        assert_eq!(s.to_raw().display.bezel, Some(true));
-
-        // The written config has to load back into the same setting.
-        assert!(s.build_config().expect("valid config").bezel);
-        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
-        assert!(reloaded.toggle_value(LauncherField::Bezel));
+        // Cycling reaches every style, and each is written, reloaded and
+        // shown back as itself.
+        for _ in 0..BezelStyle::MENU_ORDER.len() {
+            s.cycle(LauncherField::Bezel, true);
+            let style = s.bezel;
+            assert_eq!(
+                s.build_config().expect("valid config").bezel,
+                style,
+                "{} did not survive the config",
+                style.label()
+            );
+            let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+            assert_eq!(
+                reloaded.value_label(LauncherField::Bezel),
+                style.menu_label()
+            );
+        }
+        // A full turn of the cycle comes back to where it started.
+        assert_eq!(s.bezel, BezelStyle::None);
     }
 
     #[test]

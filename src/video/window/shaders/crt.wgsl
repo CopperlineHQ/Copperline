@@ -82,7 +82,9 @@ const GRILLE_BOOST: f32 = 1.25;
 
 // Rounded screen corners, as a fraction of the display half-width: the
 // 1084's tube has R 11,6 mm corner arcs on a 280,8 mm wide screen
-// (11,6 / 140,4).
+// (11,6 / 140,4). `crt_shader::FACE_CORNER_RADIUS` mirrors this so the
+// bezel can open its aperture wide enough to cover this face; a test pins
+// the two together.
 const CORNER_RADIUS: f32 = 0.0826;
 
 // The glass is never black: room light reflects off the face and the
