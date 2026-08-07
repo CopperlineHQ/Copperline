@@ -45,6 +45,9 @@
 //! - `sock_setopt(h: i32, level: i32, optname: i32, value: i32) -> i32`   requires `host_sockets`
 //! - `sock_getopt(h: i32, level: i32, optname: i32, out_ptr: i32) -> i32` requires `host_sockets`
 //! - `sock_dup(h: i32) -> i32`                                    requires `host_sockets`
+//! - `sock_shutdown(h: i32, how: i32) -> i32`                     requires `host_sockets`
+//! - `sock_peek(h: i32, ptr: i32, cap: i32) -> i32`                requires `host_sockets`
+//! - `sock_nread(h: i32) -> i32`                                   requires `host_sockets`
 //!
 //! `dma_read` copies `len` bytes from Amiga address `addr` into the plugin's
 //! linear memory at `ptr`; `dma_write` copies the other way. Both use the
@@ -125,7 +128,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::mem::MaybeUninit;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use wasmtime::{
@@ -686,7 +689,9 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
         )?;
 
         // sock_poll(h) -> i32: a readiness bitmask (bit 0 readable, bit 1
-        // writable, bit 2 error-pending), or -EBADF for an unknown handle.
+        // writable, bit 2 error-pending, bit 3 peer hangup -- set alongside
+        // bit 0, see SOCK_HUP's own comment), or -EBADF for an unknown
+        // handle.
         // socket2 has no portable select()/poll(), so this approximates
         // the same way a caller without an event loop would: a
         // zero-consuming MSG_PEEK for readability (true at EOF too, same
@@ -1040,6 +1045,93 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                 Ok(id)
             },
         )?;
+
+        // sock_shutdown(h, how) -> i32: real BSD shutdown() -- `how` is
+        // 0 (SHUT_RD), 1 (SHUT_WR), or 2 (SHUT_RDWR). Found missing
+        // entirely (`crates/hostsocket-plugin`'s `do_shutdown` had no
+        // host-backed branch at all) running bsdsocktest for real
+        // against this backend for the first time.
+        linker.func_wrap(
+            "env",
+            "sock_shutdown",
+            |caller: Caller<'_, HostCtx>, handle: i32, how: i32| -> Result<i32> {
+                let Some(socket) = caller.data().sockets.get(&handle) else {
+                    return Ok(-EBADF);
+                };
+                let dir = match how {
+                    0 => Shutdown::Read,
+                    1 => Shutdown::Write,
+                    2 => Shutdown::Both,
+                    _ => return Ok(-EINVAL),
+                };
+                match socket.shutdown(dir) {
+                    Ok(()) => Ok(0),
+                    Err(e) => Ok(-translate_errno(&e)),
+                }
+            },
+        )?;
+
+        // sock_peek(h, ptr, cap) -> i32: like `sock_recv`, but a real
+        // non-consuming peek (`socket2::Socket::peek`, `MSG_PEEK` at the
+        // OS level) -- backs `recv(MSG_PEEK)`/`recvmsg(MSG_PEEK)` on a
+        // host-backed fd, found missing entirely (rejected with a flat
+        // `EOPNOTSUPP`) running bsdsocktest for real against this
+        // backend for the first time.
+        linker.func_wrap(
+            "env",
+            "sock_peek",
+            |mut caller: Caller<'_, HostCtx>, handle: i32, ptr: i32, cap: i32| -> Result<i32> {
+                let mem_size = caller_memory(&mut caller)?.data_size(&caller);
+                let (_, cap) = checked_wasm_window(ptr, cap, mem_size)?;
+                let mut raw = vec![0u8; cap];
+                // SAFETY: same reasoning as `sock_recvfrom`'s own
+                // identical cast -- `raw` is already fully initialized
+                // (zeroed), so reinterpreting it as `&mut [MaybeUninit<u8>]`
+                // for socket2's own `peek` API is sound.
+                let uninit: &mut [MaybeUninit<u8>] =
+                    unsafe { std::slice::from_raw_parts_mut(raw.as_mut_ptr().cast(), raw.len()) };
+                let Some(socket) = caller.data().sockets.get(&handle) else {
+                    return Ok(-EBADF);
+                };
+                match socket.peek(uninit) {
+                    Ok(n) => {
+                        write_wasm_bytes(&mut caller, ptr, &raw[..n])?;
+                        Ok(n as i32)
+                    }
+                    Err(e) => Ok(-translate_errno(&e)),
+                }
+            },
+        )?;
+
+        // sock_nread(h) -> i32: bytes currently available to read without
+        // blocking -- a real `ioctl(fd, FIONREAD, &n)`, backing
+        // `IoctlSocket(FIONREAD)` on a host-backed fd (unix only; no
+        // portable equivalent is wired up for other targets yet, same
+        // caveat as this module's other unix-only paths).
+        linker.func_wrap(
+            "env",
+            "sock_nread",
+            |caller: Caller<'_, HostCtx>, handle: i32| -> Result<i32> {
+                let Some(socket) = caller.data().sockets.get(&handle) else {
+                    return Ok(-EBADF);
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    let mut n: libc::c_int = 0;
+                    let rc = unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut n) };
+                    if rc < 0 {
+                        return Ok(-translate_errno(&std::io::Error::last_os_error()));
+                    }
+                    Ok(n)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = socket;
+                    Ok(-EOPNOTSUPP)
+                }
+            },
+        )?;
     }
     Ok(())
 }
@@ -1169,6 +1261,13 @@ fn translate_errno(e: &std::io::Error) -> i32 {
 const SOCK_READABLE: i32 = 1;
 const SOCK_WRITABLE: i32 = 2;
 const SOCK_ERROR: i32 = 4;
+/// Set alongside `SOCK_READABLE` specifically on a peer hangup (`POLLHUP`,
+/// or a zero-length `peek()` on the non-unix fallback) -- lets a caller
+/// that needs to tell "there is real data" apart from "the peer is gone,
+/// a `recv()` here would just return EOF" do so without consuming
+/// anything, which `GetSocketEvents()`'s FD_CLOSE edge detection needs
+/// (see `sample_event_level_host` in the plugin crate).
+const SOCK_HUP: i32 = 8;
 
 /// `sock_poll`'s readiness check for one socket. On unix, a real
 /// non-blocking `poll(2)` -- correct for every socket state this module
@@ -1205,8 +1304,11 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
         return SOCK_ERROR;
     }
     let mut mask = 0;
-    if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+    if pfd.revents & libc::POLLIN != 0 {
         mask |= SOCK_READABLE;
+    }
+    if pfd.revents & libc::POLLHUP != 0 {
+        mask |= SOCK_READABLE | SOCK_HUP;
     }
     if pfd.revents & libc::POLLOUT != 0 {
         mask |= SOCK_WRITABLE;
@@ -1222,6 +1324,7 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
     let mut mask = 0;
     let mut probe = [MaybeUninit::new(0u8); 1];
     match socket.peek(&mut probe) {
+        Ok(0) => mask |= SOCK_READABLE | SOCK_HUP,
         Ok(_) => mask |= SOCK_READABLE,
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
         Err(_) => mask |= SOCK_READABLE | SOCK_ERROR,
@@ -2104,6 +2207,12 @@ mod tests {
     const HS_CALL_OBTAINSOCKET: i32 = 36;
     const HS_CALL_RELEASESOCKET: i32 = 37;
     const HS_CALL_RELEASECOPYOFSOCKET: i32 = 38;
+    const HS_CALL_SHUTDOWN: i32 = 15;
+    const HS_CALL_IOCTLSOCKET: i32 = 6;
+    const HS_CALL_SENDMSG: i32 = 33;
+    const HS_CALL_RECVMSG: i32 = 34;
+    const HS_FIONREAD: i32 = 0x4004667F;
+    const HS_MSG_PEEK: i32 = 0x2;
     const HS_AF_INET: i32 = 2;
     const HS_SOCK_STREAM: i32 = 1;
     const HS_RES_PENDING: i32 = -2;
@@ -3697,6 +3806,400 @@ mod tests {
             task,
             HS_CALL_CLOSESOCKET,
             [copy_fd, 0, 0, 0, 0, 0, 0],
+        );
+        server.join().unwrap();
+    }
+
+    /// Shutdown(SHUT_WR) on a host-backed fd: a real half-close reaching
+    /// the actual host socket -- proven by the *peer* observing EOF on
+    /// its next read (only possible if the FIN genuinely left the host),
+    /// not just that the call itself returns success. Found missing
+    /// entirely (`do_shutdown` had no host-backed branch at all) running
+    /// bsdsocktest for real against this backend for the first time.
+    #[test]
+    fn hostsocket_plugin_host_backend_shutdown_write_reaches_the_real_peer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4];
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+            assert_eq!(
+                n, 0,
+                "the peer must see a clean EOF after shutdown(SHUT_WR)"
+            );
+        });
+
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host"),
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let task = 0x2000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        let fd = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SOCKET,
+            [HS_AF_INET, HS_SOCK_STREAM, 0, 0, 0, 0, 0],
+        );
+        assert!(fd > 0);
+        const SOCKADDR_ADDR: u32 = 0x200;
+        let mut sockaddr = [0u8; 16];
+        sockaddr[2..4].copy_from_slice(&port.to_be_bytes());
+        sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let base = SOCKADDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr);
+        let rc = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fd, SOCKADDR_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0);
+
+        // shutdown(fd, SHUT_WR = 1)
+        let rc = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SHUTDOWN,
+            [fd, 1, 0, 0, 0, 0, 0],
+        );
+        assert_eq!(rc, 0, "shutdown (host backend) should succeed");
+
+        hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CLOSESOCKET,
+            [fd, 0, 0, 0, 0, 0, 0],
+        );
+        server.join().unwrap();
+    }
+
+    /// `recv(MSG_PEEK)` on a host-backed fd: a real, non-consuming peek --
+    /// proven by reading the *same* bytes twice, once via `MSG_PEEK` and
+    /// once via a plain `recv()` right after, which only works if the
+    /// peek genuinely left the data in the socket's own receive buffer.
+    #[test]
+    fn hostsocket_plugin_host_backend_recv_msg_peek_does_not_consume() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::io::Write::write_all(&mut stream, b"PING").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host"),
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let task = 0x2000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        let fd = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SOCKET,
+            [HS_AF_INET, HS_SOCK_STREAM, 0, 0, 0, 0, 0],
+        );
+        assert!(fd > 0);
+        const SOCKADDR_ADDR: u32 = 0x200;
+        let mut sockaddr = [0u8; 16];
+        sockaddr[2..4].copy_from_slice(&port.to_be_bytes());
+        sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let base = SOCKADDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr);
+        let rc = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fd, SOCKADDR_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0);
+
+        // recv(fd, buf, 4, MSG_PEEK)
+        const PEEK_BUF_ADDR: u32 = 0x300;
+        let peeked = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_RECV,
+            [fd, PEEK_BUF_ADDR as i32, 4, HS_MSG_PEEK, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(peeked, 4, "peek should see the 4 bytes already sent");
+        let base = PEEK_BUF_ADDR as usize;
+        assert_eq!(&host.memory_mut().chip_ram[base..base + 4], b"PING");
+
+        // recv(fd, buf, 4, 0) -- must see the SAME bytes, not EOF/nothing.
+        const RECV_BUF_ADDR: u32 = 0x400;
+        let received = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_RECV,
+            [fd, RECV_BUF_ADDR as i32, 4, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(
+            received, 4,
+            "a real recv() right after peeking must still see the data"
+        );
+        let base = RECV_BUF_ADDR as usize;
+        assert_eq!(&host.memory_mut().chip_ram[base..base + 4], b"PING");
+
+        hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CLOSESOCKET,
+            [fd, 0, 0, 0, 0, 0, 0],
+        );
+        server.join().unwrap();
+    }
+
+    /// `IoctlSocket(FIONREAD)` on a host-backed fd: reports the real
+    /// number of bytes the kernel actually has queued -- proven by
+    /// checking it matches what was really sent, not a placeholder.
+    #[test]
+    fn hostsocket_plugin_host_backend_ioctl_fionread_reports_pending_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::io::Write::write_all(&mut stream, b"PING").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host"),
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let task = 0x2000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        let fd = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SOCKET,
+            [HS_AF_INET, HS_SOCK_STREAM, 0, 0, 0, 0, 0],
+        );
+        assert!(fd > 0);
+        const SOCKADDR_ADDR: u32 = 0x200;
+        let mut sockaddr = [0u8; 16];
+        sockaddr[2..4].copy_from_slice(&port.to_be_bytes());
+        sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let base = SOCKADDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr);
+        let rc = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fd, SOCKADDR_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0);
+
+        // Poll FIONREAD until the peer's 4 bytes have actually arrived
+        // (a real network round trip, even over loopback, isn't
+        // instantaneous relative to this call).
+        const ARGP_ADDR: u32 = 0x300;
+        let pending = {
+            let poll_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let rc = hs_call(
+                    &mut board,
+                    &mut host,
+                    task,
+                    HS_CALL_IOCTLSOCKET,
+                    [fd, HS_FIONREAD, ARGP_ADDR as i32, 0, 0, 0, 0],
+                );
+                assert_eq!(rc, 0, "IoctlSocket(FIONREAD) should succeed");
+                let base = ARGP_ADDR as usize;
+                let n = i32::from_be_bytes(
+                    host.memory_mut().chip_ram[base..base + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                if n > 0 {
+                    break n;
+                }
+                assert!(
+                    std::time::Instant::now() < poll_deadline,
+                    "FIONREAD never reported the peer's data arriving"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        assert_eq!(
+            pending, 4,
+            "FIONREAD should report the real pending byte count"
+        );
+
+        hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CLOSESOCKET,
+            [fd, 0, 0, 0, 0, 0, 0],
+        );
+        server.join().unwrap();
+    }
+
+    /// `sendmsg()`/`recvmsg()` on a host-backed fd: a real round trip
+    /// through the gather/scatter path (one iovec each, still exercising
+    /// the real code, not the plain send()/recv() one).
+    #[test]
+    fn hostsocket_plugin_host_backend_sendmsg_recvmsg_round_trip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4];
+            std::io::Read::read_exact(&mut stream, &mut buf).unwrap();
+            assert_eq!(&buf, b"PING");
+            std::io::Write::write_all(&mut stream, b"PONG").unwrap();
+        });
+
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host"),
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let task = 0x2000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        let fd = hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SOCKET,
+            [HS_AF_INET, HS_SOCK_STREAM, 0, 0, 0, 0, 0],
+        );
+        assert!(fd > 0);
+        const SOCKADDR_ADDR: u32 = 0x200;
+        let mut sockaddr = [0u8; 16];
+        sockaddr[2..4].copy_from_slice(&port.to_be_bytes());
+        sockaddr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let base = SOCKADDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 16].copy_from_slice(&sockaddr);
+        let rc = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CONNECT,
+            [fd, SOCKADDR_ADDR as i32, 16, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(rc, 0);
+
+        // sendmsg: one iovec pointing at "PING", via a struct msghdr at
+        // MSGHDR_ADDR (msg_iov at +8, msg_iovlen at +12, matching
+        // read_iovec_descriptors's own layout).
+        const SEND_DATA_ADDR: u32 = 0x300;
+        const SEND_IOVEC_ADDR: u32 = 0x320;
+        const SEND_MSGHDR_ADDR: u32 = 0x340;
+        let base = SEND_DATA_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 4].copy_from_slice(b"PING");
+        let mut iovec = [0u8; 8];
+        iovec[0..4].copy_from_slice(&SEND_DATA_ADDR.to_be_bytes());
+        iovec[4..8].copy_from_slice(&4u32.to_be_bytes());
+        let base = SEND_IOVEC_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 8].copy_from_slice(&iovec);
+        let mut msghdr = [0u8; 28];
+        msghdr[8..12].copy_from_slice(&SEND_IOVEC_ADDR.to_be_bytes());
+        msghdr[12..16].copy_from_slice(&1u32.to_be_bytes());
+        let base = SEND_MSGHDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 28].copy_from_slice(&msghdr);
+
+        let sent = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_SENDMSG,
+            [fd, SEND_MSGHDR_ADDR as i32, 0, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(sent, 4, "sendmsg (host backend) should queue all 4 bytes");
+
+        // recvmsg: one iovec to receive into.
+        const RECV_DATA_ADDR: u32 = 0x400;
+        const RECV_IOVEC_ADDR: u32 = 0x420;
+        const RECV_MSGHDR_ADDR: u32 = 0x440;
+        let mut iovec = [0u8; 8];
+        iovec[0..4].copy_from_slice(&RECV_DATA_ADDR.to_be_bytes());
+        iovec[4..8].copy_from_slice(&4u32.to_be_bytes());
+        let base = RECV_IOVEC_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 8].copy_from_slice(&iovec);
+        let mut msghdr = [0u8; 28];
+        msghdr[8..12].copy_from_slice(&RECV_IOVEC_ADDR.to_be_bytes());
+        msghdr[12..16].copy_from_slice(&1u32.to_be_bytes());
+        let base = RECV_MSGHDR_ADDR as usize;
+        host.memory_mut().chip_ram[base..base + 28].copy_from_slice(&msghdr);
+
+        let received = hs_call_blocking(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_RECVMSG,
+            [fd, RECV_MSGHDR_ADDR as i32, 0, 0, 0, 0, 0],
+            deadline,
+        );
+        assert_eq!(
+            received, 4,
+            "recvmsg (host backend) should return \"PONG\"'s 4 bytes"
+        );
+        let base = RECV_DATA_ADDR as usize;
+        assert_eq!(&host.memory_mut().chip_ram[base..base + 4], b"PONG");
+
+        hs_call(
+            &mut board,
+            &mut host,
+            task,
+            HS_CALL_CLOSESOCKET,
+            [fd, 0, 0, 0, 0, 0, 0],
         );
         server.join().unwrap();
     }

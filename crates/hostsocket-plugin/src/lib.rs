@@ -112,6 +112,9 @@ extern "C" {
     fn sock_setopt(handle: i32, level: i32, optname: i32, value: i32) -> i32;
     fn sock_getopt(handle: i32, level: i32, optname: i32, out_ptr: i32) -> i32;
     fn sock_dup(handle: i32) -> i32;
+    fn sock_shutdown(handle: i32, how: i32) -> i32;
+    fn sock_peek(handle: i32, ptr: i32, cap: i32) -> i32;
+    fn sock_nread(handle: i32) -> i32;
 
     fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32;
     fn resource_len(key_ptr: i32, key_len: i32) -> i32;
@@ -190,6 +193,15 @@ mod native_host_stubs {
         -1
     }
     pub unsafe fn sock_dup(handle: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_shutdown(handle: i32, how: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_peek(handle: i32, ptr: i32, cap: i32) -> i32 {
+        -1
+    }
+    pub unsafe fn sock_nread(handle: i32) -> i32 {
         -1
     }
     pub unsafe fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32) -> i32 {
@@ -898,6 +910,12 @@ struct HostFdSlot {
     // very first call, so this never actually gates a real wait there,
     // just keeps the bookkeeping uniform across both kinds.
     connect_started: bool,
+    // Set by `do_listen_host` on success. Mirrors `FdSlot::is_listener`:
+    // `sample_event_level_host` needs to know a fd is a listener to report
+    // `accept_ready` instead of `read_ready`/`write_ready` for it (a
+    // listening socket's own `sock_poll` readable bit means "a connection
+    // is pending accept()", not "there is data to read").
+    is_listener: bool,
     opts: HostSockOpts,
 }
 
@@ -910,14 +928,21 @@ struct HostFdSlot {
 // layout) as `SockOpts`'s own identical fields on the smoltcp path -- kept
 // as a separate, smaller struct rather than reusing `SockOpts` wholesale,
 // since every *other* field there (SO_REUSEADDR/SO_KEEPALIVE/SO_RCVBUF/
-// SO_SNDBUF/TCP_NODELAY/SO_EVENTMASK) either goes to the real host socket
-// on this backend instead, or (SO_EVENTMASK) isn't supported here at all.
+// SO_SNDBUF/TCP_NODELAY) goes to the real host socket on this backend
+// instead. SO_EVENTMASK/`ev_prev` below are the one exception: those *do*
+// need local bookkeeping here too, same reasoning as `SockOpts`'s own.
 #[derive(Clone, Copy, Default)]
 struct HostSockOpts {
     linger_onoff: i32,
     linger_secs: i32,
     rcvtimeo: (i32, i32),
     sndtimeo: (i32, i32),
+    // Mirrors `SockOpts::eventmask`/`ev_prev` (same doc comments apply) --
+    // `sample_event_level_host` and `process_socket_events`'s host-fd arm
+    // are the host-backend counterparts of `sample_event_level`/that same
+    // function's smoltcp arm.
+    eventmask: i32,
+    ev_prev: Option<EventLevel>,
 }
 
 // `sock_poll`'s readiness bitmask (src/wasmboard.rs's own doc comment on
@@ -927,6 +952,7 @@ struct HostSockOpts {
 const SOCK_READABLE: i32 = 1;
 const SOCK_WRITABLE: i32 = 2;
 const SOCK_ERROR: i32 = 4;
+const SOCK_HUP: i32 = 8;
 
 // Per-fd setsockopt()/getsockopt() state (Board::do_setsockopt/
 // do_getsockopt). None of these actually change smoltcp's own behaviour
@@ -2079,6 +2105,7 @@ impl Board {
             kind,
             nonblocking: false,
             connect_started: false,
+            is_listener: false,
             opts: HostSockOpts::default(),
         });
         (idx + 1) as i32
@@ -2306,6 +2333,37 @@ impl Board {
             self.set_errno(task, EOPNOTSUPP);
             return -1;
         }
+        let n = (len.max(0) as usize).min(MAX_XFER_LEN);
+        self.send_host_stream(task, fd, n, |already, remaining| {
+            let mut data = vec![0u8; remaining];
+            // Safety: reading the guest's send buffer out of Amiga
+            // memory, offset by whatever a previous retry already
+            // queued.
+            unsafe {
+                dma_read(
+                    (buf_addr as usize + already) as i32,
+                    data.as_mut_ptr() as i32,
+                    remaining as i32,
+                )
+            };
+            data
+        })
+    }
+
+    // Shared blocking/partial-progress host-socket send logic behind both
+    // do_send_host and do_sendmsg_host -- the host-backend counterpart of
+    // the smoltcp path's own send_tcp_stream, same parameterization (see
+    // that function's own comment for why: scattered iovec segments
+    // can't be expressed as a single "address + offset" the way a plain
+    // send()'s own buf_addr can, but already/remaining still address
+    // correctly into an already-flattened byte vector either way).
+    fn send_host_stream(
+        &mut self,
+        task: u32,
+        fd: i32,
+        n: usize,
+        read_at: impl FnOnce(usize, usize) -> Vec<u8>,
+    ) -> i32 {
         let idx = self
             .host_fd_index(fd)
             .expect("caller already checked host_fd_index");
@@ -2313,7 +2371,6 @@ impl Board {
         let handle = slot.handle;
         let nonblocking = slot.nonblocking;
 
-        let n = (len.max(0) as usize).min(MAX_XFER_LEN);
         let already = self
             .send_progress
             .remove(&task)
@@ -2324,16 +2381,7 @@ impl Board {
         }
 
         let remaining = n - already;
-        let mut data = vec![0u8; remaining];
-        // Safety: reading the guest's send buffer out of Amiga memory,
-        // offset by whatever a previous retry already queued.
-        unsafe {
-            dma_read(
-                (buf_addr as usize + already) as i32,
-                data.as_mut_ptr() as i32,
-                remaining as i32,
-            )
-        };
+        let data = read_at(already, remaining);
         let rc = unsafe { sock_send(handle, data.as_ptr() as i32, data.len() as i32) };
 
         if rc >= 0 {
@@ -2555,17 +2603,16 @@ impl Board {
     }
 
     // do_recv's host-backend branch. Unlike the smoltcp path, no
-    // ECONNRESET-vs-plain-EOF tracking is needed: `sock_recv` returning
-    // `0` genuinely means EOF on a real host socket (read() semantics),
-    // and a real error already comes back as the right negative errno
-    // (see src/wasmboard.rs's own errno translation). MSG_PEEK isn't
-    // implemented yet (the `sock_*` import surface has no peek operation
-    // -- see HOSTSOCKET-HOST-BACKEND-PLAN.md) -- rejected explicitly
-    // rather than silently falling through to a consuming recv, which
-    // would corrupt a caller's own "peek then recv the same bytes again"
-    // expectation instead of just failing cleanly.
+    // ECONNRESET-vs-plain-EOF tracking is needed: `sock_recv`/`sock_peek`
+    // returning `0` genuinely means EOF on a real host socket (read()
+    // semantics), and a real error already comes back as the right
+    // negative errno (see src/wasmboard.rs's own errno translation).
+    // MSG_PEEK uses `sock_peek` (a real, non-consuming `MSG_PEEK` at the
+    // OS level) instead of `sock_recv` -- consuming on a peek would
+    // corrupt a caller's own "peek then recv the same bytes again"
+    // expectation.
     fn do_recv_host(&mut self, task: u32, fd: i32, buf_addr: u32, len: i32, flags: i32) -> i32 {
-        if flags & (MSG_OOB | MSG_PEEK) != 0 {
+        if flags & MSG_OOB != 0 {
             self.set_errno(task, EOPNOTSUPP);
             return -1;
         }
@@ -2575,10 +2622,15 @@ impl Board {
         let slot = self.host_fds[idx].as_ref().unwrap();
         let handle = slot.handle;
         let nonblocking = slot.nonblocking;
+        let peek = flags & MSG_PEEK != 0;
 
         let cap = (len.max(0) as usize).min(MAX_XFER_LEN);
         let mut data = vec![0u8; cap];
-        let rc = unsafe { sock_recv(handle, data.as_mut_ptr() as i32, data.len() as i32) };
+        let rc = if peek {
+            unsafe { sock_peek(handle, data.as_mut_ptr() as i32, data.len() as i32) }
+        } else {
+            unsafe { sock_recv(handle, data.as_mut_ptr() as i32, data.len() as i32) }
+        };
 
         if rc >= 0 {
             let n = rc as usize;
@@ -2618,6 +2670,9 @@ impl Board {
     // buf_addr), if wasteful for already-sent bytes; nothing here is
     // remotely hot enough for that to matter.
     fn do_sendmsg(&mut self, task: u32, fd: i32, msg_addr: u32, flags: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_sendmsg_host(task, fd, msg_addr, flags);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2640,6 +2695,32 @@ impl Board {
         })
     }
 
+    // do_sendmsg's host-backend branch: gathers the iovecs up front
+    // (same reasoning as the smoltcp version above), then reuses
+    // send_host_stream -- the same shared blocking/partial-progress
+    // logic do_send_host itself is built on.
+    fn do_sendmsg_host(&mut self, task: u32, fd: i32, msg_addr: u32, flags: i32) -> i32 {
+        if flags & MSG_OOB != 0 {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        if self.host_fds[idx].as_ref().unwrap().kind != SockKind::Tcp {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let Some(data) = read_iovec_bytes(msg_addr) else {
+            self.set_errno(task, EINVAL);
+            return -1;
+        };
+        let n = data.len();
+        self.send_host_stream(task, fd, n, move |already, remaining| {
+            data[already..already + remaining].to_vec()
+        })
+    }
+
     // recvmsg(sock, msg, flags): TCP-only, same scope limits as
     // do_sendmsg (msg_name/msg_control ignored, nothing exercises UDP).
     // Single-shot like do_recv (short reads are legitimate for recv-
@@ -2652,6 +2733,9 @@ impl Board {
     // semantics) -- matches do_recv's own MSG_PEEK handling exactly, just
     // writing to multiple guest buffers instead of one.
     fn do_recvmsg(&mut self, task: u32, fd: i32, msg_addr: u32, flags: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_recvmsg_host(task, fd, msg_addr, flags);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -2721,6 +2805,75 @@ impl Board {
             off += chunk;
         }
         n as i32
+    }
+
+    // do_recvmsg's host-backend branch: reads up to the combined
+    // capacity of every iovec in one `sock_recv`/`sock_peek` call (same
+    // shape as `do_recv_host`'s own single-buffer version -- see that
+    // function's own comment for why no ECONNRESET-vs-EOF tracking is
+    // needed here either), then scatters the result across the iovecs in
+    // order, matching the smoltcp version's own real readv()/recvmsg()
+    // semantics.
+    fn do_recvmsg_host(&mut self, task: u32, fd: i32, msg_addr: u32, flags: i32) -> i32 {
+        if flags & MSG_OOB != 0 {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let slot = self.host_fds[idx].as_ref().unwrap();
+        if slot.kind != SockKind::Tcp {
+            self.set_errno(task, EOPNOTSUPP);
+            return -1;
+        }
+        let handle = slot.handle;
+        let nonblocking = slot.nonblocking;
+        let peek = flags & MSG_PEEK != 0;
+        let Some(iovecs) = read_iovec_descriptors(msg_addr) else {
+            self.set_errno(task, EINVAL);
+            return -1;
+        };
+
+        let cap: usize = iovecs.iter().map(|&(_, len)| len).sum();
+        let mut data = vec![0u8; cap];
+        let rc = if peek {
+            unsafe { sock_peek(handle, data.as_mut_ptr() as i32, data.len() as i32) }
+        } else {
+            unsafe { sock_recv(handle, data.as_mut_ptr() as i32, data.len() as i32) }
+        };
+
+        if rc >= 0 {
+            let n = rc as usize;
+            let mut off = 0usize;
+            for (base, len) in iovecs {
+                if off >= n {
+                    break;
+                }
+                let chunk = len.min(n - off);
+                // Safety: writing into the guest's own receive buffer(s),
+                // same as do_recv_host's single-buffer case.
+                unsafe {
+                    dma_write(
+                        base as i32,
+                        data[off..off + chunk].as_ptr() as i32,
+                        chunk as i32,
+                    )
+                };
+                off += chunk;
+            }
+            return n as i32;
+        }
+        if rc == -EAGAIN {
+            if nonblocking {
+                self.set_errno(task, EAGAIN);
+                return -1;
+            }
+            self.last_pending.insert(task, WaitKind::Recv { fd });
+            return RES_PENDING;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     fn do_close(&mut self, task: u32, fd: i32) -> i32 {
@@ -2960,10 +3113,12 @@ impl Board {
     }
 
     // do_listen's host-backend branch: a plain passthrough to
-    // `sock_listen`. No `is_listener`/replacement-socket bookkeeping is
-    // needed on this path at all -- see `do_accept_host`'s own comment
-    // for why a real host listening socket doesn't need the smoltcp
-    // path's "swap in a fresh listener on every accept" trick.
+    // `sock_listen`, plus recording `is_listener` for
+    // `sample_event_level_host`'s benefit (see that field's own comment).
+    // No replacement-socket bookkeeping is needed here -- see
+    // `do_accept_host`'s own comment for why a real host listening socket
+    // doesn't need the smoltcp path's "swap in a fresh listener on every
+    // accept" trick.
     fn do_listen_host(&mut self, task: u32, fd: i32, backlog: i32) -> i32 {
         let idx = self
             .host_fd_index(fd)
@@ -2977,8 +3132,10 @@ impl Board {
             self.set_errno(task, EINVAL);
             return -1;
         }
-        let rc = unsafe { sock_listen(slot.handle, backlog) };
+        let handle = slot.handle;
+        let rc = unsafe { sock_listen(handle, backlog) };
         if rc == 0 {
+            self.host_fds[idx].as_mut().unwrap().is_listener = true;
             return 0;
         }
         self.set_errno(task, -rc);
@@ -3138,6 +3295,7 @@ impl Board {
             // fd), but true is the accurate description, same reasoning
             // as the smoltcp path's own identical comment just above.
             connect_started: true,
+            is_listener: false,
             opts: HostSockOpts::default(),
         });
 
@@ -3527,6 +3685,9 @@ impl Board {
     }
 
     fn do_shutdown(&mut self, task: u32, fd: i32, _how: i32) -> i32 {
+        if self.host_fd_index(fd).is_some() {
+            return self.do_shutdown_host(task, fd, _how);
+        }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
             return -1;
@@ -3556,6 +3717,23 @@ impl Board {
             // Same -- no connection state, nothing to shut down.
             SockKind::Icmp => 0,
         }
+    }
+
+    // do_shutdown's host-backend branch: unlike the smoltcp path, a real
+    // host socket has a genuine half-duplex `shutdown(2)`, so `how`
+    // (0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR) is honoured for real
+    // instead of always mapping to a full close.
+    fn do_shutdown_host(&mut self, task: u32, fd: i32, how: i32) -> i32 {
+        let idx = self
+            .host_fd_index(fd)
+            .expect("caller already checked host_fd_index");
+        let handle = self.host_fds[idx].as_ref().unwrap().handle;
+        let rc = unsafe { sock_shutdown(handle, how) };
+        if rc == 0 {
+            return 0;
+        }
+        self.set_errno(task, -rc);
+        -1
     }
 
     // setsockopt: a small, real subset, not the full option space (see
@@ -3661,6 +3839,18 @@ impl Board {
                 i32::from_be_bytes(raw[4..8].try_into().unwrap()),
             )
         };
+        // Same reasoning as do_setsockopt's own identical special-case:
+        // sample the current readiness as the edge-detection baseline
+        // before storing the mask, via the host-backed
+        // `sample_event_level_host` rather than `sample_event_level`.
+        if level == SOL_SOCKET && optname == SO_EVENTMASK {
+            let mask = read_i32(optval);
+            let baseline = self.sample_event_level_host(idx);
+            let opts = &mut self.host_fds[idx].as_mut().unwrap().opts;
+            opts.eventmask = mask;
+            opts.ev_prev = Some(baseline);
+            return 0;
+        }
         match (level, optname) {
             (SOL_SOCKET, SO_LINGER) if optlen >= 8 => {
                 let (onoff, secs) = read_pair(optval);
@@ -3783,7 +3973,7 @@ impl Board {
     }
 
     // do_getsockopt's host-backend branch: SO_TYPE reads the fd's real
-    // kind, SO_LINGER/SO_RCVTIMEO/SO_SNDTIMEO read back
+    // kind, SO_LINGER/SO_RCVTIMEO/SO_SNDTIMEO/SO_EVENTMASK read back
     // `HostFdSlot::opts`'s roundtrip storage (see that type's own doc
     // comment), and everything else -- including SO_ERROR, which here is
     // a *real* "get pending error and clear" via the host socket's own
@@ -3851,6 +4041,10 @@ impl Board {
                 bytes[0..4].copy_from_slice(&slot.opts.sndtimeo.0.to_be_bytes());
                 bytes[4..8].copy_from_slice(&slot.opts.sndtimeo.1.to_be_bytes());
                 write_capped(&bytes);
+                return 0;
+            }
+            (SOL_SOCKET, SO_EVENTMASK) => {
+                write_i32(slot.opts.eventmask);
                 return 0;
             }
             _ => {}
@@ -4082,6 +4276,7 @@ impl Board {
             kind: slot.kind,
             nonblocking: false,
             connect_started: slot.connect_started,
+            is_listener: slot.is_listener,
             opts: slot.opts,
         });
         (target_idx + 1) as i32
@@ -4219,6 +4414,7 @@ impl Board {
                 kind: slot.kind,
                 nonblocking: false,
                 connect_started: slot.connect_started,
+                is_listener: slot.is_listener,
                 opts: slot.opts,
             },
         );
@@ -4995,18 +5191,30 @@ impl Board {
     // blocking, via smoltcp's own `recv_queue()` on either socket kind.
     fn do_ioctl_socket(&mut self, task: u32, fd: i32, request: u32, argp: u32) -> i32 {
         if let Some(idx) = self.host_fd_index(fd) {
-            // FIONREAD has no host-backend equivalent yet (`sock_*` has no
-            // "bytes pending" query) -- EOPNOTSUPP rather than a fake 0,
-            // which would misreport "no data" instead of "unknown".
-            if request != FIONBIO {
-                self.set_errno(task, EOPNOTSUPP);
-                return -1;
+            match request {
+                FIONBIO => {
+                    let mut raw = [0u8; 4];
+                    unsafe { dma_read(argp as i32, raw.as_mut_ptr() as i32, 4) };
+                    let nonblocking = i32::from_be_bytes(raw) != 0;
+                    self.host_fds[idx].as_mut().unwrap().nonblocking = nonblocking;
+                    return 0;
+                }
+                FIONREAD => {
+                    let handle = self.host_fds[idx].as_ref().unwrap().handle;
+                    let rc = unsafe { sock_nread(handle) };
+                    if rc < 0 {
+                        self.set_errno(task, -rc);
+                        return -1;
+                    }
+                    let bytes = rc.to_be_bytes();
+                    unsafe { dma_write(argp as i32, bytes.as_ptr() as i32, 4) };
+                    return 0;
+                }
+                _ => {
+                    self.set_errno(task, EINVAL);
+                    return -1;
+                }
             }
-            let mut raw = [0u8; 4];
-            unsafe { dma_read(argp as i32, raw.as_mut_ptr() as i32, 4) };
-            let nonblocking = i32::from_be_bytes(raw) != 0;
-            self.host_fds[idx].as_mut().unwrap().nonblocking = nonblocking;
-            return 0;
         }
         let Some(idx) = self.fd_index(fd) else {
             self.set_errno(task, ENOTSOCK);
@@ -5460,6 +5668,46 @@ impl Board {
         }
     }
 
+    // `sample_event_level`'s host-backend counterpart: a real `sock_poll`
+    // stands in for smoltcp's `can_recv()`/`can_send()`/`may_recv()`/
+    // `is_listening()`/`state()`. `SOCK_HUP` (set alongside `SOCK_READABLE`
+    // on a real peer hangup, see that const's own comment in
+    // src/wasmboard.rs) is what lets `may_recv` go false here the same way
+    // `!socket.may_recv()` does on the smoltcp arm, without this call
+    // itself consuming any data. "Still connecting" has no host-backed
+    // socket-state query the way smoltcp's `tcp::State::SynSent` is one --
+    // instead, `connect_started` combined with "no WRITABLE/ERROR bit yet"
+    // stands in for it: a real non-blocking `connect()`'s completion is
+    // exactly the transition `sock_poll`'s WRITABLE/ERROR bits report, and
+    // `do_connect_host`'s own retry loop already relies on that same
+    // signal.
+    fn sample_event_level_host(&self, idx: usize) -> EventLevel {
+        let slot = self.host_fds[idx].as_ref().expect("caller checked Some");
+        let mask = unsafe { sock_poll(slot.handle) };
+        if slot.is_listener {
+            EventLevel {
+                read_ready: false,
+                write_ready: false,
+                accept_ready: mask & (SOCK_READABLE | SOCK_ERROR) != 0,
+                may_recv: true,
+                connecting: false,
+            }
+        } else {
+            let connecting = slot.connect_started && mask & (SOCK_WRITABLE | SOCK_ERROR) == 0;
+            EventLevel {
+                read_ready: mask & (SOCK_READABLE | SOCK_ERROR) != 0,
+                write_ready: if connecting {
+                    false
+                } else {
+                    mask & (SOCK_WRITABLE | SOCK_ERROR) != 0
+                },
+                accept_ready: false,
+                may_recv: mask & SOCK_HUP == 0,
+                connecting,
+            }
+        }
+    }
+
     // Synthesizes GetSocketEvents()-reportable FD_* events from tick-over-
     // tick transitions in `sample_event_level`'s readiness, for every fd
     // with a non-zero SO_EVENTMASK (do_setsockopt). Two-pass, not one:
@@ -5467,48 +5715,83 @@ impl Board {
     // writes (self.fds[..].opts.ev_prev, self.event_queues, self.wake_queue)
     // -- collecting fires/updates first avoids interleaving a shared borrow
     // of self.sockets with the mutable borrows the second pass needs.
+    //
+    // `fds` and `host_fds` share one index space (an fd lives in exactly
+    // one of the two tables, see `do_socket_host`/`do_obtain_socket`'s own
+    // collision-avoidance comment), so one loop over `0..MAX_FDS` checks
+    // both, tagging each update with which table it came from. The
+    // edge-detection arithmetic itself is identical either way -- only
+    // `sample_event_level`/`sample_event_level_host` and which struct's
+    // `opts` gets read/written differ.
     fn process_socket_events(&mut self) {
-        let mut updates: Vec<(usize, EventLevel)> = Vec::new();
+        let mut updates: Vec<(usize, bool, EventLevel)> = Vec::new();
         let mut fires: Vec<(i32, u32)> = Vec::new();
         for idx in 0..MAX_FDS {
-            let Some(slot) = self.fds[idx].as_ref() else {
-                continue;
-            };
-            if slot.opts.eventmask == 0 {
-                continue;
-            }
-            let Some(prev) = slot.opts.ev_prev else {
-                continue;
-            };
-            let cur = self.sample_event_level(idx);
+            let (eventmask, ev_prev, connect_started, cur, is_host) =
+                if let Some(slot) = self.fds[idx].as_ref() {
+                    if slot.opts.eventmask == 0 {
+                        continue;
+                    }
+                    let Some(prev) = slot.opts.ev_prev else {
+                        continue;
+                    };
+                    (
+                        slot.opts.eventmask,
+                        prev,
+                        slot.connect_started,
+                        self.sample_event_level(idx),
+                        false,
+                    )
+                } else if let Some(slot) = self.host_fds[idx].as_ref() {
+                    if slot.opts.eventmask == 0 {
+                        continue;
+                    }
+                    let Some(prev) = slot.opts.ev_prev else {
+                        continue;
+                    };
+                    (
+                        slot.opts.eventmask,
+                        prev,
+                        slot.connect_started,
+                        self.sample_event_level_host(idx),
+                        true,
+                    )
+                } else {
+                    continue;
+                };
             let mut bits = 0u32;
-            if !prev.accept_ready && cur.accept_ready {
+            if !ev_prev.accept_ready && cur.accept_ready {
                 bits |= FD_ACCEPT;
             }
-            // A connect() completing (leaving SynSent/SynReceived) reports
-            // FD_CONNECT, never FD_WRITE, even though the same underlying
-            // write_ready transition also goes true then -- real AmiTCP
-            // disambiguates these two conditions rather than reporting
-            // both for the same edge.
-            if slot.connect_started && prev.connecting && !cur.connecting {
+            // A connect() completing (leaving SynSent/SynReceived, or on
+            // the host backend the WRITABLE/ERROR bit finally landing)
+            // reports FD_CONNECT, never FD_WRITE, even though the same
+            // underlying write_ready transition also goes true then --
+            // real AmiTCP disambiguates these two conditions rather than
+            // reporting both for the same edge.
+            if connect_started && ev_prev.connecting && !cur.connecting {
                 bits |= FD_CONNECT;
-            } else if !prev.write_ready && cur.write_ready {
+            } else if !ev_prev.write_ready && cur.write_ready {
                 bits |= FD_WRITE;
             }
-            if !prev.read_ready && cur.read_ready {
+            if !ev_prev.read_ready && cur.read_ready {
                 bits |= FD_READ;
             }
-            if prev.may_recv && !cur.may_recv {
+            if ev_prev.may_recv && !cur.may_recv {
                 bits |= FD_CLOSE;
             }
-            bits &= slot.opts.eventmask as u32;
-            updates.push((idx, cur));
+            bits &= eventmask as u32;
+            updates.push((idx, is_host, cur));
             if bits != 0 {
                 fires.push(((idx + 1) as i32, bits));
             }
         }
-        for (idx, cur) in updates {
-            if let Some(slot) = self.fds[idx].as_mut() {
+        for (idx, is_host, cur) in updates {
+            if is_host {
+                if let Some(slot) = self.host_fds[idx].as_mut() {
+                    slot.opts.ev_prev = Some(cur);
+                }
+            } else if let Some(slot) = self.fds[idx].as_mut() {
                 slot.opts.ev_prev = Some(cur);
             }
         }
@@ -5695,8 +5978,23 @@ impl Board {
                 // `do_connect_host`/`do_send_host`/`do_recv_host` call
                 // this wakeup lets the guest retry is what authoritatively
                 // re-checks and reports the real result.
+                // Any bit at all, not just WRITABLE/ERROR: a refused
+                // connect's own `poll(2)` result is platform-dependent
+                // (found running bsdsocktest for real -- macOS reports
+                // *only* POLLHUP for a loopback ECONNREFUSED, not
+                // POLLOUT/POLLERR, which this module classifies as
+                // SOCK_READABLE; checking only WRITABLE|ERROR here left
+                // the waiter permanently unsatisfied and the guest
+                // livelocked in Wait() forever, the exact hang shape
+                // this same test number caused on the smoltcp path
+                // before its own `connect_started` fix -- see
+                // bsdsocktest-status.md's hang #2). Safe to treat any
+                // readiness bit as "go recheck": `do_connect_host`'s own
+                // retry doesn't trust this signal either way, it just
+                // re-issues `sock_connect` and reports whatever that
+                // says.
                 WaitKind::Connect { fd } => match self.host_socket_mask(fd) {
-                    Some(mask) => mask & (SOCK_WRITABLE | SOCK_ERROR) != 0,
+                    Some(mask) => mask != 0,
                     None => self.fd_slot(fd).is_none_or(|slot| {
                         let sockets = self.sockets.as_ref().expect("init() has run");
                         let st = sockets.get::<tcp::Socket>(slot.socket).state();
