@@ -43,9 +43,11 @@ running in Copperline.
 - [](guide/ui) -- the window, status bar, keyboard shortcuts, menus, and
   gamepad calibration.
 - [](guide/fluxbridge) -- reading and writing real Amiga floppies in a
-  physical drive, over a DrawBridge, Greaseweazle, or Supercard Pro.
+  physical drive over the Greaseweazle driver Copperline currently includes.
 - [](guide/host-disks) -- giving the machine a real disk of this computer's
   in place of an image, with its own RDB and partitions intact.
+- [](guide/mt32) -- configuring the built-in MT-32 synthesiser and its front
+  panel.
 - [](guide/headless) -- scripted, deterministic runs: screenshots, frame
   dumps, scripted input, and WAV capture.
 - [](guide/browser) -- the same core compiled to WebAssembly, hosted at

@@ -532,39 +532,20 @@ framebuffer):
   rendered source texture instead of copying the picture sideways. Vertical
   border colour changes remain visible because they are part of the Denise
   output and are often deliberate border effects.
-- **TV PNG aperture**: normal screenshots and `--dump-frames` in TV mode
-  crop standard horizontal content to a 692x540 aperture. The horizontal crop
-  keeps a 640-pixel standard display centred with 26 pixels of visible
-  overscan on both sides and is shared by both video standards, which place
-  the standard window at the same colour clocks; vertically it keeps the
-  title-bar/top-border position aligned with the reference-emulator crop.
-  The aperture's height follows the scan the frame actually ran, not the
-  configured standard: a 312/313-line (50 Hz) field carries the 256-line
-  standard window (540 woven rows with a 7-line overscan margin each side),
-  a 262/263-line (60 Hz) field the 200-line one (428 rows with the same
-  margin). Both apertures fill the same 4:3 glass, so presentation keeps
-  one shape -- a 60 Hz crop's rows are scaled onto the 50 Hz aperture's
-  native row count (whole-row selection, no blending) in the saved PNG, and
-  the live window stretches it over the same display rect. True horizontal
-  overscan fetches are not cropped to this aperture: they stay on the
-  full-width TV path so intentional border content remains visible.
-  `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop and writes the raw 716x570
-  woven framebuffer. A second, narrower aperture (`TV_CAPTURED_*`, 668
-  wide) clips the same rect to columns the framebuffer actually captures:
-  the reference aperture's right margin reaches 12 columns past the
-  framebuffer's right edge, which the PNG path pads with black bezel.
-  Presentation paths whose frame should end on real pixels use the
-  captured aperture instead, with the margin mirrored from the captured
-  right-overscan width so the standard window stays exactly centred: the
-  browser canvas hugs its border on every side, and the desktop's live
-  window centres the captured aperture in its 716-pixel 4:3 texture (kept
-  for the status bar and scaling path) between symmetric black side pads,
-  so the visible raster and the standard window are both dead centre --
-  the reference aperture's one-sided black margin read as an off-centre
-  picture inside the monitor bezel. The pads stay black rather than
-  replicating the crop's edge columns, which carry picture when a display
-  fetches or parks sprites in the deepest overscan. The captured
-  aperture's geometry invariants are const-evaluated beside the
+- **TV glass**: normal screenshots and `--dump-frames` in TV mode present the
+  same 716x540 4:3 glass as the live window. Horizontally the framebuffer's
+  captured aperture (`TV_CAPTURED_*`, 668 columns) contains the 640-pixel
+  standard display with 14 captured overscan pixels on each side. Those real
+  columns are nearest-neighbour resampled across the 716-pixel glass, so the
+  raster reaches both edges without synthetic black bezel columns. Vertically
+  the aperture follows the scan the frame actually ran: a 312/313-line (50 Hz)
+  field contributes 540 woven rows, while a 262/263-line (60 Hz) field
+  contributes 428. The shorter crop is resampled onto the same 540 output rows,
+  keeping PAL and NTSC presentation the same shape. True horizontal overscan
+  fetches are not cropped to this aperture: they stay on the full-width path
+  so intentional border content remains visible. `COPPERLINE_SHOT_RAW=1`
+  bypasses presentation and writes the raw 716x570 woven framebuffer. The
+  captured-aperture geometry invariants are const-evaluated beside the
   definitions.
 - **Full-overscan horizontal recentring**: in `"full"` presentation, a standard
   (non-overscan) display is recentred because the framebuffer captures a deep
@@ -588,8 +569,8 @@ shift); a frame that does carry content, including a true-overscan fetch or
 a programmable scan, re-latches the decision, so an overscan demo that
 blanks between parts stays on full-frame presentation throughout. The latch
 resets on presentation discontinuities (machine swap, reset, state load).
-Frame dumps and screenshots share the resolved decision, so a dump's PNG
-dimensions no longer flip between 716x537 and 692x540 across a boot.
+Frame dumps and screenshots share the resolved decision, so a TV-mode dump's
+PNG dimensions remain 716x540 across a boot.
 
 ### RTG scanout (Z3660 and Picasso II/II+)
 

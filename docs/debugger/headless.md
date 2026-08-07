@@ -200,8 +200,8 @@ Timing-model knobs that pair well with the debugger:
 - `COPPERLINE_HCENTER=0` -- disable presentation recentring when debugging
   display alignment.
 - `COPPERLINE_SHOT_RAW=1` -- save screenshots and frame dumps as the raw
-  716x570 woven framebuffer instead of the TV PNG aperture (692x540 for
-  standard PAL fields) or full-overscan presentation scale. Per-scanline
+  716x570 woven framebuffer instead of the 716x540 TV glass or
+  full-overscan presentation scale. Per-scanline
   forensics (which exact framebuffer row carries an artifact) need the raw
   field.
 - `COPPERLINE_OVERSCAN=full|tv` -- override the configured overscan mask.

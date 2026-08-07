@@ -627,6 +627,10 @@ fn describe(media: io_registry_entry_t, mounts: &[(String, String)]) -> Option<H
     let writable = dict_bool(dict, "Writable").unwrap_or(true);
 
     let model = inherited_dict_string(media, "Device Characteristics", "Product Name");
+    let serial =
+        inherited_dict_string(media, "Device Characteristics", "Serial Number").or_else(|| {
+            inherited_dict_string(media, "USB Device Characteristics", "USB Serial Number")
+        });
     let internal = inherited(media, "Physical Interconnect Location")
         .and_then(|value| read_string(value.0))
         .map(|location| location == "Internal")
@@ -645,6 +649,7 @@ fn describe(media: io_registry_entry_t, mounts: &[(String, String)]) -> Option<H
         path: PathBuf::from(format!("/dev/r{id}")),
         id,
         model,
+        serial,
         size_bytes,
         block_size,
         removable: removable || ejectable,
@@ -694,6 +699,24 @@ pub fn unmount_whole_disk(id: &str) -> Result<()> {
     anyhow::bail!("{id} could not be unmounted: {}", combined.trim());
 }
 
+fn remount_whole_disk(id: &str) {
+    match std::process::Command::new("/usr/sbin/diskutil")
+        .arg("mountDisk")
+        .arg(format!("/dev/{id}"))
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            log::info!("blockdev: {id} mounted again for the host");
+        }
+        Ok(output) => log::warn!(
+            "blockdev: {id} could not be mounted again: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => log::warn!("blockdev: could not run diskutil to remount {id}: {error}"),
+    }
+}
+
 /// Whether taking a disk will need the host to raise a prompt.
 ///
 /// Answered "no" deliberately, elevation being the wrong question here: the
@@ -709,9 +732,22 @@ pub(super) fn taking_needs_privilege() -> bool {
 ///
 /// `authopen` hands back a descriptor with no lasting claim of its own on
 /// the media, so the descriptor is the whole of what there is to hold; its
-/// `O_EXCL` (on writable opens) is what keeps the host from mounting a
-/// volume underneath the machine, and it lasts until the last copy closes.
-pub(super) type Held = std::fs::File;
+/// `O_EXCL` is what keeps the host from mounting a volume underneath the
+/// machine, and it lasts until the last copy closes.
+pub(super) struct Held {
+    file: Option<std::fs::File>,
+    id: String,
+    remount: bool,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if self.remount {
+            remount_whole_disk(&self.id);
+        }
+    }
+}
 
 /// Take disks from the host, asking the system for permission only where it
 /// has to.
@@ -738,39 +774,95 @@ pub(super) type Held = std::fs::File;
 /// cost one dialog between them -- though while [`authorize_open`] is
 /// dormant (see its docs), `authopen` asks per disk itself.
 pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, Held)>> {
+    // Validate every path before unmounting the first volume. A later path
+    // failure must not strand earlier authorization candidates unmounted.
+    for (device, _) in wanted {
+        device
+            .path
+            .to_str()
+            .with_context(|| format!("device path is not UTF-8: {}", device.path.display()))?;
+    }
     let mut taken = Vec::new();
-    let mut ask = Vec::new();
+    let mut ask: Vec<(HostDevice, bool, bool)> = Vec::new();
     for (device, write) in wanted {
         // The host must let go before the machine can take hold: a mounted
         // volume keeps the kernel's claim on the media and the open would
         // fail with EBUSY.
-        if !device.mounted.is_empty() {
-            unmount_whole_disk(&device.id)?;
+        let remount = !device.mounted.is_empty();
+        if remount {
+            if let Err(error) = unmount_whole_disk(&device.id) {
+                for (pending, _, should_remount) in &ask {
+                    if *should_remount {
+                        remount_whole_disk(&pending.id);
+                    }
+                }
+                return Err(error);
+            }
         }
-        let path = device.path.to_str().context("device path is not UTF-8")?;
+        let path = device.path.to_str().expect("device paths validated above");
         match direct_open(path, open_flags(*write)) {
-            Ok(file) => taken.push((device.id.clone(), file)),
+            Ok(file) => taken.push((
+                device.id.clone(),
+                Held {
+                    file: Some(file),
+                    id: device.id.clone(),
+                    remount,
+                },
+            )),
             Err(error) => {
                 let denied = matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES));
                 if !denied {
+                    if remount {
+                        remount_whole_disk(&device.id);
+                    }
+                    for (pending, _, should_remount) in &ask {
+                        if *should_remount {
+                            remount_whole_disk(&pending.id);
+                        }
+                    }
                     return Err(error).with_context(|| format!("opening {path}"));
                 }
-                ask.push((device.clone(), *write));
+                ask.push((device.clone(), *write, remount));
             }
         }
     }
     if !ask.is_empty() {
-        let names: Vec<&str> = ask.iter().map(|(device, _)| device.id.as_str()).collect();
+        let names: Vec<&str> = ask
+            .iter()
+            .map(|(device, _, _)| device.id.as_str())
+            .collect();
         log::info!(
             "blockdev: {} needs permission; asking through authopen",
             names.join(", ")
         );
-        let authorized = authorize_open(&ask);
-        for (device, write) in &ask {
-            let path = device.path.to_str().context("device path is not UTF-8")?;
-            let file = authopen(path, open_flags(*write), authorized.as_ref())
-                .with_context(|| format!("opening {path} with authorization"))?;
-            taken.push((device.id.clone(), file));
+        let request: Vec<(HostDevice, bool)> = ask
+            .iter()
+            .map(|(device, write, _)| (device.clone(), *write))
+            .collect();
+        let authorized = authorize_open(&request);
+        for (device, write, remount) in &ask {
+            let path = device.path.to_str().expect("device paths validated above");
+            let file = match authopen(path, open_flags(*write), authorized.as_ref())
+                .with_context(|| format!("opening {path} with authorization"))
+            {
+                Ok(file) => file,
+                Err(error) => {
+                    for (pending, _, should_remount) in &ask {
+                        if *should_remount && !taken.iter().any(|(id, _)| id == &pending.id) {
+                            remount_whole_disk(&pending.id);
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            taken.push((
+                device.id.clone(),
+                Held {
+                    file: Some(file),
+                    id: device.id.clone(),
+                    remount: *remount,
+                },
+            ));
         }
     }
     Ok(taken)
@@ -795,11 +887,15 @@ fn open_flags(write: bool) -> i32 {
 /// positioned rather than seeking.
 pub(super) fn lend(device: &HostDevice, write: bool, held: &Held) -> Result<super::BlockDevice> {
     let file = held
+        .file
+        .as_ref()
+        .context("the reserved disk handle has already closed")?
         .try_clone()
         .context("lending the disk to the machine")?;
     Ok(super::BlockDevice::new(
         file,
         device.id.clone(),
+        device.fingerprint(),
         device.block_size,
         device.size_bytes,
         write,

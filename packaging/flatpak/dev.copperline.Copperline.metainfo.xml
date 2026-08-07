@@ -63,7 +63,7 @@
   <releases>
     <release version="0.14.0" date="2026-08-01">
       <description>
-        <p>Picasso II and Picasso II+ Zorro II RTG boards, real floppy disks in any drive bay through DrawBridge, Greaseweazle and SupercardPro controllers, bridged Ethernet attached to a host adapter, an experimental JIT CPU mode, rewind and save-state slots, CRT shader presets with custom WGSL support, a 1084-style monitor bezel and screen tints, autofire, input remapping, mouse sensitivity and capture modes, a memory heat map and chipset-misuse debugging suite, host-filesystem volumes under Kickstart 1.3, browser PWA persistence and display controls, substantial render performance work, and HAM, sprite, 68020 and AGA accuracy fixes.</p>
+        <p>Picasso II and Picasso II+ Zorro II RTG boards, real floppy disks in any drive bay through a Greaseweazle controller, bridged Ethernet attached to a host adapter, an experimental JIT CPU mode, rewind and save-state slots, CRT shader presets with custom WGSL support, a 1084-style monitor bezel and screen tints, autofire, input remapping, mouse sensitivity and capture modes, a memory heat map and chipset-misuse debugging suite, host-filesystem volumes under Kickstart 1.3, browser PWA persistence and display controls, substantial render performance work, and HAM, sprite, 68020 and AGA accuracy fixes.</p>
       </description>
     </release>
     <release version="0.13.0" date="2026-07-25">

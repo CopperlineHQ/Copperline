@@ -693,10 +693,17 @@ floppy_sounds_volume = 100
 # partitions, its own filesystem. Nothing is copied, and no RDB is invented
 # over a disk that has none.
 #
-# `device` is the host's stable name for the disk, exactly as
-# `--list-disks` prints it: "sdb" on Linux, "disk4" on macOS,
-# "PhysicalDrive1" on Windows. A disk named here that is not plugged in
-# leaves that drive slot empty and the machine starts anyway.
+# `device` is the host's current enumeration name, exactly as `--list-disks`
+# prints it: "sdb" on Linux, "disk4" on macOS, "PhysicalDrive1" on Windows.
+# These names can change. The launcher also writes an opaque `fingerprint`;
+# keep it unchanged, because it follows the same disk to a changed name only
+# when one attached disk matches. Older/hand-written entries may omit it and
+# then use exact `device` lookup; freshly select and mount the disk in the
+# launcher before saving to add one. Merely opening and saving preserves its
+# absence. A persisted removable disk (even if its reader reports a serial),
+# or a fixed disk without a credible serial/WWN, is usable read-only after one
+# unambiguous match but must be freshly selected before writable use. An
+# unresolved disk leaves the slot empty.
 #
 # The disk this computer is running from is never offered and never opened,
 # whatever is written here. Opening a real disk needs permission the first
@@ -706,6 +713,7 @@ floppy_sounds_volume = 100
 # why, and what a correct read-only attach looks like.
 #
 # [[host_disk]]
-# device = "sdb"                 # as --list-disks prints it
+# device = "sdb"                 # last name shown by --list-disks
+# fingerprint = "v1-..."        # launcher-generated; do not copy between disks
 # attach = "ide-master"          # ide-master (default), ide-slave, scsi0..scsi6
-# read_only = true               # absent means writable
+# read_only = true               # the default; false explicitly allows writes

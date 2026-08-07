@@ -15,7 +15,7 @@ name = "cputest-runner"
 path = "src/main.rs"
 
 [dependencies]
-m68k = "0.5.2"
+m68k = "0.7.1"
 
 [build-dependencies]
 cc = "1"

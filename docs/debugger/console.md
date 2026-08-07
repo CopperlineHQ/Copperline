@@ -1,7 +1,7 @@
 # The Console
 
 Pick **Console...** from the status-bar menu (or press
-{kbd}`Cmd+K` / {kbd}`Alt+K`) to open the debugger console: a GDB-flavoured
+`Cmd+K` / `Alt+K`) to open the debugger console: a GDB-flavoured
 command line in its own tool window. Like the debugger and Frame Analyzer
 it is a separate host window, so all three can be visible at once --
 console on one side driving execution, the debugger's disassembly and the
@@ -16,9 +16,9 @@ A console session: a breakpoint set, hit, and inspected.
 
 Opening the console pauses the machine (`RUN` resumes it); closing it
 restores the previous run state. The prompt takes any printable text;
-{kbd}`Enter` executes, {kbd}`Backspace` edits, {kbd}`Up` / {kbd}`Down`
-walk the command history, and {kbd}`PageUp` / {kbd}`PageDown` or the
-mouse wheel scroll the output. {kbd}`Cmd+V` (macOS) or {kbd}`Ctrl+V`
+`Enter` executes, `Backspace` edits, `Up` / `Down`
+walk the command history, and `PageUp` / `PageDown` or the
+mouse wheel scroll the output. `Cmd+V` (macOS) or `Ctrl+V`
 pastes the host clipboard -- a multi-line paste executes each complete
 line in order and leaves the trailing fragment in the prompt, so a
 saved command script can be replayed with one paste. Commands are

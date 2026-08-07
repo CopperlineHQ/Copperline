@@ -19,19 +19,27 @@ MFM the head would be passing over, so Paula, the disk DMA, and
 A [Greaseweazle](https://github.com/keirf/greaseweazle) (any revision with
 main firmware 0.27 or newer), a 3.5" floppy drive, and some disks.
 
-FluxBridge is pure Rust, pinned by revision in `Cargo.toml` and compiled into
-Copperline, so a build that offers a physical drive can actually drive one --
-there is no library to fetch, install, or keep beside the binary, and no C or
-C++ toolchain involved in building it.
+FluxBridge is pure Rust, tracked from its `main` branch and compiled into
+Copperline. `Cargo.lock` pins the exact revision used by a checkout, so a
+build that offers a physical drive can actually drive one -- there is no
+library to fetch, install, or keep beside the binary, and no C or C++
+toolchain involved in building it.
 
 ```sh
 cargo build --release
 ```
 
-The `fluxbridge` Cargo feature, on by default, is what includes it. Built
-without it (`--no-default-features`), none of this exists: no **Physical
-drive** tick box in the launcher, no `--floppy-bridge` flags, and a config
-file's `bridge` keys are read and ignored.
+The `fluxbridge` Cargo feature, on by default, is what includes it. To build
+the normal desktop feature set without it:
+
+```sh
+cargo build --release --no-default-features \
+  --features "midi,frontend,wasm-boards,control,ctl-bin,net-nat,net-bridge,mt32,cpu-jit,profile-stats"
+```
+
+In that build none of this exists: no **Physical drive** tick box in the
+launcher, no `--floppy-bridge` flags, and a config file's `bridge` keys are
+read and ignored.
 
 ## Using a physical drive
 
@@ -142,8 +150,10 @@ loaders that cannot tolerate being answered "not yet".
 
 ### Replay speed
 
-Every track the guest reads is kept in memory, so re-reads never touch the
-platter twice. `replay_speed` is how fast those replays are served:
+Every index-aligned or otherwise proven capture is kept in memory. An
+unproven normal-mode capture is still served once and fetched afresh on the
+next visit, as described above. `replay_speed` is how fast the kept captures
+are served:
 
 - `fast` (the default): replays run at double speed. A track's *first* read
   always arrives at the platter's own pace -- the capture is served as it
@@ -264,7 +274,7 @@ when the launcher opens and when a bay is switched over, so untick and re-tick
 the same footing as an image being inserted:
 
 ```text
-floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" HD drive, FluxBridge v0.2.0
+floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" HD drive, FluxBridge v0.3.0
 floppy.df0 disk in the physical drive
 floppy.df0 write-protected by the configuration; set write_protected = false to write to the disk
 ```

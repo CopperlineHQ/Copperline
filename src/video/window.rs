@@ -385,6 +385,26 @@ fn logical_size_is_canvas(logical_w: f64, logical_h: f64, canvas_height: usize) 
     (logical_w - FB_WIDTH as f64).abs() < 2.0 && (logical_h - canvas_height as f64).abs() < 2.0
 }
 
+const CANVAS_SNAP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a resize still belongs to the presentation canvas. The first
+/// event after an asynchronous `request_inner_size` is the platform's answer
+/// even when a window-manager limit clamps it far away from the requested
+/// dimensions. A platform may ignore the request entirely, so the ownership
+/// expires rather than swallowing a user resize much later.
+fn resize_is_canvas_owned(
+    snap_request_deadline: &mut Option<Instant>,
+    now: Instant,
+    logical_w: f64,
+    logical_h: f64,
+    canvas_height: usize,
+) -> bool {
+    snap_request_deadline
+        .take()
+        .is_some_and(|deadline| now <= deadline)
+        || logical_size_is_canvas(logical_w, logical_h, canvas_height)
+}
+
 /// Host mouse speed multiplier for a 0-100 sensitivity. Exponential so 50 is
 /// exactly 1:1 (2^0), 0 is a quarter speed (2^-2) and 100 quadruple (2^2),
 /// with perceptually even steps between.
@@ -889,12 +909,13 @@ pub struct App {
     /// Whether the user has sized the main window themselves, in which case
     /// the canvas reflows into it instead of the window snapping to the
     /// canvas. Tracked from the resizes that arrive rather than measured
-    /// from the current size: a snap the platform clamped or rounded reads
-    /// as the user's own drag, and the window would never snap again.
+    /// from the current size so a snap the platform clamped or rounded does
+    /// not read as the user's own drag and disable future snaps.
     window_manually_sized: bool,
-    /// The logical size the last snap asked for, so the resize it causes is
-    /// not counted as the user's.
-    snap_request: Option<(f64, f64)>,
+    /// Deadline for the asynchronous response to the last canvas snap, so a
+    /// platform-clamped result is not counted as the user's resize. Bounded
+    /// because a window manager may ignore the request entirely.
+    snap_request_deadline: Option<Instant>,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
@@ -1531,7 +1552,7 @@ impl App {
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
             window_manually_sized: false,
-            snap_request: None,
+            snap_request_deadline: None,
             cursor_pos: None,
             last_display_cursor_pos: None,
             last_cursor_phys: None,
@@ -5750,11 +5771,18 @@ impl App {
                             // only the ones just ticked: this says which disks
                             // are wanted, and anything held that is not on the
                             // list goes back to the host.
-                            let asked: Vec<(String, bool)> = state
+                            let asked: Vec<(String, Option<String>, bool, bool)> = state
                                 .setup
                                 .host_disks_attached()
                                 .iter()
-                                .map(|disk| (disk.device.clone(), disk.writable))
+                                .map(|disk| {
+                                    (
+                                        disk.device.clone(),
+                                        disk.fingerprint.clone(),
+                                        disk.writable,
+                                        disk.identity_confirmed,
+                                    )
+                                })
                                 .collect();
                             let refused = match crate::blockdev::reserve_devices(&asked) {
                                 Ok(()) => {
@@ -7417,7 +7445,13 @@ impl App {
     /// save is expected to be instant, and the previous contents of the slot
     /// are what the user is replacing.
     fn quick_save_state(&mut self, slot: usize) {
-        let Some(path) = crate::savestate::slot_path(slot) else {
+        self.quick_save_state_at(slot, crate::savestate::slot_path(slot));
+    }
+
+    /// Test/frontend seam for slot roots that must not touch the host's real
+    /// per-user state directory.
+    fn quick_save_state_at(&mut self, slot: usize, path: Option<PathBuf>) {
+        let Some(path) = path else {
             self.show_osd("No per-user directory for save slots");
             return;
         };
@@ -7442,7 +7476,17 @@ impl App {
     /// rather than treated as an error: the menu and the hotkeys cover all
     /// ten, and most of them are usually unused.
     fn quick_load_state(&mut self, slot: usize, event_loop: Option<&ActiveEventLoop>) {
-        let Some(path) = crate::savestate::slot_path(slot) else {
+        self.quick_load_state_at(slot, crate::savestate::slot_path(slot), event_loop);
+    }
+
+    /// Test/frontend seam paired with [`Self::quick_save_state_at`].
+    fn quick_load_state_at(
+        &mut self,
+        slot: usize,
+        path: Option<PathBuf>,
+        event_loop: Option<&ActiveEventLoop>,
+    ) {
+        let Some(path) = path else {
             self.show_osd("No per-user directory for save slots");
             return;
         };
@@ -8853,8 +8897,16 @@ impl App {
                 }
                 let header = format!(
                     "BPLCON0 {bplcon0:04X}: {nplanes} planes {res}{modes}   DMACON: BPLEN {} SPREN {}",
-                    if base.dmacon & 0x0100 != 0 { "on" } else { "off" },
-                    if base.dmacon & 0x0020 != 0 { "on" } else { "off" },
+                    if base.dmacon & 0x0100 != 0 {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    if base.dmacon & 0x0020 != 0 {
+                        "on"
+                    } else {
+                        "off"
+                    },
                 );
                 let captured = bus.frame_captured_sprite_lines();
                 let sprites = (0..8)
@@ -9825,9 +9877,14 @@ impl App {
             return;
         }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
-        self.snap_request = Some((size.width, size.height));
         if let Some(applied) = window.request_inner_size(size) {
             self.apply_surface_size(applied);
+            // This backend applied the request synchronously, so no Resized
+            // event remains to consume it.
+            self.snap_request_deadline = None;
+            self.window_manually_sized = false;
+        } else {
+            self.snap_request_deadline = Some(Instant::now() + CANVAS_SNAP_RESPONSE_TIMEOUT);
         }
     }
 
@@ -9854,11 +9911,13 @@ impl App {
         }
         let logical_w = f64::from(size.width) / scale;
         let logical_h = f64::from(size.height) / scale;
-        let asked_for = self
-            .snap_request
-            .is_some_and(|(w, h)| (logical_w - w).abs() < 2.0 && (logical_h - h).abs() < 2.0);
-        if asked_for || logical_size_is_canvas(logical_w, logical_h, window_present_height()) {
-            self.snap_request = None;
+        if resize_is_canvas_owned(
+            &mut self.snap_request_deadline,
+            Instant::now(),
+            logical_w,
+            logical_h,
+            window_present_height(),
+        ) {
             self.window_manually_sized = false;
             return;
         }

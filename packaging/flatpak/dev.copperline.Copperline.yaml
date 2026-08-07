@@ -86,6 +86,10 @@ modules:
       # <prefix>/share/copperline/a4091.
       - install -Dm644 assets/a4091/a4091_cdfs.rom
         -t ${FLATPAK_DEST}/share/copperline/a4091/
+      - install -Dm644 assets/a4091/README.md
+        -t ${FLATPAK_DEST}/share/copperline/a4091/
+      - install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt
+        -t ${FLATPAK_DEST}/share/copperline/a4091/
       # Desktop integration metadata.
       - install -Dm644 packaging/flatpak/dev.copperline.Copperline.desktop
         ${FLATPAK_DEST}/share/applications/dev.copperline.Copperline.desktop

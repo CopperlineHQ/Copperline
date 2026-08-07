@@ -9,6 +9,12 @@
 // worklet. Everything is served from this site - no external requests.
 
 import init, { WebEmu } from './pkg/copperline_web.js';
+import {
+  cancelRenderStrideTransition as cancelRenderStrideTransitionState,
+  newRenderStrideState,
+  resetRenderStrideState,
+  updateRenderStrideState,
+} from './render-stride.js';
 import { TelnetSession } from './serial-telnet.js';
 
 const $ = (id) => document.getElementById(id);
@@ -645,7 +651,7 @@ async function buildAudioStack(suspendForPause) {
         keepRunningHidden ||
         (!document.hidden &&
           nowMs - lastRafMs > RAF_STARVED_MS &&
-          avgStepMs < STEP_OVERLOAD_MS)
+          renderStride.avgStepMs < STEP_OVERLOAD_MS)
       ) {
         stepMachine(nowMs, true);
       }
@@ -810,11 +816,6 @@ let lastRafMs = 0;
 // audio; a catch-up burst no longer leaves it stuck there. Old bundles
 // without run_hidden render every step regardless, preserving their
 // existing behaviour.
-const RENDER_SKIP_ENTER_MS = 16;
-const RENDER_SKIP_EXIT_MS = 14.5;
-const RENDER_SKIP_ENTER_HOLD_MS = 500;
-const RENDER_SKIP_EXIT_HOLD_MS = 2000;
-const RENDER_SKIP_SAMPLE_WEIGHT = 0.2;
 // The starved-rAF fallback exists for a THROTTLED host: animation frames
 // withheld from a machine that is cheap to step. On an OVERLOADED host -
 // the machine itself eating more than the worklet's ~29 ms report
@@ -829,54 +830,20 @@ const STEP_OVERLOAD_MS = 25;
 // Raw whole-call cost remains the correct signal for the starved-rAF
 // fallback: it decides whether another call right now would monopolise the
 // main thread, not whether one emulated pacing slice is affordable.
-let avgStepMs = 0;
-let avgFrameStepMs = 0;
-let renderSkipActive = false;
-let renderSkipTransitionSinceMs = null;
+const renderStride = newRenderStrideState();
 let renderDeferredLastTick = false;
 
 function cancelRenderStrideTransition() {
-  renderSkipTransitionSinceMs = null;
+  cancelRenderStrideTransitionState(renderStride);
 }
 
 function resetRenderStrideController() {
-  avgStepMs = 0;
-  avgFrameStepMs = 0;
-  renderSkipActive = false;
-  cancelRenderStrideTransition();
+  resetRenderStrideState(renderStride);
   renderDeferredLastTick = false;
 }
 
-function updateRenderStrideController(nowMs, stepElapsed, stepped) {
-  avgStepMs = avgStepMs * 0.9 + stepElapsed * 0.1;
-
-  // `run` advances fixed 1/60-second pacing slices, not necessarily one
-  // hardware video field. Normalize catch-up calls by the work completed;
-  // an idle call pulls the average down because it proves the host caught up.
-  const frameStepMs = stepped > 0 ? stepElapsed / stepped : 0;
-  if (avgFrameStepMs === 0 && frameStepMs > 0) {
-    avgFrameStepMs = frameStepMs;
-  } else {
-    avgFrameStepMs =
-      avgFrameStepMs * (1 - RENDER_SKIP_SAMPLE_WEIGHT) +
-      frameStepMs * RENDER_SKIP_SAMPLE_WEIGHT;
-  }
-
-  const threshold = renderSkipActive ? RENDER_SKIP_EXIT_MS : RENDER_SKIP_ENTER_MS;
-  const nextActive = avgFrameStepMs > threshold;
-  if (nextActive === renderSkipActive) {
-    renderSkipTransitionSinceMs = null;
-    return;
-  }
-  if (renderSkipTransitionSinceMs === null) {
-    renderSkipTransitionSinceMs = nowMs;
-    return;
-  }
-  const holdMs = nextActive ? RENDER_SKIP_ENTER_HOLD_MS : RENDER_SKIP_EXIT_HOLD_MS;
-  if (nowMs - renderSkipTransitionSinceMs >= holdMs) {
-    renderSkipActive = nextActive;
-    renderSkipTransitionSinceMs = null;
-  }
+function updateRenderStrideController(nowMs, stepElapsed, stepped, rendered) {
+  updateRenderStrideState(renderStride, nowMs, stepElapsed, stepped, rendered);
 }
 
 function maxFramesForQueue() {
@@ -950,12 +917,10 @@ function stepMachine(nowMs, deferRender) {
   try {
     const max = maxFramesForQueue();
     const stepStart = performance.now();
-    const stepped =
-      deferRender && typeof emu.run_hidden === 'function'
-        ? emu.run_hidden(nowMs, max)
-        : emu.run(nowMs, max);
+    const deferred = deferRender && typeof emu.run_hidden === 'function';
+    const stepped = deferred ? emu.run_hidden(nowMs, max) : emu.run(nowMs, max);
     const stepElapsed = performance.now() - stepStart;
-    updateRenderStrideController(nowMs, stepElapsed, stepped);
+    updateRenderStrideController(nowMs, stepElapsed, stepped, !deferred);
     if (
       typeof emu.last_run_core_ms === 'function' &&
       typeof emu.last_run_render_ms === 'function'
@@ -1015,7 +980,7 @@ function stepMachine(nowMs, deferRender) {
         `upload ${(uploadMsThisSecond / timedFrames).toFixed(1)}`,
         `shader ${(shaderMsThisSecond / timedFrames).toFixed(1)}`,
       ].join(' + ')} ms/frame` +
-      (renderSkipActive ? ' | render 1/2' : '');
+      (renderStride.active ? ' | render 1/2' : '');
     framesThisSecond = 0;
     ticksThisSecond = 0;
     presentsThisSecond = 0;
@@ -1043,7 +1008,7 @@ function tick(nowMs) {
   // (see the render-stride notes above): the machine keeps real time on
   // a host that cannot afford a render per frame, and only the shown
   // rate degrades - never the emulation or its audio.
-  const deferRender = renderSkipActive && !renderDeferredLastTick;
+  const deferRender = renderStride.active && !renderDeferredLastTick;
   if (!stepMachine(nowMs, deferRender)) return;
   renderDeferredLastTick = deferRender;
   const presentedFresh = presentFrame();

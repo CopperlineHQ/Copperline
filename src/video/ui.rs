@@ -8911,6 +8911,7 @@ mod tests {
             setup.select_model(Some(crate::config::MachineModel::A1200));
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
                 id: "disk4".to_string(),
+                fingerprint: None,
                 volume: "SanDisk".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
@@ -8947,6 +8948,7 @@ mod tests {
             setup.set_host_disks_for_test(vec![
                 launcher::HostDiskRow {
                     id: "disk4".to_string(),
+                    fingerprint: None,
                     volume: "SanDisk Extreme SD".to_string(),
                     size: "31.9 GB".to_string(),
                     mounted: Vec::new(),
@@ -8955,6 +8957,7 @@ mod tests {
                 },
                 launcher::HostDiskRow {
                     id: "disk6".to_string(),
+                    fingerprint: None,
                     volume: "Kingston DataTraveler".to_string(),
                     size: "3.9 GB".to_string(),
                     mounted: vec!["/Volumes/UNTITLED".to_string()],
@@ -8963,6 +8966,7 @@ mod tests {
                 },
                 launcher::HostDiskRow {
                     id: "PhysicalDrive11".to_string(),
+                    fingerprint: None,
                     volume: "Generic USB3.0 CRW-SD/MS Multi-Card Reader".to_string(),
                     size: "512 MB".to_string(),
                     mounted: Vec::new(),
@@ -8990,6 +8994,7 @@ mod tests {
             let mut setup = launcher::MachineSetup::default();
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
                 id: "disk4".to_string(),
+                fingerprint: None,
                 volume: "SanDisk Extreme SD".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
@@ -9014,6 +9019,7 @@ mod tests {
                 (0..14)
                     .map(|i| launcher::HostDiskRow {
                         id: format!("disk{i}"),
+                        fingerprint: None,
                         volume: format!("Pretend Media {i}"),
                         size: format!("{}.0 GB", i % 9 + 1),
                         mounted: Vec::new(),
@@ -9041,6 +9047,7 @@ mod tests {
             setup.select_model(Some(crate::config::MachineModel::A1200));
             setup.set_host_disks_for_test(vec![launcher::HostDiskRow {
                 id: "disk4".to_string(),
+                fingerprint: None,
                 volume: "SanDisk Extreme SD".to_string(),
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),

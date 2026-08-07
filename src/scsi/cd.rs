@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! SCSI-2 CD-ROM target: a read-only removable-medium device (peripheral
-//! type 5) backed by a cue/bin or ISO image.
+//! type 5) backed by a CUE/BIN, bare ISO, or CHD image.
 //!
 //! The command set covers what Amiga CD filesystems (CDFileSystem,
 //! CacheCDFS, AsimCDFS and friends) drive through a host adapter's
@@ -64,7 +64,7 @@ struct PendingDisc {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScsiCdRom {
     image: CdImage,
-    /// Path the drive was opened from (the cue sheet or ISO), for logs.
+    /// Path the drive was opened from (CUE, ISO, or CHD), for logs.
     path: PathBuf,
     /// Tray closed with the medium in place. START STOP UNIT's eject and
     /// load strobes toggle it; reloading raises a unit attention.
@@ -87,7 +87,7 @@ pub struct ScsiCdRom {
 }
 
 impl ScsiCdRom {
-    /// Open a CD-ROM unit from a cue sheet or bare ISO image.
+    /// Open a CD-ROM unit from a CUE/BIN, bare ISO, or CHD image.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let image = CdImage::load(path)?;
         Ok(Self {

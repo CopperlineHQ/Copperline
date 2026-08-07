@@ -2355,9 +2355,10 @@ impl FloppyController {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FloppyDrive {
     image: Option<FloppyImage>,
-    /// A real drive standing in for the image, over a DrawBridge/Greaseweazle/
-    /// Supercard Pro. Mutually exclusive with `image`: whichever is present
-    /// supplies the track under the head.
+    /// A real drive standing in for the image through whichever FluxBridge
+    /// driver this build enables (Greaseweazle in the standard build).
+    /// Mutually exclusive with `image`: whichever is present supplies the
+    /// track under the head.
     ///
     /// Skipped by the save-state serialiser because a physical disk cannot be
     /// snapshotted -- a state saved with a bridge attached reloads as an empty
@@ -2445,10 +2446,10 @@ struct FloppyDrive {
     #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_rev_seamless: bool,
-    /// Serving speed for this bay, a percentage of the platter's real speed
-    /// (`bridge_speed`: 100, 125, or 150). Compresses the cck-per-word fit
-    /// when a captured revolution is served; the physical capture itself is
-    /// untouched, so only rotational waits shrink.
+    /// Serving speed for kept captures in this bay: 100 (`normal`) or 200
+    /// (`fast`). Compresses the cck-per-word fit when a captured revolution is
+    /// replayed; the physical capture itself is untouched, so only replayed
+    /// rotational waits shrink.
     #[cfg(feature = "fluxbridge")]
     #[serde(skip, default = "default_bridge_speed_percent")]
     bridge_speed_percent: u16,

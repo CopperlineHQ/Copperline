@@ -104,6 +104,16 @@ pub struct IdeDrive {
 }
 
 impl IdeDrive {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
+        self.disk.materialize_host_disk()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
+        self.disk.pending_host_disk()
+    }
+
     /// Open an IDE unit (0 = master, 1 = slave; this picks the DHn device
     /// name a synthesized RDB advertises). The path may be a raw HDF image
     /// file, or a host directory, which is built into an in-memory FFS
@@ -151,8 +161,14 @@ impl IdeDrive {
     /// pass -- it names the device a synthesized RDB advertises, and a real
     /// disk brings its own.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_host_disk(device: &str, writable: bool) -> anyhow::Result<Self> {
-        let disk = HardDriveImage::open_device(device, "ide", writable)?;
+    pub fn open_host_disk(
+        device: &str,
+        fingerprint: Option<&str>,
+        identity_confirmed: bool,
+        writable: bool,
+    ) -> anyhow::Result<Self> {
+        let disk =
+            HardDriveImage::open_device(device, fingerprint, identity_confirmed, "ide", writable)?;
         let heads = RDB_HEADS as u8;
         let spt = RDB_SPT as u8;
         let cylinders =
@@ -297,6 +313,24 @@ impl AtaBus {
 
     pub fn attach_drive(&mut self, slot: usize, drive: IdeDrive) {
         self.drives[slot.min(1)] = Some(drive);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
+        out.extend(
+            self.drives
+                .iter()
+                .flatten()
+                .filter_map(IdeDrive::pending_host_disk),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disks(&mut self) -> anyhow::Result<()> {
+        for drive in self.drives.iter_mut().flatten() {
+            drive.materialize_host_disk()?;
+        }
+        Ok(())
     }
 
     /// Let go of any real disk of the host's, and say how many went.
@@ -524,7 +558,11 @@ impl AtaBus {
         }
         if remaining == 0 {
             if let Some(drive) = self.drive() {
-                drive.disk.flush();
+                if let Err(error) = drive.disk.flush() {
+                    log::warn!("IDE flush: {error}");
+                    self.command_error(ERR_ABRT);
+                    return;
+                }
             }
             self.status = ST_DRDY | ST_DSC;
             self.transfer = Transfer::None;

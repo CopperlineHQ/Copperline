@@ -77,8 +77,8 @@
 //! doorbell loop is what turns this into a blocking call, same as it
 //! already does for the smoltcp backend). `sock_poll` returns a bitmask:
 //! bit 0 readable, bit 1 writable, bit 2 error-pending (check with
-//! `sock_recv`/`SO_ERROR`-style semantics via a `-1`-length `sock_recv`, not
-//! implemented yet). All host errno values are normalized to the guest's
+//! `sock_getopt(..., SO_ERROR, ...)`, which reads and clears the host socket's
+//! pending error). All host errno values are normalized to the guest's
 //! BSD-style numbering at this boundary (matching
 //! `crates/hostsocket-plugin`'s own `EAGAIN = 35` etc. -- the two are
 //! hand-kept in sync, same as the guest-ROM/plugin window offsets already
@@ -1433,11 +1433,9 @@ const SOCK_HUP: i32 = 8;
 /// retrievable directly, no polling needed -- only the non-consuming
 /// "is one pending" signal `exceptfds` would need is what's missing.
 ///
-/// Non-unix falls back to a cruder heuristic (`peek()` for readability,
-/// `SO_ERROR`/`peer_addr()` for write-readiness) that cannot detect
-/// accept-readiness on a listening socket at all -- see the Windows note in
-/// `HOSTSOCKET-HOST-BACKEND-PLAN.md`; `libc::poll` itself isn't available
-/// there.
+/// Windows uses `WSAPoll`, whose listener/read/connect semantics match the
+/// `poll(2)` bits used here. Remaining non-unix targets fall back to a
+/// cruder `peek()`/`peer_addr()` heuristic.
 #[cfg(unix)]
 fn poll_socket_mask(socket: &Socket) -> i32 {
     use std::os::unix::io::AsRawFd;
@@ -1481,7 +1479,39 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
     mask
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn poll_socket_mask(socket: &Socket) -> i32 {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        WSAPoll, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, WSAPOLLFD,
+    };
+
+    let mut pfd = WSAPOLLFD {
+        fd: socket.as_raw_socket() as usize,
+        events: POLLIN | POLLOUT,
+        revents: 0,
+    };
+    // Zero timeout: the WASM host call must never block the emulator thread.
+    if unsafe { WSAPoll(&mut pfd, 1, 0) } < 0 {
+        return SOCK_ERROR;
+    }
+    let mut mask = 0;
+    if pfd.revents & POLLIN != 0 {
+        mask |= SOCK_READABLE;
+    }
+    if pfd.revents & POLLHUP != 0 {
+        mask |= SOCK_READABLE | SOCK_WRITABLE | SOCK_HUP;
+    }
+    if pfd.revents & POLLOUT != 0 {
+        mask |= SOCK_WRITABLE;
+    }
+    if pfd.revents & (POLLERR | POLLNVAL) != 0 {
+        mask |= SOCK_ERROR;
+    }
+    mask
+}
+
+#[cfg(not(any(unix, windows)))]
 fn poll_socket_mask(socket: &Socket) -> i32 {
     let mut mask = 0;
     let mut probe = [MaybeUninit::new(0u8); 1];
@@ -2741,16 +2771,10 @@ mod tests {
     /// bsdsocktest's own NULL-timeout test does for a smoltcp one, must
     /// report ready exactly when a real client connects -- not before,
     /// and not only via a direct `accept()` call.
-    /// Unix-only: the non-unix `poll_socket_mask` fallback has no way to
-    /// detect accept-readiness on a listening socket at all (see that
-    /// function's own doc comment) -- it used to report one as spuriously
-    /// always-ready via a `peek()` error that happened to look like
-    /// readiness, which incidentally satisfied this test for the wrong
-    /// reason; fixing that false positive (a real bug, see the
-    /// `NotConnected` handling in that function) means this genuinely
-    /// never resolves on non-unix now, an honest reflection of the
-    /// existing documented gap rather than a new regression.
-    #[cfg(unix)]
+    /// POSIX `poll(2)` and Windows `WSAPoll` both define listener
+    /// read-readiness as a queued connection, so this covers every supported
+    /// native desktop target rather than being a Unix-only accommodation.
+    #[cfg(any(unix, windows))]
     #[test]
     fn hostsocket_plugin_host_backend_waitselect_reports_accept_readiness() {
         let port = {

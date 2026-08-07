@@ -454,7 +454,8 @@ secure context, which `localhost` satisfies.
 
 Releases publish automatically: the `wasm-demo.yml` workflow rebuilds the
 bundle on every `v*` tag and pushes it to the website repository, together
-with `crates/copperline-web/www/try.js` and `www/audio-worklet.js` -- the
+with `crates/copperline-web/www/try.js`, `www/render-stride.js`, and
+`www/audio-worklet.js` -- the
 page glue lives in this repository precisely so it can never drift from the
 `WebEmu` API it drives.
 
@@ -541,6 +542,9 @@ most recent paced call for page-side diagnostics.
 fields are line-doubled and the weave history stays unallocated.
 `set_phosphor(fraction)` selects CRT persistence from 0.0 (off, the browser
 default) through 0.95, with `phosphor()` returning the quantised value.
+When rendering is deferred, the next presentation ages the persistence by
+all elapsed emulated fields, so returning from a hidden tab cannot revive an
+old one-field trail.
 Both setters re-present the held frame immediately and leave progressive,
 zero-persistence output on the direct copy path.
 
@@ -596,7 +600,8 @@ overscan), and 0 when a scanline effect has nothing honest to draw -- no
 frame yet, or a programmable scan, where the desktop suspends its CRT
 preset too.
 
-`www/try.js` and `www/audio-worklet.js` are the reference implementation of
+`www/try.js`, `www/render-stride.js`, and `www/audio-worklet.js` are the
+reference implementation of
 all of the above, including the audio drift control.
 
 ### Optional page-shell hooks

@@ -263,9 +263,7 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
             // instruction's step: count that instruction, not the 34-clock
             // trace stacking.
             if v == 9 {
-                regs.cycles = regs
-                    .cycles
-                    .wrapping_add(step_cycles.saturating_sub(34));
+                regs.cycles = regs.cycles.wrapping_add(step_cycles.saturating_sub(34));
             }
             exc = v;
             excframe = cpu.a(7);

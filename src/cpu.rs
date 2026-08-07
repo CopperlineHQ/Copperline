@@ -2144,7 +2144,11 @@ impl M68kMachine {
             if self.force_fpu_line_f_if_needed() {
                 instructions = instructions.saturating_add(1);
                 cpu_cycles = cpu_cycles.saturating_add(34);
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(34));
+                // The forced exception performs the same stack writes as an
+                // IRQ or a core-raised exception. Consume any posted-write
+                // overlap inside this exception's charge so it cannot leak
+                // into the handler's first instruction.
+                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(34));
             } else {
                 let dbg_pc_before = self.cpu.pc;
                 let dbg_ipl_before = if DEBUG_HOOKS {
@@ -5391,6 +5395,11 @@ mod tests {
         let slice = machine.step_slice(1)?;
         assert_eq!(slice.instructions, 1);
         assert_eq!(machine.pc(), 0x0000_0200);
+        assert_eq!(
+            machine.bus.bus.take_cpu_bus_overlap_clocks(),
+            0,
+            "exception stack-write overlap is charged at the exception boundary"
+        );
         Ok(())
     }
 
