@@ -657,6 +657,16 @@ elements, and pages without them are untouched:
   canvas under the 2D fallback) and baked into screenshots. Always on,
   self-inserting, and remembered in the browser like `#overscan`; it
   never touches the wasm, so it works with any bundle.
+- `#deinterlace` and `#phosphor` (checkboxes): the **Deinterlace** and
+  **Phosphor persistence** options described under
+  [Using the hosted page](#using-the-hosted-page). Always on like
+  `#floppy-speed`: without the elements two labelled checkboxes insert
+  themselves below the canvas shell. Both are viewing preferences the
+  glue remembers in the browser, and each hides itself on a wasm bundle
+  without the matching call (`set_deinterlace` / `set_phosphor`) -- for
+  a shell-hosted checkbox the input element is hidden, so a shell can
+  drop the whole labelled row with a
+  `.row:has(> input[hidden]) { display: none }` rule.
 - `#monitor` (a `<select>` with option values `1084`, `crt`, `bezel`,
   and `plain`): the monitor presentation (**Monitor** on the hosted
   page), the desktop window's CRT shader preset and 1084 bezel rendered
