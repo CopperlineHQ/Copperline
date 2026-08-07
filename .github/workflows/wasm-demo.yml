@@ -60,9 +60,10 @@ jobs:
         # simd128: every wasm-capable browser has had fixed-width SIMD for
         # years, and the render passes vectorize measurably (+6% whole-run
         # on an Ice Lake laptop). wasm-opt -O3 then shrinks the bundle by
-        # about 13%. Fat LTO was measured too and is deliberately absent:
-        # it regresses the wasm build under V8 even though the native
-        # profile documents it as a win, so the crate keeps thin LTO.
+        # about 13%. The crate's fat-LTO release profile costs more link time
+        # but is about 4% faster than thin LTO in the controlled Chrome AROS
+        # workload; an earlier standalone-V8 regression did not reproduce in
+        # the actual browser after the hot-path profiling work landed.
         run: |
           RUSTFLAGS="-C target-feature=+simd128" \
             cargo build --release --target wasm32-unknown-unknown --locked
