@@ -4049,6 +4049,9 @@ mod tests {
     /// genuinely supports this. The peer sends the urgent byte with a raw
     /// `libc::send(..., MSG_OOB)` (std's own `TcpStream` has no flags-aware
     /// send), matching exactly how bsdsocktest's own test 27 drives this.
+    /// Unix-only: drives the peer side with a raw `libc::send`/`AsRawFd`,
+    /// neither available on Windows.
+    #[cfg(unix)]
     #[test]
     fn hostsocket_plugin_host_backend_recv_msg_oob_gets_real_urgent_byte() {
         use std::os::unix::io::AsRawFd;
