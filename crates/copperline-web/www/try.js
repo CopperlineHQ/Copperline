@@ -523,6 +523,14 @@ let audioBuildGeneration = 0;
 let audioUnlockRebuild = false;
 
 function audioUnlock() {
+  // The pause contract holds on this path too: a paused machine's
+  // context stays suspended, and unpausing owns the resume. Returning
+  // WITHOUT disarming keeps the ladder ready for the first unpaused
+  // gesture - which cannot be the unpause tap itself (its pointerup
+  // precedes the click that clears the flag), but setPaused resumes
+  // inside that same activation window, and a resume it cannot land is
+  // exactly what the still-armed ladder is for.
+  if (paused) return;
   if (!audioCtx || audioUnlockRebuild) {
     audioUnlockRebuild = false;
     buildAudioStack(false).catch((e) => console.error('audio rebuild', e));
@@ -533,10 +541,15 @@ function audioUnlock() {
     () => {
       if (audioCtx !== ctx) return; // superseded while settling
       if (ctx.state === 'running') disarmAudioUnlock();
-      else audioUnlockRebuild = true;
+      // A suspended reading here can be the Pause tap's own doing: its
+      // pointerup fires this handler while still unpaused, and the
+      // click's suspend lands before the resume settles. That is the
+      // pause contract at work, not a context beyond resuming, so it
+      // must not arm the escalation.
+      else if (!paused) audioUnlockRebuild = true;
     },
     () => {
-      if (audioCtx === ctx) audioUnlockRebuild = true;
+      if (audioCtx === ctx && !paused) audioUnlockRebuild = true;
     },
   );
 }
