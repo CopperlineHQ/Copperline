@@ -815,13 +815,13 @@ fn device_number(device: &OwnedHandle) -> Option<u32> {
 /// them is the one that must never be handed to the emulator. A volume that
 /// spans disks puts every disk it touches out of reach, because any of them
 /// carries part of the running system.
-fn system_disks() -> Vec<u32> {
+fn system_disks() -> Option<Vec<u32>> {
     let mut directory = [0u16; MAX_PATH];
     let length =
         unsafe { GetWindowsDirectoryW(directory.as_mut_ptr(), directory.len() as u32) } as usize;
     if length == 0 || length >= directory.len() {
-        log::warn!("blockdev: the Windows directory could not be found, so no disk can be ruled out as the host's own");
-        return Vec::new();
+        log::warn!("blockdev: the Windows directory could not be found");
+        return None;
     }
     let windows = wide(&from_wide(&directory));
 
@@ -831,7 +831,7 @@ fn system_disks() -> Vec<u32> {
             "blockdev: the volume holding Windows could not be named: {}",
             std::io::Error::last_os_error()
         );
-        return Vec::new();
+        return None;
     }
     let root = wide(&from_wide(&root));
 
@@ -844,9 +844,16 @@ fn system_disks() -> Vec<u32> {
             "blockdev: the volume holding Windows has no GUID path: {}",
             std::io::Error::last_os_error()
         );
-        return Vec::new();
+        return None;
     }
-    disks_behind(&from_wide(&guid))
+    // A volume that names no disk is a trace that failed, not a system with
+    // no disks: the caller must not read it as "none of them".
+    let disks = disks_behind(&from_wide(&guid));
+    if disks.is_empty() {
+        log::warn!("blockdev: the volume holding Windows sits on no disk this could name");
+        return None;
+    }
+    Some(disks)
 }
 
 /// Capacity in bytes, from a handle that may have been opened for nothing.
@@ -924,7 +931,7 @@ fn hardware_writable(device: &OwnedHandle) -> bool {
 }
 
 /// Describe one disk, or nothing if it will not say what it is.
-fn describe(interface: &str, volumes: &[Volume], system: &[u32]) -> Option<HostDevice> {
+fn describe(interface: &str, volumes: &[Volume], system: Option<&[u32]>) -> Option<HostDevice> {
     // Zero access: enough for the descriptive IOCTLs, and no access check to
     // fail. A disk unplugged between the listing and here fails at this point
     // and is simply not offered.
@@ -995,23 +1002,33 @@ fn describe(interface: &str, volumes: &[Volume], system: &[u32]) -> Option<HostD
         internal,
         writable: hardware_writable(&device),
         mounted,
-        safety: classify(system.contains(&number)),
+        // No set at all means the trace failed, and then every disk is
+        // treated as the host's -- offering nothing is recoverable, offering
+        // the disk Windows runs from is not.
+        safety: classify(system.is_none_or(|system| system.contains(&number))),
     })
 }
 
 /// Every whole physical disk the host can see.
 pub fn list_devices() -> Result<Vec<HostDevice>> {
     let volumes = volumes();
-    let system = system_disks();
-    if system.is_empty() {
+    // Not knowing which disk Windows runs from is not a reason to offer them
+    // all: it is the one case where a wrong answer is unrecoverable, so the
+    // whole list goes unusable until it can be told. Linux takes the same
+    // line, for the same reason.
+    let Some(system) = system_disks() else {
         log::warn!(
-            "blockdev: no disk could be identified as the one Windows is running from; \
-             every disk will be offered, so choose carefully"
+            "blockdev: no disk could be identified as the one Windows is running from, \
+             so none will be offered -- one of them may be it"
         );
-    }
+        return Ok(disk_interface_paths()
+            .iter()
+            .filter_map(|interface| describe(interface, &volumes, None))
+            .collect());
+    };
     Ok(disk_interface_paths()
         .iter()
-        .filter_map(|interface| describe(interface, &volumes, &system))
+        .filter_map(|interface| describe(interface, &volumes, Some(&system)))
         .collect())
 }
 

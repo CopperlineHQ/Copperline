@@ -527,9 +527,25 @@ pub fn list_devices() -> Result<Vec<HostDevice>> {
         }
     }
 
-    for id in system_disk_ids(&mounts, &backing) {
-        if let Some(device) = devices.iter_mut().find(|device| device.id == id) {
-            device.safety = Safety::SystemDisk;
+    // Not knowing which disk the system runs from is not a reason to offer
+    // them all: it is the one case where a wrong answer is unrecoverable, so
+    // the whole list goes unusable until it can be told.
+    match system_disk_ids(&mounts, &backing) {
+        Some(system) => {
+            for id in system {
+                if let Some(device) = devices.iter_mut().find(|device| device.id == id) {
+                    device.safety = Safety::SystemDisk;
+                }
+            }
+        }
+        None => {
+            log::warn!(
+                "blockdev: no disk could be identified as the one this Mac is running \
+                 from, so none will be offered -- one of them may be it"
+            );
+            for device in &mut devices {
+                device.safety = Safety::SystemDisk;
+            }
         }
     }
     Ok(devices)
@@ -544,12 +560,20 @@ pub fn list_devices() -> Result<Vec<HostDevice>> {
 /// carry the system. Upward: any other synthesized disk stored on that same
 /// hardware (the Apple Silicon boot containers, say) is a window onto the
 /// system disk's own partitions, and writing to it raw is writing to them.
-fn system_disk_ids(mounts: &[(String, String)], backing: &[(String, Vec<String>)]) -> Vec<String> {
+fn system_disk_ids(
+    mounts: &[(String, String)],
+    backing: &[(String, Vec<String>)],
+) -> Option<Vec<String>> {
     let mut system: Vec<String> = mounts
         .iter()
         .filter(|(_, on)| on == "/")
         .map(|(disk, _)| disk.clone())
         .collect();
+    // Nothing serving `/` means `getfsstat` told us nothing usable, not that
+    // this Mac is running from no disk.
+    if system.is_empty() {
+        return None;
+    }
     loop {
         let mut more: Vec<String> = backing
             .iter()
@@ -573,7 +597,7 @@ fn system_disk_ids(mounts: &[(String, String)], backing: &[(String, Vec<String>)
         }
         system.extend(more);
     }
-    system
+    Some(system)
 }
 
 /// Turn one `IOMedia` object into a device, or nothing if it is not a whole
@@ -753,14 +777,14 @@ pub(super) fn take_disks(wanted: &[(HostDevice, bool)]) -> Result<Vec<(String, H
 }
 
 /// `O_EXCL` on a device node claims the media, which stops the system
-/// mounting a volume underneath the emulator mid-session. Without it the
-/// claim is advisory only.
+/// mounting a volume underneath the emulator mid-session.
+///
+/// Taken on read-only attachments too, as Linux and Windows do: a guest
+/// reading a medium the host is free to remount and write is reading
+/// something that can change under it between one sector and the next. The
+/// unmount alone only settles what was mounted when the disk was taken.
 fn open_flags(write: bool) -> i32 {
-    if write {
-        libc::O_RDWR | libc::O_EXCL
-    } else {
-        libc::O_RDONLY
-    }
+    libc::O_EXCL | if write { libc::O_RDWR } else { libc::O_RDONLY }
 }
 
 /// Give a held disk to a machine.
@@ -958,7 +982,7 @@ mod tests {
             ("disk6".to_string(), vec!["disk5".to_string()]),
             ("disk5".to_string(), Vec::new()),
         ];
-        let mut system = system_disk_ids(&mounts, &backing);
+        let mut system = system_disk_ids(&mounts, &backing).expect("a root was named");
         system.sort();
         assert_eq!(system, ["disk0", "disk1", "disk3"]);
 
@@ -971,12 +995,34 @@ mod tests {
             ("disk0".to_string(), Vec::new()),
             ("disk1".to_string(), Vec::new()),
         ];
-        let mut system = system_disk_ids(&mounts, &fusion);
+        let mut system = system_disk_ids(&mounts, &fusion).expect("a root was named");
         system.sort();
         assert_eq!(system, ["disk0", "disk1", "disk3"]);
     }
 
-    /// Enumeration must work with no privileges and no hardware attached:
+    /// Failing to identify the running system's disk must take every disk
+    /// with it. This is the fail-closed rule: offering nothing is something
+    /// a user can recover from, and offering the disk the Mac boots from is
+    /// not. It is the one case a live-host test cannot reach, since this Mac
+    /// can always find its own root.
+    #[test]
+    fn a_root_that_cannot_be_found_makes_every_disk_unusable() {
+        // Mounts that name no root at all -- what an unreadable `getfsstat`
+        // or an unrecognised layout leaves behind.
+        let orphaned = vec![("disk9".to_string(), "/Volumes/Card".to_string())];
+        assert_eq!(system_disk_ids(&orphaned, &[]), None);
+        assert_eq!(system_disk_ids(&[], &[]), None);
+
+        // And a root that is found still answers with its disks.
+        let rooted = vec![("disk3".to_string(), "/".to_string())];
+        let mut found =
+            system_disk_ids(&rooted, &[("disk3".to_string(), vec!["disk0".to_string()])])
+                .expect("a root was named");
+        found.sort();
+        assert_eq!(found, ["disk0", "disk3"]);
+    }
+
+    /// Enumeration must work with no privileges and no hardware attached:    /// Enumeration must work with no privileges and no hardware attached:
     /// it is reached from config validation and from the launcher on
     /// machines that have never seen a real Amiga disk.
     #[test]

@@ -5733,6 +5733,12 @@ impl App {
             }
             UiControl::LauncherHostDiskMount => {
                 if let Some(state) = self.launcher_state_mut() {
+                    // Mounting rearranges the machine -- a disk takes a slot,
+                    // and whatever image was in it goes. If the host then
+                    // refuses the disk, none of that should have happened, so
+                    // the whole setup is put back rather than unpicked
+                    // step by step and one step forgotten.
+                    let before = state.setup.clone();
                     let status = match state.setup.mount_host_disks() {
                         Ok(disks) => {
                             // The host gives the disk up here, not when the
@@ -5785,8 +5791,8 @@ impl App {
                                     // refused here.
                                     for disk in &disks {
                                         crate::blockdev::release_device(&disk.device);
-                                        state.setup.unmount_host_disk(disk.attach);
                                     }
+                                    state.setup = before;
                                     log::warn!("host disk: not attached: {reason}");
                                     StatusMessage::err(reason)
                                 }

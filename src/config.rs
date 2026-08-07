@@ -5352,6 +5352,16 @@ fn parse_host_disks(
         if !fitted {
             bail!("host_disk[{index}]: {}", attach.requirement());
         }
+        // The same medium on two buses is not two drives: the guest mounts
+        // and writes the one disk through both, each unaware of the other's
+        // cached blocks, which is how a filesystem is destroyed by a machine
+        // that never did anything wrong.
+        if disks.iter().any(|d| d.device == device) {
+            bail!(
+                "host_disk[{index}] names {device}, which is already attached to this \
+                 machine; one disk cannot be two drives"
+            );
+        }
         if let Some(clash) = disks.iter().find(|d| d.attach == attach) {
             bail!(
                 "host_disk[{index}] and {} are both attached to {}; a slot holds one disk",
@@ -5669,6 +5679,52 @@ mod tests {
     fn parse_config(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text)?;
         raw.try_into()
+    }
+
+    /// One medium cannot be two drives. Two slots pointed at the same disk
+    /// would have the guest mount and write it through both buses at once,
+    /// each unaware of the other -- so the configuration is refused rather
+    /// than opened twice.
+    #[test]
+    fn one_disk_cannot_be_attached_twice() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let twice = [
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-master".to_string()),
+                read_only: None,
+            },
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-slave".to_string()),
+                read_only: None,
+            },
+        ];
+        let error = parse_host_disks(&twice, &ide, &scsi, true, false)
+            .expect_err("the same disk on two slots is refused")
+            .to_string();
+        assert!(error.contains("already attached"), "{error}");
+
+        // Two different disks on two slots is the ordinary case.
+        let separately = [
+            RawHostDisk {
+                device: "sdb".to_string(),
+                attach: Some("ide-master".to_string()),
+                read_only: None,
+            },
+            RawHostDisk {
+                device: "sdc".to_string(),
+                attach: Some("ide-slave".to_string()),
+                read_only: None,
+            },
+        ];
+        assert_eq!(
+            parse_host_disks(&separately, &ide, &scsi, true, false)
+                .expect("two disks, two slots")
+                .len(),
+            2
+        );
     }
 
     /// Where several disks went, said once. A single point reads as its own

@@ -3963,6 +3963,11 @@ impl MachineSetup {
             if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == device) {
                 row.attach = None;
             }
+            // This is an unmount like any other, so the hold goes with it.
+            // Leaving it would keep the disk from the host with nothing left
+            // on screen to release it -- no row, no tick, no Unmount.
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::blockdev::release_device(&device);
         }
     }
 

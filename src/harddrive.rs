@@ -69,6 +69,21 @@ struct HardDriveImageState {
     rdb_overlay: Option<Vec<u8>>,
     overlay_write_warned: bool,
     scsi_bus: bool,
+    /// The real disk this drive is, if it is one: the identifier a
+    /// configuration names it by, and whether the guest may write to it.
+    ///
+    /// Both are needed, and neither is recoverable from `path`. Without the
+    /// identifier the node path would be reopened as an ordinary file, which
+    /// walks past the rules that refuse the host's own disk and loses the
+    /// sector translation; without the access, a disk attached read-only
+    /// would come back writable.
+    host_device: Option<HostDiskState>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HostDiskState {
+    id: String,
+    writable: bool,
 }
 
 impl serde::Serialize for HardDriveImage {
@@ -79,14 +94,22 @@ impl serde::Serialize for HardDriveImage {
                 Backing::Memory(image) => Some(image.clone()),
                 // A physical disk is not ours to capture: the medium lives
                 // outside the emulator and can be swapped while a state is
-                // saved. Only the path is recorded, and reopening it asks for
-                // permission again.
+                // saved. What it is gets recorded instead, and resuming
+                // takes the disk again on the same terms.
                 _ => None,
             },
             total_sectors: self.total_sectors,
             rdb_overlay: self.rdb_overlay.clone(),
             overlay_write_warned: self.overlay_write_warned,
             scsi_bus: self.bus_name == "scsi",
+            host_device: match &self.backing {
+                #[cfg(not(target_arch = "wasm32"))]
+                Backing::Device(device) => Some(HostDiskState {
+                    id: device.id().to_string(),
+                    writable: device.writable(),
+                }),
+                _ => None,
+            },
         }
         .serialize(serializer)
     }
@@ -95,6 +118,25 @@ impl serde::Serialize for HardDriveImage {
 impl<'de> serde::Deserialize<'de> for HardDriveImage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let state = HardDriveImageState::deserialize(deserializer)?;
+        let bus_name = if state.scsi_bus { "scsi" } else { "ide" };
+        // A real disk goes back through the door every other attach uses, so
+        // resuming a state cannot reach a disk that attaching one could not:
+        // the host's own disk is refused here as anywhere, the session's
+        // hold is honoured rather than opened around, and the access it was
+        // saved with is the access it comes back with.
+        if let Some(disk) = &state.host_device {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                return Self::open_device(&disk.id, bus_name, disk.writable).map_err(|e| {
+                    serde::de::Error::custom(format!("reopening host disk {}: {e:#}", disk.id))
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
+            return Err(serde::de::Error::custom(format!(
+                "this state has host disk {} attached, which this build cannot open",
+                disk.id
+            )));
+        }
         let backing = match state.memory {
             Some(image) => Backing::Memory(image),
             None => Backing::File(
@@ -116,7 +158,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             total_sectors: state.total_sectors,
             rdb_overlay: state.rdb_overlay,
             overlay_write_warned: state.overlay_write_warned,
-            bus_name: if state.scsi_bus { "scsi" } else { "ide" },
+            bus_name,
         })
     }
 }
