@@ -1,16 +1,121 @@
-# Handoff: finish the host-disk feature on macOS
+# Handoff: review the Windows and Linux work, then finish macOS
 
 **Delete this file before the branch is merged.** It is a working brief for a
 session on a Mac, not documentation. It replaces `HANDOFF-LINUX.md`, which
 replaced `HANDOFF-WINDOWS.md`; each went when its backend landed.
 
 All three platform backends of the real-disk feature now exist on
-`feature/native-hdd`: macOS (written first), Windows, and Linux. What is left
-is macOS-specific polish, one shared decision that macOS alone has not taken,
-and the verification that only a Mac with a real Amiga card can do.
+`feature/native-hdd`: macOS (written first), Windows, and Linux. Two jobs
+remain, in this order: **an objective review of everything the Windows and
+Linux sessions added**, and then the macOS work those sessions could not do.
 
 Read `AGENTS.md` (`CLAUDE.md` is a symlink to it) first: it governs how you
 work here.
+
+---
+
+## 0. The review
+
+### Scope
+
+```sh
+git fetch origin && git checkout feature/native-hdd
+git diff 6b34a33^..HEAD -- src/ docs/ copperline.example.toml   # ~4400 lines
+git log --oneline 6b34a33^..HEAD                                # 16 commits
+```
+
+`6b34a33` is where the platform seam was cut and the two briefs written;
+everything after it is the Windows and Linux backends and the launcher and
+bus changes they needed. The bulk is two files that share no code:
+`src/blockdev/windows.rs` (1850 lines) and `src/blockdev/linux.rs` (1776).
+Everything before `6b34a33` is the macOS backend and the platform-neutral
+core, already reviewed when it landed.
+
+### Why this needs a fresh reviewer
+
+Each backend was written by a session running on that platform, which could
+build and test its own file and **neither compile nor run the other two**.
+That is the structural weakness of the whole feature and it is where the
+review should push hardest:
+
+- Nothing has ever type-checked all three backends together. `cargo clippy`
+  on a Mac has never seen `windows.rs` or `linux.rs`.
+- `src/blockdev/mod.rs`, `src/main.rs`, `src/bus.rs`, and
+  `src/video/window.rs` are shared and were edited by all three sessions. A
+  change made for one host that quietly breaks another would not have been
+  caught by anybody so far.
+- The per-host claims in the module docs are each attested by one session
+  only, on one machine, and are what the next person will build on.
+
+**Do not take this file's summaries on trust.** It was written by the session
+that wrote the Linux backend, so it is the least reliable witness to that
+backend's quality. Read the diff.
+
+### Decisions that deserve challenge
+
+These were judgement calls, not forced moves. Each is argued in the code, and
+each could reasonably go the other way:
+
+1. **`pkexec` over udisks2 on Linux** (`linux.rs` module docs). Both were
+   measured, both cost an admin password. `pkexec` avoided a hand-rolled
+   D-Bus client. Someone may reasonably prefer the desktop-native call and a
+   crate, given `AGENTS.md` invites the argument for a D-Bus dependency.
+2. **Reservation at the Mount button** — the disk is taken when Mount is
+   pressed, not when the machine starts. Windows did this first, Linux copied
+   it, macOS still does not (§3). It means a disk can be held with no machine
+   running, and the launcher's Unmount is the only thing that frees it.
+3. **Essential mounts beyond `/`** (`ESSENTIAL_MOUNTS` in `linux.rs`). A list
+   of paths is a heuristic. It was added because a root on ZFS or a live USB
+   is served by no block device, and reading only `/` would have offered the
+   host its own medium. Is the list right? Is a list the right shape at all?
+4. **Refusing everything when the root cannot be traced.** Safe, and it means
+   one unrecognised layout disables the feature entirely with only a log line
+   to explain it.
+5. **`open_device` keeps a disk it took**, so a machine powered off and on
+   again does not re-prompt — at the cost of the disk staying held while the
+   machine is off. Both hosts do this; it is contestable.
+6. **Enumeration cost.** `find_device` is a full enumeration and is called per
+   disk, in `mod.rs::reserve_devices` and in the Linux broker. Judged not
+   worth optimising for the handful of disks anybody attaches. Check that
+   judgement against a machine with many mounts.
+
+### Where the bodies are likely buried
+
+Weighted by where review effort actually pays here:
+
+- **The privileged halves.** Both hosts run a second copy of this binary as
+  root/Administrator. `serve_broker_request` in each is reached by a command
+  line and must decide for itself what it will open. The Linux one calls
+  `super::refuse_if_unusable`; **the Windows one still hand-copies two of its
+  three checks and is missing the block-size one** (§4).
+- **Descriptor and handle lifetimes.** `O_EXCL` on Linux and the volume locks
+  on Windows are both released by closing, and both are duplicated between a
+  reservation and a running machine. Trace every error path for one that
+  leaks or double-frees.
+- **The shared files.** `mod.rs`'s cfg gates, `main.rs`'s per-platform broker
+  argument parsing, `bus.rs`'s power-off/on handling, `window.rs`'s
+  Mount/Unmount. This is where cross-platform damage would hide.
+- **`docs/guide/host-disks.md`** makes claims about all three hosts. Only the
+  macOS ones can be checked from a Mac — do check them.
+
+### What the Linux session already found in review
+
+A review of the Linux backend before it landed caught two bugs worth knowing
+about, because both are the kind that a single-platform author cannot see and
+both have analogues elsewhere:
+
+- Deciding "is this a whole disk?" by whether the sysfs parent directory is
+  named `block`. True for SCSI and ATA, false for NVMe namespaces, which hang
+  straight off their controller — so every NVMe root traced to nothing, and
+  since an untraceable root refuses every disk, the feature was dead on most
+  modern machines. **The unit test missed it because it modelled NVMe as if it
+  were SCSI.** Treat every fake-layout test in this diff with that in mind.
+- A root on ZFS or a live-session overlay is served by no block device, which
+  was being read as "no disk here is the host's" — offering the running
+  system's own medium. See §3: the macOS equivalent looks unhandled.
+
+Assume more of this kind remains. The Windows backend has had no equivalent
+adversarial pass by anybody but its author.
 
 ---
 
@@ -286,3 +391,10 @@ macOS too.
 
 Push to the fork (`origin`, `hobbo91/Copperline`). **Never open a pull
 request** — that is the maintainer's step, always. Delete this file.
+
+Report the review as findings, not as a rewrite: the two backends work on
+their own hardware and each was verified there, so a change made from a Mac to
+code that cannot be built or run from a Mac needs a stronger reason than
+taste. Where a finding cannot be fixed safely from this host, say so and leave
+it written down — that is how the last two sessions handed on the things they
+could not close, and it is why §4 and §5 exist.
