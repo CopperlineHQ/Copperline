@@ -617,7 +617,7 @@ where
             }
             "--hostsocket-net" => {
                 overrides.hostsocket_net = Some(args.next().ok_or_else(|| {
-                    anyhow!("--hostsocket-net requires a backend (none/loopback/nat/bridge)")
+                    anyhow!("--hostsocket-net requires a backend (none/loopback/nat/bridge/host)")
                 })?);
             }
             "--hostsocket-interface" => {
@@ -1269,7 +1269,9 @@ fn print_help() {
          \x20                            or bridge (direct attachment to a host adapter)\n  \
          --a2065-interface NAME         bridge adapter; implies --a2065-net bridge\n  \
          --hostsocket-net BACKEND       fit the HostSocket bsdsocket.library board: none,\n  \
-         \x20                            loopback, nat, or bridge\n  \
+         \x20                            loopback, nat, bridge, or host (direct passthrough\n  \
+         \x20                            to real host OS sockets, bypassing the emulated\n  \
+         \x20                            stack entirely)\n  \
          --hostsocket-interface NAME    bridge adapter; implies --hostsocket-net bridge\n  \
          --parallel DEVICE              parallel port: none, printer, or sampler\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \

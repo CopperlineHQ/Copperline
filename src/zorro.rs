@@ -852,6 +852,12 @@ struct RawBoardMeta {
     /// Grants the `resolve` capability (the resolve_start/resolve_poll
     /// imports): host-OS-resolver DNS lookups on a background thread.
     resolve: Option<bool>,
+    /// Grants the `host_sockets` capability (the sock_* imports): direct
+    /// passthrough to real host OS sockets, on the host's own network
+    /// identity. A materially bigger grant than `resolve`/`net` -- see
+    /// `WasmCaps::host_sockets`'s own doc comment -- so this is opt-in per
+    /// board, never implied by `net`/`resolve`.
+    host_sockets: Option<bool>,
     /// Host network backend ("none"/"loopback"/"nat"/"bridge"); presence grants the
     /// `net` capability (the net_send/net_recv imports).
     net: Option<String>,
@@ -1048,6 +1054,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                     int6: raw.int6.unwrap_or(false),
                     net: raw.net.is_some(),
                     resolve: raw.resolve.unwrap_or(false),
+                    host_sockets: raw.host_sockets.unwrap_or(false),
                 },
                 net,
                 // The merge with the user's per-board overrides happens at
