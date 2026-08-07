@@ -1047,17 +1047,13 @@ mod tests {
             system.contains(&root.as_str()),
             "{root} serves / and must be marked: {devices:#?}"
         );
-        // A synthesized root without its physical store marked is exactly the
-        // hole this enumeration exists to close: the container itself has no
-        // medium, so a machine whose only SystemDisk is synthesized has left
-        // the real one open to being taken.
-        let physical_system = devices
-            .iter()
-            .any(|d| d.safety == Safety::SystemDisk && d.model.is_some());
-        assert!(
-            physical_system,
-            "no physical disk is marked as the system's: {devices:#?}"
-        );
+        // What this cannot check from out here is that the *hardware* under a
+        // synthesized root is marked too -- there is no way to tell a
+        // container from a physical disk in what `list_devices` returns, and
+        // the obvious proxies do not hold: a virtual disk reports no model,
+        // so a CI runner has none. That closure is the whole point of the
+        // enumeration and is tested where it can be tested exactly, against
+        // known layouts, in `the_system_is_every_disk_its_root_touches`.
         for device in &devices {
             assert!(!device.id.is_empty());
             assert!(device.size_bytes > 0);
