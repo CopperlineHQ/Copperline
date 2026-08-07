@@ -622,6 +622,17 @@ fn explain(error: &std::io::Error, device: &HostDevice) -> anyhow::Error {
     }
 }
 
+/// Whether taking a disk will need the host to raise a password prompt.
+///
+/// `/dev/sdX` is `root:disk 0660` with no seat ACL (see the module docs), so
+/// short of running as root the open ends at polkit. A user in `disk` is the
+/// rare exception this cannot see without a device to try; the warning this
+/// feeds errs toward telling somebody a prompt may appear.
+pub(super) fn taking_needs_privilege() -> bool {
+    let euid = unsafe { libc::geteuid() };
+    euid != 0
+}
+
 /// What a reservation keeps on Linux: the open descriptor itself.
 ///
 /// Its `O_EXCL` is the claim -- the kernel refuses a mount while it is held

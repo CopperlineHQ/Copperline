@@ -674,6 +674,17 @@ pub fn unmount_whole_disk(id: &str) -> Result<()> {
     anyhow::bail!("{id} could not be unmounted: {}", combined.trim());
 }
 
+/// Whether taking a disk will need the host to raise a prompt.
+///
+/// Answered "no" deliberately, elevation being the wrong question here: the
+/// gate on raw media is the privacy check, root does not pass it either, and
+/// `authopen` prompts on the process's behalf whoever it is. A warning that
+/// running elevated would avoid the dialog would be telling people to do
+/// something that does not work.
+pub(super) fn taking_needs_privilege() -> bool {
+    false
+}
+
 /// What a reservation keeps on macOS: the open descriptor itself.
 ///
 /// `authopen` hands back a descriptor with no lasting claim of its own on

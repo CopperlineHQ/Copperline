@@ -229,12 +229,12 @@ pub struct BlockDevice {
     dismounted: Vec<std::fs::File>,
 }
 
-/// Closing the handle drops the exclusive claim, which is what lets the host
-/// mount the disk again. Say so: the disk went from the host's control to the
-/// machine's on the way in, and this is it going back.
+/// A machine letting go of its copy. The reservation holds its own, so this
+/// is not the disk going back to the host -- that is [`release_device`], and
+/// it says so itself. Worth a line only to somebody tracing handle lifetimes.
 impl Drop for BlockDevice {
     fn drop(&mut self) {
-        log::info!("blockdev: {} released back to the host", self.id);
+        log::debug!("blockdev: the machine let go of {}", self.id);
     }
 }
 
@@ -601,6 +601,17 @@ fn take_and_reserve(wanted: &[(HostDevice, bool)]) -> anyhow::Result<()> {
     );
     reserved().extend(store);
     Ok(())
+}
+
+/// Whether attaching a disk will make the host ask for privilege.
+///
+/// The launcher says so before anybody ticks anything, so the dialog that
+/// follows Mount is announced rather than a surprise. Asked of the platform
+/// once: what it depends on -- the process's token, its uid -- is settled
+/// for the life of the process.
+pub fn attaching_needs_privilege() -> bool {
+    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(platform::taking_needs_privilege)
 }
 
 /// Open a device for the emulated machine.

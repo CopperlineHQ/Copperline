@@ -10373,7 +10373,8 @@ impl App {
             self.sync_live_audio_suspension();
             #[cfg(feature = "fluxbridge")]
             self.attach_configured_bridges();
-            // The disks powering off handed back to the host, taken again.
+            // The lent disks powering off gave up, lent again -- the session
+            // still holds them, so no permission is asked twice.
             self.attach_configured_host_disks();
             info!("power button: machine powered on (cold boot)");
         }
@@ -10460,14 +10461,15 @@ impl App {
         // could open it.
         #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
-        // A real hard disk is the same story, and matters more: it is held
-        // exclusively, with the host's volumes dismounted, so a machine that
-        // is off but still holding one leaves the disk unusable to everything
-        // -- Windows, the configuration screen's Unmount, and the next machine
-        // built here alike.
+        // A real hard disk is different: the machine only ever borrowed it
+        // from the session's own hold, which the launcher still shows as
+        // attached. The machine's copies go -- an off machine holds nothing
+        // -- but the disk stays taken, so powering back on lends it again
+        // without a second permission prompt, and only the launcher's
+        // Unmount (or quitting) actually hands it back to the host.
         let released = self.emu.bus_mut().release_host_disks();
         if released > 0 {
-            info!("power button: {released} host disk(s) handed back to the host");
+            info!("power button: {released} host disk(s) off with the machine, still held for it");
         }
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]

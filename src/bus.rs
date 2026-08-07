@@ -3880,12 +3880,12 @@ impl Bus {
     /// Let go of every real disk of the host's, wherever it hangs, and say how
     /// many went.
     ///
-    /// A drive is powered by the machine: with the Amiga off it stops, and the
-    /// disk belongs to the host again. Holding one keeps the host from
-    /// mounting it, keeps the launcher from handing it back, and keeps the
-    /// next machine this window builds from opening it -- the same reasoning
-    /// that hands a physical floppy drive back on power off. Image-backed
-    /// drives are untouched: a file is held against nobody.
+    /// A drive is powered by the machine: with the Amiga off it stops, and an
+    /// off machine holds nothing. What it lets go of is only its borrowed
+    /// copy -- the session's own hold (`blockdev`'s reservation) stays, so
+    /// the disk is still taken from the host and powering on lends it again
+    /// without a second permission prompt. Image-backed drives are untouched:
+    /// a file is held against nobody.
     pub fn release_host_disks(&mut self) -> usize {
         let mut released = 0;
         if let Some(gayle) = self.gayle.as_mut() {
@@ -3911,12 +3911,12 @@ impl Bus {
     /// saying how many went back on.
     ///
     /// The counterpart to [`Self::release_host_disks`], and the reason that one
-    /// is safe: a machine powered on takes its drives back, exactly as the
-    /// physical floppy drives are taken back. Nothing is asked of the user
-    /// again -- the disks are still this process's, having only been taken off
-    /// the emulated cable -- and a disk that has since been unplugged is
-    /// reported and skipped, leaving that slot empty as it would be on real
-    /// hardware.
+    /// is safe: a machine powered on borrows its drives again, exactly as the
+    /// physical floppy drives are taken back. Nothing is asked of the user --
+    /// the disks are still held by the session's reservation, having only been
+    /// taken off the emulated cable -- and a disk that has since been
+    /// unplugged is reported and skipped, leaving that slot empty as it would
+    /// be on real hardware.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn attach_host_disks(&mut self, cfg: &crate::config::Config) -> usize {
         let mut attached = 0;

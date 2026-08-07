@@ -4294,7 +4294,7 @@ pub(crate) const HOST_DISK_VISIBLE_ROWS: usize = 8;
 /// enough for what actually goes in it: a device identifier runs to
 /// `PhysicalDrive11` on Windows, and an attachment point to `SCSI Unit 0`.
 const HOST_DISK_COL_DISK: usize = 8;
-const HOST_DISK_COL_VOLUME: usize = 128;
+const HOST_DISK_COL_VOLUME: usize = 112;
 const HOST_DISK_COL_SIZE: usize = 272;
 const HOST_DISK_COL_ATTACH: usize = 344;
 const HOST_DISK_COL_WRITABLE: usize = 440;
@@ -5006,7 +5006,9 @@ fn draw_host_disk_page(
             (
                 HOST_DISK_COL_ATTACH,
                 HOST_DISK_COL_WRITABLE,
-                disk.attach.label(),
+                // Blank until the disk is ticked: an unticked disk is going
+                // nowhere, and ticking is what gives it a place.
+                disk.attach.map(|attach| attach.label()).unwrap_or_default(),
             ),
         ] {
             let text = truncate_to_width(&text, next - offset - 8);
@@ -5107,32 +5109,56 @@ fn draw_host_disk_page(
     // What Mount will do, one line per ticked disk, under the buttons so the
     // greyed Mount button is never a mystery and two ticks are never a
     // surprise about where the second disk went. Same shape as the Input
-    // page's summary: a dimmed heading over the lines it introduces.
+    // page's summary: a dimmed heading over the lines it introduces. With
+    // nothing ticked the block instead says the one thing worth knowing
+    // before ticking anything -- on hosts where attaching will raise the
+    // system's privilege prompt, that it will; elsewhere, what to do next.
     let summary_top = host_disk_button_rects(rect)[0].1.y + LAUNCH_TAB_H + 10;
-    draw_panel_text(
-        frame,
-        table.x,
-        summary_top,
-        "With these settings:",
-        PANEL_TEXT_DIM,
-        1,
-        scale,
-    );
     let chosen: Vec<&crate::video::launcher::HostDiskRow> = setup
         .host_disks()
         .iter()
         .filter(|d| setup.host_disk_is_selected(&d.id))
         .collect();
+    let warn_privilege = chosen.is_empty() && crate::blockdev::attaching_needs_privilege();
+    draw_panel_text(
+        frame,
+        table.x,
+        summary_top,
+        if warn_privilege {
+            "Warning:"
+        } else {
+            "With these settings:"
+        },
+        if warn_privilege {
+            PANEL_TEXT_ACCENT
+        } else {
+            PANEL_TEXT_DIM
+        },
+        1,
+        scale,
+    );
     if chosen.is_empty() {
-        draw_panel_text(
-            frame,
-            table.x + 8,
-            summary_top + 16,
-            "Select a disk to attach it to the machine",
-            PANEL_TEXT,
-            1,
-            scale,
-        );
+        if warn_privilege {
+            draw_panel_text(
+                frame,
+                table.x + 8,
+                summary_top + 16,
+                "Attaching a host drive requires elevated privileges.",
+                PANEL_TEXT_ACCENT,
+                1,
+                scale,
+            );
+        } else {
+            draw_panel_text(
+                frame,
+                table.x + 8,
+                summary_top + 16,
+                "Select a disk to attach it to the machine",
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
     }
     // A disk gets two lines if it needs them. The sentence ends with where the
     // disk is going, and on a long model name that is exactly the half a
@@ -5151,11 +5177,13 @@ fn draw_host_disk_page(
         } else {
             "read only"
         };
+        let place = disk
+            .attach
+            .expect("a ticked disk has an attachment point")
+            .label();
         let text = format!(
-            "{} ({}): attached {access} to {}",
-            disk.id,
-            disk.volume,
-            disk.attach.label()
+            "{} ({}): attached {access} to {place}",
+            disk.id, disk.volume
         );
         let chars = width_px / font::GLYPH_W;
         let mut lines = wrap_text(&text, chars, chars);
@@ -8871,8 +8899,7 @@ mod tests {
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
                 writable: false,
-                attach: crate::config::HostDiskAttach::IdeMaster,
-                attach_chosen: false,
+                attach: None,
             }]);
             setup.select_host_disk(0);
             setup.mount_host_disks().expect("A1200 has IDE");
@@ -8908,8 +8935,7 @@ mod tests {
                     size: "31.9 GB".to_string(),
                     mounted: Vec::new(),
                     writable: true,
-                    attach: crate::config::HostDiskAttach::IdeMaster,
-                    attach_chosen: false,
+                    attach: None,
                 },
                 launcher::HostDiskRow {
                     id: "disk6".to_string(),
@@ -8917,8 +8943,7 @@ mod tests {
                     size: "3.9 GB".to_string(),
                     mounted: vec!["/Volumes/UNTITLED".to_string()],
                     writable: false,
-                    attach: crate::config::HostDiskAttach::IdeSlave,
-                    attach_chosen: false,
+                    attach: None,
                 },
                 launcher::HostDiskRow {
                     id: "PhysicalDrive11".to_string(),
@@ -8926,8 +8951,7 @@ mod tests {
                     size: "512 MB".to_string(),
                     mounted: Vec::new(),
                     writable: true,
-                    attach: crate::config::HostDiskAttach::IdeMaster,
-                    attach_chosen: false,
+                    attach: None,
                 },
             ]);
             setup.select_model(Some(crate::config::MachineModel::A1200));
@@ -8954,8 +8978,7 @@ mod tests {
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
                 writable: false,
-                attach: crate::config::HostDiskAttach::IdeMaster,
-                attach_chosen: false,
+                attach: None,
             }]);
             let mut state = LauncherState::new(setup);
             state.tab = LauncherTab::HostDisk;
@@ -8979,8 +9002,7 @@ mod tests {
                         size: format!("{}.0 GB", i % 9 + 1),
                         mounted: Vec::new(),
                         writable: true,
-                        attach: crate::config::HostDiskAttach::IdeMaster,
-                        attach_chosen: false,
+                        attach: None,
                     })
                     .collect(),
             );
@@ -9007,8 +9029,7 @@ mod tests {
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
                 writable: false,
-                attach: crate::config::HostDiskAttach::IdeMaster,
-                attach_chosen: false,
+                attach: None,
             }]);
             setup.select_host_disk(0);
             setup

@@ -173,6 +173,10 @@ const INFINITE: u32 = 0xFFFF_FFFF;
 const ERROR_CANCELLED: i32 = 1223;
 /// `PROCESS_DUP_HANDLE`.
 const PROCESS_DUP_HANDLE: u32 = 0x0040;
+/// `TOKEN_QUERY`.
+const TOKEN_QUERY: u32 = 0x0008;
+/// `TokenElevation` in `TOKEN_INFORMATION_CLASS`.
+const TOKEN_ELEVATION_CLASS: u32 = 20;
 /// `DUPLICATE_SAME_ACCESS`.
 const DUPLICATE_SAME_ACCESS: u32 = 0x0002;
 /// `DUPLICATE_CLOSE_SOURCE`, which is the only way to close a handle living in
@@ -413,6 +417,18 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
+    fn GetTokenInformation(
+        token: Handle,
+        class: u32,
+        information: *mut c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "cfgmgr32")]
@@ -1387,6 +1403,33 @@ fn broker_open(
 pub(super) struct Held {
     disk: OwnedHandle,
     dismounted: Vec<std::fs::File>,
+}
+
+/// Whether taking a disk will need the host to raise a consent dialog.
+///
+/// Raw disk access needs Administrator whatever the medium, so an
+/// unelevated process always ends up at the `runas` consent prompt; one
+/// already elevated opens directly. Read from this process's token.
+pub(super) fn taking_needs_privilege() -> bool {
+    let mut token: Handle = ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        // Not knowing reads as needing it: the warning this feeds errs
+        // toward telling somebody a dialog may appear.
+        return true;
+    }
+    let mut elevation: u32 = 0;
+    let mut returned: u32 = 0;
+    let asked = unsafe {
+        GetTokenInformation(
+            token,
+            TOKEN_ELEVATION_CLASS,
+            (&raw mut elevation).cast(),
+            std::mem::size_of::<u32>() as u32,
+            &mut returned,
+        )
+    };
+    unsafe { CloseHandle(token) };
+    asked == 0 || elevation == 0
 }
 
 /// Take a disk from the host: directly if this process may, and otherwise by

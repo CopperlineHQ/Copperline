@@ -1030,12 +1030,10 @@ pub struct HostDiskRow {
     /// Whether the guest may write to it. On by default; unticking it is
     /// what protects the disk.
     pub writable: bool,
-    /// Where the machine would see this disk.
-    pub attach: crate::config::HostDiskAttach,
-    /// Whether that was chosen deliberately, rather than left at the default.
-    /// A choice is honoured: ticking a disk only picks a place for it when
-    /// nobody has picked one already.
-    pub attach_chosen: bool,
+    /// Where the machine would see this disk -- and only while it is ticked.
+    /// An unticked disk is going nowhere, and its cell reads blank rather
+    /// than naming a place nothing has claimed.
+    pub attach: Option<crate::config::HostDiskAttach>,
 }
 
 /// The disks the Host Disk page will offer.
@@ -1059,8 +1057,7 @@ fn sample_host_disks() -> Vec<HostDiskRow> {
             mounted: device.mounted.clone(),
             id: device.id,
             writable: true,
-            attach: crate::config::HostDiskAttach::default(),
-            attach_chosen: false,
+            attach: None,
         })
         .chain(fake_host_disks())
         .collect()
@@ -1087,8 +1084,7 @@ fn fake_host_disks() -> Vec<HostDiskRow> {
             size: format!("{}.0 GB", i % 9 + 1),
             mounted: Vec::new(),
             writable: true,
-            attach: crate::config::HostDiskAttach::default(),
-            attach_chosen: false,
+            attach: None,
         })
         .collect()
 }
@@ -3877,7 +3873,6 @@ impl MachineSetup {
             if let Some(old) = previous.iter().find(|p| p.id == row.id) {
                 row.writable = old.writable;
                 row.attach = old.attach;
-                row.attach_chosen = old.attach_chosen;
             }
         }
         // A disk that has gone (unplugged between looks) cannot stay ticked.
@@ -3887,10 +3882,8 @@ impl MachineSetup {
         // is ticked, sitting where it was put.
         for attached in &self.host_disks_attached {
             if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == attached.device) {
-                row.attach = attached.attach;
+                row.attach = Some(attached.attach);
                 row.writable = attached.writable;
-                // Where it actually went is a choice by any measure.
-                row.attach_chosen = true;
             }
             if !self.host_disk_selected.contains(&attached.device) {
                 self.host_disk_selected.push(attached.device.clone());
@@ -3932,15 +3925,12 @@ impl MachineSetup {
 
     /// The first attachment point nothing has claimed, preferring the ones
     /// the machine can actually use so a tick lands somewhere useful.
-    fn free_host_disk_attach(
-        &self,
-        ignoring: Option<&str>,
-    ) -> Option<crate::config::HostDiskAttach> {
+    fn free_host_disk_attach(&self) -> Option<crate::config::HostDiskAttach> {
         let claimed: Vec<_> = self
             .host_disks
             .iter()
-            .filter(|row| self.host_disk_is_selected(&row.id) && Some(row.id.as_str()) != ignoring)
-            .map(|row| row.attach)
+            .filter(|row| self.host_disk_is_selected(&row.id))
+            .filter_map(|row| row.attach)
             .collect();
         crate::config::HostDiskAttach::all()
             .into_iter()
@@ -3966,6 +3956,9 @@ impl MachineSetup {
             );
             self.host_disks_attached.retain(|d| d.attach != attach);
             self.host_disk_selected.retain(|id| *id != device);
+            if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == device) {
+                row.attach = None;
+            }
         }
     }
 
@@ -3976,7 +3969,11 @@ impl MachineSetup {
 
     /// Tick or untick one disk. Ticking claims the first free attachment
     /// point, so a second disk lands beside the first rather than on it --
-    /// unless the row already names one, which is honoured while it is free.
+    /// Ticking is what gives the disk a place: the first attachment point
+    /// still free, IDE Master before anything else. Unticking takes the
+    /// place away again, and the cell reads blank -- an unticked disk is
+    /// going nowhere, and a place named on one would be a claim nothing is
+    /// making.
     pub fn select_host_disk(&mut self, index: usize) {
         let Some(id) = self.host_disks.get(index).map(|d| d.id.clone()) else {
             return;
@@ -3984,46 +3981,36 @@ impl MachineSetup {
         self.host_disk_warning = None;
         if self.host_disk_is_selected(&id) {
             self.host_disk_selected.retain(|d| *d != id);
+            if let Some(row) = self.host_disks.get_mut(index) {
+                row.attach = None;
+            }
             return;
         }
-        // A choice made on the row stands, so long as it is still free: the
-        // point of choosing is that ticking does not undo it. Nothing chosen,
-        // or chosen and since taken, and the first free point is used.
-        let chosen = self.host_disks.get(index).filter(|row| row.attach_chosen);
-        let claimed = chosen.is_some_and(|row| {
-            self.host_disks.iter().any(|other| {
-                other.id != id
-                    && self.host_disk_is_selected(&other.id)
-                    && other.attach == row.attach
-            })
-        });
-        if chosen.is_none() || claimed {
-            match self.free_host_disk_attach(Some(&id)) {
-                Some(free) => {
-                    if let Some(row) = self.host_disks.get_mut(index) {
-                        row.attach = free;
-                    }
+        match self.free_host_disk_attach() {
+            Some(free) => {
+                if let Some(row) = self.host_disks.get_mut(index) {
+                    row.attach = Some(free);
                 }
-                // Nowhere to put this disk, so the tick does not take and the
-                // reason is shown: silently ticking a disk that could not be
-                // attached would be a lie found out only at Mount. Which
-                // reason depends on why -- a machine with no port at all is a
-                // different problem from one whose ports are full.
-                None => {
-                    let wanted = self.host_disks[index].attach;
-                    let any_port = crate::config::HostDiskAttach::all()
-                        .into_iter()
-                        .any(|a| self.attach_is_fitted(a));
-                    self.host_disk_warning = Some(if any_port {
-                        format!("{} is already in use", wanted.label())
-                    } else {
-                        wanted.requirement().to_string()
-                    });
-                    return;
-                }
+                self.host_disk_selected.push(id);
+            }
+            // Nowhere to put this disk, so the tick does not take and the
+            // reason is shown: silently ticking a disk that could not be
+            // attached would be a lie found out only at Mount. Which reason
+            // depends on why -- a machine with no port at all is a different
+            // problem from one whose ports are full.
+            None => {
+                let any_port = crate::config::HostDiskAttach::all()
+                    .into_iter()
+                    .any(|a| self.attach_is_fitted(a));
+                self.host_disk_warning = Some(if any_port {
+                    "Every attachment point is already in use".to_string()
+                } else {
+                    crate::config::HostDiskAttach::default()
+                        .requirement()
+                        .to_string()
+                });
             }
         }
-        self.host_disk_selected.push(id);
     }
 
     /// What to call a disk that is attached: the volume the host reported for
@@ -4042,13 +4029,18 @@ impl MachineSetup {
     /// so one that is not there says so rather than reading as normal.
     pub fn host_disk_label(&self, device: &str) -> String {
         match self.host_disks.iter().find(|d| d.id == device) {
-            Some(disk) => format!("{device}: {}", disk.volume),
+            // The volume alone: the row's own label already says which drive
+            // this is, and Unmount beside it already says it is a real disk.
+            // (On Windows the "volume" is the model string the bridge
+            // reports, `Generic MassStorageClass USB Device` and the like --
+            // there is nothing shorter that still names the hardware.)
+            Some(disk) => disk.volume.clone(),
             // Nothing has been sampled yet, so nothing is known: the Host Disk
             // page looks when it opens, and a launcher that has not been there
             // has not asked. A disk sitting in the reader called "not
             // connected" is worse than one described only by its name.
             None if self.host_disks.is_empty() => device.to_string(),
-            None => format!("{device}: not connected"),
+            None => format!("{device} (not connected)"),
         }
     }
 
@@ -4062,21 +4054,29 @@ impl MachineSetup {
         if self.host_disk_selected.is_empty() {
             return Err("Select a disk to attach it to the machine".to_string());
         }
-        let chosen: Vec<HostDiskRow> = self
+        // A ticked disk always has a place -- ticking is what assigns one --
+        // so a tick without one is a bug worth failing loudly on, not a case.
+        let chosen: Vec<(HostDiskRow, crate::config::HostDiskAttach)> = self
             .host_disks
             .iter()
             .filter(|row| self.host_disk_is_selected(&row.id))
-            .cloned()
+            .map(|row| {
+                let attach = row.attach.expect("a ticked disk has an attachment point");
+                (row.clone(), attach)
+            })
             .collect();
-        if let Some(bad) = chosen.iter().find(|row| !self.attach_is_fitted(row.attach)) {
-            return Err(bad.attach.requirement().to_string());
+        if let Some((_, bad)) = chosen
+            .iter()
+            .find(|(_, attach)| !self.attach_is_fitted(*attach))
+        {
+            return Err(bad.requirement().to_string());
         }
 
         let mut attached = Vec::new();
-        for row in chosen {
+        for (row, attach) in chosen {
             let entry = crate::config::HostDiskConfig {
                 device: row.id.clone(),
-                attach: row.attach,
+                attach,
                 writable: row.writable,
             };
             self.host_disks_attached
@@ -4116,7 +4116,15 @@ impl MachineSetup {
             .host_disks_attached
             .iter()
             .position(|d| d.attach == attach)?;
-        Some(self.host_disks_attached.remove(at).device)
+        let device = self.host_disks_attached.remove(at).device;
+        // The Host Disk page mirrors what is attached, so taking the disk
+        // off the machine unticks it there too -- a tick surviving the
+        // unmount would read as still attached.
+        self.host_disk_selected.retain(|id| *id != device);
+        if let Some(row) = self.host_disks.iter_mut().find(|d| d.id == device) {
+            row.attach = None;
+        }
+        Some(device)
     }
 
     /// Flip whether the guest may write to one disk.
@@ -4132,12 +4140,17 @@ impl MachineSetup {
         let Some(row) = self.host_disks.get(index) else {
             return;
         };
-        let (id, current) = (row.id.clone(), row.attach);
+        // Only a ticked disk has a place to step: the cell is blank
+        // otherwise, and clicking blank is not a request anybody made.
+        let (Some(current), true) = (row.attach, self.host_disk_is_selected(&row.id)) else {
+            return;
+        };
+        let id = row.id.clone();
         let claimed: Vec<_> = self
             .host_disks
             .iter()
             .filter(|r| r.id != id && self.host_disk_is_selected(&r.id))
-            .map(|r| r.attach)
+            .filter_map(|r| r.attach)
             .collect();
         let options: Vec<_> = crate::config::HostDiskAttach::all()
             .into_iter()
@@ -4149,10 +4162,8 @@ impl MachineSetup {
         } else {
             (at + options.len() - 1) % options.len()
         };
-        let next = options[next];
         if let Some(row) = self.host_disks.get_mut(index) {
-            row.attach = next;
-            row.attach_chosen = true;
+            row.attach = Some(options[next]);
         }
     }
 
@@ -5006,8 +5017,7 @@ mod tests {
                 size: "31.9 GB".to_string(),
                 mounted: Vec::new(),
                 writable: true,
-                attach: crate::config::HostDiskAttach::IdeSlave,
-                attach_chosen: false,
+                attach: Some(crate::config::HostDiskAttach::IdeSlave),
             },
             HostDiskRow {
                 id: "disk9".to_string(),
@@ -5015,8 +5025,7 @@ mod tests {
                 size: "3.9 GB".to_string(),
                 mounted: Vec::new(),
                 writable: false,
-                attach: crate::config::HostDiskAttach::IdeMaster,
-                attach_chosen: false,
+                attach: Some(crate::config::HostDiskAttach::IdeMaster),
             },
         ]);
 
@@ -5026,13 +5035,13 @@ mod tests {
         setup.select_host_disk(0);
         assert_eq!(
             setup.host_disks()[0].attach,
-            crate::config::HostDiskAttach::IdeMaster
+            Some(crate::config::HostDiskAttach::IdeMaster)
         );
         // The second disk lands beside the first, not on it.
         setup.select_host_disk(1);
         assert_eq!(
             setup.host_disks()[1].attach,
-            crate::config::HostDiskAttach::IdeSlave
+            Some(crate::config::HostDiskAttach::IdeSlave)
         );
 
         let mounted = setup.mount_host_disks().expect("ticked disks mount");
@@ -5086,8 +5095,7 @@ mod tests {
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
             writable: false,
-            attach: crate::config::HostDiskAttach::IdeMaster,
-            attach_chosen: false,
+            attach: Some(crate::config::HostDiskAttach::IdeMaster),
         }]);
         no_ide.select_host_disk(0);
         assert!(
@@ -5111,11 +5119,14 @@ mod tests {
         assert_eq!(reloaded.to_raw().host_disk.len(), 1);
     }
 
-    /// A place chosen on the row is honoured when the disk is ticked; only a
-    /// row still sitting on the default gets one picked for it. When every
-    /// place is taken the tick does not happen at all, and says why.
+    /// A disk has a place only while it is ticked. Ticking assigns the first
+    /// free point (IDE Master leads), unticking blanks it again, a choice
+    /// stepped on a ticked row survives other disks coming and going, and
+    /// when every place is taken the tick does not happen at all and says
+    /// why.
     #[test]
-    fn a_chosen_attachment_point_survives_ticking() {
+    fn a_place_exists_only_while_the_disk_is_ticked() {
+        use crate::config::HostDiskAttach as A;
         let disks = |n: usize| -> Vec<HostDiskRow> {
             (0..n)
                 .map(|i| HostDiskRow {
@@ -5124,8 +5135,7 @@ mod tests {
                     size: "4.0 GB".to_string(),
                     mounted: Vec::new(),
                     writable: true,
-                    attach: crate::config::HostDiskAttach::default(),
-                    attach_chosen: false,
+                    attach: None,
                 })
                 .collect()
         };
@@ -5134,28 +5144,39 @@ mod tests {
         setup.select_model(Some(MachineModel::A1200));
         setup.set_host_disks_for_test(disks(3));
 
-        // Chosen before ticking: the tick leaves it alone.
+        // Blank until ticked, and stepping a blank cell is not a request.
+        assert_eq!(setup.host_disks()[0].attach, None);
         setup.cycle_host_disk_attach(0, true);
-        let chosen = setup.host_disks()[0].attach;
-        assert_eq!(chosen, crate::config::HostDiskAttach::IdeSlave);
-        setup.select_host_disk(0);
-        assert_eq!(setup.host_disks()[0].attach, chosen);
+        assert_eq!(setup.host_disks()[0].attach, None);
 
-        // Untouched: a place is picked, and it is not the taken one.
+        // Ticking assigns the first free point; the next tick the next.
+        setup.select_host_disk(0);
+        assert_eq!(setup.host_disks()[0].attach, Some(A::IdeMaster));
+        setup.select_host_disk(1);
+        assert_eq!(setup.host_disks()[1].attach, Some(A::IdeSlave));
+
+        // A choice stepped on a ticked row stands while the disk stays
+        // ticked, and unticking another disk frees its place.
+        setup.select_host_disk(1);
+        assert_eq!(setup.host_disks()[1].attach, None, "unticking blanks it");
+        setup.cycle_host_disk_attach(0, true);
+        assert_eq!(setup.host_disks()[0].attach, Some(A::IdeSlave));
         setup.select_host_disk(1);
         assert_eq!(
             setup.host_disks()[1].attach,
-            crate::config::HostDiskAttach::IdeMaster
+            Some(A::IdeMaster),
+            "the freed place is picked up by the next tick"
         );
 
-        // Nothing left on a machine with no SCSI: the third tick is refused.
+        // Nothing left on a machine with no SCSI: the third tick is refused,
+        // stays unticked, and the next tick clears the warning.
         setup.select_host_disk(2);
         assert!(!setup.host_disk_is_selected("disk2"));
+        assert_eq!(setup.host_disks()[2].attach, None);
         assert_eq!(
             setup.host_disk_warning(),
-            Some("IDE Master is already in use")
+            Some("Every attachment point is already in use")
         );
-        // And the next tick clears the warning.
         setup.select_host_disk(1);
         assert_eq!(setup.host_disk_warning(), None);
     }
@@ -5172,14 +5193,18 @@ mod tests {
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
             writable: true,
-            attach: crate::config::HostDiskAttach::Scsi(2),
-            attach_chosen: true,
+            attach: None,
         }]);
         // Pick the motherboard controller, which is what makes its units real.
         while setup.scsi_controller_for_test() != Some(ScsiController::A3000) {
             setup.cycle(LauncherField::ScsiController, true);
         }
         setup.select_host_disk(0);
+        assert_eq!(
+            setup.host_disks()[0].attach,
+            Some(crate::config::HostDiskAttach::Scsi(0)),
+            "an A3000 has no IDE, so the first free point is a SCSI unit"
+        );
         setup.mount_host_disks().expect("the A3000 has SCSI");
         assert_eq!(setup.host_disks_attached().len(), 1);
 
@@ -5193,6 +5218,11 @@ mod tests {
             "the disk goes with the controller"
         );
         assert!(!setup.host_disk_is_selected("disk4"));
+        assert_eq!(
+            setup.host_disks()[0].attach,
+            None,
+            "a disk with no port is going nowhere, and its cell reads blank"
+        );
     }
 
     /// A real disk takes its place on the Boot Priority page like any other
@@ -5208,8 +5238,7 @@ mod tests {
             size: "31.9 GB".to_string(),
             mounted: Vec::new(),
             writable: true,
-            attach: crate::config::HostDiskAttach::IdeMaster,
-            attach_chosen: false,
+            attach: Some(crate::config::HostDiskAttach::IdeMaster),
         }]);
         // Nothing attached: the row reads as an empty slot.
         assert_eq!(
