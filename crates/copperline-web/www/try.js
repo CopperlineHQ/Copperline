@@ -994,18 +994,28 @@ function stepMachine(nowMs, deferRender) {
 
   if (nowMs - lastStatUpdate >= 1000) {
     const timedFrames = Math.max(1, framesThisSecond);
+    // Two lines: the rates the visitor watches, then the host-cost
+    // breakdown. A shell renders the split with `white-space: pre-line`
+    // on #stat (one long nowrap line ran off a 13" screen); on any style
+    // that collapses the newline to a space, the second line starts with
+    // the ` | ` separator instead, so the collapsed rendering is exactly
+    // the historical single line.
+    const statKeepsNewline = /pre|preserve|break-spaces/.test(
+      getComputedStyle(statLine).whiteSpace,
+    );
     statLine.textContent =
       `${framesThisSecond} fps (${presentsThisSecond} shown, ${ticksThisSecond} ticks) | ` +
       `${emu.emulated_seconds().toFixed(1)}s emulated | ` +
       `audio ${queuedMs.toFixed(0)} ms` +
       (audioUnderruns > 0 ? ` (${audioUnderruns} underruns)` : '') +
-      (renderSkipActive ? ' | render 1/2' : '') +
-      ` | host ${[
+      (statKeepsNewline ? '\n' : '\n| ') +
+      `host ${[
         `core ${(coreMsThisSecond / timedFrames).toFixed(1)}`,
         `render ${(rustRenderMsThisSecond / timedFrames).toFixed(1)}`,
         `upload ${(uploadMsThisSecond / timedFrames).toFixed(1)}`,
         `shader ${(shaderMsThisSecond / timedFrames).toFixed(1)}`,
-      ].join(' + ')} ms/frame`;
+      ].join(' + ')} ms/frame` +
+      (renderSkipActive ? ' | render 1/2' : '');
     framesThisSecond = 0;
     ticksThisSecond = 0;
     presentsThisSecond = 0;
