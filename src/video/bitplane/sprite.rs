@@ -858,7 +858,6 @@ pub(super) fn flush_manual_sprite_lines(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 pub(super) fn render_sprites(
     state: &RenderState,
     ram: &[u8],

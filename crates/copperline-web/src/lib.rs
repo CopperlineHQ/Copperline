@@ -464,16 +464,24 @@ impl WebEmu {
             return;
         }
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
-        // A frame identical to the previous render needs no pipeline at
-        // all: the present buffer already shows it, and the detector
-        // carries the frame's CLXDAT so collisions still accumulate.
-        if bitplane::render_reusing_previous(
-            self.emu.bus_mut(),
-            &mut self.fb,
-            &mut self.repeated_frame_detector,
-        ) {
-            self.last_rendered_frame = Some(emulated_frame);
-            return;
+        if self.deinterlacer.phosphor() == 0.0 {
+            // A frame identical to the previous render needs no pipeline at
+            // all: the present buffer already shows it, and the detector
+            // carries the frame's CLXDAT so collisions still accumulate.
+            if bitplane::render_reusing_previous(
+                self.emu.bus_mut(),
+                &mut self.fb,
+                &mut self.repeated_frame_detector,
+            ) {
+                self.last_rendered_frame = Some(emulated_frame);
+                return;
+            }
+        } else {
+            // Phosphor changes the presentation on every field while its
+            // trail decays, even when the emulated pixels repeat exactly.
+            // Render the field unconditionally so every repeated frame
+            // reaches the persistence blend.
+            bitplane::render(self.emu.bus_mut(), &mut self.fb);
         }
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
@@ -522,21 +530,20 @@ impl WebEmu {
             // fill the same 4:3 glass -- so a 60 Hz crop's rows scale onto
             // the 50 Hz aperture's native row count (whole-row selection,
             // like the desktop present copy).
-            (self.present_rows, self.present_width) =
-                self.deinterlacer.present_field_region_into(
-                    &self.fb,
-                    field_rows,
-                    canvas_width,
-                    lace,
-                    base.long_field,
-                    double_rows,
-                    present_common::TV_CAPTURED_SOURCE_X,
-                    present_common::TV_PRESENT_SOURCE_Y,
-                    aperture_rows,
-                    present_common::TV_CAPTURED_WIDTH,
-                    present_common::TV_GLASS_PRESENT_ROWS,
-                    &mut self.present,
-                );
+            (self.present_rows, self.present_width) = self.deinterlacer.present_field_region_into(
+                &self.fb,
+                field_rows,
+                canvas_width,
+                lace,
+                base.long_field,
+                double_rows,
+                present_common::TV_CAPTURED_SOURCE_X,
+                present_common::TV_PRESENT_SOURCE_Y,
+                aperture_rows,
+                present_common::TV_CAPTURED_WIDTH,
+                present_common::TV_GLASS_PRESENT_ROWS,
+                &mut self.present,
+            );
             // Two woven rows per emulated field line, and the aperture's
             // rows fill the glass exactly, so the aperture is the line
             // count whatever row count it was scaled onto (the desktop's

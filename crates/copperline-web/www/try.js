@@ -835,11 +835,15 @@ let renderSkipActive = false;
 let renderSkipTransitionSinceMs = null;
 let renderDeferredLastTick = false;
 
+function cancelRenderStrideTransition() {
+  renderSkipTransitionSinceMs = null;
+}
+
 function resetRenderStrideController() {
   avgStepMs = 0;
   avgFrameStepMs = 0;
   renderSkipActive = false;
-  renderSkipTransitionSinceMs = null;
+  cancelRenderStrideTransition();
   renderDeferredLastTick = false;
 }
 
@@ -1108,6 +1112,11 @@ function recoverAudio() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  // A hide/show boundary is not evidence of sustained pressure or recovery:
+  // discard a pending transition so inactive wall time cannot satisfy its
+  // hold duration. Keep the active stride and averages; background running
+  // still supplies real samples and a foreground return can reassess them.
+  cancelRenderStrideTransition();
   // The browser drops a screen wake lock when the page hides; re-request
   // it when a still-running machine comes back into view.
   syncWakeLock();
@@ -3433,6 +3442,9 @@ function setPauseLabel() {
 function setPaused(next) {
   if (!emu || !running || next === paused) return;
   paused = next;
+  // Paused wall time must not count toward the controller's sustained
+  // enter/exit hold when stepping resumes.
+  cancelRenderStrideTransition();
   setPauseLabel();
   syncWakeLock();
   if (paused) {
