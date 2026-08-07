@@ -3967,8 +3967,8 @@ impl MachineSetup {
         self.host_disk_warning.as_deref()
     }
 
-    /// Tick or untick one disk. Ticking claims the first free attachment
-    /// point, so a second disk lands beside the first rather than on it --
+    /// Tick or untick one disk.
+    ///
     /// Ticking is what gives the disk a place: the first attachment point
     /// still free, IDE Master before anything else. Unticking takes the
     /// place away again, and the cell reads blank -- an unticked disk is
