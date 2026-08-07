@@ -770,8 +770,10 @@ pub enum UiControl {
     LauncherHostDiskScroll(isize),
     /// Look at the host's storage again.
     LauncherHostDiskRefresh,
-    /// Attach the ticked disk to the machine.
+    /// Attach the ticked disks to the machine.
     LauncherHostDiskMount,
+    /// Take the ticked disks that the machine has back off it.
+    LauncherHostDiskUnmountSelected,
     /// Plugin config: step an enum/int option of a Zorro board.
     LauncherBoardCycle {
         board: usize,
@@ -4377,8 +4379,9 @@ fn host_disk_writable_cell(rect: Rect, index: usize) -> Rect {
     }
 }
 
-/// The buttons under the table, left to right.
-fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+/// The buttons under the table, left to right: the two acts on the ticked
+/// disks first, then Refresh, which only looks.
+fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let table = host_disk_table_rect(rect);
     let y = table.y + table.h + 10;
     let button = |slot: usize| Rect {
@@ -4388,8 +4391,9 @@ fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
         h: LAUNCH_TAB_H,
     };
     [
-        (UiControl::LauncherHostDiskRefresh, button(0)),
-        (UiControl::LauncherHostDiskMount, button(1)),
+        (UiControl::LauncherHostDiskMount, button(0)),
+        (UiControl::LauncherHostDiskUnmountSelected, button(1)),
+        (UiControl::LauncherHostDiskRefresh, button(2)),
     ]
 }
 
@@ -4987,7 +4991,13 @@ fn draw_host_disk_page(
         let i = scroll + slot;
         let row = host_disk_row_rect(rect, slot);
         let ticked = setup.host_disk_is_selected(&disk.id);
-        if ticked || hover == Some(UiControl::LauncherHostDiskSelect(i)) {
+        // A disk the machine has keeps the highlight whether or not it is
+        // ticked right now: in a long list, what is in use should be
+        // findable at a glance.
+        if ticked
+            || setup.host_disk_is_attached(&disk.id)
+            || hover == Some(UiControl::LauncherHostDiskSelect(i))
+        {
             fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
@@ -5088,12 +5098,17 @@ fn draw_host_disk_page(
     for (control, button) in host_disk_button_rects(rect) {
         let label = match control {
             UiControl::LauncherHostDiskMount => "Mount",
+            UiControl::LauncherHostDiskUnmountSelected => "Unmount",
             _ => "Refresh",
         };
-        // Mounting needs both a disk to mount and the access to open it;
-        // Refresh only ever looks, so it stays live.
+        // Mount needs a disk to mount; Unmount a ticked disk the machine
+        // actually has; Refresh only ever looks, so it stays live.
         let enabled = match control {
             UiControl::LauncherHostDiskMount => !setup.host_disks_selected().is_empty(),
+            UiControl::LauncherHostDiskUnmountSelected => setup
+                .host_disks_selected()
+                .iter()
+                .any(|id| setup.host_disk_is_attached(id)),
             _ => true,
         };
         draw_text_button(

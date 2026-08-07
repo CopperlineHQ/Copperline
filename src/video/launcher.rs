@@ -3904,6 +3904,11 @@ impl MachineSetup {
         self.host_disks_attached.iter().find(|d| d.attach == attach)
     }
 
+    /// Whether a disk is currently given to the machine.
+    pub fn host_disk_is_attached(&self, device: &str) -> bool {
+        self.host_disks_attached.iter().any(|d| d.device == device)
+    }
+
     /// Whether a disk is ticked.
     pub fn host_disk_is_selected(&self, device: &str) -> bool {
         self.host_disk_selected.iter().any(|d| d == device)
@@ -3986,6 +3991,21 @@ impl MachineSetup {
             }
             return;
         }
+        // A disk the machine already has goes back to the place it holds:
+        // ticking it again is recognising the attachment, not asking for a
+        // second one somewhere new.
+        if let Some(attached) = self
+            .host_disks_attached
+            .iter()
+            .find(|d| d.device == id)
+            .map(|d| d.attach)
+        {
+            if let Some(row) = self.host_disks.get_mut(index) {
+                row.attach = Some(attached);
+            }
+            self.host_disk_selected.push(id);
+            return;
+        }
         match self.free_host_disk_attach() {
             Some(free) => {
                 if let Some(row) = self.host_disks.get_mut(index) {
@@ -4005,9 +4025,7 @@ impl MachineSetup {
                 self.host_disk_warning = Some(if any_port {
                     "Every attachment point is already in use".to_string()
                 } else {
-                    crate::config::HostDiskAttach::default()
-                        .requirement()
-                        .to_string()
+                    crate::config::HostDiskAttach::no_port_requirement().to_string()
                 });
             }
         }
@@ -4125,6 +4143,22 @@ impl MachineSetup {
             row.attach = None;
         }
         Some(device)
+    }
+
+    /// Take every ticked disk that the machine has back off it, and say
+    /// which went. The Host Disk page's Unmount: the ticks say which disks
+    /// are meant, exactly as they do for Mount.
+    pub fn unmount_selected_host_disks(&mut self) -> Vec<String> {
+        let attached: Vec<crate::config::HostDiskAttach> = self
+            .host_disks_attached
+            .iter()
+            .filter(|d| self.host_disk_is_selected(&d.device))
+            .map(|d| d.attach)
+            .collect();
+        attached
+            .into_iter()
+            .filter_map(|attach| self.unmount_host_disk(attach))
+            .collect()
     }
 
     /// Flip whether the guest may write to one disk.
@@ -5104,7 +5138,7 @@ mod tests {
         );
         assert_eq!(
             no_ide.host_disk_warning(),
-            Some("Attach to IDE requires an A600, A1200 or A4000")
+            Some("Host disk attach requires an A600, A1200, A4000 or SCSI controller")
         );
         assert!(no_ide.mount_host_disks().is_err());
         assert!(no_ide.host_disks_attached().is_empty());

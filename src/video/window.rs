@@ -5694,6 +5694,25 @@ impl App {
                     });
                 }
             }
+            UiControl::LauncherHostDiskUnmountSelected => {
+                if let Some(state) = self.launcher_state_mut() {
+                    let released = state.setup.unmount_selected_host_disks();
+                    state.status = Some(if released.is_empty() {
+                        StatusMessage::err("Nothing to unmount")
+                    } else {
+                        // Off the machine and back to the host in one act,
+                        // exactly as the Storage rows' Unmount does it.
+                        for device in &released {
+                            crate::blockdev::release_device(device);
+                            log::info!("host disk: {device} taken off the machine");
+                        }
+                        StatusMessage::ok(match released.as_slice() {
+                            [device] => format!("{device} released"),
+                            many => format!("{} released", many.join(", ")),
+                        })
+                    });
+                }
+            }
             UiControl::LauncherHostDiskScroll(delta) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state

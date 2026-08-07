@@ -1299,6 +1299,13 @@ impl HostDiskAttach {
         }
     }
 
+    /// What a machine with no way to attach a host disk at all is missing.
+    /// Said without naming a bus: an A500 could take a SCSI card, so telling
+    /// its owner "IDE needs an A600" reads as the wrong half of the answer.
+    pub fn no_port_requirement() -> &'static str {
+        "Host disk attach requires an A600, A1200, A4000 or SCSI controller"
+    }
+
     /// What a machine must have for this point to exist at all. Both IDE
     /// positions share one requirement, so they share one message.
     pub fn requirement(self) -> &'static str {
