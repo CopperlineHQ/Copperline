@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Full CRT preset, in the spirit of the 1084 the Amiga shipped with: a
-// bowed tube face, scanlines that bow with it, an aperture grille and a
-// corner vignette, all faded in together by the one strength knob.
+// bowed tube face cropping a straight raster, scanlines, an aperture
+// grille and a corner vignette, all faded in together by the one
+// strength knob.
 //
 // The block between the two "shared contract" markers below is the
 // Copperline window-shader contract, byte-identical in every preset and
@@ -94,27 +95,29 @@ const CORNER_RADIUS: f32 = 0.0826;
 // the true black beyond the glass even when the picture itself is dark.
 const GLASS_GLOW: f32 = 0.01;
 
-// Barrel distortion about the centre of the display rect, matched to the
-// 1084's tube (Philips M34EAQ10X, 1986 Philips T08 databook): the face is
-// a section of a sphere (R 640 mm centre blending to R 530 mm at the
-// edge), and the datasheet draws the useful screen (280,8 x 210,6 mm)
-// with barrel-arced edges, R 1545 mm top and bottom, R 1173 mm at the
-// sides. Depth on the face grows with *physical* distance from the
-// centre, so in display-normalised coordinates the y term is weighted by
-// the viewport aspect squared (aspect = height/width, so the weight is
-// *below* one). The bow of an edge comes from how r2 varies while
-// travelling along it: the top edge sweeps the full unweighted x term
-// while a side edge sweeps only the down-weighted y term, so weighting y
-// down bows the top/bottom edges roughly (w/h)^2 as far as the sides --
-// exactly the relation of the datasheet arcs -- and k = 0.30 reproduces
-// the arcs' curvature.
+// The bowed outline of the glass, matched to the 1084's tube (Philips
+// M34EAQ10X, 1986 Philips T08 databook): the face is a section of a
+// sphere (R 640 mm centre blending to R 530 mm at the edge), and the
+// datasheet draws the useful screen (280,8 x 210,6 mm) with barrel-arced
+// edges, R 1545 mm top and bottom, R 1173 mm at the sides. Depth on the
+// face grows with *physical* distance from the centre, so in
+// display-normalised coordinates the y term is weighted by the viewport
+// aspect squared (aspect = height/width, so the weight is *below* one).
+// The bow of an edge comes from how r2 varies while travelling along it:
+// the top edge sweeps the full unweighted x term while a side edge
+// sweeps only the down-weighted y term, so weighting y down bows the
+// top/bottom edges roughly (w/h)^2 as far as the sides -- exactly the
+// relation of the datasheet arcs -- and k = 0.30 reproduces the arcs'
+// curvature.
 //
-// The raster overscans the face, as on the real monitor: the per-axis
-// normalisation rescales the bowed field so the source edge lands exactly
-// on the face's mid-edges. The picture therefore fills the whole face --
-// no black ring between picture and face edge -- and the bow shows as the
-// crop deepening toward the corners, where the source content falls into
-// the rounded-corner clip instead of the visible glass.
+// The warp shapes only the face silhouette that crops the picture; the
+// picture itself is sampled straight. The monitor's deflection is
+// corrected so the raster is rectilinear on the curved glass -- on a
+// real 1084 straight content stays straight to the eye -- and the raster
+// overscans the face, so the visible edge of the picture is the glass
+// boundary: flush at the mid-edges, with the crop deepening toward the
+// corners, where content falls off the barrel-arced outline instead of
+// the visible glass.
 fn warp(uv: vec2<f32>, k: f32, aspect: f32) -> vec2<f32> {
     let c = uv * 2.0 - vec2<f32>(1.0);
     let r2 = c.x * c.x + c.y * c.y * aspect * aspect;
@@ -130,14 +133,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Height over width of the display rect on screen, for warp and
     // corner geometry that must be circular in physical pixels.
     let aspect = u.size.y / max(u.size.x, 1.0);
-    // Curvature fades in with strength, so strength 0 samples straight
-    // through and every later term collapses to the plain sample.
+    // The picture is sampled straight: deflection correction keeps the
+    // raster rectilinear on the real monitor, so only the face outline
+    // below bows. The warped coordinate fades in with strength, keeping
+    // the strength-0 no-op.
     let wuv = mix(uv, warp(uv, u.params.w, aspect), strength);
-    let base = sample_display(wuv);
+    let base = sample_display(uv);
 
-    // Scanlines follow the bowed geometry.
+    // Scanlines follow the raster, which is straight.
     let lines = max(u.params.y, 1.0);
-    let profile = 0.5 - 0.5 * cos(TAU * wuv.y * lines);
+    let profile = 0.5 - 0.5 * cos(TAU * uv.y * lines);
     let scan = (FLOOR + (1.0 - FLOOR) * profile) * SCAN_BOOST;
 
     // The grille sits on the glass, so it is keyed to physical pixels of
@@ -157,23 +162,24 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     let shaded = mix(base.rgb, base.rgb * scan * grille * vig, strength);
 
-    // Anything the bow pushed off the face is the unlit inside of the
-    // tube, and a real face ends at a hard edge: off-face pixels are
-    // opaque black whatever the strength. Only the *area* of the region
-    // scales, and it already does, through wuv above -- at strength 0 the
-    // bow is flat, nothing falls off the face, and the no-op invariant
-    // holds. Mixing the black back toward `shaded` instead would fill the
-    // region with a fraction of the edge colour the sampler smears there.
+    // Anything outside the barrel-arced face outline is the unlit inside
+    // of the tube, and a real face ends at a hard edge: off-face pixels
+    // are opaque black whatever the strength. Only the *area* of the
+    // region scales, and it already does, through wuv above -- at
+    // strength 0 the bow is flat, nothing lies off the face, and the
+    // no-op invariant holds. Mixing the black back toward `shaded`
+    // instead would fill the region with a fraction of the edge colour
+    // the sampler smears there.
     //
     // The face is a rounded rectangle, not a sharp one: the corner arcs
     // are CORNER_RADIUS of the half-width, like the tube's R 11,6 mm
-    // screen corners. The distance is measured in the warped source frame
-    // (the corner is a property of the screen surface, seen through the
-    // same projection as the picture) and in half-width units on both
-    // axes, so the arc stays circular on screen instead of stretching
-    // with the display aspect. The radius fades with strength like the
-    // bow does, keeping the strength-0 no-op; at radius 0 the expression
-    // reduces to the plain rectangle distance.
+    // screen corners. The distance is measured in the warped frame --
+    // `wuv` runs off the rect toward the screen corners, which is what
+    // bows the silhouette's edges outward on screen -- and in half-width
+    // units on both axes, so the arc stays circular on screen instead of
+    // stretching with the display aspect. The radius fades with strength
+    // like the bow does, keeping the strength-0 no-op; at radius 0 the
+    // expression reduces to the plain rectangle distance.
     //
     // d is a signed distance to the face, positive outside; fwidth
     // rescales it to pixels, so the fade covers about one pixel and the

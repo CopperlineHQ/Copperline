@@ -585,17 +585,20 @@ look a phosphor trail on its own cannot give. Three presets are built in:
   size whatever the Amiga resolution behind it, again
   brightness-compensated.
 - `"crt"` -- the lot, in the spirit of the 1084 the Amiga shipped with: a
-  bowed tube face, scanlines that follow the bow, an aperture grille, and a
-  corner vignette, all faded in together. The face geometry is taken from
-  the datasheet of the 1084's picture tube (the Philips M34EAQ10X): the
-  bow reproduces its published screen-edge arcs -- the top and bottom
-  edges bow about twice as far as the sides, as they do on the real
-  screen -- and the corners are rounded at the scale of its 11.6 mm
-  corner arcs. The picture overscans the face like the real raster
-  overscans the glass, filling it to the edges with the bow deepening the
-  crop toward the rounded corners, and on-face black is lifted by a faint
-  glass glow, the room light a real tube reflects, so the face keeps its
-  silhouette even when the picture is dark.
+  bowed tube face, scanlines, an aperture grille, and a corner vignette,
+  all faded in together. The face geometry is taken from the datasheet of
+  the 1084's picture tube (the Philips M34EAQ10X): the bow reproduces its
+  published screen-edge arcs -- the top and bottom edges bow about twice
+  as far as the sides, as they do on the real screen -- and the corners
+  are rounded at the scale of its 11.6 mm corner arcs. The bow shapes
+  only the face outline, not the picture: a real monitor's deflection is
+  corrected so the raster stays rectilinear on the curved glass, and
+  straight content stays straight here too. The picture overscans the
+  face like the real raster overscans the glass, filling it to the
+  edges, with the bowed outline deepening the crop toward the rounded
+  corners, and on-face black is lifted by a faint glass glow, the room
+  light a real tube reflects, so the face keeps its silhouette even when
+  the picture is dark.
 
 `"none"` (the default; `"off"` is accepted for the same thing) presents the
 picture untouched, and any value ending in `.wgsl` is the path of a shader
