@@ -4800,16 +4800,12 @@ fn launcher_board_value_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// The "Add board..." button: a nav-style button at the top of the pane, the
-/// same size and position as the sibling-page buttons on other tabs, with the
-/// board list below it after the same gap.
+/// The "Add board..." button. It stands where every other tab's nav row
+/// stands and takes that row's first slot, so the top of the pane keeps one
+/// shape whichever tab is open; the board list follows below it after the
+/// same gap.
 fn launcher_zorro_add_rect(rect: Rect) -> Rect {
-    Rect {
-        x: launcher_pane_x(rect),
-        y: launcher_nav_y(rect),
-        w: LAUNCH_SIDEBAR_W,
-        h: LAUNCH_MODEL_H,
-    }
+    launcher_nav_button_rect(rect, 0)
 }
 
 fn launcher_action_label(control: UiControl) -> &'static str {
