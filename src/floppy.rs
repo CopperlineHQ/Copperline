@@ -1075,6 +1075,16 @@ impl FloppyController {
 
         if val & DSKLEN_DMAEN == 0 {
             if let Some(dma) = self.dma.take() {
+                if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
+                    log::info!(
+                        "disk-dma teardown df{} track={} write={} remaining={} wait_sync={}",
+                        dma.drive,
+                        dma.track,
+                        dma.write,
+                        dma.remaining,
+                        dma.wait_sync,
+                    );
+                }
                 if dma.write && !dma.write_words.is_empty() {
                     self.finish_write_dma(dma);
                 }
@@ -1749,9 +1759,18 @@ impl FloppyController {
         if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
             let secs = self.drives[idx].elapsed_cck as f64 / PAULA_CLOCK_HZ as f64;
             log::info!(
-                "disk-dma secs={secs:.5} df{idx} track={track} cyl={} write={write} words={remaining} rotbit={}",
+                "disk-dma secs={secs:.5} df{idx} track={track} cyl={} write={write} words={remaining} rotbit={} cached_track={:?} revs={} rev0_words={} settle={}",
                 self.drives[idx].cylinder,
                 self.drives[idx].rotation_bit,
+                self.drives[idx].cached_track,
+                self.drives[idx].cached.revs.len(),
+                self.drives[idx]
+                    .cached
+                    .revs
+                    .first()
+                    .map(|rev| rev.words.len())
+                    .unwrap_or(0),
+                self.drives[idx].seek_settle_cck,
             );
         }
         false
@@ -1811,6 +1830,17 @@ impl FloppyController {
     }
 
     fn finish_dma(&mut self, dma: DiskDma) {
+        if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
+            log::info!(
+                "disk-dma finish df{} track={} write={} remaining={} wait_sync={} dskpt={:#08X}",
+                dma.drive,
+                dma.track,
+                dma.write,
+                dma.remaining,
+                dma.wait_sync,
+                self.dskpt,
+            );
+        }
         self.dsklen &= !DSKLEN_DMAEN;
         if dma.write && !dma.write_words.is_empty() {
             self.finish_write_dma(dma);
