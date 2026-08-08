@@ -59,6 +59,35 @@ foreach ($f in @("a4091_cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
     Copy-Item (Join-Path "assets\a4091" $f) (Join-Path $a4091Dir $f)
 }
 
+# WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
+# with checksums pinned in step with tools/fetch-whdload.sh (the sh script
+# does not run on Windows runners) and shipped unmodified next to the exe,
+# where whdload::find_whdboot_assets probes a sibling whdboot\ directory.
+$whdbootSources = @(
+    @{ Url = "https://whdload.de/whdload/WHDLoad_usr.lha"
+       Sha256 = "093333953737528d79c1eda7d21a16a0aa298698722624e7cfb31f588a0a156d" },
+    @{ Url = "https://aminet.net/util/boot/skick346.lha"
+       Sha256 = "02b4d01852d12ab391c6469064f917221a0f7319fd0b3ba6c359403ec1d59f96" }
+)
+$whdbootAssets = "assets\whdboot"
+foreach ($src in $whdbootSources) {
+    $file = Join-Path $whdbootAssets (Split-Path $src.Url -Leaf)
+    if (-not (Test-Path $file) -or
+        (Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne $src.Sha256) {
+        Write-Host "==> Fetching $($src.Url)"
+        Invoke-WebRequest -Uri $src.Url -OutFile $file
+        $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $src.Sha256) {
+            throw "checksum mismatch for $($src.Url): expected $($src.Sha256), got $got"
+        }
+    }
+}
+$whdbootDir = Join-Path $stage "whdboot"
+New-Item -ItemType Directory -Force -Path $whdbootDir | Out-Null
+foreach ($f in @("WHDLoad_usr.lha", "skick346.lha", "README.md")) {
+    Copy-Item (Join-Path $whdbootAssets $f) (Join-Path $whdbootDir $f)
+}
+
 # Top-level docs and an example config to get users started.
 Copy-Item "copperline.example.toml" $stage
 Copy-Item "LICENSE" (Join-Path $stage "LICENSE.txt")

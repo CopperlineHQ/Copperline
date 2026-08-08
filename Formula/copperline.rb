@@ -26,6 +26,22 @@ class Copperline < Formula
 
   depends_on "rust" => :build
 
+  # WHDLoad support archives for the direct WHDLoad boot (src/whdload.rs).
+  # Both are freely redistributable and shipped unmodified; checksums are
+  # pinned in step with tools/fetch-whdload.sh. whdload.de publishes
+  # WHDLoad_usr.lha as a rolling latest-release file, so a new upstream
+  # WHDLoad release means reviewing it and bumping the hash everywhere the
+  # fetch script's header lists.
+  resource "whdload" do
+    url "https://whdload.de/whdload/WHDLoad_usr.lha", using: :nounzip
+    sha256 "093333953737528d79c1eda7d21a16a0aa298698722624e7cfb31f588a0a156d"
+  end
+
+  resource "skick" do
+    url "https://aminet.net/util/boot/skick346.lha", using: :nounzip
+    sha256 "02b4d01852d12ab391c6469064f917221a0f7319fd0b3ba6c359403ec1d59f96"
+  end
+
   def install
     # Cargo.lock is committed; std_cargo_args passes --locked so the build
     # uses the pinned dependency graph.
@@ -39,6 +55,13 @@ class Copperline < Formula
     # Install the bundled open-source A4091 autoboot ROM (default when a config
     # fits an A4091 without naming a ROM): <prefix>/share/copperline/a4091.
     (pkgshare/"a4091").install Dir["assets/a4091/*"]
+
+    # WHDLoad support archives: <prefix>/share/copperline/whdboot, where
+    # whdload::find_whdboot_assets looks, with the provenance README beside
+    # them.
+    (pkgshare/"whdboot").install "assets/whdboot/README.md"
+    resource("whdload").stage { (pkgshare/"whdboot").install "WHDLoad_usr.lha" }
+    resource("skick").stage { (pkgshare/"whdboot").install "skick346.lha" }
   end
 
   test do

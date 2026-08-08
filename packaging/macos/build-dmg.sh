@@ -101,6 +101,15 @@ for f in a4091_cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
   cp "assets/a4091/$f" "$app/Contents/Resources/a4091/$f"
 done
 
+# WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
+# with pinned checksums, shipped unmodified with their provenance README.
+# whdload::find_whdboot_assets resolves Contents/Resources/whdboot.
+tools/fetch-whdload.sh
+mkdir -p "$app/Contents/Resources/whdboot"
+for f in WHDLoad_usr.lha skick346.lha README.md; do
+  cp "assets/whdboot/$f" "$app/Contents/Resources/whdboot/$f"
+done
+
 echo "==> Ad-hoc signing $app_name"
 # --deep so the nested executable is signed too; "-" selects the ad-hoc
 # identity (no Developer ID needed). This is what lets the universal binary

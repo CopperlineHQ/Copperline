@@ -69,6 +69,17 @@ install -Dm644 assets/a4091/README.md \
 install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt \
   "$appdir/usr/share/copperline/a4091/THIRD_PARTY_NOTICES.txt"
 
+# WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
+# with pinned checksums, shipped unmodified with their provenance README.
+# whdload::find_whdboot_assets looks under share/copperline/whdboot.
+tools/fetch-whdload.sh
+install -Dm644 assets/whdboot/WHDLoad_usr.lha \
+  "$appdir/usr/share/copperline/whdboot/WHDLoad_usr.lha"
+install -Dm644 assets/whdboot/skick346.lha \
+  "$appdir/usr/share/copperline/whdboot/skick346.lha"
+install -Dm644 assets/whdboot/README.md \
+  "$appdir/usr/share/copperline/whdboot/README.md"
+
 # Desktop integration metadata, shared with the Flatpak build.
 install -Dm644 "$flatpak_meta/dev.copperline.Copperline.desktop" \
   "$appdir/usr/share/applications/dev.copperline.Copperline.desktop"
