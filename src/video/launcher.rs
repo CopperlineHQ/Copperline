@@ -197,7 +197,7 @@ pub enum LauncherTab {
     AvAudio,
     AvVideo,
     AvEmulation,
-    /// The Disk Image workshop, reached from Storage: two pages that make
+    /// The Create Image workshop, reached from Storage: two pages that make
     /// fresh images and touch nothing about the machine.
     CreateFloppy,
     CreateHard,
@@ -308,21 +308,21 @@ impl LauncherTab {
 
 /// The Storage tab's top nav links (its sub-pages), left to right.
 const STORAGE_NAV: &[(&str, LauncherTab)] = &[
-    // The workshop leads: nothing here describes this machine, so it lands
-    // on its own pair of pages rather than adding rows to Storage, and it
-    // is the one entry that makes something rather than attaching it.
-    ("Create Image...", LauncherTab::CreateFloppy),
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Boot Priority", LauncherTab::BootPriority),
+    // Last of the four, because it is the one entry that makes something
+    // rather than attaching something: nothing on its pages describes this
+    // machine, which is why they are pages of their own.
+    ("Create Image...", LauncherTab::CreateFloppy),
     // Four to a row, so these two wrap onto a second.
     ("CD", LauncherTab::Cd),
     ("WHDLoad", LauncherTab::Whdload),
 ];
 
-/// The Disk Image workshop's two pages. Reached from Storage, so these pages
-/// show a Back button *and* this nav: one says where you came from, the
-/// other which of the two you are on.
+/// The workshop's two pages. Reached from Storage, so they show a Back
+/// button *and* this nav: one says where you came from, the other which of
+/// the two you are on.
 const CREATE_NAV: &[(&str, LauncherTab)] = &[
     ("Floppy Disk", LauncherTab::CreateFloppy),
     ("Hard Disk", LauncherTab::CreateHard),
@@ -342,7 +342,7 @@ const AV_NAV: &[(&str, LauncherTab)] = &[
 /// same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherField {
-    // Disk Image workshop -- these edit no machine setting, only what the
+    // Create Image workshop -- these edit no machine setting, only what the
     // next image will be made of.
     NewFloppyDensity,
     NewFloppyContainer,
@@ -890,8 +890,8 @@ const EMULATION_ROWS: [Row; 4] = [
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
 ];
-/// The Disk Image workshop's two pages. Every option the format supports is
-/// here; nothing on either page reads or writes the machine's configuration.
+/// The floppy page. Every option the format carries is on it; nothing on
+/// it reads or writes the machine's configuration.
 const NEW_FLOPPY_ROWS: [Row; 8] = [
     section_header("Create Floppy Disk image (ADF):"),
     row(F::NewFloppyDensity, "Density", Cycle),
@@ -4670,7 +4670,7 @@ pub enum EditTarget {
     DriveName(LauncherField),
     /// A hard-disk boot priority typed as a number (the Boot Priority page).
     DriveBootpri(LauncherField),
-    /// A word typed on a Disk Image page: a volume name or a device name.
+    /// A word typed on a Create Image page: a volume name or a device name.
     NewImageText(LauncherField),
 }
 
@@ -4973,7 +4973,7 @@ impl FsFamily {
 #[derive(Debug, Clone)]
 pub struct LauncherState {
     pub setup: MachineSetup,
-    /// What the Disk Image pages will make. Not machine configuration, so
+    /// What the Create Image pages will make. Not machine configuration, so
     /// it sits beside the setup rather than inside it.
     pub workshop: ImageWorkshop,
     pub tab: LauncherTab,
@@ -4985,7 +4985,7 @@ pub struct LauncherState {
 }
 
 impl LauncherState {
-    /// Whether a field belongs to the Disk Image workshop rather than to
+    /// Whether a field belongs to the Create Image workshop rather than to
     /// the machine, so the drawing and click paths read the right state.
     pub fn is_workshop(field: LauncherField) -> bool {
         matches!(
@@ -5021,7 +5021,7 @@ impl LauncherState {
         )
     }
 
-    /// The filesystem a Disk Image row is about: the floppy page's or the
+    /// The filesystem a Create Image row is about: the floppy page's or the
     /// hard-drive page's, whichever row asked.
     pub fn workshop_fs_of(&self, field: LauncherField) -> Option<crate::diskimage::FileSystem> {
         match field {
@@ -5163,7 +5163,7 @@ impl LauncherState {
         }
     }
 
-    /// The value a Disk Image row shows.
+    /// The value a Create Image row shows.
     pub fn workshop_value(&self, field: LauncherField) -> String {
         let w = &self.workshop;
         match field {
@@ -5186,7 +5186,7 @@ impl LauncherState {
         }
     }
 
-    /// Whether a Disk Image toggle is on.
+    /// Whether a Create Image toggle is on.
     pub fn workshop_toggle(&self, field: LauncherField) -> bool {
         match field {
             F::NewFloppyBootable => self.workshop.floppy_bootable,
@@ -5197,7 +5197,7 @@ impl LauncherState {
         }
     }
 
-    /// Whether a Disk Image row can be used at all. Boot code needs a
+    /// Whether a Create Image row can be used at all. Boot code needs a
     /// filesystem to load, so an unformatted disk has nothing to boot, and
     /// a volume name only means something once there is a volume.
     pub fn workshop_applies(&self, field: LauncherField) -> bool {
@@ -5223,7 +5223,7 @@ impl LauncherState {
         }
     }
 
-    /// The button wording on a Disk Image page's action row.
+    /// The button wording on a Create Image page's action row.
     pub fn workshop_action_label(&self, field: LauncherField) -> String {
         match field {
             // Both write a file, and the dialog that follows says which
@@ -5235,7 +5235,7 @@ impl LauncherState {
         }
     }
 
-    /// Step a Disk Image picker.
+    /// Step a Create Image picker.
     pub fn workshop_cycle(&mut self, field: LauncherField, forward: bool) {
         let w = &mut self.workshop;
         match field {
@@ -5295,7 +5295,7 @@ impl LauncherState {
         }
     }
 
-    /// Flip a Disk Image tick box.
+    /// Flip a Create Image tick box.
     pub fn workshop_toggle_flip(&mut self, field: LauncherField) {
         let w = &mut self.workshop;
         match field {
@@ -5307,7 +5307,7 @@ impl LauncherState {
         }
     }
 
-    /// Focus a Disk Image text field, seeding the buffer with its value.
+    /// Focus a Create Image text field, seeding the buffer with its value.
     pub fn begin_edit_new_image(&mut self, field: LauncherField) {
         if !self.workshop_applies(field) {
             return;
@@ -8243,8 +8243,8 @@ mod tests {
         assert_eq!(LauncherTab::Storage.parent_tab(), None);
 
         // The Storage nav lists its sub-pages in order (drawn as a fixed top
-        // nav row, not a settings row). Create Image leads and lands on the
-        // floppy page, which is the workshop's default half.
+        // nav row, not a settings row). Create Image lands on the floppy
+        // page, which is the workshop's default half.
         let storage_nav: Vec<_> = LauncherTab::Storage
             .nav_options()
             .iter()
@@ -8253,10 +8253,10 @@ mod tests {
         assert_eq!(
             storage_nav,
             [
-                LauncherTab::CreateFloppy,
                 LauncherTab::HostFs,
                 LauncherTab::HostDisk,
                 LauncherTab::BootPriority,
+                LauncherTab::CreateFloppy,
                 LauncherTab::Cd,
                 LauncherTab::Whdload,
             ]

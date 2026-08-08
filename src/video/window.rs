@@ -1412,7 +1412,7 @@ impl Drop for RenderWorker {
     }
 }
 
-/// Which of the two Disk Image pages asked for a file, and what it asked
+/// Which of the two Create Image pages asked for a file, and what it asked
 /// for. The choice is made while the launcher state is still borrowed, and
 /// acted on after the save dialog has come back.
 enum ImageToMake {
@@ -7161,7 +7161,7 @@ impl App {
         self.finish_host_io_pause();
     }
 
-    /// Make a fresh disk image from what the Disk Image page is showing.
+    /// Make a fresh disk image from what the Create Image page is showing.
     ///
     /// The file is chosen first: the save dialog is where a user cancels,
     /// and nothing is written until they have named somewhere to write it.

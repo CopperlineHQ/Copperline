@@ -756,13 +756,13 @@ pub enum UiControl {
     LauncherClear(LauncherField),
     /// Configuration screen: focus a drive's volume-name field for text entry.
     LauncherDriveNameEdit(LauncherField),
-    /// A free-text box on a Disk Image page (a volume or device name).
+    /// A free-text box on a Create Image page (a volume or device name).
     LauncherNewImageEdit(LauncherField),
-    /// The Create button on a Disk Image page.
+    /// The Create button on a Create Image page.
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.
     LauncherNewImageUnit,
-    /// A filesystem family tick box on a Disk Image page.
+    /// A filesystem family tick box on a Create Image page.
     LauncherFsFamily {
         field: LauncherField,
         family: launcher::FsFamily,
@@ -4338,7 +4338,7 @@ fn launcher_nav_rows(slots: usize) -> usize {
     slots.max(1).div_ceil(LAUNCH_NAV_PER_ROW)
 }
 
-/// A free-text value box on a Disk Image row: where a value would sit, at
+/// A free-text value box on a Create Image row: where a value would sit, at
 /// the width a volume or device name needs.
 fn launcher_text_rect(rect: Rect, row_y: usize) -> Rect {
     Rect {
@@ -4349,7 +4349,7 @@ fn launcher_text_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// The button on a Disk Image action row: the page's one commitment,
+/// The button on a Create Image action row: the page's one commitment,
 /// rather than another little control.
 fn launcher_action_rect(rect: Rect, row_y: usize) -> Rect {
     Rect {
@@ -5241,7 +5241,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     }
     // The nav row: a Back button when this is a sub-page, then whatever
-    // sibling pages it offers. A page can have both -- the Disk Image pages
+    // sibling pages it offers. A page can have both -- the Create Image pages
     // say where they came from and which of the two they are.
     let mut slot = 0;
     if let Some(parent) = state.tab.parent_tab() {
@@ -6758,7 +6758,7 @@ fn draw_launcher(
     }
     // Nav row at the top of the pane: a Back button when this is a sub-page,
     // then its sibling links, with the current one highlighted. A page can
-    // show both -- the Disk Image pages say where they came from and which
+    // show both -- the Create Image pages say where they came from and which
     // of the two they are.
     let back_parent = state.tab.parent_tab();
     let options = state.tab.nav_options();
@@ -8490,41 +8490,6 @@ mod tests {
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "about");
 
-        // The Disk Image workshop's two pages, which are the pages a layout
-        // change is judged on.
-        for (tab, name) in [
-            (launcher::LauncherTab::CreateFloppy, "create-floppy"),
-            (launcher::LauncherTab::CreateHard, "create-hard"),
-        ] {
-            let mut frame = vec![0u8; w * h * 4];
-            let mut state = launcher::LauncherState::new(launcher::MachineSetup::default());
-            state.tab = tab;
-            let ui = UiState {
-                menu_open: false,
-                menu_rows: Vec::new(),
-                menu_nav: menu::MenuNav::default(),
-                panel: Some(Panel::Launcher(Box::new(state))),
-            };
-            draw(&mut frame, scale, &ui, None, None);
-            assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
-            save(&frame, name);
-        }
-        // ...and the Storage page they are reached from, whose nav row now
-        // carries five links.
-        {
-            let mut frame = vec![0u8; w * h * 4];
-            let mut state = launcher::LauncherState::new(launcher::MachineSetup::default());
-            state.tab = launcher::LauncherTab::Storage;
-            let ui = UiState {
-                menu_open: false,
-                menu_rows: Vec::new(),
-                menu_nav: menu::MenuNav::default(),
-                panel: Some(Panel::Launcher(Box::new(state))),
-            };
-            draw(&mut frame, scale, &ui, None, None);
-            save(&frame, "storage");
-        }
-
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
@@ -9377,7 +9342,7 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-printer");
 
-        // The Host Mounts sub-page reached from the Storage tab.
+        // The Host Folder sub-page reached from the Storage tab.
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::HostFs;
@@ -9408,8 +9373,7 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-whdload");
 
-        // The Storage tab itself, whose nav row now wraps onto a second
-        // row of chips.
+        // The Storage tab, whose six sub-page links wrap onto a second row.
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::Storage;
@@ -9422,7 +9386,7 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-storage");
 
-        // The Disk Image workshop: its two pages, and the geometry editor
+        // The Create Image workshop: its two pages, and the geometry editor
         // behind the hard-drive one.
         for (tab, name) in [
             (LauncherTab::CreateFloppy, "launcher-new-floppy"),
