@@ -129,13 +129,23 @@ pub fn list_files(archive: &Path) -> Result<Vec<PathBuf>> {
     Ok(read_archive(archive)?.into_iter().map(|e| e.path).collect())
 }
 
+/// A path lowered to its components for host-neutral comparison: rendering
+/// a `PathBuf` as a string would join with the HOST separator (`\` on
+/// Windows), which can never match a `/`-separated query string.
+fn fold_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
+}
+
 /// Extract a single member, matched against `member` case-insensitively the
-/// way AmigaDOS names are matched (archives are inconsistent about case).
+/// way AmigaDOS names are matched (archives are inconsistent about case),
+/// and component-wise so the host's path separator does not matter.
 pub fn read_member(archive: &Path, member: &Path) -> Result<Vec<u8>> {
-    let want = member.to_string_lossy().to_ascii_lowercase();
+    let want = fold_components(member);
     let entries = read_archive(archive)?;
     for entry in entries {
-        if entry.path.to_string_lossy().to_ascii_lowercase() == want {
+        if fold_components(&entry.path) == want {
             return Ok(entry.data);
         }
     }
@@ -256,6 +266,19 @@ pub(crate) mod tests {
         assert_eq!(
             std::fs::read(out.join("Game/data/level1")).unwrap(),
             b"payload"
+        );
+    }
+
+    /// The comparison must survive a `PathBuf` assembled with the host's
+    /// own separator (backslash on Windows) against a `/`-separated query;
+    /// comparing rendered strings did not, which broke every archive-member
+    /// lookup on Windows.
+    #[test]
+    fn member_lookup_is_separator_neutral() {
+        let entry_path: PathBuf = ["WHDLoad", "C", "WHDLoad"].iter().collect();
+        assert_eq!(
+            fold_components(&entry_path),
+            fold_components(Path::new("whdload/c/whdload"))
         );
     }
 
