@@ -6001,7 +6001,10 @@ fn whdload_package_dropped_on_launcher_fills_the_game_field() {
                 state.setup.path(LauncherField::WhdloadGame),
                 Some(std::path::Path::new("/games/Turrican.lha"))
             );
-            assert!(state.status.as_ref().is_some_and(|s| !s.error));
+            assert!(state
+                .status
+                .as_ref()
+                .is_some_and(|s| s.kind != crate::video::launcher::StatusKind::Error));
         }
         _ => panic!("launcher should stay open"),
     }

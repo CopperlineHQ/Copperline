@@ -9408,6 +9408,41 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-whdload");
 
+        // The Storage tab itself, whose nav row now wraps onto a second
+        // row of chips.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::Storage;
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        save(&frame, "launcher-storage");
+
+        // The Disk Image workshop: its two pages, and the geometry editor
+        // behind the hard-drive one.
+        for (tab, name) in [
+            (LauncherTab::CreateFloppy, "launcher-new-floppy"),
+            (LauncherTab::CreateHard, "launcher-new-hard"),
+            (LauncherTab::CreateGeometry, "launcher-new-geometry"),
+        ] {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = tab;
+            state.workshop.geometry_custom = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, name);
+        }
+
         // The Boot Priority sub-page: an A1200 with two IDE drives -- the master
         // bootable at 0, the slave with its Bootable box cleared -- and one
         // SCSI unit carrying a disk of its own.
