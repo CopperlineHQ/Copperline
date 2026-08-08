@@ -1418,7 +1418,7 @@ as you would expect. Set `readonly = true` to export a directory
 write-protected instead -- the guest sees a read-only disk and every write
 fails with the same "disk is write-protected" error a physical
 write-protected disk gives, which is worth setting on anything you would
-rather the Amiga could not damage. The launcher's Host Mounts sub-page (under
+rather the Amiga could not damage. The launcher's Host Folder sub-page (under
 the Storage tab) exposes the same choice as its **Access** field.
 
 Amiga file attributes a host filesystem cannot hold -- protection bits

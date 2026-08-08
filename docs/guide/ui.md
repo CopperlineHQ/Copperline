@@ -434,17 +434,19 @@ The layout is:
   serial port, drive select, density, read mode and replay speed, greying
   whatever the chosen interface does not honour. See [](fluxbridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
-  links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host
-  Mounts**, for host directories served live as AmigaDOS volumes (up to four
-  mounts, each with a boot priority and a read-write/read-only **Access** field
-  -- the config file itself takes up to eight `[[filesys]]` mounts, of which the
-  launcher edits the first four); **Boot Priority**, which sets each
-  hard-disk drive's synthesized-RDB boot priority (see below); and
-  **WHDLoad**, which picks a WHDLoad game package plus its optional
-  Kickstart-image and game-library directories (see [](whdload.md); Run then
-  boots straight into the game). Each sub-page has
-  a **< Back** button in that top row that returns to Storage),
+  A3000's onboard SCSI -- and its boot ROM and units; a block of buttons at
+  the top links to six sub-pages: **Host Folder**, for host directories
+  served live as AmigaDOS volumes (up to four mounts, each with a boot
+  priority and a read-write/read-only **Access** field -- the config file
+  itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
+  the first four); **Host Disk**, for a real disk of this computer's (see
+  [](host-disks.md)); **Boot Priority**, which sets each hard-disk drive's
+  synthesized-RDB boot priority (see below); **Create Image...**, which
+  makes new ADF and HDF images (see below); **CD** (image, insert delay,
+  CD32 NVRAM); and **WHDLoad**, which picks a WHDLoad game package plus its
+  optional Kickstart-image and game-library directories (see
+  [](whdload.md); Run then boots straight into the game). Each sub-page has
+  a **< Back** button in that block that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
@@ -522,6 +524,95 @@ Saved files use the same schema as a hand-written `copperline.toml`
 interchangeable: configure a machine and save it, or load an existing config to
 tweak it. **Run** builds the machine in place, so the configuration screen and a
 direct `--config` launch produce an identical machine.
+
+### Create Image
+
+*Storage -> Create Image...* makes new, empty disk images: **Floppy Disk**
+writes an ADF, **Hard Disk** writes an HDF. These pages write a file and
+nothing else; none of their settings belongs to the machine, so none of it
+is saved to a configuration file.
+
+**Save...** opens a file dialog, then writes the image. The status line
+reports progress and the finished size; the write runs in the background,
+so the window stays responsive while a large image is written.
+
+#### Floppy Disk
+
+| Option | Effect |
+|---|---|
+| **Density** | `DD (880K)` or `HD (1.76M)`. Sets the image size: 901,120 or 1,802,240 bytes. |
+| **Container** | `Standard ADF` writes the sectors in order. `Extended ADF` wraps them in the `UAE-1ADF` container, which stores one record per track. |
+| **Filesystem** | `Unformatted` leaves the image blank for the Amiga to format. `OFS` and `FFS` write a boot block, root block and bitmap. |
+| **DOSType** | The DOS type's options: `International` case folding, `Dir cache`, `Long names`. See **DOSType** below. |
+| **Volume name** | The name the volume mounts under. |
+| **Bootable** | Writes the boot code that loads `dos.library`, so the disk boots rather than only mounting. |
+
+#### Hard Disk
+
+| Option | Effect |
+|---|---|
+| **Size** | A whole number up to 9999, in the unit beside it. Click `MB`/`GB` to change the unit. The image is rounded up to the next whole cylinder. |
+| **Geometry** | `Auto` derives cylinders/surfaces/sectors from the size. `Custom` sets them by hand, and adds a **Configure** button that opens the geometry editor. |
+| **Partitioning** | `RDB` writes a Rigid Disk Block and one partition filling the drive. `None` writes no partition table. |
+| **Filesystem** | As for a floppy. With `RDB` the type is recorded in the partition entry; with `None` the volume starts at block 0. |
+| **DOSType** | As for a floppy. |
+| **Device name** | The device the partition mounts as, e.g. `DH0`. RDB only. |
+| **Volume name** | The name the volume mounts under. |
+| **Bootable** | Sets the partition's bootable flag. RDB only. |
+| **Boot priority** | The partition's `de_BootPri`, -128 to 127. Kickstart enters DF0: at 5, so 6 boots the hard disk ahead of a floppy. Applies while Bootable is ticked. |
+| **Read only** | Marks the finished file read-only on this computer. |
+| **Sparse image** | On by default: the file is created at full length with only its structure written, and the host fills the rest in as it is used. Clear it to write the whole file now, which takes as long as writing that many bytes takes. |
+
+An image larger than 2048 GB can be made only with `Partitioning: None`
+and `Filesystem: Unformatted`: every block number an RDB or an AmigaDOS
+volume uses is a 32-bit field.
+
+With **Sparse image** cleared, the volume the file is being written to is
+checked for room first, and the write is refused if there is not enough.
+
+#### Geometry editor
+
+Reached from **Configure** on the Hard Disk page once **Geometry** is set
+to `Custom`. The geometry set here decides the image's size; the Size box
+seeds it.
+
+| Option | Effect |
+|---|---|
+| **Cylinders**, **Surfaces**, **Sectors per track** | The drive's stated geometry. Surfaces x sectors is one cylinder; the RDB states the partition in cylinders, so these set the granularity a partition can start and end on. |
+| **Reserved blocks** | Blocks at the front of the partition the filesystem never allocates. Two -- the length of the boot block -- unless there is a reason to say otherwise. |
+| **Drive**, **Type**, **Revision** | What the drive answers when asked what it is. HDToolBox shows the first two as its *Drive* and *Type* columns. Each box holds as many characters as its RDB field: 8, 16 and 4. |
+
+**Apply** returns to the Hard Disk page. **Auto** puts every figure back to
+what the size implies, and the identity back to `Amiga` / the size /
+Copperline's version.
+
+```{figure} ../images/ui-preview-launcher-new-geometry.png
+:alt: The geometry editor of the Create Image sub-page
+:width: 75%
+
+The geometry editor, with the drive identity below the figures and a note
+of the size they come to.
+```
+
+#### DOSType
+
+The **Filesystem** row picks OFS or FFS; the **DOSType** row picks the
+options that filesystem carries. Between them they name one of the eight
+AmigaDOS types:
+
+| Ticked | Type |
+|---|---|
+| -- | `DOS0` (OFS), `DOS1` (FFS) |
+| International | `DOS2`, `DOS3` |
+| International + Dir cache | `DOS4`, `DOS5` |
+| International + Long names | `DOS6`, `DOS7` |
+
+`Dir cache` and `Long names` are two values of one field, so ticking one
+greys the other. Both are international, so `International` shows ticked
+and greyed alongside either.
+
+`Dir cache` needs Kickstart 3.0, `International` needs 2.0, and `Long
+names` needs a filesystem no Kickstart provides.
 
 ## Recording video
 

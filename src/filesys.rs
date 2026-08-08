@@ -2237,8 +2237,14 @@ fn match_component(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
 }
 
 /// Total and available bytes of the host filesystem containing `path`.
+///
+/// The figure is the one for the filesystem `path` sits on, not the one
+/// Copperline is running from: both platform calls resolve the path to its
+/// own mount, so a save onto another drive is measured against that drive.
+/// `path` has to exist -- for a file about to be written, ask about the
+/// directory it is going into.
 #[cfg(unix)]
-fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -2253,7 +2259,7 @@ fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
 /// `lpFreeBytesAvailableToCaller` is the quota-aware figure, matching what
 /// the statvfs `f_bavail` reports on Unix.
 #[cfg(windows)]
-fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" {
@@ -2274,7 +2280,7 @@ fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn host_fs_usage(_path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn host_fs_usage(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
