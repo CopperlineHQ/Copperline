@@ -510,11 +510,15 @@ pub(super) fn dual_playfield_pixel(idx: u8, control: ControlState) -> (u8, usize
     // Lisa does not inherit the quirk. Alfred Chicken (AGA) programs
     // BPLCON2 = 0x003F -- both codes 7 -- for its whole in-game display and
     // draws an eight-plane dual playfield on real hardware, which the
-    // Denise behaviour would blank to the background colour. There is no
-    // AGA photo of invprio1 to check the ECS case against, so the split is
-    // drawn where the evidence is: Denise keeps the photographed quirk,
-    // Lisa resolves the colour independently of the code.
-    // TODO: photograph invprio1 on an A1200 to confirm Lisa ignores
+    // Denise behaviour would blank to the background colour. The quirk
+    // reached us from an OCS/ECS-only reference, so it never carried
+    // evidence about Lisa; WinUAE, which does model AGA, resolves the
+    // playfield colour from the plane bits alone and uses the priority
+    // codes only to mask sprites. So the split is drawn where the evidence
+    // is: the photographed Denise case keeps the quirk, and Lisa resolves
+    // the colour independently of the code.
+    // TODO: the Lisa side rests on the game plus WinUAE, with no photograph
+    // of its own; shoot invprio1 on an A1200 to confirm Lisa ignores
     // out-of-range codes entirely rather than differing in some other way.
     if !control.aga() && control.playfield_priority_code(winner) > 4 {
         return (0, 0);
