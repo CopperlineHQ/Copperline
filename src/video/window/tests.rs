@@ -3477,7 +3477,10 @@ fn launcher_run_keeps_panel_open_on_error() {
     app.launcher_run();
     match &app.ui.panel {
         Some(Panel::Launcher(state)) => assert!(
-            state.status.as_ref().is_some_and(|s| s.error),
+            state
+                .status
+                .as_ref()
+                .is_some_and(|s| s.kind == crate::video::launcher::StatusKind::Error),
             "expected an error status to keep the user in the launcher"
         ),
         _ => panic!("launcher should stay open on a validation error"),
@@ -5998,7 +6001,10 @@ fn whdload_package_dropped_on_launcher_fills_the_game_field() {
                 state.setup.path(LauncherField::WhdloadGame),
                 Some(std::path::Path::new("/games/Turrican.lha"))
             );
-            assert!(state.status.as_ref().is_some_and(|s| !s.error));
+            assert!(state
+                .status
+                .as_ref()
+                .is_some_and(|s| s.kind != crate::video::launcher::StatusKind::Error));
         }
         _ => panic!("launcher should stay open"),
     }

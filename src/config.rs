@@ -9854,11 +9854,18 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> PathBuf {
+        // The clock alone is not unique enough: tests run in parallel, and
+        // two landing on the same nanosecond share a path -- so one reads a
+        // file the other is still writing, and fails on a short read. The
+        // counter makes the name unique within the process whatever the
+        // clock says.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("copperline-config-test-{nanos}-{name}"))
+        std::env::temp_dir().join(format!("copperline-config-test-{nanos}-{seq}-{name}"))
     }
 
     fn toml_path(path: &Path) -> String {

@@ -189,10 +189,89 @@ fn rdb_checksum(block: &mut [u8]) {
     put_be32(block, 8, 0u32.wrapping_sub(sum));
 }
 
+/// How a drive says what it is, in the Rigid Disk Block.
+///
+/// Three fields, laid out as a SCSI INQUIRY reply and shown by HDToolBox as
+/// the drive's *Drive* and *Type* columns. The widths are the reason they
+/// are separate strings rather than one: a name longer than eight
+/// characters written across the pair splits between the two columns, which
+/// is how "Copperline" once became a drive called `Copperli` of type `ne`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdbIdentity {
+    /// `rdb_DiskVendor`, 8 bytes. HDToolBox's "Drive".
+    pub vendor: String,
+    /// `rdb_DiskProduct`, 16 bytes. HDToolBox's "Type".
+    pub product: String,
+    /// `rdb_DiskRevision`, 4 bytes.
+    pub revision: String,
+}
+
+/// The longest each identity field can be, in that order. A string past its
+/// width is cut rather than spilling into the next field.
+pub const RDB_IDENTITY_WIDTHS: [usize; 3] = [8, 16, 4];
+
+/// What Copperline calls a drive it made or made up, unless told otherwise:
+/// who it came from, how big it is, and which version wrote it.
+pub fn default_rdb_identity(bytes: u64) -> RdbIdentity {
+    RdbIdentity {
+        vendor: "Amiga".to_string(),
+        product: default_rdb_product(bytes),
+        revision: default_rdb_revision(),
+    }
+}
+
+/// The size, as the drive's model name: what an Amiga tool shows in its
+/// Type column, so a glance at HDToolBox says how big the drive is.
+pub fn default_rdb_product(bytes: u64) -> String {
+    const K: u64 = 1 << 10;
+    const M: u64 = 1 << 20;
+    const G: u64 = 1 << 30;
+    // Only a whole number of the larger unit reads as that unit: a 1023 MB
+    // drive is not a 1 GB drive, and saying so would be a lie the user
+    // cannot see past.
+    if bytes.is_multiple_of(G) {
+        format!("{}GB HDF", bytes / G)
+    } else if bytes >= M {
+        format!("{}MB HDF", bytes / M)
+    } else {
+        format!("{}KB HDF", bytes.div_ceil(K))
+    }
+}
+
+/// Copperline's own version, cut to the four bytes the field holds:
+/// major.minor, which is as much as fits and as much as matters.
+pub fn default_rdb_revision() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut parts = version.split('.');
+    let short = match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        _ => version.to_string(),
+    };
+    short.chars().take(RDB_IDENTITY_WIDTHS[2]).collect()
+}
+
+/// Write the drive identity into an RDSK block at the three offsets the
+/// format gives it, each padded with spaces to its own width.
+pub fn put_rdb_identity(block: &mut [u8], identity: &RdbIdentity) {
+    // Longs 40, 42 and 46 of the block.
+    let fields = [
+        (160usize, RDB_IDENTITY_WIDTHS[0], &identity.vendor),
+        (168, RDB_IDENTITY_WIDTHS[1], &identity.product),
+        (184, RDB_IDENTITY_WIDTHS[2], &identity.revision),
+    ];
+    for (at, width, text) in fields {
+        let mut field = vec![b' '; width];
+        for (slot, byte) in field.iter_mut().zip(text.bytes()) {
+            *slot = byte;
+        }
+        block[at..at + width].copy_from_slice(&field);
+    }
+}
+
 /// Build the RDSK block for a synthesized RDB: `total_cyls` cylinders of
 /// 16x32 geometry, RDB occupying cylinder 0, partitionable space from
-/// cylinder 1. `disk_label` fills the vendor/product identity fields.
-fn build_rdsk_block(total_cyls: u32, disk_label: &str) -> Vec<u8> {
+/// cylinder 1.
+fn build_rdsk_block(total_cyls: u32) -> Vec<u8> {
     let mut b = vec![0u8; SECTOR_SIZE];
     b[0..4].copy_from_slice(b"RDSK");
     put_be32(&mut b, 4, 64); // size in longs
@@ -220,11 +299,8 @@ fn build_rdsk_block(total_cyls: u32, disk_label: &str) -> Vec<u8> {
     put_be32(&mut b, 136, 1); // lo cylinder
     put_be32(&mut b, 140, total_cyls - 1); // hi cylinder
     put_be32(&mut b, 144, CYL_SECTORS); // blocks per cylinder
-                                        // Vendor (8) + product (16) identity, then the revision.
-    let mut label = disk_label.as_bytes().to_vec();
-    label.resize(24, b' ');
-    b[160..184].copy_from_slice(&label);
-    b[184..188].copy_from_slice(b"1.0 ");
+    let bytes = u64::from(total_cyls) * u64::from(CYL_SECTORS) * SECTOR_SIZE as u64;
+    put_rdb_identity(&mut b, &default_rdb_identity(bytes));
     rdb_checksum(&mut b);
     b
 }
@@ -272,6 +348,14 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) ->
 }
 
 impl HardDriveImage {
+    /// Whether the image carries its own Rigid Disk Block, rather than
+    /// being a bare single-partition hardfile this had to synthesize one
+    /// over. An image made by the disk-image workshop with a partition
+    /// table must land here, which is what its tests assert.
+    pub fn has_own_rdb(&self) -> bool {
+        self.rdb_overlay.is_none()
+    }
+
     /// Attach a real host disk in place of an image.
     ///
     /// The device is identified the way a configuration names it (`disk4`,
@@ -362,7 +446,8 @@ impl HardDriveImage {
 
     /// Open a drive image. `device_name` is the DOS device name (e.g.
     /// "DH0") a synthesized RDB advertises; `bus_name` ("ide"/"scsi") tags
-    /// log messages; `disk_label` fills the RDSK vendor/product identity.
+    /// log messages. A synthesized RDB names itself (see
+    /// [`default_rdb_identity`]); nothing a caller passes reaches it.
     /// The path may be a raw HDF image file, or a host directory, which is
     /// built into an in-memory FFS volume at open time. `volume_override`
     /// names that FFS volume; when `None` the directory name is used. It has
@@ -373,7 +458,6 @@ impl HardDriveImage {
         path: &Path,
         device_name: &str,
         bus_name: &'static str,
-        disk_label: &str,
         volume_override: Option<&str>,
         boot_pri: i8,
     ) -> anyhow::Result<Self> {
@@ -475,7 +559,7 @@ impl HardDriveImage {
             let total_cyls = 1 + part_cyls;
             let dostype = u32::from_be_bytes(head[..4].try_into().unwrap());
             let mut overlay = vec![0u8; CYL_BYTES as usize];
-            overlay[..SECTOR_SIZE].copy_from_slice(&build_rdsk_block(total_cyls, disk_label));
+            overlay[..SECTOR_SIZE].copy_from_slice(&build_rdsk_block(total_cyls));
             overlay[SECTOR_SIZE..2 * SECTOR_SIZE].copy_from_slice(&build_part_block(
                 total_cyls,
                 dostype,
@@ -647,7 +731,7 @@ mod tests {
         let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
         bytes[5 * SECTOR_SIZE..5 * SECTOR_SIZE + 4].copy_from_slice(b"MARK");
         let path = temp_image("serde.hdf", &bytes);
-        let mut original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, 0).unwrap();
+        let mut original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
 
         let encoded = bincode::serialize(&original).unwrap();
         let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
@@ -734,7 +818,7 @@ mod tests {
     #[test]
     fn directory_mount_uses_the_directory_name_as_the_volume_label() {
         let (parent, mount) = temp_mount_dir("Games");
-        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", None, 0).unwrap();
+        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", None, 0).unwrap();
         assert_eq!(volume_label(&mut disk), "Games");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -742,8 +826,7 @@ mod tests {
     #[test]
     fn directory_mount_volume_override_sets_the_label() {
         let (parent, mount) = temp_mount_dir("Games");
-        let mut disk =
-            HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", Some("Workbench"), 0).unwrap();
+        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", Some("Workbench"), 0).unwrap();
         assert_eq!(volume_label(&mut disk), "Workbench");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -751,7 +834,7 @@ mod tests {
     #[test]
     fn serde_errors_when_backing_file_is_missing() {
         let path = temp_image("gone.hdf", &vec![0u8; 8 * SECTOR_SIZE]);
-        let original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, 0).unwrap();
+        let original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
         let encoded = bincode::serialize(&original).unwrap();
         let _ = std::fs::remove_file(&path);
         let Err(err) = bincode::deserialize::<HardDriveImage>(&encoded) else {
@@ -789,8 +872,7 @@ mod tests {
     fn synthesized_partition_carries_the_configured_boot_priority() {
         let path = bare_partition_image("bootpri.hdf");
         for pri in [0i8, 6, 20, -5, 127] {
-            let mut disk =
-                HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, pri).unwrap();
+            let mut disk = HardDriveImage::open(&path, "DH0", "ide", None, pri).unwrap();
             let part = part_block(&mut disk);
             assert_eq!(
                 be32(&part, DE_BOOT_PRI_OFF) as i32,
@@ -805,15 +887,9 @@ mod tests {
     #[test]
     fn boot_pri_never_mounts_the_partition_without_making_it_bootable() {
         let path = bare_partition_image("neverboot.hdf");
-        let mut disk = HardDriveImage::open(
-            &path,
-            "DH1",
-            "scsi",
-            "TEST DISK",
-            None,
-            crate::config::BOOT_PRI_NEVER,
-        )
-        .unwrap();
+        let mut disk =
+            HardDriveImage::open(&path, "DH1", "scsi", None, crate::config::BOOT_PRI_NEVER)
+                .unwrap();
         let part = part_block(&mut disk);
         assert_eq!(
             be32(&part, DE_BOOT_PRI_OFF) as i32,
@@ -834,8 +910,7 @@ mod tests {
     fn part_block_checksum_stays_valid_for_every_boot_priority() {
         let path = bare_partition_image("checksum.hdf");
         for pri in [i8::MIN, -1, 0, 1, i8::MAX] {
-            let mut disk =
-                HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, pri).unwrap();
+            let mut disk = HardDriveImage::open(&path, "DH0", "ide", None, pri).unwrap();
             let part = part_block(&mut disk);
             let sum = (0..64).fold(0u32, |acc, i| acc.wrapping_add(be32(&part, i * 4)));
             assert_eq!(sum, 0, "RDB checksum rule broken for bootpri {pri}");

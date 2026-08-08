@@ -35,6 +35,7 @@ pub mod crashlog;
 pub mod debugger;
 pub mod dirfs;
 pub mod disasm;
+pub mod diskimage;
 pub mod dms;
 pub mod drive_sounds;
 pub mod emulator;

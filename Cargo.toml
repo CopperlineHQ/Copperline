@@ -187,7 +187,13 @@ libloading = { version = "0.8", optional = true }
 # connect/read/write readiness. This is the Windows counterpart of poll(2);
 # in particular it can report a queued connection on a listening socket,
 # which MSG_PEEK cannot.
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+# Win32_System_IO is DeviceIoControl, which src/diskimage.rs uses to ask
+# NTFS for a sparse file: setting a file's length commits the space there,
+# where on Unix it leaves a hole.
+windows-sys = { version = "0.61", features = [
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
 
 # Optional realtime-priority feature: cross-platform thread scheduling control.
 # Only used off macOS -- the macOS path uses the libc pthread QoS API directly

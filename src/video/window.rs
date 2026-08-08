@@ -976,6 +976,11 @@ pub struct App {
     /// Files from DroppedFile events, coalesced in about_to_wait: winit
     /// delivers one event per file, and a multi-file drop must act once.
     pending_dropped_files: Vec<PathBuf>,
+    /// A disk image being written by the launcher's workshop. A large,
+    /// fully-allocated image takes long enough that writing it on this
+    /// thread would look like a hang, so it runs on a worker and the loop
+    /// stays awake to collect it.
+    image_job: Option<ImageJob>,
     /// Per-drive disk-swap playlists: the ordered image paths the user can
     /// cycle through for each drive with the disk-swap shortcut. Lets a
     /// multi-disk demo run on a single drive.
@@ -1407,6 +1412,59 @@ impl Drop for RenderWorker {
     }
 }
 
+/// Which of the two Create Image pages asked for a file, and what it asked
+/// for. The choice is made while the launcher state is still borrowed, and
+/// acted on after the save dialog has come back.
+enum ImageToMake {
+    Floppy(crate::diskimage::FloppySpec),
+    Hard(crate::diskimage::HardSpec),
+}
+
+impl ImageToMake {
+    /// Whether the file will be left with holes in it. A floppy is written
+    /// whole -- it is under two megabytes -- so it never is.
+    fn is_sparse(&self) -> bool {
+        match self {
+            ImageToMake::Floppy(_) => false,
+            ImageToMake::Hard(spec) => spec.sparse,
+        }
+    }
+
+    /// How much room the finished file will take on the host. For a hard
+    /// drive that is the geometry's own size, which a hand-set geometry
+    /// decides rather than the size box.
+    fn bytes_on_disk(&self) -> u64 {
+        match self {
+            ImageToMake::Floppy(spec) => crate::diskimage::floppy_bytes(spec),
+            ImageToMake::Hard(spec) => spec
+                .geometry
+                .unwrap_or_else(|| crate::diskimage::Geometry::for_size(spec.bytes))
+                .bytes(),
+        }
+    }
+}
+
+/// An image being written on a worker thread, and what to call it when it
+/// lands.
+struct ImageJob {
+    rx: std::sync::mpsc::Receiver<std::io::Result<crate::diskimage::Created>>,
+    path: PathBuf,
+    /// The file's own name, for the line that reports it landing.
+    name: String,
+}
+
+/// Bytes free on the filesystem a not-yet-created file would land on.
+///
+/// The file itself does not exist, so the question is asked of the
+/// directory holding it -- and of *that* directory, not of Copperline's
+/// own: saving onto a second drive is measured against the second drive.
+/// `None` when the host will not say, in which case there is nothing to
+/// warn about and the write simply goes ahead.
+fn free_space_for_new_file(path: &std::path::Path) -> Option<u64> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty())?;
+    crate::filesys::host_fs_usage(dir).map(|(_, avail)| avail)
+}
+
 impl App {
     pub fn new(
         emu: Emulator,
@@ -1595,6 +1653,7 @@ impl App {
             osd: None,
             drop_hover: false,
             pending_dropped_files: Vec::new(),
+            image_job: None,
             disk_playlists,
             disk_write_protected,
             disk_playlist_index: [0; 4],
@@ -3620,11 +3679,22 @@ impl ApplicationHandler for App {
         // The calibration panel polls raw gamepad events, so it needs the
         // loop awake even while the machine is paused or powered off.
         let calibrating = matches!(self.ui.panel, Some(Panel::Calibration(_)));
-        event_loop.set_control_flow(if running || osd_active || calibrating {
+        // An image being written on a worker has to be collected, and the
+        // launcher is up with the machine off -- nothing else would wake
+        // the loop to notice it finished.
+        self.poll_image_job();
+        let writing_image = self.image_job.is_some();
+        event_loop.set_control_flow(if running || osd_active || calibrating || writing_image {
             ControlFlow::Poll
         } else {
             ControlFlow::Wait
         });
+        if writing_image && !running {
+            // Nothing else paces the loop while the machine is off; check
+            // back at a human rate rather than spinning a core on it.
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            self.request_redraw();
+        }
         if osd_active && !running {
             self.request_redraw();
         }
@@ -5678,14 +5748,32 @@ impl App {
             }
             UiControl::LauncherCycle { field, forward } => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.setup.cycle(field, forward);
-                    state.status = None;
+                    // Reaching for another control ends the typing, the way
+                    // Enter does: what is in the box counts.
+                    state.edit_commit();
+                    let refused = state.editing().is_some();
+                    if LauncherState::is_workshop(field) {
+                        state.workshop_cycle(field, forward);
+                    } else {
+                        state.setup.cycle(field, forward);
+                    }
+                    if !refused {
+                        state.status = None;
+                    }
                 }
             }
             UiControl::LauncherToggle(field) => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.setup.toggle(field);
-                    state.status = None;
+                    state.edit_commit();
+                    let refused = state.editing().is_some();
+                    if LauncherState::is_workshop(field) {
+                        state.workshop_toggle_flip(field);
+                    } else {
+                        state.setup.toggle(field);
+                    }
+                    if !refused {
+                        state.status = None;
+                    }
                 }
             }
             UiControl::LauncherClear(field) => {
@@ -5698,6 +5786,49 @@ impl App {
             UiControl::LauncherDriveNameEdit(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.begin_edit_drive_name(field);
+                }
+            }
+            UiControl::LauncherNewImageEdit(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.begin_edit_new_image(field);
+                }
+            }
+            UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
+            UiControl::LauncherFsFamily { field, family } => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    state.workshop_set_fs_family(field, family);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherFsVariant { field, variant } => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    state.workshop_set_fs_variant(field, variant);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherNewImageUnit => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // The size in the box is in the unit being left, so it
+                    // has to be taken before the unit changes under it.
+                    state.edit_commit();
+                    state.workshop.flip_size_unit();
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherGeometryAuto | UiControl::LauncherGeometryCustom => {
+                let by_hand = control == UiControl::LauncherGeometryCustom;
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    // Entering hand-set geometry starts from what Auto
+                    // would have produced, so the figures are never blank
+                    // and never disagree with the size.
+                    if by_hand && !state.workshop.geometry_custom {
+                        state.workshop.geometry_from_size();
+                    }
+                    state.workshop.geometry_custom = by_hand;
+                    state.status = None;
                 }
             }
             UiControl::LauncherDriveBootpriEdit(field) => {
@@ -7028,6 +7159,160 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+    }
+
+    /// Make a fresh disk image from what the Create Image page is showing.
+    ///
+    /// The file is chosen first: the save dialog is where a user cancels,
+    /// and nothing is written until they have named somewhere to write it.
+    fn launcher_create_image(&mut self, field: crate::video::launcher::LauncherField) {
+        use crate::video::launcher::LauncherField as F;
+        // Whatever is half-typed counts: pressing a button is as much an
+        // end to typing as Enter is, and a size typed but not committed
+        // would otherwise be silently thrown away.
+        if let Some(state) = self.launcher_state_mut() {
+            state.edit_commit();
+            if state.editing().is_some() {
+                // The commit was refused -- an invalid name -- and the
+                // status line says so. Nothing further can be trusted.
+                return;
+            }
+        }
+        // The geometry editor's two buttons write no file: Save takes the
+        // figures as they stand and returns, Auto fills them in from the
+        // size so a hand-set geometry can be started over.
+        if matches!(field, F::NewGeomSave | F::NewGeomAuto) {
+            if let Some(state) = self.launcher_state_mut() {
+                if field == F::NewGeomAuto {
+                    state.workshop.geometry_from_size();
+                } else {
+                    state.tab = crate::video::launcher::LauncherTab::CreateHard;
+                }
+                state.status = None;
+            }
+            return;
+        }
+        if self.image_job.is_some() {
+            // The status line already says which one, and starting a second
+            // would leave the first writing with nothing watching for it.
+            return;
+        }
+        let floppy = field == F::NewFloppyCreate;
+        let Some(state) = self.launcher_state() else {
+            return;
+        };
+        let suggested = state.workshop.suggested_name(floppy);
+        let spec = if floppy {
+            ImageToMake::Floppy(state.workshop.floppy_spec())
+        } else {
+            ImageToMake::Hard(state.workshop.hard_spec())
+        };
+
+        self.suspend_live_audio_for_host_io();
+        let (kind, ext) = if floppy {
+            ("Amiga floppy image", vec!["adf"])
+        } else {
+            // The same bytes either way: .hdf is what emulators look for,
+            // .img what a card writer expects, so both are offered.
+            ("Amiga hard disk image", vec!["hdf", "img"])
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("Create disk image")
+            .add_filter(kind, &ext)
+            .set_file_name(&suggested)
+            .save_file();
+        self.finish_host_io_pause();
+
+        let Some(path) = picked else { return };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let claimed = spec.bytes_on_disk();
+        let size = crate::config::format_size(claimed as usize);
+
+        // Only a fully-written image needs its room now; a sparse one takes
+        // what it uses, and making a large one on a small drive is a
+        // perfectly ordinary thing to do.
+        if !spec.is_sparse() {
+            if let Some(free) = free_space_for_new_file(&path) {
+                if claimed > free {
+                    let where_to = path.parent().unwrap_or(&path).display().to_string();
+                    warn!(
+                        "create disk image {}: needs {claimed} bytes, {free} free",
+                        path.display()
+                    );
+                    self.set_launcher_status(crate::video::launcher::StatusMessage::err(format!(
+                        "Not enough free space to create {name} ({size}) -- {} free on {where_to}",
+                        crate::config::format_size(free as usize)
+                    )));
+                    return;
+                }
+            }
+        }
+
+        // Writing gigabytes takes as long as it takes, and doing it on this
+        // thread would stop the loop servicing events -- which the host
+        // reads as a hung application. It goes to a worker, the panel says
+        // what it is waiting for, and `poll_image_job` collects the result.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job_path = path.clone();
+        std::thread::spawn(move || {
+            let made = match &spec {
+                ImageToMake::Floppy(spec) => crate::diskimage::create_floppy(&job_path, spec),
+                ImageToMake::Hard(spec) => crate::diskimage::create_hard(&job_path, spec),
+            };
+            let _ = tx.send(made);
+        });
+        self.image_job = Some(ImageJob {
+            rx,
+            path,
+            name: name.clone(),
+        });
+        self.set_launcher_status(crate::video::launcher::StatusMessage::busy(format!(
+            "Creating {name} ({size})..."
+        )));
+    }
+
+    /// Collect a finished image write and report it, or leave the job
+    /// running. Called once per pass while one is outstanding.
+    fn poll_image_job(&mut self) {
+        let Some(job) = &self.image_job else { return };
+        let made = match job.rx.try_recv() {
+            Ok(made) => made,
+            // Still writing. A disconnected channel means the worker died
+            // without sending, which nothing here does, but treating it as
+            // "still going" would hang the status line forever.
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(std::io::Error::other(
+                "the image writer stopped without saying why",
+            )),
+        };
+        let job = self.image_job.take().expect("checked above");
+        let status = match made {
+            Ok(made) => {
+                info!(
+                    "created {} ({} bytes){}",
+                    job.path.display(),
+                    made.bytes,
+                    match made.geometry {
+                        Some(g) => format!(", {}/{}/{}", g.cylinders, g.surfaces, g.sectors),
+                        None => String::new(),
+                    }
+                );
+                crate::video::launcher::StatusMessage::ok(format!(
+                    "Created {} ({})",
+                    job.name,
+                    crate::config::format_size(made.bytes as usize)
+                ))
+            }
+            Err(e) => {
+                warn!("create disk image {}: {e}", job.path.display());
+                crate::video::launcher::StatusMessage::err(format!("Could not create: {e}"))
+            }
+        };
+        self.set_launcher_status(status);
+        self.request_redraw();
     }
 
     fn launcher_add_zorro(&mut self) {
