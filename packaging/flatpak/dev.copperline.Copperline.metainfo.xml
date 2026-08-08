@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.15.0" date="2026-08-08">
+      <description>
+        <p>An emulated Roland MT-32 sound module with its working front panel, real host hard disks handed to the machine on Linux, macOS and Windows, physical floppy drives driven by the pure-Rust FluxBridge library, an Amiberry-style host-socket networking board, native IPF disk and CHD CD image support, a redesigned pop-up menu, integer display scaling and a performance overlay, a choice of monitor bezels including an authentic 1084, a bundled open-source A4091 boot ROM, an on-screen keyboard and major performance work in the browser build, and 68020, AGA and HAM accuracy fixes.</p>
+      </description>
+    </release>
     <release version="0.14.0" date="2026-08-01">
       <description>
         <p>Picasso II and Picasso II+ Zorro II RTG boards, real floppy disks in any drive bay through a Greaseweazle controller, bridged Ethernet attached to a host adapter, an experimental JIT CPU mode, rewind and save-state slots, CRT shader presets with custom WGSL support, a 1084-style monitor bezel and screen tints, autofire, input remapping, mouse sensitivity and capture modes, a memory heat map and chipset-misuse debugging suite, host-filesystem volumes under Kickstart 1.3, browser PWA persistence and display controls, substantial render performance work, and HAM, sprite, 68020 and AGA accuracy fixes.</p>
