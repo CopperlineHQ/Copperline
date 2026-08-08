@@ -620,7 +620,7 @@ pub struct DiskInsertSpec {
     pub write_protected: bool,
 }
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{error, info, warn};
 use pixels::{Pixels, PixelsBuilder, ScalingMode, SurfaceTexture};
 use std::io::Cursor;
@@ -3798,6 +3798,9 @@ enum DroppedMediaKind {
     HardDisk,
     /// Kickstart ROMs load from the config screen, not at runtime.
     Rom,
+    /// A WHDLoad game package (.lha), or a .slave inside an extracted one:
+    /// something to boot into (src/whdload.rs), not media to insert.
+    WhdloadGame,
 }
 
 fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
@@ -3808,8 +3811,25 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         Some("cue") | Some("iso") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
+        Some("lha") | Some("slave") => DroppedMediaKind::WhdloadGame,
         _ => DroppedMediaKind::Floppy,
     }
+}
+
+/// A WHDLoad game path as the configuration stores it. Picking or dropping a
+/// bare `.slave` means its directory (an already-extracted package), which is
+/// what `whdload::prepare` mounts; an `.lha` archive or a directory is taken
+/// as given.
+fn whdload_game_config_path(path: PathBuf) -> PathBuf {
+    let is_slave = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("slave"));
+    if is_slave {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            return dir.to_path_buf();
+        }
+    }
+    path
 }
 
 /// Shorten any filesystem path in a status message so its file name stays
@@ -6874,9 +6894,10 @@ impl App {
     /// Open a native file dialog for a configuration-screen path field, seeded
     /// at the field's current directory, and store the picked path.
     fn launcher_browse(&mut self, field: LauncherField) {
-        // Host FS mounts are a host directory, not an image file, so they get
-        // a folder picker seeded at the current directory itself.
-        if LauncherField::is_filesys_dir_field(field) {
+        // Host FS mounts and the WHDLoad staging directories are a host
+        // directory, not an image file, so they get a folder picker seeded
+        // at the current directory itself.
+        if field.is_filesys_dir_field() || field.is_whdload_dir_field() {
             self.launcher_browse_folder(field);
             return;
         }
@@ -6914,6 +6935,13 @@ impl App {
             // or a CHD (a raw .bin is a cue sheet's payload, not loadable
             // alone).
             LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "chd"]),
+            // A WHDLoad package as distributed (.lha), or a bare .slave
+            // picked inside an already-extracted one (stored as its
+            // directory, which is what the stager mounts). Both cases
+            // spelled out like the ROM filters.
+            LauncherField::WhdloadGame => {
+                dialog.add_filter("WHDLoad packages", &["lha", "LHA", "slave", "Slave"])
+            }
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
             // SCSI units take hard disks or CD images (a cue/iso/chd
             // attaches a CD-ROM drive at that ID).
@@ -6932,7 +6960,10 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let picked = dialog.pick_file();
-        if let Some(path) = picked {
+        if let Some(mut path) = picked {
+            if field == LauncherField::WhdloadGame {
+                path = whdload_game_config_path(path);
+            }
             if let Some(state) = self.launcher_state_mut() {
                 // A pending volume-name edit (on this or another drive row)
                 // would otherwise be left visually focused after the dialog.
@@ -7102,50 +7133,73 @@ impl App {
     }
 
     /// Build and start the configured machine (the Run button). Validation,
-    /// AROS resolution, audio-device and machine-construction errors all stay
-    /// in the panel as a status line; only success swaps the live machine.
+    /// WHDLoad staging, AROS resolution, audio-device and
+    /// machine-construction errors all stay in the panel as a status line;
+    /// only success swaps the live machine.
     fn launcher_run(&mut self) {
         // Capture a name/option typed but not yet committed with Enter.
         if let Some(state) = self.launcher_state_mut() {
             state.edit_commit();
         }
-        let mut cfg = match self.launcher_state().map(|s| s.setup.build_config()) {
-            Some(Ok(cfg)) => cfg,
-            Some(Err(e)) => {
-                // The status line is one shortened sentence; the log keeps the
-                // whole chain (which names the underlying cause).
-                warn!("run failed: {e:#}");
-                self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
-                return;
-            }
+        let raw = match self.launcher_state().map(|s| s.setup.to_raw()) {
+            Some(raw) => raw,
             None => return,
         };
-        if let Err(e) = crate::config::resolve_bundled_rom(&mut cfg) {
+        if let Err(e) = self.stage_and_run(raw) {
+            // The status line is one shortened sentence; the log keeps the
+            // whole chain (which names the underlying cause).
             warn!("run failed: {e:#}");
             self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
-            return;
         }
+    }
+
+    /// Stage any configured WHDLoad game, validate the configuration, and
+    /// boot it. `raw` is the user's own configuration and is what the
+    /// session remembers; the WHDLoad derivation (machine profile, fast
+    /// RAM, ROM, the two staged mounts -- whdload::apply_to_raw) happens on
+    /// a copy, so it is rebuilt fresh on every boot and a later Save writes
+    /// the setup, not the derivation.
+    fn stage_and_run(&mut self, raw: RawConfig) -> Result<()> {
+        let mut staged = raw.clone();
+        let (game, opts) = crate::whdload::game_and_options(&staged);
+        if let Some(game) = game {
+            let prepared = crate::whdload::prepare(&game, &opts)?;
+            crate::whdload::apply_to_raw(&mut staged, &prepared);
+            info!(
+                "whdload: booting {} ({}) from {}, saves persist in {}",
+                prepared.slave_rel.display(),
+                prepared.slave.name.as_deref().unwrap_or("unnamed slave"),
+                game.display(),
+                prepared.game_dir.display()
+            );
+        }
+        // The same validation Run has always used: the raw view through the
+        // config pipeline (MachineSetup::build_config is exactly this over
+        // its own to_raw()).
+        let mut cfg = Config::try_from(staged)?;
+        crate::config::resolve_bundled_rom(&mut cfg)?;
+        self.build_and_run_machine(&cfg, raw)
+    }
+
+    /// Build a machine for `cfg` and swap it in (shared by the configuration
+    /// screen's Run and the dropped-WHDLoad-game reboot): session audio
+    /// sink, real-drive handover, then [`Self::run_machine`]. On failure the
+    /// running machine stays as it was; the caller reports the error in its
+    /// own place (panel status line or OSD).
+    fn build_and_run_machine(&mut self, cfg: &Config, raw: RawConfig) -> Result<()> {
         // Remember the session's realtime request so later live sink rebuilds
         // (device switch, disconnect recovery) reuse it.
         self.realtime_priority = cfg.emulation.realtime_priority;
         let realtime = crate::priority::requested(self.realtime_priority);
-        // The launcher's Audio output picker drives the session selection
-        // (default device, a named device, or Disabled).
+        // The configured Audio output drives the session selection (default
+        // device, a named device, or Disabled).
         self.audio_output = crate::audio::AudioOutput::from_config(
             cfg.audio.output_enabled,
             cfg.audio.output_device.as_deref(),
         );
         let audio: Box<dyn AudioSink> =
-            match crate::audio::open_output_sink(realtime, &self.audio_output) {
-                Ok(sink) => sink,
-                Err(e) => {
-                    self.set_launcher_status(StatusMessage::err(format!(
-                        "Audio init failed: {}",
-                        short_status_error(&e)
-                    )));
-                    return;
-                }
-            };
+            crate::audio::open_output_sink(realtime, &self.audio_output)
+                .context("Audio init failed")?;
         // Let go of any real floppy drive the outgoing machine holds before
         // building the new one. The interface can only be open once, and the
         // machine being replaced is not dropped until `run_machine` swaps it
@@ -7153,26 +7207,22 @@ impl App {
         // predecessor still owns, and is told it is in use.
         #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
-        // The launcher boots a fresh machine, never a save state, so a real
+        // This path boots a fresh machine, never a save state, so a real
         // ROM is required here.
-        let emu = match crate::emulator::build_machine(&cfg, audio, true, false) {
-            Ok(emu) => emu,
+        match crate::emulator::build_machine(cfg, audio, true, false) {
+            Ok(emu) => {
+                self.run_machine(emu, cfg, raw);
+                Ok(())
+            }
             Err(e) => {
-                warn!("run failed: {e:#}");
-                self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
                 // The machine that is staying put had its drives taken away
                 // above; give them back rather than leaving it with empty bays
                 // because a different configuration failed to build.
                 #[cfg(feature = "fluxbridge")]
                 self.attach_configured_bridges();
-                return;
+                Err(e)
             }
-        };
-        let raw = self
-            .launcher_state()
-            .map(|s| s.setup.to_raw())
-            .unwrap_or_default();
-        self.run_machine(emu, &cfg, raw);
+        }
     }
 
     /// Replace the live machine with a freshly built one (configuration screen
@@ -9589,18 +9639,40 @@ impl App {
         // The configuration screen runs on a placeholder machine: an insert
         // would target hardware the launcher is about to rebuild, and the
         // chooser would replace the launcher panel and its unsaved state.
+        // A WHDLoad package is configuration rather than media, so it lands
+        // in the setup's Game field exactly as the WHDLoad page's Browse
+        // would.
         if matches!(self.ui.panel, Some(Panel::Launcher(_))) {
-            self.show_osd("Close the machine screen to drop disks");
+            let mut refused = false;
+            for path in files {
+                if classify_dropped_media(&path) == DroppedMediaKind::WhdloadGame {
+                    let path = whdload_game_config_path(path);
+                    let name = display_file_name(&path);
+                    if let Some(state) = self.launcher_state_mut() {
+                        state.edit_cancel();
+                        state.setup.set_path(LauncherField::WhdloadGame, path);
+                        state.status = Some(StatusMessage::ok(format!("WHDLoad game: {name}")));
+                    }
+                } else {
+                    refused = true;
+                }
+            }
+            if refused {
+                self.show_osd("Close the machine screen to drop disks");
+            }
             return;
         }
         let mut floppies: Vec<PathBuf> = Vec::new();
         let mut cd: Option<PathBuf> = None;
+        let mut whdload: Option<PathBuf> = None;
         let mut notice: Option<&'static str> = None;
         for path in files {
             match classify_dropped_media(&path) {
                 DroppedMediaKind::Floppy => floppies.push(path),
                 // One disc tray; the first CD image wins.
                 DroppedMediaKind::Cd => cd = cd.or(Some(path)),
+                // One machine to reboot; the first game wins.
+                DroppedMediaKind::WhdloadGame => whdload = whdload.or(Some(path)),
                 DroppedMediaKind::HardDisk => {
                     notice = Some("Hard disks are configured in the machine screen");
                 }
@@ -9610,6 +9682,10 @@ impl App {
             }
         }
         let mut handled = false;
+        if let Some(path) = whdload {
+            self.boot_whdload_game(whdload_game_config_path(path));
+            handled = true;
+        }
         if let Some(path) = cd {
             if self.emu.bus().cd_drive_present() {
                 self.insert_cd_image_from_path(&path);
@@ -9640,6 +9716,27 @@ impl App {
         if !handled {
             if let Some(text) = notice {
                 self.show_osd(text);
+            }
+        }
+    }
+
+    /// Reboot into a dropped WHDLoad package: stage it against the session's
+    /// own configuration (explicit machine, ROM, and memory choices there
+    /// still win over the WHDLoad derivation, exactly as on the command
+    /// line) and swap the running machine for the staged one, as the
+    /// configuration screen's Run does. The dropped game lands in
+    /// `[whdload] game` on the remembered config, so a reopened
+    /// configuration screen (and a save) carries it, while the derived
+    /// machine and mounts stay out of it.
+    fn boot_whdload_game(&mut self, game: PathBuf) {
+        let mut raw = self.machine_config.clone();
+        raw.whdload.game = Some(game.to_string_lossy().into_owned());
+        let name = display_file_name(&game);
+        match self.stage_and_run(raw) {
+            Ok(()) => self.show_osd(format!("WHDLoad: {name}")),
+            Err(e) => {
+                warn!("whdload boot failed ({}): {e:#}", game.display());
+                self.show_osd(format!("WHDLoad failed: {}", short_status_error(&e)));
             }
         }
     }

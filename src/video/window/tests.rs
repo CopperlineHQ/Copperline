@@ -5833,6 +5833,28 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);
+    assert_eq!(kind("game.lha"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("Game.LHA"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("x.slave"), DroppedMediaKind::WhdloadGame);
+}
+
+#[test]
+fn whdload_game_config_path_stores_a_slave_as_its_directory() {
+    use super::whdload_game_config_path;
+    // A bare .slave means the extracted package around it; archives and
+    // directories are stored as given.
+    assert_eq!(
+        whdload_game_config_path(PathBuf::from("/games/Turrican/Turrican.slave")),
+        PathBuf::from("/games/Turrican")
+    );
+    assert_eq!(
+        whdload_game_config_path(PathBuf::from("/games/Turrican.lha")),
+        PathBuf::from("/games/Turrican.lha")
+    );
+    assert_eq!(
+        whdload_game_config_path(PathBuf::from("Turrican.slave")),
+        PathBuf::from("Turrican.slave")
+    );
 }
 
 #[test]
@@ -5957,6 +5979,46 @@ fn drop_on_launcher_screen_is_refused() {
     assert!(matches!(app.ui.panel, Some(Panel::Launcher(_))));
     assert!(!app.emu.bus().floppy.disk_inserted(0));
     assert!(app.osd.as_ref().unwrap().text.contains("machine screen"));
+}
+
+#[test]
+fn whdload_package_dropped_on_launcher_fills_the_game_field() {
+    use crate::video::launcher::LauncherField;
+    let mut app = test_app();
+    app.open_launcher();
+    // A package plus a disk in one drop: the package lands in the setup
+    // like a Browse would, the disk is still refused with the notice.
+    app.handle_dropped_files(vec![
+        PathBuf::from("/games/Turrican.lha"),
+        PathBuf::from("disk.adf"),
+    ]);
+    match &app.ui.panel {
+        Some(Panel::Launcher(state)) => {
+            assert_eq!(
+                state.setup.path(LauncherField::WhdloadGame),
+                Some(std::path::Path::new("/games/Turrican.lha"))
+            );
+            assert!(state.status.as_ref().is_some_and(|s| !s.error));
+        }
+        _ => panic!("launcher should stay open"),
+    }
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    assert!(app.osd.as_ref().unwrap().text.contains("machine screen"));
+}
+
+#[test]
+fn whdload_package_dropped_on_running_machine_reports_stage_failure() {
+    let mut app = test_app();
+    // Staging a package that does not exist fails before any machine is
+    // touched: the session keeps running and the OSD reports the failure.
+    app.handle_dropped_files(vec![PathBuf::from("/no/such/game.lha")]);
+    assert!(app.ui.panel.is_none());
+    let osd = app.osd.as_ref().expect("a failure lands on the OSD");
+    assert!(osd.text.starts_with("WHDLoad failed:"), "{}", osd.text);
+    assert!(
+        app.machine_config.whdload.game.is_none(),
+        "a failed boot must not store the game in the session config"
+    );
 }
 
 #[test]
