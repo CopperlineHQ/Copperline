@@ -24,6 +24,21 @@ is paced to real time rather than unthrottled, and it is not reproducible.
 `--screenshot-after SECS PATH` emulates for SECS *emulated* seconds, saves
 the framebuffer as a PNG, and exits.
 
+The flag repeats, so one run can capture several moments; the run ends
+once the latest of them has been saved. Order on the command line does not
+matter, and a capture that comes due while an earlier one is still waiting
+for its frame is not lost:
+
+```sh
+./target/release/copperline --config copperline.example.toml --noaudio \
+  --screenshot-after 10 /tmp/menu.png \
+  --screenshot-after 30 /tmp/level.png \
+  --screenshot-after 60 /tmp/boss.png
+```
+
+Use `--dump-frames` instead when the moments are consecutive frames rather
+than points spread across a run.
+
 ## Frame dumps
 
 For frame-to-frame rendering glitches, dump consecutive rendered frames:
@@ -57,6 +72,9 @@ investigation.
   --load-state /tmp/snapshot-120s.clstate \
   --screenshot-after 125 /tmp/scene.png
 ```
+
+`--save-state-after` repeats too, so one pass can leave snapshots at
+several points to iterate from later.
 
 The core is deterministic, so a resumed run is byte-identical to an
 uninterrupted one -- screenshots from either path can be compared

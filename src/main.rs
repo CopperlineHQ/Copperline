@@ -33,11 +33,16 @@ pub struct CliArgs {
     /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
     /// directory) and boot straight into it (src/whdload.rs).
     pub whdload: Option<PathBuf>,
-    pub screenshot_after: Option<(f32, PathBuf)>,
+    /// `--screenshot-after SECS PATH`: save the framebuffer after SECS
+    /// emulated seconds. Repeatable, like the scheduled-input flags: every
+    /// occurrence is captured, and the run ends once the last one has
+    /// fired.
+    pub screenshot_after: Vec<(f32, PathBuf)>,
     /// `--save-state-after SECS PATH`: write a save state of the whole
     /// machine after SECS emulated seconds, then keep running (combine
     /// with --screenshot-after/--dump-frames to bound the run).
-    pub save_state_after: Option<(f32, PathBuf)>,
+    /// Repeatable, like `--screenshot-after`.
+    pub save_state_after: Vec<(f32, PathBuf)>,
     /// `--load-state PATH`: restore a save state before entering the
     /// event loop, resuming from its emulated timeline.
     pub load_state: Option<PathBuf>,
@@ -311,8 +316,8 @@ where
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
     let mut whdload: Option<PathBuf> = None;
-    let mut screenshot_after: Option<(f32, PathBuf)> = None;
-    let mut save_state_after: Option<(f32, PathBuf)> = None;
+    let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
     let mut benchmark_until: Option<f32> = None;
     let mut gdb: Option<gdbstub::Config> = None;
@@ -889,14 +894,14 @@ where
                 let secs: f32 =
                     next_arg(&mut args, USAGE, "--screenshot-after SECS must be a number")?;
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                screenshot_after = Some((secs, PathBuf::from(path)));
+                screenshot_after.push((secs, PathBuf::from(path)));
             }
             "--save-state-after" => {
                 const USAGE: &str = "--save-state-after requires SECS PATH";
                 let secs: f32 =
                     next_arg(&mut args, USAGE, "--save-state-after SECS must be a number")?;
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                save_state_after = Some((secs, PathBuf::from(path)));
+                save_state_after.push((secs, PathBuf::from(path)));
             }
             "--load-state" => {
                 let v = args
@@ -1466,12 +1471,12 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         return Ok(());
     }
 
-    if cli.screenshot_after.is_some() {
+    if !cli.screenshot_after.is_empty() {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with --screenshot-after"
         ));
     }
-    if cli.save_state_after.is_some() {
+    if !cli.save_state_after.is_empty() {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with --save-state-after"
         ));
@@ -1519,10 +1524,10 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     if cli.benchmark_until.is_some() {
         return Err(anyhow!("--gdb cannot be combined with --benchmark-until"));
     }
-    if cli.screenshot_after.is_some() {
+    if !cli.screenshot_after.is_empty() {
         return Err(anyhow!("--gdb cannot be combined with --screenshot-after"));
     }
-    if cli.save_state_after.is_some() {
+    if !cli.save_state_after.is_empty() {
         return Err(anyhow!("--gdb cannot be combined with --save-state-after"));
     }
     if cli.frame_dump.is_some() {
@@ -1581,12 +1586,12 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
     // The headless server owns the machine like --gdb does; the windowed
     // App (which fires the scheduled/capture flags) never runs. Input
     // recording IS supported: the server journals injected input itself.
-    if cli.screenshot_after.is_some() {
+    if !cli.screenshot_after.is_empty() {
         return Err(anyhow!(
             "--control cannot be combined with --screenshot-after (use capture.screenshot)"
         ));
     }
-    if cli.save_state_after.is_some() {
+    if !cli.save_state_after.is_empty() {
         return Err(anyhow!(
             "--control cannot be combined with --save-state-after (use state.save)"
         ));
@@ -2094,7 +2099,7 @@ fn main() -> Result<()> {
     // Headless capture runs (screenshot / frame dump) advance the
     // deterministic core unthrottled; the interactive window paces to
     // wall-clock time. The emulated result is identical either way.
-    let headless_capture = cli.screenshot_after.is_some()
+    let headless_capture = !cli.screenshot_after.is_empty()
         || cli.frame_dump.is_some()
         || cli.benchmark_until.is_some()
         || cli.gdb.is_some()
@@ -2174,7 +2179,7 @@ fn main() -> Result<()> {
     // --control-gui keeps the windowed path: it explicitly asks for an
     // interactive session.
     let windowless_capture =
-        (cli.screenshot_after.is_some() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
+        (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
@@ -2305,8 +2310,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     let mut app = App::new(
         emu,
         false,
-        None,
-        None,
+        Vec::new(),
+        Vec::new(),
         None,
         Vec::new(),
         Vec::new(),
@@ -2357,8 +2362,8 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.whdload.is_none()
         && cli.overrides.is_empty()
         && !Path::new("copperline.toml").exists()
-        && cli.screenshot_after.is_none()
-        && cli.save_state_after.is_none()
+        && cli.screenshot_after.is_empty()
+        && cli.save_state_after.is_empty()
         && cli.frame_dump.is_none()
         && cli.benchmark_until.is_none()
         && cli.gdb.is_none()
@@ -2530,6 +2535,57 @@ mod tests {
             &parse(&["--screenshot-after", "5", "out.png"]).unwrap()
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
+    }
+
+    #[test]
+    fn capture_flags_accumulate_instead_of_overwriting() {
+        // --screenshot-after and --save-state-after repeat like the
+        // scheduled-input flags: a run can bracket several moments. They
+        // used to parse into a single slot, so a second occurrence silently
+        // replaced the first and the earlier capture never fired.
+        let args = parse(&[
+            "--screenshot-after",
+            "5",
+            "early.png",
+            "--screenshot-after",
+            "10",
+            "late.png",
+            "--save-state-after",
+            "7",
+            "mid.clstate",
+            "--save-state-after",
+            "9",
+            "end.clstate",
+        ])
+        .unwrap();
+
+        let shots: Vec<_> = args
+            .screenshot_after
+            .iter()
+            .map(|(secs, path)| (*secs, path.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            shots,
+            vec![(5.0, "early.png".to_owned()), (10.0, "late.png".to_owned())]
+        );
+
+        let states: Vec<_> = args
+            .save_state_after
+            .iter()
+            .map(|(secs, path)| (*secs, path.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (7.0, "mid.clstate".to_owned()),
+                (9.0, "end.clstate".to_owned())
+            ]
+        );
+
+        // A single occurrence still parses to exactly one entry.
+        let args = parse(&["--screenshot-after", "5", "out.png"]).unwrap();
+        assert_eq!(args.screenshot_after.len(), 1);
+        assert!(args.save_state_after.is_empty());
     }
 
     #[test]
