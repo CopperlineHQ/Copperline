@@ -201,6 +201,26 @@ bits are gated on the AGA revision; pre-AGA chips never carry bitplanes
 7/8 and keep the exact three-bit decode. Denise state is not rendered live
 -- writes become beam events that the [video pipeline](video) replays.
 
+BPLCON2's PF1P/PF2P priority codes behave differently on the two chip
+generations, and the split is where the evidence is. Denise draws a dual
+playfield field transparent when its code is programmed out of range (5-7):
+the winning field collapses to the background instead of revealing the
+field behind it. That is photographed on an A500 (vAmigaTS
+Denise/Registers/BPLCON0/invprio1 runs PF2 code 7 and the real machine
+shows background between the bars).
+
+Lisa does not inherit it. Alfred Chicken runs its whole in-game display at
+BPLCON2 = 0x003F -- both codes 7 -- and draws an eight-plane dual playfield
+on real AGA hardware, which the Denise rule would blank to the background
+colour. The quirk reached us from an OCS/ECS-only reference, so it never
+carried evidence about Lisa in the first place; WinUAE, which does model
+AGA, resolves the playfield colour from the plane bits alone and uses the
+codes only to mask sprites. On both chips the code still saturates in the
+sprite comparison, where it counts the sprite pairs passing in front of the
+playfield: 101/110/111 behave as 100. No AGA photo of invprio1 exists yet
+to confirm Lisa ignores out-of-range codes entirely rather than differing
+some other way.
+
 The ECS DIWHIGH high bits only stay in force until the next DIWSTRT or
 DIWSTOP write, which re-arms the OCS-implicit high bits derived from the
 low DIWSTRT/DIWSTOP values. Software that programmed a wide window through

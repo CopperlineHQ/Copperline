@@ -5418,15 +5418,16 @@ fn dual_playfield_uses_separate_palette_banks_and_priority() {
 }
 
 #[test]
-fn dual_playfield_out_of_range_priority_draws_the_field_transparent() {
+fn dual_playfield_out_of_range_priority_draws_the_field_transparent_on_denise() {
     // A dual playfield whose BPLCON2 priority code is programmed out of range
-    // (5-7) is drawn transparent: the winning field's pixels collapse to the
-    // background instead of revealing the field behind it (vAmiga zPF returns
-    // 0 for codes 5-7). vAmigaTS Denise/BPLCON0/invprio. Valid codes (0-4)
-    // are unaffected, so real dual-playfield content is unchanged.
+    // (5-7) is drawn transparent on Denise: the winning field's pixels
+    // collapse to the background instead of revealing the field behind it.
+    // Photographed on an A500 (vAmigaTS Denise/Registers/BPLCON0/invprio1,
+    // PF2 code 7, background visible between the bars). Valid codes (0-4) are
+    // unaffected, so real dual-playfield content is unchanged.
     let invalid_pf2 = ControlState {
         bplcon0: 0x6400, // 4 planes, dual playfield
-        bplcon2: 0x0038, // PF2 priority code 7 (invalid), PF1 code 0
+        bplcon2: 0x0038, // PF2 priority code 7 (out of range), PF1 code 0
         bplcon3: BPLCON3_PF2OF_DEFAULT,
         ..ControlState::default()
     };
@@ -5441,6 +5442,53 @@ fn dual_playfield_out_of_range_priority_draws_the_field_transparent() {
         ..invalid_pf2
     };
     assert_eq!(dual_playfield_pixel(0b0000_0010, valid), (2, 9));
+}
+
+#[test]
+fn dual_playfield_out_of_range_priority_still_draws_on_lisa() {
+    // Lisa does not inherit Denise's out-of-range-priority quirk. Alfred
+    // Chicken programs BPLCON2 = 0x003F -- both codes 7 -- for its whole
+    // in-game display and draws an eight-plane dual playfield on real AGA
+    // hardware; blanking it there left the level invisible (issue #416).
+    let aga = ControlState {
+        bplcon0: 0x6400,
+        bplcon2: 0x003F, // both priority codes 7
+        bplcon3: BPLCON3_PF2OF_DEFAULT,
+        agnus_revision: AgnusRevision::AgaAlice,
+        ..ControlState::default()
+    };
+    assert_eq!(dual_playfield_pixel(0b0000_0010, aga), (2, 9));
+    assert_eq!(dual_playfield_pixel(0b0000_0001, aga), (1, 1));
+    assert_eq!(dual_playfield_pixel(0, aga), (0, 0));
+
+    // The same pixels resolve identically with an in-range code, which is
+    // what "the code does not affect colour resolution on Lisa" means.
+    let aga_valid = ControlState {
+        bplcon2: 0x0004,
+        ..aga
+    };
+    assert_eq!(dual_playfield_pixel(0b0000_0010, aga_valid), (2, 9));
+    assert_eq!(dual_playfield_pixel(0b0000_0001, aga_valid), (1, 1));
+
+    // On either chip the code still saturates in the sprite comparison,
+    // where it counts the sprite pairs that pass in front of the playfield:
+    // 5-7 put all four pairs in front exactly as 4 does, while 3 leaves the
+    // last pair behind.
+    for code in 4u16..=7 {
+        let control = ControlState {
+            bplcon2: code,
+            ..aga
+        };
+        for group in 0..4 {
+            assert!(
+                sprite_has_priority(group * 2, 1, control),
+                "code {code} group {group}"
+            );
+        }
+    }
+    let code_three = ControlState { bplcon2: 3, ..aga };
+    assert!(sprite_has_priority(4, 1, code_three));
+    assert!(!sprite_has_priority(6, 1, code_three));
 }
 
 #[test]
