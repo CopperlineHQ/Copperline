@@ -30,10 +30,16 @@ pre-boot choice is stashed and applied when the machine starts (the boot
 button relabels to show which ROM it will use), and a post-boot pick swaps
 the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, IPF,
 and SCP, plain or gzip/zip packed -- and are always write-protected, since
-the browser has no filesystem to write changes back to. On iOS the pickers
-offer every file rather than filtering by extension, because the system
-document picker greys out extensions it does not recognise, which would
-lock out `.adf` and friends.
+the browser has no filesystem to write changes back to. A file picker
+cannot sniff content, though: it filters by extension and hides whatever
+the filter leaves out, which is how an `.ipf` stayed greyed out in a
+bundle that decodes IPF perfectly well. So the glue rewrites the disk
+picker's filter from the running build's own format list instead of
+leaving it as the page shell's hand-written HTML spelled it. A shell that
+ships no filter at all still offers every file, and on iOS the pickers
+filter nothing either, because the system document picker greys out
+extensions it does not recognise, which would lock out `.adf` and
+friends.
 
 A Kickstart that fits is also *remembered*: the image goes into the
 browser's own storage (IndexedDB, never uploaded anywhere), and the next
@@ -510,6 +516,16 @@ fitted Agnus crystal, not the live BEAMCON0 bit ECS software can flip);
 CPU, chipset, video standard, RAM, ROM fingerprint -- for bug reports
 and diagnostics.
 
+`insert_floppy(drive, bytes, name)` takes any format the core reads --
+ADF/ADZ, extended ADF, DMS, IPF, SCP, plain or gzip/zip packed -- decided
+by signature, so the name it is given is only a label. The static
+`WebEmu.floppy_formats()` lists the extensions those formats conventionally
+carry (`["adf", "adz", ...]`, no dots) for the one thing a page cannot
+decide by content: a file input's `accept` filter, and any list it scrapes
+by name. Building the filter from it is what stops a picker hiding an image
+the build would happily read; its absence is the feature test on an older
+bundle.
+
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
 `mouse_button(button, pressed)`. `key_raw(rawkey, pressed)` is the same
@@ -700,8 +716,10 @@ elements, and pages without them are untouched:
   `<folder>/index.json` -- a JSON array of file names, or of
   `{name, url}` objects with URLs resolved against the folder. Without a
   manifest, a server directory listing of the folder (nginx `autoindex`,
-  Apache, `python -m http.server`) is scraped for disk-image links
-  instead. If the folder yields nothing, the select hides itself.
+  Apache, `python -m http.server`) is scraped for links whose extension
+  the build reads (`WebEmu.floppy_formats()`, the same list the disk
+  picker filters on). If the folder yields nothing, the select hides
+  itself, as it does on a bundle too old to name its formats.
 - `#kicklist` (a `<select>`): the same list pattern for Kickstart ROMs.
   The folder is the select's `data-src` attribute (default `kick/`), with
   the same manifest-or-directory-listing contract as `#df0list`: a

@@ -357,6 +357,23 @@ impl WebEmu {
         vec!["PAL".to_string(), "NTSC".to_string()]
     }
 
+    /// The floppy image file extensions this build can open, without their
+    /// dots ("adf", "ipf", ...), straight from the core's own list.
+    ///
+    /// [`WebEmu::insert_floppy`] decides by signature and never looks at the
+    /// name, but a file picker cannot sniff: `<input type="file" accept=...>`
+    /// hides everything it does not list, so a filter naming fewer formats
+    /// than the core reads locks a visitor out of images this build would
+    /// have loaded. The page fills the picker (and the `#df0list` folder
+    /// filter) from here so the two cannot drift apart. Like `models`, its
+    /// presence is also the feature test for older bundles.
+    pub fn floppy_formats() -> Vec<String> {
+        copperline::floppy::IMAGE_EXTENSIONS
+            .iter()
+            .map(|ext| (*ext).to_string())
+            .collect()
+    }
+
     /// The running machine's profile name ("A500", "A1200", ...), or
     /// undefined for a machine no profile describes -- the model-less
     /// default constructor's machine, or a custom-shaped machine restored
@@ -815,9 +832,10 @@ impl WebEmu {
         self.set_cd32_buttons_port(2, play, rwd, ffw, green, yellow);
     }
 
-    /// Insert a floppy image (ADF/ADZ/DMS/extended ADF, optionally
-    /// gzip/zip-packed) from bytes. Always write-protected: the browser has
-    /// nowhere to write changes back to.
+    /// Insert a floppy image from bytes: every format the core reads
+    /// (ADF/ADZ, extended ADF, DMS, IPF, SCP, optionally gzip/zip-packed),
+    /// recognised by signature rather than by name. Always write-protected:
+    /// the browser has nowhere to write changes back to.
     pub fn insert_floppy(&mut self, drive: u8, bytes: Vec<u8>, name: &str) -> Result<(), JsValue> {
         self.emu
             .bus_mut()

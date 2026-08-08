@@ -3858,7 +3858,7 @@ fn display_file_name(path: &std::path::Path) -> String {
 /// sheets/hard disks/ROMs have no shared magic worth probing here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DroppedMediaKind {
-    /// Anything the floppy loader may accept (adf/adz/dms/scp/gz/zip and
+    /// Anything the floppy loader may accept (floppy::IMAGE_EXTENSIONS and
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
@@ -7058,10 +7058,9 @@ impl App {
             LauncherField::Df0Image
             | LauncherField::Df1Image
             | LauncherField::Df2Image
-            | LauncherField::Df3Image => dialog.add_filter(
-                "Floppy images",
-                &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
-            ),
+            | LauncherField::Df3Image => {
+                dialog.add_filter("Floppy images", crate::floppy::IMAGE_EXTENSIONS)
+            }
             // Only formats CdImage::load takes: a cue sheet, a bare ISO,
             // or a CHD (a raw .bin is a cue sheet's payload, not loadable
             // alone).
@@ -9783,10 +9782,7 @@ impl App {
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
             .set_title(format!("Load DF{drive_idx} disk image(s)"))
-            .add_filter(
-                "Amiga disk images",
-                &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
-            )
+            .add_filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS)
             .pick_files();
 
         // The modal file dialog blocks this (the main/emulation) thread, so

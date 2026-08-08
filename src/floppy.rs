@@ -166,6 +166,18 @@ const UAE_EXT2_SIGNATURE: &[u8; 8] = b"UAE-1ADF";
 const SCP_SIGNATURE: &[u8; 3] = b"SCP";
 const GZIP_SIGNATURE: &[u8; 2] = &[0x1F, 0x8B];
 const ZIP_SIGNATURE: &[u8; 4] = &[0x50, 0x4b, 0x03, 0x04];
+
+/// The file extensions floppy images conventionally carry, in menu order.
+///
+/// The loader itself never looks at a name: [`FloppyImage::from_bytes`]
+/// decides by signature, which is why an oddly-named image still opens. This
+/// list exists only for the places that must offer a *name* filter and cannot
+/// sniff -- the desktop file dialogs and the browser page's file picker, both
+/// of which hide whatever they do not list. It lives beside the decoder so
+/// that adding a format to `decode_floppy_payload` and forgetting the filters
+/// is a one-line fix rather than a format that silently cannot be picked.
+pub const IMAGE_EXTENSIONS: &[&str] = &["adf", "adz", "dms", "ipf", "scp", "gz", "zip"];
+
 const STANDARD_EXTERNAL_DRIVE_ID: u32 = 0xFFFF_FFFF;
 const SCP_TRACK_TABLE_OFFSET: usize = 0x10;
 const SCP_EXTENDED_TRACK_TABLE_OFFSET: usize = 0x80;
@@ -5216,6 +5228,47 @@ mod tests {
         assert!(tracks[1..].iter().all(Option::is_none));
 
         let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    /// A host with no filesystem inserts bytes rather than a path: the
+    /// browser build's picker, drop target and `?df0=` fetch all land in
+    /// `insert_disk_image_bytes`, which sniffs the signature exactly as the
+    /// filesystem loader does. IPF is the case worth pinning, because the
+    /// format arrives as raw MFM instead of sectors and the only thing that
+    /// ever knew it apart from an ADF was the CAPS signature.
+    #[test]
+    fn ipf_bytes_insert_without_a_filesystem_and_stay_write_protected() -> Result<()> {
+        let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
+            speed: 100,
+            drives: [None, None, None, None],
+        };
+        let mut controller = FloppyController::from_config(&cfg)?;
+        controller.insert_disk_image_bytes(
+            0,
+            crate::ipf::tests::amigados_ipf_image(),
+            PathBuf::from("promo.ipf"),
+            true,
+        )?;
+
+        let image = controller.drives[0]
+            .image
+            .as_ref()
+            .expect("the IPF bytes should have loaded");
+        assert!(image.write_protected);
+        let FloppyImageData::Tracks(tracks) = &image.data else {
+            panic!("an IPF should decode to per-track raw MFM, not a sector image");
+        };
+        let Some(FloppyTrackImage::RawMfm { bit_len, .. }) = &tracks[0] else {
+            panic!("cylinder 0 head 0 should hold a raw MFM revolution");
+        };
+        assert_eq!(*bit_len, crate::ipf::tests::AMIGADOS_TRACK_BITS);
+        // The label a filesystem-less host passes is what the page shows.
+        assert_eq!(
+            controller.inserted_disk_name(0).as_deref(),
+            Some("promo.ipf")
+        );
         Ok(())
     }
 
