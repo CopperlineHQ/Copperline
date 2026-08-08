@@ -1435,7 +1435,7 @@ impl ImageToMake {
     /// decides rather than the size box.
     fn bytes_on_disk(&self) -> u64 {
         match self {
-            ImageToMake::Floppy(spec) => spec.density.bytes(),
+            ImageToMake::Floppy(spec) => crate::diskimage::floppy_bytes(spec),
             ImageToMake::Hard(spec) => spec
                 .geometry
                 .unwrap_or_else(|| crate::diskimage::Geometry::for_size(spec.bytes))

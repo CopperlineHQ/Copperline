@@ -4741,10 +4741,13 @@ pub struct ImageWorkshop {
     pub boot_pri: i8,
     /// Blocks kept clear at the front of the partition.
     pub reserved: u32,
-    /// What the drive says it is, once it has been told. `None` -- the
-    /// usual case -- lets it name itself from its size, so the Type follows
-    /// the Size box instead of going stale behind it.
-    pub identity: Option<crate::harddrive::RdbIdentity>,
+    /// What the drive says it is, per field, once that field has been
+    /// told. A field left `None` -- the usual case -- keeps naming itself,
+    /// so the Type follows the Size box instead of going stale behind it,
+    /// and typing a Drive does not freeze the Type along with it.
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub revision: Option<String>,
     pub read_only: bool,
     /// Leave the file's unwritten blocks as holes on the host. On by
     /// default: a sparse image is instant to make and costs only what it
@@ -4773,7 +4776,9 @@ impl Default for ImageWorkshop {
             hard_bootable: true,
             boot_pri: 0,
             reserved: crate::diskimage::RESERVED_BLOCKS,
-            identity: None,
+            vendor: None,
+            product: None,
+            revision: None,
             read_only: false,
             sparse: true,
         }
@@ -4801,33 +4806,38 @@ impl ImageWorkshop {
     }
 
     /// Fill the custom geometry in from the size, and put the drive's
-    /// identity back to what the size would name it. This is what the
-    /// editor's Auto button does: everything on the page returns to what
-    /// Copperline would have chosen.
+    /// identity back to naming itself. This is what the editor's Auto
+    /// button does: everything on the page returns to what Copperline
+    /// would have chosen.
     pub fn geometry_from_size(&mut self) {
         self.custom_geometry = crate::diskimage::Geometry::for_size(self.bytes());
-        self.identity = None;
+        self.vendor = None;
+        self.product = None;
+        self.revision = None;
     }
 
-    /// What the drive will say it is: as typed, or as its size names it.
+    /// What the drive will say it is: each field as typed, or as the drive
+    /// names itself. Resolved on the way out rather than stored, so a field
+    /// nobody has touched still follows the size.
     pub fn identity(&self) -> crate::harddrive::RdbIdentity {
-        self.identity.clone().unwrap_or_else(|| {
-            crate::harddrive::default_rdb_identity(self.effective_geometry().bytes())
-        })
+        let named = crate::harddrive::default_rdb_identity(self.effective_geometry().bytes());
+        crate::harddrive::RdbIdentity {
+            vendor: self.vendor.clone().unwrap_or(named.vendor),
+            product: self.product.clone().unwrap_or(named.product),
+            revision: self.revision.clone().unwrap_or(named.revision),
+        }
     }
 
-    /// Change one identity field, taking the other two as they stand -- so
-    /// editing the Drive does not silently freeze the Type at whatever size
-    /// was showing when it was typed.
+    /// Take one identity field as typed, leaving the others naming
+    /// themselves: editing the Drive does not freeze the Type at whatever
+    /// size happened to be showing.
     pub fn set_identity_field(&mut self, field: LauncherField, text: String) {
-        let mut identity = self.identity();
         match field {
-            F::NewGeomVendor => identity.vendor = text,
-            F::NewGeomProduct => identity.product = text,
-            F::NewGeomRevision => identity.revision = text,
-            _ => return,
+            F::NewGeomVendor => self.vendor = Some(text),
+            F::NewGeomProduct => self.product = Some(text),
+            F::NewGeomRevision => self.revision = Some(text),
+            _ => {}
         }
-        self.identity = Some(identity);
     }
 
     pub fn floppy_spec(&self) -> crate::diskimage::FloppySpec {
@@ -8192,6 +8202,12 @@ mod tests {
         assert_eq!(state.editing(), None);
         assert_eq!(state.workshop.identity().vendor, "A600 HD");
         assert_eq!(state.workshop.identity().product, "2GB HDF");
+        // ...and the Type keeps following the size afterwards, which is the
+        // whole reason each field is remembered separately.
+        state.workshop.size = 512;
+        state.workshop.size_unit = SizeUnit::Mb;
+        assert_eq!(state.workshop.identity().vendor, "A600 HD");
+        assert_eq!(state.workshop.identity().product, "512MB HDF");
 
         // Each box stops at the width its RDB field has: a longer string
         // would spill into the next field rather than simply being long.
@@ -8217,11 +8233,13 @@ mod tests {
             state.edit_commit();
         }
 
-        // Auto puts the whole page back to what the size would name it.
+        // Auto puts the whole page back to naming itself.
         state.workshop.geometry_from_size();
-        assert_eq!(state.workshop.identity, None);
+        assert_eq!(state.workshop.vendor, None);
+        assert_eq!(state.workshop.product, None);
+        assert_eq!(state.workshop.revision, None);
         assert_eq!(state.workshop.identity().vendor, "Amiga");
-        assert_eq!(state.workshop.identity().product, "2GB HDF");
+        assert_eq!(state.workshop.identity().product, "512MB HDF");
     }
 
     #[test]

@@ -78,6 +78,12 @@ impl Density {
         self.blocks() * BLOCK_BYTES as u64
     }
 
+    /// Tracks on the disk: one per cylinder per side, which is what the
+    /// extended container writes a record for.
+    pub fn tracks(self) -> u64 {
+        self.blocks() / u64::from(self.sectors_per_track())
+    }
+
     /// Sectors per track, which the extended container records per track.
     fn sectors_per_track(self) -> u32 {
         match self {
@@ -116,6 +122,17 @@ impl Container {
         match self {
             Container::Adf => "Standard ADF",
             Container::ExtendedAdf => "Extended ADF",
+        }
+    }
+
+    /// How many bytes the container adds around the sectors: the tag, the
+    /// track count, and one record per track. A plain sector image adds
+    /// nothing, so the file is exactly the disk.
+    pub fn overhead(self, density: Density) -> u64 {
+        match self {
+            Container::Adf => 0,
+            // 8-byte tag, 4-byte header, then 12 bytes per track.
+            Container::ExtendedAdf => 12 + 12 * density.tracks(),
         }
     }
 
@@ -775,26 +792,57 @@ fn mark_sparse(file: &File) {
 #[cfg(not(windows))]
 fn mark_sparse(_file: &File) {}
 
-/// Create the file, run `write` on it, and take the file away again if
-/// that fails.
+/// Write an image beside its destination, and move it into place only once
+/// it is whole.
 ///
 /// A half-written image is worse than none: it sits there under the name
-/// the user chose, the right length, and mounts as garbage. Anything that
-/// goes wrong once writing has started -- a full disk, a reserved count
-/// that does not fit -- leaves the workshop as it found it.
+/// the user chose, the right length, and mounts as garbage. Writing
+/// straight to that name would also destroy whatever was already there
+/// before knowing whether the new one can be finished at all -- and the
+/// write runs on a worker, so quitting part-way through is an ordinary
+/// thing to do rather than a crash.
 ///
-/// The file is created inside here rather than passed in, so that a failure
-/// to create it at all cannot reach the cleanup: whatever is at that path
-/// in that case is somebody else's, and must not be removed.
+/// So the bytes go to a sibling of the destination -- same directory,
+/// therefore same filesystem, therefore the rename at the end is atomic --
+/// and nothing but that sibling is ever removed. An interrupted write
+/// leaves the temporary file behind and the destination untouched.
 fn writing_image<T>(path: &Path, write: impl FnOnce(File) -> io::Result<T>) -> io::Result<T> {
-    let file = File::create(path)?;
-    match write(file) {
-        Ok(made) => Ok(made),
-        Err(e) => {
-            let _ = std::fs::remove_file(path);
-            Err(e)
-        }
+    // A read-only file is one somebody meant to keep -- quite possibly an
+    // image this workshop marked itself. Renaming over it would succeed on
+    // Unix, where permission to replace a file belongs to its directory
+    // rather than to the file, so it is refused here instead.
+    if std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "that file is read only",
+        ));
     }
+    let temp = partial_path(path);
+    let file = File::create(&temp)?;
+    let made = write(file).and_then(|made| {
+        std::fs::rename(&temp, path)?;
+        Ok(made)
+    });
+    if made.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    made
+}
+
+/// Where an image is assembled before it is moved into place: beside the
+/// destination, named after it, and out of the way of a real image.
+fn partial_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    path.with_file_name(format!(".{name}.copperline-partial"))
+}
+
+/// How large the finished file will be, which for the extended container
+/// is the disk plus the records that describe it.
+pub fn floppy_bytes(spec: &FloppySpec) -> u64 {
+    spec.density.bytes() + spec.container.overhead(spec.density)
 }
 
 /// Write a fresh floppy image.
@@ -877,6 +925,24 @@ pub fn create_hard(path: &Path, spec: &HardSpec) -> io::Result<Created> {
             ),
         ));
     }
+    // The table lives in cylinder 0 and the partition starts at cylinder 1,
+    // so a drive needs a second cylinder to have anything to partition --
+    // and that first cylinder needs room for both the RDSK block and the
+    // PART block after it. A one-block cylinder would put PART at the
+    // partition's own first block, where formatting the volume writes over
+    // it and an unformatted image points the partition at its own table.
+    if spec.partitioning == Partitioning::Rdb
+        && (geometry.cylinders < 2 || geometry.cylinder_blocks() < 2)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "a partition table needs two cylinders of at least two blocks; \
+                 {} cylinders of {} x {} is too small",
+                geometry.cylinders, geometry.surfaces, geometry.sectors
+            ),
+        ));
+    }
     // A cylinder is stated in 32-bit fields too, and every drive numbers
     // at least two of them -- so for a partitioned drive the check above
     // has already caught this. It is here for the unpartitioned case,
@@ -891,15 +957,19 @@ pub fn create_hard(path: &Path, spec: &HardSpec) -> io::Result<Created> {
             ),
         ));
     }
-    writing_image(path, |file| write_hard(path, file, spec, geometry))
+    let made = writing_image(path, |file| write_hard(file, spec, geometry))?;
+    if spec.read_only {
+        // Once it is in place and finished: a read-only file cannot be
+        // renamed over anything on Windows, and there is nothing to protect
+        // until the image is whole.
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(made)
 }
 
-fn write_hard(
-    path: &Path,
-    mut file: File,
-    spec: &HardSpec,
-    geometry: Geometry,
-) -> io::Result<Created> {
+fn write_hard(mut file: File, spec: &HardSpec, geometry: Geometry) -> io::Result<Created> {
     if spec.sparse {
         // Before the length is set, which is the point at which a
         // filesystem decides whether to commit the space.
@@ -975,13 +1045,6 @@ fn write_hard(
         }
     }
     file.flush()?;
-    if spec.read_only {
-        // Done last: the structure has to be written before the file is
-        // closed to further writing.
-        let mut perms = file.metadata()?.permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(path, perms)?;
-    }
     Ok(Created {
         bytes: geometry.bytes(),
         geometry: Some(geometry),
@@ -1511,6 +1574,102 @@ mod tests {
         assert_eq!(std::fs::read(s.path()).unwrap(), b"somebody else's file");
 
         std::fs::set_permissions(s.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_file_that_was_already_there() {
+        // The destination is not touched until the image is whole: it may
+        // hold an image the user still wants, and a write that fails --
+        // or a session that quits -- must not take it with them.
+        let s = Scratch::new("keepold");
+        std::fs::write(s.path(), b"the image that was already there").unwrap();
+        let err = create_hard(
+            s.path(),
+            &HardSpec {
+                bytes: 4 * 1024 * 1024,
+                filesystem: Some(FileSystem::FFS),
+                reserved: 90_000,
+                ..Default::default()
+            },
+        )
+        .expect_err("a reserved run larger than the volume is refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(s.path()).unwrap(),
+            b"the image that was already there",
+            "the old image was destroyed by a write that never succeeded"
+        );
+        // And nothing is left lying beside it either.
+        assert!(!partial_path(s.path()).exists());
+
+        // A write that does succeed replaces it.
+        create_hard(
+            s.path(),
+            &HardSpec {
+                bytes: 4 * 1024 * 1024,
+                filesystem: Some(FileSystem::FFS),
+                ..Default::default()
+            },
+        )
+        .expect("created");
+        assert_eq!(std::fs::metadata(s.path()).unwrap().len(), 4 * 1024 * 1024);
+        assert!(!partial_path(s.path()).exists());
+    }
+
+    #[test]
+    fn a_cylinder_too_small_to_hold_the_table_is_refused() {
+        // The RDB owns cylinder 0 and the partition starts at cylinder 1,
+        // so the first cylinder has to have room for RDSK *and* the PART
+        // block after it. One block to a cylinder would put PART at the
+        // partition's own first block, and formatting would write over it.
+        let s = Scratch::new("tinycyl");
+        for (cylinders, surfaces, sectors) in [(1000, 1, 1), (1, 16, 32), (1000, 2, 1)] {
+            let made = create_hard(
+                s.path(),
+                &HardSpec {
+                    geometry: Some(Geometry {
+                        cylinders,
+                        surfaces,
+                        sectors,
+                    }),
+                    partitioning: Partitioning::Rdb,
+                    filesystem: None,
+                    ..Default::default()
+                },
+            );
+            if surfaces * sectors >= 2 && cylinders >= 2 {
+                made.expect("two cylinders of two blocks is the floor");
+            } else {
+                let err = made.expect_err("{cylinders}x{surfaces}x{sectors} cannot hold a table");
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            }
+        }
+    }
+
+    #[test]
+    fn an_extended_image_is_as_large_as_it_says_it_will_be() {
+        // The container writes a tag, a track count and a record per track
+        // around the sectors, so the file is larger than the disk -- and
+        // the figure the launcher checks free space against has to be the
+        // file's, not the disk's.
+        for density in Density::ALL {
+            for container in Container::ALL {
+                let spec = FloppySpec {
+                    density,
+                    container,
+                    ..Default::default()
+                };
+                let s = Scratch::new("extsize");
+                let made = create_floppy(s.path(), &spec).expect("created");
+                let on_disk = std::fs::metadata(s.path()).unwrap().len();
+                assert_eq!(on_disk, made.bytes);
+                assert_eq!(
+                    floppy_bytes(&spec),
+                    on_disk,
+                    "{density:?}/{container:?}: predicted size"
+                );
+            }
+        }
     }
 
     #[test]
