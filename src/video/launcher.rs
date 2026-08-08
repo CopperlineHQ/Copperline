@@ -7574,7 +7574,11 @@ mod tests {
     fn the_disk_image_pages_edit_no_machine_setting() {
         let mut state = LauncherState::new(MachineSetup::default());
         let before = state.setup.to_raw();
-        for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
+        for tab in [
+            LauncherTab::CreateFloppy,
+            LauncherTab::CreateHard,
+            LauncherTab::CreateGeometry,
+        ] {
             for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
                 // The page heading is inert and carries no field.
                 if r.kind == RowKind::SectionHeader {
@@ -7585,16 +7589,43 @@ mod tests {
                     "{:?} is not a workshop field",
                     r.field
                 );
-                // Work every control the row offers.
+                // Work every control the row offers, whichever kind it is:
+                // a control added here later must be worked here too, or
+                // this stops proving anything.
                 state.workshop_cycle(r.field, true);
                 state.workshop_cycle(r.field, false);
                 state.workshop_toggle_flip(r.field);
+                for family in FsFamily::ALL {
+                    state.workshop_set_fs_family(r.field, family);
+                }
+                for variant in crate::diskimage::Variant::ALL {
+                    state.workshop_set_fs_variant(r.field, variant);
+                }
+                // Typing into it, and pressing it if it is a button.
+                state.begin_edit_new_image(r.field);
+                for c in "XY9".chars() {
+                    state.edit_push(c);
+                }
+                state.edit_commit();
+                state.edit_cancel();
             }
         }
+        // And the two things the workshop can be asked to work out for
+        // itself, which reach further than a single row.
+        state.workshop.geometry_from_size();
+        let _ = state.workshop.hard_spec();
+        let _ = state.workshop.floppy_spec();
+
         assert_eq!(
             state.setup.to_raw(),
             before,
             "the workshop changed the machine configuration"
+        );
+        // The saved file is that same structure, so nothing here can reach
+        // a TOML key by another route either.
+        assert_eq!(
+            state.setup.to_toml().unwrap(),
+            before.to_toml_string().unwrap()
         );
     }
 
