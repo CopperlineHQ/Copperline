@@ -190,14 +190,7 @@ impl ScsiDisk {
         volume_name: Option<&str>,
         boot_pri: i8,
     ) -> anyhow::Result<Self> {
-        let disk = HardDriveImage::open(
-            path,
-            &format!("DH{unit}"),
-            "scsi",
-            "COPPERLINE SCSI DISK",
-            volume_name,
-            boot_pri,
-        )?;
+        let disk = HardDriveImage::open(path, &format!("DH{unit}"), "scsi", volume_name, boot_pri)?;
         Ok(Self {
             disk,
             sense: [0u8; SENSE_LEN],

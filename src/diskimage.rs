@@ -382,6 +382,9 @@ pub struct HardSpec {
     /// Blocks at the front of the partition the filesystem never uses.
     /// [`RESERVED_BLOCKS`] unless there is a reason to say otherwise.
     pub reserved: u32,
+    /// What the drive says it is: the three strings HDToolBox shows as
+    /// Drive and Type. `None` lets the drive name itself from its size.
+    pub identity: Option<crate::harddrive::RdbIdentity>,
     /// Mark the file itself read-only on this computer once written, so
     /// nothing can change the image by accident. Not an Amiga flag -- the
     /// Rigid Disk Block has no such thing -- but the host's own.
@@ -412,6 +415,7 @@ impl Default for HardSpec {
             bootable: true,
             boot_pri: 0,
             reserved: RESERVED_BLOCKS,
+            identity: None,
             read_only: false,
             sparse: true,
         }
@@ -889,6 +893,9 @@ fn write_hard(
                 spec.bootable,
                 spec.boot_pri,
                 spec.reserved,
+                spec.identity
+                    .clone()
+                    .unwrap_or_else(|| crate::harddrive::default_rdb_identity(geometry.bytes())),
             )?;
             if let Some(fs) = spec.filesystem {
                 let blocks = u64::from(high_cyl - low_cyl + 1) * cyl_blocks;
@@ -952,6 +959,7 @@ fn write_rdb(
     bootable: bool,
     boot_pri: i8,
     reserved: u32,
+    identity: crate::harddrive::RdbIdentity,
 ) -> io::Result<()> {
     let cyl_blocks = geometry.cylinder_blocks();
 
@@ -982,10 +990,7 @@ fn write_rdb(
     put_long(&mut rdsk, 35, geometry.cylinders - 1);
     put_long(&mut rdsk, 36, cyl_blocks as u32);
     put_long(&mut rdsk, 38, (cyl_blocks - 1) as u32); // highest RDB block
-    let mut identity = b"Copperline".to_vec();
-    identity.resize(24, b' ');
-    rdsk[160..184].copy_from_slice(&identity);
-    rdsk[184..188].copy_from_slice(b"1.0 ");
+    crate::harddrive::put_rdb_identity(&mut rdsk, &identity);
     checksum(&mut rdsk, 2);
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&rdsk)?;
@@ -1382,9 +1387,8 @@ mod tests {
 
         // The strongest check available: the emulator's own hardfile
         // support has to recognise it, since that is what will mount it.
-        let opened =
-            crate::harddrive::HardDriveImage::open(s.path(), "DH0", "ide", "Copperline", None, 0)
-                .expect("our own parser opens it");
+        let opened = crate::harddrive::HardDriveImage::open(s.path(), "DH0", "ide", None, 0)
+            .expect("our own parser opens it");
         assert!(
             opened.has_own_rdb(),
             "our parser did not find the partition table we wrote, and \

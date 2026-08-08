@@ -367,6 +367,9 @@ pub enum LauncherField {
     NewGeomSurfaces,
     NewGeomSectors,
     NewGeomReserved,
+    NewGeomVendor,
+    NewGeomProduct,
+    NewGeomRevision,
     NewGeomSave,
     NewGeomAuto,
     // System
@@ -917,7 +920,7 @@ const NEW_HARD_ROWS: [Row; 13] = [
 ];
 
 /// The geometry editor, reached from the hard-disk page.
-const NEW_GEOMETRY_ROWS: [Row; 6] = [
+const NEW_GEOMETRY_ROWS: [Row; 10] = [
     section_header("Custom disk geometry:"),
     row(F::NewGeomCylinders, "Cylinders", RowKind::Stepper),
     // The Amiga's own word for it, and the name of the Rigid Disk Block
@@ -925,6 +928,12 @@ const NEW_GEOMETRY_ROWS: [Row; 6] = [
     row(F::NewGeomSurfaces, "Surfaces", RowKind::Stepper),
     row(F::NewGeomSectors, "Sectors per track", RowKind::Stepper),
     row(F::NewGeomReserved, "Reserved blocks", RowKind::Stepper),
+    // What the drive answers when asked what it is. HDToolBox shows the
+    // first two as its Drive and Type columns.
+    section_header("Drive identity:"),
+    row(F::NewGeomVendor, "Drive", RowKind::Text),
+    row(F::NewGeomProduct, "Type", RowKind::Text),
+    row(F::NewGeomRevision, "Revision", RowKind::Text),
     row(F::NewGeomSave, "", RowKind::Action),
 ];
 
@@ -4732,6 +4741,10 @@ pub struct ImageWorkshop {
     pub boot_pri: i8,
     /// Blocks kept clear at the front of the partition.
     pub reserved: u32,
+    /// What the drive says it is, once it has been told. `None` -- the
+    /// usual case -- lets it name itself from its size, so the Type follows
+    /// the Size box instead of going stale behind it.
+    pub identity: Option<crate::harddrive::RdbIdentity>,
     pub read_only: bool,
     /// Leave the file's unwritten blocks as holes on the host. On by
     /// default: a sparse image is instant to make and costs only what it
@@ -4760,6 +4773,7 @@ impl Default for ImageWorkshop {
             hard_bootable: true,
             boot_pri: 0,
             reserved: crate::diskimage::RESERVED_BLOCKS,
+            identity: None,
             read_only: false,
             sparse: true,
         }
@@ -4786,10 +4800,34 @@ impl ImageWorkshop {
         }
     }
 
-    /// Fill the custom geometry in from the size, which is what the
-    /// editor's Auto button does.
+    /// Fill the custom geometry in from the size, and put the drive's
+    /// identity back to what the size would name it. This is what the
+    /// editor's Auto button does: everything on the page returns to what
+    /// Copperline would have chosen.
     pub fn geometry_from_size(&mut self) {
         self.custom_geometry = crate::diskimage::Geometry::for_size(self.bytes());
+        self.identity = None;
+    }
+
+    /// What the drive will say it is: as typed, or as its size names it.
+    pub fn identity(&self) -> crate::harddrive::RdbIdentity {
+        self.identity.clone().unwrap_or_else(|| {
+            crate::harddrive::default_rdb_identity(self.effective_geometry().bytes())
+        })
+    }
+
+    /// Change one identity field, taking the other two as they stand -- so
+    /// editing the Drive does not silently freeze the Type at whatever size
+    /// was showing when it was typed.
+    pub fn set_identity_field(&mut self, field: LauncherField, text: String) {
+        let mut identity = self.identity();
+        match field {
+            F::NewGeomVendor => identity.vendor = text,
+            F::NewGeomProduct => identity.product = text,
+            F::NewGeomRevision => identity.revision = text,
+            _ => return,
+        }
+        self.identity = Some(identity);
     }
 
     pub fn floppy_spec(&self) -> crate::diskimage::FloppySpec {
@@ -4817,6 +4855,7 @@ impl ImageWorkshop {
                 && self.partitioning == crate::diskimage::Partitioning::Rdb,
             boot_pri: self.boot_pri,
             reserved: self.reserved,
+            identity: Some(self.identity()),
             read_only: self.read_only,
             sparse: self.sparse,
         }
@@ -4840,6 +4879,23 @@ impl ImageWorkshop {
         } else {
             format!("{}.hdf", stem(&self.hard_label))
         }
+    }
+}
+
+/// How many characters a workshop text field takes, or `None` when it is
+/// not one of the fixed-width ones.
+///
+/// The identity boxes are exactly as wide as the Rigid Disk Block's fields,
+/// because a longer string would not be cut so much as spill into the next
+/// field -- which is the bug that made a drive called `Copperli` of type
+/// `ne`. Stopping the typing at the width is the honest place to stop it.
+fn workshop_text_limit(field: LauncherField) -> Option<usize> {
+    let widths = crate::harddrive::RDB_IDENTITY_WIDTHS;
+    match field {
+        F::NewGeomVendor => Some(widths[0]),
+        F::NewGeomProduct => Some(widths[1]),
+        F::NewGeomRevision => Some(widths[2]),
+        _ => None,
     }
 }
 
@@ -4957,6 +5013,9 @@ impl LauncherState {
                 | F::NewGeomSurfaces
                 | F::NewGeomSectors
                 | F::NewGeomReserved
+                | F::NewGeomVendor
+                | F::NewGeomProduct
+                | F::NewGeomRevision
                 | F::NewGeomSave
                 | F::NewGeomAuto
         )
@@ -5117,6 +5176,9 @@ impl LauncherState {
             F::NewGeomSurfaces => w.custom_geometry.surfaces.to_string(),
             F::NewGeomSectors => w.custom_geometry.sectors.to_string(),
             F::NewGeomReserved => w.reserved.to_string(),
+            F::NewGeomVendor => w.identity().vendor,
+            F::NewGeomProduct => w.identity().product,
+            F::NewGeomRevision => w.identity().revision,
             F::NewHardPartitioning => w.partitioning.label().to_string(),
             F::NewHardDevice => w.device.clone(),
             F::NewHardLabel => w.hard_label.clone(),
@@ -5330,6 +5392,19 @@ impl LauncherState {
                 self.edit_buffer.push(c);
                 return;
             }
+            if let Some(limit) = workshop_text_limit(field) {
+                // A drive identity is read back by tools that expect the
+                // plain printable ASCII a SCSI INQUIRY carries, so nothing
+                // else gets in -- and never more than the field holds.
+                if !c.is_ascii_graphic() && c != ' ' {
+                    return;
+                }
+                if self.edit_buffer.chars().count() >= limit {
+                    return;
+                }
+                self.edit_buffer.push(c);
+                return;
+            }
         }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
@@ -5403,6 +5478,17 @@ impl LauncherState {
                     }
                     _ => {}
                 }
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
+            EditTarget::NewImageText(field) if workshop_text_limit(field).is_some() => {
+                // Not an AmigaDOS name: an identity field is a run of
+                // printable bytes a tool prints back, so anything typed
+                // into it is already valid by the time it lands. Emptying
+                // one is a choice too -- the field goes to spaces.
+                let text = self.edit_buffer.trim().to_string();
+                self.workshop.set_identity_field(field, text);
                 self.editing = None;
                 self.edit_buffer.clear();
                 return;
@@ -8039,6 +8125,72 @@ mod tests {
             V::ALL.into_iter().collect::<std::collections::HashSet<_>>(),
             "three boxes reach all four tags and nothing else"
         );
+    }
+
+    /// The drive identity: what it says by default, what typing into it
+    /// does, and that a field never spills into the one beside it.
+    #[test]
+    fn the_drive_identity_names_itself_until_it_is_told_otherwise() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.tab = LauncherTab::CreateGeometry;
+
+        // Untouched, the drive names itself from its size -- and follows
+        // the Size box rather than going stale behind it.
+        assert_eq!(state.workshop.identity().vendor, "Amiga");
+        assert_eq!(state.workshop.identity().product, "64MB HDF");
+        state.workshop.size = 2;
+        state.workshop.size_unit = SizeUnit::Gb;
+        assert_eq!(state.workshop.identity().product, "2GB HDF");
+
+        // The revision is Copperline's own version, cut to the four bytes
+        // the field holds.
+        let revision = state.workshop.identity().revision;
+        assert!(revision.len() <= crate::harddrive::RDB_IDENTITY_WIDTHS[2]);
+        assert!(env!("CARGO_PKG_VERSION").starts_with(&revision));
+
+        // Typing into one field leaves the others deriving, so a Drive
+        // typed now does not freeze the Type at today's size.
+        state.begin_edit_new_image(F::NewGeomVendor);
+        while !state.edit_buffer().is_empty() {
+            state.edit_backspace();
+        }
+        for c in "A600 HD".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert_eq!(state.editing(), None);
+        assert_eq!(state.workshop.identity().vendor, "A600 HD");
+        assert_eq!(state.workshop.identity().product, "2GB HDF");
+
+        // Each box stops at the width its RDB field has: a longer string
+        // would spill into the next field rather than simply being long.
+        for (field, width) in [
+            (F::NewGeomVendor, crate::harddrive::RDB_IDENTITY_WIDTHS[0]),
+            (F::NewGeomProduct, crate::harddrive::RDB_IDENTITY_WIDTHS[1]),
+            (F::NewGeomRevision, crate::harddrive::RDB_IDENTITY_WIDTHS[2]),
+        ] {
+            state.begin_edit_new_image(field);
+            while !state.edit_buffer().is_empty() {
+                state.edit_backspace();
+            }
+            for c in "0123456789ABCDEFGHIJ".chars() {
+                state.edit_push(c);
+            }
+            assert_eq!(state.edit_buffer().chars().count(), width, "{field:?}");
+            // And nothing a tool could not print back gets in at all.
+            for c in ['\n', '\t', 'é'] {
+                let before = state.edit_buffer().to_string();
+                state.edit_push(c);
+                assert_eq!(state.edit_buffer(), before, "{field:?} took {c:?}");
+            }
+            state.edit_commit();
+        }
+
+        // Auto puts the whole page back to what the size would name it.
+        state.workshop.geometry_from_size();
+        assert_eq!(state.workshop.identity, None);
+        assert_eq!(state.workshop.identity().vendor, "Amiga");
+        assert_eq!(state.workshop.identity().product, "2GB HDF");
     }
 
     #[test]

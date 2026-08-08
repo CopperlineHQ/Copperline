@@ -125,14 +125,7 @@ impl IdeDrive {
         volume_name: Option<&str>,
         boot_pri: i8,
     ) -> anyhow::Result<Self> {
-        let disk = HardDriveImage::open(
-            path,
-            &format!("DH{unit}"),
-            "ide",
-            "COPPERLINE IDE DISK",
-            volume_name,
-            boot_pri,
-        )?;
+        let disk = HardDriveImage::open(path, &format!("DH{unit}"), "ide", volume_name, boot_pri)?;
         // The classic Amiga HDF geometry: 16 surfaces, 32 sectors per track
         // (what HDToolBox/RDB tooling defaults to), so the CHS the host
         // computes from an RDB's physical-drive block agrees with what the
