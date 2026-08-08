@@ -5096,6 +5096,10 @@ impl LauncherState {
         match field {
             F::NewFloppyBootable | F::NewFloppyLabel => w.floppy_fs.is_some(),
             F::NewHardLabel => w.hard_fs.is_some(),
+            // An unformatted volume has no DOS type, so there is nothing
+            // for its identifiers to identify -- label and all.
+            F::NewFloppyFsVariant => w.floppy_fs.is_some(),
+            F::NewHardFsVariant => w.hard_fs.is_some(),
             // Without a partition table there is no partition entry to
             // carry a device name or a boot flag: the emulator names the
             // mount instead.
@@ -7863,10 +7867,13 @@ mod tests {
         assert!(state.workshop_fs_variant_set(F::NewHardFs, Variant::DirCache));
         assert_eq!(state.workshop.hard_fs.unwrap().dos_type(), 0x444F5304);
 
-        // Unformatted has no variant to show, and none of the boxes is lit.
+        // Unformatted has no DOS type, so the whole identifiers row goes
+        // -- its label with it -- and none of the boxes is lit.
         state.workshop_set_fs_family(F::NewHardFs, FsFamily::Unformatted);
         assert_eq!(state.workshop.hard_fs, None);
         assert!(!FsFamily::of(None).has_identifiers());
+        assert!(!state.workshop_applies(F::NewHardFsVariant));
+        assert!(state.workshop_applies(F::NewHardFs), "the family row stays");
         for variant in [Variant::Intl, Variant::DirCache, Variant::LongName] {
             assert!(!state.workshop_fs_variant_set(F::NewHardFs, variant));
             // ...and clicking one while unformatted does nothing at all.

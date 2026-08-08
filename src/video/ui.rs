@@ -5023,9 +5023,6 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     }
                 }
                 RowKind::FsVariant => {
-                    if !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_identifiers() {
-                        return None;
-                    }
                     let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
                     for (at, variant) in launcher_tick_strip(rect, row_y, &labels)
                         .into_iter()
@@ -5946,10 +5943,9 @@ fn draw_launcher_row(
             }
         }
         RowKind::FsVariant => {
-            // An unformatted volume has no DOS type to identify, so the
-            // whole row greys rather than disappearing -- the page keeps its
+            // On an unformatted volume the row greys whole -- label, boxes
+            // and all -- rather than disappearing, so the page keeps its
             // shape as the family above it changes.
-            let none = !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_identifiers();
             let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
             for (at, variant) in launcher_tick_strip(rect, row_y, &labels)
                 .into_iter()
@@ -5960,7 +5956,7 @@ fn draw_launcher_row(
                     at,
                     variant.label(),
                     state.workshop_fs_variant_set(r.field, variant),
-                    disabled || none,
+                    disabled,
                     hover
                         == Some(UiControl::LauncherFsVariant {
                             field: r.field,
