@@ -308,14 +308,16 @@ impl LauncherTab {
 
 /// The Storage tab's top nav links (its sub-pages), left to right.
 const STORAGE_NAV: &[(&str, LauncherTab)] = &[
-    ("CD", LauncherTab::Cd),
+    // The workshop leads: nothing here describes this machine, so it lands
+    // on its own pair of pages rather than adding rows to Storage, and it
+    // is the one entry that makes something rather than attaching it.
+    ("Create Image...", LauncherTab::CreateFloppy),
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Boot Priority", LauncherTab::BootPriority),
+    // Four to a row, so these two wrap onto a second.
+    ("CD", LauncherTab::Cd),
     ("WHDLoad", LauncherTab::Whdload),
-    // The workshop: nothing to do with this machine, so it lands on its own
-    // pair of pages rather than adding rows here.
-    ("Create image...", LauncherTab::CreateFloppy),
 ];
 
 /// The Disk Image workshop's two pages. Reached from Storage, so these pages
@@ -4989,7 +4991,7 @@ impl LauncherState {
             // Both write a file, and the dialog that follows says which
             // kind: the page is already headed with that.
             F::NewFloppyCreate | F::NewHardCreate => "Save...".to_string(),
-            F::NewGeomSave => "Save".to_string(),
+            F::NewGeomSave => "Apply".to_string(),
             F::NewGeomAuto => "Auto".to_string(),
             _ => String::new(),
         }
@@ -7711,7 +7713,7 @@ mod tests {
         assert_eq!(LauncherTab::Storage.parent_tab(), None);
 
         // The Storage nav lists its sub-pages in order (drawn as a fixed top
-        // nav row, not a settings row). Disk Image is last and lands on the
+        // nav row, not a settings row). Create Image leads and lands on the
         // floppy page, which is the workshop's default half.
         let storage_nav: Vec<_> = LauncherTab::Storage
             .nav_options()
@@ -7721,12 +7723,12 @@ mod tests {
         assert_eq!(
             storage_nav,
             [
-                LauncherTab::Cd,
+                LauncherTab::CreateFloppy,
                 LauncherTab::HostFs,
                 LauncherTab::HostDisk,
                 LauncherTab::BootPriority,
+                LauncherTab::Cd,
                 LauncherTab::Whdload,
-                LauncherTab::CreateFloppy,
             ]
         );
 

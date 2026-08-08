@@ -4412,6 +4412,7 @@ fn draw_launcher_value_box(
     state: &LauncherState,
     field: LauncherField,
     disabled: bool,
+    centred: bool,
     scale: usize,
 ) {
     draw_rect_bevel(
@@ -4430,15 +4431,15 @@ fn draw_launcher_value_box(
         (state.workshop_value(field), PANEL_TEXT)
     };
     let shown = truncate_to_width(&text, box_rect.w.saturating_sub(8));
-    draw_panel_text(
-        frame,
-        box_rect.x + 4,
-        box_rect.y + 6,
-        &shown,
-        color,
-        1,
-        scale,
-    );
+    // A short figure between two arrows reads as belonging to them when it
+    // is centred, and as a stray left-aligned word when it is not.
+    let x = if centred {
+        let text_w = shown.chars().count() * font::GLYPH_W;
+        box_rect.x + box_rect.w.saturating_sub(text_w) / 2
+    } else {
+        box_rect.x + 4
+    };
+    draw_panel_text(frame, x, box_rect.y + 6, &shown, color, 1, scale);
 }
 
 /// A typed whole number, lined up with the value column beside it.
@@ -5773,6 +5774,7 @@ fn draw_launcher_row(
                 state,
                 r.field,
                 disabled,
+                false,
                 scale,
             );
         }
@@ -5785,6 +5787,7 @@ fn draw_launcher_row(
                 state,
                 r.field,
                 disabled,
+                false,
                 scale,
             );
             let unit = launcher_size_unit_rect(rect, row_y);
@@ -5809,6 +5812,7 @@ fn draw_launcher_row(
                 state,
                 r.field,
                 disabled,
+                false,
                 scale,
             );
         }
@@ -5838,7 +5842,7 @@ fn draw_launcher_row(
                     }),
                 scale,
             );
-            draw_launcher_value_box(frame, value, state, r.field, disabled, scale);
+            draw_launcher_value_box(frame, value, state, r.field, disabled, true, scale);
         }
         RowKind::GeometryMode => {
             // Auto and Custom sit together as one choice, the chosen one
