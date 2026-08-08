@@ -501,12 +501,26 @@ pub(super) fn dual_playfield_pixel(idx: u8, control: ControlState) -> (u8, usize
         (_, pf2) if control.pf2_priority() => (2, 2, pf2_offset + pf2 as usize),
         (pf1, _) => (1, 1, pf1 as usize),
     };
-    // A playfield whose BPLCON2 priority code is programmed out of range
-    // (> 4) is drawn transparent: the winning field's pixels collapse to the
-    // background rather than showing the field behind it (vAmiga zPF returns
-    // 0 for codes 5-7, which masks that field's index to 0). Real software
-    // only uses codes 0-4, so valid dual-playfield content is unaffected.
-    if control.playfield_priority_code(winner) > 4 {
+    // Denise draws a field transparent when its BPLCON2 priority code is
+    // programmed out of range (5-7): the winning field's pixels collapse to
+    // the background instead of revealing the field behind it. Photographed
+    // on an A500 (vAmigaTS Denise/Registers/BPLCON0/invprio1, PF2 code 7,
+    // where the real machine shows background between the bars).
+    //
+    // Lisa does not inherit the quirk. Alfred Chicken (AGA) programs
+    // BPLCON2 = 0x003F -- both codes 7 -- for its whole in-game display and
+    // draws an eight-plane dual playfield on real hardware, which the
+    // Denise behaviour would blank to the background colour. The quirk
+    // reached us from an OCS/ECS-only reference, so it never carried
+    // evidence about Lisa; WinUAE, which does model AGA, resolves the
+    // playfield colour from the plane bits alone and uses the priority
+    // codes only to mask sprites. So the split is drawn where the evidence
+    // is: the photographed Denise case keeps the quirk, and Lisa resolves
+    // the colour independently of the code.
+    // TODO: the Lisa side rests on the game plus WinUAE, with no photograph
+    // of its own; shoot invprio1 on an A1200 to confirm Lisa ignores
+    // out-of-range codes entirely rather than differing in some other way.
+    if !control.aga() && control.playfield_priority_code(winner) > 4 {
         return (0, 0);
     }
     (pf_mask, color_idx)

@@ -1503,6 +1503,10 @@ impl Bus {
         };
         if matches!(source, BeamWriteSource::CpuCopperIrq)
             && matches!(offset & 0x01FE, 0x180..=0x1BE)
+            // Same scoping as write_cpu_palette_snapshot: only bank-0
+            // LOCT-clear writes belong to the split-palette pattern the
+            // bottom-palette replay reconstructs.
+            && self.cpu_palette_write_bank_loct() == (0, false)
         {
             let (target_vpos, target_hpos) = self.cpu_palette_target_beam.unwrap_or((vpos, hpos));
             if target_vpos >= CPU_COPPER_BOTTOM_PALETTE_MIN_VPOS {
@@ -1667,28 +1671,58 @@ impl Bus {
         }
     }
 
+    /// BPLCON3 BANK/LOCT routing for a CPU COLORxx write, as Lisa decodes
+    /// it. Pre-AGA Denise has no banking: everything lands on bank 0 with
+    /// both nibble planes written.
+    pub(super) fn cpu_palette_write_bank_loct(&self) -> (usize, bool) {
+        if self.denise_is_lisa() {
+            (
+                crate::chipset::denise::Palette::bank_from_bplcon3(self.denise.bplcon3),
+                crate::chipset::denise::Palette::loct_from_bplcon3(self.denise.bplcon3),
+            )
+        } else {
+            (0, false)
+        }
+    }
+
     pub(super) fn write_cpu_palette_snapshot(&mut self, idx: usize, color: u16) {
+        // Lisa decodes every COLORxx write against the BPLCON3 latch standing
+        // at the write (BANK selects the 32-entry block, LOCT the nibble
+        // half), so the CPU-write shadow must decode identically: resolving
+        // bank-blind would collapse a banked palette upload onto entries
+        // 0..31, and a frame later seeded from this shadow would show bank 0
+        // holding the last-written bank with every other bank black.
+        let (bank, loct) = self.cpu_palette_write_bank_loct();
         let target = self.cpu_palette_target;
         match target {
             CpuPaletteTarget::Top => {
-                self.beam_top_palette.write_ocs(idx, color);
+                self.beam_top_palette.write_banked(bank, idx, loct, color);
             }
             CpuPaletteTarget::Bottom => {
-                self.beam_top_palette.write_ocs(idx, color);
-                let target_vpos = self
-                    .cpu_palette_target_beam
-                    .map(|(vpos, _)| vpos)
-                    .unwrap_or(self.agnus.vpos);
-                if target_vpos >= CPU_COPPER_BOTTOM_PALETTE_MIN_VPOS {
-                    self.beam_bottom_palette.write_ocs(idx, color);
-                    self.beam_bottom_palette_valid = true;
-                }
-                self.cpu_palette_target_writes = self.cpu_palette_target_writes.saturating_add(1);
-                if idx == 15 || idx == 31 || self.cpu_palette_target_writes >= 16 {
-                    self.commit_pending_bottom_palette_events();
-                    self.cpu_palette_target = CpuPaletteTarget::Top;
-                    self.cpu_palette_target_writes = 0;
-                    self.cpu_palette_target_beam = None;
+                self.beam_top_palette.write_banked(bank, idx, loct, color);
+                // The bottom-palette reconstruction models the classic
+                // split-palette pattern: a copper interrupt near the display
+                // bottom whose handler rewrites the OCS-visible palette
+                // (bank 0, LOCT clear). A banked or low-nibble AGA write is
+                // not that pattern; letting one latch the bottom palette
+                // would replay wrong values into carry-forward frames.
+                if bank == 0 && !loct {
+                    let target_vpos = self
+                        .cpu_palette_target_beam
+                        .map(|(vpos, _)| vpos)
+                        .unwrap_or(self.agnus.vpos);
+                    if target_vpos >= CPU_COPPER_BOTTOM_PALETTE_MIN_VPOS {
+                        self.beam_bottom_palette.write_ocs(idx, color);
+                        self.beam_bottom_palette_valid = true;
+                    }
+                    self.cpu_palette_target_writes =
+                        self.cpu_palette_target_writes.saturating_add(1);
+                    if idx == 15 || idx == 31 || self.cpu_palette_target_writes >= 16 {
+                        self.commit_pending_bottom_palette_events();
+                        self.cpu_palette_target = CpuPaletteTarget::Top;
+                        self.cpu_palette_target_writes = 0;
+                        self.cpu_palette_target_beam = None;
+                    }
                 }
             }
         }

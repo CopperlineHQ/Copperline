@@ -2976,6 +2976,54 @@ fn cpu_palette_writes_snapshot_top_and_status_palettes_by_interrupt_source() {
 }
 
 #[test]
+fn cpu_palette_snapshot_routes_aga_banked_writes_by_bplcon3() {
+    // Lisa decodes every COLORxx write against the BPLCON3 latch standing at
+    // the write: BANK (bits 15-13) selects the 32-entry block and LOCT
+    // (bit 9) the nibble half. The CPU-write shadow palette must decode the
+    // same way, or an 8-bank CPU palette upload (Bubble and Squeak's level
+    // fade) collapses onto entries 0..31: bank 0 ends up holding the
+    // last-written bank and a frame later seeded from the shadow shows every
+    // other bank black.
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+
+    // Bank 0 high nibbles, then low nibbles via LOCT.
+    assert!(!bus.custom_write(0x106, 2, 0x0000));
+    assert!(!bus.custom_write(0x182, 2, 0x0123));
+    assert!(!bus.custom_write(0x106, 2, 0x0200));
+    assert!(!bus.custom_write(0x182, 2, 0x0456));
+    // Bank 1 (BPLCON3 BANK=001): must land on entry 33, not entry 1.
+    assert!(!bus.custom_write(0x106, 2, 0x2000));
+    assert!(!bus.custom_write(0x182, 2, 0x0789));
+
+    assert_eq!(bus.beam_top_palette[1], 0x0123, "bank 0 high word");
+    assert_eq!(
+        bus.beam_top_palette.rgb24(1),
+        0x14_25_36,
+        "bank 0 24-bit colour from high+low nibble writes"
+    );
+    assert_eq!(bus.beam_top_palette[33], 0x0789, "bank 1 entry");
+
+    // A banked write inside a copper-interrupt window is not the OCS
+    // split-palette pattern: it must not latch the bottom palette or record
+    // replay events.
+    bus.agnus.vpos = 0xD4;
+    bus.delivered_irq_pending = INT_COPER;
+    assert!(!bus.custom_write(0x09C, 2, INT_COPER as u64));
+    assert!(!bus.custom_write(0x184, 2, 0x0AAA));
+    assert_eq!(bus.beam_top_palette[34], 0x0AAA);
+    assert!(!bus.beam_bottom_palette_valid);
+    assert!(bus.frame_bottom_palette_events().is_empty());
+
+    // The same write with bank 0 / LOCT clear selected is the classic
+    // pattern and still latches.
+    assert!(!bus.custom_write(0x106, 2, 0x0000));
+    assert!(!bus.custom_write(0x186, 2, 0x0BBB));
+    assert_eq!(bus.beam_bottom_palette[3], 0x0BBB);
+    assert!(bus.beam_bottom_palette_valid);
+}
+
+#[test]
 fn intreq_palette_target_uses_delivered_interrupt_when_coper_and_vertb_clear_together() {
     let mut bus = empty_bus();
 

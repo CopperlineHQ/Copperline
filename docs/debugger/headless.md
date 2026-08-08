@@ -142,6 +142,10 @@ cannot change at runtime (see [](../internals/architecture)).
   channel is the signature of a stale display latch: the shadow shows what
   software last wrote, the hardware view what Denise would actually
   serialize, and the latter drives the DMA-idle latched redisplay.
+  `COPPERLINE_DBG_FRAMESTATE_FULLPAL=1` extends the palette line to all 256
+  AGA entries as 24-bit colours, sixteen per row -- whole banks unexpectedly
+  black is the signature of banked COLOR writes not landing where BPLCON3
+  aimed them.
 
 ## Diagnostic knobs
 
@@ -165,6 +169,7 @@ authoritative list. The most useful ones:
 | `COPPERLINE_DIAG_DISPLAY` | Display-register change log |
 | `COPPERLINE_DIAG_CAPROW` | `=all`, `=V`, or `=START:END`: per-line bitplane capture state at DDF start, including DMACON, current and DDF-anchor BPLCON0, FMODE/DIW/DDF, effective fetch window, unit/period/quantum, words/row, modulos, and all BPLxPTs -- separates wrong-pointer from wrong-decode display bugs |
 | `COPPERLINE_DIAG_PALETTE_ROW` | `=all`, `=V`, or `=START:END`: log beam-timed COLOR writes for selected beam lines, including source, framebuffer x, palette entry, LOCT, value, and BPLCON3; the setting is cached after first use |
+| `COPPERLINE_DIAG_PALSTORE` | Log every COLOR and BPLCON3 write as the register store applies it: beam position, CPU/Copper source, value, the BPLCON3 latch decoding the write, the resolved AGA palette entry, and the entry's pre-write 24-bit colour -- the store-side companion of `COPPERLINE_DIAG_PALETTE_ROW` (which shows the render replay's view of the same writes) |
 | `COPPERLINE_DIAG_HAM_PIXELS` | `=BEAMY,X0,X1[,STEP]`: sample DMA playfield HAM pixels on one beam line, including framebuffer/native x, selected bitplane index, active/fetched state, HAM hold colour before/after, output latch, plane count, fetched width, BPLCON1 delays, DIW/DDF, and display window; pairs with `COPPERLINE_DBG_AFTER` / `COPPERLINE_DBG_UNTIL` and is cached after first use |
 | `COPPERLINE_DIAG_MANUAL_BPL_PIXELS` | `=BEAMY,X0,X1[,STEP]`: sample CPU/Copper BPLDAT replay pixels on one beam line, including source x/native bit, selected index, HAM seed/output state, output latch, BPLCON0/BPLCON1, and display window; cached after first use |
 | `COPPERLINE_DIAG_FRAME_PIXELS` | `=BEAMY,X0,X1[,STEP]`: sample final framebuffer pixels after playfield, manual BPLDAT replay, sprites, and final blanking so post-decode overwrites can be isolated; cached after first use |

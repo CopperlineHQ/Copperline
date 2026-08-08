@@ -66,6 +66,19 @@ pub(super) fn maybe_log_frame_state(
         .map(|i| format!("{:03x}", state.palette[i]))
         .collect();
     log::info!("  pal0-15=[{}]", pal.join(" "));
+    if crate::envcfg::flag("COPPERLINE_DBG_FRAMESTATE_FULLPAL") {
+        for row in 0..16 {
+            let entries: Vec<String> = (row * 16..row * 16 + 16)
+                .map(|i| format!("{:06x}", state.palette.rgb24(i) & 0x00FF_FFFF))
+                .collect();
+            log::info!(
+                "  pal{:3}-{:3}=[{}]",
+                row * 16,
+                row * 16 + 15,
+                entries.join(" ")
+            );
+        }
+    }
     let spr_lines = captured_sprite_lines;
     let mut per_sprite = [0u32; 8];
     let (mut ymin, mut ymax) = (i32::MAX, i32::MIN);
