@@ -15,10 +15,12 @@
 //! noted beside it, because a magic number nobody can re-derive is how
 //! these formats get quietly wrong.
 //!
-//! Pure `std`: no platform code, no dependencies. A big image is created
-//! sparse by default -- the length is set and only the blocks that carry
-//! structure are written -- so a 2 GB hard drive costs a few kilobytes of
-//! writes and whatever the host filesystem chooses to allocate.
+//! A big image is created sparse by default -- the length is set and only
+//! the blocks that carry structure are written -- so a 2 GB hard drive
+//! costs a few kilobytes of writes and whatever the host filesystem
+//! chooses to allocate. That is `std` alone on Unix, where setting the
+//! length of a file leaves a hole; NTFS allocates unless a file is marked
+//! sparse first, so [`mark_sparse`] is the one platform call here.
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -738,6 +740,41 @@ fn clear_bit(data: &mut [u8], bit: u64) {
 
 // --- floppies -------------------------------------------------------------
 
+/// Ask the host to leave a file's unwritten extents as holes.
+///
+/// Setting the length of a file is enough on Unix: the tail reads as zeros
+/// and nothing is committed until it is written to. NTFS is the other way
+/// round -- a file is dense unless it has been marked sparse -- so a 100 GB
+/// image would otherwise be 100 GB of real writes on Windows however the
+/// Sparse image box is set.
+///
+/// Best effort, and deliberately silent: a filesystem that cannot do it
+/// (FAT32 on a card, say) still gets a correct image, just a fully
+/// allocated one, and the write fails with the host's own out-of-space
+/// error if there is not room for it.
+#[cfg(windows)]
+fn mark_sparse(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    // FSCTL_SET_SPARSE. No input or output buffer: the call is the request.
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+    let mut returned = 0u32;
+    unsafe {
+        windows_sys::Win32::System::IO::DeviceIoControl(
+            file.as_raw_handle() as _,
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn mark_sparse(_file: &File) {}
+
 /// Create the file, run `write` on it, and take the file away again if
 /// that fails.
 ///
@@ -863,6 +900,11 @@ fn write_hard(
     spec: &HardSpec,
     geometry: Geometry,
 ) -> io::Result<Created> {
+    if spec.sparse {
+        // Before the length is set, which is the point at which a
+        // filesystem decides whether to commit the space.
+        mark_sparse(&file);
+    }
     file.set_len(geometry.bytes())?;
     if !spec.sparse {
         // Walk the file writing zeros, so the host commits the space now
@@ -1427,9 +1469,12 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!s.path().exists());
 
-        // The same size with no partition table is fine: nothing has to
-        // describe it in 32-bit fields.
-        create_hard(
+        // The same size with no partition table is not turned away here:
+        // nothing has to describe it in 32-bit fields. Whether the host can
+        // hold a file that big is its own business -- a filesystem with no
+        // sparse files (or a small disk under one) says so, and that is a
+        // different answer from this module's refusal.
+        let made = create_hard(
             s.path(),
             &HardSpec {
                 bytes: MAX_RDB_BYTES + BLOCK_BYTES as u64,
@@ -1437,9 +1482,15 @@ mod tests {
                 filesystem: None,
                 ..Default::default()
             },
-        )
-        .expect("an unpartitioned drive has no such limit");
-        assert!(s.path().exists());
+        );
+        match made {
+            Ok(_) => assert!(s.path().exists()),
+            Err(e) => assert_ne!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "an unpartitioned drive was refused for a limit it does not have"
+            ),
+        }
     }
 
     #[test]
