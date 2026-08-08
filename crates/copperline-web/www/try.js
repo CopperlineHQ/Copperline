@@ -456,6 +456,7 @@ async function load() {
     showBuildInfo();
     populateMachineSelect();
     populateVideoSelect();
+    applyDiskFormats();
   } catch (e) {
     setLoadStatus(`failed to load the emulator: ${e.message ?? e}`);
     console.error(e);
@@ -5448,10 +5449,66 @@ function updateStatusDisks() {
 // http.server) is scraped for links with a matching extension instead.
 // An empty or unreachable folder hides the select.
 
-const DISK_LIST_EXT = /\.(adf|adz|dms|scp|zip|gz)$/i;
 // Raw ROM images only: a list pick feeds load_rom directly, which takes
 // uncompressed 256/512 KiB images.
 const KICK_LIST_EXT = /\.(rom|bin)$/i;
+
+// The floppy formats this wasm bundle reads, from WebEmu.floppy_formats():
+// extensions without their dots, in menu order. insert_floppy decides by
+// signature and never reads the name, so nothing on the insert path needs
+// this - but a file picker and a scraped directory listing have only names
+// to go on, and both hide what they do not list. Taking the list from the
+// build is what keeps them from offering less than the core reads (an IPF
+// greyed out in the picker of a bundle that decodes IPF perfectly well).
+// Null until the module is up, and on a bundle too old to say.
+let diskFormats = null;
+
+// Called once the wasm module is ready (load()): point the disk picker and
+// the optional DF0 list at the formats this build reads. A shell's
+// hand-written accept attribute is a list the wasm can outgrow, and it did
+// - which is why the glue rewrites it rather than trusting it. Only a
+// picker that already carries one is touched, so a shell that deliberately
+// filters nothing keeps offering every file, and iOS (which drops the
+// attribute at the top of this file, because its document picker greys out
+// extensions it does not know) stays unfiltered too. A bundle without
+// floppy_formats leaves the picker alone and hides the list, the way the
+// machine and video selects hide themselves.
+function applyDiskFormats() {
+  try {
+    diskFormats = WebEmu.floppy_formats?.() ?? null;
+  } catch {
+    diskFormats = null;
+  }
+  const diskListSelect = $('df0list');
+  if (!diskFormats?.length) {
+    diskFormats = null;
+    if (diskListSelect) diskListSelect.hidden = true;
+    return;
+  }
+  const picker = $('df0');
+  if (picker.hasAttribute('accept')) {
+    picker.accept = diskFormats.map((ext) => `.${ext}`).join(',');
+  }
+  if (diskListSelect) {
+    const listExt = new RegExp(`\\.(${diskFormats.join('|')})$`, 'i');
+    loadFolderList(diskListSelect, 'adf/', listExt, 'DF0 from list...', false, insertDiskFromUrl);
+  }
+}
+
+// What the DF0-from-URL prompt promises, from the same list: the image
+// formats by name, then the two packers as what they are. Before the
+// module is up (or on a bundle that cannot say) it promises nothing rather
+// than a list that might be wrong.
+function diskUrlPrompt() {
+  if (!diskFormats?.length) return 'Disk image URL:';
+  const packers = { gz: 'gzip', zip: 'zip' };
+  const images = diskFormats.filter((ext) => !(ext in packers));
+  const packed = diskFormats.filter((ext) => ext in packers).map((ext) => packers[ext]);
+  const names = images.map((ext) => ext.toUpperCase()).join('/');
+  return packed.length
+    ? `Disk image URL (${names}, ${packed.join(' or ')} packed):`
+    : `Disk image URL (${names}):`;
+}
 
 async function folderListEntries(folder, extensions) {
   // A manifest wins when the site ships one; a missing or invalid one
@@ -5547,11 +5604,6 @@ async function loadFolderList(select, defaultSrc, extensions, placeholder, sameO
   });
 }
 
-const diskListSelect = $('df0list');
-if (diskListSelect) {
-  loadFolderList(diskListSelect, 'adf/', DISK_LIST_EXT, 'DF0 from list...', false, insertDiskFromUrl);
-}
-
 // The hosted page's server carries no ROMs, so its kick/ folder lists
 // nothing and the select hides; a self-hosted shell that serves its
 // owner's ROMs next to the page gets a one-click ROM chooser.
@@ -5562,9 +5614,7 @@ if (kickListSelect) {
 
 // Optional in the page shell: older shells have no URL button.
 $('df0url')?.addEventListener('click', () => {
-  const url = window.prompt(
-    'Disk image URL (ADF/ADZ/DMS/SCP, gzip or zip packed):',
-  );
+  const url = window.prompt(diskUrlPrompt());
   if (url && url.trim()) insertDiskFromUrl(url.trim());
 });
 
