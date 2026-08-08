@@ -2934,8 +2934,8 @@ fn test_app_with_audio_cpu_and_program(
     super::App::new(
         emu,
         true,
-        None,
-        None,
+        Vec::new(),
+        Vec::new(),
         None,
         Vec::new(),
         Vec::new(),
@@ -6522,7 +6522,7 @@ fn temp_capture_path(name: &str) -> PathBuf {
 fn windowless_screenshot_run_saves_png_and_exits() {
     let path = temp_capture_path("shot.png");
     let mut app = test_app();
-    app.pending_auto_shot = Some((0.04, path.clone()));
+    app.pending_auto_shot = vec![(0.04, path.clone())];
     app.run_headless().expect("windowless screenshot run");
     let data = std::fs::read(&path).expect("screenshot file written");
     assert!(
@@ -6531,6 +6531,37 @@ fn windowless_screenshot_run_saves_png_and_exits() {
         data.len()
     );
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn windowless_run_saves_every_scheduled_screenshot_before_exiting() {
+    // Repeated --screenshot-after captures all fire, and the run ends on
+    // the latest one rather than the last one written on the command line.
+    let early = temp_capture_path("multi-early.png");
+    let late = temp_capture_path("multi-late.png");
+    let state = temp_capture_path("multi.clstate");
+    let mut app = test_app();
+    app.pending_auto_shot = vec![(0.12, late.clone()), (0.04, early.clone())];
+    app.pending_auto_save_state = vec![(0.08, state.clone())];
+    app.run_headless().expect("windowless multi-capture run");
+
+    for path in [&early, &late] {
+        let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(
+            data.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "{} should be a PNG, got {} bytes",
+            path.display(),
+            data.len()
+        );
+    }
+    assert!(
+        state.exists(),
+        "a save state scheduled between two screenshots still fires"
+    );
+
+    std::fs::remove_file(&early).ok();
+    std::fs::remove_file(&late).ok();
+    std::fs::remove_file(&state).ok();
 }
 
 #[test]
@@ -6554,7 +6585,7 @@ fn windowless_run_fires_scheduled_input_and_flushes_recording() {
     let shot = temp_capture_path("input-shot.png");
     let script = temp_capture_path("session.clscript");
     let mut app = test_app();
-    app.pending_auto_shot = Some((0.2, shot.clone()));
+    app.pending_auto_shot = vec![(0.2, shot.clone())];
     app.pending_auto_keys.push(super::KeyPressSpec {
         secs: 0.04,
         rawkey: 0x45,

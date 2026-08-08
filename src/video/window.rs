@@ -860,12 +860,16 @@ pub struct App {
     /// stays powered on, so the last rendered frame is held on screen and
     /// emulation resumes from the same point when unpaused.
     paused: bool,
-    auto_shot: Option<(f32, PathBuf)>,
-    pending_auto_shot: Option<(f32, PathBuf)>,
-    /// Scheduled --save-state-after capture: write a save state once
-    /// emulated time reaches the deadline, then keep running.
-    auto_save_state: Option<(f32, PathBuf)>,
-    pending_auto_save_state: Option<(f32, PathBuf)>,
+    /// Scheduled --screenshot-after captures, earliest deadline first.
+    /// The flag repeats, so a run can bracket several moments; the run
+    /// ends once the last of them has been saved.
+    auto_shot: Vec<(f32, PathBuf)>,
+    pending_auto_shot: Vec<(f32, PathBuf)>,
+    /// Scheduled --save-state-after captures, earliest deadline first:
+    /// write a save state once emulated time reaches each deadline, then
+    /// keep running. Repeats like --screenshot-after.
+    auto_save_state: Vec<(f32, PathBuf)>,
+    pending_auto_save_state: Vec<(f32, PathBuf)>,
     frame_dump: Option<FrameDumpState>,
     pending_frame_dump: Option<FrameDumpSpec>,
     auto_keys: Vec<ScheduledKey>,
@@ -1469,8 +1473,8 @@ impl App {
     pub fn new(
         emu: Emulator,
         power_on: bool,
-        screenshot_after: Option<(f32, PathBuf)>,
-        save_state_after: Option<(f32, PathBuf)>,
+        screenshot_after: Vec<(f32, PathBuf)>,
+        save_state_after: Vec<(f32, PathBuf)>,
         frame_dump: Option<FrameDumpSpec>,
         press_after: Vec<KeyPressSpec>,
         click_after: Vec<(f32, MouseButtonKind, u32, u8)>,
@@ -1514,8 +1518,8 @@ impl App {
         // Headless capture runs drive themselves off emulated time, so a
         // powered-off start would simply hang. Force power on for those.
         let powered_on = power_on
-            || screenshot_after.is_some()
-            || save_state_after.is_some()
+            || !screenshot_after.is_empty()
+            || !save_state_after.is_empty()
             || frame_dump.is_some();
         let render_worker = threaded_render_enabled().then(|| {
             info!("threaded render pipeline enabled");
@@ -1598,9 +1602,9 @@ impl App {
             cpu_halted: false,
             powered_on,
             paused: false,
-            auto_shot: None,
+            auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
-            auto_save_state: None,
+            auto_save_state: Vec::new(),
             pending_auto_save_state: save_state_after,
             frame_dump: None,
             pending_frame_dump: frame_dump,
@@ -2281,7 +2285,7 @@ impl App {
     /// without window-server access.
     pub fn run_headless(mut self) -> Result<()> {
         self.arm_scheduled_events();
-        if self.auto_shot.is_none() && self.frame_dump.is_none() {
+        if self.auto_shot.is_empty() && self.frame_dump.is_none() {
             return Err(anyhow!(
                 "windowless capture run needs --screenshot-after or --dump-frames"
             ));
@@ -2317,22 +2321,28 @@ impl App {
     /// scheduling would fire at the wrong emulated point or never fire at
     /// all before the run exits.
     fn arm_scheduled_events(&mut self) {
-        if let Some((secs, path)) = self.pending_auto_shot.take() {
+        for (secs, path) in std::mem::take(&mut self.pending_auto_shot) {
             info!(
                 "auto-screenshot armed: will save {} after {:.1}s emulated time",
                 path.display(),
                 secs
             );
-            self.auto_shot = Some((secs.max(0.0), path));
+            self.auto_shot.push((secs.max(0.0), path));
         }
-        if let Some((secs, path)) = self.pending_auto_save_state.take() {
+        // Deadline order, not command-line order, so the run ends on the
+        // latest capture however the flags were written. The sort is
+        // stable, so captures sharing a deadline keep their given order.
+        self.auto_shot.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        for (secs, path) in std::mem::take(&mut self.pending_auto_save_state) {
             info!(
                 "auto-save-state armed: will save {} after {:.1}s emulated time",
                 path.display(),
                 secs
             );
-            self.auto_save_state = Some((secs.max(0.0), path));
+            self.auto_save_state.push((secs.max(0.0), path));
         }
+        self.auto_save_state
+            .sort_by(|(a, _), (b, _)| a.total_cmp(b));
         if let Some(spec) = self.pending_frame_dump.take() {
             info!(
                 "frame dump armed: will save {} frames to {} after {:.1}s emulated time",
@@ -2630,38 +2640,58 @@ impl App {
     /// end the run: a state save is a capture along the way, not the end
     /// of a verification run.
     fn fire_auto_save_state(&mut self) {
-        let Some((secs, path)) = self.auto_save_state.take() else {
-            return;
-        };
-        if self.emu.bus().emulated_seconds() < secs as f64 {
-            self.auto_save_state = Some((secs, path));
+        if self.auto_save_state.is_empty() {
             return;
         }
-        match self.emu.save_state(&path) {
-            Ok(()) => info!("auto-save-state saved: {}", path.display()),
-            Err(e) => warn!("auto-save-state failed ({}): {e:#}", path.display()),
+        let now = self.emu.bus().emulated_seconds();
+        // Deadline-ordered, so everything still pending starts at the first
+        // entry that is not due yet.
+        let due = self
+            .auto_save_state
+            .iter()
+            .take_while(|(secs, _)| now >= *secs as f64)
+            .count();
+        for (_, path) in self.auto_save_state.drain(..due).collect::<Vec<_>>() {
+            match self.emu.save_state(&path) {
+                Ok(()) => info!("auto-save-state saved: {}", path.display()),
+                Err(e) => warn!("auto-save-state failed ({}): {e:#}", path.display()),
+            }
         }
     }
 
-    /// Fire the scheduled --screenshot-after capture once its emulated
-    /// timestamp has passed. Returns true when the screenshot has been
-    /// saved and the run is complete (both loops exit on it); the capture
-    /// stays armed while the target frame is still being rendered.
+    /// Fire every scheduled --screenshot-after capture whose emulated
+    /// timestamp has passed. Returns true when the last one has been saved
+    /// and the run is complete (both loops exit on it); captures stay armed
+    /// while the target frame is still being rendered, and a run with more
+    /// captures still pending keeps going.
     fn fire_auto_shot(&mut self) -> bool {
-        let Some((secs, path)) = self.auto_shot.take() else {
+        if self.auto_shot.is_empty() {
             return false;
-        };
-        if self.emu.bus().emulated_seconds() < secs as f64 {
-            self.auto_shot = Some((secs, path));
+        }
+        let now = self.emu.bus().emulated_seconds();
+        // Deadline-ordered, so everything still pending starts at the first
+        // entry that is not due yet.
+        let due = self
+            .auto_shot
+            .iter()
+            .take_while(|(secs, _)| now >= *secs as f64)
+            .count();
+        if due == 0 {
             return false;
         }
         let emulated_frame = self.emu.bus().emulated_frames();
         self.finish_render_for_current_frame();
         if self.last_rendered_emulated_frame != Some(emulated_frame) {
-            self.auto_shot = Some((secs, path));
             return false;
         }
-        self.save_screenshot(&path);
+        // Captures that came due together all describe this frame, so they
+        // all get it rather than drifting a frame apart.
+        for (_, path) in self.auto_shot.drain(..due).collect::<Vec<_>>() {
+            self.save_screenshot(&path);
+        }
+        if !self.auto_shot.is_empty() {
+            return false;
+        }
         self.emu.report_stats();
         self.emu.bus().poll_stats.dump_top("at screenshot");
         // Evaluate an untargeted reverse watchpoint at run end.
@@ -2708,7 +2738,7 @@ impl ApplicationHandler for App {
         // screen and removes the vsync present gate, letting the run
         // advance as fast as the host allows. Emulated state is identical.
         let headless_capture =
-            self.pending_auto_shot.is_some() || self.pending_frame_dump.is_some();
+            !self.pending_auto_shot.is_empty() || self.pending_frame_dump.is_some();
         // Start fullscreen only for an interactive window ([display] full_screen
         // / --full-screen); a headless capture window stays hidden and windowed.
         let fullscreen =
@@ -3722,7 +3752,7 @@ impl ApplicationHandler for App {
         // frame per loop (request_redraw is skipped below), and every captured
         // frame must be rendered, so warp's output frame-skip burst must not
         // apply there.
-        let headless_capture = self.auto_shot.is_some() || self.frame_dump.is_some();
+        let headless_capture = !self.auto_shot.is_empty() || self.frame_dump.is_some();
         // Run one scheduler quantum. Rebuild the host framebuffer only
         // when Agnus has crossed into a new frame; the expensive renderer
         // reconstructs a completed hardware frame, not an instruction slice.
