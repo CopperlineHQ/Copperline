@@ -1037,6 +1037,17 @@ impl Bus {
                 false
             }
             0x106 => {
+                if crate::envcfg::flag("COPPERLINE_DIAG_PALSTORE") {
+                    log::info!(
+                        "palstore f={} v={} h={} src={} BPLCON3={:#06X} enabled={}",
+                        self.emulated_frames,
+                        self.agnus.vpos,
+                        self.agnus.hpos,
+                        beam_write_source_name(source),
+                        val,
+                        self.bplcon3_write_enabled(),
+                    );
+                }
                 // ECS Denise only latches BPLCON3 while BPLCON0 bit 0
                 // (ENBPLCN3/ECSENA) is set; OCS Denise has no BPLCON3.
                 if self.bplcon3_write_enabled() {
@@ -1229,6 +1240,23 @@ impl Bus {
                         source
                     };
                     self.record_render_write(off, val, render_source);
+                    if crate::envcfg::flag("COPPERLINE_DIAG_PALSTORE") {
+                        let bank =
+                            crate::chipset::denise::Palette::bank_from_bplcon3(self.denise.bplcon3);
+                        let entry = bank * 32 + (idx & 31);
+                        log::info!(
+                            "palstore f={} v={} h={} src={} COLOR{:02}={:#06X} bplcon3={:#06X} entry={} pre={:#08X}",
+                            self.emulated_frames,
+                            self.agnus.vpos,
+                            self.agnus.hpos,
+                            beam_write_source_name(source),
+                            idx,
+                            color,
+                            self.denise.bplcon3,
+                            entry,
+                            self.denise.palette.rgb24(entry),
+                        );
+                    }
                     if self.denise_is_lisa() {
                         // AGA: BPLCON3 BANK/LOCT route the write into the
                         // 256-entry store. Bank 0 with LOCT clear is the
