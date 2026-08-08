@@ -50,6 +50,17 @@ into it (the committed guest probe from `guest/hostfs-test/`), and assert
 the file the probe creates arrives on the host side -- autoboot, handler
 startup, LoadSeg off the volume, and a write back through it, end to end.
 
+### WHDLoad boot
+
+`tests/whdload_boot.rs` boots the committed, project-owned
+`tests/assets/whdload/TestGame.lha` fixture through the full WHDLoad path
+(`--whdload` staging, hostfs boot, the real WHDLoad binary handing control
+to the fixture slave) and asserts the slave's solid-colour frame. It needs
+the fetched support archives (`tools/fetch-whdload.sh` populates
+`assets/whdboot/`) and a Kickstart 3.1 (40.068 A1200) image anywhere in the
+asset directory -- identification is by content, the filename does not
+matter -- and skips cleanly without either.
+
 ### DiagROM smoke
 
 DiagROM is the first asset-backed boot smoke before a Kickstart OS check:

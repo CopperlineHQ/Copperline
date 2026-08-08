@@ -1446,6 +1446,27 @@ both the V36 boot-node protocol and V34's own autoboot and handler
 startup conventions). Kickstart 1.2 and older lack the expansion-ROM
 hook entirely and never see the mounts.
 
+## `[whdload]` -- direct WHDLoad boot
+
+```toml
+[whdload]
+game = "Turrican.lha"       # .lha archive or a directory holding a .slave
+# library = "..."           # game library; default: <config dir>/whdload
+# kickstarts = "..."        # directory scanned for Kickstart images
+# args = "ButtonWait"       # extra WHDLoad command-line options
+```
+
+Boots straight into a WHDLoad-installed game: the package is extracted
+into the game library (once -- saves the game writes persist there), a
+minimal boot volume is synthesized around the real WHDLoad program, raw
+Kickstart images from `kickstarts` are identified by content and staged
+into `Devs:Kickstarts/`, and the machine is derived from the slave
+header (an A1200 with 8 MiB fast RAM) unless `[machine]`, `rom`, or
+`[memory]` say otherwise. `--whdload GAME` is the command-line
+equivalent and overrides `game`. The whole story, including what the
+support archives are and how Kickstart identification works, is in
+[](whdload.md).
+
 ## `[cd]` -- CDTV and CD32
 
 ```toml

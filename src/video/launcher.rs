@@ -176,6 +176,9 @@ pub enum LauncherTab {
     FluxBridge,
     BootPriority,
     HostFs,
+    /// Direct WHDLoad boot (src/whdload.rs): the game package to boot and
+    /// the staging directories, reached from the Storage tab.
+    Whdload,
     /// Real host storage -- an SD card, a CF card, an Amiga's own hard
     /// drive -- attached in place of a disk image. Drawn as its own layout
     /// rather than a list of settings rows, because choosing a disk is a
@@ -224,6 +227,7 @@ impl LauncherTab {
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Folder",
+            LauncherTab::Whdload => "WHDLoad",
             LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
             LauncherTab::IoPorts => "I/O Ports",
@@ -242,6 +246,7 @@ impl LauncherTab {
         match self {
             LauncherTab::Cd
             | LauncherTab::HostFs
+            | LauncherTab::Whdload
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority => LauncherTab::Storage,
             LauncherTab::FluxBridge => LauncherTab::Floppy,
@@ -257,6 +262,7 @@ impl LauncherTab {
         match self {
             LauncherTab::Cd
             | LauncherTab::HostFs
+            | LauncherTab::Whdload
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority => Some(LauncherTab::Storage),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
@@ -288,6 +294,7 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Boot Priority", LauncherTab::BootPriority),
+    ("WHDLoad", LauncherTab::Whdload),
 ];
 
 /// The A/V & Emu categories, left to right (matching "A/V"). `AvAudio` is the
@@ -400,6 +407,10 @@ pub enum LauncherField {
     CdImage,
     CdInsertDelay,
     Cd32Nvram,
+    // WHDLoad direct boot (the Storage tab's WHDLoad sub-page)
+    WhdloadGame,
+    WhdloadKickstarts,
+    WhdloadLibrary,
     // Serial (MIDI). Present only with the `midi` feature.
     #[cfg(feature = "midi")]
     SerialMode,
@@ -559,6 +570,28 @@ impl LauncherField {
     pub fn is_filesys_dir_field(self) -> bool {
         matches!(filesys_slot(self), Some((_, false)))
     }
+
+    /// Whether this field is a WHDLoad staging directory (folder picker):
+    /// the Kickstart-image and game-library directories, but not the game
+    /// package (an `.lha` file, picked as a file).
+    pub fn is_whdload_dir_field(self) -> bool {
+        matches!(
+            self,
+            LauncherField::WhdloadKickstarts | LauncherField::WhdloadLibrary
+        )
+    }
+
+    /// Whether this field is one of the WHDLoad host paths (game package or
+    /// staging directory), which show the whole host path like the Host FS
+    /// mounts do.
+    pub fn is_whdload_path_field(self) -> bool {
+        matches!(
+            self,
+            LauncherField::WhdloadGame
+                | LauncherField::WhdloadKickstarts
+                | LauncherField::WhdloadLibrary
+        )
+    }
 }
 
 /// What a hard-disk slot holds. The two are interchangeable to everything
@@ -685,6 +718,15 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
+// The WHDLoad sub-page: the game package to boot, then the two directories
+// staging draws on (src/whdload.rs). Drive rows like the Host FS mounts so
+// the whole host path shows; the staged volumes mount under fixed names
+// (WHDBoot:/WHDGame:), so there is no volume box to fill.
+const WHDLOAD_ROWS: [Row; 3] = [
+    row(F::WhdloadGame, "Game package", Drive),
+    row(F::WhdloadKickstarts, "Kickstart images", Drive),
+    row(F::WhdloadLibrary, "Game library", Drive),
+];
 // The MIDI endpoint rows appear only when the serial port is in MIDI mode, so
 // the Serial section shows just the Device / Mode selector otherwise. The
 // selector is labelled "Device / Mode" because some choices are devices (MIDI)
@@ -806,6 +848,7 @@ pub fn rows(
             Cow::Owned(rows)
         }
         LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
+        LauncherTab::Whdload => Cow::Borrowed(&WHDLOAD_ROWS),
         // Drawn as its own layout: a disk table and its buttons, not rows.
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
@@ -1467,6 +1510,14 @@ pub struct MachineSetup {
     cd_image: Option<PathBuf>,
     cd_insert_delay: f64,
     cd32_nvram: Option<PathBuf>,
+    // WHDLoad direct boot (`[whdload]`, src/whdload.rs): the game package
+    // and the staging directories, edited on the Storage tab's WHDLoad
+    // sub-page. `args` has no row of its own; it is carried through so a
+    // hand-written key survives a launcher save.
+    whdload_game: Option<PathBuf>,
+    whdload_kickstarts: Option<PathBuf>,
+    whdload_library: Option<PathBuf>,
+    whdload_args: Option<String>,
     // Serial port. Carried in every build so a config's `[serial]` block
     // round-trips; only edited in the I/O Ports tab's Serial section, which a
     // `midi` build shows.
@@ -1697,6 +1748,10 @@ impl MachineSetup {
             // Use the raw NVRAM path: Config defaults it to "cd32-nvram.bin"
             // on CD32, which we do not want to persist as an explicit setting.
             cd32_nvram: raw.cd.nvram.as_deref().map(PathBuf::from),
+            whdload_game: raw.whdload.game.as_deref().map(PathBuf::from),
+            whdload_kickstarts: raw.whdload.kickstarts.as_deref().map(PathBuf::from),
+            whdload_library: raw.whdload.library.as_deref().map(PathBuf::from),
+            whdload_args: raw.whdload.args.clone(),
             serial_mode: cfg.serial.mode,
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
@@ -2081,6 +2136,11 @@ impl MachineSetup {
             raw.cd.insert_delay = Some(self.cd_insert_delay);
         }
         raw.cd.nvram = self.cd32_nvram.as_deref().map(path_string);
+        // WHDLoad direct boot. `args` has no UI row but still round-trips.
+        raw.whdload.game = self.whdload_game.as_deref().map(path_string);
+        raw.whdload.kickstarts = self.whdload_kickstarts.as_deref().map(path_string);
+        raw.whdload.library = self.whdload_library.as_deref().map(path_string);
+        raw.whdload.args = self.whdload_args.clone();
         // A/V and emulation
         if self.overscan != base.overscan {
             raw.display.overscan = Some(overscan_name(self.overscan).to_string());
@@ -2732,6 +2792,9 @@ impl MachineSetup {
             F::CdImage => self.cd_image.as_deref(),
             F::Cd32Nvram => self.cd32_nvram.as_deref(),
             F::ParallelOutput => self.parallel_output.as_deref(),
+            F::WhdloadGame => self.whdload_game.as_deref(),
+            F::WhdloadKickstarts => self.whdload_kickstarts.as_deref(),
+            F::WhdloadLibrary => self.whdload_library.as_deref(),
             _ => None,
         }
     }
@@ -2844,11 +2907,13 @@ impl MachineSetup {
     /// name or a placeholder for paths; On/Off for toggles).
     /// Whether the drive row's volume-name box applies: a name labels a
     /// directory mount's FFS volume, so a CD image (which attaches a
-    /// CD-ROM drive) has nothing to name.
+    /// CD-ROM drive) has nothing to name, and the WHDLoad paths mount
+    /// under fixed volume names (WHDBoot:/WHDGame:).
     pub fn drive_name_applies(&self, field: LauncherField) -> bool {
-        !self
-            .path(field)
-            .is_some_and(crate::config::is_cd_image_path)
+        !field.is_whdload_path_field()
+            && !self
+                .path(field)
+                .is_some_and(crate::config::is_cd_image_path)
     }
 
     pub fn value_label(&self, field: LauncherField) -> String {
@@ -3082,6 +3147,10 @@ impl MachineSetup {
                     _ => label,
                 }
             }
+            // The WHDLoad staging directories derive sensible defaults when
+            // unset (see whdload::game_and_options), so their placeholder
+            // says so; the game itself has no default.
+            F::WhdloadKickstarts | F::WhdloadLibrary => self.path_label(field, "(default)"),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -3543,6 +3612,9 @@ impl MachineSetup {
             F::CdImage => self.cd_image = Some(path),
             F::Cd32Nvram => self.cd32_nvram = Some(path),
             F::ParallelOutput => self.parallel_output = Some(path),
+            F::WhdloadGame => self.whdload_game = Some(path),
+            F::WhdloadKickstarts => self.whdload_kickstarts = Some(path),
+            F::WhdloadLibrary => self.whdload_library = Some(path),
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = Some(path);
@@ -3589,6 +3661,9 @@ impl MachineSetup {
             F::CdImage => self.cd_image = None,
             F::Cd32Nvram => self.cd32_nvram = None,
             F::ParallelOutput => self.parallel_output = None,
+            F::WhdloadGame => self.whdload_game = None,
+            F::WhdloadKickstarts => self.whdload_kickstarts = None,
+            F::WhdloadLibrary => self.whdload_library = None,
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = None;
@@ -4622,6 +4697,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &FLOPPY_ROWS,
         &STORAGE_ROWS,
         &HOSTFS_ROWS,
+        &WHDLOAD_ROWS,
         &CD_ROWS,
         &INPUT_ROWS,
         &VIDEO_ROWS,
@@ -5966,6 +6042,91 @@ mod tests {
     }
 
     #[test]
+    fn whdload_settings_round_trip_including_args() {
+        // All four [whdload] keys, args included: args has no UI row, so it
+        // must be carried through rather than edited.
+        let raw = RawConfig {
+            whdload: crate::config::RawWhdload {
+                game: Some("/games/Turrican.lha".to_string()),
+                library: Some("/whd/library".to_string()),
+                kickstarts: Some("/roms/kickstarts".to_string()),
+                args: Some("NoVBRMove ButtonWait".to_string()),
+            },
+            ..RawConfig::default()
+        };
+        let setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(
+            setup.path(F::WhdloadGame),
+            Some(Path::new("/games/Turrican.lha"))
+        );
+        assert_eq!(
+            setup.path(F::WhdloadKickstarts),
+            Some(Path::new("/roms/kickstarts"))
+        );
+        assert_eq!(
+            setup.path(F::WhdloadLibrary),
+            Some(Path::new("/whd/library"))
+        );
+        assert_eq!(setup.to_raw().whdload, raw.whdload);
+    }
+
+    #[test]
+    fn whdload_paths_route_through_set_path_and_clear_path() {
+        let mut setup = MachineSetup::default();
+        for field in [F::WhdloadGame, F::WhdloadKickstarts, F::WhdloadLibrary] {
+            assert_eq!(setup.path(field), None);
+        }
+        // Distinct paths per field, so cross-wired slots would show.
+        setup.set_path(F::WhdloadGame, PathBuf::from("/g/game.lha"));
+        setup.set_path(F::WhdloadKickstarts, PathBuf::from("/k"));
+        setup.set_path(F::WhdloadLibrary, PathBuf::from("/l"));
+        assert_eq!(setup.path(F::WhdloadGame), Some(Path::new("/g/game.lha")));
+        assert_eq!(setup.path(F::WhdloadKickstarts), Some(Path::new("/k")));
+        assert_eq!(setup.path(F::WhdloadLibrary), Some(Path::new("/l")));
+        let raw = setup.to_raw();
+        assert_eq!(raw.whdload.game.as_deref(), Some("/g/game.lha"));
+        assert_eq!(raw.whdload.kickstarts.as_deref(), Some("/k"));
+        assert_eq!(raw.whdload.library.as_deref(), Some("/l"));
+        // The WHDLoad volumes have fixed names, so no volume box applies.
+        assert!(!setup.drive_name_applies(F::WhdloadGame));
+        for field in [F::WhdloadGame, F::WhdloadKickstarts, F::WhdloadLibrary] {
+            setup.clear_path(field);
+            assert_eq!(setup.path(field), None);
+        }
+        assert_eq!(setup.to_raw().whdload, crate::config::RawWhdload::default());
+    }
+
+    #[test]
+    fn the_whdload_sub_page_hangs_off_the_storage_tab() {
+        // The sub-page keeps the Storage strip entry lit, returns to Storage
+        // via Back, and is reachable from the Storage nav row.
+        assert_eq!(LauncherTab::Whdload.strip_tab(), LauncherTab::Storage);
+        assert_eq!(
+            LauncherTab::Whdload.parent_tab(),
+            Some(LauncherTab::Storage)
+        );
+        assert!(LauncherTab::Storage
+            .nav_options()
+            .iter()
+            .any(|&(label, tab)| label == "WHDLoad" && tab == LauncherTab::Whdload));
+        // The row table: the game package plus the two staging directories,
+        // all path rows with a Browse button.
+        let rows = rows(
+            LauncherTab::Whdload,
+            ParallelDevice::None,
+            SerialMode::Off,
+            false,
+        );
+        let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
+        assert_eq!(labels, ["Game package", "Kickstart images", "Game library"]);
+        assert!(rows.iter().all(|r| r.kind == RowKind::Drive));
+        // The two directories browse as folders; the package browses as a file.
+        assert!(!F::WhdloadGame.is_whdload_dir_field());
+        assert!(F::WhdloadKickstarts.is_whdload_dir_field());
+        assert!(F::WhdloadLibrary.is_whdload_dir_field());
+    }
+
+    #[test]
     fn an_invalid_drive_name_is_reported_and_keeps_the_field_focused() {
         let mut state = LauncherState::from_raw(&RawConfig {
             filesys: vec![raw_mount("/host0")],
@@ -6523,6 +6684,7 @@ mod tests {
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
             LauncherTab::BootPriority,
+            LauncherTab::Whdload,
         ] {
             assert!(!TABS.contains(&t));
             // Each keeps the Storage strip tab highlighted and returns to it.
@@ -6532,8 +6694,8 @@ mod tests {
         // A top-level tab has no parent.
         assert_eq!(LauncherTab::Storage.parent_tab(), None);
 
-        // The Storage nav lists CD, Host Mounts, Boot Priority in that order
-        // (drawn as a fixed top nav row, not a settings row).
+        // The Storage nav lists CD, Host Mounts, Boot Priority, WHDLoad in
+        // that order (drawn as a fixed top nav row, not a settings row).
         let storage_nav: Vec<_> = LauncherTab::Storage
             .nav_options()
             .iter()
@@ -6545,7 +6707,8 @@ mod tests {
                 LauncherTab::Cd,
                 LauncherTab::HostFs,
                 LauncherTab::HostDisk,
-                LauncherTab::BootPriority
+                LauncherTab::BootPriority,
+                LauncherTab::Whdload
             ]
         );
 

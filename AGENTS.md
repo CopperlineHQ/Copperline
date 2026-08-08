@@ -38,6 +38,13 @@ images go in via `[floppy.df0] path` in the config or `--insert-disk-after`:
 Running with no arguments at all opens an interactive launcher window; any
 flag suppresses it, so headless invocations never block on it.
 
+WHDLoad game packages boot directly -- `--whdload game.lha` (or a directory
+holding a `.slave`) stages a boot volume around the real WHDLoad program,
+derives the machine from the slave header, and persists saves per game
+(`docs/guide/whdload.md`). It needs the support archives fetched once by
+`tools/fetch-whdload.sh` and, for real compatibility, Kickstart images via
+`[whdload] kickstarts`; it composes with every headless flag below.
+
 ## Headless verification
 
 All `SECS` timestamps below are absolute *emulated* seconds, not wall-clock.

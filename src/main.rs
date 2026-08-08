@@ -30,6 +30,9 @@ use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 pub struct CliArgs {
     pub config_path: Option<PathBuf>,
     pub rom_path: Option<PathBuf>,
+    /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
+    /// directory) and boot straight into it (src/whdload.rs).
+    pub whdload: Option<PathBuf>,
     pub screenshot_after: Option<(f32, PathBuf)>,
     /// `--save-state-after SECS PATH`: write a save state of the whole
     /// machine after SECS emulated seconds, then keep running (combine
@@ -307,6 +310,7 @@ where
     let args = expand_script_files(args.into_iter().collect())?;
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
+    let mut whdload: Option<PathBuf> = None;
     let mut screenshot_after: Option<(f32, PathBuf)> = None;
     let mut save_state_after: Option<(f32, PathBuf)> = None;
     let mut load_state: Option<PathBuf> = None;
@@ -428,6 +432,12 @@ where
                     .next()
                     .ok_or_else(|| anyhow!("--config requires a path"))?;
                 config_path = Some(PathBuf::from(v));
+            }
+            "--whdload" => {
+                let v = args.next().ok_or_else(|| {
+                    anyhow!("--whdload requires a game package (.lha archive or directory)")
+                })?;
+                whdload = Some(PathBuf::from(v));
             }
             "--model" => {
                 overrides.model = Some(
@@ -1124,6 +1134,7 @@ where
     Ok(CliArgs {
         config_path,
         rom_path,
+        whdload,
         screenshot_after,
         save_state_after,
         load_state,
@@ -1205,6 +1216,8 @@ fn print_help() {
          \n\
          Options:\n  \
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml)\n  \
+         --whdload GAME                 boot a WHDLoad game package: an .lha archive or a\n  \
+         \x20                            directory holding a .slave (see docs/guide/whdload.md)\n  \
          --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
          \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
@@ -1980,6 +1993,30 @@ fn main() -> Result<()> {
     }
 
     let mut cfg = cfg.with_rom_override(cli.rom_path.clone());
+    // Direct WHDLoad boot: stage the package and derive the machine before
+    // the bundled-ROM sentinel resolves, so a Kickstart 3.1 found in the
+    // user's collection can serve as the machine ROM. Explicit machine, ROM,
+    // and memory choices (config file or CLI overrides, already merged into
+    // the raw config) win over the derivation.
+    let (config_game, whdload_options) = copperline::whdload::game_and_options(&raw_cfg);
+    if let Some(game) = cli.whdload.clone().or(config_game) {
+        let prepared = copperline::whdload::prepare(&game, &whdload_options)?;
+        // Derive on a clone: the session keeps the user's own raw config
+        // (plus the game itself), so a launcher opened later edits -- and
+        // Save writes -- the user's settings, never the derived machine or
+        // the two staged mounts, and its own Run restages from scratch.
+        let mut derived = raw_cfg.clone();
+        copperline::whdload::apply_to_raw(&mut derived, &prepared);
+        cfg = Config::try_from(derived)?;
+        copperline::whdload::remember_game(&mut raw_cfg, &game);
+        info!(
+            "whdload: booting {} ({}) from {}, saves persist in {}",
+            prepared.slave_rel.display(),
+            prepared.slave.name.as_deref().unwrap_or("unnamed slave"),
+            game.display(),
+            prepared.game_dir.display()
+        );
+    }
     if cli.load_state.is_some() {
         // A save state restores the full ROM image, so a Kickstart file is not
         // required to load one. Still resolve the bundled-AROS sentinel when
@@ -2317,6 +2354,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
 fn launcher_requested(cli: &CliArgs) -> bool {
     cli.config_path.is_none()
         && cli.rom_path.is_none()
+        && cli.whdload.is_none()
         && cli.overrides.is_empty()
         && !Path::new("copperline.toml").exists()
         && cli.screenshot_after.is_none()

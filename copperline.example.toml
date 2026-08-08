@@ -381,6 +381,21 @@ video = "PAL"
 # master = { path = "workbench.hdf", bootpri = 6 }
 
 
+# Direct WHDLoad boot (docs/guide/whdload.md): boot straight into a
+# WHDLoad-installed game package. The package is extracted into the game
+# library once (savegames persist there), a boot volume is synthesized
+# around the real WHDLoad program (support archives ship with releases, or
+# tools/fetch-whdload.sh), Kickstart images from `kickstarts` are
+# identified by content and staged into Devs:Kickstarts/, and the machine
+# is derived from the slave header (A1200, 8M fast) unless [machine]/rom/
+# [memory] choices above say otherwise. --whdload GAME overrides `game`.
+# [whdload]
+# game = "Turrican.lha"       # .lha archive or a directory holding a .slave
+# library = ""                # game library; default: <config dir>/whdload
+# kickstarts = "/data/amiga/kickstarts"
+# args = "ButtonWait"         # extra WHDLoad command-line options
+
+
 # Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,
 # HOSTFS1:, ...), served live with no disk image in between: the guest reads
 # and writes the host's files directly, and changes land in the directory as

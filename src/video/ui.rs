@@ -4275,14 +4275,20 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// A sub-page navigation button (the `slot`-th one) on the top nav row: a page's
-/// sibling links, or a sub-page's Back button.
-/// Sized to match the left-hand category tabs.
-fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
+/// A sub-page navigation button (the `slot`-th of `count`) on the top nav row:
+/// a page's sibling links, or a sub-page's Back button.
+/// Sized to match the left-hand category tabs while `count` of them fit; a
+/// longer row (the Storage tab's five sub-pages) narrows the buttons evenly so
+/// the last one stays inside the pane.
+fn launcher_nav_button_rect(rect: Rect, slot: usize, count: usize) -> Rect {
+    let x = launcher_pane_x(rect);
+    let avail = (rect.x + rect.w).saturating_sub(x + LAUNCH_MARGIN);
+    let count = count.max(1);
+    let w = LAUNCH_SIDEBAR_W.min(avail.saturating_sub((count - 1) * 8) / count);
     Rect {
-        x: launcher_pane_x(rect) + slot * (LAUNCH_SIDEBAR_W + 8),
+        x: x + slot * (w + 8),
         y: launcher_nav_y(rect),
-        w: LAUNCH_SIDEBAR_W,
+        w,
         h: LAUNCH_TAB_H,
     }
 }
@@ -4400,7 +4406,7 @@ fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
 
 /// A sub-page's Back button, on the nav row.
 fn launcher_back_button_rect(rect: Rect) -> Rect {
-    launcher_nav_button_rect(rect, 0)
+    launcher_nav_button_rect(rect, 0, 1)
 }
 
 /// Y of the nav row (the sibling-page buttons and any Back button) at the top of
@@ -4615,7 +4621,7 @@ fn launcher_board_value_rect(rect: Rect, row_y: usize) -> Rect {
 /// same size and position as the sibling-page buttons on other tabs, with the
 /// board list below it after the same gap.
 fn launcher_zorro_add_rect(rect: Rect) -> Rect {
-    launcher_nav_button_rect(rect, 0)
+    launcher_nav_button_rect(rect, 0, 1)
 }
 
 fn launcher_action_label(control: UiControl) -> &'static str {
@@ -4884,8 +4890,9 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             return Some(UiControl::LauncherTab(parent));
         }
     } else {
-        for (slot, &(_, target)) in state.tab.nav_options().iter().enumerate() {
-            if launcher_nav_button_rect(rect, slot).contains(pos) {
+        let options = state.tab.nav_options();
+        for (slot, &(_, target)) in options.iter().enumerate() {
+            if launcher_nav_button_rect(rect, slot, options.len()).contains(pos) {
                 return Some(UiControl::LauncherTab(target));
             }
         }
@@ -5835,10 +5842,12 @@ fn draw_launcher_row(
             let name_box = launcher_drive_name_rect(rect, row_y);
             let text_right = if has_image { name_box.x } else { browse.x };
             let avail = text_right.saturating_sub(value_x + 8);
-            // Host FS mounts show the whole host path (clipped to keep the final
-            // directory name, with a leading "..." when long), since the path is
-            // meaningful; other drives show the image's file name.
-            let text = match (r.field.is_filesys_dir_field(), setup.path(r.field)) {
+            // Host FS mounts and the WHDLoad paths show the whole host path
+            // (clipped to keep the final name, with a leading "..." when
+            // long), since the path is meaningful; other drives show the
+            // image's file name.
+            let full_path = r.field.is_filesys_dir_field() || r.field.is_whdload_path_field();
+            let text = match (full_path, setup.path(r.field)) {
                 (true, Some(p)) => clip_path_keep_name(&p.to_string_lossy(), avail),
                 _ => truncate_to_width(&setup.value_label(r.field), avail),
             };
@@ -6187,7 +6196,7 @@ fn draw_launcher(
             for (slot, &(label, target)) in options.iter().enumerate() {
                 draw_launcher_chip(
                     frame,
-                    launcher_nav_button_rect(rect, slot),
+                    launcher_nav_button_rect(rect, slot, options.len()),
                     label,
                     target == state.tab,
                     hover == Some(UiControl::LauncherTab(target)),
@@ -6889,6 +6898,7 @@ mod tests {
         let off_strip = [
             LauncherTab::Cd,
             LauncherTab::HostFs,
+            LauncherTab::Whdload,
             LauncherTab::BootPriority,
             LauncherTab::AvVideo,
             LauncherTab::AvEmulation,
@@ -8722,6 +8732,24 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-host-mounts");
+
+        // The WHDLoad sub-page reached from the Storage tab, with a game
+        // chosen so the full host path shows.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::Whdload;
+        state.setup.set_path(
+            LauncherField::WhdloadGame,
+            std::path::PathBuf::from("/Users/me/Amiga/whdload/Turrican.lha"),
+        );
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        save(&frame, "launcher-whdload");
 
         // The Boot Priority sub-page: an A1200 with two IDE drives -- the master
         // bootable at 0, the slave with its Bootable box cleared -- and one

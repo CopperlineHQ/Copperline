@@ -142,9 +142,13 @@ Disk images can be dropped anywhere on the emulator window:
   multi-selection in the disk dialog.
 - **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
+- **WHDLoad packages** (`.lha`, or a bare `.slave`) reboot the machine
+  straight into the game through the [WHDLoad booter](whdload.md), keeping
+  any explicit machine choices; dropped on the configuration screen they
+  fill its **Storage -> WHDLoad** game field instead.
 - **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
   notice points at the machine-configuration screen, which also refuses
-  drops while it is open.
+  such drops while it is open.
 
 The chooser opens after the drop rather than offering per-drive drop
 targets because the windowing layer reports file drops without a cursor
@@ -435,8 +439,11 @@ The layout is:
   Mounts**, for host directories served live as AmigaDOS volumes (up to four
   mounts, each with a boot priority and a read-write/read-only **Access** field
   -- the config file itself takes up to eight `[[filesys]]` mounts, of which the
-  launcher edits the first four); and **Boot Priority**, which sets each
-  hard-disk drive's synthesized-RDB boot priority (see below). Each sub-page has
+  launcher edits the first four); **Boot Priority**, which sets each
+  hard-disk drive's synthesized-RDB boot priority (see below); and
+  **WHDLoad**, which picks a WHDLoad game package plus its optional
+  Kickstart-image and game-library directories (see [](whdload.md); Run then
+  boots straight into the game). Each sub-page has
   a **< Back** button in that top row that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),

@@ -167,6 +167,7 @@ fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "mai
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
+delharc = "0.7.0"
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the
