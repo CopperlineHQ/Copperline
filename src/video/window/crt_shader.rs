@@ -924,6 +924,16 @@ fn fs_main() -> @location(0) vec4<f32> {
         queue: &wgpu::Queue,
         display: [u8; 4],
     ) -> wgpu::Texture {
+        pattern_source(device, queue, |_, _| display)
+    }
+
+    /// Like `source_texture`, but the display region is painted per texel
+    /// by `pattern(x, y)`; the "status bar" rows stay magenta.
+    fn pattern_source(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pattern: impl Fn(u32, u32) -> [u8; 4],
+    ) -> wgpu::Texture {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("crt_shader_test_src"),
             size: wgpu::Extent3d {
@@ -942,7 +952,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         for y in 0..TEX {
             for x in 0..TEX {
                 let px = if y < DISPLAY_ROWS {
-                    display
+                    pattern(x, y)
                 } else {
                     [255, 0, 255, 255]
                 };
@@ -1175,10 +1185,12 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
     }
 
-    /// The bowed face of the CRT preset pushes sample coordinates past the
-    /// bottom of the display rect. At full strength those pixels are
-    /// blacked out anyway, but at an intermediate strength they are only
-    /// partly dimmed, so anything the clamp picked up shows through.
+    /// The CRT preset's face silhouette runs coordinates past the bottom
+    /// of the display rect, and the picture itself must be sampled
+    /// straight. If a regression routed sampling back through the warped
+    /// frame, at full strength the off-face pixels are blacked out anyway,
+    /// but at an intermediate strength they are only partly dimmed, so
+    /// anything the clamp picked up shows through.
     #[test]
     fn the_crt_warp_never_reaches_the_status_bar() {
         let Some(gpu) = gpu() else {
@@ -1362,6 +1374,71 @@ fn fs_main() -> @location(0) vec4<f32> {
                 "{name} corner ({corner:.1}) should be well below the centre ({centre:.1})"
             );
         }
+    }
+
+    /// A CRT's deflection is corrected so the raster is rectilinear on the
+    /// curved glass: straight content stays straight to the eye, and only
+    /// the face outline bows (the 1084 photo on issue #413). A horizontal
+    /// stripe must therefore peak on the same output row in every lit
+    /// column -- the face crop may swallow it near the corners, never
+    /// bend it.
+    #[test]
+    fn the_crt_raster_stays_rectilinear() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (device, queue) = (gpu.device(), gpu.queue());
+        // A white stripe on black across source rows 4..8, well inside the
+        // top of the display region so the old sampling bow (about three
+        // output rows of displacement at 2x) would be unmistakable.
+        let src = pattern_source(device, queue, |_, y| {
+            if (4..8).contains(&y) {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            }
+        });
+        let mut shader = CrtShader::new(device, FORMAT);
+        let frame = render_preset(
+            device,
+            queue,
+            &mut shader,
+            &src,
+            ShaderKind::Crt,
+            1.0,
+            16.0,
+            2,
+        );
+
+        // Per column, the brightest row in the top half of the display.
+        // Scanlines and the grille modulate brightness but are constant
+        // per row and per column respectively, so the peak row tracks
+        // where the stripe landed. Columns the face crop darkened past
+        // recognition are skipped.
+        let mut peaks: Vec<u32> = Vec::new();
+        for x in 0..frame.dim {
+            let mut best = (0.0f32, 0u32);
+            for y in 0..frame.rows / 2 {
+                let l = Frame::luma(frame.at(x, y));
+                if l > best.0 {
+                    best = (l, y);
+                }
+            }
+            if best.0 > 60.0 {
+                peaks.push(best.1);
+            }
+        }
+        assert!(
+            peaks.len() > (frame.dim / 2) as usize,
+            "the stripe should stay lit across most of the face, got {} columns",
+            peaks.len()
+        );
+        let lo = *peaks.iter().min().unwrap();
+        let hi = *peaks.iter().max().unwrap();
+        assert!(
+            hi - lo <= 1,
+            "a horizontal stripe bowed: peak rows span {lo}..={hi}"
+        );
     }
 
     /// The tube face ends at a hard edge: what the bow pushed off it is

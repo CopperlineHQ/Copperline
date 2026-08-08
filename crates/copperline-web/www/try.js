@@ -4830,11 +4830,14 @@ void main() {
 }
 `;
 
-  // The CRT preset, ported from shaders/crt.wgsl: a bowed tube face,
-  // scanlines that bow with it, an aperture grille and a corner vignette,
-  // faded in together by the strength knob. See the WGSL source for the
-  // derivations (tube geometry from the 1084's Philips M34EAQ10X
-  // datasheet); comments here mark web-port differences only.
+  // The CRT preset, ported from shaders/crt.wgsl: a bowed tube face
+  // cropping a straight raster, scanlines, an aperture grille and a
+  // corner vignette, faded in together by the strength knob. The picture
+  // and scanlines sample the straight coordinate -- a real monitor's
+  // deflection is corrected so the raster is rectilinear on the curved
+  // glass -- and the warp shapes only the face silhouette. See the WGSL
+  // source for the derivations (tube geometry from the 1084's Philips
+  // M34EAQ10X datasheet); comments here mark web-port differences only.
   const FS_CRT = `#version 300 es
 ${FS_COMMON}
 uniform vec4 u_params;  // x: strength, y: scanline count, z: mask kind, w: curvature
@@ -4861,10 +4864,10 @@ void main() {
   vec2 uv = clamp(v_uv, 0.0, 1.0);
   float aspect = u_size.y / max(u_size.x, 1.0);
   vec2 wuv = mix(uv, warp(uv, u_params.w, aspect), strength);
-  vec3 base = sample_display(wuv);
+  vec3 base = sample_display(uv);
 
   float lines = max(u_params.y, 1.0);
-  float profile = 0.5 - 0.5 * cos(TAU * wuv.y * lines);
+  float profile = 0.5 - 0.5 * cos(TAU * uv.y * lines);
   float scan = (FLOOR + (1.0 - FLOOR) * profile) * SCAN_BOOST;
 
   vec2 px = uv * u_size.xy;

@@ -641,18 +641,20 @@ selection, not a compile.
 than to its edge. On the boundary a linear tap is a 50/50 blend with the
 texel on the far side, which along the bottom edge is the status bar's
 separator hairline; that reaches the picture whenever the display rect is
-magnified (the last fragment row lands past the last texel centre) or a
-preset's curvature warps a coordinate off the face.
+magnified (the last fragment row lands past the last texel centre).
 
-The `crt` preset's bowed face ends at a hard edge: what the bow carries off
-the face is the unlit inside of the tube, opaque black at any strength, and
-only the *area* of that region scales with strength (through the warped
-coordinate, so strength 0 has no off-face region at all and the no-op
-invariant holds). Mixing the black back toward the sample instead would
-leave the region holding a fraction of the edge colour the clamp smears
-there. The boundary is faded to black over about one pixel, keyed to
-`fwidth` of the signed distance to the face, so the curve does not
-staircase.
+The `crt` preset's curvature bows only the face outline, never the
+picture: a real monitor's deflection is corrected so the raster is
+rectilinear on the curved glass, so the picture (and its scanlines) is
+sampled straight and the warped coordinate feeds only the face's signed
+distance. What lies outside the bowed outline is the unlit inside of the
+tube, opaque black at any strength, and only the *area* of that region
+scales with strength (through the warped coordinate, so strength 0 has no
+off-face region at all and the no-op invariant holds). Mixing the black
+back toward the sample instead would leave the region holding a fraction
+of the edge colour the clamp smears there. The boundary is faded to black
+over about one pixel, keyed to `fwidth` of the signed distance to the
+face, so the curve does not staircase.
 
 The scanline count is what the window actually shows, not what the
 framebuffer holds (`crt_scanline_count`). The TV-aperture present path
