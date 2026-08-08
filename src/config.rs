@@ -2727,6 +2727,8 @@ pub struct RawConfig {
     pub(crate) serial: RawSerial,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) parallel: RawParallel,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) whdload: RawWhdload,
     /// `[[filesys]]` host-directory mount entries, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) filesys: Vec<RawFilesysMount>,
@@ -2844,6 +2846,30 @@ pub struct HostDiskArg {
     pub device: String,
     pub attach: Option<String>,
     pub read_only: bool,
+}
+
+/// `[whdload]` direct WHDLoad boot (src/whdload.rs): stage a WHDLoad game
+/// package and boot straight into it.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawWhdload {
+    /// Game to boot: an `.lha` archive or a directory holding a `.slave`.
+    /// `--whdload` overrides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) game: Option<String>,
+    /// Game library directory (extracted packages, their saves, and the
+    /// staged boot volumes); defaults to `whdload/` in the per-user
+    /// configuration directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library: Option<String>,
+    /// Directory scanned for Kickstart images to stage into
+    /// `Devs:Kickstarts/` (and to boot the machine from). When unset, the
+    /// directory of an explicit `rom` and `<library>/Kickstarts` are tried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kickstarts: Option<String>,
+    /// Extra options appended to the generated WHDLoad command line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) args: Option<String>,
 }
 
 /// One `[[filesys]]` entry (experimental): a host directory exported to the

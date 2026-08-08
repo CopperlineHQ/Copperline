@@ -64,6 +64,7 @@ pub mod ipf;
 // with it lives in `config`, which every build has.
 #[cfg(feature = "frontend")]
 pub mod keymap;
+pub mod lha;
 pub mod memory;
 #[cfg(feature = "midi")]
 pub mod midi;
@@ -96,6 +97,7 @@ pub mod wasm_manifest;
 #[cfg(feature = "wasm-boards")]
 pub mod wasmboard;
 pub mod waveform;
+pub mod whdload;
 pub mod z3660;
 pub mod zorro;
 pub mod zorro_device;
