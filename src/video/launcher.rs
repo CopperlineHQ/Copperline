@@ -197,6 +197,13 @@ pub enum LauncherTab {
     AvAudio,
     AvVideo,
     AvEmulation,
+    /// The Disk Image workshop, reached from Storage: two pages that make
+    /// fresh images and touch nothing about the machine.
+    CreateFloppy,
+    CreateHard,
+    /// The hard-disk page's geometry editor, reached from its Configure
+    /// button once the geometry is set by hand.
+    CreateGeometry,
 }
 
 /// Tabs shown top to bottom.
@@ -236,6 +243,9 @@ impl LauncherTab {
             LauncherTab::AvAudio => "A/V & Emu",
             LauncherTab::AvVideo => "Video",
             LauncherTab::AvEmulation => "Emulation",
+            LauncherTab::CreateFloppy => "Floppy Disk",
+            LauncherTab::CreateHard => "Hard Disk",
+            LauncherTab::CreateGeometry => "Disk Geometry",
         }
     }
 
@@ -248,7 +258,10 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::Whdload
             | LauncherTab::HostDisk
-            | LauncherTab::BootPriority => LauncherTab::Storage,
+            | LauncherTab::BootPriority
+            | LauncherTab::CreateFloppy
+            | LauncherTab::CreateHard
+            | LauncherTab::CreateGeometry => LauncherTab::Storage,
             LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
@@ -264,7 +277,11 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::Whdload
             | LauncherTab::HostDisk
-            | LauncherTab::BootPriority => Some(LauncherTab::Storage),
+            | LauncherTab::BootPriority
+            | LauncherTab::CreateFloppy
+            | LauncherTab::CreateHard => Some(LauncherTab::Storage),
+            // Back goes to the page that sent you here, not to Storage.
+            LauncherTab::CreateGeometry => Some(LauncherTab::CreateHard),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
@@ -277,6 +294,7 @@ impl LauncherTab {
         match self {
             LauncherTab::Storage => STORAGE_NAV,
             LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmulation => AV_NAV,
+            LauncherTab::CreateFloppy | LauncherTab::CreateHard => CREATE_NAV,
             _ => &[],
         }
     }
@@ -295,6 +313,17 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("Host Disk", LauncherTab::HostDisk),
     ("Boot Priority", LauncherTab::BootPriority),
     ("WHDLoad", LauncherTab::Whdload),
+    // The workshop: nothing to do with this machine, so it lands on its own
+    // pair of pages rather than adding rows here.
+    ("Create image...", LauncherTab::CreateFloppy),
+];
+
+/// The Disk Image workshop's two pages. Reached from Storage, so these pages
+/// show a Back button *and* this nav: one says where you came from, the
+/// other which of the two you are on.
+const CREATE_NAV: &[(&str, LauncherTab)] = &[
+    ("Floppy Disk", LauncherTab::CreateFloppy),
+    ("Hard Disk", LauncherTab::CreateHard),
 ];
 
 /// The A/V & Emu categories, left to right (matching "A/V"). `AvAudio` is the
@@ -311,6 +340,31 @@ const AV_NAV: &[(&str, LauncherTab)] = &[
 /// same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherField {
+    // Disk Image workshop -- these edit no machine setting, only what the
+    // next image will be made of.
+    NewFloppyDensity,
+    NewFloppyContainer,
+    NewFloppyFs,
+    NewFloppyLabel,
+    NewFloppyBootable,
+    NewFloppyCreate,
+    NewHardSize,
+    NewHardGeometryMode,
+    NewHardPartitioning,
+    NewHardDevice,
+    NewHardFs,
+    NewHardLabel,
+    NewHardBootable,
+    NewHardBootPri,
+    NewHardReadOnly,
+    NewHardAllocate,
+    NewHardCreate,
+    NewGeomCylinders,
+    NewGeomSurfaces,
+    NewGeomSectors,
+    NewGeomReserved,
+    NewGeomSave,
+    NewGeomAuto,
     // System
     Chipset,
     Agnus,
@@ -500,6 +554,25 @@ pub enum RowKind {
     /// The pair of tick boxes under a drive: write protect, and whether the
     /// bay uses a real drive. Its `field` is the drive's write-protect field.
     FloppyFlags,
+    /// A free-text value box: click it to type. Unlike [`RowKind::Path`] it
+    /// holds a word rather than a file, so it has no Browse button.
+    Text,
+    /// A button that does something, drawn where a value would be. The row
+    /// label is blank and the button carries the wording.
+    Action,
+    /// A typed number with the unit it is in written beside it; clicking
+    /// the unit swaps it. Used for the hard-drive size, where the useful
+    /// range is far too wide for a stepper.
+    Size,
+    /// The geometry mode: Auto and Custom side by side, with a Configure
+    /// button appearing beside them once Custom is chosen.
+    GeometryMode,
+    /// A typed whole number in a plain box, lined up with the value column.
+    /// Used where the useful range is too wide to walk with arrows.
+    Number,
+    /// A typed whole number with a stepper either side, for the geometry
+    /// figures: the arrows nudge by one, the box takes an exact value.
+    Stepper,
 }
 
 /// One settings row: a label, the field it edits, and how to edit it.
@@ -803,6 +876,45 @@ const EMULATION_ROWS: [Row; 4] = [
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
 ];
+/// The Disk Image workshop's two pages. Every option the format supports is
+/// here; nothing on either page reads or writes the machine's configuration.
+const NEW_FLOPPY_ROWS: [Row; 7] = [
+    section_header("Create Floppy Disk image (ADF):"),
+    row(F::NewFloppyDensity, "Density", Cycle),
+    row(F::NewFloppyContainer, "Container", Cycle),
+    row(F::NewFloppyFs, "File system", Cycle),
+    row(F::NewFloppyLabel, "Volume name", RowKind::Text),
+    row(F::NewFloppyBootable, "Bootable", Toggle),
+    row(F::NewFloppyCreate, "", RowKind::Action),
+];
+
+const NEW_HARD_ROWS: [Row; 12] = [
+    section_header("Create Hard Disk image (HDF):"),
+    row(F::NewHardSize, "Size", RowKind::Size),
+    row(F::NewHardGeometryMode, "Geometry", RowKind::GeometryMode),
+    row(F::NewHardPartitioning, "Partitioning", Cycle),
+    row(F::NewHardFs, "File system", Cycle),
+    row(F::NewHardDevice, "Device name", RowKind::Text),
+    row(F::NewHardLabel, "Volume name", RowKind::Text),
+    row(F::NewHardBootable, "Bootable", Toggle),
+    row(F::NewHardBootPri, "Boot priority", RowKind::Number),
+    row(F::NewHardReadOnly, "Read only", Toggle),
+    row(F::NewHardAllocate, "Claim space now", Toggle),
+    row(F::NewHardCreate, "", RowKind::Action),
+];
+
+/// The geometry editor, reached from the hard-disk page.
+const NEW_GEOMETRY_ROWS: [Row; 6] = [
+    section_header("Custom disk geometry:"),
+    row(F::NewGeomCylinders, "Cylinders", RowKind::Stepper),
+    // The Amiga's own word for it, and the name of the Rigid Disk Block
+    // field this ends up in.
+    row(F::NewGeomSurfaces, "Surfaces", RowKind::Stepper),
+    row(F::NewGeomSectors, "Sectors per track", RowKind::Stepper),
+    row(F::NewGeomReserved, "Reserved blocks", RowKind::Stepper),
+    row(F::NewGeomSave, "", RowKind::Action),
+];
+
 const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
     row(F::Port2Device, "Port 2", Cycle),
@@ -825,6 +937,9 @@ pub fn rows(
     midi_out_is_mt32: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
+        LauncherTab::CreateFloppy => Cow::Borrowed(&NEW_FLOPPY_ROWS),
+        LauncherTab::CreateHard => Cow::Borrowed(&NEW_HARD_ROWS),
+        LauncherTab::CreateGeometry => Cow::Borrowed(&NEW_GEOMETRY_ROWS),
         LauncherTab::System => Cow::Borrowed(&SYSTEM_ROWS),
         LauncherTab::Cpu => Cow::Borrowed(&CPU_ROWS),
         LauncherTab::Memory => Cow::Borrowed(&MEMORY_ROWS),
@@ -4514,12 +4629,238 @@ pub enum EditTarget {
     DriveName(LauncherField),
     /// A hard-disk boot priority typed as a number (the Boot Priority page).
     DriveBootpri(LauncherField),
+    /// A word typed on a Disk Image page: a volume name or a device name.
+    NewImageText(LauncherField),
+}
+
+/// The largest size the box accepts, in whichever unit is showing.
+/// The largest number the size box accepts: four digits, so 9999 GB is the
+/// most that can be asked for. Past 2 TiB only an unpartitioned,
+/// unformatted drive is possible -- see [`crate::diskimage::MAX_RDB_BYTES`].
+const NEW_HARD_SIZE_MAX: u32 = 9999;
+
+/// The unit the hard-drive size is typed in. Clicking it swaps to the
+/// other, keeping the number: 8 MB becomes 8 GB.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SizeUnit {
+    #[default]
+    Mb,
+    Gb,
+}
+
+impl SizeUnit {
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeUnit::Mb => "MB",
+            SizeUnit::Gb => "GB",
+        }
+    }
+
+    fn bytes(self) -> u64 {
+        match self {
+            SizeUnit::Mb => 1 << 20,
+            SizeUnit::Gb => 1 << 30,
+        }
+    }
+
+    fn flipped(self) -> SizeUnit {
+        match self {
+            SizeUnit::Mb => SizeUnit::Gb,
+            SizeUnit::Gb => SizeUnit::Mb,
+        }
+    }
+}
+
+/// What the next image will be made of.
+///
+/// Deliberately not part of [`MachineSetup`]: nothing here describes the
+/// machine, so none of it belongs in a configuration file. It lives for as
+/// long as the launcher is open and is thrown away with it.
+#[derive(Debug, Clone)]
+pub struct ImageWorkshop {
+    pub density: crate::diskimage::Density,
+    pub container: crate::diskimage::Container,
+    /// `None` is an unformatted disk, for the guest to format itself.
+    pub floppy_fs: Option<crate::diskimage::FileSystem>,
+    pub floppy_label: String,
+    pub floppy_bootable: bool,
+    /// The size as typed, in [`ImageWorkshop::size_unit`].
+    pub size: u32,
+    pub size_unit: SizeUnit,
+    /// Whether the geometry is the size's own or one set by hand.
+    pub geometry_custom: bool,
+    /// The geometry set by hand, once it has been. Kept while Auto is
+    /// showing so going back to Custom finds it where it was left.
+    pub custom_geometry: crate::diskimage::Geometry,
+    pub partitioning: crate::diskimage::Partitioning,
+    pub device: String,
+    pub hard_fs: Option<crate::diskimage::FileSystem>,
+    pub hard_label: String,
+    pub hard_bootable: bool,
+    pub boot_pri: i8,
+    /// Blocks kept clear at the front of the partition.
+    pub reserved: u32,
+    pub read_only: bool,
+    pub allocate: bool,
+}
+
+impl Default for ImageWorkshop {
+    fn default() -> Self {
+        Self {
+            density: crate::diskimage::Density::Dd,
+            container: crate::diskimage::Container::Adf,
+            // A plain OFS floppy is the one that mounts on every Amiga
+            // ever made, so it is where the page starts.
+            floppy_fs: Some(crate::diskimage::FileSystem::OFS),
+            floppy_label: "Empty".to_string(),
+            floppy_bootable: false,
+            size: 64,
+            size_unit: SizeUnit::Mb,
+            geometry_custom: false,
+            custom_geometry: crate::diskimage::Geometry::for_size(64 << 20),
+            partitioning: crate::diskimage::Partitioning::Rdb,
+            device: "DH0".to_string(),
+            hard_fs: Some(crate::diskimage::FileSystem::FFS),
+            hard_label: "Work".to_string(),
+            hard_bootable: true,
+            boot_pri: 0,
+            reserved: crate::diskimage::RESERVED_BLOCKS,
+            read_only: false,
+            allocate: false,
+        }
+    }
+}
+
+impl ImageWorkshop {
+    pub fn bytes(&self) -> u64 {
+        u64::from(self.size.max(1)) * self.size_unit.bytes()
+    }
+
+    /// Swap MB and GB, keeping the number: 8 MB becomes 8 GB.
+    pub fn flip_size_unit(&mut self) {
+        self.size_unit = self.size_unit.flipped();
+    }
+
+    /// The geometry the image will carry: the one set by hand, or the one
+    /// the size implies.
+    pub fn effective_geometry(&self) -> crate::diskimage::Geometry {
+        if self.geometry_custom {
+            self.custom_geometry
+        } else {
+            crate::diskimage::Geometry::for_size(self.bytes())
+        }
+    }
+
+    /// Fill the custom geometry in from the size, which is what the
+    /// editor's Auto button does.
+    pub fn geometry_from_size(&mut self) {
+        self.custom_geometry = crate::diskimage::Geometry::for_size(self.bytes());
+    }
+
+    pub fn floppy_spec(&self) -> crate::diskimage::FloppySpec {
+        crate::diskimage::FloppySpec {
+            density: self.density,
+            container: self.container,
+            filesystem: self.floppy_fs,
+            bootable: self.floppy_bootable && self.floppy_fs.is_some(),
+            label: self.floppy_label.clone(),
+        }
+    }
+
+    pub fn hard_spec(&self) -> crate::diskimage::HardSpec {
+        crate::diskimage::HardSpec {
+            bytes: self.bytes(),
+            geometry: self.geometry_custom.then_some(self.custom_geometry),
+            partitioning: self.partitioning,
+            filesystem: self.hard_fs,
+            device: self.device.clone(),
+            label: self.hard_label.clone(),
+            // The boot flag and its rank live in the partition entry, so
+            // without a partition table there is nothing to carry them:
+            // the spec says what will happen, not what the page shows.
+            bootable: self.hard_bootable
+                && self.partitioning == crate::diskimage::Partitioning::Rdb,
+            boot_pri: self.boot_pri,
+            reserved: self.reserved,
+            read_only: self.read_only,
+            allocate: self.allocate,
+        }
+    }
+
+    /// A file name to offer in the save dialog, from what is being made.
+    pub fn suggested_name(&self, floppy: bool) -> String {
+        let stem = |s: &str| {
+            let cleaned: String = s
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>();
+            if cleaned.is_empty() {
+                "image".to_string()
+            } else {
+                cleaned
+            }
+        };
+        if floppy {
+            format!("{}.adf", stem(&self.floppy_label))
+        } else {
+            format!("{}.hdf", stem(&self.hard_label))
+        }
+    }
+}
+
+/// How many characters a workshop number field takes, or `None` when the
+/// field is a word rather than a number.
+fn workshop_digit_limit(field: LauncherField) -> Option<usize> {
+    match field {
+        // 9999 is the largest size the box accepts.
+        F::NewHardSize => Some(4),
+        // -128..=127.
+        F::NewHardBootPri => Some(4),
+        F::NewGeomCylinders | F::NewGeomSurfaces | F::NewGeomSectors => Some(5),
+        F::NewGeomReserved => Some(3),
+        _ => None,
+    }
+}
+
+/// Nudge a geometry figure by one, keeping it inside `floor..=ceiling`.
+fn step_u32(value: u32, forward: bool, floor: u32, ceiling: u32) -> u32 {
+    if forward {
+        value.saturating_add(1).min(ceiling)
+    } else {
+        value.saturating_sub(1).max(floor)
+    }
+}
+
+/// The largest value a workshop number box will hold, from the digits it
+/// accepts: the arrows and the keyboard have to agree on the same range.
+fn workshop_ceiling(field: LauncherField) -> u32 {
+    match workshop_digit_limit(field) {
+        Some(digits) => 10u32.saturating_pow(digits as u32) - 1,
+        None => u32::MAX,
+    }
+}
+
+/// Every filesystem the pickers offer, unformatted first.
+fn fs_choices() -> Vec<Option<crate::diskimage::FileSystem>> {
+    std::iter::once(None)
+        .chain(crate::diskimage::FileSystem::all().map(Some))
+        .collect()
+}
+
+fn fs_label(fs: Option<crate::diskimage::FileSystem>) -> String {
+    match fs {
+        None => "Unformatted".to_string(),
+        Some(fs) => fs.label(),
+    }
 }
 
 /// The full interactive state of the open configuration panel.
 #[derive(Debug, Clone)]
 pub struct LauncherState {
     pub setup: MachineSetup,
+    /// What the Disk Image pages will make. Not machine configuration, so
+    /// it sits beside the setup rather than inside it.
+    pub workshop: ImageWorkshop,
     pub tab: LauncherTab,
     pub status: Option<StatusMessage>,
     /// The text field being typed into, and the edit buffer, when one has
@@ -4529,6 +4870,221 @@ pub struct LauncherState {
 }
 
 impl LauncherState {
+    /// Whether a field belongs to the Disk Image workshop rather than to
+    /// the machine, so the drawing and click paths read the right state.
+    pub fn is_workshop(field: LauncherField) -> bool {
+        matches!(
+            field,
+            F::NewFloppyDensity
+                | F::NewFloppyContainer
+                | F::NewFloppyFs
+                | F::NewFloppyLabel
+                | F::NewFloppyBootable
+                | F::NewFloppyCreate
+                | F::NewHardSize
+                | F::NewHardGeometryMode
+                | F::NewHardPartitioning
+                | F::NewHardDevice
+                | F::NewHardFs
+                | F::NewHardLabel
+                | F::NewHardBootable
+                | F::NewHardBootPri
+                | F::NewHardReadOnly
+                | F::NewHardAllocate
+                | F::NewHardCreate
+                | F::NewGeomCylinders
+                | F::NewGeomSurfaces
+                | F::NewGeomSectors
+                | F::NewGeomReserved
+                | F::NewGeomSave
+                | F::NewGeomAuto
+        )
+    }
+
+    /// A row's displayed value, from wherever that row's state lives.
+    pub fn row_value(&self, field: LauncherField) -> String {
+        if Self::is_workshop(field) {
+            self.workshop_value(field)
+        } else {
+            self.setup.value_label(field)
+        }
+    }
+
+    /// Whether a row's tick box is on, from wherever it lives.
+    pub fn row_toggle(&self, field: LauncherField) -> bool {
+        if Self::is_workshop(field) {
+            self.workshop_toggle(field)
+        } else {
+            self.setup.toggle_value(field)
+        }
+    }
+
+    /// Whether a row can be used at all, from wherever it lives.
+    pub fn row_applies(&self, field: LauncherField) -> bool {
+        if Self::is_workshop(field) {
+            self.workshop_applies(field)
+        } else {
+            self.setup.applies(field)
+        }
+    }
+
+    /// The value a Disk Image row shows.
+    pub fn workshop_value(&self, field: LauncherField) -> String {
+        let w = &self.workshop;
+        match field {
+            F::NewFloppyDensity => w.density.label().to_string(),
+            F::NewFloppyContainer => w.container.label().to_string(),
+            F::NewFloppyFs => fs_label(w.floppy_fs),
+            F::NewFloppyLabel => w.floppy_label.clone(),
+            F::NewHardSize => w.size.to_string(),
+            F::NewHardBootPri => w.boot_pri.to_string(),
+            F::NewGeomCylinders => w.custom_geometry.cylinders.to_string(),
+            F::NewGeomSurfaces => w.custom_geometry.surfaces.to_string(),
+            F::NewGeomSectors => w.custom_geometry.sectors.to_string(),
+            F::NewGeomReserved => w.reserved.to_string(),
+            F::NewHardPartitioning => w.partitioning.label().to_string(),
+            F::NewHardDevice => w.device.clone(),
+            F::NewHardFs => fs_label(w.hard_fs),
+            F::NewHardLabel => w.hard_label.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether a Disk Image toggle is on.
+    pub fn workshop_toggle(&self, field: LauncherField) -> bool {
+        match field {
+            F::NewFloppyBootable => self.workshop.floppy_bootable,
+            F::NewHardBootable => self.workshop.hard_bootable,
+            F::NewHardReadOnly => self.workshop.read_only,
+            F::NewHardAllocate => self.workshop.allocate,
+            _ => false,
+        }
+    }
+
+    /// Whether a Disk Image row can be used at all. Boot code needs a
+    /// filesystem to load, so an unformatted disk has nothing to boot, and
+    /// a volume name only means something once there is a volume.
+    pub fn workshop_applies(&self, field: LauncherField) -> bool {
+        let w = &self.workshop;
+        match field {
+            F::NewFloppyBootable | F::NewFloppyLabel => w.floppy_fs.is_some(),
+            F::NewHardLabel => w.hard_fs.is_some(),
+            // Without a partition table there is no partition entry to
+            // carry a device name or a boot flag: the emulator names the
+            // mount instead.
+            F::NewHardDevice | F::NewHardBootable => {
+                w.partitioning == crate::diskimage::Partitioning::Rdb
+            }
+            // Only a boot candidate has a rank among boot candidates.
+            F::NewHardBootPri => {
+                w.partitioning == crate::diskimage::Partitioning::Rdb && w.hard_bootable
+            }
+            _ => true,
+        }
+    }
+
+    /// The button wording on a Disk Image page's action row.
+    pub fn workshop_action_label(&self, field: LauncherField) -> String {
+        match field {
+            // Both write a file, and the dialog that follows says which
+            // kind: the page is already headed with that.
+            F::NewFloppyCreate | F::NewHardCreate => "Save...".to_string(),
+            F::NewGeomSave => "Save".to_string(),
+            F::NewGeomAuto => "Auto".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Step a Disk Image picker.
+    pub fn workshop_cycle(&mut self, field: LauncherField, forward: bool) {
+        let w = &mut self.workshop;
+        match field {
+            F::NewFloppyDensity => {
+                w.density = cycle_slice(&crate::diskimage::Density::ALL, w.density, forward)
+            }
+            F::NewFloppyContainer => {
+                w.container = cycle_slice(&crate::diskimage::Container::ALL, w.container, forward)
+            }
+            F::NewFloppyFs => {
+                let all = fs_choices();
+                w.floppy_fs = cycle_slice(&all, w.floppy_fs, forward);
+            }
+            F::NewHardFs => {
+                let all = fs_choices();
+                w.hard_fs = cycle_slice(&all, w.hard_fs, forward);
+            }
+            // The geometry figures are the only stepped numbers here: the
+            // size and the boot priority are typed, and have no arrows.
+            //
+            // Cylinder 0 goes to the Rigid Disk Block, so a drive needs a
+            // second one before there is anything to partition.
+            F::NewGeomCylinders => {
+                w.custom_geometry.cylinders = step_u32(
+                    w.custom_geometry.cylinders,
+                    forward,
+                    2,
+                    workshop_ceiling(field),
+                )
+            }
+            F::NewGeomSurfaces => {
+                w.custom_geometry.surfaces = step_u32(
+                    w.custom_geometry.surfaces,
+                    forward,
+                    1,
+                    workshop_ceiling(field),
+                )
+            }
+            F::NewGeomSectors => {
+                w.custom_geometry.sectors = step_u32(
+                    w.custom_geometry.sectors,
+                    forward,
+                    1,
+                    workshop_ceiling(field),
+                )
+            }
+            // The boot block is two blocks long, so two is the floor: with
+            // fewer, the filesystem would be free to allocate over it.
+            F::NewGeomReserved => {
+                w.reserved = step_u32(
+                    w.reserved,
+                    forward,
+                    crate::diskimage::RESERVED_BLOCKS,
+                    workshop_ceiling(field),
+                )
+            }
+            F::NewHardPartitioning => {
+                w.partitioning = cycle_slice(
+                    &crate::diskimage::Partitioning::ALL,
+                    w.partitioning,
+                    forward,
+                )
+            }
+            _ => {}
+        }
+    }
+
+    /// Flip a Disk Image tick box.
+    pub fn workshop_toggle_flip(&mut self, field: LauncherField) {
+        let w = &mut self.workshop;
+        match field {
+            F::NewFloppyBootable => w.floppy_bootable = !w.floppy_bootable,
+            F::NewHardBootable => w.hard_bootable = !w.hard_bootable,
+            F::NewHardReadOnly => w.read_only = !w.read_only,
+            F::NewHardAllocate => w.allocate = !w.allocate,
+            _ => {}
+        }
+    }
+
+    /// Focus a Disk Image text field, seeding the buffer with its value.
+    pub fn begin_edit_new_image(&mut self, field: LauncherField) {
+        if !self.workshop_applies(field) {
+            return;
+        }
+        self.edit_buffer = self.workshop_value(field);
+        self.editing = Some(EditTarget::NewImageText(field));
+        self.status = None;
+    }
+
     pub fn new(setup: MachineSetup) -> Self {
         let mut setup = setup;
         // Read the host devices as the screen opens so the pickers show what is
@@ -4536,6 +5092,7 @@ impl LauncherState {
         setup.refresh_host_devices();
         Self {
             setup,
+            workshop: ImageWorkshop::default(),
             tab: LauncherTab::System,
             status: None,
             editing: None,
@@ -4590,6 +5147,20 @@ impl LauncherState {
 
     pub fn edit_push(&mut self, c: char) {
         let Some(target) = self.editing else { return };
+        // The size is a whole number of MB or GB: digits only, and no more
+        // than the box accepts.
+        if let EditTarget::NewImageText(field) = target {
+            if let Some(limit) = workshop_digit_limit(field) {
+                // A boot priority is the one signed figure here.
+                let minus_ok =
+                    field == F::NewHardBootPri && c == '-' && self.edit_buffer.is_empty();
+                if (!c.is_ascii_digit() && !minus_ok) || self.edit_buffer.len() >= limit {
+                    return;
+                }
+                self.edit_buffer.push(c);
+                return;
+            }
+        }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
             let minus_ok = c == '-' && self.edit_buffer.is_empty();
@@ -4622,6 +5193,69 @@ impl LauncherState {
                     return;
                 }
             }
+            EditTarget::NewImageText(field) if workshop_digit_limit(field).is_some() => {
+                // Every one of these is a number with a floor, so an empty
+                // or unreadable box returns to the floor rather than
+                // refusing: there is no wrong value to complain about.
+                let typed = self.edit_buffer.trim();
+                let w = &mut self.workshop;
+                match field {
+                    F::NewHardSize => {
+                        w.size = typed
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .clamp(1, NEW_HARD_SIZE_MAX)
+                    }
+                    F::NewHardBootPri => w.boot_pri = typed.parse::<i8>().unwrap_or(0),
+                    F::NewGeomCylinders => {
+                        w.custom_geometry.cylinders = typed
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .clamp(2, workshop_ceiling(field))
+                    }
+                    F::NewGeomSurfaces => {
+                        w.custom_geometry.surfaces = typed
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .clamp(1, workshop_ceiling(field))
+                    }
+                    F::NewGeomSectors => {
+                        w.custom_geometry.sectors = typed
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .clamp(1, workshop_ceiling(field))
+                    }
+                    F::NewGeomReserved => {
+                        w.reserved = typed
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .clamp(crate::diskimage::RESERVED_BLOCKS, workshop_ceiling(field))
+                    }
+                    _ => {}
+                }
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
+            EditTarget::NewImageText(field) => {
+                let text = self.edit_buffer.trim();
+                // A volume name is an AmigaDOS name and has to survive
+                // being one; a device name is what the mount is called.
+                if let Some(err) = crate::filesys::volume_name_error(text) {
+                    self.status = Some(StatusMessage::err(err));
+                    return;
+                }
+                let text = text.to_string();
+                match field {
+                    F::NewFloppyLabel => self.workshop.floppy_label = text,
+                    F::NewHardLabel => self.workshop.hard_label = text,
+                    F::NewHardDevice => self.workshop.device = text,
+                    _ => {}
+                }
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
             EditTarget::DriveBootpri(field) => {
                 // A bad number keeps the field focused so it can be fixed, the
                 // same as a rejected drive name. Typing the -128 sentinel clears
@@ -4650,7 +5284,8 @@ impl LauncherState {
                 self.setup.zorro_option_set(board, opt, value)
             }
             EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
-            EditTarget::DriveBootpri(_) => {}
+            // Both commit above and return, so nothing is left to do here.
+            EditTarget::DriveBootpri(_) | EditTarget::NewImageText(_) => {}
         }
     }
 
@@ -6676,6 +7311,387 @@ mod tests {
         );
     }
 
+    /// The workshop's pages carry every option the image formats have, and
+    /// none of them is a machine setting: nothing here may reach the
+    /// configuration a Save would write.
+    #[test]
+    fn the_disk_image_pages_edit_no_machine_setting() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        let before = state.setup.to_raw();
+        for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
+            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+                // The page heading is inert and carries no field.
+                if r.kind == RowKind::SectionHeader {
+                    continue;
+                }
+                assert!(
+                    LauncherState::is_workshop(r.field),
+                    "{:?} is not a workshop field",
+                    r.field
+                );
+                // Work every control the row offers.
+                state.workshop_cycle(r.field, true);
+                state.workshop_cycle(r.field, false);
+                state.workshop_toggle_flip(r.field);
+            }
+        }
+        assert_eq!(
+            state.setup.to_raw(),
+            before,
+            "the workshop changed the machine configuration"
+        );
+    }
+
+    /// Each picker reaches every value it offers and comes back, and the
+    /// value column always has something to say.
+    #[test]
+    fn the_disk_image_pickers_cover_their_choices() {
+        use crate::diskimage::{Container, Density, FileSystem, Partitioning};
+        let mut state = LauncherState::new(MachineSetup::default());
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..Density::ALL.len() * 2 {
+            seen.insert(state.workshop.density);
+            state.workshop_cycle(F::NewFloppyDensity, true);
+        }
+        assert_eq!(seen.len(), Density::ALL.len());
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..Container::ALL.len() * 2 {
+            seen.insert(state.workshop.container);
+            state.workshop_cycle(F::NewFloppyContainer, true);
+        }
+        assert_eq!(seen.len(), Container::ALL.len());
+
+        // Unformatted, then all eight DOS tags.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            seen.insert(state.workshop.floppy_fs.map(|f| f.dos_type()));
+            state.workshop_cycle(F::NewFloppyFs, true);
+        }
+        assert_eq!(seen.len(), 9, "unformatted plus DOS0..DOS7");
+        assert!(seen.contains(&None));
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..Partitioning::ALL.len() * 2 {
+            seen.insert(state.workshop.partitioning);
+            state.workshop_cycle(F::NewHardPartitioning, true);
+        }
+        assert_eq!(seen.len(), Partitioning::ALL.len());
+
+        // The size steppers stop at each end of what the box accepts, and
+        // the unit swaps without touching the number.
+        state.workshop.size = 1;
+        state.workshop_cycle(F::NewHardSize, false);
+        assert_eq!(state.workshop.size, 1, "size stepped below one");
+        state.workshop.size = NEW_HARD_SIZE_MAX;
+        state.workshop_cycle(F::NewHardSize, true);
+        assert_eq!(
+            state.workshop.size, NEW_HARD_SIZE_MAX,
+            "size stepped past the max"
+        );
+        state.workshop.size = 8;
+        state.workshop.size_unit = SizeUnit::Mb;
+        assert_eq!(state.workshop.bytes(), 8 << 20);
+        state.workshop.flip_size_unit();
+        assert_eq!(
+            state.workshop.size, 8,
+            "flipping the unit changed the number"
+        );
+        assert_eq!(state.workshop.bytes(), 8 << 30);
+        state.workshop.flip_size_unit();
+        assert_eq!(state.workshop.size_unit, SizeUnit::Mb);
+
+        // Every row shows something in its value column.
+        for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
+            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+                match r.kind {
+                    RowKind::Cycle | RowKind::Text | RowKind::Size => assert!(
+                        !state.row_value(r.field).is_empty(),
+                        "{:?} shows nothing",
+                        r.field
+                    ),
+                    RowKind::Action => assert!(
+                        !state.workshop_action_label(r.field).is_empty(),
+                        "{:?} has no button wording",
+                        r.field
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        let _ = FileSystem::OFS;
+    }
+
+    /// What the pages describe is what gets built, and the rows that mean
+    /// nothing for a given choice grey out.
+    #[test]
+    fn the_disk_image_pages_describe_what_gets_built() {
+        use crate::diskimage::Partitioning;
+        let mut state = LauncherState::new(MachineSetup::default());
+
+        // Defaults: a plain OFS floppy, and an RDB hard drive with FFS.
+        assert_eq!(
+            state.workshop.floppy_spec().filesystem,
+            Some(crate::diskimage::FileSystem::OFS)
+        );
+        let hard = state.workshop.hard_spec();
+        assert_eq!(hard.partitioning, Partitioning::Rdb);
+        assert_eq!(hard.device, "DH0");
+        assert_eq!(hard.bytes, state.workshop.bytes());
+
+        // An unformatted floppy has nothing to boot and nothing to name.
+        while state.workshop.floppy_fs.is_some() {
+            state.workshop_cycle(F::NewFloppyFs, false);
+        }
+        assert!(!state.workshop_applies(F::NewFloppyBootable));
+        assert!(!state.workshop_applies(F::NewFloppyLabel));
+        // ...and asking for bootable anyway cannot produce boot code.
+        state.workshop.floppy_bootable = true;
+        assert!(!state.workshop.floppy_spec().bootable);
+
+        // Without a partition table there is no entry to carry a device
+        // name or a boot flag.
+        state.workshop.partitioning = Partitioning::None;
+        assert!(!state.workshop_applies(F::NewHardDevice));
+        assert!(!state.workshop_applies(F::NewHardBootable));
+
+        // Geometry follows the size until it is set by hand, and once it
+        // is, the size can move without disturbing it.
+        assert!(!state.workshop.geometry_custom);
+        state.workshop.size = 100;
+        let derived = state.workshop.effective_geometry();
+        assert_eq!(
+            derived,
+            crate::diskimage::Geometry::for_size(state.workshop.bytes())
+        );
+        state.workshop.geometry_from_size();
+        state.workshop.geometry_custom = true;
+        state.workshop.size = 200;
+        assert_eq!(state.workshop.effective_geometry(), derived);
+
+        // The suggested file name follows the volume and the kind.
+        state.workshop.floppy_label = "My Disk".into();
+        assert_eq!(state.workshop.suggested_name(true), "MyDisk.adf");
+        state.workshop.hard_label = String::new();
+        assert_eq!(state.workshop.suggested_name(false), "image.hdf");
+    }
+
+    /// Drive the workshop pages the way a user does -- type into the boxes,
+    /// walk the pickers, flip the ticks -- and check every one of those
+    /// choices survives all the way into the bytes on disk. A setting that
+    /// looks right on the page and never reaches the image is the one
+    /// failure this feature cannot afford.
+    #[test]
+    fn every_workshop_setting_reaches_the_image() {
+        use crate::diskimage::{Container, Density, FileSystem, Partitioning};
+
+        fn scratch(name: &str) -> std::path::PathBuf {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("copperline-workshop-{n}-{name}"))
+        }
+        fn long(data: &[u8], block: u64, long: usize) -> u32 {
+            let at = block as usize * 512 + long * 4;
+            u32::from_be_bytes(data[at..at + 4].try_into().unwrap())
+        }
+        // Clicking a box seeds it with what is already there, so typing a
+        // fresh value means clearing it first -- exactly what a user does.
+        fn typed(state: &mut LauncherState, field: LauncherField, text: &str) {
+            state.begin_edit_new_image(field);
+            while !state.edit_buffer().is_empty() {
+                state.edit_backspace();
+            }
+            for c in text.chars() {
+                state.edit_push(c);
+            }
+            state.edit_commit();
+            assert_eq!(state.editing(), None, "{field:?} refused \"{text}\"");
+        }
+
+        // --- the floppy page ---
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.tab = LauncherTab::CreateFloppy;
+        state.workshop_cycle(F::NewFloppyDensity, true); // DD -> HD
+        state.workshop_cycle(F::NewFloppyContainer, true); // ADF -> extended
+        state.workshop_cycle(F::NewFloppyFs, true); // OFS -> FFS
+        typed(&mut state, F::NewFloppyLabel, "Scratch");
+        state.workshop_toggle_flip(F::NewFloppyBootable);
+        let spec = state.workshop.floppy_spec();
+        assert_eq!(spec.density, Density::Hd);
+        assert_eq!(spec.container, Container::ExtendedAdf);
+        assert_eq!(spec.filesystem, Some(FileSystem::FFS));
+        assert_eq!(spec.label, "Scratch");
+        assert!(spec.bootable);
+
+        let path = scratch("floppy.adf");
+        crate::diskimage::create_floppy(&path, &spec).expect("floppy written");
+        let adf = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            &adf[0..8],
+            b"UAE-1ADF",
+            "the extended container was asked for"
+        );
+        // An extended image is not a plain sector run, so the volume is
+        // checked through a plain one written from the same settings.
+        let mut plain = spec.clone();
+        plain.container = Container::Adf;
+        let path = scratch("floppy2.adf");
+        crate::diskimage::create_floppy(&path, &plain).expect("floppy written");
+        let adf = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(adf.len(), 1_802_240, "HD density");
+        assert_eq!(&adf[0..4], b"DOS\x01", "FFS");
+        assert!(adf[12..24].iter().any(|&b| b != 0), "boot code was written");
+        let root = 1760u64;
+        assert_eq!(adf[root as usize * 512 + (128 - 20) * 4], 7, "name length");
+        assert_eq!(
+            &adf[root as usize * 512 + (128 - 20) * 4 + 1..][..7],
+            b"Scratch"
+        );
+
+        // --- the hard disk page ---
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.tab = LauncherTab::CreateHard;
+        typed(&mut state, F::NewHardSize, "1234");
+        assert_eq!(state.workshop.size, 1234, "the typed size took");
+        state.workshop.flip_size_unit(); // MB -> GB
+        state.workshop.flip_size_unit(); // and back, so the run stays quick
+        typed(&mut state, F::NewHardSize, "48");
+        state.workshop_cycle(F::NewHardFs, true); // DOS1 (FFS) -> DOS2 (OFS/intl)
+        typed(&mut state, F::NewHardDevice, "WORK");
+        typed(&mut state, F::NewHardLabel, "Stuff");
+        typed(&mut state, F::NewHardBootPri, "-9");
+        state.workshop_toggle_flip(F::NewHardReadOnly);
+
+        // Hand-set geometry, reached the way the page reaches it.
+        state.workshop.geometry_from_size();
+        state.workshop.geometry_custom = true;
+        state.tab = LauncherTab::CreateGeometry;
+        typed(&mut state, F::NewGeomCylinders, "300");
+        typed(&mut state, F::NewGeomSurfaces, "4");
+        typed(&mut state, F::NewGeomSectors, "63");
+        typed(&mut state, F::NewGeomReserved, "6");
+
+        let spec = state.workshop.hard_spec();
+        assert_eq!(spec.partitioning, Partitioning::Rdb);
+        assert_eq!(
+            spec.filesystem,
+            Some(crate::diskimage::FileSystem {
+                ffs: false,
+                variant: crate::diskimage::Variant::Intl,
+            })
+        );
+        assert_eq!(spec.device, "WORK");
+        assert_eq!(spec.label, "Stuff");
+        assert_eq!(spec.boot_pri, -9);
+        assert_eq!(spec.reserved, 6);
+        assert!(spec.read_only);
+        assert_eq!(
+            spec.geometry,
+            Some(crate::diskimage::Geometry {
+                cylinders: 300,
+                surfaces: 4,
+                sectors: 63,
+            })
+        );
+
+        let path = scratch("hard.hdf");
+        let made = crate::diskimage::create_hard(&path, &spec).expect("hard disk written");
+        let hdf = std::fs::read(&path).unwrap();
+        // Written read-only, so it has to be made writable again to go.
+        let perms = std::fs::metadata(&path).unwrap().permissions();
+        assert!(perms.readonly(), "the file was marked read only");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = perms;
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+
+        // The geometry decides the size, not the Size box, once it is set
+        // by hand: 300 x 4 x 63 blocks of 512.
+        assert_eq!(made.bytes, 300 * 4 * 63 * 512);
+        assert_eq!(hdf.len() as u64, made.bytes);
+
+        assert_eq!(&hdf[0..4], b"RDSK");
+        assert_eq!(long(&hdf, 0, 16), 300, "cylinders");
+        assert_eq!(long(&hdf, 0, 17), 63, "sectors");
+        assert_eq!(long(&hdf, 0, 18), 4, "surfaces");
+
+        assert_eq!(&hdf[512..516], b"PART");
+        assert_eq!(hdf[512 + 36], 4, "device name length");
+        assert_eq!(&hdf[512 + 37..512 + 41], b"WORK");
+        assert_eq!(long(&hdf, 1, 5), 1, "bootable");
+        assert_eq!(long(&hdf, 1, 38), 6, "de_Reserved");
+        assert_eq!(long(&hdf, 1, 47) as i32, -9, "de_BootPri");
+        assert_eq!(
+            long(&hdf, 1, 48),
+            crate::diskimage::FileSystem {
+                ffs: false,
+                variant: crate::diskimage::Variant::Intl,
+            }
+            .dos_type()
+        );
+
+        // And the volume inside the partition carries the name and tag.
+        let cyl_blocks = 4 * 63;
+        let first = cyl_blocks;
+        let blocks = (300 - 1) * cyl_blocks;
+        assert_eq!(&hdf[first as usize * 512..][..4], b"DOS\x02");
+        let root = first + blocks / 2;
+        assert_eq!(hdf[root as usize * 512 + (128 - 20) * 4], 5);
+        assert_eq!(
+            &hdf[root as usize * 512 + (128 - 20) * 4 + 1..][..5],
+            b"Stuff"
+        );
+
+        // --- and with the geometry left on Auto, the Size box is what
+        // decides, in whichever unit it is showing.
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.tab = LauncherTab::CreateHard;
+        typed(&mut state, F::NewHardSize, "3");
+        state.workshop.flip_size_unit(); // MB -> GB
+        assert_eq!(state.workshop.bytes(), 3 * 1024 * 1024 * 1024);
+        typed(&mut state, F::NewHardSize, "9");
+        state.workshop.flip_size_unit(); // GB -> MB
+                                         // No partition table, no filesystem: a brand new mechanism, which
+                                         // is also the quickest thing to write.
+        while state.workshop.partitioning != Partitioning::None {
+            state.workshop_cycle(F::NewHardPartitioning, true);
+        }
+        while state.workshop.hard_fs.is_some() {
+            state.workshop_cycle(F::NewHardFs, false);
+        }
+        state.workshop_toggle_flip(F::NewHardAllocate);
+        let spec = state.workshop.hard_spec();
+        assert_eq!(spec.bytes, 9 * 1024 * 1024);
+        assert_eq!(spec.geometry, None, "Auto derives it at write time");
+        assert!(spec.allocate);
+
+        let path = scratch("plain.hdf");
+        let made = crate::diskimage::create_hard(&path, &spec).expect("hard disk written");
+        let hdf = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        // Rounded up to the next whole cylinder, never below what was asked.
+        assert!(made.bytes >= 9 * 1024 * 1024);
+        assert_eq!(hdf.len() as u64, made.bytes);
+        assert!(
+            hdf.iter().all(|&b| b == 0),
+            "an unpartitioned, unformatted drive carries nothing at all"
+        );
+    }
+
     #[test]
     fn sub_pages_of_hdd_cd() {
         // The sub-pages (CD included) are not top-level strip tabs.
@@ -6694,8 +7710,9 @@ mod tests {
         // A top-level tab has no parent.
         assert_eq!(LauncherTab::Storage.parent_tab(), None);
 
-        // The Storage nav lists CD, Host Mounts, Boot Priority, WHDLoad in
-        // that order (drawn as a fixed top nav row, not a settings row).
+        // The Storage nav lists its sub-pages in order (drawn as a fixed top
+        // nav row, not a settings row). Disk Image is last and lands on the
+        // floppy page, which is the workshop's default half.
         let storage_nav: Vec<_> = LauncherTab::Storage
             .nav_options()
             .iter()
@@ -6708,9 +7725,26 @@ mod tests {
                 LauncherTab::HostFs,
                 LauncherTab::HostDisk,
                 LauncherTab::BootPriority,
-                LauncherTab::Whdload
+                LauncherTab::Whdload,
+                LauncherTab::CreateFloppy,
             ]
         );
+
+        // The two workshop pages are siblings of each other and children of
+        // Storage: their nav row carries a Back button *and* the pair, so a
+        // page says both where it came from and which of the two it is.
+        for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
+            assert_eq!(tab.parent_tab(), Some(LauncherTab::Storage));
+            assert_eq!(tab.strip_tab(), LauncherTab::Storage);
+            assert!(!TABS.contains(&tab), "a workshop page is not a strip tab");
+            let nav: Vec<_> = tab.nav_options().iter().map(|&(_, t)| t).collect();
+            assert_eq!(
+                nav,
+                [LauncherTab::CreateFloppy, LauncherTab::CreateHard],
+                "{} does not offer both halves",
+                tab.label()
+            );
+        }
 
         // The Storage tab is just the storage rows (IDE/SCSI options).
         let storage = rows(

@@ -1407,6 +1407,14 @@ impl Drop for RenderWorker {
     }
 }
 
+/// Which of the two Disk Image pages asked for a file, and what it asked
+/// for. The choice is made while the launcher state is still borrowed, and
+/// acted on after the save dialog has come back.
+enum ImageToMake {
+    Floppy(crate::diskimage::FloppySpec),
+    Hard(crate::diskimage::HardSpec),
+}
+
 impl App {
     pub fn new(
         emu: Emulator,
@@ -5678,14 +5686,32 @@ impl App {
             }
             UiControl::LauncherCycle { field, forward } => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.setup.cycle(field, forward);
-                    state.status = None;
+                    // Reaching for another control ends the typing, the way
+                    // Enter does: what is in the box counts.
+                    state.edit_commit();
+                    let refused = state.editing().is_some();
+                    if LauncherState::is_workshop(field) {
+                        state.workshop_cycle(field, forward);
+                    } else {
+                        state.setup.cycle(field, forward);
+                    }
+                    if !refused {
+                        state.status = None;
+                    }
                 }
             }
             UiControl::LauncherToggle(field) => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.setup.toggle(field);
-                    state.status = None;
+                    state.edit_commit();
+                    let refused = state.editing().is_some();
+                    if LauncherState::is_workshop(field) {
+                        state.workshop_toggle_flip(field);
+                    } else {
+                        state.setup.toggle(field);
+                    }
+                    if !refused {
+                        state.status = None;
+                    }
                 }
             }
             UiControl::LauncherClear(field) => {
@@ -5698,6 +5724,35 @@ impl App {
             UiControl::LauncherDriveNameEdit(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.begin_edit_drive_name(field);
+                }
+            }
+            UiControl::LauncherNewImageEdit(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.begin_edit_new_image(field);
+                }
+            }
+            UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
+            UiControl::LauncherNewImageUnit => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // The size in the box is in the unit being left, so it
+                    // has to be taken before the unit changes under it.
+                    state.edit_commit();
+                    state.workshop.flip_size_unit();
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherGeometryAuto | UiControl::LauncherGeometryCustom => {
+                let by_hand = control == UiControl::LauncherGeometryCustom;
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    // Entering hand-set geometry starts from what Auto
+                    // would have produced, so the figures are never blank
+                    // and never disagree with the size.
+                    if by_hand && !state.workshop.geometry_custom {
+                        state.workshop.geometry_from_size();
+                    }
+                    state.workshop.geometry_custom = by_hand;
+                    state.status = None;
                 }
             }
             UiControl::LauncherDriveBootpriEdit(field) => {
@@ -7028,6 +7083,98 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+    }
+
+    /// Make a fresh disk image from what the Disk Image page is showing.
+    ///
+    /// The file is chosen first: the save dialog is where a user cancels,
+    /// and nothing is written until they have named somewhere to write it.
+    fn launcher_create_image(&mut self, field: crate::video::launcher::LauncherField) {
+        use crate::video::launcher::LauncherField as F;
+        // Whatever is half-typed counts: pressing a button is as much an
+        // end to typing as Enter is, and a size typed but not committed
+        // would otherwise be silently thrown away.
+        if let Some(state) = self.launcher_state_mut() {
+            state.edit_commit();
+            if state.editing().is_some() {
+                // The commit was refused -- an invalid name -- and the
+                // status line says so. Nothing further can be trusted.
+                return;
+            }
+        }
+        // The geometry editor's two buttons write no file: Save takes the
+        // figures as they stand and returns, Auto fills them in from the
+        // size so a hand-set geometry can be started over.
+        if matches!(field, F::NewGeomSave | F::NewGeomAuto) {
+            if let Some(state) = self.launcher_state_mut() {
+                if field == F::NewGeomAuto {
+                    state.workshop.geometry_from_size();
+                } else {
+                    state.tab = crate::video::launcher::LauncherTab::CreateHard;
+                }
+                state.status = None;
+            }
+            return;
+        }
+        let floppy = field == F::NewFloppyCreate;
+        let Some(state) = self.launcher_state() else {
+            return;
+        };
+        let suggested = state.workshop.suggested_name(floppy);
+        let spec = if floppy {
+            ImageToMake::Floppy(state.workshop.floppy_spec())
+        } else {
+            ImageToMake::Hard(state.workshop.hard_spec())
+        };
+
+        self.suspend_live_audio_for_host_io();
+        let (kind, ext) = if floppy {
+            ("Amiga floppy image", vec!["adf"])
+        } else {
+            // The same bytes either way: .hdf is what emulators look for,
+            // .img what a card writer expects, so both are offered.
+            ("Amiga hard disk image", vec!["hdf", "img"])
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("Create disk image")
+            .add_filter(kind, &ext)
+            .set_file_name(&suggested)
+            .save_file();
+        self.finish_host_io_pause();
+
+        let Some(path) = picked else { return };
+        let made = match &spec {
+            ImageToMake::Floppy(spec) => crate::diskimage::create_floppy(&path, spec),
+            ImageToMake::Hard(spec) => crate::diskimage::create_hard(&path, spec),
+        };
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        state.status = Some(match made {
+            Ok(made) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                info!(
+                    "created {} ({} bytes){}",
+                    path.display(),
+                    made.bytes,
+                    match made.geometry {
+                        Some(g) => format!(", {}/{}/{}", g.cylinders, g.surfaces, g.sectors),
+                        None => String::new(),
+                    }
+                );
+                crate::video::launcher::StatusMessage::ok(format!(
+                    "Created {name} ({})",
+                    crate::config::format_size(made.bytes as usize)
+                ))
+            }
+            Err(e) => {
+                warn!("create disk image {}: {e}", path.display());
+                crate::video::launcher::StatusMessage::err(format!("Could not create: {e}"))
+            }
+        });
     }
 
     fn launcher_add_zorro(&mut self) {

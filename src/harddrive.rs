@@ -272,6 +272,14 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) ->
 }
 
 impl HardDriveImage {
+    /// Whether the image carries its own Rigid Disk Block, rather than
+    /// being a bare single-partition hardfile this had to synthesize one
+    /// over. An image made by the disk-image workshop with a partition
+    /// table must land here, which is what its tests assert.
+    pub fn has_own_rdb(&self) -> bool {
+        self.rdb_overlay.is_none()
+    }
+
     /// Attach a real host disk in place of an image.
     ///
     /// The device is identified the way a configuration names it (`disk4`,

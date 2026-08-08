@@ -37,6 +37,8 @@ const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
 /// DDF fetch-bound verticals on the Frame Analyzer heatmap.
 const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
+/// The mark inside a ticked box.
+const TICK_GREEN: u32 = rgba(72, 214, 96);
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
 const SCRIM: u32 = rgba(0, 0, 0);
 const SCRIM_ALPHA: f32 = 0.45;
@@ -746,6 +748,16 @@ pub enum UiControl {
     LauncherClear(LauncherField),
     /// Configuration screen: focus a drive's volume-name field for text entry.
     LauncherDriveNameEdit(LauncherField),
+    /// A free-text box on a Disk Image page (a volume or device name).
+    LauncherNewImageEdit(LauncherField),
+    /// The Create button on a Disk Image page.
+    LauncherNewImageCreate(LauncherField),
+    /// The MB/GB written beside the hard-drive size, which swaps on click.
+    LauncherNewImageUnit,
+    /// Let the hard-disk geometry follow the size.
+    LauncherGeometryAuto,
+    /// Set the hard-disk geometry by hand.
+    LauncherGeometryCustom,
     /// Boot Priority page: focus a drive's boot-priority field for typing.
     LauncherDriveBootpriEdit(LauncherField),
     /// Boot Priority page: toggle a drive's Bootable box.
@@ -4237,6 +4249,12 @@ fn launcher_cycle_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
     launcher_stepper_rects(rect, row_y, LAUNCH_VALUE_W)
 }
 
+/// The geometry figures' `< value >`, on the same run as every other
+/// stepper in the launcher.
+fn launcher_geometry_stepper_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
+    launcher_stepper_rects(rect, row_y, 64)
+}
+
 /// The priority column's `< value >`, on its own narrower value box.
 fn launcher_bootpri_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
     launcher_stepper_rects(rect, row_y, LAUNCH_BOOTPRI_VALUE_W)
@@ -4275,21 +4293,173 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// A sub-page navigation button (the `slot`-th of `count`) on the top nav row:
-/// a page's sibling links, or a sub-page's Back button.
-/// Sized to match the left-hand category tabs while `count` of them fit; a
-/// longer row (the Storage tab's five sub-pages) narrows the buttons evenly so
-/// the last one stays inside the pane.
-fn launcher_nav_button_rect(rect: Rect, slot: usize, count: usize) -> Rect {
-    let x = launcher_pane_x(rect);
-    let avail = (rect.x + rect.w).saturating_sub(x + LAUNCH_MARGIN);
-    let count = count.max(1);
-    let w = LAUNCH_SIDEBAR_W.min(avail.saturating_sub((count - 1) * 8) / count);
+/// Nav-row buttons per row before they wrap.
+const LAUNCH_NAV_PER_ROW: usize = 4;
+
+/// A nav-row button, in the machine selector's own size and rhythm: same
+/// width, same height, same gap, and the first one sits in the machine
+/// grid's second column so it lines up with the button above it. Four to a
+/// row, wrapping after that.
+fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
+    // Column 1 of the machine grid, which is where the pane's own left
+    // edge very nearly falls: taking the grid's column exactly is what
+    // makes the two rows read as one column of buttons.
+    let above = launcher_model_rect(rect, 1);
+    let (row, col) = (slot / LAUNCH_NAV_PER_ROW, slot % LAUNCH_NAV_PER_ROW);
     Rect {
-        x: x + slot * (w + 8),
-        y: launcher_nav_y(rect),
-        w,
+        x: above.x + col * (above.w + LAUNCH_MODEL_GAP),
+        y: launcher_nav_y(rect) + row * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP),
+        w: above.w,
+        h: LAUNCH_MODEL_H,
+    }
+}
+
+/// How tall the nav row block is for a given number of buttons, so the
+/// settings below it start clear of a wrapped second row.
+fn launcher_nav_rows(slots: usize) -> usize {
+    slots.max(1).div_ceil(LAUNCH_NAV_PER_ROW)
+}
+
+/// A free-text value box on a Disk Image row: where a value would sit, at
+/// the width a volume or device name needs.
+fn launcher_text_rect(rect: Rect, row_y: usize) -> Rect {
+    Rect {
+        x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
+        y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
+        w: LAUNCH_NAME_W,
+        h: LAUNCH_CONTROL_H,
+    }
+}
+
+/// The button on a Disk Image action row: the page's one commitment,
+/// rather than another little control.
+fn launcher_action_rect(rect: Rect, row_y: usize) -> Rect {
+    Rect {
+        // At the pane's own left edge, under the labels rather than out in
+        // the value column: it acts on the page, not on a row.
+        x: launcher_pane_x(rect),
+        // Pushed down a little, so it is not mistaken for another setting.
+        y: row_y + (LAUNCH_ROW_H - LAUNCH_TAB_H) / 2 + 10,
+        // Sized like the category buttons down the left: the same shape the
+        // launcher uses everywhere for "go and do this".
+        w: LAUNCH_SIDEBAR_W,
         h: LAUNCH_TAB_H,
+    }
+}
+
+/// The geometry editor's second button, beside its Save.
+fn launcher_action2_rect(rect: Rect, row_y: usize) -> Rect {
+    let first = launcher_action_rect(rect, row_y);
+    Rect {
+        x: first.x + first.w + LAUNCH_TAB_GAP,
+        ..first
+    }
+}
+
+/// The typed number on the hard-drive size row. Lines up with the value
+/// boxes on the rows below it, so the column reads straight down.
+fn launcher_size_box_rect(rect: Rect, row_y: usize) -> Rect {
+    Rect {
+        x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
+        y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
+        w: 64,
+        h: LAUNCH_CONTROL_H,
+    }
+}
+
+/// The Auto / Custom pair on the geometry row, and the Configure button
+/// that joins them once the geometry is set by hand. Sized like the
+/// Browse/Clear buttons the path rows use.
+fn launcher_geometry_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
+    let y = row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2;
+    let auto = Rect {
+        x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
+        y,
+        w: LAUNCH_CLEAR_W,
+        h: LAUNCH_CONTROL_H,
+    };
+    let custom = Rect {
+        x: auto.x + auto.w + 4,
+        w: LAUNCH_BROWSE_W,
+        ..auto
+    };
+    let configure = Rect {
+        x: custom.x + custom.w + 4,
+        w: LAUNCH_ACTION_W,
+        ..auto
+    };
+    (auto, custom, configure)
+}
+
+/// "a" or "an" for a size like `64M`, which is read aloud as a number:
+/// anything beginning with an eight takes "an", as do eleven and eighteen
+/// themselves. (Eighteen *thousand* would too, but no size box reaches it.)
+fn indefinite_article(size: &str) -> &'static str {
+    let leading: String = size.chars().take_while(char::is_ascii_digit).collect();
+    let vowel = leading.starts_with('8') || leading == "11" || leading == "18";
+    if vowel {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// Draw a workshop value box: what the setting holds, or what is being
+/// typed into it, with a caret while it has the focus.
+fn draw_launcher_value_box(
+    frame: &mut [u8],
+    box_rect: Rect,
+    state: &LauncherState,
+    field: LauncherField,
+    disabled: bool,
+    scale: usize,
+) {
+    draw_rect_bevel(
+        frame,
+        scale_rect(box_rect, scale),
+        BUTTON_EDGE_DARK,
+        BUTTON_EDGE_LIGHT,
+        scale,
+    );
+    let typing = state.editing() == Some(EditTarget::NewImageText(field));
+    let (text, color) = if typing {
+        (format!("{}_", state.edit_buffer()), PANEL_TEXT_HILIGHT)
+    } else if disabled {
+        (state.workshop_value(field), PANEL_TEXT_DIM)
+    } else {
+        (state.workshop_value(field), PANEL_TEXT)
+    };
+    let shown = truncate_to_width(&text, box_rect.w.saturating_sub(8));
+    draw_panel_text(
+        frame,
+        box_rect.x + 4,
+        box_rect.y + 6,
+        &shown,
+        color,
+        1,
+        scale,
+    );
+}
+
+/// A typed whole number, lined up with the value column beside it.
+fn launcher_number_rect(rect: Rect, row_y: usize) -> Rect {
+    Rect {
+        x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
+        y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
+        w: 64,
+        h: LAUNCH_CONTROL_H,
+    }
+}
+
+/// The unit written beside that number. Text, not a button -- but clicking
+/// it swaps MB and GB, so it is a control all the same.
+fn launcher_size_unit_rect(rect: Rect, row_y: usize) -> Rect {
+    let box_rect = launcher_size_box_rect(rect, row_y);
+    Rect {
+        x: box_rect.x + box_rect.w + 8,
+        y: box_rect.y,
+        w: 2 * font::GLYPH_W,
+        h: LAUNCH_CONTROL_H,
     }
 }
 
@@ -4404,9 +4574,15 @@ fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     ]
 }
 
-/// A sub-page's Back button, on the nav row.
+/// A sub-page's Back button: the nav row's first slot, always.
 fn launcher_back_button_rect(rect: Rect) -> Rect {
-    launcher_nav_button_rect(rect, 0, 1)
+    launcher_nav_button_rect(rect, 0)
+}
+
+/// How many buttons the nav row holds for a tab: its sibling links, plus a
+/// Back button when it is a sub-page.
+fn launcher_nav_slots(tab: launcher::LauncherTab) -> usize {
+    usize::from(tab.parent_tab().is_some()) + tab.nav_options().len()
 }
 
 /// Y of the nav row (the sibling-page buttons and any Back button) at the top of
@@ -4418,7 +4594,13 @@ fn launcher_nav_y(rect: Rect) -> usize {
 
 /// Vertical space reserved at the top of the pane for the nav button row plus a
 /// gap below it, before the settings begin, on tabs that have a nav.
-const LAUNCH_NAV_BLOCK_H: usize = LAUNCH_TAB_H + 14;
+const LAUNCH_NAV_BLOCK_H: usize = LAUNCH_MODEL_H + 14;
+
+/// The same, for a tab whose nav wraps onto more than one row.
+fn launcher_nav_block_h(tab: launcher::LauncherTab) -> usize {
+    let rows = launcher_nav_rows(launcher_nav_slots(tab));
+    LAUNCH_NAV_BLOCK_H + (rows - 1) * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP)
+}
 
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
 /// sitting to the right of the priority stepper on a Boot Priority row.
@@ -4621,7 +4803,12 @@ fn launcher_board_value_rect(rect: Rect, row_y: usize) -> Rect {
 /// same size and position as the sibling-page buttons on other tabs, with the
 /// board list below it after the same gap.
 fn launcher_zorro_add_rect(rect: Rect) -> Rect {
-    launcher_nav_button_rect(rect, 0, 1)
+    Rect {
+        x: launcher_pane_x(rect),
+        y: launcher_nav_y(rect),
+        w: LAUNCH_SIDEBAR_W,
+        h: LAUNCH_MODEL_H,
+    }
 }
 
 fn launcher_action_label(control: UiControl) -> &'static str {
@@ -4704,7 +4891,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     } else {
         let row_offset = if state.tab.has_top_nav() {
-            LAUNCH_NAV_BLOCK_H
+            launcher_nav_block_h(state.tab)
         } else {
             0
         };
@@ -4718,13 +4905,75 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         .filter(|r| !state.setup.row_hidden(r.field))
         .enumerate()
         {
-            if !state.setup.applies(r.field) {
+            if !state.row_applies(r.field) {
                 continue;
             }
             let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
                 RowKind::SectionHeader | RowKind::BootpriHeader => {}
+                RowKind::Text => {
+                    if launcher_text_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherNewImageEdit(r.field));
+                    }
+                }
+                RowKind::Size => {
+                    if launcher_size_box_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherNewImageEdit(r.field));
+                    }
+                    if launcher_size_unit_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherNewImageUnit);
+                    }
+                }
+                RowKind::Number => {
+                    if launcher_number_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherNewImageEdit(r.field));
+                    }
+                }
+                RowKind::Stepper => {
+                    let (prev, value, next) = launcher_geometry_stepper_rects(rect, row_y);
+                    if prev.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: false,
+                        });
+                    }
+                    if next.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: true,
+                        });
+                    }
+                    if value.contains(pos) {
+                        return Some(UiControl::LauncherNewImageEdit(r.field));
+                    }
+                }
+                RowKind::GeometryMode => {
+                    let (auto, custom, configure) = launcher_geometry_rects(rect, row_y);
+                    if auto.contains(pos) {
+                        return Some(UiControl::LauncherGeometryAuto);
+                    }
+                    if custom.contains(pos) {
+                        return Some(UiControl::LauncherGeometryCustom);
+                    }
+                    // Configure is only there once the geometry is by hand.
+                    if state.workshop.geometry_custom && configure.contains(pos) {
+                        return Some(UiControl::LauncherTab(LauncherTab::CreateGeometry));
+                    }
+                }
+                RowKind::Action => {
+                    if launcher_action_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherNewImageCreate(r.field));
+                    }
+                    // The geometry editor's Auto sits beside its Save.
+                    if r.field == LauncherField::NewGeomSave
+                        && launcher_action2_rect(rect, row_y).contains(pos)
+                    {
+                        return Some(UiControl::LauncherNewImageCreate(
+                            LauncherField::NewGeomAuto,
+                        ));
+                    }
+                }
                 RowKind::Cycle => {
                     let (prev, _value, next) = launcher_cycle_rects(rect, row_y);
                     if prev.contains(pos) {
@@ -4885,16 +5134,19 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             }
         }
     }
+    // The nav row: a Back button when this is a sub-page, then whatever
+    // sibling pages it offers. A page can have both -- the Disk Image pages
+    // say where they came from and which of the two they are.
+    let mut slot = 0;
     if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherTab(parent));
         }
-    } else {
-        let options = state.tab.nav_options();
-        for (slot, &(_, target)) in options.iter().enumerate() {
-            if launcher_nav_button_rect(rect, slot, options.len()).contains(pos) {
-                return Some(UiControl::LauncherTab(target));
-            }
+        slot = 1;
+    }
+    for (i, &(_, target)) in state.tab.nav_options().iter().enumerate() {
+        if launcher_nav_button_rect(rect, slot + i).contains(pos) {
+            return Some(UiControl::LauncherTab(target));
         }
     }
     for (control, button_rect) in launcher_action_rects(rect) {
@@ -5373,6 +5625,11 @@ enum GreyedAs {
 
 fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> GreyedAs {
     use LauncherField as F;
+    // The workshop's rows stay put when they stop applying: an unformatted
+    // disk still remembers the volume name it would have had.
+    if LauncherState::is_workshop(r.field) {
+        return GreyedAs::DimmedValue;
+    }
     // A priority the machine has no drive to apply.
     if r.kind == RowKind::Bootpri {
         return GreyedAs::DimmedReason;
@@ -5450,7 +5707,13 @@ fn draw_launcher_row(
         }
         return;
     }
-    let reason = setup.disabled_reason(r.field);
+    // A workshop row greys on its own terms -- there is no machine setting
+    // behind it to explain itself -- so it is asked directly.
+    let reason = if LauncherState::is_workshop(r.field) {
+        (!state.workshop_applies(r.field)).then_some("")
+    } else {
+        setup.disabled_reason(r.field)
+    };
     let label_color = if reason.is_none() {
         PANEL_TEXT
     } else {
@@ -5503,6 +5766,142 @@ fn draw_launcher_row(
     match r.kind {
         // Drawn above with an early return.
         RowKind::SectionHeader | RowKind::BootpriHeader => {}
+        RowKind::Text => {
+            draw_launcher_value_box(
+                frame,
+                launcher_text_rect(rect, row_y),
+                state,
+                r.field,
+                disabled,
+                scale,
+            );
+        }
+        RowKind::Size => {
+            // A number to type, with the unit written beside it. The unit
+            // is text rather than a button: clicking it swaps MB and GB.
+            draw_launcher_value_box(
+                frame,
+                launcher_size_box_rect(rect, row_y),
+                state,
+                r.field,
+                disabled,
+                scale,
+            );
+            let unit = launcher_size_unit_rect(rect, row_y);
+            draw_panel_text(
+                frame,
+                unit.x,
+                unit.y + 6,
+                state.workshop.size_unit.label(),
+                if hover == Some(UiControl::LauncherNewImageUnit) {
+                    PANEL_TEXT_HILIGHT
+                } else {
+                    PANEL_TEXT
+                },
+                1,
+                scale,
+            );
+        }
+        RowKind::Number => {
+            draw_launcher_value_box(
+                frame,
+                launcher_number_rect(rect, row_y),
+                state,
+                r.field,
+                disabled,
+                scale,
+            );
+        }
+        RowKind::Stepper => {
+            let (prev, value, next) = launcher_geometry_stepper_rects(rect, row_y);
+            draw_text_button(
+                frame,
+                prev,
+                "<",
+                !disabled,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: false,
+                    }),
+                scale,
+            );
+            draw_text_button(
+                frame,
+                next,
+                ">",
+                !disabled,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: true,
+                    }),
+                scale,
+            );
+            draw_launcher_value_box(frame, value, state, r.field, disabled, scale);
+        }
+        RowKind::GeometryMode => {
+            // Auto and Custom sit together as one choice, the chosen one
+            // lit; Configure only appears once there is something to
+            // configure.
+            let (auto, custom, configure) = launcher_geometry_rects(rect, row_y);
+            let by_hand = state.workshop.geometry_custom;
+            draw_launcher_chip(
+                frame,
+                auto,
+                "Auto",
+                !by_hand,
+                hover == Some(UiControl::LauncherGeometryAuto),
+                false,
+                scale,
+            );
+            draw_launcher_chip(
+                frame,
+                custom,
+                "Custom",
+                by_hand,
+                hover == Some(UiControl::LauncherGeometryCustom),
+                false,
+                scale,
+            );
+            if by_hand {
+                draw_text_button(
+                    frame,
+                    configure,
+                    "Configure",
+                    true,
+                    hover == Some(UiControl::LauncherTab(LauncherTab::CreateGeometry)),
+                    scale,
+                );
+            }
+        }
+        RowKind::Action => {
+            let label = state.workshop_action_label(r.field);
+            draw_text_button(
+                frame,
+                launcher_action_rect(rect, row_y),
+                &label,
+                !disabled,
+                hover == Some(UiControl::LauncherNewImageCreate(r.field)),
+                scale,
+            );
+            // The geometry editor commits with Save, and fills itself in
+            // from the size with Auto beside it.
+            if r.field == LauncherField::NewGeomSave {
+                let auto = state.workshop_action_label(LauncherField::NewGeomAuto);
+                draw_text_button(
+                    frame,
+                    launcher_action2_rect(rect, row_y),
+                    &auto,
+                    true,
+                    hover
+                        == Some(UiControl::LauncherNewImageCreate(
+                            LauncherField::NewGeomAuto,
+                        )),
+                    scale,
+                );
+            }
+        }
         RowKind::Cycle => {
             let (prev, value, next) = launcher_cycle_rects(rect, row_y);
             draw_text_button(
@@ -5533,7 +5932,7 @@ fn draw_launcher_row(
             // it cannot spill over the ">" stepper.
             let shown = match reason {
                 Some(reason) if greyed_shows_reason => reason.to_string(),
-                _ => setup.value_label(r.field),
+                _ => state.row_value(r.field),
             };
             let text = truncate_to_width(&shown, value.w);
             let tw = text.chars().count() * font::GLYPH_W;
@@ -5752,9 +6151,35 @@ fn draw_launcher_row(
                 );
             }
         }
+        RowKind::Toggle if LauncherState::is_workshop(r.field) => {
+            // A tick box rather than an On/Off button: these pages are a
+            // list of choices about one thing, and ticks read as a list.
+            let button = launcher_toggle_rect(rect, row_y);
+            let on = state.row_toggle(r.field);
+            let hot = hover == Some(UiControl::LauncherToggle(r.field));
+            let box_rect = Rect {
+                x: button.x,
+                y: row_y + (LAUNCH_ROW_H - 10) / 2,
+                w: 10,
+                h: 10,
+            };
+            draw_tick_box(
+                frame,
+                box_rect.x,
+                box_rect.y,
+                // A setting that does not apply is not in force: showing a
+                // tick on a row that cannot boot would promise a boot.
+                on && !disabled,
+                if disabled { PANEL_TEXT_DIM } else { TICK_GREEN },
+                scale,
+            );
+            if hot && !disabled {
+                draw_outline(frame, box_rect, PANEL_TEXT_HILIGHT, scale);
+            }
+        }
         RowKind::Toggle => {
             let button = launcher_toggle_rect(rect, row_y);
-            let label = if setup.toggle_value(r.field) {
+            let label = if state.row_toggle(r.field) {
                 "On"
             } else {
                 "Off"
@@ -6157,7 +6582,7 @@ fn draw_launcher(
     // Active tab content in the settings pane, shifted down past the top nav
     // when the tab has one.
     let row_offset = if state.tab.has_top_nav() {
-        LAUNCH_NAV_BLOCK_H
+        launcher_nav_block_h(state.tab)
     } else {
         0
     };
@@ -6177,34 +6602,34 @@ fn draw_launcher(
             draw_launcher_row(frame, rect, state, r, i, row_offset, hover, scale);
         }
     }
-    // Nav row at the top of the pane: a page's sibling links, or a sub-page's
-    // Back button. The A/V categories highlight the current one; Storage's
-    // sub-page links are plain (no current selection).
+    // Nav row at the top of the pane: a Back button when this is a sub-page,
+    // then its sibling links, with the current one highlighted. A page can
+    // show both -- the Disk Image pages say where they came from and which
+    // of the two they are.
     let back_parent = state.tab.parent_tab();
     let options = state.tab.nav_options();
-    if back_parent.is_some() || !options.is_empty() {
-        if let Some(parent) = back_parent {
-            draw_text_button(
-                frame,
-                launcher_back_button_rect(rect),
-                "< Back",
-                true,
-                hover == Some(UiControl::LauncherTab(parent)),
-                scale,
-            );
-        } else {
-            for (slot, &(label, target)) in options.iter().enumerate() {
-                draw_launcher_chip(
-                    frame,
-                    launcher_nav_button_rect(rect, slot, options.len()),
-                    label,
-                    target == state.tab,
-                    hover == Some(UiControl::LauncherTab(target)),
-                    false,
-                    scale,
-                );
-            }
-        }
+    let mut slot = 0;
+    if let Some(parent) = back_parent {
+        draw_text_button(
+            frame,
+            launcher_back_button_rect(rect),
+            "< Back",
+            true,
+            hover == Some(UiControl::LauncherTab(parent)),
+            scale,
+        );
+        slot = 1;
+    }
+    for (i, &(label, target)) in options.iter().enumerate() {
+        draw_launcher_chip(
+            frame,
+            launcher_nav_button_rect(rect, slot + i),
+            label,
+            target == state.tab,
+            hover == Some(UiControl::LauncherTab(target)),
+            false,
+            scale,
+        );
     }
     if state.tab == LauncherTab::HostDisk {
         draw_host_disk_page(frame, rect, state, hover, scale);
@@ -6243,6 +6668,47 @@ fn draw_launcher(
                 scale,
             );
         }
+    }
+    // The geometry editor says what the figures come to, because on this
+    // page the geometry -- not the Size box -- decides how big the image is.
+    if state.tab == LauncherTab::CreateGeometry {
+        let g = state.workshop.custom_geometry;
+        let note_top = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::CreateGeometry,
+                state.setup.parallel_device(),
+                state.setup.serial_mode(),
+                state.setup.midi_out_is_mt32(),
+            )
+            .len()
+                + 1,
+        ) + row_offset
+            + 14;
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            note_top,
+            "Info:",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect) + 2 * font::GLYPH_W,
+            note_top + 16,
+            &{
+                let size = crate::config::format_size(g.bytes() as usize);
+                format!(
+                    "These values will create {} {size} disk image.",
+                    indefinite_article(&size)
+                )
+            },
+            PANEL_TEXT,
+            1,
+            scale,
+        );
     }
     // The Boot Priority page spells out the valid priority range below the
     // rows, under a dimmed "Info:" heading.
@@ -7867,6 +8333,41 @@ mod tests {
         draw(&mut frame, scale, &ui, None, Some(&data));
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "about");
+
+        // The Disk Image workshop's two pages, which are the pages a layout
+        // change is judged on.
+        for (tab, name) in [
+            (launcher::LauncherTab::CreateFloppy, "create-floppy"),
+            (launcher::LauncherTab::CreateHard, "create-hard"),
+        ] {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = launcher::LauncherState::new(launcher::MachineSetup::default());
+            state.tab = tab;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+            save(&frame, name);
+        }
+        // ...and the Storage page they are reached from, whose nav row now
+        // carries five links.
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = launcher::LauncherState::new(launcher::MachineSetup::default());
+            state.tab = launcher::LauncherTab::Storage;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "storage");
+        }
 
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
