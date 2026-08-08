@@ -5028,7 +5028,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         .into_iter()
                         .zip(FS_VARIANTS)
                     {
-                        if at.contains(pos) {
+                        if state.workshop_fs_variant_enabled(r.field, variant) && at.contains(pos) {
                             return Some(UiControl::LauncherFsVariant {
                                 field: r.field,
                                 variant,
@@ -5956,7 +5956,7 @@ fn draw_launcher_row(
                     at,
                     variant.label(),
                     state.workshop_fs_variant_set(r.field, variant),
-                    disabled,
+                    disabled || !state.workshop_fs_variant_enabled(r.field, variant),
                     hover
                         == Some(UiControl::LauncherFsVariant {
                             field: r.field,

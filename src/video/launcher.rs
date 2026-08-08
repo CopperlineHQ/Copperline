@@ -4976,15 +4976,50 @@ impl LauncherState {
         FsFamily::of(self.workshop_fs_of(field)) == family
     }
 
-    /// Whether a variant tick box is the chosen one. An unformatted volume
-    /// has no variant, so none of them is.
+    /// Whether a DOSType tick box shows as set.
+    ///
+    /// More than one can be: dircache and longname each *are* international,
+    /// so choosing either lights the International box too. What cannot
+    /// happen is dircache and longname together -- they are two values of
+    /// one field.
     pub fn workshop_fs_variant_set(
         &self,
         field: LauncherField,
         variant: crate::diskimage::Variant,
     ) -> bool {
-        self.workshop_fs_of(field)
-            .is_some_and(|fs| fs.variant == variant)
+        use crate::diskimage::Variant as V;
+        let Some(fs) = self.workshop_fs_of(field) else {
+            return false;
+        };
+        match variant {
+            V::Intl => fs.variant.is_intl(),
+            V::DirCache => fs.variant.is_dircache(),
+            V::LongName => fs.variant.is_longname(),
+            V::Plain => false,
+        }
+    }
+
+    /// Whether a DOSType tick box can be clicked.
+    ///
+    /// International is fixed on while a directory scheme is chosen: it
+    /// comes with them, and there is no tag that has one without it. And
+    /// each directory scheme turns the other away, because the tag holds
+    /// one or neither.
+    pub fn workshop_fs_variant_enabled(
+        &self,
+        field: LauncherField,
+        variant: crate::diskimage::Variant,
+    ) -> bool {
+        use crate::diskimage::Variant as V;
+        let Some(fs) = self.workshop_fs_of(field) else {
+            return false;
+        };
+        match variant {
+            V::Intl => !fs.variant.is_dircache() && !fs.variant.is_longname(),
+            V::DirCache => !fs.variant.is_longname(),
+            V::LongName => !fs.variant.is_dircache(),
+            V::Plain => false,
+        }
     }
 
     /// Choose a filesystem family, keeping the variant that was already
@@ -5009,20 +5044,32 @@ impl LauncherState {
         }
     }
 
-    /// Choose a variant, or clear it back to plain by ticking the one that
-    /// is already set. Does nothing on a family that has no variants.
+    /// Tick or clear one DOSType box, landing on whichever tag the boxes
+    /// then describe.
+    ///
+    /// Clearing a directory scheme leaves International behind rather than
+    /// going all the way back to plain: the box is still lit, so the state
+    /// the user is looking at is the state they get.
     pub fn workshop_set_fs_variant(
         &mut self,
         field: LauncherField,
         variant: crate::diskimage::Variant,
     ) {
+        use crate::diskimage::Variant as V;
+        if !self.workshop_fs_variant_enabled(field, variant) {
+            return;
+        }
         let Some(mut fs) = self.workshop_fs_of(field) else {
             return;
         };
-        fs.variant = if fs.variant == variant {
-            crate::diskimage::Variant::Plain
-        } else {
-            variant
+        let set = self.workshop_fs_variant_set(field, variant);
+        fs.variant = match (variant, set) {
+            (V::Intl, true) => V::Plain,
+            (V::Intl, false) => V::Intl,
+            (V::DirCache | V::LongName, true) => V::Intl,
+            (V::DirCache, false) => V::DirCache,
+            (V::LongName, false) => V::LongName,
+            (V::Plain, _) => fs.variant,
         };
         match field {
             F::NewHardFs | F::NewHardFsVariant => self.workshop.hard_fs = Some(fs),
@@ -7493,7 +7540,7 @@ mod tests {
         for family in [FsFamily::Ofs, FsFamily::Ffs] {
             for variant in crate::diskimage::Variant::ALL {
                 state.workshop_set_fs_family(F::NewFloppyFs, family);
-                state.workshop_set_fs_variant(F::NewFloppyFs, variant);
+                set_dostype(&mut state, F::NewFloppyFs, variant);
                 seen.insert(state.workshop.floppy_fs.map(|f| f.dos_type()));
             }
         }
@@ -7818,6 +7865,39 @@ mod tests {
         );
     }
 
+    /// Click the DOSType boxes until they describe `want`, from whatever
+    /// they were describing. A directory scheme turns the other away while
+    /// it is held, so getting from one to the other means clearing first --
+    /// which is what the page makes you do too.
+    fn set_dostype(
+        state: &mut LauncherState,
+        field: LauncherField,
+        want: crate::diskimage::Variant,
+    ) {
+        use crate::diskimage::Variant as V;
+        for clear in [V::DirCache, V::LongName, V::Intl] {
+            if state.workshop_fs_variant_set(field, clear)
+                && state.workshop_fs_variant_enabled(field, clear)
+            {
+                state.workshop_set_fs_variant(field, clear);
+            }
+        }
+        for set in [V::Intl, V::DirCache, V::LongName] {
+            let wanted = match set {
+                V::Intl => want.is_intl(),
+                V::DirCache => want.is_dircache(),
+                V::LongName => want.is_longname(),
+                V::Plain => false,
+            };
+            if wanted && !state.workshop_fs_variant_set(field, set) {
+                state.workshop_set_fs_variant(field, set);
+            }
+        }
+        if let Some(fs) = state.workshop_fs_of(field) {
+            assert_eq!(fs.variant, want, "clicked to the wrong DOS type");
+        }
+    }
+
     /// The filesystem picker is two rows of ticks: the family, then the
     /// variants AmigaDOS's own filesystem carries. Between them they have to
     /// reach every DOS tag, and never make one that does not exist.
@@ -7836,13 +7916,7 @@ mod tests {
                 Variant::LongName,
             ] {
                 state.workshop_set_fs_family(F::NewHardFs, family);
-                // Plain is what no variant ticked means, so it is reached by
-                // clearing whatever was set rather than by ticking anything.
-                state.workshop_set_fs_variant(F::NewHardFs, variant);
-                if variant == Variant::Plain {
-                    let held = state.workshop.hard_fs.expect("a family was chosen").variant;
-                    state.workshop_set_fs_variant(F::NewHardFs, held);
-                }
+                set_dostype(&mut state, F::NewHardFs, variant);
                 let fs = state.workshop.hard_fs.expect("a family was chosen");
                 assert_eq!(FsFamily::of(Some(fs)), family);
                 assert_eq!(fs.variant, variant);
@@ -7853,7 +7927,8 @@ mod tests {
         assert_eq!(*seen.first().unwrap(), 0x444F5300);
         assert_eq!(*seen.last().unwrap(), 0x444F5307);
 
-        // Ticking the variant that is already set clears it back to plain.
+        // Ticking the box that is already set clears it back to plain.
+        set_dostype(&mut state, F::NewHardFs, Variant::Plain);
         state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
         state.workshop_set_fs_variant(F::NewHardFs, Variant::Intl);
         assert!(state.workshop_fs_variant_set(F::NewHardFs, Variant::Intl));
@@ -7862,7 +7937,7 @@ mod tests {
 
         // Moving between OFS and FFS keeps the variant: it is one bit of the
         // tag, and dropping the other two with it would surprise.
-        state.workshop_set_fs_variant(F::NewHardFs, Variant::DirCache);
+        set_dostype(&mut state, F::NewHardFs, Variant::DirCache);
         state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ofs);
         assert!(state.workshop_fs_variant_set(F::NewHardFs, Variant::DirCache));
         assert_eq!(state.workshop.hard_fs.unwrap().dos_type(), 0x444F5304);
@@ -7887,6 +7962,83 @@ mod tests {
         assert!(state.workshop_fs_family_set(F::NewFloppyFs, FsFamily::Ofs));
         assert!(state.workshop_fs_family_set(F::NewHardFs, FsFamily::Ffs));
         assert!(state.workshop_fs_family_set(F::NewHardFsVariant, FsFamily::Ffs));
+    }
+
+    /// The DOSType boxes are a picture of the tag, so what they show and
+    /// what they accept both come from the tag rather than from a table
+    /// written out beside them.
+    #[test]
+    fn the_dostype_boxes_agree_with_the_tag_they_describe() {
+        use crate::diskimage::Variant as V;
+        const BOXES: [V; 3] = [V::Intl, V::DirCache, V::LongName];
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
+
+        // Whatever tag is held, each box shows exactly what that tag says
+        // about itself, and offers a click only where another tag is
+        // reachable by changing that one box.
+        for held in V::ALL {
+            state.workshop.hard_fs = Some(crate::diskimage::FileSystem {
+                ffs: true,
+                variant: held,
+            });
+            for boxed in BOXES {
+                let shown = state.workshop_fs_variant_set(F::NewHardFs, boxed);
+                let says = match boxed {
+                    V::Intl => held.is_intl(),
+                    V::DirCache => held.is_dircache(),
+                    V::LongName => held.is_longname(),
+                    V::Plain => unreachable!("not a box"),
+                };
+                assert_eq!(shown, says, "{held:?}: the {boxed:?} box");
+
+                // Clicking is offered only when it lands somewhere: a
+                // directory scheme carries international with it, so that
+                // box cannot be cleared while one is chosen, and the two
+                // schemes are one field so neither can join the other.
+                let offered = state.workshop_fs_variant_enabled(F::NewHardFs, boxed);
+                let reachable = match boxed {
+                    V::Intl => !held.is_dircache() && !held.is_longname(),
+                    V::DirCache => !held.is_longname(),
+                    V::LongName => !held.is_dircache(),
+                    V::Plain => unreachable!("not a box"),
+                };
+                assert_eq!(offered, reachable, "{held:?}: the {boxed:?} box");
+
+                // A click the page will not offer changes nothing.
+                if !offered {
+                    state.workshop_set_fs_variant(F::NewHardFs, boxed);
+                    assert_eq!(state.workshop.hard_fs.unwrap().variant, held);
+                }
+            }
+        }
+
+        // Every tag is reachable by clicking, and no click ever lands on a
+        // combination that is not one: three boxes have eight states, the
+        // field has four, and the four are the ones the page can produce.
+        let mut reached = std::collections::HashSet::new();
+        for first in BOXES {
+            for second in BOXES {
+                for third in BOXES {
+                    state.workshop.hard_fs = Some(crate::diskimage::FileSystem {
+                        ffs: true,
+                        variant: V::Plain,
+                    });
+                    for click in [first, second, third] {
+                        state.workshop_set_fs_variant(F::NewHardFs, click);
+                    }
+                    let held = state.workshop.hard_fs.unwrap().variant;
+                    // Never both schemes at once, however the clicks fell.
+                    assert!(!(held.is_dircache() && held.is_longname()));
+                    reached.insert(held);
+                }
+            }
+        }
+        assert_eq!(
+            reached,
+            V::ALL.into_iter().collect::<std::collections::HashSet<_>>(),
+            "three boxes reach all four tags and nothing else"
+        );
     }
 
     #[test]

@@ -173,6 +173,28 @@ impl Variant {
             Variant::LongName => "Long names",
         }
     }
+
+    /// Whether the DOS type folds case the international way.
+    ///
+    /// True of the intl variant, and of dircache and longname *whether or
+    /// not* the intl bit is set: DOS4 is `ofs+intl+dircache` and DOS6 is
+    /// `ofs+intl+longname`, so international is not an option alongside
+    /// them but a property they carry. This is the rule AmigaDOS itself
+    /// applies (and the one amitools' `is_intl` states), and the reason
+    /// the field is two bits rather than three flags.
+    pub fn is_intl(self) -> bool {
+        !matches!(self, Variant::Plain)
+    }
+
+    /// Whether the two directory schemes can be held at once: they cannot,
+    /// being two values of one two-bit field.
+    pub fn is_dircache(self) -> bool {
+        matches!(self, Variant::DirCache)
+    }
+
+    pub fn is_longname(self) -> bool {
+        matches!(self, Variant::LongName)
+    }
 }
 
 /// The AmigaDOS filesystem a volume is formatted with.
@@ -1066,6 +1088,32 @@ mod tests {
             sum = sum.wrapping_add(get_long(b, i));
         }
         sum == 0
+    }
+
+    /// The three things a DOS tag can say about itself, and which of them
+    /// can be true together. Dircache and longname are two values of one
+    /// field, so never both; and each is international in its own right,
+    /// whether or not the intl bit happens to be set.
+    #[test]
+    fn a_dos_tag_is_international_by_implication() {
+        for variant in Variant::ALL {
+            assert!(
+                !(variant.is_dircache() && variant.is_longname()),
+                "{variant:?}: a tag cannot be both"
+            );
+            assert_eq!(
+                variant.is_intl(),
+                variant != Variant::Plain,
+                "{variant:?}: everything but plain folds case the intl way"
+            );
+        }
+        // Which is to say: DOS4..DOS7 are international although only
+        // DOS2/DOS3 carry the bit that says so on its own.
+        for fs in FileSystem::all() {
+            let tag = fs.dos_type() & 0xFF;
+            let bit_set = tag & 0b10 != 0;
+            assert_eq!(fs.variant.is_intl(), bit_set || tag >= 4, "DOS{tag}");
+        }
     }
 
     /// Bits 1 and 2 of the tag are one two-bit number, not two flags, so
