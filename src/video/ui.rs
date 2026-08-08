@@ -39,6 +39,14 @@ const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
 /// The mark inside a ticked box.
 const TICK_GREEN: u32 = rgba(72, 214, 96);
+
+/// The variants the second filesystem row offers. Plain is not among them:
+/// it is what none of these being ticked means.
+const FS_VARIANTS: [crate::diskimage::Variant; 3] = [
+    crate::diskimage::Variant::Intl,
+    crate::diskimage::Variant::DirCache,
+    crate::diskimage::Variant::LongName,
+];
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
 const SCRIM: u32 = rgba(0, 0, 0);
 const SCRIM_ALPHA: f32 = 0.45;
@@ -754,6 +762,16 @@ pub enum UiControl {
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.
     LauncherNewImageUnit,
+    /// A filesystem family tick box on a Disk Image page.
+    LauncherFsFamily {
+        field: LauncherField,
+        family: launcher::FsFamily,
+    },
+    /// A filesystem variant tick box, on the row under the family.
+    LauncherFsVariant {
+        field: LauncherField,
+        variant: crate::diskimage::Variant,
+    },
     /// Let the hard-disk geometry follow the size.
     LauncherGeometryAuto,
     /// Set the hard-disk geometry by hand.
@@ -4442,6 +4460,68 @@ fn draw_launcher_value_box(
     draw_panel_text(frame, x, box_rect.y + 6, &shown, color, 1, scale);
 }
 
+/// Gap between one tick box's label and the next box along.
+const LAUNCH_TICK_GAP: usize = 14;
+/// A tick box's own side, and the gap between it and its label.
+const LAUNCH_TICK_BOX: usize = 10;
+const LAUNCH_TICK_LABEL_GAP: usize = 5;
+
+/// Lay a row of labelled tick boxes across the value column, left to right,
+/// and hand back each one's clickable rect (box and label together, so the
+/// word is as easy to hit as the square).
+fn launcher_tick_strip(rect: Rect, row_y: usize, labels: &[&str]) -> Vec<Rect> {
+    let mut x = launcher_pane_x(rect) + LAUNCH_LABEL_W;
+    let y = row_y + (LAUNCH_ROW_H - LAUNCH_TICK_BOX) / 2;
+    labels
+        .iter()
+        .map(|label| {
+            let w = LAUNCH_TICK_BOX + LAUNCH_TICK_LABEL_GAP + label.len() * font::GLYPH_W;
+            let at = Rect {
+                x,
+                y,
+                w,
+                h: LAUNCH_TICK_BOX,
+            };
+            x += w + LAUNCH_TICK_GAP;
+            at
+        })
+        .collect()
+}
+
+/// Draw one entry of a tick strip: the box, then its word.
+fn draw_launcher_tick_choice(
+    frame: &mut [u8],
+    at: Rect,
+    label: &str,
+    set: bool,
+    disabled: bool,
+    hot: bool,
+    scale: usize,
+) {
+    let colour = if disabled { PANEL_TEXT_DIM } else { TICK_GREEN };
+    draw_tick_box(frame, at.x, at.y, set, colour, scale);
+    if hot && !disabled {
+        draw_outline(
+            frame,
+            Rect {
+                w: LAUNCH_TICK_BOX,
+                ..at
+            },
+            PANEL_TEXT_HILIGHT,
+            scale,
+        );
+    }
+    draw_panel_text(
+        frame,
+        at.x + LAUNCH_TICK_BOX + LAUNCH_TICK_LABEL_GAP,
+        at.y + 1,
+        label,
+        if disabled { PANEL_TEXT_DIM } else { PANEL_TEXT },
+        1,
+        scale,
+    );
+}
+
 /// A typed whole number, lined up with the value column beside it.
 fn launcher_number_rect(rect: Rect, row_y: usize) -> Rect {
     Rect {
@@ -4925,6 +5005,38 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 RowKind::Number => {
                     if launcher_number_rect(rect, row_y).contains(pos) {
                         return Some(UiControl::LauncherNewImageEdit(r.field));
+                    }
+                }
+                RowKind::FsFamily => {
+                    let labels: Vec<&str> =
+                        launcher::FsFamily::ALL.iter().map(|f| f.label()).collect();
+                    for (at, family) in launcher_tick_strip(rect, row_y, &labels)
+                        .into_iter()
+                        .zip(launcher::FsFamily::ALL)
+                    {
+                        if family.available() && at.contains(pos) {
+                            return Some(UiControl::LauncherFsFamily {
+                                field: r.field,
+                                family,
+                            });
+                        }
+                    }
+                }
+                RowKind::FsVariant => {
+                    if !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_variants() {
+                        return None;
+                    }
+                    let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
+                    for (at, variant) in launcher_tick_strip(rect, row_y, &labels)
+                        .into_iter()
+                        .zip(FS_VARIANTS)
+                    {
+                        if at.contains(pos) {
+                            return Some(UiControl::LauncherFsVariant {
+                                field: r.field,
+                                variant,
+                            });
+                        }
                     }
                 }
                 RowKind::Stepper => {
@@ -5811,6 +5923,52 @@ fn draw_launcher_row(
                 false,
                 scale,
             );
+        }
+        RowKind::FsFamily => {
+            let labels: Vec<&str> = launcher::FsFamily::ALL.iter().map(|f| f.label()).collect();
+            for (at, family) in launcher_tick_strip(rect, row_y, &labels)
+                .into_iter()
+                .zip(launcher::FsFamily::ALL)
+            {
+                draw_launcher_tick_choice(
+                    frame,
+                    at,
+                    family.label(),
+                    state.workshop_fs_family_set(r.field, family),
+                    disabled || !family.available(),
+                    hover
+                        == Some(UiControl::LauncherFsFamily {
+                            field: r.field,
+                            family,
+                        }),
+                    scale,
+                );
+            }
+        }
+        RowKind::FsVariant => {
+            // Only AmigaDOS's own filesystem has these, so on anything else
+            // the whole row greys rather than disappearing -- the page keeps
+            // its shape as the family above it changes.
+            let none = !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_variants();
+            let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
+            for (at, variant) in launcher_tick_strip(rect, row_y, &labels)
+                .into_iter()
+                .zip(FS_VARIANTS)
+            {
+                draw_launcher_tick_choice(
+                    frame,
+                    at,
+                    variant.label(),
+                    state.workshop_fs_variant_set(r.field, variant),
+                    disabled || none,
+                    hover
+                        == Some(UiControl::LauncherFsVariant {
+                            field: r.field,
+                            variant,
+                        }),
+                    scale,
+                );
+            }
         }
         RowKind::Stepper => {
             let (prev, value, next) = launcher_geometry_stepper_rects(rect, row_y);
@@ -6796,10 +6954,12 @@ fn draw_launcher(
     }
     // Status / error line.
     if let Some(status) = &state.status {
-        let color = if status.error {
-            PANEL_TEXT_ACCENT
-        } else {
-            PANEL_TEXT_HILIGHT
+        let color = match status.kind {
+            launcher::StatusKind::Ok => PANEL_TEXT_HILIGHT,
+            // Neither done nor wrong: the plain panel colour, so a line that
+            // is only reporting progress does not read as either.
+            launcher::StatusKind::Busy => PANEL_TEXT,
+            launcher::StatusKind::Error => PANEL_TEXT_ACCENT,
         };
         // Kept inside the panel. A failure explains itself at whatever length
         // it needs to, and one long enough to run past the edge is drawn over

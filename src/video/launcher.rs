@@ -347,6 +347,7 @@ pub enum LauncherField {
     NewFloppyDensity,
     NewFloppyContainer,
     NewFloppyFs,
+    NewFloppyFsVariant,
     NewFloppyLabel,
     NewFloppyBootable,
     NewFloppyCreate,
@@ -355,11 +356,12 @@ pub enum LauncherField {
     NewHardPartitioning,
     NewHardDevice,
     NewHardFs,
+    NewHardFsVariant,
     NewHardLabel,
     NewHardBootable,
     NewHardBootPri,
     NewHardReadOnly,
-    NewHardAllocate,
+    NewHardSparse,
     NewHardCreate,
     NewGeomCylinders,
     NewGeomSurfaces,
@@ -575,6 +577,13 @@ pub enum RowKind {
     /// A typed whole number with a stepper either side, for the geometry
     /// figures: the arrows nudge by one, the box takes an exact value.
     Stepper,
+    /// The filesystem family, as a row of tick boxes: which handler the
+    /// volume is for, one of them always chosen.
+    FsFamily,
+    /// The filesystem variant, on the row directly under the family: the
+    /// options AmigaDOS's own filesystem carries, greyed for a family that
+    /// has none.
+    FsVariant,
 }
 
 /// One settings row: a label, the field it edits, and how to edit it.
@@ -880,28 +889,30 @@ const EMULATION_ROWS: [Row; 4] = [
 ];
 /// The Disk Image workshop's two pages. Every option the format supports is
 /// here; nothing on either page reads or writes the machine's configuration.
-const NEW_FLOPPY_ROWS: [Row; 7] = [
+const NEW_FLOPPY_ROWS: [Row; 8] = [
     section_header("Create Floppy Disk image (ADF):"),
     row(F::NewFloppyDensity, "Density", Cycle),
     row(F::NewFloppyContainer, "Container", Cycle),
-    row(F::NewFloppyFs, "File system", Cycle),
+    row(F::NewFloppyFs, "File system", RowKind::FsFamily),
+    row(F::NewFloppyFsVariant, "", RowKind::FsVariant),
     row(F::NewFloppyLabel, "Volume name", RowKind::Text),
     row(F::NewFloppyBootable, "Bootable", Toggle),
     row(F::NewFloppyCreate, "", RowKind::Action),
 ];
 
-const NEW_HARD_ROWS: [Row; 12] = [
+const NEW_HARD_ROWS: [Row; 13] = [
     section_header("Create Hard Disk image (HDF):"),
     row(F::NewHardSize, "Size", RowKind::Size),
     row(F::NewHardGeometryMode, "Geometry", RowKind::GeometryMode),
     row(F::NewHardPartitioning, "Partitioning", Cycle),
-    row(F::NewHardFs, "File system", Cycle),
+    row(F::NewHardFs, "File system", RowKind::FsFamily),
+    row(F::NewHardFsVariant, "", RowKind::FsVariant),
     row(F::NewHardDevice, "Device name", RowKind::Text),
     row(F::NewHardLabel, "Volume name", RowKind::Text),
     row(F::NewHardBootable, "Bootable", Toggle),
     row(F::NewHardBootPri, "Boot priority", RowKind::Number),
     row(F::NewHardReadOnly, "Read only", Toggle),
-    row(F::NewHardAllocate, "Claim space now", Toggle),
+    row(F::NewHardSparse, "Sparse image", Toggle),
     row(F::NewHardCreate, "", RowKind::Action),
 ];
 
@@ -4599,25 +4610,44 @@ impl MachineSetup {
     }
 }
 
+/// What a status line is saying, which is also how it is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// It worked.
+    Ok,
+    /// It is still happening. Shown while a long piece of host work runs,
+    /// so the panel says what it is waiting for rather than going quiet.
+    Busy,
+    /// It did not work, or will not.
+    Error,
+}
+
 /// A short status/error line shown along the bottom of the configuration panel.
 #[derive(Debug, Clone)]
 pub struct StatusMessage {
     pub text: String,
-    pub error: bool,
+    pub kind: StatusKind,
 }
 
 impl StatusMessage {
     pub fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            error: false,
+            kind: StatusKind::Ok,
+        }
+    }
+
+    pub fn busy(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: StatusKind::Busy,
         }
     }
 
     pub fn err(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            error: true,
+            kind: StatusKind::Error,
         }
     }
 }
@@ -4703,7 +4733,10 @@ pub struct ImageWorkshop {
     /// Blocks kept clear at the front of the partition.
     pub reserved: u32,
     pub read_only: bool,
-    pub allocate: bool,
+    /// Leave the file's unwritten blocks as holes on the host. On by
+    /// default: a sparse image is instant to make and costs only what it
+    /// is actually used for.
+    pub sparse: bool,
 }
 
 impl Default for ImageWorkshop {
@@ -4728,7 +4761,7 @@ impl Default for ImageWorkshop {
             boot_pri: 0,
             reserved: crate::diskimage::RESERVED_BLOCKS,
             read_only: false,
-            allocate: false,
+            sparse: true,
         }
     }
 }
@@ -4785,7 +4818,7 @@ impl ImageWorkshop {
             boot_pri: self.boot_pri,
             reserved: self.reserved,
             read_only: self.read_only,
-            allocate: self.allocate,
+            sparse: self.sparse,
         }
     }
 
@@ -4843,16 +4876,62 @@ fn workshop_ceiling(field: LauncherField) -> u32 {
 }
 
 /// Every filesystem the pickers offer, unformatted first.
-fn fs_choices() -> Vec<Option<crate::diskimage::FileSystem>> {
-    std::iter::once(None)
-        .chain(crate::diskimage::FileSystem::all().map(Some))
-        .collect()
+/// The filesystem families the picker's first row offers, in the order it
+/// draws them. `None` is an unformatted volume, which is a real choice: the
+/// Amiga formats it itself.
+///
+/// PFS3 and SFS are listed because they are what a real Amiga hard drive
+/// usually carries, but choosing one means more than a tag -- the handler
+/// has to travel with the drive, and neither volume format is one this
+/// module can lay out. They are shown greyed until that is true, so the
+/// page says what it will one day do rather than pretending the choice is
+/// absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsFamily {
+    Unformatted,
+    Ofs,
+    Ffs,
+    Pfs3,
+    Sfs,
 }
 
-fn fs_label(fs: Option<crate::diskimage::FileSystem>) -> String {
-    match fs {
-        None => "Unformatted".to_string(),
-        Some(fs) => fs.label(),
+impl FsFamily {
+    pub const ALL: [FsFamily; 5] = [
+        FsFamily::Unformatted,
+        FsFamily::Ofs,
+        FsFamily::Ffs,
+        FsFamily::Pfs3,
+        FsFamily::Sfs,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FsFamily::Unformatted => "Unformatted",
+            FsFamily::Ofs => "OFS",
+            FsFamily::Ffs => "FFS",
+            FsFamily::Pfs3 => "PFS3",
+            FsFamily::Sfs => "SFS",
+        }
+    }
+
+    /// Whether the workshop can actually make one of these yet.
+    pub fn available(self) -> bool {
+        !matches!(self, FsFamily::Pfs3 | FsFamily::Sfs)
+    }
+
+    /// Whether it is AmigaDOS's own filesystem, which is the one with
+    /// variants to choose from.
+    pub fn has_variants(self) -> bool {
+        matches!(self, FsFamily::Ofs | FsFamily::Ffs)
+    }
+
+    /// The family a chosen filesystem belongs to.
+    pub fn of(fs: Option<crate::diskimage::FileSystem>) -> FsFamily {
+        match fs {
+            None => FsFamily::Unformatted,
+            Some(fs) if fs.ffs => FsFamily::Ffs,
+            Some(_) => FsFamily::Ofs,
+        }
     }
 }
 
@@ -4880,6 +4959,7 @@ impl LauncherState {
             F::NewFloppyDensity
                 | F::NewFloppyContainer
                 | F::NewFloppyFs
+                | F::NewFloppyFsVariant
                 | F::NewFloppyLabel
                 | F::NewFloppyBootable
                 | F::NewFloppyCreate
@@ -4888,11 +4968,12 @@ impl LauncherState {
                 | F::NewHardPartitioning
                 | F::NewHardDevice
                 | F::NewHardFs
+                | F::NewHardFsVariant
                 | F::NewHardLabel
                 | F::NewHardBootable
                 | F::NewHardBootPri
                 | F::NewHardReadOnly
-                | F::NewHardAllocate
+                | F::NewHardSparse
                 | F::NewHardCreate
                 | F::NewGeomCylinders
                 | F::NewGeomSurfaces
@@ -4901,6 +4982,79 @@ impl LauncherState {
                 | F::NewGeomSave
                 | F::NewGeomAuto
         )
+    }
+
+    /// The filesystem a Disk Image row is about: the floppy page's or the
+    /// hard-drive page's, whichever row asked.
+    pub fn workshop_fs_of(&self, field: LauncherField) -> Option<crate::diskimage::FileSystem> {
+        match field {
+            F::NewHardFs | F::NewHardFsVariant => self.workshop.hard_fs,
+            _ => self.workshop.floppy_fs,
+        }
+    }
+
+    /// Whether a family tick box is the chosen one.
+    pub fn workshop_fs_family_set(&self, field: LauncherField, family: FsFamily) -> bool {
+        FsFamily::of(self.workshop_fs_of(field)) == family
+    }
+
+    /// Whether a variant tick box is the chosen one. An unformatted volume
+    /// has no variant, so none of them is.
+    pub fn workshop_fs_variant_set(
+        &self,
+        field: LauncherField,
+        variant: crate::diskimage::Variant,
+    ) -> bool {
+        self.workshop_fs_of(field)
+            .is_some_and(|fs| fs.variant == variant)
+    }
+
+    /// Choose a filesystem family, keeping the variant that was already
+    /// picked: moving between OFS and FFS is a change of one bit, and
+    /// silently dropping "international" with it would be a surprise.
+    pub fn workshop_set_fs_family(&mut self, field: LauncherField, family: FsFamily) {
+        if !family.available() {
+            return;
+        }
+        let variant = self
+            .workshop_fs_of(field)
+            .map(|fs| fs.variant)
+            .unwrap_or_default();
+        let chosen = match family {
+            FsFamily::Unformatted => None,
+            FsFamily::Ofs => Some(crate::diskimage::FileSystem {
+                ffs: false,
+                variant,
+            }),
+            FsFamily::Ffs => Some(crate::diskimage::FileSystem { ffs: true, variant }),
+            // Not reachable: `available()` turned them away above.
+            FsFamily::Pfs3 | FsFamily::Sfs => return,
+        };
+        match field {
+            F::NewHardFs | F::NewHardFsVariant => self.workshop.hard_fs = chosen,
+            _ => self.workshop.floppy_fs = chosen,
+        }
+    }
+
+    /// Choose a variant, or clear it back to plain by ticking the one that
+    /// is already set. Does nothing on a family that has no variants.
+    pub fn workshop_set_fs_variant(
+        &mut self,
+        field: LauncherField,
+        variant: crate::diskimage::Variant,
+    ) {
+        let Some(mut fs) = self.workshop_fs_of(field) else {
+            return;
+        };
+        fs.variant = if fs.variant == variant {
+            crate::diskimage::Variant::Plain
+        } else {
+            variant
+        };
+        match field {
+            F::NewHardFs | F::NewHardFsVariant => self.workshop.hard_fs = Some(fs),
+            _ => self.workshop.floppy_fs = Some(fs),
+        }
     }
 
     /// A row's displayed value, from wherever that row's state lives.
@@ -4936,7 +5090,6 @@ impl LauncherState {
         match field {
             F::NewFloppyDensity => w.density.label().to_string(),
             F::NewFloppyContainer => w.container.label().to_string(),
-            F::NewFloppyFs => fs_label(w.floppy_fs),
             F::NewFloppyLabel => w.floppy_label.clone(),
             F::NewHardSize => w.size.to_string(),
             F::NewHardBootPri => w.boot_pri.to_string(),
@@ -4946,7 +5099,6 @@ impl LauncherState {
             F::NewGeomReserved => w.reserved.to_string(),
             F::NewHardPartitioning => w.partitioning.label().to_string(),
             F::NewHardDevice => w.device.clone(),
-            F::NewHardFs => fs_label(w.hard_fs),
             F::NewHardLabel => w.hard_label.clone(),
             _ => String::new(),
         }
@@ -4958,7 +5110,7 @@ impl LauncherState {
             F::NewFloppyBootable => self.workshop.floppy_bootable,
             F::NewHardBootable => self.workshop.hard_bootable,
             F::NewHardReadOnly => self.workshop.read_only,
-            F::NewHardAllocate => self.workshop.allocate,
+            F::NewHardSparse => self.workshop.sparse,
             _ => false,
         }
     }
@@ -5006,14 +5158,6 @@ impl LauncherState {
             }
             F::NewFloppyContainer => {
                 w.container = cycle_slice(&crate::diskimage::Container::ALL, w.container, forward)
-            }
-            F::NewFloppyFs => {
-                let all = fs_choices();
-                w.floppy_fs = cycle_slice(&all, w.floppy_fs, forward);
-            }
-            F::NewHardFs => {
-                let all = fs_choices();
-                w.hard_fs = cycle_slice(&all, w.hard_fs, forward);
             }
             // The geometry figures are the only stepped numbers here: the
             // size and the boot priority are typed, and have no arrows.
@@ -5072,7 +5216,7 @@ impl LauncherState {
             F::NewFloppyBootable => w.floppy_bootable = !w.floppy_bootable,
             F::NewHardBootable => w.hard_bootable = !w.hard_bootable,
             F::NewHardReadOnly => w.read_only = !w.read_only,
-            F::NewHardAllocate => w.allocate = !w.allocate,
+            F::NewHardSparse => w.sparse = !w.sparse,
             _ => {}
         }
     }
@@ -6776,7 +6920,7 @@ mod tests {
         }
         state.edit_commit();
         let status = state.status.as_ref().expect("invalid name is reported");
-        assert!(status.error);
+        assert_eq!(status.kind, StatusKind::Error);
         assert!(status.text.contains("invalid character"), "{}", status.text);
         assert_eq!(state.editing(), Some(EditTarget::DriveName(F::Filesys0Dir)));
 
@@ -7365,11 +7509,16 @@ mod tests {
         }
         assert_eq!(seen.len(), Container::ALL.len());
 
-        // Unformatted, then all eight DOS tags.
+        // Unformatted, then all eight DOS tags, from the two tick rows.
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..20 {
-            seen.insert(state.workshop.floppy_fs.map(|f| f.dos_type()));
-            state.workshop_cycle(F::NewFloppyFs, true);
+        state.workshop_set_fs_family(F::NewFloppyFs, FsFamily::Unformatted);
+        seen.insert(state.workshop.floppy_fs.map(|f| f.dos_type()));
+        for family in [FsFamily::Ofs, FsFamily::Ffs] {
+            for variant in crate::diskimage::Variant::ALL {
+                state.workshop_set_fs_family(F::NewFloppyFs, family);
+                state.workshop_set_fs_variant(F::NewFloppyFs, variant);
+                seen.insert(state.workshop.floppy_fs.map(|f| f.dos_type()));
+            }
         }
         assert_eq!(seen.len(), 9, "unformatted plus DOS0..DOS7");
         assert!(seen.contains(&None));
@@ -7443,9 +7592,7 @@ mod tests {
         assert_eq!(hard.bytes, state.workshop.bytes());
 
         // An unformatted floppy has nothing to boot and nothing to name.
-        while state.workshop.floppy_fs.is_some() {
-            state.workshop_cycle(F::NewFloppyFs, false);
-        }
+        state.workshop_set_fs_family(F::NewFloppyFs, FsFamily::Unformatted);
         assert!(!state.workshop_applies(F::NewFloppyBootable));
         assert!(!state.workshop_applies(F::NewFloppyLabel));
         // ...and asking for bootable anyway cannot produce boot code.
@@ -7518,7 +7665,7 @@ mod tests {
         state.tab = LauncherTab::CreateFloppy;
         state.workshop_cycle(F::NewFloppyDensity, true); // DD -> HD
         state.workshop_cycle(F::NewFloppyContainer, true); // ADF -> extended
-        state.workshop_cycle(F::NewFloppyFs, true); // OFS -> FFS
+        state.workshop_set_fs_family(F::NewFloppyFs, FsFamily::Ffs);
         typed(&mut state, F::NewFloppyLabel, "Scratch");
         state.workshop_toggle_flip(F::NewFloppyBootable);
         let spec = state.workshop.floppy_spec();
@@ -7563,7 +7710,9 @@ mod tests {
         state.workshop.flip_size_unit(); // MB -> GB
         state.workshop.flip_size_unit(); // and back, so the run stays quick
         typed(&mut state, F::NewHardSize, "48");
-        state.workshop_cycle(F::NewHardFs, true); // DOS1 (FFS) -> DOS2 (OFS/intl)
+        // OFS with international case folding: DOS2.
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ofs);
+        state.workshop_set_fs_variant(F::NewHardFs, crate::diskimage::Variant::Intl);
         typed(&mut state, F::NewHardDevice, "WORK");
         typed(&mut state, F::NewHardLabel, "Stuff");
         typed(&mut state, F::NewHardBootPri, "-9");
@@ -7672,14 +7821,12 @@ mod tests {
         while state.workshop.partitioning != Partitioning::None {
             state.workshop_cycle(F::NewHardPartitioning, true);
         }
-        while state.workshop.hard_fs.is_some() {
-            state.workshop_cycle(F::NewHardFs, false);
-        }
-        state.workshop_toggle_flip(F::NewHardAllocate);
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Unformatted);
+        state.workshop_toggle_flip(F::NewHardSparse);
         let spec = state.workshop.hard_spec();
         assert_eq!(spec.bytes, 9 * 1024 * 1024);
         assert_eq!(spec.geometry, None, "Auto derives it at write time");
-        assert!(spec.allocate);
+        assert!(!spec.sparse, "the tick was cleared, so it is fully written");
 
         let path = scratch("plain.hdf");
         let made = crate::diskimage::create_hard(&path, &spec).expect("hard disk written");
@@ -7692,6 +7839,83 @@ mod tests {
             hdf.iter().all(|&b| b == 0),
             "an unpartitioned, unformatted drive carries nothing at all"
         );
+    }
+
+    /// The filesystem picker is two rows of ticks: the family, then the
+    /// variants AmigaDOS's own filesystem carries. Between them they have to
+    /// reach every DOS tag, and never make one that does not exist.
+    #[test]
+    fn the_filesystem_ticks_reach_every_dos_tag() {
+        use crate::diskimage::Variant;
+        let mut state = LauncherState::new(MachineSetup::default());
+
+        // Every tag DOS0..DOS7, from a family tick plus a variant tick.
+        let mut seen = std::collections::BTreeSet::new();
+        for family in [FsFamily::Ofs, FsFamily::Ffs] {
+            for variant in [
+                Variant::Plain,
+                Variant::Intl,
+                Variant::DirCache,
+                Variant::LongName,
+            ] {
+                state.workshop_set_fs_family(F::NewHardFs, family);
+                // Plain is what no variant ticked means, so it is reached by
+                // clearing whatever was set rather than by ticking anything.
+                state.workshop_set_fs_variant(F::NewHardFs, variant);
+                if variant == Variant::Plain {
+                    let held = state.workshop.hard_fs.expect("a family was chosen").variant;
+                    state.workshop_set_fs_variant(F::NewHardFs, held);
+                }
+                let fs = state.workshop.hard_fs.expect("a family was chosen");
+                assert_eq!(FsFamily::of(Some(fs)), family);
+                assert_eq!(fs.variant, variant);
+                seen.insert(fs.dos_type());
+            }
+        }
+        assert_eq!(seen.len(), 8, "the two rows reach all eight tags");
+        assert_eq!(*seen.first().unwrap(), 0x444F5300);
+        assert_eq!(*seen.last().unwrap(), 0x444F5307);
+
+        // Ticking the variant that is already set clears it back to plain.
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
+        state.workshop_set_fs_variant(F::NewHardFs, Variant::Intl);
+        assert!(state.workshop_fs_variant_set(F::NewHardFs, Variant::Intl));
+        state.workshop_set_fs_variant(F::NewHardFs, Variant::Intl);
+        assert!(!state.workshop_fs_variant_set(F::NewHardFs, Variant::Intl));
+
+        // Moving between OFS and FFS keeps the variant: it is one bit of the
+        // tag, and dropping the other two with it would surprise.
+        state.workshop_set_fs_variant(F::NewHardFs, Variant::DirCache);
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ofs);
+        assert!(state.workshop_fs_variant_set(F::NewHardFs, Variant::DirCache));
+        assert_eq!(state.workshop.hard_fs.unwrap().dos_type(), 0x444F5304);
+
+        // Unformatted has no variant to show, and none of the boxes is lit.
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Unformatted);
+        assert_eq!(state.workshop.hard_fs, None);
+        assert!(!FsFamily::of(None).has_variants());
+        for variant in [Variant::Intl, Variant::DirCache, Variant::LongName] {
+            assert!(!state.workshop_fs_variant_set(F::NewHardFs, variant));
+            // ...and clicking one while unformatted does nothing at all.
+            state.workshop_set_fs_variant(F::NewHardFs, variant);
+            assert_eq!(state.workshop.hard_fs, None);
+        }
+
+        // The families this module cannot write yet turn the click away
+        // rather than setting a tag it would not honour.
+        for family in [FsFamily::Pfs3, FsFamily::Sfs] {
+            assert!(!family.available());
+            state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
+            state.workshop_set_fs_family(F::NewHardFs, family);
+            assert_eq!(FsFamily::of(state.workshop.hard_fs), FsFamily::Ffs);
+        }
+
+        // The two pages keep their own choice.
+        state.workshop_set_fs_family(F::NewFloppyFs, FsFamily::Ofs);
+        state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
+        assert!(state.workshop_fs_family_set(F::NewFloppyFs, FsFamily::Ofs));
+        assert!(state.workshop_fs_family_set(F::NewHardFs, FsFamily::Ffs));
+        assert!(state.workshop_fs_family_set(F::NewHardFsVariant, FsFamily::Ffs));
     }
 
     #[test]

@@ -16,9 +16,9 @@
 //! these formats get quietly wrong.
 //!
 //! Pure `std`: no platform code, no dependencies. A big image is created
-//! sparse -- the length is set and only the blocks that carry structure are
-//! written -- so a 2 GB hard drive costs a few kilobytes of writes and
-//! whatever the host filesystem chooses to allocate.
+//! sparse by default -- the length is set and only the blocks that carry
+//! structure are written -- so a 2 GB hard drive costs a few kilobytes of
+//! writes and whatever the host filesystem chooses to allocate.
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -364,17 +364,18 @@ pub struct HardSpec {
     /// nothing can change the image by accident. Not an Amiga flag -- the
     /// Rigid Disk Block has no such thing -- but the host's own.
     pub read_only: bool,
-    /// Claim the whole file on the host now, rather than letting the
-    /// filesystem fill it in as the image is written to.
+    /// Leave the file's unwritten blocks as holes, rather than claiming
+    /// the whole of it on the host up front.
     ///
     /// The image's *contents* are the same either way -- a hole reads as
     /// zeros, so writing either to a card gives identical bytes. What
-    /// differs is when the space is taken: sparse makes a large image
-    /// instantly and costs nothing until used, but a drive with less room
-    /// than the image claims then fails part-way through a guest write
-    /// rather than here, and a file filled in piecemeal can end up
-    /// fragmented. Claiming it up front trades the wait for both.
-    pub allocate: bool,
+    /// differs is when the space is taken. Sparse makes a large image
+    /// instantly and costs nothing until it is used, which is what almost
+    /// everyone wants; the price is that a host drive with less room than
+    /// the image claims fails part-way through a *guest* write rather than
+    /// here, and a file filled in piecemeal can end up fragmented.
+    /// Claiming it up front trades the wait for both.
+    pub sparse: bool,
 }
 
 impl Default for HardSpec {
@@ -390,7 +391,7 @@ impl Default for HardSpec {
             boot_pri: 0,
             reserved: RESERVED_BLOCKS,
             read_only: false,
-            allocate: false,
+            sparse: true,
         }
     }
 }
@@ -790,11 +791,12 @@ fn write_extended_adf(file: &mut File, image: &[u8], density: Density) -> io::Re
 
 /// Write a fresh hard drive image.
 ///
-/// The file is created at its full length but only the blocks that carry
-/// structure are written, so the host filesystem decides how much of a
-/// large image to allocate up front. A blank unpartitioned drive therefore
-/// costs almost nothing, which is the point: it is a drive with nothing on
-/// it yet.
+/// A sparse image is created at its full length with only the blocks that
+/// carry structure written, so the host filesystem is left to fill the rest
+/// in as it is used. A blank unpartitioned drive therefore costs almost
+/// nothing, which is the point: it is a drive with nothing on it yet.
+/// Clearing [`HardSpec::sparse`] walks the whole file instead, which takes
+/// as long as writing that many bytes takes.
 pub fn create_hard(path: &Path, spec: &HardSpec) -> io::Result<Created> {
     let geometry = spec
         .geometry
@@ -836,7 +838,7 @@ fn write_hard(
     geometry: Geometry,
 ) -> io::Result<Created> {
     file.set_len(geometry.bytes())?;
-    if spec.allocate {
+    if !spec.sparse {
         // Walk the file writing zeros, so the host commits the space now
         // and says so now if it has not got it.
         let zeros = vec![0u8; 1 << 20];
