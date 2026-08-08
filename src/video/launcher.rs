@@ -893,8 +893,8 @@ const NEW_FLOPPY_ROWS: [Row; 8] = [
     section_header("Create Floppy Disk image (ADF):"),
     row(F::NewFloppyDensity, "Density", Cycle),
     row(F::NewFloppyContainer, "Container", Cycle),
-    row(F::NewFloppyFs, "File system", RowKind::FsFamily),
-    row(F::NewFloppyFsVariant, "", RowKind::FsVariant),
+    row(F::NewFloppyFs, "Filesystem", RowKind::FsFamily),
+    row(F::NewFloppyFsVariant, "DOSType", RowKind::FsVariant),
     row(F::NewFloppyLabel, "Volume name", RowKind::Text),
     row(F::NewFloppyBootable, "Bootable", Toggle),
     row(F::NewFloppyCreate, "", RowKind::Action),
@@ -905,8 +905,8 @@ const NEW_HARD_ROWS: [Row; 13] = [
     row(F::NewHardSize, "Size", RowKind::Size),
     row(F::NewHardGeometryMode, "Geometry", RowKind::GeometryMode),
     row(F::NewHardPartitioning, "Partitioning", Cycle),
-    row(F::NewHardFs, "File system", RowKind::FsFamily),
-    row(F::NewHardFsVariant, "", RowKind::FsVariant),
+    row(F::NewHardFs, "Filesystem", RowKind::FsFamily),
+    row(F::NewHardFsVariant, "DOSType", RowKind::FsVariant),
     row(F::NewHardDevice, "Device name", RowKind::Text),
     row(F::NewHardLabel, "Volume name", RowKind::Text),
     row(F::NewHardBootable, "Bootable", Toggle),
@@ -4876,52 +4876,30 @@ fn workshop_ceiling(field: LauncherField) -> u32 {
 }
 
 /// Every filesystem the pickers offer, unformatted first.
-/// The filesystem families the picker's first row offers, in the order it
-/// draws them. `None` is an unformatted volume, which is a real choice: the
-/// Amiga formats it itself.
-///
-/// PFS3 and SFS are listed because they are what a real Amiga hard drive
-/// usually carries, but choosing one means more than a tag -- the handler
-/// has to travel with the drive, and neither volume format is one this
-/// module can lay out. They are shown greyed until that is true, so the
-/// page says what it will one day do rather than pretending the choice is
-/// absent.
+/// What the picker's first row offers, in the order it draws them.
+/// `Unformatted` is a real choice, not an absent one: the volume is left
+/// for the Amiga to format itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsFamily {
     Unformatted,
     Ofs,
     Ffs,
-    Pfs3,
-    Sfs,
 }
 
 impl FsFamily {
-    pub const ALL: [FsFamily; 5] = [
-        FsFamily::Unformatted,
-        FsFamily::Ofs,
-        FsFamily::Ffs,
-        FsFamily::Pfs3,
-        FsFamily::Sfs,
-    ];
+    pub const ALL: [FsFamily; 3] = [FsFamily::Unformatted, FsFamily::Ofs, FsFamily::Ffs];
 
     pub fn label(self) -> &'static str {
         match self {
             FsFamily::Unformatted => "Unformatted",
             FsFamily::Ofs => "OFS",
             FsFamily::Ffs => "FFS",
-            FsFamily::Pfs3 => "PFS3",
-            FsFamily::Sfs => "SFS",
         }
     }
 
-    /// Whether the workshop can actually make one of these yet.
-    pub fn available(self) -> bool {
-        !matches!(self, FsFamily::Pfs3 | FsFamily::Sfs)
-    }
-
-    /// Whether it is AmigaDOS's own filesystem, which is the one with
-    /// variants to choose from.
-    pub fn has_variants(self) -> bool {
+    /// Whether the DOS type carries identifiers to choose from, which an
+    /// unformatted volume has no room for -- it has no boot block to tag.
+    pub fn has_identifiers(self) -> bool {
         matches!(self, FsFamily::Ofs | FsFamily::Ffs)
     }
 
@@ -5013,9 +4991,6 @@ impl LauncherState {
     /// picked: moving between OFS and FFS is a change of one bit, and
     /// silently dropping "international" with it would be a surprise.
     pub fn workshop_set_fs_family(&mut self, field: LauncherField, family: FsFamily) {
-        if !family.available() {
-            return;
-        }
         let variant = self
             .workshop_fs_of(field)
             .map(|fs| fs.variant)
@@ -5027,8 +5002,6 @@ impl LauncherState {
                 variant,
             }),
             FsFamily::Ffs => Some(crate::diskimage::FileSystem { ffs: true, variant }),
-            // Not reachable: `available()` turned them away above.
-            FsFamily::Pfs3 | FsFamily::Sfs => return,
         };
         match field {
             F::NewHardFs | F::NewHardFsVariant => self.workshop.hard_fs = chosen,
@@ -7893,21 +7866,12 @@ mod tests {
         // Unformatted has no variant to show, and none of the boxes is lit.
         state.workshop_set_fs_family(F::NewHardFs, FsFamily::Unformatted);
         assert_eq!(state.workshop.hard_fs, None);
-        assert!(!FsFamily::of(None).has_variants());
+        assert!(!FsFamily::of(None).has_identifiers());
         for variant in [Variant::Intl, Variant::DirCache, Variant::LongName] {
             assert!(!state.workshop_fs_variant_set(F::NewHardFs, variant));
             // ...and clicking one while unformatted does nothing at all.
             state.workshop_set_fs_variant(F::NewHardFs, variant);
             assert_eq!(state.workshop.hard_fs, None);
-        }
-
-        // The families this module cannot write yet turn the click away
-        // rather than setting a tag it would not honour.
-        for family in [FsFamily::Pfs3, FsFamily::Sfs] {
-            assert!(!family.available());
-            state.workshop_set_fs_family(F::NewHardFs, FsFamily::Ffs);
-            state.workshop_set_fs_family(F::NewHardFs, family);
-            assert_eq!(FsFamily::of(state.workshop.hard_fs), FsFamily::Ffs);
         }
 
         // The two pages keep their own choice.

@@ -5014,7 +5014,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         .into_iter()
                         .zip(launcher::FsFamily::ALL)
                     {
-                        if family.available() && at.contains(pos) {
+                        if at.contains(pos) {
                             return Some(UiControl::LauncherFsFamily {
                                 field: r.field,
                                 family,
@@ -5023,7 +5023,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     }
                 }
                 RowKind::FsVariant => {
-                    if !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_variants() {
+                    if !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_identifiers() {
                         return None;
                     }
                     let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
@@ -5935,7 +5935,7 @@ fn draw_launcher_row(
                     at,
                     family.label(),
                     state.workshop_fs_family_set(r.field, family),
-                    disabled || !family.available(),
+                    disabled,
                     hover
                         == Some(UiControl::LauncherFsFamily {
                             field: r.field,
@@ -5946,10 +5946,10 @@ fn draw_launcher_row(
             }
         }
         RowKind::FsVariant => {
-            // Only AmigaDOS's own filesystem has these, so on anything else
-            // the whole row greys rather than disappearing -- the page keeps
-            // its shape as the family above it changes.
-            let none = !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_variants();
+            // An unformatted volume has no DOS type to identify, so the
+            // whole row greys rather than disappearing -- the page keeps its
+            // shape as the family above it changes.
+            let none = !launcher::FsFamily::of(state.workshop_fs_of(r.field)).has_identifiers();
             let labels: Vec<&str> = FS_VARIANTS.iter().map(|v| v.label()).collect();
             for (at, variant) in launcher_tick_strip(rect, row_y, &labels)
                 .into_iter()
