@@ -2001,8 +2001,14 @@ fn main() -> Result<()> {
     let (config_game, whdload_options) = copperline::whdload::game_and_options(&raw_cfg);
     if let Some(game) = cli.whdload.clone().or(config_game) {
         let prepared = copperline::whdload::prepare(&game, &whdload_options)?;
-        copperline::whdload::apply_to_raw(&mut raw_cfg, &prepared);
-        cfg = Config::try_from(raw_cfg.clone())?;
+        // Derive on a clone: the session keeps the user's own raw config
+        // (plus the game itself), so a launcher opened later edits -- and
+        // Save writes -- the user's settings, never the derived machine or
+        // the two staged mounts, and its own Run restages from scratch.
+        let mut derived = raw_cfg.clone();
+        copperline::whdload::apply_to_raw(&mut derived, &prepared);
+        cfg = Config::try_from(derived)?;
+        copperline::whdload::remember_game(&mut raw_cfg, &game);
         info!(
             "whdload: booting {} ({}) from {}, saves persist in {}",
             prepared.slave_rel.display(),

@@ -245,6 +245,21 @@ fn first_code_hunk(bytes: &[u8]) -> Result<&[u8]> {
 }
 
 /// Parse a `.slave` file's WHDLoadSlave structure.
+/// Whether a slave-declared Kickstart name is a plain `Devs:Kickstarts/`
+/// file name. WHDLoad prepends that path itself, so the field's contract is
+/// a bare name; anything carrying a path separator (or `.`/`..`) is not a
+/// valid declaration, and honouring one would let a hostile package steer
+/// the staging writes outside the generated boot volume.
+fn safe_kick_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
 pub fn parse_slave(bytes: &[u8]) -> Result<SlaveInfo> {
     let code = first_code_hunk(bytes)?;
     if be32(code, 0)? != SLAVE_SECURITY {
@@ -286,21 +301,25 @@ pub fn parse_slave(bytes: &[u8]) -> Result<SlaveInfo> {
                         break;
                     }
                     let name_off = be16(code, entry + 2)?;
-                    if let Some(name) = rptr_string(code, name_off) {
+                    if let Some(name) = rptr_string(code, name_off).filter(|n| safe_kick_name(n)) {
                         slave.kicks.push(KickRequirement {
                             name,
                             size: kicksize,
                             crc,
                         });
+                    } else {
+                        log::warn!("whdload: slave declares an invalid Kickstart name; ignored");
                     }
                     entry += 4;
                 }
-            } else if let Some(name) = rptr_string(code, kickname) {
+            } else if let Some(name) = rptr_string(code, kickname).filter(|n| safe_kick_name(n)) {
                 slave.kicks.push(KickRequirement {
                     name,
                     size: kicksize,
                     crc: kickcrc,
                 });
+            } else {
+                log::warn!("whdload: slave declares an invalid Kickstart name; ignored");
             }
         }
     }
@@ -485,8 +504,17 @@ fn find_slaves(dir: &Path) -> Result<Vec<PathBuf>> {
         let entries = std::fs::read_dir(dir)
             .with_context(|| format!("reading directory {}", dir.display()))?;
         for entry in entries {
-            let path = entry?.path();
-            if path.is_dir() {
+            let entry = entry?;
+            // file_type() does not follow symlinks: a link to an ancestor
+            // must not recurse forever, so links are skipped outright (the
+            // slave search only decides what to boot; the mounted volume
+            // itself still serves whatever the package contains).
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
                 walk(root, &path, out)?;
             } else if path
                 .extension()
@@ -618,17 +646,55 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
     let game_dir = if game.is_dir() {
         game.to_path_buf()
     } else {
+        // The extraction is a cache keyed by the sanitized archive stem, so
+        // two guards make reuse trustworthy: a marker recording the source
+        // archive's file name (written only after a completed extraction,
+        // and sitting outside the mounted game/ tree) catches both a
+        // half-finished extraction and two different archives whose stems
+        // sanitize to the same library entry; and the extraction lands in a
+        // temporary sibling promoted by rename, so game/ never holds a
+        // partial tree.
         let dest = game_home.join("game");
-        if dest.is_dir() {
+        let marker = game_home.join(".source");
+        let source_name = game
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let recorded = std::fs::read_to_string(&marker)
+            .ok()
+            .map(|s| s.trim().to_string());
+        if dest.is_dir() && recorded.as_deref() == Some(source_name.as_str()) {
             log::info!(
                 "whdload: reusing extracted game in {} (saves persist there)",
                 dest.display()
             );
+        } else if dest.is_dir() && recorded.is_some() {
+            bail!(
+                "game library entry {} was extracted from \"{}\", but this game is \
+                 \"{source_name}\"; rename one archive or use a different [whdload] library",
+                game_home.display(),
+                recorded.unwrap_or_default(),
+            );
         } else {
-            std::fs::create_dir_all(&dest)
-                .with_context(|| format!("creating {}", dest.display()))?;
-            let files = lha::extract_to_dir(game, &dest)
+            if dest.exists() {
+                // A directory without its marker is a leftover from an
+                // interrupted extraction; nothing in it can be trusted.
+                std::fs::remove_dir_all(&dest)
+                    .with_context(|| format!("clearing partial extraction {}", dest.display()))?;
+            }
+            let staging = game_home.join("game.extracting");
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging)
+                    .with_context(|| format!("clearing {}", staging.display()))?;
+            }
+            std::fs::create_dir_all(&staging)
+                .with_context(|| format!("creating {}", staging.display()))?;
+            let files = lha::extract_to_dir(game, &staging)
                 .with_context(|| format!("extracting {}", game.display()))?;
+            std::fs::rename(&staging, &dest)
+                .with_context(|| format!("promoting extraction into {}", dest.display()))?;
+            std::fs::write(&marker, format!("{source_name}\n"))
+                .with_context(|| format!("writing {}", marker.display()))?;
             log::info!(
                 "whdload: extracted {} files from {} into {}",
                 files,
@@ -709,21 +775,25 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
             stage.entry(name.to_string()).or_insert(image);
         }
     }
-    // Slave-declared images may be variants outside the canonical table:
-    // match by declared size + CRC and stage under the declared name.
+    // Slave-declared images are matched strictly by their declared size and
+    // CRC -- the values WHDLoad itself verifies at load time -- and staged
+    // under the declared name, overriding a canonical entry that happens to
+    // share it (the declaration is authoritative for that name). A canonical
+    // image under the same name does NOT satisfy the requirement: with the
+    // wrong content WHDLoad would only fail later, in the guest, instead of
+    // here with the precise ask.
+    let mut requirement_met = slave.kicks.is_empty();
     for req in &slave.kicks {
-        if stage.contains_key(&req.name) {
-            continue;
-        }
         if let Some(image) = images
             .iter()
             .find(|i| i.data.len() as u32 == req.size && i.crc == req.crc)
         {
             stage.insert(req.name.clone(), image);
+            requirement_met = true;
         }
     }
 
-    if !slave.kicks.is_empty() && !slave.kicks.iter().any(|req| stage.contains_key(&req.name)) {
+    if !requirement_met {
         let wanted = slave
             .kicks
             .iter()
@@ -805,6 +875,14 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
         machine_rom,
         staged_kicks,
     })
+}
+
+/// Record the game in the raw configuration's own `[whdload]` section, so a
+/// configuration retained for the session (and later edited or saved from
+/// the launcher) carries the user's intent -- unlike [`apply_to_raw`]'s
+/// derived machine and mounts, which belong only to a throwaway clone.
+pub fn remember_game(raw: &mut RawConfig, game: &Path) {
+    raw.whdload.game = Some(game.to_string_lossy().into_owned());
 }
 
 /// Apply a prepared game to the raw configuration: derive the machine where
@@ -1214,6 +1292,146 @@ mod tests {
         let err = format!("{:#}", prepare(&game_lha, &opts).unwrap_err());
         assert!(err.contains("kick34005.A500"), "{err}");
         assert!(err.contains("F9E3"), "{err}");
+    }
+
+    /// Minimal support-archive fixtures for `prepare` tests.
+    fn fixture_assets(dir: &Path) -> WhdbootAssets {
+        let assets_dir = dir.join("whdboot");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(
+            assets_dir.join(WHDLOAD_USR_ARCHIVE),
+            build_lha(&[("WHDLoad/C/WHDLoad", b"bin")]),
+        )
+        .unwrap();
+        WhdbootAssets {
+            whdload_archive: assets_dir.join(WHDLOAD_USR_ARCHIVE),
+            skick_archive: None,
+        }
+    }
+
+    /// Rewrite the last two bytes so the buffer's CRC-16 equals `target`
+    /// (CRC-16 is a linear code, so two free bytes always reach any value;
+    /// found by scanning the 65536 candidates against the prefix CRC).
+    fn force_crc16(data: &mut [u8], target: u16) {
+        let split = data.len() - 2;
+        let prefix = lha::crc16(&data[..split]);
+        for candidate in 0..=u16::MAX {
+            let bytes = candidate.to_le_bytes();
+            let mut crc = prefix;
+            for &b in &bytes {
+                crc ^= b as u16;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xA001
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            if crc == target {
+                data[split..].copy_from_slice(&bytes);
+                return;
+            }
+        }
+        unreachable!("two free bytes always reach any CRC-16");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slave_search_skips_symlink_loops() {
+        let dir = temp_dir("symlink-loop");
+        std::fs::create_dir_all(dir.join("Game")).unwrap();
+        std::fs::write(dir.join("Game").join("Test.Slave"), b"x").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("Game").join("loop")).unwrap();
+        let slaves = find_slaves(&dir).unwrap();
+        assert_eq!(slaves, vec![PathBuf::from("Game/Test.Slave")]);
+    }
+
+    #[test]
+    fn declared_kick_names_with_separators_are_ignored() {
+        assert!(safe_kick_name("kick34005.A500"));
+        assert!(!safe_kick_name("kick/34005"));
+        assert!(!safe_kick_name("..\\evil"));
+        assert!(!safe_kick_name("dev:name"));
+        assert!(!safe_kick_name(".."));
+        assert!(!safe_kick_name(""));
+        let bytes = build_slave(17, 0, 0x80000, 0, Some(("../../evil", 0x40000, 0x1234)));
+        let slave = parse_slave(&bytes).unwrap();
+        assert!(slave.kicks.is_empty());
+    }
+
+    /// A canonical image staged under the declared name must not satisfy a
+    /// requirement declaring different content: the failure belongs here,
+    /// naming the exact ask, not later inside the guest.
+    #[test]
+    fn canonical_name_with_wrong_content_does_not_satisfy_a_declared_kick() {
+        let dir = temp_dir("wrong-content");
+        let mut image = fake_kick(0x40000, 11);
+        force_crc16(&mut image, 0xE9C6); // identifies as kick33180.A500
+        let kick_dir = dir.join("roms");
+        std::fs::create_dir_all(&kick_dir).unwrap();
+        std::fs::write(kick_dir.join("some.rom"), &image).unwrap();
+
+        let slave = build_slave(17, 0, 0x80000, 0, Some(("kick33180.A500", 0x40000, 0x0102)));
+        let game_lha = dir.join("game.lha");
+        std::fs::write(&game_lha, build_lha(&[("Game/Game.Slave", &slave)])).unwrap();
+
+        let opts = Options {
+            library: Some(dir.join("library")),
+            kickstart_dirs: vec![kick_dir],
+            extra_args: None,
+            assets: Some(fixture_assets(&dir)),
+        };
+        let err = format!("{:#}", prepare(&game_lha, &opts).unwrap_err());
+        assert!(err.contains("kick33180.A500"), "{err}");
+        assert!(err.contains("0102"), "{err}");
+    }
+
+    /// The extraction cache is only trusted with its completion marker and
+    /// a matching source archive: a markerless directory (an interrupted
+    /// extraction) is wiped and redone, and a different archive whose stem
+    /// sanitizes to the same library entry is refused.
+    #[test]
+    fn extraction_reuse_needs_marker_and_matching_source() {
+        let dir = temp_dir("extraction-cache");
+        let slave = build_slave(10, 0, 0x80000, 0, None);
+        let game_lha = dir.join("Test Game.lha");
+        std::fs::write(&game_lha, build_lha(&[("Game/Game.Slave", &slave)])).unwrap();
+        let opts = Options {
+            library: Some(dir.join("library")),
+            kickstart_dirs: vec![],
+            extra_args: None,
+            assets: Some(fixture_assets(&dir)),
+        };
+
+        // A leftover game/ without the marker is not trusted.
+        let partial = dir.join("library").join("Test_Game").join("game");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("junk"), b"stale").unwrap();
+        let prepared = prepare(&game_lha, &opts).unwrap();
+        assert!(!prepared.game_dir.join("junk").exists());
+        assert!(prepared.game_dir.join("Game").join("Game.Slave").exists());
+
+        // The same archive reuses the extraction...
+        std::fs::write(prepared.game_dir.join("savegame"), b"save").unwrap();
+        let again = prepare(&game_lha, &opts).unwrap();
+        assert!(again.game_dir.join("savegame").exists());
+
+        // ...but a different archive colliding on the sanitized stem fails.
+        let collider = dir.join("Test_Game.lha");
+        std::fs::write(&collider, build_lha(&[("Game/Game.Slave", &slave)])).unwrap();
+        let err = format!("{:#}", prepare(&collider, &opts).unwrap_err());
+        assert!(err.contains("Test Game.lha"), "{err}");
+        assert!(err.contains("rename"), "{err}");
+    }
+
+    #[test]
+    fn remember_game_records_only_the_game() {
+        let mut raw = RawConfig::default();
+        remember_game(&mut raw, Path::new("/games/Turrican.lha"));
+        assert_eq!(raw.whdload.game.as_deref(), Some("/games/Turrican.lha"));
+        assert!(raw.filesys.is_empty());
+        assert!(raw.machine.profile.is_none());
     }
 
     #[test]
