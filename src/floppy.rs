@@ -10,9 +10,10 @@
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::dms;
+use crate::gzip;
 use crate::ipf;
 use anyhow::{bail, ensure, Context, Result};
-use flate2::read::{DeflateDecoder, GzDecoder};
+use flate2::read::DeflateDecoder;
 use flate2::CrcReader;
 use log::{debug, warn};
 // The bridge's retry path traces, and its media reporting is worth an info
@@ -164,7 +165,7 @@ const DEFAULT_DSKSYNC: u16 = 0x4489;
 const UAE_EXT1_SIGNATURE: &[u8; 8] = b"UAE--ADF";
 const UAE_EXT2_SIGNATURE: &[u8; 8] = b"UAE-1ADF";
 const SCP_SIGNATURE: &[u8; 3] = b"SCP";
-const GZIP_SIGNATURE: &[u8; 2] = &[0x1F, 0x8B];
+const GZIP_SIGNATURE: &[u8; 2] = &gzip::SIGNATURE;
 const ZIP_SIGNATURE: &[u8; 4] = &[0x50, 0x4b, 0x03, 0x04];
 
 /// The file extensions floppy images conventionally carry, in menu order.
@@ -3341,12 +3342,10 @@ fn decode_floppy_payload(
 
 fn decode_gzip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
     ensure!(data.starts_with(GZIP_SIGNATURE), "missing gzip signature");
-    let mut decoder = GzDecoder::new(data);
-    let mut unpacked = Vec::with_capacity(ADF_SIZE);
-    decoder
-        .read_to_end(&mut unpacked)
-        .context("decompressing gzip-compressed floppy image")?;
-    Ok(unpacked)
+    // Every member, not just the first: a concatenated ADZ would otherwise
+    // decode to a fraction of the disk, which the format dispatch could only
+    // report as an unknown format rather than as the half-read image it is.
+    gzip::inflate_members(data, None).context("decompressing gzip-compressed floppy image")
 }
 
 fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
@@ -5117,6 +5116,24 @@ mod tests {
         let sector0 = decoded.iter().find(|(sector, _)| *sector == 0).unwrap();
         assert_eq!(&sector0.1[..], &adf[0..BYTES_PER_SECTOR]);
         assert_eq!(decoded.len(), SECTORS_PER_TRACK);
+        Ok(())
+    }
+
+    #[test]
+    fn multi_member_adz_decompresses_every_member() -> Result<()> {
+        // Concatenated gzip members are one valid gzip stream (`cat a.gz
+        // b.gz`), and only the whole of it is the ADF: a decoder that stopped
+        // at the first member would produce a short image the format dispatch
+        // could report only as an unknown format.
+        let mut adf = vec![0u8; ADF_SIZE];
+        adf[ADF_SIZE - 4..].copy_from_slice(b"TAIL");
+        let (first, second) = adf.split_at(ADF_SIZE / 2);
+        let mut packed = gzip_bytes(first)?;
+        packed.extend_from_slice(&gzip_bytes(second)?);
+
+        let decoded = decode_gzip_floppy_image(&packed)?;
+        assert_eq!(decoded.len(), ADF_SIZE);
+        assert_eq!(&decoded[ADF_SIZE - 4..], b"TAIL");
         Ok(())
     }
 
@@ -9537,11 +9554,17 @@ mod tests {
         temp_gzip("test.adz", adf)
     }
 
-    fn temp_gzip(name: &str, data: &[u8]) -> Result<PathBuf> {
-        let path = temp_path(name);
+    /// One gzip member holding `data`. Concatenating two of these makes the
+    /// multi-member stream `MultiGzDecoder` exists for.
+    fn gzip_bytes(data: &[u8]) -> Result<Vec<u8>> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data)?;
-        fs::write(&path, encoder.finish()?)?;
+        Ok(encoder.finish()?)
+    }
+
+    fn temp_gzip(name: &str, data: &[u8]) -> Result<PathBuf> {
+        let path = temp_path(name);
+        fs::write(&path, gzip_bytes(data)?)?;
         Ok(path)
     }
 

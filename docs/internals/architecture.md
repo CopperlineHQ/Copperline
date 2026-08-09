@@ -38,6 +38,7 @@ src/
   wasm_manifest.rs  # plugin manifest types shared with wasmtime-less builds
   floppy.rs         # disk images + timed disk DMA controller
   dms.rs            # DMS archive decompression
+  gzip.rs           # gzip member loop behind ADZ/HDZ (multi-member, padding-tolerant)
   drive_sounds.rs   # synthesized floppy-drive sound effects
   gary.rs           # Gary motherboard address decode (big-box machines)
   ramsey.rs         # Ramsey memory controller registers (A3000/A4000)

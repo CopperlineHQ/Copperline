@@ -11,15 +11,10 @@
 //! pre-conversion.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const SECTOR_SIZE: usize = 512;
-
-/// A gzip member header, as it opens a `.hdz` (or a plainly gzipped `.hdf`).
-/// The name is not what decides: an image is unpacked because it begins with
-/// this, so `disk.hdf.gz` and a misnamed `.hdf` open just as well.
-const GZIP_SIGNATURE: [u8; 2] = [0x1F, 0x8B];
 
 /// Largest image a gzip-compressed hardfile may unpack to. Deflate has no
 /// random access, so the whole disk has to be held in memory rather than
@@ -371,7 +366,7 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) ->
 fn read_gzip_hardfile(path: &Path, bus_name: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let mut file = File::open(path)
         .map_err(|e| anyhow::anyhow!("opening {bus_name} image {}: {e}", path.display()))?;
-    let mut magic = [0u8; GZIP_SIGNATURE.len()];
+    let mut magic = [0u8; 2];
     match file.read_exact(&mut magic) {
         Ok(()) => {}
         // Too short to hold a gzip header, so it is not one. The size check
@@ -381,24 +376,20 @@ fn read_gzip_hardfile(path: &Path, bus_name: &str) -> anyhow::Result<Option<Vec<
             anyhow::bail!("reading {bus_name} image {}: {e}", path.display());
         }
     }
-    if magic != GZIP_SIGNATURE {
+    if !crate::gzip::is_gzip(&magic) {
         return Ok(None);
     }
-    file.rewind()
+    // Only now is the whole file worth holding: an ordinary hardfile stays a
+    // file the sectors are read from, and never comes into memory at all.
+    drop(file);
+    let packed = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display()))?;
-
-    // Read one byte past the cap so an image that is exactly at it still
-    // opens and only a genuinely larger one is refused.
-    let mut image = Vec::new();
-    flate2::read::GzDecoder::new(BufReader::new(file))
-        .take(MAX_GZIP_IMAGE_BYTES + 1)
-        .read_to_end(&mut image)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "decompressing gzip-compressed {bus_name} image {}: {e}",
-                path.display()
-            )
-        })?;
+    let image = crate::gzip::inflate_members(&packed, Some(MAX_GZIP_IMAGE_BYTES)).map_err(|e| {
+        anyhow::anyhow!(
+            "decompressing gzip-compressed {bus_name} image {}: {e}",
+            path.display()
+        )
+    })?;
     if image.len() as u64 > MAX_GZIP_IMAGE_BYTES {
         anyhow::bail!(
             "gzip-compressed {bus_name} image {} unpacks to more than {} MiB, which does not \
@@ -807,6 +798,39 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    /// A gzip stream of several members, which is what concatenating gzip
+    /// files produces and is as valid as a single-member one.
+    fn gzip_members(chunks: &[&[u8]]) -> Vec<u8> {
+        chunks.iter().flat_map(|chunk| gzip(chunk)).collect()
+    }
+
+    #[test]
+    fn multi_member_gzip_hardfile_unpacks_every_member() {
+        // Split one image across two members and check the second half is
+        // there. A decoder that stopped at the first member would hand back
+        // exactly half the disk -- still a whole number of sectors, so the
+        // size check would pass it and the disk would be quietly truncated.
+        let mut bytes = bare_partition_bytes(2);
+        let tail = bytes.len() - SECTOR_SIZE;
+        bytes[tail..tail + 4].copy_from_slice(b"TAIL");
+        let (first, second) = bytes.split_at(bytes.len() / 2);
+        let path = temp_image("multi.hdz", &gzip_members(&[first, second]));
+        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+
+        assert_eq!(
+            drive.total_sectors(),
+            u64::from(CYL_SECTORS) + (bytes.len() / SECTOR_SIZE) as u64
+        );
+        // The marked last sector lives in the second member.
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive
+            .read_sector(drive.total_sectors() - 1, &mut sector)
+            .unwrap();
+        assert_eq!(&sector[..4], b"TAIL");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
