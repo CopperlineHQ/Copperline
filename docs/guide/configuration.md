@@ -1154,7 +1154,11 @@ Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
 read-only IPF and SCP images. DMS, gzip, IPF, and SCP images are decoded at
 load time and always treated as write-protected; set `write_protected = false`
-on a plain ADF to allow write-through updates to the image file.
+on a plain ADF to allow write-through updates to the image file. A DMS archive
+is unpacked cylinder by cylinder into the DD image the disk was read from, so
+archives that repeat a cylinder (an advertising boot block ahead of the real
+one) or omit the cylinders that read back blank load normally; high-density
+DMS archives are rejected, matching the DD-only floppy support.
 
 IPF (the SPS/CAPS preservation format) is decoded by Copperline itself rather
 than through the closed-source `capsimg` library, so every build reads IPF on
