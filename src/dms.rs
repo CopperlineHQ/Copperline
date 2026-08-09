@@ -1059,6 +1059,75 @@ mod tests {
     }
 
     #[test]
+    fn a_high_density_archive_is_rejected() {
+        // An HD record holds two cylinders, so its data would have to land at
+        // twice the spacing. Nothing downstream reads a 1760K disk, and at DD
+        // spacing the cylinders would overlap into an image of exactly the
+        // expected size, so the general-info bit is refused up front.
+        let mut dms = make_uncompressed_dms(&pattern_adf());
+        let geninfo = be_u16(&dms[10..12]) | GENINFO_HD;
+        put_be_u16(&mut dms[10..12], geninfo);
+        let hcrc = dms_crc16(&dms[4..HEAD_LEN - 2]);
+        put_be_u16(&mut dms[HEAD_LEN - 2..HEAD_LEN], hcrc);
+
+        let err = decode_dms_adf(&dms).unwrap_err().to_string();
+        assert!(err.contains("high-density"), "{err}");
+    }
+
+    #[test]
+    fn a_non_disk_record_restarts_the_decrunchers() -> Result<()> {
+        // Cylinder 0 fills the quick decruncher's 256-byte history with
+        // literals and keeps it (general flag bit 0), and cylinder 1 opens
+        // with a back-reference into that history. A FILEID.DIZ record
+        // between the two carries no disk data and is not part of that
+        // history, so it restarts the decrunchers and the very same packed
+        // bytes then reference a blank history instead.
+        let cylinder0: Vec<u8> = (0..DMS_CYLINDER_BYTES)
+            .map(|idx| quick_safe_byte(idx as u32))
+            .collect();
+        let tail: Vec<u8> = (0..DMS_CYLINDER_BYTES - QUICK_BACK_COUNT)
+            .map(|idx| quick_safe_byte(0x5000 + idx as u32))
+            .collect();
+
+        let mut literals = BitWriter::default();
+        for &byte in &cylinder0 {
+            literals.push(1, 1);
+            literals.push(byte as u16, 8);
+        }
+        let packed0 = literals.finish();
+
+        let mut reference = BitWriter::default();
+        reference.push(0, 1);
+        reference.push(QUICK_BACK_COUNT as u16 - 2, 2);
+        reference.push(QUICK_BACK_OFFSET as u16, 8);
+        for &byte in &tail {
+            reference.push(1, 1);
+            reference.push(byte as u16, 8);
+        }
+        let packed1 = reference.finish();
+
+        // The history left by cylinder 0, and the blank one a restart gives.
+        let (carried_text, carried_loc) = quick_history(&cylinder0);
+        let kept = quick_back_reference_output(&carried_text, carried_loc, &tail);
+        let restarted = quick_back_reference_output(&[0u8; 256], QUICK_INITIAL_LOC, &tail);
+        assert_ne!(kept[..QUICK_BACK_COUNT], restarted[..QUICK_BACK_COUNT]);
+
+        let mut carried = make_dms_header();
+        carried.extend_from_slice(&quick_record(0, &packed0, &cylinder0));
+        carried.extend_from_slice(&quick_record(1, &packed1, &kept));
+
+        let mut interrupted = make_dms_header();
+        interrupted.extend_from_slice(&quick_record(0, &packed0, &cylinder0));
+        interrupted.extend_from_slice(&uncompressed_record(80, b"FILEID.DIZ contents"));
+        interrupted.extend_from_slice(&quick_record(1, &packed1, &restarted));
+
+        let cylinder1 = DMS_CYLINDER_BYTES..2 * DMS_CYLINDER_BYTES;
+        assert_eq!(decode_dms_adf(&carried)?[cylinder1.clone()], kept[..]);
+        assert_eq!(decode_dms_adf(&interrupted)?[cylinder1], restarted[..]);
+        Ok(())
+    }
+
+    #[test]
     fn an_archive_without_disk_cylinders_is_rejected() {
         let diz = vec![0x2Au8; DMS_CYLINDER_BYTES];
         let mut dms = make_dms_header();
@@ -1116,5 +1185,94 @@ mod tests {
             out.extend_from_slice(&uncompressed_record(track as u16, chunk));
         }
         out
+    }
+
+    /// Where the quick decruncher's 256-byte ring starts after a restart.
+    const QUICK_INITIAL_LOC: u16 = 251;
+    /// A back-reference short enough that it cannot read a byte it just
+    /// wrote, so its output depends only on the history it inherited.
+    const QUICK_BACK_COUNT: usize = 4;
+    const QUICK_BACK_OFFSET: u8 = 8;
+
+    /// A byte the RLE stage passes straight through (0x90 is its escape), so
+    /// a quick stream's output is also the cylinder's contents.
+    fn quick_safe_byte(seed: u32) -> u8 {
+        let byte = seed.wrapping_mul(37).wrapping_add(11) as u8;
+        if byte == 0x90 {
+            0x91
+        } else {
+            byte
+        }
+    }
+
+    /// The ring and write position a run of quick literals leaves behind.
+    fn quick_history(literals: &[u8]) -> ([u8; 256], u16) {
+        let mut text = [0u8; 256];
+        let mut loc = QUICK_INITIAL_LOC;
+        for &byte in literals {
+            text[(loc & 0x00FF) as usize] = byte;
+            loc = loc.wrapping_add(1);
+        }
+        (text, loc.wrapping_add(5) & 0x00FF)
+    }
+
+    fn quick_back_reference_output(text: &[u8; 256], loc: u16, tail: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(QUICK_BACK_COUNT + tail.len());
+        let mut source = loc.wrapping_sub(QUICK_BACK_OFFSET as u16).wrapping_sub(1);
+        for _ in 0..QUICK_BACK_COUNT {
+            out.push(text[(source & 0x00FF) as usize]);
+            source = source.wrapping_add(1);
+        }
+        out.extend_from_slice(tail);
+        out
+    }
+
+    /// A quick-compressed (mode 2) record whose RLE stage is a pass-through,
+    /// keeping the decruncher history for the next record (flag bit 0).
+    fn quick_record(track: u16, packed: &[u8], unpacked: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; TRACK_HEAD_LEN];
+        header[0..2].copy_from_slice(b"TR");
+        put_be_u16(&mut header[2..4], track);
+        put_be_u16(&mut header[6..8], packed.len() as u16);
+        put_be_u16(&mut header[8..10], unpacked.len() as u16);
+        put_be_u16(&mut header[10..12], unpacked.len() as u16);
+        header[12] = 1;
+        header[13] = 2;
+        put_be_u16(&mut header[14..16], checksum16(unpacked));
+        put_be_u16(&mut header[16..18], dms_crc16(packed));
+        let hcrc = dms_crc16(&header[..18]);
+        put_be_u16(&mut header[18..20], hcrc);
+        let mut out = header.to_vec();
+        out.extend_from_slice(packed);
+        out
+    }
+
+    /// Most-significant-bit-first, the order `BitReader` consumes.
+    #[derive(Default)]
+    struct BitWriter {
+        out: Vec<u8>,
+        partial: u8,
+        filled: u8,
+    }
+
+    impl BitWriter {
+        fn push(&mut self, value: u16, bits: u8) {
+            for bit in (0..bits).rev() {
+                self.partial = (self.partial << 1) | ((value >> bit) & 1) as u8;
+                self.filled += 1;
+                if self.filled == 8 {
+                    self.out.push(self.partial);
+                    self.partial = 0;
+                    self.filled = 0;
+                }
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.filled > 0 {
+                self.out.push(self.partial << (8 - self.filled));
+            }
+            self.out
+        }
     }
 }
