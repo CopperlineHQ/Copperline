@@ -3,17 +3,30 @@
 //! Shared hard-drive image backend: the sector store behind both the Gayle
 //! IDE drives and the A2091 SCSI targets.
 //!
-//! A unit opens from a raw HDF image file or from a host directory (built
-//! into an in-memory FFS volume at open time, see `dirfs.rs`). Bare
-//! partition hardfiles (a filesystem boot block at sector 0, no RDSK) get a
-//! synthesized RDB cylinder prepended so the ROM boot driver can
-//! mount them without pre-conversion.
+//! A unit opens from a raw HDF image file, from a gzip-compressed one (the
+//! `.hdz` convention), or from a host directory (built into an in-memory FFS
+//! volume at open time, see `dirfs.rs`). Bare partition hardfiles (a
+//! filesystem boot block at sector 0, no RDSK) get a synthesized RDB
+//! cylinder prepended so the ROM boot driver can mount them without
+//! pre-conversion.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const SECTOR_SIZE: usize = 512;
+
+/// A gzip member header, as it opens a `.hdz` (or a plainly gzipped `.hdf`).
+/// The name is not what decides: an image is unpacked because it begins with
+/// this, so `disk.hdf.gz` and a misnamed `.hdf` open just as well.
+const GZIP_SIGNATURE: [u8; 2] = [0x1F, 0x8B];
+
+/// Largest image a gzip-compressed hardfile may unpack to. Deflate has no
+/// random access, so the whole disk has to be held in memory rather than
+/// read a sector at a time, and a cap turns a decompression bomb (or a
+/// wildly oversized image) into a clear error instead of the host running
+/// out of RAM.
+const MAX_GZIP_IMAGE_BYTES: u64 = 1 << 30;
 
 // HDToolBox-default RDB geometry: 16 surfaces x 32 sectors. Used both for
 // the IDE IDENTIFY translation default and for the RDB synthesized in front
@@ -28,8 +41,8 @@ pub const CYL_BYTES: u64 = CYL_SECTORS as u64 * SECTOR_SIZE as u64;
 const RDB_LOCATION_LIMIT: usize = 16;
 
 /// Sector storage behind a drive: a host image file, or an in-memory image
-/// (a filesystem built from a host directory) whose writes last only for
-/// the session.
+/// (a filesystem built from a host directory, or a gzip-compressed hardfile
+/// unpacked at open time) whose writes last only for the session.
 enum Backing {
     File(File),
     Memory(Vec<u8>),
@@ -347,6 +360,56 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) ->
     b
 }
 
+/// Unpack a gzip-compressed hardfile, or report that the file is not one.
+///
+/// `Ok(None)` means the file does not begin with a gzip header and should be
+/// opened as an ordinary sector file; nothing about the *name* is consulted,
+/// so `.hdz`, `.hdf.gz` and a gzipped image called `.hdf` all take the same
+/// route. Deflate cannot be seeked, so a compressed image is read whole here
+/// and served from memory afterwards -- which is also why it is capped at
+/// [`MAX_GZIP_IMAGE_BYTES`].
+fn read_gzip_hardfile(path: &Path, bus_name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut file = File::open(path)
+        .map_err(|e| anyhow::anyhow!("opening {bus_name} image {}: {e}", path.display()))?;
+    let mut magic = [0u8; GZIP_SIGNATURE.len()];
+    match file.read_exact(&mut magic) {
+        Ok(()) => {}
+        // Too short to hold a gzip header, so it is not one. The size check
+        // in `open` is what rejects it, and it says how big the file was.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => {
+            anyhow::bail!("reading {bus_name} image {}: {e}", path.display());
+        }
+    }
+    if magic != GZIP_SIGNATURE {
+        return Ok(None);
+    }
+    file.rewind()
+        .map_err(|e| anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display()))?;
+
+    // Read one byte past the cap so an image that is exactly at it still
+    // opens and only a genuinely larger one is refused.
+    let mut image = Vec::new();
+    flate2::read::GzDecoder::new(BufReader::new(file))
+        .take(MAX_GZIP_IMAGE_BYTES + 1)
+        .read_to_end(&mut image)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "decompressing gzip-compressed {bus_name} image {}: {e}",
+                path.display()
+            )
+        })?;
+    if image.len() as u64 > MAX_GZIP_IMAGE_BYTES {
+        anyhow::bail!(
+            "gzip-compressed {bus_name} image {} unpacks to more than {} MiB, which does not \
+             fit in memory as a whole disk; decompress it to a plain hardfile and attach that",
+            path.display(),
+            MAX_GZIP_IMAGE_BYTES / (1 << 20)
+        );
+    }
+    Ok(Some(image))
+}
+
 impl HardDriveImage {
     /// Whether the image carries its own Rigid Disk Block, rather than
     /// being a bare single-partition hardfile this had to synthesize one
@@ -448,12 +511,13 @@ impl HardDriveImage {
     /// "DH0") a synthesized RDB advertises; `bus_name` ("ide"/"scsi") tags
     /// log messages. A synthesized RDB names itself (see
     /// [`default_rdb_identity`]); nothing a caller passes reaches it.
-    /// The path may be a raw HDF image file, or a host directory, which is
-    /// built into an in-memory FFS volume at open time. `volume_override`
-    /// names that FFS volume; when `None` the directory name is used. It has
-    /// no effect on a raw HDF, which carries its own label inside the image.
-    /// `boot_pri` is the `de_BootPri` written into a synthesized RDB; it too is
-    /// ignored by an image that carries its own RDB.
+    /// The path may be a raw HDF image file, a gzip-compressed one (`.hdz`),
+    /// or a host directory, which is built into an in-memory FFS volume at
+    /// open time. `volume_override` names that FFS volume; when `None` the
+    /// directory name is used. It has no effect on an HDF, which carries its
+    /// own label inside the image. `boot_pri` is the `de_BootPri` written
+    /// into a synthesized RDB; it too is ignored by an image that carries its
+    /// own RDB.
     pub fn open(
         path: &Path,
         device_name: &str,
@@ -483,15 +547,27 @@ impl HardDriveImage {
                     path.display()
                 );
             }
-            Backing::File(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)
-                    .map_err(|e| {
-                        anyhow::anyhow!("opening {bus_name} image {}: {e}", path.display())
-                    })?,
-            )
+            match read_gzip_hardfile(path, bus_name)? {
+                Some(image) => {
+                    log::warn!(
+                        "{bus_name}: {} is a gzip-compressed hardfile, unpacked into memory \
+                         ({} bytes); guest writes to it are NOT written back to the host and \
+                         are lost at exit",
+                        path.display(),
+                        image.len()
+                    );
+                    Backing::Memory(image)
+                }
+                None => Backing::File(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(path)
+                        .map_err(|e| {
+                            anyhow::anyhow!("opening {bus_name} image {}: {e}", path.display())
+                        })?,
+                ),
+            }
         };
         let len = match &backing {
             Backing::File(file) => file
@@ -726,6 +802,140 @@ mod tests {
         path
     }
 
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_serves_the_unpacked_sectors() {
+        let bytes = bare_partition_bytes(2);
+        let path = temp_image("packed.hdz", &gzip(&bytes));
+        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+
+        // The synthesized RDB cylinder still goes in front: the sniff runs on
+        // the unpacked image, not on the gzip stream.
+        assert_eq!(
+            drive.total_sectors(),
+            u64::from(CYL_SECTORS) + (bytes.len() / SECTOR_SIZE) as u64
+        );
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(0, &mut sector).unwrap();
+        assert_eq!(&sector[..4], b"RDSK");
+        drive
+            .read_sector(u64::from(CYL_SECTORS), &mut sector)
+            .unwrap();
+        assert_eq!(&sector[..4], b"DOS\x01");
+        drive
+            .read_sector(u64::from(CYL_SECTORS) + 5, &mut sector)
+            .unwrap();
+        assert_eq!(&sector[..4], b"MARK");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_keeps_guest_writes_out_of_the_host_file() {
+        let bytes = bare_partition_bytes(1);
+        let packed = gzip(&bytes);
+        let path = temp_image("readonly.hdz", &packed);
+        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+
+        // Writes land in the unpacked copy for the session...
+        let written = vec![0x5A; SECTOR_SIZE];
+        let lba = u64::from(CYL_SECTORS) + 3;
+        drive.write_sector(lba, &written).unwrap();
+        drive.flush().unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(lba, &mut sector).unwrap();
+        assert_eq!(sector, written);
+        // ...and never reach the compressed file on disk.
+        assert_eq!(std::fs::read(&path).unwrap(), packed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_is_recognised_by_content_not_by_name() {
+        // The same bytes under the .hdf name every other emulator expects.
+        let bytes = bare_partition_bytes(1);
+        let path = temp_image("misnamed.hdf", &gzip(&bytes));
+        let drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        assert_eq!(
+            drive.total_sectors(),
+            u64::from(CYL_SECTORS) + (bytes.len() / SECTOR_SIZE) as u64
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_with_its_own_rdb_is_left_alone() {
+        let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
+        bytes[..4].copy_from_slice(b"RDSK");
+        let path = temp_image("rdb.hdz", &gzip(&bytes));
+        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+
+        assert_eq!(drive.total_sectors(), 64);
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(0, &mut sector).unwrap();
+        assert_eq!(&sector[..4], b"RDSK");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_survives_a_save_state_round_trip() {
+        let bytes = bare_partition_bytes(1);
+        let path = temp_image("state.hdz", &gzip(&bytes));
+        let mut original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        // A session-only write has nowhere else to live, so the state has to
+        // carry the unpacked image rather than reopen the .hdz.
+        let written = vec![0xA5; SECTOR_SIZE];
+        let lba = u64::from(CYL_SECTORS) + 7;
+        original.write_sector(lba, &written).unwrap();
+
+        let encoded = bincode::serialize(&original).unwrap();
+        // Deleting the source proves the state is self-contained.
+        std::fs::remove_file(&path).unwrap();
+        let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
+
+        assert_eq!(restored.total_sectors(), original.total_sectors());
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        restored.read_sector(lba, &mut sector).unwrap();
+        assert_eq!(sector, written);
+    }
+
+    #[test]
+    fn gzip_compressed_hardfile_that_unpacks_to_junk_is_rejected() {
+        // Not a multiple of the sector size once unpacked: the size check
+        // runs on the unpacked bytes, so the message names those.
+        let path = temp_image("junk.hdz", &gzip(&[0u8; SECTOR_SIZE + 1]));
+        let Err(err) = HardDriveImage::open(&path, "DH0", "ide", None, 0) else {
+            panic!("a gzip stream of junk is not a hardfile");
+        };
+        assert!(
+            err.to_string().contains(&format!("{}", SECTOR_SIZE + 1)),
+            "{err}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn truncated_gzip_hardfile_reports_the_decompression_failure() {
+        let packed = gzip(&bare_partition_bytes(1));
+        let path = temp_image("truncated.hdz", &packed[..packed.len() / 2]);
+        let Err(err) = HardDriveImage::open(&path, "DH0", "ide", None, 0) else {
+            panic!("a truncated gzip stream cannot be unpacked");
+        };
+        assert!(err.to_string().contains("decompressing"), "{err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn serde_reopens_file_backed_image_and_serves_same_sectors() {
         let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
@@ -845,10 +1055,17 @@ mod tests {
 
     /// A bare partition hardfile: an FFS boot block and no RDSK, sized to a
     /// whole number of 16x32 cylinders so the RDB wrapper can be synthesized.
-    fn bare_partition_image(name: &str) -> PathBuf {
-        let mut bytes = vec![0u8; CYL_BYTES as usize];
+    /// Sector 5 carries a marker, which is how a test tells the partition
+    /// data apart from the cylinder synthesized in front of it.
+    fn bare_partition_bytes(cylinders: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; cylinders * CYL_BYTES as usize];
         bytes[..4].copy_from_slice(b"DOS\x01");
-        temp_image(name, &bytes)
+        bytes[5 * SECTOR_SIZE..5 * SECTOR_SIZE + 4].copy_from_slice(b"MARK");
+        bytes
+    }
+
+    fn bare_partition_image(name: &str) -> PathBuf {
+        temp_image(name, &bare_partition_bytes(1))
     }
 
     /// The PART block of a synthesized RDB (LBA 1), read back through the
