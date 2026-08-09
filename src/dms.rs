@@ -13,8 +13,11 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 const HEAD_LEN: usize = 56;
 const TRACK_HEAD_LEN: usize = 20;
 const DMS_TRACKS: usize = 80;
-#[cfg(test)]
 const DMS_CYLINDER_BYTES: usize = ADF_SIZE / DMS_TRACKS;
+/// Info-header general-info bits: encrypted archive, and a high-density
+/// (two cylinders' worth of data per record) archive.
+const GENINFO_ENCRYPTED: u16 = 0x0002;
+const GENINFO_HD: u16 = 0x0010;
 
 const D_CODE: [u8; 256] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -71,8 +74,12 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
 
     let geninfo = be_u16(&data[10..12]);
     ensure!(
-        geninfo & 0x0002 == 0,
+        geninfo & GENINFO_ENCRYPTED == 0,
         "encrypted DMS archives are not supported"
+    );
+    ensure!(
+        geninfo & GENINFO_HD == 0,
+        "high-density DMS archives are not supported"
     );
     let disktype = be_u16(&data[50..52]);
     ensure!(disktype != 7, "FMS DMS archives are not floppy images");
@@ -80,7 +87,14 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
     let mut pos = HEAD_LEN;
     let mut decoder = Decrunchers::new();
     decoder.init();
-    let mut adf = Vec::with_capacity(ADF_SIZE);
+    // Each record names the cylinder it holds, so the image is filled by
+    // cylinder number rather than in arrival order: an archive may repeat a
+    // cylinder (packers prepend a padded advertising boot cylinder ahead of
+    // the real cylinder 0, and the later record wins) and, with the NoZero
+    // general-info bit, omit records for cylinders that read back as all
+    // zeroes. Both cases leave the image at its natural 80-cylinder size.
+    let mut adf = vec![0u8; ADF_SIZE];
+    let mut cylinders = 0usize;
 
     while pos < data.len() {
         let Some(header) = data.get(pos..pos + TRACK_HEAD_LEN) else {
@@ -122,18 +136,28 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
                 track.unpacked_sum,
                 actual_sum
             );
-            adf.extend_from_slice(&unpacked);
-        } else if track.number == 80 || track.number == 0xFFFF {
-            // FILEID.DIZ and banner records are intentionally skipped.
+            let start = track.number as usize * DMS_CYLINDER_BYTES;
+            let end = start + unpacked.len();
+            ensure!(
+                end <= adf.len(),
+                "DMS track {} unpacks to {} bytes at offset {}, past the end of a {} byte ADF",
+                track.number,
+                unpacked.len(),
+                start,
+                ADF_SIZE
+            );
+            adf[start..end].copy_from_slice(&unpacked);
+            cylinders += 1;
+        } else {
+            // FILEID.DIZ (track 80), the banner (track 0xFFFF) and the short
+            // fake boot block hold no disk data. They are not part of the
+            // decompression history the disk cylinders share, so the
+            // decrunchers restart before the next cylinder.
+            decoder.init();
         }
     }
 
-    ensure!(
-        adf.len() == ADF_SIZE,
-        "DMS decoded to {} bytes, expected {} bytes",
-        adf.len(),
-        ADF_SIZE
-    );
+    ensure!(cylinders > 0, "DMS archive holds no disk cylinders");
     Ok(adf)
 }
 
@@ -952,10 +976,7 @@ mod tests {
 
     #[test]
     fn no_compression_dms_decodes_to_adf() -> Result<()> {
-        let mut adf = vec![0u8; ADF_SIZE];
-        for (idx, byte) in adf.iter_mut().enumerate() {
-            *byte = (idx as u8).wrapping_mul(17).wrapping_add(23);
-        }
+        let adf = pattern_adf();
         let dms = make_uncompressed_dms(&adf);
         assert_eq!(decode_dms_adf(&dms)?, adf);
         Ok(())
@@ -996,8 +1017,136 @@ mod tests {
         Ok(())
     }
 
-    fn make_uncompressed_dms(adf: &[u8]) -> Vec<u8> {
-        assert_eq!(adf.len(), ADF_SIZE);
+    #[test]
+    fn a_repeated_cylinder_record_overwrites_rather_than_shifting_the_image() -> Result<()> {
+        // Some packers store an advertising boot cylinder as a second record
+        // numbered 0, ahead of the real one. Both are full-length cylinder
+        // records, so appending them would push every later cylinder one
+        // cylinder along and overrun the 80-cylinder image.
+        let adf = pattern_adf();
+        let mut advert = vec![0u8; DMS_CYLINDER_BYTES];
+        advert[..4].copy_from_slice(b"DOS\0");
+        advert[4..64].fill(b'-');
+
+        let mut dms = make_dms_header();
+        dms.extend_from_slice(&uncompressed_record(0, &advert));
+        for (cylinder, chunk) in adf.chunks_exact(DMS_CYLINDER_BYTES).enumerate() {
+            dms.extend_from_slice(&uncompressed_record(cylinder as u16, chunk));
+        }
+
+        assert_eq!(decode_dms_adf(&dms)?, adf);
+        Ok(())
+    }
+
+    #[test]
+    fn an_omitted_cylinder_decodes_as_zeroes() -> Result<()> {
+        // The NoZero general-info bit lets a packer leave out cylinders that
+        // read back as all zeroes; the image keeps its full size with those
+        // cylinders blank.
+        let adf = pattern_adf();
+        let mut dms = make_dms_header();
+        for (cylinder, chunk) in adf.chunks_exact(DMS_CYLINDER_BYTES).enumerate() {
+            if cylinder == 5 {
+                continue;
+            }
+            dms.extend_from_slice(&uncompressed_record(cylinder as u16, chunk));
+        }
+
+        let mut expected = adf;
+        expected[5 * DMS_CYLINDER_BYTES..6 * DMS_CYLINDER_BYTES].fill(0);
+        assert_eq!(decode_dms_adf(&dms)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn a_high_density_archive_is_rejected() {
+        // An HD record holds two cylinders, so its data would have to land at
+        // twice the spacing. Nothing downstream reads a 1760K disk, and at DD
+        // spacing the cylinders would overlap into an image of exactly the
+        // expected size, so the general-info bit is refused up front.
+        let mut dms = make_uncompressed_dms(&pattern_adf());
+        let geninfo = be_u16(&dms[10..12]) | GENINFO_HD;
+        put_be_u16(&mut dms[10..12], geninfo);
+        let hcrc = dms_crc16(&dms[4..HEAD_LEN - 2]);
+        put_be_u16(&mut dms[HEAD_LEN - 2..HEAD_LEN], hcrc);
+
+        let err = decode_dms_adf(&dms).unwrap_err().to_string();
+        assert!(err.contains("high-density"), "{err}");
+    }
+
+    #[test]
+    fn a_non_disk_record_restarts_the_decrunchers() -> Result<()> {
+        // Cylinder 0 fills the quick decruncher's 256-byte history with
+        // literals and keeps it (general flag bit 0), and cylinder 1 opens
+        // with a back-reference into that history. A FILEID.DIZ record
+        // between the two carries no disk data and is not part of that
+        // history, so it restarts the decrunchers and the very same packed
+        // bytes then reference a blank history instead.
+        let cylinder0: Vec<u8> = (0..DMS_CYLINDER_BYTES)
+            .map(|idx| quick_safe_byte(idx as u32))
+            .collect();
+        let tail: Vec<u8> = (0..DMS_CYLINDER_BYTES - QUICK_BACK_COUNT)
+            .map(|idx| quick_safe_byte(0x5000 + idx as u32))
+            .collect();
+
+        let mut literals = BitWriter::default();
+        for &byte in &cylinder0 {
+            literals.push(1, 1);
+            literals.push(byte as u16, 8);
+        }
+        let packed0 = literals.finish();
+
+        let mut reference = BitWriter::default();
+        reference.push(0, 1);
+        reference.push(QUICK_BACK_COUNT as u16 - 2, 2);
+        reference.push(QUICK_BACK_OFFSET as u16, 8);
+        for &byte in &tail {
+            reference.push(1, 1);
+            reference.push(byte as u16, 8);
+        }
+        let packed1 = reference.finish();
+
+        // The history left by cylinder 0, and the blank one a restart gives.
+        let (carried_text, carried_loc) = quick_history(&cylinder0);
+        let kept = quick_back_reference_output(&carried_text, carried_loc, &tail);
+        let restarted = quick_back_reference_output(&[0u8; 256], QUICK_INITIAL_LOC, &tail);
+        assert_ne!(kept[..QUICK_BACK_COUNT], restarted[..QUICK_BACK_COUNT]);
+
+        let mut carried = make_dms_header();
+        carried.extend_from_slice(&quick_record(0, &packed0, &cylinder0));
+        carried.extend_from_slice(&quick_record(1, &packed1, &kept));
+
+        let mut interrupted = make_dms_header();
+        interrupted.extend_from_slice(&quick_record(0, &packed0, &cylinder0));
+        interrupted.extend_from_slice(&uncompressed_record(80, b"FILEID.DIZ contents"));
+        interrupted.extend_from_slice(&quick_record(1, &packed1, &restarted));
+
+        let cylinder1 = DMS_CYLINDER_BYTES..2 * DMS_CYLINDER_BYTES;
+        assert_eq!(decode_dms_adf(&carried)?[cylinder1.clone()], kept[..]);
+        assert_eq!(decode_dms_adf(&interrupted)?[cylinder1], restarted[..]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_archive_without_disk_cylinders_is_rejected() {
+        let diz = vec![0x2Au8; DMS_CYLINDER_BYTES];
+        let mut dms = make_dms_header();
+        dms.extend_from_slice(&uncompressed_record(80, &diz));
+        dms.extend_from_slice(&uncompressed_record(0xFFFF, &diz));
+
+        let err = decode_dms_adf(&dms).unwrap_err().to_string();
+        assert!(err.contains("no disk cylinders"), "{err}");
+    }
+
+    fn pattern_adf() -> Vec<u8> {
+        let mut adf = vec![0u8; ADF_SIZE];
+        for (idx, byte) in adf.iter_mut().enumerate() {
+            *byte = (idx as u8).wrapping_mul(17).wrapping_add(23);
+        }
+        adf
+    }
+
+    fn make_dms_header() -> Vec<u8> {
         let mut out = vec![0u8; HEAD_LEN];
         out[0..4].copy_from_slice(b"DMS!");
         put_be_u16(&mut out[16..18], 0);
@@ -1009,22 +1158,121 @@ mod tests {
         put_be_u16(&mut out[52..54], 0);
         let hcrc = dms_crc16(&out[4..HEAD_LEN - 2]);
         put_be_u16(&mut out[HEAD_LEN - 2..HEAD_LEN], hcrc);
+        out
+    }
 
+    fn uncompressed_record(track: u16, chunk: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; TRACK_HEAD_LEN];
+        header[0..2].copy_from_slice(b"TR");
+        put_be_u16(&mut header[2..4], track);
+        put_be_u16(&mut header[6..8], chunk.len() as u16);
+        put_be_u16(&mut header[8..10], chunk.len() as u16);
+        put_be_u16(&mut header[10..12], chunk.len() as u16);
+        header[13] = 0;
+        put_be_u16(&mut header[14..16], checksum16(chunk));
+        put_be_u16(&mut header[16..18], dms_crc16(chunk));
+        let hcrc = dms_crc16(&header[..18]);
+        put_be_u16(&mut header[18..20], hcrc);
+        let mut out = header.to_vec();
+        out.extend_from_slice(chunk);
+        out
+    }
+
+    fn make_uncompressed_dms(adf: &[u8]) -> Vec<u8> {
+        assert_eq!(adf.len(), ADF_SIZE);
+        let mut out = make_dms_header();
         for (track, chunk) in adf.chunks_exact(DMS_CYLINDER_BYTES).enumerate() {
-            let mut header = [0u8; TRACK_HEAD_LEN];
-            header[0..2].copy_from_slice(b"TR");
-            put_be_u16(&mut header[2..4], track as u16);
-            put_be_u16(&mut header[6..8], DMS_CYLINDER_BYTES as u16);
-            put_be_u16(&mut header[8..10], DMS_CYLINDER_BYTES as u16);
-            put_be_u16(&mut header[10..12], DMS_CYLINDER_BYTES as u16);
-            header[13] = 0;
-            put_be_u16(&mut header[14..16], checksum16(chunk));
-            put_be_u16(&mut header[16..18], dms_crc16(chunk));
-            let hcrc = dms_crc16(&header[..18]);
-            put_be_u16(&mut header[18..20], hcrc);
-            out.extend_from_slice(&header);
-            out.extend_from_slice(chunk);
+            out.extend_from_slice(&uncompressed_record(track as u16, chunk));
         }
         out
+    }
+
+    /// Where the quick decruncher's 256-byte ring starts after a restart.
+    const QUICK_INITIAL_LOC: u16 = 251;
+    /// A back-reference short enough that it cannot read a byte it just
+    /// wrote, so its output depends only on the history it inherited.
+    const QUICK_BACK_COUNT: usize = 4;
+    const QUICK_BACK_OFFSET: u8 = 8;
+
+    /// A byte the RLE stage passes straight through (0x90 is its escape), so
+    /// a quick stream's output is also the cylinder's contents.
+    fn quick_safe_byte(seed: u32) -> u8 {
+        let byte = seed.wrapping_mul(37).wrapping_add(11) as u8;
+        if byte == 0x90 {
+            0x91
+        } else {
+            byte
+        }
+    }
+
+    /// The ring and write position a run of quick literals leaves behind.
+    fn quick_history(literals: &[u8]) -> ([u8; 256], u16) {
+        let mut text = [0u8; 256];
+        let mut loc = QUICK_INITIAL_LOC;
+        for &byte in literals {
+            text[(loc & 0x00FF) as usize] = byte;
+            loc = loc.wrapping_add(1);
+        }
+        (text, loc.wrapping_add(5) & 0x00FF)
+    }
+
+    fn quick_back_reference_output(text: &[u8; 256], loc: u16, tail: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(QUICK_BACK_COUNT + tail.len());
+        let mut source = loc.wrapping_sub(QUICK_BACK_OFFSET as u16).wrapping_sub(1);
+        for _ in 0..QUICK_BACK_COUNT {
+            out.push(text[(source & 0x00FF) as usize]);
+            source = source.wrapping_add(1);
+        }
+        out.extend_from_slice(tail);
+        out
+    }
+
+    /// A quick-compressed (mode 2) record whose RLE stage is a pass-through,
+    /// keeping the decruncher history for the next record (flag bit 0).
+    fn quick_record(track: u16, packed: &[u8], unpacked: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; TRACK_HEAD_LEN];
+        header[0..2].copy_from_slice(b"TR");
+        put_be_u16(&mut header[2..4], track);
+        put_be_u16(&mut header[6..8], packed.len() as u16);
+        put_be_u16(&mut header[8..10], unpacked.len() as u16);
+        put_be_u16(&mut header[10..12], unpacked.len() as u16);
+        header[12] = 1;
+        header[13] = 2;
+        put_be_u16(&mut header[14..16], checksum16(unpacked));
+        put_be_u16(&mut header[16..18], dms_crc16(packed));
+        let hcrc = dms_crc16(&header[..18]);
+        put_be_u16(&mut header[18..20], hcrc);
+        let mut out = header.to_vec();
+        out.extend_from_slice(packed);
+        out
+    }
+
+    /// Most-significant-bit-first, the order `BitReader` consumes.
+    #[derive(Default)]
+    struct BitWriter {
+        out: Vec<u8>,
+        partial: u8,
+        filled: u8,
+    }
+
+    impl BitWriter {
+        fn push(&mut self, value: u16, bits: u8) {
+            for bit in (0..bits).rev() {
+                self.partial = (self.partial << 1) | ((value >> bit) & 1) as u8;
+                self.filled += 1;
+                if self.filled == 8 {
+                    self.out.push(self.partial);
+                    self.partial = 0;
+                    self.filled = 0;
+                }
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.filled > 0 {
+                self.out.push(self.partial << (8 - self.filled));
+            }
+            self.out
+        }
     }
 }
