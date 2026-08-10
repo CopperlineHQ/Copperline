@@ -1484,13 +1484,22 @@ hook entirely and never see the mounts.
 
 ```toml
 [whdload]
-game = "Turrican.lha"       # .lha archive or a directory holding a .slave
+game = "Turrican.lha"       # .lha, .zip, or a folder with a .slave
 # library = "..."           # game library; default: <config dir>/whdload
 # kickstarts = "..."        # directory scanned for Kickstart images
 # args = "ButtonWait"       # extra WHDLoad command-line options
+# machine_type = "auto"     # or "copperline" to boot on this machine
+# whd_package = "..."       # your own WHDLoad_usr.lha
+# skick_package = "..."     # your own skick*.lha
+
+# Launcher only.
+# enabled = true            # false removes the WHDLoad page entirely
+# games = "..."             # the folder the Library page lists
+# library_db = "..."        # default: <config>/whdload/support/launcher.db
+# library_cache = "..."     # default: <config>/whdload/support/cache
 ```
 
-Boots straight into a WHDLoad-installed game: the package is extracted
+Boots straight into a WHDLoad-installed game: the package is unpacked
 into the game library (once -- saves the game writes persist there), a
 minimal boot volume is synthesized around the real WHDLoad program, raw
 Kickstart images from `kickstarts` are identified by content and staged

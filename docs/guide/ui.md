@@ -191,10 +191,10 @@ Disk images can be dropped anywhere on the emulator window:
   multi-selection in the disk dialog.
 - **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
-- **WHDLoad packages** (`.lha`, or a bare `.slave`) reboot the machine
-  straight into the game through the [WHDLoad booter](whdload.md), keeping
-  any explicit machine choices; dropped on the configuration screen they
-  fill its **Storage -> WHDLoad** game field instead.
+- **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
+  machine straight into the game through the [WHDLoad booter](whdload.md),
+  keeping any explicit machine choices; dropped on the configuration
+  screen they fill the **WHDLoad** page's game field instead.
 - **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
   notice points at the machine-configuration screen, which also refuses
   such drops while it is open.
@@ -501,11 +501,12 @@ The layout is:
   the first four); **Host Disk**, for a real disk of this computer's (see
   [](host-disks.md)); **Boot Priority**, which sets each hard-disk drive's
   synthesized-RDB boot priority (see below); **Create Image...**, which
-  makes new ADF and HDF images (see below); **CD** (image, insert delay,
-  CD32 NVRAM); and **WHDLoad**, which picks a WHDLoad game package plus its
-  optional Kickstart-image and game-library directories (see
-  [](whdload.md); Run then boots straight into the game). Each sub-page has
-  a **< Back** button in that block that returns to Storage),
+  makes new ADF and HDF images (see below); and **CD** (image, insert
+  delay, CD32 NVRAM). Each sub-page has a **< Back** button in that block
+  that returns to Storage),
+  *WHDLoad* (the game library, and the settings a package boots with --
+  see [](whdload.md); its entry can be turned off in A/V & Emu ->
+  Emulation),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
