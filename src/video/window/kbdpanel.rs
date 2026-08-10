@@ -1153,21 +1153,33 @@ fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 fn draw_amiga_mark(frame: &mut [u8], x: usize, y: usize, hollow: bool, ink: u32, scale: usize) {
     let h = AMIGA_H as f32;
     let r = AMIGA_STROKE as f32 / 2.0;
+    // The outlined mark's ring is centred on the letter's edge, so it
+    // reaches half a stroke beyond it; its geometry is inset by the same
+    // amount so the ring's outer rim lands exactly where the solid mark's
+    // silhouette does, and the two keys print the letter the same size.
+    let ring = if hollow { r / 2.0 } else { 0.0 };
+    let inset = r + ring;
     // The legs splay to fill the cell at the foot; the apex leans a
     // quarter of the height right of the letter's midline.
-    let half = (AMIGA_W as f32 - 2.0 * r) / 2.0;
-    let apex = (half + r + h / 4.0, r);
-    let foot_l = (r, h - r);
-    let foot_r = (2.0 * half + r, h - r);
+    let half = (AMIGA_W as f32 - 2.0 * inset) / 2.0;
+    let apex = (half + inset + h / 4.0, inset);
+    let foot_l = (inset, h - inset);
+    let foot_r = (2.0 * half + inset, h - inset);
     // The crossbar runs between the legs' centrelines at its height.
     let t = (AMIGA_BAR_Y - apex.1) / (foot_l.1 - apex.1);
     let bar_l = (apex.0 + t * (foot_l.0 - apex.0), AMIGA_BAR_Y);
     let bar_r = (apex.0 + t * (foot_r.0 - apex.0), AMIGA_BAR_Y);
     let s = scale as f32;
-    for ty in 0..AMIGA_H * scale {
-        for tx in 0..AMIGA_W * scale {
+    // One canvas pixel of slack around the cell, so the antialiased fade
+    // at the letter's extremes is painted rather than cut off flat.
+    let m = 1usize;
+    for ty in 0..(AMIGA_H + 2 * m) * scale {
+        for tx in 0..(AMIGA_W + 2 * m) * scale {
             // The pixel's centre, in the letter's own canvas units.
-            let p = ((tx as f32 + 0.5) / s, (ty as f32 + 0.5) / s);
+            let p = (
+                (tx as f32 + 0.5) / s - m as f32,
+                (ty as f32 + 0.5) / s - m as f32,
+            );
             let d = segment_distance(p, apex, foot_l)
                 .min(segment_distance(p, apex, foot_r))
                 .min(segment_distance(p, bar_l, bar_r))
@@ -1178,13 +1190,19 @@ fn draw_amiga_mark(frame: &mut [u8], x: usize, y: usize, hollow: bool, ink: u32,
             // edge instead of the inside.
             let d = d * s;
             let alpha = if hollow {
-                0.5 + r * s / 2.0 - d.abs()
+                0.5 + ring * s - d.abs()
             } else {
                 0.5 - d
             }
             .clamp(0.0, 1.0);
             if alpha > 0.0 {
-                blend_pixel(frame, x * scale + tx, y * scale + ty, ink, alpha, scale);
+                let (Some(px), Some(py)) = (
+                    (x * scale + tx).checked_sub(m * scale),
+                    (y * scale + ty).checked_sub(m * scale),
+                ) else {
+                    continue;
+                };
+                blend_pixel(frame, px, py, ink, alpha, scale);
             }
         }
     }
