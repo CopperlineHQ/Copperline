@@ -4695,17 +4695,22 @@ fn host_disk_row_rect(rect: Rect, index: usize) -> Rect {
 /// Ports, and the favourites list fills what is left below it, so both are
 /// worked out from the strip rather than from a row count. These are what
 /// that comes to, and what the scrolling and hit-testing count in.
+///
+/// `whdload_entry` is whether the strip carries the WHDLoad entry -- see
+/// [`launcher::tabs`] -- since the strip is a row longer when it does, and
+/// every rect on this page is measured against it. Every layout function
+/// here takes it for the same reason.
 #[cfg(feature = "game-library")]
-pub(in crate::video) fn library_visible_rows(rect: Rect, pinned: bool) -> usize {
-    library_table_rect(rect, pinned)
+pub(in crate::video) fn library_visible_rows(rect: Rect, whdload_entry: bool) -> usize {
+    library_table_rect(rect, whdload_entry)
         .h
         .saturating_sub(LIBRARY_HEADER_H + 4)
         / LIBRARY_ROW_H
 }
 
 #[cfg(feature = "game-library")]
-pub(in crate::video) fn library_favourite_rows(rect: Rect, pinned: bool) -> usize {
-    library_favourites_rect(rect, pinned)
+pub(in crate::video) fn library_favourite_rows(rect: Rect, whdload_entry: bool) -> usize {
+    library_favourites_rect(rect, whdload_entry)
         .h
         .saturating_sub(LIBRARY_HEADER_H + 4)
         / LIBRARY_ROW_H
@@ -4764,8 +4769,8 @@ const LIBRARY_COL_NAME: usize = 6;
 /// heading and the ticks under it stay clear of the scroll arrows inside
 /// the frame -- which they did not when the art column beside them grew.
 #[cfg(feature = "game-library")]
-fn library_col_favourite(rect: Rect, pinned: bool) -> usize {
-    let table = library_table_rect(rect, pinned);
+fn library_col_favourite(rect: Rect, whdload_entry: bool) -> usize {
+    let table = library_table_rect(rect, whdload_entry);
     let heading = "Favourite".len() * font::GLYPH_W;
     table
         .w
@@ -4775,8 +4780,8 @@ fn library_col_favourite(rect: Rect, pinned: bool) -> usize {
 
 /// Where a tab sits in the strip, whichever strip is showing.
 #[cfg(feature = "game-library")]
-fn strip_rect(rect: Rect, tab: launcher::LauncherTab, pinned: bool) -> Rect {
-    let at = launcher::tabs(pinned)
+fn strip_rect(rect: Rect, tab: launcher::LauncherTab, whdload_entry: bool) -> Rect {
+    let at = launcher::tabs(whdload_entry)
         .iter()
         .position(|&t| t == tab)
         .unwrap_or(0);
@@ -4789,8 +4794,8 @@ fn strip_rect(rect: Rect, tab: launcher::LauncherTab, pinned: bool) -> Rect {
 /// deliberate when the strip changes -- which it does, since WHDLoad can
 /// join it.
 #[cfg(feature = "game-library")]
-fn library_table_rect(rect: Rect, pinned: bool) -> Rect {
-    let top = strip_rect(rect, launcher::LauncherTab::Memory, pinned);
+fn library_table_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let top = strip_rect(rect, launcher::LauncherTab::Memory, whdload_entry);
     let x = launcher_pane_x(rect);
     let right = rect.x + rect.w - 16;
     Rect {
@@ -4810,8 +4815,8 @@ fn library_table_rect(rect: Rect, pinned: bool) -> Rect {
 /// It stops short of the bottom so the panel's own status line, which
 /// reports what just happened, is never drawn over.
 #[cfg(feature = "game-library")]
-fn library_favourites_rect(rect: Rect, pinned: bool) -> Rect {
-    let games = library_table_rect(rect, pinned);
+fn library_favourites_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let games = library_table_rect(rect, whdload_entry);
     // The gap: the button row, then the "Favourites:" label above the box.
     let y = games.y + games.h + LIBRARY_BUTTON_GAP + LAUNCH_MODEL_H + 10 + 14;
     let bottom = launcher_status_y(rect).saturating_sub(10);
@@ -4824,8 +4829,8 @@ fn library_favourites_rect(rect: Rect, pinned: bool) -> Rect {
 
 /// One row of the favourites list.
 #[cfg(feature = "game-library")]
-fn library_favourite_row_rect(rect: Rect, pinned: bool, drawn: usize) -> Rect {
-    let table = library_favourites_rect(rect, pinned);
+fn library_favourite_row_rect(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    let table = library_favourites_rect(rect, whdload_entry);
     Rect {
         x: table.x + 2,
         y: table.y + LIBRARY_HEADER_H + drawn * LIBRARY_ROW_H,
@@ -4837,33 +4842,33 @@ fn library_favourite_row_rect(rect: Rect, pinned: bool, drawn: usize) -> Rect {
 /// The Favourite tick on one drawn row: centred under its heading rather
 /// than tucked against the left of the column.
 #[cfg(feature = "game-library")]
-fn library_favourite_box(rect: Rect, pinned: bool, drawn: usize) -> Rect {
+fn library_favourite_box(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
     centred_tick(
-        library_row_rect(rect, pinned, drawn),
-        library_col_favourite(rect, pinned),
+        library_row_rect(rect, whdload_entry, drawn),
+        library_col_favourite(rect, whdload_entry),
         "Favourite",
     )
 }
 
 /// The Remove tick on one row of the favourites list.
 #[cfg(feature = "game-library")]
-fn library_remove_box(rect: Rect, pinned: bool, drawn: usize) -> Rect {
+fn library_remove_box(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
     // On the same line as the Favourite tick in the list above it, not
     // centred under its own shorter heading: two columns of the same tick
     // that do not line up read as a mistake.
     centred_tick(
-        library_favourite_row_rect(rect, pinned, drawn),
-        library_col_favourite(rect, pinned),
+        library_favourite_row_rect(rect, whdload_entry, drawn),
+        library_col_favourite(rect, whdload_entry),
         "Favourite",
     )
 }
 
 /// Where the "Remove" heading goes: centred over its own ticks.
 #[cfg(feature = "game-library")]
-fn library_remove_heading_x(rect: Rect, pinned: bool) -> usize {
+fn library_remove_heading_x(rect: Rect, whdload_entry: bool) -> usize {
     let tick = centred_tick(
-        library_favourites_rect(rect, pinned),
-        library_col_favourite(rect, pinned),
+        library_favourites_rect(rect, whdload_entry),
+        library_col_favourite(rect, whdload_entry),
         "Favourite",
     );
     (tick.x + 5).saturating_sub("Remove".len() * font::GLYPH_W / 2)
@@ -4885,8 +4890,8 @@ fn centred_tick(row: Rect, column: usize, heading: &str) -> Rect {
 /// One row of the list, by drawn position rather than by index into the
 /// library: the list scrolls, so the two differ.
 #[cfg(feature = "game-library")]
-fn library_row_rect(rect: Rect, pinned: bool, drawn: usize) -> Rect {
-    let table = library_table_rect(rect, pinned);
+fn library_row_rect(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    let table = library_table_rect(rect, whdload_entry);
     Rect {
         x: table.x + 2,
         y: table.y + LIBRARY_HEADER_H + drawn * LIBRARY_ROW_H,
@@ -4915,12 +4920,13 @@ fn library_cover_size() -> (usize, usize) {
     )
 }
 
-/// The largest the art frame can be: what the layout reserves, and what an
-/// empty one is drawn as. The frame around a picture is this or smaller --
-/// see [`library_mounted_art`].
+/// The art frame: the size the layout reserves, whatever is in it. A
+/// picture that is not this shape is fitted inside and letterboxed, rather
+/// than the frame being cut to the picture -- a frame that changed shape
+/// per game would drag the metadata under it up and down the page.
 #[cfg(feature = "game-library")]
-fn library_cover_rect(rect: Rect, pinned: bool) -> Rect {
-    let table = library_table_rect(rect, pinned);
+fn library_cover_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let table = library_table_rect(rect, whdload_entry);
     let column = table.x + table.w;
     let right = rect.x + rect.w - 16;
     let (w, h) = library_cover_size();
@@ -4934,8 +4940,8 @@ fn library_cover_rect(rect: Rect, pinned: bool) -> Rect {
 
 /// The most a picture may be, inside the widest frame.
 #[cfg(feature = "game-library")]
-fn library_art_rect(rect: Rect, pinned: bool) -> Rect {
-    let frame = library_cover_rect(rect, pinned);
+fn library_art_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let frame = library_cover_rect(rect, whdload_entry);
     Rect {
         x: frame.x + LIBRARY_COVER_BEZEL,
         y: frame.y + LIBRARY_COVER_BEZEL,
@@ -4947,8 +4953,8 @@ fn library_art_rect(rect: Rect, pinned: bool) -> Rect {
 /// The three buttons under the game list: as thin as the ones along the
 /// top, and sized so a third fits beside the two there are.
 #[cfg(feature = "game-library")]
-fn library_button_rects(rect: Rect, pinned: bool) -> [Rect; 3] {
-    let table = library_table_rect(rect, pinned);
+fn library_button_rects(rect: Rect, whdload_entry: bool) -> [Rect; 3] {
+    let table = library_table_rect(rect, whdload_entry);
     let gap = 6;
     let w = (table.w + gap) / 3 - gap;
     std::array::from_fn(|i| Rect {
@@ -5085,17 +5091,17 @@ fn library_arrows_in(table: Rect, control: fn(isize) -> UiControl) -> [(UiContro
 }
 
 #[cfg(feature = "game-library")]
-fn library_arrow_rects(rect: Rect, pinned: bool) -> [(UiControl, Rect); 2] {
+fn library_arrow_rects(rect: Rect, whdload_entry: bool) -> [(UiControl, Rect); 2] {
     library_arrows_in(
-        library_table_rect(rect, pinned),
+        library_table_rect(rect, whdload_entry),
         UiControl::LauncherLibraryScroll,
     )
 }
 
 #[cfg(feature = "game-library")]
-fn library_favourite_arrow_rects(rect: Rect, pinned: bool) -> [(UiControl, Rect); 2] {
+fn library_favourite_arrow_rects(rect: Rect, whdload_entry: bool) -> [(UiControl, Rect); 2] {
     library_arrows_in(
-        library_favourites_rect(rect, pinned),
+        library_favourites_rect(rect, whdload_entry),
         UiControl::LauncherLibraryFavouriteScroll,
     )
 }
@@ -5882,24 +5888,24 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     }
     #[cfg(feature = "game-library")]
     if state.tab == LauncherTab::WhdloadLibrary {
-        let pinned = state.setup.whdload_enabled();
-        if state.library.games.len() > library_visible_rows(rect, pinned) {
-            for (control, arrow) in library_arrow_rects(rect, pinned) {
+        let whdload_entry = state.setup.whdload_enabled();
+        if state.library.games.len() > library_visible_rows(rect, whdload_entry) {
+            for (control, arrow) in library_arrow_rects(rect, whdload_entry) {
                 if arrow.contains(pos) {
                     return Some(control);
                 }
             }
         }
-        for drawn in 0..library_visible_rows(rect, pinned) {
+        for drawn in 0..library_visible_rows(rect, whdload_entry) {
             if state.library.scroll + drawn >= state.library.games.len() {
                 break;
             }
             // The tick first: it sits inside the row, and marking a
             // favourite is not the same as choosing the game.
-            if library_favourite_box(rect, pinned, drawn).contains(pos) {
+            if library_favourite_box(rect, whdload_entry, drawn).contains(pos) {
                 return Some(UiControl::LauncherLibraryFavourite(drawn));
             }
-            if library_row_rect(rect, pinned, drawn).contains(pos) {
+            if library_row_rect(rect, whdload_entry, drawn).contains(pos) {
                 return Some(UiControl::LauncherLibraryPick(drawn));
             }
         }
@@ -5911,16 +5917,16 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         .into_iter()
         .enumerate()
         {
-            if library_button_rects(rect, pinned)[at].contains(pos)
+            if library_button_rects(rect, whdload_entry)[at].contains(pos)
                 && (at == 0 || !state.library.games.is_empty())
             {
                 return Some(control);
             }
         }
         let starred = state.library.db.favourite_count();
-        let rows = library_favourite_rows(rect, pinned);
+        let rows = library_favourite_rows(rect, whdload_entry);
         if starred > rows {
-            for (control, arrow) in library_favourite_arrow_rects(rect, pinned) {
+            for (control, arrow) in library_favourite_arrow_rects(rect, whdload_entry) {
                 if arrow.contains(pos) {
                     return Some(control);
                 }
@@ -5930,10 +5936,10 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             .saturating_sub(state.library.favourite_scroll)
             .min(rows)
         {
-            if library_remove_box(rect, pinned, drawn).contains(pos) {
+            if library_remove_box(rect, whdload_entry, drawn).contains(pos) {
                 return Some(UiControl::LauncherLibraryFavouriteRemove(drawn));
             }
-            if library_favourite_row_rect(rect, pinned, drawn).contains(pos) {
+            if library_favourite_row_rect(rect, whdload_entry, drawn).contains(pos) {
                 return Some(UiControl::LauncherLibraryFavouritePick(drawn));
             }
         }
@@ -6007,8 +6013,8 @@ fn draw_library_page(
     scale: usize,
 ) {
     let entries = state.library.games.entries();
-    let pinned = state.setup.whdload_enabled();
-    let games = library_table_rect(rect, pinned);
+    let whdload_entry = state.setup.whdload_enabled();
+    let games = library_table_rect(rect, whdload_entry);
     // A scan running greys both buttons: neither of them can start a
     // second one while the first is going.
     let busy = matches!(
@@ -6028,7 +6034,7 @@ fn draw_library_page(
     draw_library_box(frame, games, scale);
     for (at, title) in [
         (LIBRARY_COL_NAME, "Game"),
-        (library_col_favourite(rect, pinned), "Favourite"),
+        (library_col_favourite(rect, whdload_entry), "Favourite"),
     ] {
         draw_panel_text(
             frame,
@@ -6068,11 +6074,11 @@ fn draw_library_page(
         }
     }
 
-    for drawn in 0..library_visible_rows(rect, pinned) {
+    for drawn in 0..library_visible_rows(rect, whdload_entry) {
         let Some(entry) = entries.get(state.library.scroll + drawn) else {
             break;
         };
-        let row = library_row_rect(rect, pinned, drawn);
+        let row = library_row_rect(rect, whdload_entry, drawn);
         let chosen = state.library.focus == launcher::LibraryFocus::Games
             && state.library.scroll + drawn == state.library.selected;
         if chosen {
@@ -6093,13 +6099,13 @@ fn draw_library_page(
             row.y + 3,
             &truncate_to_width(
                 entry.title(),
-                library_col_favourite(rect, pinned).saturating_sub(LIBRARY_COL_NAME + 12),
+                library_col_favourite(rect, whdload_entry).saturating_sub(LIBRARY_COL_NAME + 12),
             ),
             colour,
             1,
             scale,
         );
-        let tick = library_favourite_box(rect, pinned, drawn);
+        let tick = library_favourite_box(rect, whdload_entry, drawn);
         draw_tick_box(
             frame,
             tick.x,
@@ -6113,9 +6119,9 @@ fn draw_library_page(
         }
     }
 
-    let visible = library_visible_rows(rect, pinned);
+    let visible = library_visible_rows(rect, whdload_entry);
     if entries.len() > visible {
-        for (control, at) in library_arrow_rects(rect, pinned) {
+        for (control, at) in library_arrow_rects(rect, whdload_entry) {
             let up = matches!(control, UiControl::LauncherLibraryScroll(d) if d < 0);
             let live = match up {
                 true => state.library.scroll > 0,
@@ -6126,7 +6132,7 @@ fn draw_library_page(
     }
 
     // The favourites, which are the same games under a shorter heading.
-    let favourites = library_favourites_rect(rect, pinned);
+    let favourites = library_favourites_rect(rect, whdload_entry);
     draw_panel_text(
         frame,
         favourites.x,
@@ -6139,14 +6145,14 @@ fn draw_library_page(
     draw_library_box(frame, favourites, scale);
     for (x, title) in [
         (favourites.x + 4 + LIBRARY_COL_NAME, "Game"),
-        (library_remove_heading_x(rect, pinned), "Remove"),
+        (library_remove_heading_x(rect, whdload_entry), "Remove"),
     ] {
         draw_panel_text(frame, x, favourites.y + 5, title, PANEL_TEXT_DIM, 1, scale);
     }
     // From the database rather than from the library, so a favourite whose
     // package has been deleted is still listed -- and can still be taken
     // off, which is most of the reason its Remove tick is there.
-    let favourite_rows = library_favourite_rows(rect, pinned);
+    let favourite_rows = library_favourite_rows(rect, whdload_entry);
     for (drawn, (key, name)) in state
         .library
         .db
@@ -6155,7 +6161,7 @@ fn draw_library_page(
         .take(favourite_rows)
         .enumerate()
     {
-        let row = library_favourite_row_rect(rect, pinned, drawn);
+        let row = library_favourite_row_rect(rect, whdload_entry, drawn);
         let chosen = state.library.focus == launcher::LibraryFocus::Favourites
             && state.library.favourite_scroll + drawn == state.library.favourite_selected;
         if chosen {
@@ -6177,13 +6183,13 @@ fn draw_library_page(
             row.y + 3,
             &truncate_to_width(
                 name,
-                library_col_favourite(rect, pinned).saturating_sub(LIBRARY_COL_NAME + 12),
+                library_col_favourite(rect, whdload_entry).saturating_sub(LIBRARY_COL_NAME + 12),
             ),
             colour,
             1,
             scale,
         );
-        let tick = library_remove_box(rect, pinned, drawn);
+        let tick = library_remove_box(rect, whdload_entry, drawn);
         draw_tick_box(frame, tick.x, tick.y, false, TICK_GREEN, scale);
         if hover == Some(UiControl::LauncherLibraryFavouriteRemove(drawn)) {
             draw_outline(frame, tick, PANEL_TEXT_HILIGHT, scale);
@@ -6192,7 +6198,7 @@ fn draw_library_page(
 
     let starred = state.library.db.favourite_count();
     if starred > favourite_rows {
-        for (control, at) in library_favourite_arrow_rects(rect, pinned) {
+        for (control, at) in library_favourite_arrow_rects(rect, whdload_entry) {
             let up = matches!(control, UiControl::LauncherLibraryFavouriteScroll(d) if d < 0);
             let live = match up {
                 true => state.library.favourite_scroll > 0,
@@ -6207,7 +6213,7 @@ fn draw_library_page(
     // The two buttons that say when work happens, in the gap between the
     // lists. A third slot is left beside them: the row is sized for three
     // so gaining one later does not move the two that are here.
-    let buttons = library_button_rects(rect, pinned);
+    let buttons = library_button_rects(rect, whdload_entry);
     for (at, (label, control, enabled)) in [
         ("Refresh", UiControl::LauncherLibraryRefresh, !busy),
         // Nothing to look up until the folder has been read, so Scan waits
@@ -6263,7 +6269,7 @@ fn draw_library_box(frame: &mut [u8], at: Rect, scale: usize) {
 /// The cover art box, and what the database says under it.
 #[cfg(feature = "game-library")]
 fn draw_library_cover(frame: &mut [u8], rect: Rect, state: &LauncherState, scale: usize) {
-    let pinned = state.setup.whdload_enabled();
+    let whdload_entry = state.setup.whdload_enabled();
     // The frame is the size the layout reserves, whatever shape the picture
     // in it turns out to be: it is where the eye expects the art to be, and
     // the writing under it starts on the same line for every game.
@@ -6271,13 +6277,13 @@ fn draw_library_cover(frame: &mut [u8], rect: Rect, state: &LauncherState, scale
     // cut for that and the rare landscape scan is letterboxed into it --
     // black above and below beats a frame that changes shape and drags the
     // metadata down the page with it.
-    let widest = library_cover_rect(rect, pinned);
+    let widest = library_cover_rect(rect, whdload_entry);
     let entry = state.library_selection();
     let art = entry
         .and_then(|entry| entry.game.as_ref())
         .and_then(|game| game.front_sha1.as_deref())
         .and_then(|sha1| state.library.covers.get(sha1));
-    let (frame_rect, box_rect) = (widest, library_art_rect(rect, pinned));
+    let (frame_rect, box_rect) = (widest, library_art_rect(rect, whdload_entry));
 
     // The mount: a button-faced border raised out of the panel, with the
     // picture recessed into it. Two bevels facing opposite ways is what
@@ -6329,8 +6335,8 @@ fn draw_library_cover(frame: &mut [u8], rect: Rect, state: &LauncherState, scale
 
     // Under the art: what the database knows, each label dimmed above its
     // value, and a value too long for the column wrapped rather than cut.
-    // Hung off the reserved frame rather than off this cover's, so a short
-    // one does not pull the writing up the page.
+    // It starts under the frame, which is one size for every game, so it
+    // starts on the same line each time whatever shape the picture is.
     // The block stops above the action bar: a developer credited to nine
     // people would otherwise run down over the Run button and off the
     // panel. Each value is held to two lines as well, so one long field
@@ -8112,8 +8118,8 @@ fn draw_launcher(
         scale,
     );
     // Vertical category-tab column.
-    let pinned = state.setup.whdload_enabled();
-    let strip = launcher::tabs(pinned);
+    let whdload_entry = state.setup.whdload_enabled();
+    let strip = launcher::tabs(whdload_entry);
     for (i, &tab) in strip.iter().enumerate() {
         draw_launcher_chip(
             frame,
@@ -9122,8 +9128,8 @@ mod tests {
         };
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::WhdloadLibrary;
-        let pinned = state.setup.whdload_enabled();
-        let rows = library_favourite_rows(rect, pinned);
+        let whdload_entry = state.setup.whdload_enabled();
+        let rows = library_favourite_rows(rect, whdload_entry);
         assert!(rows > 1, "the box holds rows to scroll: {rows}");
 
         // A list that fits has no arrows: the corner is a row's, not a
@@ -9134,7 +9140,7 @@ mod tests {
                 .db
                 .toggle_favourite(&format!("Game{at}.lha"), &format!("Game {at}"));
         }
-        let [(up, up_at), (down, down_at)] = library_favourite_arrow_rects(rect, pinned);
+        let [(up, up_at), (down, down_at)] = library_favourite_arrow_rects(rect, whdload_entry);
         let hit = |state: &LauncherState, at: Rect| {
             launcher_control_at(rect, state, (at.x as i32 + 2, at.y as i32 + 2))
         };
@@ -9148,7 +9154,7 @@ mod tests {
 
         // The rows are drawn positions: scrolled down, the top row is the
         // scroll's, so clicking it removes the right favourite.
-        let first = library_favourite_row_rect(rect, pinned, 0);
+        let first = library_favourite_row_rect(rect, whdload_entry, 0);
         let click = (first.x as i32 + 40, first.y as i32 + 2);
         assert_eq!(
             launcher_control_at(rect, &state, click),
@@ -9165,7 +9171,7 @@ mod tests {
         // And the last drawn row is the last one there is: scrolled to the
         // end, the rows below it are not clickable.
         state.scroll_favourites(100, rows);
-        let past = library_favourite_row_rect(rect, pinned, rows - 1);
+        let past = library_favourite_row_rect(rect, whdload_entry, rows - 1);
         assert_eq!(
             launcher_control_at(rect, &state, (past.x as i32 + 40, past.y as i32 + 2)),
             Some(UiControl::LauncherLibraryFavouritePick(rows - 1))
@@ -11660,9 +11666,9 @@ mod tests {
             };
             let rect = launcher_panel_rect(&ui).expect("the launcher is up");
             if let Some(Panel::Launcher(state)) = ui.panel.as_mut() {
-                let pinned = state.setup.whdload_enabled();
-                state.scroll_library(isize::MAX, library_visible_rows(rect, pinned));
-                state.scroll_favourites(isize::MAX, library_favourite_rows(rect, pinned));
+                let whdload_entry = state.setup.whdload_enabled();
+                state.scroll_library(isize::MAX, library_visible_rows(rect, whdload_entry));
+                state.scroll_favourites(isize::MAX, library_favourite_rows(rect, whdload_entry));
             }
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-whdload-library-scrolled");

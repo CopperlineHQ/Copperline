@@ -5010,7 +5010,7 @@ impl Caret {
 
     /// Pull the caret back inside a line it may now be off the end of --
     /// the focus moved to a shorter field, or the value was replaced.
-    pub fn clamp(&mut self, text: &str) {
+    fn clamp(&mut self, text: &str) {
         self.0 = self.0.min(text.chars().count());
     }
 
@@ -5042,7 +5042,7 @@ impl Caret {
 
     /// The byte offset the caret sits at, which is the end of the string
     /// when it is past the last character.
-    pub fn byte_in(self, text: &str) -> usize {
+    fn byte_in(self, text: &str) -> usize {
         text.char_indices()
             .nth(self.0)
             .map_or(text.len(), |(at, _)| at)
@@ -6223,7 +6223,7 @@ impl LauncherState {
 
     /// Keep the favourites selection and scroll inside a list that may have
     /// shrunk -- a removal here, or a database re-read that dropped some.
-    pub fn clamp_favourites(&mut self) {
+    fn clamp_favourites(&mut self) {
         let last = self.library.db.favourite_count().saturating_sub(1);
         self.library.favourite_selected = self.library.favourite_selected.min(last);
         self.library.favourite_scroll = self.library.favourite_scroll.min(last);

@@ -6261,11 +6261,11 @@ impl App {
             UiControl::LauncherLibraryScroll(delta) => {
                 // How many rows are on screen comes from the panel's own
                 // size, so the scroll stops where the list does.
-                let pinned = self
+                let whdload_entry = self
                     .launcher_state()
                     .is_some_and(|state| state.setup.whdload_enabled());
                 let visible = crate::video::ui::launcher_panel_rect(&self.ui)
-                    .map(|rect| crate::video::ui::library_visible_rows(rect, pinned))
+                    .map(|rect| crate::video::ui::library_visible_rows(rect, whdload_entry))
                     .unwrap_or(1);
                 if let Some(state) = self.launcher_state_mut() {
                     state.scroll_library(delta, visible);
@@ -6307,11 +6307,11 @@ impl App {
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouriteScroll(delta) => {
-                let pinned = self
+                let whdload_entry = self
                     .launcher_state()
                     .is_some_and(|state| state.setup.whdload_enabled());
                 let visible = crate::video::ui::launcher_panel_rect(&self.ui)
-                    .map(|rect| crate::video::ui::library_favourite_rows(rect, pinned))
+                    .map(|rect| crate::video::ui::library_favourite_rows(rect, whdload_entry))
                     .unwrap_or(1);
                 if let Some(state) = self.launcher_state_mut() {
                     state.scroll_favourites(delta, visible);
@@ -7045,11 +7045,11 @@ impl App {
             KeyCode::End => isize::MAX,
             _ => return false,
         };
-        let pinned = self
+        let whdload_entry = self
             .launcher_state()
             .is_some_and(|state| state.setup.whdload_enabled());
         let visible = crate::video::ui::launcher_panel_rect(&self.ui)
-            .map(|rect| crate::video::ui::library_visible_rows(rect, pinned))
+            .map(|rect| crate::video::ui::library_visible_rows(rect, whdload_entry))
             .unwrap_or(1);
         if let Some(state) = self.launcher_state_mut() {
             let rows = match step {
@@ -10496,7 +10496,7 @@ impl App {
                 }
                 if let Some(origin) = panel.disasm_addr {
                     lines.push(ui::DbgLine::plain(format!(
-                        "Disassembly pinned at ${origin:06X} (empty box + Enter follows PC)"
+                        "Disassembly whdload_entry at ${origin:06X} (empty box + Enter follows PC)"
                     )));
                 }
                 let breaks = machine.ui_breaks();

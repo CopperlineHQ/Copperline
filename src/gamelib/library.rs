@@ -28,8 +28,11 @@ pub struct Entry {
     /// it: two `Zool_v1.0.lha` filed under different letters are two
     /// packages, and the bare name cannot tell them apart.
     pub relative: String,
-    /// What the list shows when nothing is known: the file name without
-    /// its extension, which is what a person named it.
+    /// The file name without its extension, which is what a person named
+    /// it. Shown as the title when the scan could not name the package,
+    /// and as the version where a named game is held more than once --
+    /// `.lha` against `.zip` is how it was packed, not which release it
+    /// is, so the extension is no part of either answer.
     pub file_name: String,
     /// What the database says, when the name matched an entry.
     pub game: Option<Game>,
@@ -39,25 +42,15 @@ pub struct Entry {
     /// `CannonFodder2_v1.11_0104`, `_v1.12_Fr_2578`, `_v1.1_De_0241` --
     /// and every one matches the same catalogue entry, so the list shows a
     /// run of rows all reading "Cannon Fodder 2" with nothing to tell them
-    /// apart. Where that happens the page shows a version as well.
+    /// apart. Where that happens to a *named* game the page offers a
+    /// version as well; two packages the scan could not name are two rows
+    /// that say nothing already, and a file name under them adds nothing.
     pub duplicated: bool,
 }
 
 impl Entry {
     /// What to call it: the catalogued name where there is one, and the
     /// file's own otherwise.
-    /// The package's own file name, extension and all.
-    ///
-    /// What tells one version of a game from another: there is no standard
-    /// to how installers name them -- `_v1.12_0104`, `_v1.1_Fr_2578`,
-    /// `_CD32`, `_AGA` -- so the name itself is the only honest answer.
-    pub fn file(&self) -> &str {
-        self.relative
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&self.relative)
-    }
-
     pub fn title(&self) -> &str {
         match &self.game {
             Some(game) => &game.name,

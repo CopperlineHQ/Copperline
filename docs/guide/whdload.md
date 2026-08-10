@@ -89,8 +89,8 @@ not have, the error names the file, size, and checksum it wants.
 ## What gets staged, and where saves live
 
 Each game gets a directory in the **game library** (by default
-`whdload/` inside the per-user configuration directory, e.g.
-`~/.config/copperline/whdload/`):
+`whdload/save/` inside the per-user configuration directory, e.g.
+`~/.config/copperline/whdload/save/`):
 
 ```text
 <library>/<Game>/
@@ -240,8 +240,8 @@ release it is. Edit it in **Update** to whatever tells them apart --
 
 A game held once, with nothing typed, has no version and no row. Neither
 has one the scan could not name: a file name under a row that says
-nothing else is not the answer to which release it is. Two
-lines is what the column shows and what the field accepts.
+nothing else is not the answer to which release it is. Two lines is what
+the column shows and what the field accepts.
 
 ### Turning it off
 
