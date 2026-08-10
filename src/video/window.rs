@@ -6138,6 +6138,14 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
         }
+        // A control may have put a different image in a ROM row (Browse,
+        // Clear, Reset to defaults, Load configuration), so the ROM tab's
+        // identification is brought up to date here, once per click, rather
+        // than on the redraw below: it keys on the path and only opens a file
+        // when a new one is chosen.
+        if let Some(state) = self.launcher_state_mut() {
+            state.sync_rom_notes();
+        }
         self.request_redraw();
     }
 
@@ -8022,7 +8030,10 @@ impl App {
                 .add_filter("Amiga ROM images", &["rom", "bin"])
                 .pick_file();
 
-            let result = (|| -> anyhow::Result<()> {
+            // The identification comes off the bytes already in hand (the
+            // image is handed to the machine straight after), so the OSD and
+            // the log name the Kickstart without re-reading the file.
+            let result = (|| -> anyhow::Result<Option<&'static str>> {
                 let rom = std::fs::read(&main_path)
                     .map_err(|e| anyhow::anyhow!("reading ROM {}: {e}", main_path.display()))?;
                 let ext = match &ext_path {
@@ -8031,17 +8042,35 @@ impl App {
                     })?),
                     None => None,
                 };
-                self.emu.reload_rom(rom, ext)
+                let identified = crate::romdb::describe(&rom).map(|id| id.label());
+                self.emu.reload_rom(rom, ext)?;
+                Ok(identified)
             })();
 
             match result {
-                Ok(()) => {
-                    info!("boot ROM loaded: {}", main_path.display());
+                Ok(identified) => {
+                    let name = display_file_name(&main_path);
+                    let rom_line = crate::config::about_rom_line(&name, identified);
+                    match identified {
+                        Some(id) => info!("boot ROM loaded: {} ({id})", main_path.display()),
+                        None => info!("boot ROM loaded: {}", main_path.display()),
+                    }
+                    self.show_osd(rom_line.clone());
+                    // The About panel's machine lines are cached from the
+                    // configuration; the chip in the machine just changed,
+                    // so its ROM line has to follow the swap.
+                    match self
+                        .about_machine_lines
+                        .iter_mut()
+                        .find(|l| l.starts_with("ROM: "))
+                    {
+                        Some(line) => *line = rom_line,
+                        None => self.about_machine_lines.push(rom_line),
+                    }
                     self.powered_on = true;
                     self.cpu_halted = false;
                     // The cold reset restarts the frame timeline; force a repaint.
                     self.reset_render_pipeline();
-                    self.show_osd(format!("ROM: {}", display_file_name(&main_path)));
                     self.request_redraw();
                 }
                 Err(e) => {

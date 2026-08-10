@@ -123,6 +123,21 @@ file boots identically. A 256 KiB Kickstart 1.x part is mirrored across the
 pairs for the 32-bit machines are not accepted; use the matching single-file
 image instead.
 
+Copperline also names the ROM it is given. A ROM file's name is whatever its
+dumper called it, so the image is identified by checksum against a table of
+the released Amiga boot ROMs -- every Kickstart from 1.0 to 3.2.3, the CD32
+Kickstart and extended ROM, the CDTV/A570 extended ROMs and the A1000
+bootstrap -- and the version is reported as, for example,
+`Kickstart 3.1 (40.68) A1200`. Identification survives the same forms the
+loader accepts (byte-swapped dumps, a 256 KiB part stored doubled), and an
+Amiga Forever image still in its `AMIROMTYPE1` container is reported as
+encrypted rather than unknown. The identification appears in the start-up
+`config:` log line, in the About window's `ROM:` line, in the OSD when a ROM
+is fitted from the menu, and under each path row of the machine-configuration
+screen's ROM tab. The bundled AROS ROM reports itself as `bundled AROS`; any
+other image the table does not carry -- DiagROM, a ROM you built yourself --
+simply goes unnamed and boots as usual.
+
 ## `[machine]` -- machine profiles
 
 ```toml

@@ -2034,6 +2034,13 @@ fn main() -> Result<()> {
     }
     let disk_insert_after = resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?;
 
+    // Name the boot ROM in the banner: a Kickstart image is identified by
+    // checksum (src/romdb.rs), so the log says which Kickstart is booting
+    // rather than only which file was opened.
+    let rom = match config::rom_identification(&cfg.rom_path) {
+        Some(id) => format!("{} ({id})", cfg.rom_path.display()),
+        None => cfg.rom_path.display().to_string(),
+    };
     info!(
         "config: cpu={:?} fpu={} cpu_clock={}MHz chip_ram={}K fast_ram={}K slow_ram={}K z3_ram={}K zorro_boards={} chipset={:?} (agnus={:?} denise={:?}) video={:?} rom={} floppy_drives={}",
         cfg.cpu,
@@ -2048,7 +2055,7 @@ fn main() -> Result<()> {
         cfg.agnus_revision,
         cfg.denise_revision,
         cfg.video_standard,
-        cfg.rom_path.display(),
+        rom,
         cfg.floppy_connected
             .iter()
             .filter(|&&connected| connected)

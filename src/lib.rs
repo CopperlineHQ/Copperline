@@ -81,6 +81,7 @@ pub mod priority;
 pub mod ramsey;
 pub mod recorder;
 pub mod regcheck;
+pub mod romdb;
 pub mod romsearch;
 pub mod romtags;
 pub mod rtc;
