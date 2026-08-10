@@ -326,11 +326,10 @@ impl Database {
     /// so it is a name every filesystem accepts, and prefixed so hand-set
     /// art is never mistaken for a catalogue digest.
     pub fn art_key(file: &str) -> String {
-        let safe: String = file
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        format!("manual-{safe}")
+        // A digest rather than the path with its punctuation flattened:
+        // mapping every separator to `_` makes `A/B.lha` and `A_B.lha` the
+        // same file name, and the two would overwrite each other's cover.
+        format!("manual-{}", crate::gamelib::sha1::hex(file.as_bytes()))
     }
 
     /// How many are marked, so a page can tell an empty list from a
@@ -994,6 +993,25 @@ fn hex(bytes: &[u8; 16]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Two packages that differ only in punctuation get different art.
+    ///
+    /// The key was the path with every separator flattened to `_`, which
+    /// made `A/B.lha` and `A_B.lha` the same file: whichever cover was set
+    /// second replaced the first.
+    #[test]
+    fn art_keys_do_not_collide_on_punctuation() {
+        let a = Database::art_key("A/B.lha");
+        let b = Database::art_key("A_B.lha");
+        assert_ne!(a, b, "two packages share one cover file");
+        assert_eq!(a, Database::art_key("A/B.lha"), "and it is stable");
+        // Still a name every filesystem takes.
+        assert!(a.starts_with("manual-"));
+        assert!(
+            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "{a} is not a safe file name"
+        );
+    }
+
     use super::*;
 
     #[test]
