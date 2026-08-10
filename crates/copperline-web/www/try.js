@@ -6264,8 +6264,8 @@ const pageParams = new URLSearchParams(location.search);
 //     "tint": "green",               starting screen tint (none|bw|green|
 //                                    amber|sepia); same visitor rule
 //     "monitor": "plain",            starting monitor presentation
-//                                    (1084|crt|bezel|plain, default 1084);
-//                                    same visitor rule
+//                                    (1084|classic|crt|cabinet|bezel|plain,
+//                                    default 1084); same visitor rule
 //     "deinterlace": true,           motion-adaptive LACE field merging;
 //                                    off by default for throughput
 //     "phosphor": 0.4,               CRT persistence (0.0..0.95); off by
