@@ -4672,17 +4672,17 @@ function setTintMode(mode, remember) {
 tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 
 // --- display: monitor (CRT shader + bezel) -------------------------------
-// The desktop window's 1084 monitor look, ported to WebGL2: the CRT preset
+// The desktop window's monitor look, ported to WebGL2: the CRT preset
 // (bowed tube face, scanlines, aperture grille, corner vignette - the
-// window's `[display] shader = "crt"`) and a procedural plastic bezel,
-// composed exactly as the desktop composes them: the preset paints the
-// picture into the bezel opening's bounding box first and the bezel frames
-// it on top in frame-only mode, so the moulding's rounded corners and
-// recess clip the preset's square viewport. The GLSL sources in
-// initMonitorGl are line-for-line ports of the desktop's WGSL
-// (src/video/window/shaders/{crt,bezel_classic}.wgsl); keep them in step.
-// The desktop has since grown a second bezel style (`[display] bezel =
-// "1084"`), which this page does not offer - the port here is Classic.
+// window's `[display] shader = "crt"`) and both of the desktop's bezel
+// styles (`[display] bezel = "1084" | "classic"`), composed exactly as
+// the desktop composes them: the preset paints the picture into the bezel
+// opening's bounding box first and the bezel frames it on top in
+// frame-only mode, so the moulding's rounded corners and recess clip the
+// preset's square viewport. The GLSL sources in initMonitorGl are
+// line-for-line ports of the desktop's WGSL
+// (src/video/window/shaders/{crt,bezel_1084,bezel_classic}.wgsl); keep
+// them in step.
 //
 // On by default, like nothing else here, because it is the page's face: a
 // visitor's first frame looks like the monitor the Amiga shipped with.
@@ -4692,38 +4692,70 @@ tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 // hides and the page blits as it always did.
 
 const MONITOR_STORAGE_KEY = 'copperline-monitor';
-const MONITOR_MODES = ['1084', 'crt', 'bezel', 'plain'];
+// Each mode pairs a bezel style (the 1084 cabinet, the Classic frame, or
+// none) with the CRT preset on or off. The desktop keeps the two knobs
+// separate; a flat list keeps the one select simple, and the stored
+// values stable - "bezel" has meant the Classic frame alone since before
+// the 1084 front existed, and "1084" has always been the page's default
+// full-monitor look, which the cabinet now actually is.
+const MONITOR_MODES = ['1084', 'classic', 'crt', 'cabinet', 'bezel', 'plain'];
+const MONITOR_COMPOSITION = {
+  1084: { crt: true, bezel: '1084' },
+  classic: { crt: true, bezel: 'classic' },
+  crt: { crt: true, bezel: null },
+  cabinet: { crt: false, bezel: '1084' },
+  bezel: { crt: false, bezel: 'classic' },
+  plain: { crt: false, bezel: null },
+};
 const MONITOR_LABELS = {
-  1084: '1084 (CRT + bezel)',
+  1084: '1084 (CRT + cabinet)',
+  classic: 'Classic (CRT + bezel)',
   crt: 'CRT filter',
-  bezel: 'Bezel',
+  cabinet: '1084 cabinet',
+  bezel: 'Classic bezel',
   plain: 'Plain',
 };
 let monitorMode = '1084';
 
-// The bezel opening geometry, the desktop's bezel.rs constants: the
-// picture keeps this fraction of the canvas on both axes (so its aspect
-// holds), centred horizontally, sitting high by the top share so the
-// bottom band comes out wider than the top like the 1084's face.
+// The bezel opening geometry, the desktop's bezel.rs constants. The
+// Classic frame keeps this fraction of the canvas on both axes (so the
+// picture's aspect holds), centred horizontally, sitting high by the top
+// share so the bottom band comes out wider than the top.
 const MONITOR_OPENING_SCALE = 0.85;
 const MONITOR_OPENING_TOP_SHARE = 0.42;
+// The 1084 cabinet's vertical proportions (bezel.rs FRAME_*), in units of
+// the opening's height: the opening takes what the top margin, the well
+// below the glass and the chin panel leave of the canvas height, and its
+// width follows at the canvas aspect - both axes come out scaled by the
+// same fraction, and the cabinet's side pillars take the rest.
+const MONITOR_1084_WEIGHT = 0.62;
+const MONITOR_1084_TOP = 0.1905 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_WELL_BOTTOM = 0.1293 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_CHIN = 0.1497 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_OPENING_SCALE =
+  1 / (1 + MONITOR_1084_TOP + MONITOR_1084_WELL_BOTTOM + MONITOR_1084_CHIN);
 // The CRT preset's look parameters, the desktop's uniforms_for table for
 // ShaderKind::Crt: the tube curvature of the 1084's Philips M34EAQ10X
-// datasheet arcs, and the corner falloff.
+// datasheet arcs, the corner falloff, and the radius the preset clips its
+// face corners to (crt.wgsl CORNER_RADIUS), which a bezel's aperture
+// opens to so the moulding always covers the face's own edge.
 const MONITOR_CRT_CURVATURE = 0.3;
 const MONITOR_CRT_VIGNETTE = 0.15;
+const MONITOR_CRT_FACE_RADIUS = 0.0826;
 
 // Screen-tint selector for the shaders' in-picture tint chains, keyed by
 // the tint select's values.
 const MONITOR_TINT_INDEX = { none: 0, bw: 1, green: 2, amber: 3, sepia: 4 };
 
 // The fraction of the canvas element the picture occupies: the bezel
-// opening when a bezel mode is on, the whole element otherwise. Pointer
-// scaling divides by this so mouse speed does not change with the frame.
+// opening when a bezel mode is on, the whole element otherwise. Both
+// styles scale the two axes by the one fraction, so a single number
+// covers pointer scaling, which divides by this so mouse speed does not
+// change with the frame.
 function monitorPictureScale() {
-  return monitorGl && (monitorMode === '1084' || monitorMode === 'bezel')
-    ? MONITOR_OPENING_SCALE
-    : 1;
+  const style = monitorGl ? MONITOR_COMPOSITION[monitorMode].bezel : null;
+  if (style === '1084') return MONITOR_1084_OPENING_SCALE;
+  return style ? MONITOR_OPENING_SCALE : 1;
 }
 
 // Build the WebGL2 monitor renderer, or return null to keep the 2D path
@@ -4894,14 +4926,14 @@ void main() {
 }
 `;
 
-  // The bezel, ported from shaders/bezel_classic.wgsl: the plastic
-  // front frame, with the picture seated in a rounded opening by a
-  // moulded insert, the power LED on the bottom band and the Copperline
+  // The Classic bezel, ported from shaders/bezel_classic.wgsl: the plain
+  // plastic front frame, with the picture seated in a rounded opening by
+  // a moulded insert, the power LED on the bottom band and the Copperline
   // logotype printed on its left. Two modes via u_params.x, exactly as on
   // the desktop: alone (0) the pass draws frame and picture; under the
   // CRT preset (1, frame-only) it discards the opening interior and
   // frames what the preset painted.
-  const FS_BEZEL = `#version 300 es
+  const FS_BEZEL_CLASSIC = `#version 300 es
 ${FS_COMMON}
 uniform vec4 u_opening; // picture opening in viewport UV: xy origin, zw size
 uniform vec4 u_params;  // x: 1 = frame-only, y: the preset's face curvature
@@ -5028,6 +5060,391 @@ void main() {
 }
 `;
 
+  // The 1084 bezel, ported from shaders/bezel_1084.wgsl: the two-tone
+  // cabinet of the monitor the Amiga shipped with - a pale case with a
+  // darker moulding clipped into it, dropping to the tube in a chamfer,
+  // and below it the chin panel with the model badge, the logotype and
+  // the power lamp. Same two modes via u_params.x as the Classic frame.
+  // The page runs the preset at full strength, so the WGSL's strength
+  // fades (params.w) are dropped as the CRT port drops them; u_params.z
+  // is the radius the preset clips its face to, which the aperture opens
+  // to. See the WGSL source for the derivations; comments here mark
+  // web-port differences only.
+  const FS_BEZEL_1084 = `#version 300 es
+${FS_COMMON}
+uniform vec4 u_opening; // picture opening in viewport UV: xy origin, zw size
+uniform vec4 u_params;  // x: 1 = frame-only, y: face curvature, z: face radius
+
+const float FRAME_WEIGHT = 0.62;
+const float FRAME_TOP = 0.1905 * FRAME_WEIGHT;
+const float FRAME_WELL_BOTTOM = 0.1293 * FRAME_WEIGHT;
+const float FRAME_CHIN = 0.1497 * FRAME_WEIGHT;
+const float FRAME_SIDE = 0.2313 * FRAME_WEIGHT;
+const float FRAME_BAND = 0.064 * FRAME_WEIGHT;
+
+const float APERTURE_RADIUS = 0.068;
+const float R_PLASTIC = 0.036;
+const float CHAMFER_SPAN = 0.72;
+const float CHAMFER_SLOPE = 0.80;
+
+const vec3 CASE = vec3(0.5150, 0.5459, 0.5842);
+const vec3 MOULDING = vec3(0.2581, 0.2789, 0.2622);
+const vec3 INK = vec3(0.0, 0.0331, 0.3516);
+const vec3 BADGE_INK = vec3(0.1946, 0.2874, 0.5029);
+const vec3 LAMP = vec3(0.72, 0.035, 0.014);
+const vec3 LAMP_WELL = vec3(0.014, 0.012, 0.012);
+const vec3 LEGEND = vec3(0.10, 0.10, 0.095);
+const vec3 LIGHT = vec3(-0.1, -0.5, 0.86);
+
+float rounded_rect(vec2 p, vec2 half_size, float r) {
+  vec2 q = abs(p) - half_size + vec2(r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+vec2 rounded_rect_grad(vec2 p, vec2 half_size, float r) {
+  vec2 s = sign(p + vec2(1e-6));
+  vec2 q = abs(p) - half_size + vec2(r);
+  if (q.x > 0.0 && q.y > 0.0) return normalize(q) * s;
+  if (q.x > q.y) return vec2(s.x, 0.0);
+  return vec2(0.0, s.y);
+}
+
+float grain(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453) - 0.5;
+}
+
+float tone(vec3 n) {
+  vec3 l = normalize(LIGHT);
+  return 0.42 + 0.58 * clamp(dot(n, l), 0.0, 1.0) / l.z;
+}
+
+vec3 chamfer_normal(vec2 outward, float slope) {
+  return vec3(-outward * sin(slope), cos(slope));
+}
+
+const float LOGO_CAP = 0.27;
+const float LOGO_DROP = 0.56;
+
+const float MARK_SQUASH = 0.84;
+const float MARK_REACH = 1.28;
+const float MARK_MOUTH = 0.44;
+const float MARK_BAR = 0.28;
+const float MARK_SIDE = 0.46;
+
+vec2 mark_field(vec2 d, float r) {
+  float w = r * 0.50;
+  vec2 dd = vec2(d.x / MARK_SQUASH, d.y);
+  float rad = max(length(dd), 1e-4);
+  float wl = w * (1.24 - MARK_SIDE + MARK_SIDE * abs(dd.x / rad));
+  float ring = abs(rad - r) - wl * 0.5;
+  if (dd.x > 0.0 && abs(d.y) < r * MARK_MOUTH) ring = 1.0e6;
+  float bar = rounded_rect(d, vec2(r * MARK_REACH, w * MARK_BAR), w * 0.10);
+  float sd = min(ring, bar);
+  return vec2(1.0 - smoothstep(-0.5, 0.6, sd),
+              clamp(d.y / (2.0 * r) + 0.5, 0.0, 1.0));
+}
+
+float spark(vec2 q, float s, float reach) {
+  float core = pow(1.0 - clamp(length(q) / s, 0.0, 1.0), 2.2);
+  float across = pow(1.0 - clamp(abs(q.x) / (s * reach), 0.0, 1.0), 2.0)
+    * pow(1.0 - clamp(abs(q.y) / (s * 0.30), 0.0, 1.0), 1.4);
+  float down = pow(1.0 - clamp(abs(q.y) / (s * reach * 0.62), 0.0, 1.0), 2.0)
+    * pow(1.0 - clamp(abs(q.x) / (s * 0.26), 0.0, 1.0), 1.4);
+  return clamp(core + 0.85 * across + 0.85 * down, 0.0, 1.0);
+}
+
+float mark_sparks(vec2 d, float r) {
+  float a = spark(d + vec2(r * MARK_REACH, 0.0), r * 0.34, 3.2);
+  float b = spark(d - vec2(r * MARK_REACH, 0.0), r * 0.34, 3.2);
+  float c = 0.58 * spark(d + vec2(r * 0.34, 0.0), r * 0.22, 1.5);
+  return max(max(a, b), c);
+}
+
+const vec3 SPARK_LIGHT = vec3(1.0, 0.8388, 0.7011);
+
+vec3 copper(float t) {
+  vec3 top = vec3(0.3250, 0.0865, 0.0273);
+  vec3 sheen = vec3(0.6105, 0.2346, 0.1022);
+  vec3 mid = vec3(0.2519, 0.0578, 0.0168);
+  vec3 lo = vec3(0.0759, 0.0168, 0.0048);
+  if (t < 0.40) return mix(top, sheen, 1.0 - smoothstep(0.24, 0.40, t));
+  if (t < 0.60) return mix(sheen, mid, smoothstep(0.40, 0.60, t));
+  return mix(mid, lo, smoothstep(0.60, 1.0, t));
+}
+
+const int MARK_COLS = 67;
+const int MARK_ROWS = 11;
+const float MARK_CAP = 9.0;
+const uvec3 MARK[11] = uvec3[11](
+  uvec3(0x0000007cu, 0x0006c000u, 0x00000000u),
+  uvec3(0x00000066u, 0x0006c000u, 0x00000000u),
+  uvec3(0x00000003u, 0x0000c000u, 0x00000000u),
+  uvec3(0x3f3f3e03u, 0xe3b6db3eu, 0x00000003u),
+  uvec3(0x63636303u, 0x37f6df63u, 0x00000006u),
+  uvec3(0x63636303u, 0xf636c37fu, 0x00000007u),
+  uvec3(0x63636303u, 0x3636c303u, 0x00000000u),
+  uvec3(0x63636366u, 0x3636c363u, 0x00000006u),
+  uvec3(0x3f3f3e7cu, 0xe636c33eu, 0x00000003u),
+  uvec3(0x03030000u, 0x00000000u, 0x00000000u),
+  uvec3(0x03030000u, 0x00000000u, 0x00000000u));
+
+const int MODEL_COLS = 43;
+const int MODEL_ROWS = 13;
+const float MODEL_CAP = 13.0;
+const vec2 MODEL_INK = vec2(1.0, 43.0);
+const uvec2 MODEL[13] = uvec2[13](
+  uvec2(0x1f81f838u, 0x00000380u),
+  uvec2(0x3fc3fc3cu, 0x000003e0u),
+  uvec2(0x70e70e3eu, 0x000003b0u),
+  uvec2(0x70e70e38u, 0x00000398u),
+  uvec2(0x70e70e38u, 0x0000038cu),
+  uvec2(0x3fc70e38u, 0x000007feu),
+  uvec2(0x3fc70e38u, 0x000007feu),
+  uvec2(0x3fc70e38u, 0x000007feu),
+  uvec2(0x70e70e38u, 0x00000380u),
+  uvec2(0x70e70e38u, 0x00000380u),
+  uvec2(0x70e70e38u, 0x00000380u),
+  uvec2(0x3fc3fc38u, 0x00000380u),
+  uvec2(0x1f81f838u, 0x00000380u));
+
+const int CAPTION_COLS = 29;
+const int CAPTION_ROWS = 8;
+const float CAPTION_CAP = 7.0;
+const uint CAPTION[8] = uint[8](
+  0x0f7d138fu,
+  0x11051451u,
+  0x11051451u,
+  0x0f3d544fu,
+  0x05055441u,
+  0x0905b441u,
+  0x117d1381u,
+  0x00000000u);
+
+float mark_bit(int c, int r) {
+  if (c < 0 || c >= MARK_COLS || r < 0 || r >= MARK_ROWS) return 0.0;
+  uvec3 bits = MARK[r];
+  if (c < 32) return float((bits.x >> uint(c)) & 1u);
+  if (c < 64) return float((bits.y >> uint(c - 32)) & 1u);
+  return float((bits.z >> uint(c - 64)) & 1u);
+}
+
+float model_bit(int c, int r) {
+  if (c < 0 || c >= MODEL_COLS || r < 0 || r >= MODEL_ROWS) return 0.0;
+  uvec2 bits = MODEL[r];
+  if (c < 32) return float((bits.x >> uint(c)) & 1u);
+  return float((bits.y >> uint(c - 32)) & 1u);
+}
+
+float caption_bit(int c, int r) {
+  if (c < 0 || c >= CAPTION_COLS || r < 0 || r >= CAPTION_ROWS) return 0.0;
+  return float((CAPTION[r] >> uint(c)) & 1u);
+}
+
+float cover(float v00, float v10, float v01, float v11, vec2 t) {
+  return smoothstep(0.34, 0.62, mix(mix(v00, v10, t.x), mix(v01, v11, t.x), t.y));
+}
+
+float mark_sample(vec2 q) {
+  vec2 f = q - 0.5;
+  vec2 base = floor(f);
+  vec2 t = f - base;
+  int c = int(base.x);
+  int r = int(base.y);
+  return cover(
+    mark_bit(c, r), mark_bit(c + 1, r), mark_bit(c, r + 1), mark_bit(c + 1, r + 1), t);
+}
+
+float model_sample(vec2 q) {
+  vec2 f = q - 0.5;
+  vec2 base = floor(f);
+  vec2 t = f - base;
+  int c = int(base.x);
+  int r = int(base.y);
+  return cover(
+    model_bit(c, r), model_bit(c + 1, r), model_bit(c, r + 1), model_bit(c + 1, r + 1), t);
+}
+
+float caption_sample(vec2 q) {
+  vec2 f = q - 0.5;
+  vec2 base = floor(f);
+  vec2 t = f - base;
+  int c = int(base.x);
+  int r = int(base.y);
+  return cover(
+    caption_bit(c, r), caption_bit(c + 1, r),
+    caption_bit(c, r + 1), caption_bit(c + 1, r + 1), t);
+}
+
+bool on_text(vec2 q, int cols, int rows) {
+  return all(greaterThan(q, vec2(-1.0)))
+    && all(lessThan(q, vec2(float(cols), float(rows)) + 1.0));
+}
+
+vec3 chin(vec2 px, vec2 case_org, vec2 case_size, vec2 moulding_org,
+          vec2 opening, float top, vec3 base) {
+  float h = case_org.y + case_size.y - top;
+  vec3 col = base * 1.02;
+
+  float below = px.y - top;
+  col *= mix(0.46, 1.0, smoothstep(0.0, 0.085 * h, below));
+  col *= 1.0 + 0.07 * (1.0 - smoothstep(0.10 * h, 0.26 * h, below));
+
+  float power_right = opening.x + opening.y;
+  float power_left = power_right - 0.066 * case_size.x;
+  float joints[3] = float[3](case_org.x + 0.340 * case_size.x, power_left, power_right);
+  for (int i = 0; i < 3; i++) {
+    col *= mix(0.66, 1.0, smoothstep(0.0, 1.5, abs(px.x - joints[i]) - 0.5));
+  }
+
+  float mid = top + h * 0.50;
+
+  float bs = h * 0.38 / MODEL_CAP;
+  float bcap = 0.5 * MODEL_CAP * bs;
+  float ink_w = (MODEL_INK.y - MODEL_INK.x) * bs;
+  vec2 bhalf = vec2(ink_w * 0.5 + bcap * 1.56, bcap * 1.20);
+  vec2 bc = vec2(moulding_org.x + bhalf.x, mid);
+  vec2 borg = vec2(bc.x - ink_w * 0.5 - MODEL_INK.x * bs, mid - bcap);
+  float db = rounded_rect(px - bc, bhalf, bs * 0.8);
+  col *= mix(0.78, 1.0, smoothstep(0.0, 1.4, abs(db) - 0.6));
+  if (db < 0.0) col *= 0.99;
+  if (2.0 * bcap >= 7.0) {
+    vec2 q = (px - borg) / bs;
+    if (on_text(q, MODEL_COLS, MODEL_ROWS)) {
+      col = mix(col, BADGE_INK, model_sample(q));
+    }
+  }
+
+  float logo_mid = top + h * LOGO_DROP;
+  float ls = h * LOGO_CAP / MARK_CAP;
+  float lw = float(MARK_COLS) * ls;
+  float mr = h * LOGO_CAP * 0.62;
+  float mark_w = 2.0 * MARK_REACH * mr;
+  float gap = mr * 0.42;
+  float gx = case_org.x + case_size.x * 0.47 - (mark_w + gap + lw) * 0.5;
+  if (ls >= 0.6) {
+    vec2 d = px - vec2(gx + mark_w * 0.5, logo_mid);
+    vec2 m = mark_field(d, mr);
+    if (m.x > 0.0) col = mix(col, copper(m.y), m.x);
+    float glint = mark_sparks(d, mr);
+    if (glint > 0.0) col = mix(col, SPARK_LIGHT, 0.92 * glint);
+    vec2 lorg = vec2(gx + mark_w + gap, logo_mid - 0.5 * MARK_CAP * ls);
+    vec2 q = (px - lorg) / ls;
+    if (on_text(q, MARK_COLS, MARK_ROWS)) {
+      col = mix(col, INK, 0.95 * mark_sample(q));
+    }
+  }
+
+  float pcx = (power_left + power_right) * 0.5;
+  vec2 lamp_c = vec2(pcx, top + h * 0.24);
+  float lamp_h = max(h * 0.085, 1.0);
+  float win = rounded_rect(px - lamp_c, vec2(lamp_h * 2.1, lamp_h), lamp_h * 0.4);
+  col = mix(col, LAMP_WELL, 1.0 - smoothstep(-0.7, 0.7, win));
+  float led = rounded_rect(px - lamp_c, vec2(lamp_h * 1.5, lamp_h * 0.5), lamp_h * 0.25);
+  col = mix(col, LAMP, 1.0 - smoothstep(-0.5, 0.8, led));
+
+  float ps = h * 0.145 / CAPTION_CAP;
+  if (ps >= 0.42) {
+    float weight = 0.7 * mix(0.55, 1.0, smoothstep(0.42, 0.95, ps));
+    vec2 corg = vec2(pcx - float(CAPTION_COLS) * ps * 0.5, top + h * 0.46);
+    vec2 q = (px - corg) / ps;
+    if (on_text(q, CAPTION_COLS, CAPTION_ROWS)) {
+      col = mix(col, LEGEND, weight * caption_sample(q));
+    }
+  }
+
+  float sr = max(h * 0.13, 1.4);
+  vec2 d = px - vec2(pcx, top + h * 0.76);
+  float ring = abs(length(d) - sr) - sr * 0.15;
+  float bar = rounded_rect(d + vec2(0.0, sr * 0.34),
+                           vec2(sr * 0.14, sr * 0.60), sr * 0.13);
+  float standby = min(ring, bar);
+  if (d.y < 0.0 && abs(d.x) < sr * 0.40) standby = bar;
+  return mix(col, LEGEND, 0.8 * (1.0 - smoothstep(-0.4, 0.7, standby)));
+}
+
+void main() {
+  vec2 vp = u_size.xy;
+  vec2 px = v_uv * vp;
+
+  vec2 o_org = u_opening.xy * vp;
+  vec2 o_size = u_opening.zw * vp;
+  vec2 o_half = max(o_size * 0.5, vec2(1.0));
+  vec2 centre = o_org + o_half;
+  vec2 p = px - centre;
+  float unit = o_size.y;
+
+  vec2 case_org = vec2(0.0);
+  vec2 case_size = vp;
+  float chin_top = vp.y - FRAME_CHIN * unit;
+
+  float k = u_params.y;
+  float fa = o_half.y / max(o_half.x, 1.0);
+  vec2 cn = p / o_half;
+  float q = k * 0.25;
+  float r2 = cn.x * cn.x + cn.y * cn.y * fa * fa;
+  vec2 m = vec2(1.0 + q, 1.0 + q * fa * fa);
+  vec2 wc = cn * (1.0 + q * r2) / m;
+  vec2 fh = vec2(1.0, fa);
+  vec2 gp = wc * fh;
+  float r_aperture = max(APERTURE_RADIUS, u_params.z);
+  float d_glass = rounded_rect(gp, fh, r_aperture) * o_half.x;
+  vec2 n_glass = rounded_rect_grad(gp, fh, r_aperture);
+  float aa = max(fwidth(d_glass), 1e-4);
+
+  if (u_params.x > 0.5 && d_glass < 0.0) discard;
+
+  vec2 c_half = case_size * 0.5;
+  vec2 cp = px - (case_org + c_half);
+  float r_plastic = R_PLASTIC * unit;
+  float d_case = rounded_rect(cp, c_half, r_plastic);
+  float aa_case = max(fwidth(d_case), 1e-4);
+
+  float m_side = (FRAME_SIDE - FRAME_BAND) * unit;
+  vec2 m_org = vec2(o_org.x - m_side, FRAME_BAND * unit);
+  vec2 m_half = vec2(o_size.x * 0.5 + m_side, (chin_top - m_org.y) * 0.5);
+  vec2 mp = px - (m_org + m_half);
+  float d_moulding = rounded_rect(mp, m_half, r_plastic);
+
+  float up = clamp((px.y - case_org.y) / max(case_size.y, 1.0), 0.0, 1.0);
+  float g = 1.0 + 0.018 * grain(floor(px));
+  vec3 case_plastic = CASE * mix(1.06, 0.94, pow(up, 0.75)) * g;
+  vec3 moulding_plastic = MOULDING * mix(1.03, 0.96, up) * g;
+
+  vec2 pic_uv = clamp((v_uv - u_opening.xy) / max(u_opening.zw, vec2(1e-4)),
+                      0.0, 1.0);
+  vec3 picture = sample_display(pic_uv);
+
+  vec3 frame;
+  if (px.y >= chin_top) {
+    frame = chin(px, case_org, case_size, m_org,
+                 vec2(o_org.x, o_size.x), chin_top, case_plastic);
+  } else if (d_moulding >= 0.0) {
+    frame = case_plastic * mix(0.50, 1.0, smoothstep(0.0, 1.8, d_moulding - 0.6));
+    frame *= 1.0 + 0.06 * (1.0 - smoothstep(1.8, 4.0, d_moulding));
+  } else {
+    float span = max(d_glass - d_moulding, 1e-3);
+    float t = clamp(d_glass / span, 0.0, 1.0);
+    float roll = smoothstep(CHAMFER_SPAN - 0.04, CHAMFER_SPAN + 0.04, t);
+    vec3 n = normalize(mix(chamfer_normal(n_glass, CHAMFER_SLOPE),
+                           vec3(0.0, 0.0, 1.0), roll));
+    float occ = mix(0.82, 1.0, smoothstep(0.0, CHAMFER_SPAN, t));
+    frame = moulding_plastic * tone(n) * occ;
+    frame *= mix(0.68, 1.0, smoothstep(0.0, 0.026 * unit, -d_moulding));
+    frame *= mix(0.62, 1.0, smoothstep(0.0, 0.008 * unit, d_glass));
+  }
+
+  vec2 n_case = rounded_rect_grad(cp, c_half, r_plastic);
+  frame *= 1.0 - 0.34 * smoothstep(-0.012 * unit, 0.0, d_case);
+  frame *= 1.0 + 0.42 * max(-n_case.y, 0.0)
+    * smoothstep(-0.018 * unit, -0.004 * unit, d_case);
+
+  vec3 inner = u_params.x > 0.5 ? vec3(0.0) : picture;
+  vec3 col = mix(inner, frame, clamp(d_glass / aa + 0.5, 0.0, 1.0));
+  col = mix(col, vec3(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
+  fragColor = vec4(srgb_encode(col), 1.0);
+}
+`;
+
   const program = (fsSrc, label) => {
     const compile = (type, src) => {
       const sh = gl.createShader(type);
@@ -5054,11 +5471,21 @@ void main() {
     return { prog, u };
   };
 
-  const renderer = { gl, tex: null, texW: 0, texH: 0, plain: null, crt: null, bezel: null };
+  const renderer = {
+    gl,
+    tex: null,
+    texW: 0,
+    texH: 0,
+    plain: null,
+    crt: null,
+    bezel1084: null,
+    bezelClassic: null,
+  };
   const build = () => {
     renderer.plain = program(FS_PLAIN, 'monitor plain');
     renderer.crt = program(FS_CRT, 'monitor crt');
-    renderer.bezel = program(FS_BEZEL, 'monitor bezel');
+    renderer.bezel1084 = program(FS_BEZEL_1084, 'monitor 1084 bezel');
+    renderer.bezelClassic = program(FS_BEZEL_CLASSIC, 'monitor classic bezel');
     renderer.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, renderer.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -5197,12 +5624,13 @@ function monitorDraw(width, rows, crtLines) {
     canvas.width = w;
     canvas.height = h;
   }
-  const crtOn = (monitorMode === '1084' || monitorMode === 'crt') && crtLines > 0;
-  const bezelOn = monitorMode === '1084' || monitorMode === 'bezel';
+  const comp = MONITOR_COMPOSITION[monitorMode];
+  const crtOn = comp.crt && crtLines > 0;
+  const bezelStyle = comp.bezel;
   // The effect passes resample through a linear filter like the desktop's
   // shader sampler (part of the tube look); the plain blit keeps the 2D
   // path's crisp nearest scale.
-  const filter = crtOn || bezelOn ? gl.LINEAR : gl.NEAREST;
+  const filter = crtOn || bezelStyle ? gl.LINEAR : gl.NEAREST;
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   const tint = MONITOR_TINT_INDEX[tintMode] ?? 0;
@@ -5224,20 +5652,38 @@ function monitorDraw(width, rows, crtLines) {
     gl.uniform4f(p.u.u_params2, MONITOR_CRT_VIGNETTE, 0, 0, 0);
   };
 
-  if (bezelOn) {
+  if (bezelStyle) {
     // The desktop composition (window.rs): with the preset on it paints
     // the picture into the opening's bounding box first, and the bezel
     // follows in frame-only mode, clipping the preset's square viewport
     // with its rounded moulding; alone, the one bezel pass draws both
-    // frame and picture.
-    const ow = Math.round(w * MONITOR_OPENING_SCALE);
-    const oh = Math.round(h * MONITOR_OPENING_SCALE);
-    const ox = Math.round((w - ow) * 0.5);
-    const oy = Math.round((h - oh) * MONITOR_OPENING_TOP_SHARE);
+    // frame and picture. The opening is the style's opening_rect
+    // (bezel.rs): the Classic frame scales the canvas about both axes;
+    // the 1084 cabinet spends the height on the design's vertical
+    // proportions and keeps the picture's aspect for the width.
+    let ox, oy, ow, oh;
+    if (bezelStyle === '1084') {
+      oh = Math.round(h * MONITOR_1084_OPENING_SCALE);
+      ow = Math.round(oh * (w / h));
+      ox = Math.round((w - ow) * 0.5);
+      oy = Math.round(MONITOR_1084_TOP * oh);
+    } else {
+      ow = Math.round(w * MONITOR_OPENING_SCALE);
+      oh = Math.round(h * MONITOR_OPENING_SCALE);
+      ox = Math.round((w - ow) * 0.5);
+      oy = Math.round((h - oh) * MONITOR_OPENING_TOP_SHARE);
+    }
     if (crtOn) draw(monitorGl.crt, ox, oy, ow, oh, crtUniforms);
-    draw(monitorGl.bezel, 0, 0, w, h, (p) => {
+    const bezelProg = bezelStyle === '1084' ? monitorGl.bezel1084 : monitorGl.bezelClassic;
+    draw(bezelProg, 0, 0, w, h, (p) => {
       gl.uniform4f(p.u.u_opening, ox / w, oy / h, ow / w, oh / h);
-      gl.uniform4f(p.u.u_params, crtOn ? 1.0 : 0.0, crtOn ? MONITOR_CRT_CURVATURE : 0.0, 0, 0);
+      gl.uniform4f(
+        p.u.u_params,
+        crtOn ? 1.0 : 0.0,
+        crtOn ? MONITOR_CRT_CURVATURE : 0.0,
+        crtOn ? MONITOR_CRT_FACE_RADIUS : 0.0,
+        0,
+      );
     });
   } else if (crtOn) {
     draw(monitorGl.crt, 0, 0, w, h, crtUniforms);
@@ -5287,7 +5733,7 @@ monitorSel.addEventListener('change', () => setMonitorMode(monitorSel.value, tru
 // to reapply.
 function syncShellChrome() {
   if (!monitorGl || isFullscreen()) return;
-  const bezelOn = monitorMode === '1084' || monitorMode === 'bezel';
+  const bezelOn = MONITOR_COMPOSITION[monitorMode].bezel !== null;
   shell.style.borderColor = bezelOn ? 'transparent' : '';
 }
 
@@ -5818,8 +6264,8 @@ const pageParams = new URLSearchParams(location.search);
 //     "tint": "green",               starting screen tint (none|bw|green|
 //                                    amber|sepia); same visitor rule
 //     "monitor": "plain",            starting monitor presentation
-//                                    (1084|crt|bezel|plain, default 1084);
-//                                    same visitor rule
+//                                    (1084|classic|crt|cabinet|bezel|plain,
+//                                    default 1084); same visitor rule
 //     "deinterlace": true,           motion-adaptive LACE field merging;
 //                                    off by default for throughput
 //     "phosphor": 0.4,               CRT persistence (0.0..0.95); off by

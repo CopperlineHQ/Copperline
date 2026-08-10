@@ -50,17 +50,19 @@ visit boots it with no picker round trip -- the boot button simply reads
 a **Forget** button that puts the boot button back on AROS.
 
 Five more controls shape what the glass shows without touching the
-machine. **Monitor** is the desktop window's 1084 presentation, on by
+machine. **Monitor** is the desktop window's monitor presentation, on by
 default: the CRT shader preset (bowed tube face, scanlines, aperture
-grille, corner vignette -- the desktop's `[display] shader = "crt"`) with
-the picture seated in a moulded plastic bezel -- the desktop's Classic
-frame; the page does not offer its 1084 one --
-rendered through WebGL2 at display resolution. *CRT filter* and *Bezel*
-select either half alone, and *Plain* is the undecorated blit the page
-always had -- also what a browser without WebGL2 falls back to (the
-select hides there). As on the desktop, the CRT pass suspends itself on
-programmable scans, which have no 15 kHz line structure to draw; the
-bezel stays. The selected monitor fronts the page before anything boots
+grille, corner vignette -- the desktop's `[display] shader = "crt"`)
+with the picture seated in one of the desktop's two bezel styles
+(`[display] bezel`), rendered through WebGL2 at display resolution.
+*1084* pairs the preset with the two-tone 1084 cabinet -- moulding, model
+badge, logotype and power lamp -- and *Classic* with the plain rounded
+frame Copperline drew before the 1084 arrived. *CRT filter*, *1084
+cabinet* and *Classic bezel* select each half alone, and *Plain* is the
+undecorated blit the page always had -- also what a browser without
+WebGL2 falls back to (the select hides there). As on the desktop, the
+CRT pass suspends itself on programmable scans, which have no 15 kHz
+line structure to draw; the bezel stays. The selected monitor fronts the page before anything boots
 too -- the powered-off tube, dark glass in the moulded frame, rather
 than a bare black rectangle -- and while a bezel mode is up the page
 shell's own thin border around the canvas hides, since the moulded case
@@ -689,10 +691,12 @@ elements, and pages without them are untouched:
   a shell-hosted checkbox the input element is hidden, so a shell can
   drop the whole labelled row with a
   `.row:has(> input[hidden]) { display: none }` rule.
-- `#monitor` (a `<select>` with option values `1084`, `crt`, `bezel`,
-  and `plain`): the monitor presentation (**Monitor** on the hosted
-  page), the desktop window's CRT shader preset and 1084 bezel rendered
-  through WebGL2. Defaults to `1084` (both together), self-inserting,
+- `#monitor` (a `<select>` with option values `1084`, `classic`, `crt`,
+  `cabinet`, `bezel`, and `plain`): the monitor presentation (**Monitor**
+  on the hosted page), the desktop window's CRT shader preset and its two
+  bezel styles rendered through WebGL2 -- `1084` and `classic` pair the
+  preset with the 1084 cabinet or the Classic frame, `cabinet` and
+  `bezel` are those frames alone. Defaults to `1084`, self-inserting,
   applied live including to a paused machine -- and to the powered-off
   monitor a page shows before boot -- and remembered in the browser like
   `#overscan`. While a bezel mode is up the glue makes the shell's
@@ -844,10 +848,10 @@ already serves); `df0` is any URL the visitor's browser may fetch, like
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
 to show it. `overscan`, `tint`, and `monitor` (the CRT + bezel
-presentation: `1084`, `crt`, `bezel`, or `plain`) are starting points for
-first-time visitors only: all three are per-browser viewing preferences
-the glue remembers, and a visitor's own remembered choice wins over the
-file. `serial_url` and `serial_raw` preset the
+presentation: `1084`, `classic`, `crt`, `cabinet`, `bezel`, or `plain`)
+are starting points for first-time visitors only: all three are
+per-browser viewing preferences the glue remembers, and a visitor's own
+remembered choice wins over the file. `serial_url` and `serial_raw` preset the
 serial bridge's inputs and therefore need those elements: a shell
 without them has no connect button to dial with either. `joy` picks the
 starting joystick mode. `background_run` starts first-time visitors with
