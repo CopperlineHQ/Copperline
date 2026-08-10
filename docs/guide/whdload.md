@@ -161,7 +161,9 @@ than being stretched to fill it.
 
 Point **Game library** at a folder of packages. It is searched all the
 way down, so a collection filed by letter or by genre works, and it can
-hold `.lha` files, zips and folders mixed together.
+hold `.lha` files, zips and folders mixed together. That setting is the
+whole list: clear it and there are no games, whatever `--whdload` or
+**Launch game** happens to point at.
 
 Nothing scans on its own. A folder of several thousand packages takes
 long enough to read that a page which did it whenever you opened a tab

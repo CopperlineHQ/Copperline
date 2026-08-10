@@ -6009,16 +6009,18 @@ impl LauncherState {
     /// pointing at any package still lists its neighbours. The library
     /// wins where both are set: it is the deliberate answer to "where are
     /// my games", and the other is a guess from one of them.
+    /// The folder the Library page lists, which is the one that was set
+    /// and nothing else.
+    ///
+    /// It used to fall back to the folder holding the chosen game, so that
+    /// pointing at a package listed its neighbours. That made Clear look
+    /// broken -- emptying the setting left the list full of whatever sat
+    /// beside the launch game -- and it hid the one thing the empty page
+    /// has to say, which is where to set the folder.
     pub fn library_folder(&self) -> Option<PathBuf> {
         self.setup
             .path(F::WhdloadGames)
             .map(std::path::Path::to_path_buf)
-            .or_else(|| {
-                self.setup
-                    .path(F::WhdloadGame)
-                    .and_then(|game| game.parent())
-                    .map(std::path::Path::to_path_buf)
-            })
     }
 
     pub fn library_selection(&self) -> Option<&crate::gamelib::Entry> {

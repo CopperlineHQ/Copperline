@@ -10,10 +10,10 @@
 //! from that -- so the same list comes back every time the page is opened,
 //! and comes back after a restart.
 //!
-//! Without a game library set, the folder holding the chosen game stands
-//! in, so pointing at any package still lists its neighbours. There is no
-//! separate setting for it: a second path to keep in step with the first is
-//! a way for the two to disagree.
+//! With no game library set there is no list: the page says so and says
+//! where to set one. It used to stand in the folder holding the chosen
+//! game, which read as Clear doing nothing -- emptying the setting left
+//! the list full of whatever sat beside the launch game.
 
 use std::path::{Path, PathBuf};
 
