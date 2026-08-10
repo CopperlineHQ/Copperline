@@ -148,11 +148,9 @@ const MAX_ARCHIVE: u64 = 64 << 20;
 
 fn fetch(url: &str) -> Result<Vec<u8>, Error> {
     use std::io::Read;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(120)))
-        .user_agent(concat!("Copperline/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
+    // Longer than the API's timeout: this is a couple of megabytes over
+    // somebody's home connection, not a request for a record.
+    let agent = super::http::agent(std::time::Duration::from_secs(120));
     let mut response = agent
         .get(url)
         .call()

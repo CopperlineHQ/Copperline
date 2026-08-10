@@ -283,26 +283,10 @@ fn inflate(body: &[u8]) -> Result<String> {
 /// The client every request goes through.
 ///
 /// TLS is verified against the Mozilla root set `webpki-roots` bundles --
-/// not the platform's store -- so it behaves the same on every host. Which
-/// implementation gets there differs: rustls everywhere but Windows, where
-/// it is the OS's own schannel, because rustls's crypto provider needs a C
-/// toolchain that an ARM64 Windows box does not have by default (see the
-/// two ureq entries in Cargo.toml). ureq never picks native-tls on its own,
-/// so Windows has to name it.
-///
-/// The timeout is global, so a connection that stalls mid-transfer ends
-/// rather than holding a worker for ever.
+/// not the platform's store -- so it behaves the same on every host, and
+/// which implementation gets there is [`http::agent`]'s business.
 fn agent() -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .user_agent(concat!("Copperline/", env!("CARGO_PKG_VERSION")));
-    #[cfg(windows)]
-    let config = config.tls_config(
-        ureq::tls::TlsConfig::builder()
-            .provider(ureq::tls::TlsProvider::NativeTls)
-            .build(),
-    );
-    config.build().into()
+    super::http::agent(TIMEOUT)
 }
 
 /// `application/x-www-form-urlencoded`, escaping everything that is not

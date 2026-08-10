@@ -16,6 +16,7 @@
 
 pub mod cover;
 pub mod db;
+pub mod http;
 pub mod library;
 pub mod openretro;
 pub mod scan;
