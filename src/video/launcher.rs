@@ -272,7 +272,7 @@ impl LauncherTab {
             LauncherTab::HostFs => "Host Folder",
             LauncherTab::Whdload => "WHDLoad",
             // The strip's own name for it. Inside the WHDLoad pages the
-            // nav chips say Configuration and Library, from their own
+            // nav chips say Settings... and Library, from their own
             // labels, so this one is free to say which tab it is.
             #[cfg(feature = "game-library")]
             LauncherTab::WhdloadLibrary => "WHDLoad",
@@ -382,7 +382,7 @@ const WHDLOAD_NAV: &[(&str, LauncherTab)] = &[
     // The library first: it is what the strip entry opens on, and what
     // somebody is there for. The settings behind it are one click away.
     ("Library", LauncherTab::WhdloadLibrary),
-    ("Configuration", LauncherTab::Whdload),
+    ("Settings...", LauncherTab::Whdload),
 ];
 
 const CREATE_NAV: &[(&str, LauncherTab)] = &[
@@ -925,7 +925,7 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
-// The WHDLoad Configuration page: the game to launch, then what staging
+// The WHDLoad Settings page: the game to launch, then what staging
 // draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
 // whole host path shows; the staged volumes mount under fixed names
 // (WHDBoot:/WHDGame:), so there is no volume box to fill.
@@ -936,7 +936,7 @@ const CD_ROWS: [Row; 3] = [
 // build loads in a slim one without losing them.
 #[cfg(not(feature = "game-library"))]
 const WHDLOAD_ROWS: [Row; 8] = [
-    section_header("WHDLoad Configuration:"),
+    section_header("WHDLoad Settings:"),
     // What to boot, and how: what a person changes per game.
     row(F::WhdloadGame, "Launch game", Drive),
     row(F::WhdloadMachine, "Machine type", Cycle),
@@ -949,7 +949,7 @@ const WHDLOAD_ROWS: [Row; 8] = [
 ];
 #[cfg(feature = "game-library")]
 const WHDLOAD_ROWS: [Row; 10] = [
-    section_header("WHDLoad Configuration:"),
+    section_header("WHDLoad Settings:"),
     // What to boot, and how: what a person changes per game.
     row(F::WhdloadGame, "Launch game", Drive),
     row(F::WhdloadMachine, "Machine type", Cycle),
@@ -8941,7 +8941,7 @@ mod tests {
         );
         let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
         // What to boot and how first, then the places things live.
-        let mut want = vec!["WHDLoad Configuration:", "Launch game", "Machine type"];
+        let mut want = vec!["WHDLoad Settings:", "Launch game", "Machine type"];
         if cfg!(feature = "game-library") {
             want.push("OpenRetro");
         }

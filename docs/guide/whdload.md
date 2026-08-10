@@ -68,7 +68,7 @@ saves. Delete one and press Refresh and it goes.
   freeware since release 18.2) and the Soft-Kicker package
   (`skick346.lha`) whose `.RTB` relocation tables accompany the raw
   Kickstart images. Building from source, fetch them once with
-  `tools/fetch-whdload.sh`, or press **Download** on the Configuration
+  `tools/fetch-whdload.sh`, or press **Download** on the Settings
   page; `COPPERLINE_WHDBOOT_DIR` points at a directory holding them if
   you keep them elsewhere.
 
@@ -138,7 +138,7 @@ A4000 instead. `machine_type = "copperline"` makes that the rule rather
 than the exception: the package boots on whatever machine the
 configuration describes.
 
-**Machine type** on the Configuration page is the same setting. It cycles
+**Machine type** on the Settings page is the same setting. It cycles
 between `Auto` and `Copperline`, and since neither word says what it does,
 pressing it puts the answer on the status line for a few seconds:
 "WHDLoad uses the Slave file machine type...", or "WHDLoad uses the
@@ -152,7 +152,7 @@ is scriptable and deterministic like any other Copperline run.
 
 The launcher's **WHDLoad** entry opens on the Library: the packages in
 your game folder, with their metadata and cover art, and a second list of
-favourites. **Configuration** is the other half, on the same nav row.
+favourites. **Settings...** is the other half, on the same nav row.
 
 The cover frame is one size for every game, so the writing under it starts
 on the same line each time. Amiga box art is portrait almost without
@@ -210,7 +210,7 @@ metadata editor is for.
 
 ### Signing in to OpenRetro
 
-**Log in** on the Configuration page. An account is free, and it is only
+**Log in** on the Settings page. An account is free, and it is only
 needed to sync the game database -- cover art is public.
 
 Nothing is stored. The password is traded for a token and wiped, the
