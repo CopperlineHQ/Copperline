@@ -262,10 +262,17 @@ pub fn decode_page(data: &[u8]) -> Result<Vec<Record>> {
 ///
 /// Compressed data is a ratio, not a size: the page it arrives in is
 /// bounded, but a thousand-to-one stream turns ten megabytes of page into
-/// ten gigabytes of string. A catalogue entry is a few hundred bytes and
-/// the largest seen is a few kilobytes, so this is a hundredfold headroom
-/// and still nowhere near enough to hurt.
-const MAX_RECORD: u64 = 1 << 20;
+/// ten gigabytes of string. This is the guard against that, and nothing
+/// else -- it is not a statement about what a sensible record looks like.
+///
+/// Measured over the whole catalogue rather than guessed: 22,420 records
+/// across 45 pages, median 829 bytes, 99th percentile 33 KB -- and exactly
+/// one record of 6.38 MiB, a 2013 import carrying an enormous file list.
+/// The first cap was 1 MiB, written from what an incremental sync happened
+/// to contain, and that one record failed every full sync there has ever
+/// been. This is a little over twice the largest real record, and still
+/// three orders of magnitude short of anything that could hurt.
+const MAX_RECORD: u64 = 16 << 20;
 
 /// Undo the zlib wrapper a record's JSON arrives in.
 fn inflate(body: &[u8]) -> Result<String> {
