@@ -18,7 +18,7 @@
 //! the host has no equivalent for (Help, both Amiga keys, $2B), and a
 //! session driven entirely by the mouse.
 
-use super::statusbar::{draw_rect_bevel, fill_rect};
+use super::statusbar::{blend_pixel, draw_rect_bevel, fill_rect};
 use super::Rect;
 use super::{
     texture_height, texture_width, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE,
@@ -1121,108 +1121,73 @@ fn blit_glyph(
 
 // The Amiga key's mark: a capital A leaning to the right.
 //
-// Drawn from its own geometry in canvas pixels rather than from a font
-// cell scaled by whole font pixels. The font has no italic, and shearing
-// an upright A by a whole font pixel per row turns each stroke into a
-// staircase of blocks; laid out this way each stroke is a straight line
-// whose lean only ever steps a single pixel at a time.
+// The three strokes are capsules (line segments with a stroke radius) and
+// each pixel is painted with its analytic coverage of them -- distance to
+// the nearest stroke, resolved at the texture's own resolution and blended
+// through an antialiased edge. Whole-pixel masks were tried twice and both
+// read as staircases: the font's A sheared by whole font pixels, and a
+// canvas-pixel mask whose 1 px steps became scale-sized blocks.
 
 /// How tall the mark is, in canvas pixels: half a key, which leaves the
 /// moulding around it on a 1u cap.
 const AMIGA_H: usize = KEY_UNIT / 2;
-/// How far the apex stands right of the foot -- a quarter of the height,
-/// the lean an Amiga keycap's A wears.
-const AMIGA_SHEAR: usize = AMIGA_H / 4;
-/// Half the spread of the legs at the foot.
-const AMIGA_HALF: usize = AMIGA_H * 2 / 5;
-/// Stroke weight. Three rather than two so the left key's outline has
-/// something inside its contour: the outline of a two-pixel stroke is the
-/// whole stroke, and the two marks would come out identical.
+/// Stroke weight, in canvas pixels. Three rather than two so the left
+/// key's outline ring has an interior to be hollow around.
 const AMIGA_STROKE: usize = 3;
-/// Where the crossbar sits, measured down the letter.
-const AMIGA_BAR_Y: usize = AMIGA_H * 62 / 100;
-/// The legs reach `AMIGA_HALF` either side of the stem at the foot and
-/// the apex stands `AMIGA_SHEAR` right of it, so the widest row is
-/// whichever of those two is larger.
-const AMIGA_W: usize = AMIGA_HALF
-    + AMIGA_STROKE
-    + if AMIGA_SHEAR > AMIGA_HALF {
-        AMIGA_SHEAR
-    } else {
-        AMIGA_HALF
-    };
+/// The width of the cell the mark is centred in.
+const AMIGA_W: usize = AMIGA_H * 9 / 10;
+/// Where the crossbar's centreline sits, measured down the letter.
+const AMIGA_BAR_Y: f32 = AMIGA_H as f32 * 0.69;
 
-/// The letter, as the pixels it covers.
-///
-/// Row by row: the lean runs off linearly from the apex to the foot and
-/// the legs splay the other way, so both strokes are straight lines, and
-/// the crossbar is the run between them at [`AMIGA_BAR_Y`].
-fn amiga_mask() -> [[bool; AMIGA_W]; AMIGA_H] {
-    let mut mask = [[false; AMIGA_W]; AMIGA_H];
-    let last = AMIGA_H - 1;
-    for (y, row) in mask.iter_mut().enumerate() {
-        let lean = AMIGA_SHEAR * (last - y) / last;
-        let span = AMIGA_HALF * y / last;
-        let stem = lean + AMIGA_HALF;
-        let (left, right) = (stem - span, stem + span);
-        for x in left..left + AMIGA_STROKE {
-            row[x] = true;
-        }
-        for x in right..right + AMIGA_STROKE {
-            row[x] = true;
-        }
-        if (AMIGA_BAR_Y..AMIGA_BAR_Y + AMIGA_STROKE).contains(&y) {
-            for cell in row.iter_mut().take(right + AMIGA_STROKE).skip(left) {
-                *cell = true;
-            }
-        }
-    }
-    mask
+/// Distance from `p` to the segment `a`..`b`.
+fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (px, py) = (p.0 - a.0, p.1 - a.1);
+    let (bx, by) = (b.0 - a.0, b.1 - a.1);
+    let t = ((px * bx + py * by) / (bx * bx + by * by)).clamp(0.0, 1.0);
+    let (dx, dy) = (px - t * bx, py - t * by);
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// The mark, filled on the right key and outlined on the left, as the
 /// case prints the pair.
 fn draw_amiga_mark(frame: &mut [u8], x: usize, y: usize, hollow: bool, ink: u32, scale: usize) {
-    let mask = amiga_mask();
-    for (row, cells) in mask.iter().enumerate() {
-        for (col, &set) in cells.iter().enumerate() {
-            if !set {
-                continue;
+    let h = AMIGA_H as f32;
+    let r = AMIGA_STROKE as f32 / 2.0;
+    // The legs splay to fill the cell at the foot; the apex leans a
+    // quarter of the height right of the letter's midline.
+    let half = (AMIGA_W as f32 - 2.0 * r) / 2.0;
+    let apex = (half + r + h / 4.0, r);
+    let foot_l = (r, h - r);
+    let foot_r = (2.0 * half + r, h - r);
+    // The crossbar runs between the legs' centrelines at its height.
+    let t = (AMIGA_BAR_Y - apex.1) / (foot_l.1 - apex.1);
+    let bar_l = (apex.0 + t * (foot_l.0 - apex.0), AMIGA_BAR_Y);
+    let bar_r = (apex.0 + t * (foot_r.0 - apex.0), AMIGA_BAR_Y);
+    let s = scale as f32;
+    for ty in 0..AMIGA_H * scale {
+        for tx in 0..AMIGA_W * scale {
+            // The pixel's centre, in the letter's own canvas units.
+            let p = ((tx as f32 + 0.5) / s, (ty as f32 + 0.5) / s);
+            let d = segment_distance(p, apex, foot_l)
+                .min(segment_distance(p, apex, foot_r))
+                .min(segment_distance(p, bar_l, bar_r))
+                - r;
+            // Signed distance to the letter's edge, in texture pixels;
+            // coverage fades over one pixel either side of it. The
+            // outlined mark keeps a ring half a stroke wide around the
+            // edge instead of the inside.
+            let d = d * s;
+            let alpha = if hollow {
+                0.5 + r * s / 2.0 - d.abs()
+            } else {
+                0.5 - d
             }
-            // Outlined: keep only the edge of the letter, which is every
-            // pixel that has a neighbour outside it.
-            if hollow && amiga_interior(&mask, row, col) {
-                continue;
+            .clamp(0.0, 1.0);
+            if alpha > 0.0 {
+                blend_pixel(frame, x * scale + tx, y * scale + ty, ink, alpha, scale);
             }
-            fill_rect(
-                frame,
-                scaled(
-                    Rect {
-                        x: x + col,
-                        y: y + row,
-                        w: 1,
-                        h: 1,
-                    },
-                    scale,
-                ),
-                ink,
-                scale,
-            );
         }
     }
-}
-
-/// Whether the pixel at (`row`, `col`) is surrounded by the letter on all
-/// four sides, and so is inside it rather than on its edge.
-fn amiga_interior(mask: &[[bool; AMIGA_W]; AMIGA_H], row: usize, col: usize) -> bool {
-    row > 0
-        && col > 0
-        && row + 1 < AMIGA_H
-        && col + 1 < AMIGA_W
-        && mask[row - 1][col]
-        && mask[row + 1][col]
-        && mask[row][col - 1]
-        && mask[row][col + 1]
 }
 
 /// A notch chip: the same moulding as the status bar's own buttons, so the
