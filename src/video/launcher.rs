@@ -472,9 +472,18 @@ pub enum LauncherField {
     WhdloadGame,
     WhdloadKickstarts,
     WhdloadLibrary,
-    // Serial (MIDI). Present only with the `midi` feature.
+    // Serial. Present only with the `midi` feature, the only build carrying
+    // serial rows at all.
     #[cfg(feature = "midi")]
     SerialMode,
+    /// The remote `host:port` the port dials in `tcp-connect` mode, typed
+    /// into the Serial section's Connect box.
+    #[cfg(feature = "midi")]
+    SerialConnect,
+    /// The local address the port binds in `tcp` mode, typed into the
+    /// Serial section's Listen box.
+    #[cfg(feature = "midi")]
+    SerialListen,
     #[cfg(feature = "midi")]
     MidiOut,
     Mt32ControlRom,
@@ -822,6 +831,19 @@ const WHDLOAD_ROWS: [Row; 3] = [
 // read as belonging to their `Serial:` / `Parallel:` / `Ethernet:` port.
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "  Device / Mode", Cycle)];
+// The two TCP modes each carry one address, and only one: dialling out needs
+// somewhere to dial, listening needs somewhere to bind. Each box shows only
+// under the mode it belongs to, so neither mode offers the other's address.
+#[cfg(feature = "midi")]
+const SERIAL_ROWS_TCP_CONNECT: [Row; 2] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::SerialConnect, "  Connect", RowKind::Text),
+];
+#[cfg(feature = "midi")]
+const SERIAL_ROWS_TCP_LISTEN: [Row; 2] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::SerialListen, "  Listen", RowKind::Text),
+];
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
@@ -1032,7 +1054,11 @@ fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row
     #[cfg(feature = "midi")]
     {
         if serial_mode != SerialMode::Midi {
-            return &SERIAL_ROWS_BASE;
+            return match serial_mode {
+                SerialMode::TcpConnect => &SERIAL_ROWS_TCP_CONNECT,
+                SerialMode::Tcp => &SERIAL_ROWS_TCP_LISTEN,
+                _ => &SERIAL_ROWS_BASE,
+            };
         }
         #[cfg(feature = "mt32")]
         if midi_out_is_mt32 {
@@ -1661,11 +1687,13 @@ pub struct MachineSetup {
     serial_mode: SerialMode,
     midi_out: Option<String>,
     midi_in: Option<String>,
-    /// TCP listen address for `mode = "tcp"`; carried so the override
-    /// round-trips through a launcher save even though no tab edits it.
+    /// TCP listen address for `mode = "tcp"`, typed into the Listen box the
+    /// Serial section shows in that mode. `None` binds the default
+    /// ([`crate::config::SERIAL_TCP_DEFAULT_LISTEN`]).
     serial_listen: Option<String>,
-    /// Dial-out address for `mode = "tcp-connect"`; carried like
-    /// `serial_listen` (no tab edits it, a save must not drop it).
+    /// Dial-out address for `mode = "tcp-connect"`, typed into the Connect
+    /// box that mode shows. `None` there has nothing to dial, and the run
+    /// says so rather than the launcher refusing the mode.
     serial_connect: Option<String>,
     /// The Centronics parallel-port device (None/Printer/Sampler), edited in the
     /// I/O Ports tab's Parallel section.
@@ -2006,6 +2034,28 @@ impl MachineSetup {
 
     pub fn parallel_device(&self) -> ParallelDevice {
         self.parallel_device
+    }
+
+    /// The address one of the serial TCP boxes holds, or `None` while it is
+    /// unset (the run then dials nothing and binds the default).
+    #[cfg(feature = "midi")]
+    pub fn serial_addr(&self, field: LauncherField) -> Option<&str> {
+        match field {
+            F::SerialConnect => self.serial_connect.as_deref(),
+            F::SerialListen => self.serial_listen.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Store what was typed into one of the serial TCP boxes. `None` clears
+    /// the key from a saved config rather than writing an empty address.
+    #[cfg(feature = "midi")]
+    pub fn set_serial_addr(&mut self, field: LauncherField, addr: Option<String>) {
+        match field {
+            F::SerialConnect => self.serial_connect = addr,
+            F::SerialListen => self.serial_listen = addr,
+            _ => {}
+        }
     }
 
     /// Whether the selected Ethernet backend carries traffic on the host's
@@ -3173,6 +3223,20 @@ impl MachineSetup {
                 SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
             },
+            // The dial-out address has no default -- there is no host to
+            // guess -- so an empty box says what it wants instead.
+            #[cfg(feature = "midi")]
+            F::SerialConnect => self
+                .serial_connect
+                .clone()
+                .unwrap_or_else(|| "(host:port)".to_string()),
+            // The listen address does have a default, so an empty box shows
+            // the address the run would actually bind.
+            #[cfg(feature = "midi")]
+            F::SerialListen => self
+                .serial_listen
+                .clone()
+                .unwrap_or_else(|| crate::config::SERIAL_TCP_DEFAULT_LISTEN.to_string()),
             #[cfg(feature = "midi")]
             F::MidiOut => {
                 if self.midi_out_is_mt32() {
@@ -3480,15 +3544,10 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::SerialMode => {
-                // tcp-connect is only on offer when the config already
-                // carries a dial-out address (the launcher has no editor
-                // for it, and the mode fails at Run without one) -- same
-                // pattern as the printer's capture path below.
-                let choices: Vec<SerialMode> = SERIAL_MODES
-                    .into_iter()
-                    .filter(|m| self.serial_connect.is_some() || *m != SerialMode::TcpConnect)
-                    .collect();
-                self.serial_mode = cycle_slice(&choices, self.serial_mode, forward)
+                // Every mode is on offer: choosing tcp-connect brings its
+                // Connect box with it, so the address the mode needs can be
+                // typed here rather than only in a hand-written config.
+                self.serial_mode = cycle_slice(&SERIAL_MODES, self.serial_mode, forward)
             }
             #[cfg(feature = "midi")]
             F::MidiOut => {
@@ -4672,6 +4731,38 @@ pub enum EditTarget {
     DriveBootpri(LauncherField),
     /// A word typed on a Create Image page: a volume name or a device name.
     NewImageText(LauncherField),
+    /// A `host:port` typed into the Serial section's Connect or Listen box.
+    SerialAddr(LauncherField),
+}
+
+/// The most an address box accepts. Long enough for a fully qualified name
+/// and a port, short enough that a mashed key never fills the buffer.
+const SERIAL_ADDR_MAX: usize = 96;
+
+/// Why a typed serial address is not the `host:port` the TCP modes need,
+/// or `None` when it is one.
+///
+/// Nothing here resolves a name or opens a socket: that happens at Run, and
+/// a host that is merely down should not stop the address being typed. What
+/// it does catch is the shape, so a missing or unreadable port is refused
+/// while the box still has the focus to fix it in.
+fn serial_addr_error(addr: &str) -> Option<String> {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return Some(format!("\"{addr}\" has no port: type host:port"));
+    };
+    // An IPv6 literal is full of colons, so it is written in brackets and
+    // only the colon after the closing one separates the port.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Some(format!("\"{addr}\" has no host: type host:port"));
+    }
+    if port.parse::<u16>().is_err() {
+        return Some(format!("\"{port}\" is not a port number (0-65535)"));
+    }
+    None
 }
 
 /// The largest size the box accepts, in whichever unit is showing.
@@ -5031,6 +5122,31 @@ impl LauncherState {
         )
     }
 
+    /// Whether a field is one of the Serial section's TCP address boxes.
+    /// They share the Create Image pages' free-text widget but hold machine
+    /// configuration, so the drawing and click paths have to tell them apart.
+    pub fn is_serial_addr(field: LauncherField) -> bool {
+        #[cfg(feature = "midi")]
+        {
+            matches!(field, F::SerialConnect | F::SerialListen)
+        }
+        #[cfg(not(feature = "midi"))]
+        {
+            let _ = field;
+            false
+        }
+    }
+
+    /// Whether the value box for `field` is the one being typed into. Both
+    /// the Create Image boxes and the serial address boxes are drawn by the
+    /// same widget, so it asks this one question of either.
+    pub fn typing_in_value_box(&self, field: LauncherField) -> bool {
+        matches!(
+            self.editing,
+            Some(EditTarget::NewImageText(f) | EditTarget::SerialAddr(f)) if f == field
+        )
+    }
+
     /// The filesystem a Create Image row is about: the floppy page's or the
     /// hard-drive page's, whichever row asked.
     pub fn workshop_fs_of(&self, field: LauncherField) -> Option<crate::diskimage::FileSystem> {
@@ -5327,6 +5443,23 @@ impl LauncherState {
         self.status = None;
     }
 
+    /// Focus a serial TCP address box, seeding the buffer with the address
+    /// it holds. An unset box starts empty rather than from what it shows:
+    /// the default listen address and the "(host:port)" prompt are both
+    /// placeholders, not values to be typed over.
+    pub fn begin_edit_serial_addr(&mut self, field: LauncherField) {
+        if !Self::is_serial_addr(field) {
+            return;
+        }
+        self.edit_buffer.clear();
+        #[cfg(feature = "midi")]
+        if let Some(addr) = self.setup.serial_addr(field) {
+            self.edit_buffer.push_str(addr);
+        }
+        self.editing = Some(EditTarget::SerialAddr(field));
+        self.status = None;
+    }
+
     pub fn new(setup: MachineSetup) -> Self {
         let mut setup = setup;
         // Read the host devices as the screen opens so the pickers show what is
@@ -5413,6 +5546,15 @@ impl LauncherState {
                     return;
                 }
                 self.edit_buffer.push(c);
+                return;
+            }
+        }
+        // An address is a run of printable characters with no spaces in it:
+        // a name or a numeric literal, a colon, and a port. Brackets and
+        // colons are in there for IPv6, so nothing narrower than "graphic"
+        // would do.
+        if let EditTarget::SerialAddr(_) = target {
+            if !c.is_ascii_graphic() || self.edit_buffer.chars().count() >= SERIAL_ADDR_MAX {
                 return;
             }
         }
@@ -5541,6 +5683,30 @@ impl LauncherState {
                 self.edit_buffer.clear();
                 return;
             }
+            EditTarget::SerialAddr(field) => {
+                // An emptied box means "unset": the dial-out address goes
+                // away, and the listen address returns to the default. A
+                // typed one has to be a host:port or it keeps the focus,
+                // the same as a rejected drive name -- the mode is bound to
+                // fail at Run otherwise, and this is where it can be fixed.
+                let typed = self.edit_buffer.trim();
+                let addr = if typed.is_empty() {
+                    None
+                } else {
+                    if let Some(err) = serial_addr_error(typed) {
+                        self.status = Some(StatusMessage::err(err));
+                        return;
+                    }
+                    Some(typed.to_string())
+                };
+                #[cfg(feature = "midi")]
+                self.setup.set_serial_addr(field, addr);
+                #[cfg(not(feature = "midi"))]
+                let _ = (field, addr);
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
             EditTarget::BoardOption { .. } => {}
         }
         self.editing = None;
@@ -5550,8 +5716,10 @@ impl LauncherState {
                 self.setup.zorro_option_set(board, opt, value)
             }
             EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
-            // Both commit above and return, so nothing is left to do here.
-            EditTarget::DriveBootpri(_) | EditTarget::NewImageText(_) => {}
+            // These commit above and return, so nothing is left to do here.
+            EditTarget::DriveBootpri(_)
+            | EditTarget::NewImageText(_)
+            | EditTarget::SerialAddr(_) => {}
         }
     }
 
@@ -5585,9 +5753,18 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
     #[cfg(all(feature = "midi", feature = "mt32"))]
-    let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI, &SERIAL_ROWS_MT32];
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_MT32,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
     #[cfg(all(feature = "midi", not(feature = "mt32")))]
-    let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI];
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];
     let sources: &[&[Row]] = &[
@@ -7505,8 +7682,9 @@ mod tests {
 
     #[test]
     fn serial_tcp_listen_round_trips_through_raw() {
-        // A launcher save must not drop the [serial] listen override, which
-        // no tab edits (regression: it was absent from MachineSetup/to_raw).
+        // A launcher save must not drop the [serial] listen override, whether
+        // or not the tab that edits it was ever opened (regression: it was
+        // absent from MachineSetup/to_raw altogether).
         let mut raw = RawConfig::default();
         raw.serial.mode = Some("tcp".into());
         raw.serial.listen = Some("0.0.0.0:2323".into());
@@ -7518,30 +7696,168 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
-    fn serial_mode_cycle_offers_tcp_connect_only_with_an_address() {
-        // The launcher has no editor for the dial-out address, so without
-        // one in the loaded config the mode would always fail at Run;
-        // cycling skips it (same pattern as the printer capture path).
+    fn serial_mode_cycle_always_offers_tcp_connect() {
+        // tcp-connect used to be skipped unless the loaded config already
+        // carried a dial-out address, because nothing here could type one.
+        // The Connect box can, so every mode is now reachable from the
+        // picker whatever the config arrived holding.
         let mut setup = MachineSetup {
             serial_mode: SerialMode::Tcp,
-            ..Default::default()
-        };
-        setup.cycle(LauncherField::SerialMode, true);
-        assert_eq!(setup.serial_mode, SerialMode::Pty);
-
-        let mut setup = MachineSetup {
-            serial_mode: SerialMode::Tcp,
-            serial_connect: Some("bbs.example.com:1337".into()),
             ..Default::default()
         };
         setup.cycle(LauncherField::SerialMode, true);
         assert_eq!(setup.serial_mode, SerialMode::TcpConnect);
+
+        // And the picker walks the whole list either way round.
+        let mut seen: Vec<SerialMode> = Vec::new();
+        for _ in 0..SERIAL_MODES.len() * 2 {
+            if !seen.contains(&setup.serial_mode) {
+                seen.push(setup.serial_mode);
+            }
+            setup.cycle(LauncherField::SerialMode, false);
+        }
+        assert_eq!(seen.len(), SERIAL_MODES.len());
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn serial_address_rows_appear_only_in_their_tcp_mode() {
+        let has = |mode, field| {
+            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
+                .iter()
+                .any(|r| r.field == field)
+        };
+        // Dialling out needs somewhere to dial; listening needs somewhere to
+        // bind. Neither mode carries the other's address, and the modes with
+        // no address at all show neither box.
+        assert!(has(SerialMode::TcpConnect, LauncherField::SerialConnect));
+        assert!(!has(SerialMode::TcpConnect, LauncherField::SerialListen));
+        assert!(has(SerialMode::Tcp, LauncherField::SerialListen));
+        assert!(!has(SerialMode::Tcp, LauncherField::SerialConnect));
+        for mode in [SerialMode::Off, SerialMode::Stdout, SerialMode::Midi] {
+            assert!(!has(mode, LauncherField::SerialConnect));
+            assert!(!has(mode, LauncherField::SerialListen));
+        }
+        // Both boxes are free-text rows, so the panel draws and hit-tests
+        // them with the value-box widget.
+        for (mode, field) in [
+            (SerialMode::TcpConnect, LauncherField::SerialConnect),
+            (SerialMode::Tcp, LauncherField::SerialListen),
+        ] {
+            let r = rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false);
+            let found = r.iter().find(|r| r.field == field).unwrap();
+            assert_eq!(found.kind, RowKind::Text);
+            assert!(LauncherState::is_serial_addr(field));
+        }
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn typing_a_serial_connect_address_sets_it_and_round_trips() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.setup.serial_mode = SerialMode::TcpConnect;
+        state.begin_edit_serial_addr(LauncherField::SerialConnect);
+        assert_eq!(state.edit_buffer(), "", "an unset box starts empty");
+        for c in "bbs.example.com:1337".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert!(state.editing().is_none());
+        assert_eq!(
+            state.setup.serial_connect.as_deref(),
+            Some("bbs.example.com:1337")
+        );
+        // What was typed is what a Save writes.
+        let raw = state.setup.to_raw();
+        assert_eq!(raw.serial.mode.as_deref(), Some("tcp-connect"));
+        assert_eq!(raw.serial.connect.as_deref(), Some("bbs.example.com:1337"));
+
+        // Re-opening the box starts from the address it holds, not from a
+        // placeholder, so an edit is a correction rather than a retype.
+        state.begin_edit_serial_addr(LauncherField::SerialConnect);
+        assert_eq!(state.edit_buffer(), "bbs.example.com:1337");
+        state.edit_cancel();
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn a_serial_address_without_a_port_keeps_the_focus() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        for bad in ["bbs.example.com", "bbs.example.com:sixty", ":1337"] {
+            state.begin_edit_serial_addr(LauncherField::SerialConnect);
+            for c in bad.chars() {
+                state.edit_push(c);
+            }
+            state.edit_commit();
+            assert_eq!(
+                state.editing(),
+                Some(EditTarget::SerialAddr(LauncherField::SerialConnect)),
+                "{bad} was accepted"
+            );
+            assert!(state.status.is_some(), "{bad} was refused silently");
+            assert_eq!(state.setup.serial_connect, None);
+            state.edit_cancel();
+        }
+        // A bracketed IPv6 literal is a host:port even though it is full of
+        // colons: only the one after the closing bracket separates the port.
+        state.begin_edit_serial_addr(LauncherField::SerialConnect);
+        for c in "[::1]:1337".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert!(state.editing().is_none());
+        assert_eq!(state.setup.serial_connect.as_deref(), Some("[::1]:1337"));
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn emptying_a_serial_address_box_unsets_it() {
+        let mut state = LauncherState::new(MachineSetup {
+            serial_mode: SerialMode::Tcp,
+            serial_listen: Some("0.0.0.0:2323".into()),
+            ..Default::default()
+        });
+        // The box shows what is bound; emptying it returns to the default,
+        // which is what the value column then shows.
+        assert_eq!(
+            state.setup.value_label(LauncherField::SerialListen),
+            "0.0.0.0:2323"
+        );
+        state.begin_edit_serial_addr(LauncherField::SerialListen);
+        for _ in 0..64 {
+            state.edit_backspace();
+        }
+        state.edit_commit();
+        assert_eq!(state.setup.serial_listen, None);
+        assert_eq!(
+            state.setup.value_label(LauncherField::SerialListen),
+            crate::config::SERIAL_TCP_DEFAULT_LISTEN
+        );
+        assert!(state.setup.to_raw().serial.listen.is_none());
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn a_serial_address_box_takes_only_printable_characters() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.begin_edit_serial_addr(LauncherField::SerialListen);
+        // A space is not part of an address, and neither is a control code.
+        for c in "127.0.0.1 :\t12\n34".chars() {
+            state.edit_push(c);
+        }
+        assert_eq!(state.edit_buffer(), "127.0.0.1:1234");
+        // And the box has an end: a stuck key cannot grow it without bound.
+        for _ in 0..SERIAL_ADDR_MAX * 2 {
+            state.edit_push('9');
+        }
+        assert_eq!(state.edit_buffer().chars().count(), SERIAL_ADDR_MAX);
+        state.edit_cancel();
     }
 
     #[test]
     fn serial_tcp_connect_round_trips_through_raw() {
-        // Same contract as the listen override: the dial-out address has no
-        // launcher editor, so loading and saving must carry it unchanged.
+        // Same contract as the listen override: loading and saving carry the
+        // dial-out address unchanged when nothing retypes it.
         let mut raw = RawConfig::default();
         raw.serial.mode = Some("tcp-connect".into());
         raw.serial.connect = Some("bbs.example.com:1337".into());

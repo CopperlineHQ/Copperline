@@ -2032,13 +2032,17 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             "[serial] mode = \"midi\" needs a build with --features midi"
         )),
         SerialMode::Tcp => Ok(Box::new(crate::serial::TcpSerialSink::listen(
-            cfg.serial.listen.as_deref().unwrap_or("127.0.0.1:1234"),
+            cfg.serial
+                .listen
+                .as_deref()
+                .unwrap_or(crate::config::SERIAL_TCP_DEFAULT_LISTEN),
         )?)),
         SerialMode::TcpConnect => {
             let addr = cfg.serial.connect.as_deref().ok_or_else(|| {
                 anyhow!(
                     "[serial] mode = \"tcp-connect\" needs a remote address: set \
-                     [serial] connect = \"host:port\" or pass --serial-connect"
+                     [serial] connect = \"host:port\", pass --serial-connect, \
+                     or fill in the launcher's I/O Ports > Serial > Connect box"
                 )
             })?;
             Ok(Box::new(crate::serial::TcpSerialSink::connect(addr)?))
