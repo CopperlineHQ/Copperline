@@ -6054,17 +6054,25 @@ fn draw_library_page(
     }
 
     if entries.is_empty() {
-        // What is wrong, then what to do about it, broken where it fits
-        // rather than run off the edge of the box.
-        for (line, text) in [
+        // What is wrong, then what to do about it, broken where it reads:
+        // the launcher panel is a fixed size, so these lines are the same
+        // lines on every machine. Each is still put through the wrap, which
+        // does nothing while they fit and catches them if the box is ever
+        // made narrower than the words in it.
+        let lines = [
             "No games found!",
             "",
-            "Set \"Game library\" in the WHDLoad",
-            "Configuration menu, then press Refresh.",
-        ]
-        .into_iter()
-        .enumerate()
-        {
+            "Update the \"Game library\" directory",
+            "under WHDLoad -> Settings...",
+        ];
+        let lines: Vec<String> = lines
+            .into_iter()
+            .flat_map(|line| match line.is_empty() {
+                true => vec![String::new()],
+                false => wrap_balanced(line, games.w.saturating_sub(16)),
+            })
+            .collect();
+        for (line, text) in lines.into_iter().enumerate() {
             if text.is_empty() {
                 continue;
             }
@@ -6072,7 +6080,7 @@ fn draw_library_page(
                 frame,
                 games.x + 8,
                 games.y + LIBRARY_HEADER_H + 6 + line * 14,
-                &truncate_to_width(text, games.w.saturating_sub(16)),
+                &text,
                 PANEL_TEXT_DIM,
                 1,
                 scale,
@@ -6497,6 +6505,32 @@ fn fit_within(w: usize, h: usize, into: Rect) -> Option<Rect> {
         w: fit_w,
         h: fit_h,
     })
+}
+
+/// The same as [`wrap_to_width`], but with the lines evened up.
+///
+/// A greedy wrap fills each line to the brim and leaves whatever is left
+/// on the last one, which for a sentence a little wider than its box means
+/// a full line and a single trailing word. It takes the same number of
+/// lines to say it with the break in a sensible place, so the column is
+/// narrowed a character at a time for as long as the line count holds.
+#[cfg(feature = "game-library")]
+fn wrap_balanced(text: &str, width: usize) -> Vec<String> {
+    let mut best = wrap_to_width(text, width);
+    if best.len() < 2 {
+        return best;
+    }
+    let lines = best.len();
+    let mut narrow = width;
+    while narrow > font::GLYPH_W {
+        narrow -= font::GLYPH_W;
+        let tried = wrap_to_width(text, narrow);
+        if tried.len() != lines {
+            break;
+        }
+        best = tried;
+    }
+    best
 }
 
 /// Break text into lines that fit `width`, at spaces where there are any.
@@ -9186,6 +9220,35 @@ mod tests {
             launcher_control_at(rect, &state, (past.x as i32 + 40, past.y as i32 + 2)),
             Some(UiControl::LauncherLibraryFavouritePick(rows - 1))
         );
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_balanced_wrap_does_not_leave_one_word_alone() {
+        let g = font::GLYPH_W;
+        let text = "Update the \"Game library\" path in the WHDLoad settings";
+        // Greedy: a full line, then the one word that did not fit.
+        let greedy = wrap_to_width(text, 45 * g);
+        assert_eq!(greedy.len(), 2);
+        assert_eq!(greedy[1], "settings");
+
+        // Balanced: the same two lines, broken where it reads.
+        let even = wrap_balanced(text, 45 * g);
+        assert_eq!(even.len(), 2, "the line count is what it was");
+        assert!(
+            even[1].split_whitespace().count() > 1,
+            "still one word alone: {even:?}"
+        );
+        let longest = even.iter().map(|l| l.chars().count()).max().unwrap();
+        assert!(
+            longest < greedy[0].chars().count(),
+            "no narrower than greedy: {even:?}"
+        );
+        // What is said is still what was passed in.
+        assert_eq!(even.join(" "), text);
+
+        // Text that fits is left alone rather than split for the sake of it.
+        assert_eq!(wrap_balanced("Short", 45 * g), vec!["Short".to_string()]);
     }
 
     #[test]
