@@ -49,6 +49,9 @@ Copperline will not pretend to understand.
 From the launcher: **Storage → Host Disk**, tick the disk, choose where the
 machine should see it, and press **Mount**. Permission is asked for there, at
 the button you pressed, rather than later behind a machine that is starting.
+More disks than the table shows scroll with the arrows in its top and bottom
+right corners, each greyed at its end of the list; held, they work up through
+five speeds, a second at each.
 
 From the command line:
 

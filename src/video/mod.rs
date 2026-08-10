@@ -149,6 +149,23 @@ pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the text caret is in the lit half of its blink.
+///
+/// Set by the window each pass while something is being typed into, and
+/// read at the moment the caret is drawn. A flag rather than a clock in the
+/// drawing code, so a redraw is reproducible: a preview or a test renders
+/// the same pixels whenever it runs, and the caret is lit unless something
+/// deliberately puts it out.
+static CARET_LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_caret_lit(lit: bool) {
+    CARET_LIT.store(lit, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn caret_lit() -> bool {
+    CARET_LIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // Per-thread answers for the two strips that take height from the canvas,
 // in test builds only.
 //

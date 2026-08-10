@@ -27,10 +27,22 @@ default = [
     "mt32",
     "cpu-jit",
     "profile-stats",
+    "game-library",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
+# The WHDLoad game library: the launcher's Library page, the local game
+# database it reads, and the OpenRetro sync that fills it.
+#
+# This is the only part of Copperline that talks to the internet on its own
+# account, so it is the only part that needs an HTTP client and a TLS stack.
+# Off, none of that is linked and none of it is compiled: WHDLoad boots from
+# a path in the configuration exactly as it does with the feature on, the
+# Library page is absent, and `[whdload]` keys that only the library uses
+# are parsed and ignored so a configuration written by a full build still
+# loads. See src/gamelib/.
+game-library = ["dep:ureq", "dep:serde_json", "dep:zeroize"]
 display-plan-trace = []
 # Detailed host-cost counters used by native diagnostics. The browser crate
 # builds the core with `default-features = false`, so its release hot paths do
@@ -110,6 +122,14 @@ log = "0.4"
 env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
+# The game library's HTTP client (src/gamelib/openretro.rs) is declared per
+# platform, with the other per-target dependencies below: its TLS backend
+# differs by what each host can build without a C toolchain.
+# Wiping the OpenRetro password and auth token from memory once they are
+# done with. Volatile writes with a compiler fence, which a hand-written
+# overwrite of a buffer nothing reads again is entitled to be optimised
+# away into nothing at all.
+zeroize = { version = "1", optional = true }
 serde-big-array = "0.5"
 bincode = "1"
 toml = "0.8"
@@ -168,10 +188,35 @@ fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "mai
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
 delharc = "0.7.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the
 # ones rfd already pulls in, so they add no new crate copies to the build.
+# The game library's HTTP client. Blocking, which is what a worker thread
+# wants. The TLS backend differs by platform for build requirements rather
+# than for taste; the trust anchors do not, since both are pointed at the
+# Mozilla root set `webpki-roots` bundles rather than at the host's store.
+#
+# Everywhere but Windows: rustls, so a build needs no system OpenSSL and the
+# Flatpak carries no extra runtime.
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+], optional = true }
+
+# Windows: schannel, the OS's own TLS, reached through pure-Rust bindings.
+# rustls would do on x86-64, but its crypto provider (`ring`) compiles C and
+# assembly, and on ARM64 Windows `ring` ignores MSVC and demands clang -- see
+# the FIXME in its build.rs -- so a default build fails on a machine carrying
+# exactly the toolchain Rust itself asks for. Nothing here needs a C compiler.
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = [
+    "native-tls",
+    "gzip",
+], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage"] }

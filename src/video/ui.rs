@@ -484,7 +484,14 @@ impl UiState {
 
 pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
     let rect = panel_rect(panel);
-    if close_button_rect(rect).contains(pos) {
+    // A dialog over the panel answers first, its own close gadget
+    // included; the panel's must not close the launcher out from under it.
+    #[cfg(feature = "game-library")]
+    let modal =
+        matches!(panel, Panel::Launcher(state) if state.login.is_some() || state.meta.is_some());
+    #[cfg(not(feature = "game-library"))]
+    let modal = false;
+    if !modal && close_button_rect(rect).contains(pos) {
         return Some(UiControl::PanelClose);
     }
     match panel {
@@ -764,6 +771,57 @@ pub enum UiControl {
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.
     LauncherNewImageUnit,
+    /// Fetch a WHDLoad support archive into the default place.
+    #[cfg(feature = "game-library")]
+    LauncherWhdloadDownload(LauncherField),
+    /// Scroll the Library list, by rows: negative up, positive down.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryScroll(isize),
+    /// Choose the game on that drawn row of the Library list.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryPick(usize),
+    /// Mark or unmark that drawn row of the Library list.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryFavourite(usize),
+    /// Choose the game on that row of the favourites list.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryFavouritePick(usize),
+    /// Take that row off the favourites list.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryFavouriteRemove(usize),
+    /// Scroll the favourites list by that many rows.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryFavouriteScroll(isize),
+    /// Open the OpenRetro sign-in dialog.
+    #[cfg(feature = "game-library")]
+    LauncherOpenRetroLogin,
+    /// Re-read the game folder, without touching metadata.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryRefresh,
+    /// Resolve metadata and art for everything in the game folder.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryUpdate,
+    /// Open the metadata editor on the selected game.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryEdit,
+    /// A field of the metadata editor, its art box, or one of its buttons.
+    #[cfg(feature = "game-library")]
+    MetaField(launcher::MetaField),
+    #[cfg(feature = "game-library")]
+    MetaArt,
+    #[cfg(feature = "game-library")]
+    MetaSave,
+    #[cfg(feature = "game-library")]
+    MetaClear,
+    #[cfg(feature = "game-library")]
+    MetaCancel,
+    /// A field of the sign-in dialog, or one of its two buttons.
+    #[cfg(feature = "game-library")]
+    LoginField(launcher::LoginField),
+    #[cfg(feature = "game-library")]
+    LoginOk,
+    #[cfg(feature = "game-library")]
+    LoginCancel,
     /// A filesystem family tick box on a Create Image page.
     LauncherFsFamily {
         field: LauncherField,
@@ -875,6 +933,16 @@ fn panel_title(panel: &Panel) -> &'static str {
         Panel::Console(_) => "Console",
         Panel::Launcher(_) => "Machine Configuration",
         Panel::DropChooser(_) => "Insert Disk",
+    }
+}
+
+/// The rect the launcher panel occupies, for the parts of the window that
+/// have to measure against it.
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn launcher_panel_rect(ui: &UiState) -> Option<Rect> {
+    match &ui.panel {
+        Some(panel @ Panel::Launcher(_)) => Some(panel_rect(panel)),
+        _ => None,
     }
 }
 
@@ -1766,26 +1834,39 @@ fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, 
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, PANEL_BG, scale);
     draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-    // Title bar.
-    let title = Rect {
+    draw_title_bar(
+        frame,
+        rect,
+        panel_title(panel),
+        hover == Some(UiControl::PanelClose),
+        scale,
+    );
+}
+
+/// A panel's blue title bar, with its name and its close gadget.
+fn draw_title_bar(frame: &mut [u8], rect: Rect, title: &str, close_hover: bool, scale: usize) {
+    let bar = Rect {
         x: rect.x + 1,
         y: rect.y + 1,
         w: rect.w - 2,
         h: TITLE_H - 1,
     };
-    fill_rect(frame, scale_rect(title, scale), PANEL_TITLE_BG, scale);
+    fill_rect(frame, scale_rect(bar, scale), PANEL_TITLE_BG, scale);
     draw_panel_text(
         frame,
         rect.x + 10,
         rect.y + (TITLE_H - 16) / 2,
-        panel_title(panel),
+        title,
         PANEL_TITLE_TEXT,
         2,
         scale,
     );
-    // Close gadget: classic square with an inner square.
+    draw_close_gadget(frame, rect, close_hover, scale);
+}
+
+/// The close gadget: a classic square with an inner square.
+fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: bool, scale: usize) {
     let close = close_button_rect(rect);
-    let close_hover = hover == Some(UiControl::PanelClose);
     let face = if close_hover {
         BUTTON_FACE_HOVER
     } else {
@@ -2733,15 +2814,21 @@ fn draw_console(frame: &mut [u8], rect: Rect, panel: &ConsolePanel, scale: usize
     let scaled = scale_rect(entry, scale);
     fill_rect(frame, scaled, ENTRY_BG, scale);
     draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
-    let mut prompt = format!("> {}_", panel.input);
-    prompt.truncate(84);
-    draw_panel_text(
+    // The same caret every other box in the UI draws, at the end of the
+    // line because that is the only place this one can type: the console
+    // appends and backspaces, and keeps its arrow keys for the history.
+    // (It also clips to the box, where the old fixed truncation could cut
+    // a multi-byte character in half and panic.)
+    let prompt = format!("> {}", panel.input);
+    draw_edit_line(
         frame,
         entry.x + 6,
         entry.y + (CONSOLE_INPUT_H - 8) / 2,
         &prompt,
+        prompt.chars().count(),
         ENTRY_TEXT,
-        1,
+        ENTRY_BG,
+        entry.w.saturating_sub(12),
         scale,
     );
 }
@@ -4453,23 +4540,28 @@ fn draw_launcher_value_box(
         BUTTON_EDGE_LIGHT,
         scale,
     );
-    let typing = state.typing_in_value_box(field);
-    let (text, color) = if typing {
-        (format!("{}_", state.edit_buffer()), PANEL_TEXT_HILIGHT)
-    } else if disabled {
-        (state.row_value(field), PANEL_TEXT_DIM)
-    } else {
-        (state.row_value(field), PANEL_TEXT)
-    };
     let avail = box_rect.w.saturating_sub(8);
-    // A value that is too long loses its head while it is being typed and
-    // its tail otherwise: what matters when typing is where the caret is,
-    // and it is at the end.
-    let shown = if typing {
-        clip_text_tail(&text, avail)
-    } else {
-        truncate_to_width(&text, avail)
+    if state.typing_in_value_box(field) {
+        draw_edit_line(
+            frame,
+            box_rect.x + 4,
+            box_rect.y + 6,
+            state.edit_buffer(),
+            state.edit_caret().at(),
+            PANEL_TEXT_HILIGHT,
+            PANEL_BG,
+            avail,
+            scale,
+        );
+        return;
+    }
+    let (text, color) = match disabled {
+        true => (state.row_value(field), PANEL_TEXT_DIM),
+        false => (state.row_value(field), PANEL_TEXT),
     };
+    // A value too long for the box loses its tail: the head is the part
+    // that says which of several it is.
+    let shown = truncate_to_width(&text, avail);
     // A short figure between two arrows reads as belonging to them when it
     // is centred, and as a stray left-aligned word when it is not.
     let x = if centred {
@@ -4603,6 +4695,424 @@ fn host_disk_row_rect(rect: Rect, index: usize) -> Rect {
     }
 }
 
+// --- the WHDLoad Library page ---------------------------------------------
+
+/// The games list starts level with the top of the Memory tab and is as
+/// tall as the art frame beside it; the favourites list fills what is left
+/// below, down to the status line. Both are worked out from the panel
+/// rather than from a row count, so these are what that comes to -- and
+/// what the scrolling and hit-testing count in.
+///
+/// `whdload_entry` is whether the strip carries the WHDLoad entry -- see
+/// [`launcher::tabs`] -- since the strip is a row longer when it does, and
+/// every rect on this page is measured against it. Every layout function
+/// here takes it for the same reason.
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn library_visible_rows(rect: Rect, whdload_entry: bool) -> usize {
+    library_table_rect(rect, whdload_entry)
+        .h
+        .saturating_sub(LIBRARY_HEADER_H + 4)
+        / LIBRARY_ROW_H
+}
+
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn library_favourite_rows(rect: Rect, whdload_entry: bool) -> usize {
+    library_favourites_rect(rect, whdload_entry)
+        .h
+        .saturating_sub(LIBRARY_HEADER_H + 4)
+        / LIBRARY_ROW_H
+}
+#[cfg(feature = "game-library")]
+const LIBRARY_ROW_H: usize = 14;
+#[cfg(feature = "game-library")]
+const LIBRARY_HEADER_H: usize = 16;
+/// The widest a cover is drawn. The gap either side of its frame is
+/// [`LIBRARY_COVER_GAP`], and the frame around it [`LIBRARY_COVER_BEZEL`].
+#[cfg(feature = "game-library")]
+const LIBRARY_COVER: usize = 128;
+/// How much taller than wide the art frame is. Amiga box art is portrait:
+/// measured across the catalogue it runs between 0.75 and 0.82 wide-to-tall
+/// with the odd square compilation, so 4:5 sits in the middle of what is
+/// really there and a picture of any of those shapes only has to give up a
+/// thin margin to fit.
+#[cfg(feature = "game-library")]
+const LIBRARY_COVER_TALL: (usize, usize) = (5, 4);
+/// The frame around the art: thicker than the list's hairline outline and
+/// bevelled, so the picture reads as mounted in the panel rather than
+/// pasted onto it.
+#[cfg(feature = "game-library")]
+const LIBRARY_COVER_BEZEL: usize = 5;
+/// Between the game list and the row of buttons under it.
+#[cfg(feature = "game-library")]
+const LIBRARY_BUTTON_GAP: usize = 8;
+/// How many lines the version under the cover runs to.
+#[cfg(feature = "game-library")]
+const LIBRARY_VERSION_LINES: usize = 2;
+/// How many lines each catalogue field under the cover runs to. A
+/// developer is sometimes credited to nine people, and without a limit
+/// that one field pushes everything under it off the panel.
+#[cfg(feature = "game-library")]
+const LIBRARY_FIELD_LINES: usize = 2;
+
+/// The most a version may be, in characters: what fits the column it is
+/// drawn in, over [`LIBRARY_VERSION_LINES`] lines. The editor stops there
+/// too, since there is no use in typing what the page cannot show.
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn library_version_max() -> usize {
+    LIBRARY_VERSION_LINES * (LIBRARY_COVER + 2 * LIBRARY_COVER_BEZEL) / font::GLYPH_W
+}
+#[cfg(feature = "game-library")]
+const LIBRARY_COVER_GAP: usize = 12;
+/// Where each column starts, from the inside edge of the box. Two columns:
+/// the game, and whether it is a favourite. Year and publisher moved under
+/// the cover art, where there is room to read them.
+#[cfg(feature = "game-library")]
+const LIBRARY_COL_NAME: usize = 6;
+/// The Favourite column, far enough right that a long title clips before
+/// it rather than running into it.
+/// Where the tick column starts, as an offset into the box.
+///
+/// Measured back from the right-hand edge rather than fixed, so the
+/// heading and the ticks under it stay clear of the scroll arrows inside
+/// the frame -- which they did not when the art column beside them grew.
+#[cfg(feature = "game-library")]
+fn library_col_favourite(rect: Rect, whdload_entry: bool) -> usize {
+    let table = library_table_rect(rect, whdload_entry);
+    let heading = "Favourite".len() * font::GLYPH_W;
+    table
+        .w
+        .saturating_sub(HOST_DISK_ARROW + 12 + heading + 6)
+        .max(LIBRARY_COL_NAME + 40)
+}
+
+/// Where a tab sits in the strip, whichever strip is showing.
+#[cfg(feature = "game-library")]
+fn strip_rect(rect: Rect, tab: launcher::LauncherTab, whdload_entry: bool) -> Rect {
+    let at = launcher::tabs(whdload_entry)
+        .iter()
+        .position(|&t| t == tab)
+        .unwrap_or(0);
+    launcher_tab_rect(rect, at)
+}
+
+/// The games list, squared off against the strip beside it: its top level
+/// with the top of Memory, its bottom with the bottom of I/O Ports. Tying
+/// it to the strip rather than to a row count keeps the page looking
+/// deliberate when the strip changes -- which it does, since WHDLoad can
+/// join it.
+#[cfg(feature = "game-library")]
+fn library_table_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let top = strip_rect(rect, launcher::LauncherTab::Memory, whdload_entry);
+    let x = launcher_pane_x(rect);
+    let right = rect.x + rect.w - 16;
+    Rect {
+        x,
+        y: top.y,
+        w: right
+            .saturating_sub(x)
+            .saturating_sub(library_cover_column()),
+        // The art frame's height, so the two boxes end on one line. Its
+        // top stays level with the top of Memory in the strip; whatever it
+        // no longer reaches down to, the favourites list below it takes.
+        h: library_cover_size().1,
+    }
+}
+
+/// The favourites list, under the games with the button row between them.
+/// It stops short of the bottom so the panel's own status line, which
+/// reports what just happened, is never drawn over.
+#[cfg(feature = "game-library")]
+fn library_favourites_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let games = library_table_rect(rect, whdload_entry);
+    // The gap: the button row, then the "Favourites:" label above the box.
+    let y = games.y + games.h + LIBRARY_BUTTON_GAP + LAUNCH_MODEL_H + 10 + 14;
+    let bottom = launcher_status_y(rect).saturating_sub(10);
+    Rect {
+        y,
+        h: bottom.saturating_sub(y),
+        ..games
+    }
+}
+
+/// One row of the favourites list.
+#[cfg(feature = "game-library")]
+fn library_favourite_row_rect(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    let table = library_favourites_rect(rect, whdload_entry);
+    Rect {
+        x: table.x + 2,
+        y: table.y + LIBRARY_HEADER_H + drawn * LIBRARY_ROW_H,
+        w: table.w.saturating_sub(4),
+        h: LIBRARY_ROW_H,
+    }
+}
+
+/// The Favourite tick on one drawn row: centred under its heading rather
+/// than tucked against the left of the column.
+#[cfg(feature = "game-library")]
+fn library_favourite_box(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    centred_tick(
+        library_row_rect(rect, whdload_entry, drawn),
+        library_col_favourite(rect, whdload_entry),
+        "Favourite",
+    )
+}
+
+/// The Remove tick on one row of the favourites list.
+#[cfg(feature = "game-library")]
+fn library_remove_box(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    // On the same line as the Favourite tick in the list above it, not
+    // centred under its own shorter heading: two columns of the same tick
+    // that do not line up read as a mistake.
+    centred_tick(
+        library_favourite_row_rect(rect, whdload_entry, drawn),
+        library_col_favourite(rect, whdload_entry),
+        "Favourite",
+    )
+}
+
+/// Where the "Remove" heading goes: centred over its own ticks.
+#[cfg(feature = "game-library")]
+fn library_remove_heading_x(rect: Rect, whdload_entry: bool) -> usize {
+    let tick = centred_tick(
+        library_favourites_rect(rect, whdload_entry),
+        library_col_favourite(rect, whdload_entry),
+        "Favourite",
+    );
+    (tick.x + 5).saturating_sub("Remove".len() * font::GLYPH_W / 2)
+}
+
+/// A tick in the second column, centred under a heading of that width
+/// rather than tucked against the left of the column.
+#[cfg(feature = "game-library")]
+fn centred_tick(row: Rect, column: usize, heading: &str) -> Rect {
+    let width = heading.len() * font::GLYPH_W;
+    Rect {
+        x: row.x + 4 + column + width.saturating_sub(10) / 2,
+        y: row.y + (row.h - 10) / 2,
+        w: 10,
+        h: 10,
+    }
+}
+
+/// One row of the list, by drawn position rather than by index into the
+/// library: the list scrolls, so the two differ.
+#[cfg(feature = "game-library")]
+fn library_row_rect(rect: Rect, whdload_entry: bool, drawn: usize) -> Rect {
+    let table = library_table_rect(rect, whdload_entry);
+    Rect {
+        x: table.x + 2,
+        y: table.y + LIBRARY_HEADER_H + drawn * LIBRARY_ROW_H,
+        w: table.w.saturating_sub(4),
+        h: LIBRARY_ROW_H,
+    }
+}
+
+/// How much of the panel's width the art column takes: the widest frame,
+/// with a gap either side of it, so the frame is centred in a space rather
+/// than pressed against the list.
+#[cfg(feature = "game-library")]
+fn library_cover_column() -> usize {
+    library_cover_size().0 + 2 * LIBRARY_COVER_GAP
+}
+
+/// The art frame at its widest, which is also the game list's height: the
+/// two boxes end on the same line, and it is the frame -- sized from the
+/// shape of a cover -- that decides where that line is. The frame is never
+/// stretched to reach anything.
+#[cfg(feature = "game-library")]
+fn library_cover_size() -> (usize, usize) {
+    (
+        LIBRARY_COVER + 2 * LIBRARY_COVER_BEZEL,
+        LIBRARY_COVER * LIBRARY_COVER_TALL.0 / LIBRARY_COVER_TALL.1 + 2 * LIBRARY_COVER_BEZEL,
+    )
+}
+
+/// The art frame: the size the layout reserves, whatever is in it. A
+/// picture that is not this shape is fitted inside and letterboxed, rather
+/// than the frame being cut to the picture -- a frame that changed shape
+/// per game would drag the metadata under it up and down the page.
+#[cfg(feature = "game-library")]
+fn library_cover_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let table = library_table_rect(rect, whdload_entry);
+    let column = table.x + table.w;
+    let right = rect.x + rect.w - 16;
+    let (w, h) = library_cover_size();
+    Rect {
+        x: column + right.saturating_sub(column).saturating_sub(w) / 2,
+        y: table.y,
+        w,
+        h,
+    }
+}
+
+/// The most a picture may be, inside the widest frame.
+#[cfg(feature = "game-library")]
+fn library_art_rect(rect: Rect, whdload_entry: bool) -> Rect {
+    let frame = library_cover_rect(rect, whdload_entry);
+    Rect {
+        x: frame.x + LIBRARY_COVER_BEZEL,
+        y: frame.y + LIBRARY_COVER_BEZEL,
+        w: frame.w - 2 * LIBRARY_COVER_BEZEL,
+        h: frame.h - 2 * LIBRARY_COVER_BEZEL,
+    }
+}
+
+/// The three buttons under the game list: as thin as the ones along the
+/// top, and sized so a third fits beside the two there are.
+#[cfg(feature = "game-library")]
+fn library_button_rects(rect: Rect, whdload_entry: bool) -> [Rect; 3] {
+    let table = library_table_rect(rect, whdload_entry);
+    let gap = 6;
+    let w = (table.w + gap) / 3 - gap;
+    std::array::from_fn(|i| Rect {
+        x: table.x + i * (w + gap),
+        y: table.y + table.h + LIBRARY_BUTTON_GAP,
+        w,
+        h: LAUNCH_MODEL_H,
+    })
+}
+
+/// The sign-in dialog: a small box in the middle of the panel.
+#[cfg(feature = "game-library")]
+fn login_rect(rect: Rect) -> Rect {
+    // Wide enough that the title clears its own close gadget.
+    let (w, h) = (380, 128 + TITLE_H);
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// Its two value boxes, and its two buttons.
+#[cfg(feature = "game-library")]
+fn login_field_rect(rect: Rect, field: launcher::LoginField) -> Rect {
+    let dialog = login_rect(rect);
+    let label = 10 * font::GLYPH_W;
+    Rect {
+        x: dialog.x + 12 + label,
+        y: dialog.y + TITLE_H + 20 + usize::from(field == launcher::LoginField::Pass) * 26,
+        w: dialog.w.saturating_sub(24 + label),
+        h: 18,
+    }
+}
+
+/// The metadata editor: the art on the left at the shape a cover is, the
+/// fields down the right, the buttons along the bottom.
+#[cfg(feature = "game-library")]
+fn meta_rect(rect: Rect) -> Rect {
+    let (w, h) = (440, TITLE_H + META_ART.1 + 56);
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// The art box inside it, at the same 4:5 the Library page uses.
+#[cfg(feature = "game-library")]
+const META_ART: (usize, usize) = (112, 140);
+
+#[cfg(feature = "game-library")]
+fn meta_art_rect(rect: Rect) -> Rect {
+    let dialog = meta_rect(rect);
+    Rect {
+        x: dialog.x + 14,
+        y: dialog.y + TITLE_H + 14,
+        w: META_ART.0,
+        h: META_ART.1,
+    }
+}
+
+#[cfg(feature = "game-library")]
+fn meta_field_rect(rect: Rect, field: launcher::MetaField) -> Rect {
+    let dialog = meta_rect(rect);
+    let art = meta_art_rect(rect);
+    let label = 10 * font::GLYPH_W;
+    let x = art.x + art.w + 12 + label;
+    let at = launcher::MetaField::ALL
+        .iter()
+        .position(|&f| f == field)
+        .unwrap_or(0);
+    Rect {
+        x,
+        y: art.y + at * 24,
+        w: (dialog.x + dialog.w).saturating_sub(x + 14),
+        h: 18,
+    }
+}
+
+/// Save, Clear and Cancel, in that order.
+#[cfg(feature = "game-library")]
+fn meta_button_rects(rect: Rect) -> [Rect; 3] {
+    let dialog = meta_rect(rect);
+    let (w, h, gap) = (66, 20, 8);
+    let y = dialog.y + dialog.h - h - 12;
+    std::array::from_fn(|i| Rect {
+        x: dialog.x + dialog.w - 14 - (3 - i) * (w + gap) + gap,
+        y,
+        w,
+        h,
+    })
+}
+
+#[cfg(feature = "game-library")]
+fn login_button_rects(rect: Rect) -> (Rect, Rect) {
+    let dialog = login_rect(rect);
+    let (w, h) = (66, 20);
+    let y = dialog.y + dialog.h - h - 12;
+    (
+        Rect {
+            x: dialog.x + dialog.w - 2 * w - 12 - 8,
+            y,
+            w,
+            h,
+        },
+        Rect {
+            x: dialog.x + dialog.w - w - 12,
+            y,
+            w,
+            h,
+        },
+    )
+}
+
+/// The scroll arrows for a list, inside its own frame: up in the top right
+/// corner, down in the bottom right. Both Library lists use it, each with
+/// its own pair of controls.
+#[cfg(feature = "game-library")]
+fn library_arrows_in(table: Rect, control: fn(isize) -> UiControl) -> [(UiControl, Rect); 2] {
+    let x = table.x + table.w - HOST_DISK_ARROW - 3;
+    let arrow = |y| Rect {
+        x,
+        y,
+        w: HOST_DISK_ARROW,
+        h: HOST_DISK_ARROW,
+    };
+    [
+        (control(-1), arrow(table.y + 2)),
+        (control(1), arrow(table.y + table.h - HOST_DISK_ARROW - 2)),
+    ]
+}
+
+#[cfg(feature = "game-library")]
+fn library_arrow_rects(rect: Rect, whdload_entry: bool) -> [(UiControl, Rect); 2] {
+    library_arrows_in(
+        library_table_rect(rect, whdload_entry),
+        UiControl::LauncherLibraryScroll,
+    )
+}
+
+#[cfg(feature = "game-library")]
+fn library_favourite_arrow_rects(rect: Rect, whdload_entry: bool) -> [(UiControl, Rect); 2] {
+    library_arrows_in(
+        library_favourites_rect(rect, whdload_entry),
+        UiControl::LauncherLibraryFavouriteScroll,
+    )
+}
+
 /// The scroll arrows, up at the top right of the box and down at the bottom
 /// right. Inside the frame rather than beside it, so the box keeps its shape
 /// whether or not the list overflows.
@@ -4631,6 +5141,57 @@ fn host_disk_arrow_rects(rect: Rect) -> [(UiControl, Rect); 2] {
             },
         ),
     ]
+}
+
+/// One scroll arrow: a bevelled button with a triangle on it.
+///
+/// Every scrolling list in the launcher draws its pair with this, so they
+/// look and behave alike -- lit while there is somewhere to go that way and
+/// greyed at the end of the list, brightened under the pointer.
+///
+/// The triangle is stacked runs rather than a glyph: the 8x8 font has no
+/// arrow in it, and a "^" is a caret, which reads as punctuation next to a
+/// list rather than as a direction.
+fn draw_scroll_arrow(
+    frame: &mut [u8],
+    arrow: Rect,
+    up: bool,
+    live: bool,
+    hovered: bool,
+    scale: usize,
+) {
+    let scaled = scale_rect(arrow, scale);
+    fill_rect(frame, scaled, BUTTON_FACE, scale);
+    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    let colour = match (live, hovered) {
+        (false, _) => BUTTON_TEXT_DISABLED,
+        (true, true) => PANEL_TEXT_HILIGHT,
+        (true, false) => BUTTON_TEXT,
+    };
+    // Three rows is enough to read as an arrow at this size. Widening
+    // downwards is an up arrow (narrow tip at the top); widening upwards is
+    // a down arrow.
+    for step in 0..3usize {
+        let width = 1 + step * 2;
+        let y = match up {
+            true => arrow.y + 4 + step,
+            false => arrow.y + 4 + (2 - step),
+        };
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: arrow.x + HOST_DISK_ARROW / 2 - width / 2 - 1,
+                    y,
+                    w: width,
+                    h: 1,
+                },
+                scale,
+            ),
+            colour,
+            scale,
+        );
+    }
 }
 
 /// The Attach cell of one row: clicked to step through where the machine
@@ -4805,6 +5366,36 @@ fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
     (browse, clear)
 }
 
+/// The Download button on a support-archive row.
+///
+/// To the *left* of Browse rather than after Clear, where the row's value
+/// would be. There is room because the button and the value are never both
+/// there: it is only offered while nothing has been chosen, and the value
+/// then reads "(none)".
+#[cfg(feature = "game-library")]
+const LAUNCH_DOWNLOAD_W: usize = 78;
+
+#[cfg(feature = "game-library")]
+fn launcher_download_rect(rect: Rect, row_y: usize) -> Rect {
+    let (browse, _) = launcher_path_rects(rect, row_y);
+    Rect {
+        x: browse.x.saturating_sub(LAUNCH_DOWNLOAD_W + 6),
+        w: LAUNCH_DOWNLOAD_W,
+        ..browse
+    }
+}
+
+/// Which archive a row is for, if it is one of the two.
+#[cfg(feature = "game-library")]
+fn row_archive(field: LauncherField) -> Option<crate::gamelib::support::Archive> {
+    use crate::gamelib::support::Archive;
+    match field {
+        LauncherField::WhdloadWhdPackage => Some(Archive::Whdload),
+        LauncherField::WhdloadSkickPackage => Some(Archive::Skick),
+        _ => None,
+    }
+}
+
 /// The editable volume-name box on a drive row: it sits just left of the
 /// Browse button, with the path text filling the space before it.
 fn launcher_drive_name_rect(rect: Rect, row_y: usize) -> Rect {
@@ -4922,12 +5513,62 @@ fn launcher_action_label(control: UiControl) -> &'static str {
 /// Hit-test the configuration panel. Returns the control under `pos`, or `None`
 /// to let the caller swallow the click on the panel body.
 fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Option<UiControl> {
+    // The dialog answers for the whole panel while it is up: nothing
+    // behind it can be clicked, which is what makes it a dialog.
+    #[cfg(feature = "game-library")]
+    if state.meta.is_some() {
+        for (at, control) in [
+            UiControl::MetaSave,
+            UiControl::MetaClear,
+            UiControl::MetaCancel,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if meta_button_rects(rect)[at].contains(pos) {
+                return Some(control);
+            }
+        }
+        if close_button_rect(meta_rect(rect)).contains(pos) {
+            return Some(UiControl::MetaCancel);
+        }
+        if meta_art_rect(rect).contains(pos) {
+            return Some(UiControl::MetaArt);
+        }
+        for field in launcher::MetaField::ALL {
+            if meta_field_rect(rect, field).contains(pos) {
+                return Some(UiControl::MetaField(field));
+            }
+        }
+        return Some(UiControl::PanelBody);
+    }
+    #[cfg(feature = "game-library")]
+    if state.login.is_some() {
+        let (ok, cancel) = login_button_rects(rect);
+        if ok.contains(pos) {
+            return Some(UiControl::LoginOk);
+        }
+        // Its own close gadget, which is Cancel by another name. Checked
+        // before the panel's, which sits behind it.
+        if cancel.contains(pos) || close_button_rect(login_rect(rect)).contains(pos) {
+            return Some(UiControl::LoginCancel);
+        }
+        for field in [launcher::LoginField::User, launcher::LoginField::Pass] {
+            if login_field_rect(rect, field).contains(pos) {
+                return Some(UiControl::LoginField(field));
+            }
+        }
+        return Some(UiControl::PanelBody);
+    }
     for (i, &model) in launcher::MODELS.iter().enumerate() {
         if launcher_model_rect(rect, i).contains(pos) {
             return Some(UiControl::LauncherModel(model));
         }
     }
-    for (i, &tab) in launcher::TABS.iter().enumerate() {
+    for (i, &tab) in launcher::tabs(state.setup.whdload_enabled())
+        .iter()
+        .enumerate()
+    {
         if launcher_tab_rect(rect, i).contains(pos) {
             return Some(UiControl::LauncherTab(tab));
         }
@@ -5164,6 +5805,15 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
+                #[cfg(feature = "game-library")]
+                RowKind::Account => {
+                    let (button, _) = launcher_path_rects(rect, row_y);
+                    if button.contains(pos) {
+                        return Some(UiControl::LauncherOpenRetroLogin);
+                    }
+                }
+                #[cfg(not(feature = "game-library"))]
+                RowKind::Account => {}
                 RowKind::FloppyMedia => {
                     let drive = launcher::MachineSetup::drive_image_bay(r.field);
                     if let Some(bay) = drive {
@@ -5220,6 +5870,16 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         if clear.contains(pos) {
                             return Some(UiControl::LauncherClear(r.field));
                         }
+                        // A support archive with nothing chosen can fetch
+                        // its own; once something is chosen there is
+                        // nothing to fetch, and Clear brings it back.
+                        #[cfg(feature = "game-library")]
+                        if row_archive(r.field).is_some()
+                            && state.setup.path(r.field).is_none()
+                            && launcher_download_rect(rect, row_y).contains(pos)
+                        {
+                            return Some(UiControl::LauncherWhdloadDownload(r.field));
+                        }
                     }
                     // The volume name only matters once an image is chosen
                     // (and never for a CD image).
@@ -5230,6 +5890,64 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         return Some(UiControl::LauncherDriveNameEdit(r.field));
                     }
                 }
+            }
+        }
+    }
+    #[cfg(feature = "game-library")]
+    if state.tab == LauncherTab::WhdloadLibrary {
+        let whdload_entry = state.setup.whdload_enabled();
+        if state.library.games.len() > library_visible_rows(rect, whdload_entry) {
+            for (control, arrow) in library_arrow_rects(rect, whdload_entry) {
+                if arrow.contains(pos) {
+                    return Some(control);
+                }
+            }
+        }
+        for drawn in 0..library_visible_rows(rect, whdload_entry) {
+            if state.library.scroll + drawn >= state.library.games.len() {
+                break;
+            }
+            // The tick first: it sits inside the row, and marking a
+            // favourite is not the same as choosing the game.
+            if library_favourite_box(rect, whdload_entry, drawn).contains(pos) {
+                return Some(UiControl::LauncherLibraryFavourite(drawn));
+            }
+            if library_row_rect(rect, whdload_entry, drawn).contains(pos) {
+                return Some(UiControl::LauncherLibraryPick(drawn));
+            }
+        }
+        for (at, control) in [
+            UiControl::LauncherLibraryRefresh,
+            UiControl::LauncherLibraryUpdate,
+            UiControl::LauncherLibraryEdit,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if library_button_rects(rect, whdload_entry)[at].contains(pos)
+                && (at == 0 || !state.library.games.is_empty())
+            {
+                return Some(control);
+            }
+        }
+        let starred = state.library.db.favourite_count();
+        let rows = library_favourite_rows(rect, whdload_entry);
+        if starred > rows {
+            for (control, arrow) in library_favourite_arrow_rects(rect, whdload_entry) {
+                if arrow.contains(pos) {
+                    return Some(control);
+                }
+            }
+        }
+        for drawn in 0..starred
+            .saturating_sub(state.library.favourite_scroll)
+            .min(rows)
+        {
+            if library_remove_box(rect, whdload_entry, drawn).contains(pos) {
+                return Some(UiControl::LauncherLibraryFavouriteRemove(drawn));
+            }
+            if library_favourite_row_rect(rect, whdload_entry, drawn).contains(pos) {
+                return Some(UiControl::LauncherLibraryFavouritePick(drawn));
             }
         }
     }
@@ -5291,6 +6009,574 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
 }
 
 /// The Host Disk page: what the host has, and which of it to attach.
+/// The Library page: the games found, which are favourites, and what the
+/// database says about the one picked.
+#[cfg(feature = "game-library")]
+fn draw_library_page(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let entries = state.library.games.entries();
+    let whdload_entry = state.setup.whdload_enabled();
+    let games = library_table_rect(rect, whdload_entry);
+    // A scan running greys both buttons: neither of them can start a
+    // second one while the first is going.
+    let busy = matches!(
+        state.status.as_ref().map(|s| s.kind),
+        Some(launcher::StatusKind::Busy)
+    );
+
+    draw_panel_text(
+        frame,
+        games.x,
+        games.y.saturating_sub(14),
+        "Games:",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    draw_library_box(frame, games, scale);
+    for (at, title) in [
+        (LIBRARY_COL_NAME, "Game"),
+        (library_col_favourite(rect, whdload_entry), "Favourite"),
+    ] {
+        draw_panel_text(
+            frame,
+            games.x + 4 + at,
+            games.y + 5,
+            title,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+
+    if entries.is_empty() {
+        // What is wrong, then what to do about it, broken where it reads:
+        // the launcher panel is a fixed size, so these lines are the same
+        // lines on every machine. Each is still put through the wrap, which
+        // does nothing while they fit and catches them if the box is ever
+        // made narrower than the words in it.
+        let lines = [
+            "No games found!",
+            "",
+            "Update the \"Game library\" directory",
+            "under WHDLoad -> Settings...",
+        ];
+        let lines: Vec<String> = lines
+            .into_iter()
+            .flat_map(|line| match line.is_empty() {
+                true => vec![String::new()],
+                false => wrap_balanced(line, games.w.saturating_sub(16)),
+            })
+            .collect();
+        for (line, text) in lines.into_iter().enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            draw_panel_text(
+                frame,
+                games.x + 8,
+                games.y + LIBRARY_HEADER_H + 6 + line * 14,
+                &text,
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
+    }
+
+    for drawn in 0..library_visible_rows(rect, whdload_entry) {
+        let Some(entry) = entries.get(state.library.scroll + drawn) else {
+            break;
+        };
+        let row = library_row_rect(rect, whdload_entry, drawn);
+        let chosen = state.library.focus == launcher::LibraryFocus::Games
+            && state.library.scroll + drawn == state.library.selected;
+        if chosen {
+            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
+        } else if hover == Some(UiControl::LauncherLibraryPick(drawn)) {
+            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE_HOVER, scale);
+        }
+        let colour = if chosen {
+            MENU_HILIGHT_TEXT
+        } else {
+            PANEL_TEXT
+        };
+        // Clipped at the Favourite column, so a long title stops rather
+        // than running under the tick.
+        draw_panel_text(
+            frame,
+            row.x + 4 + LIBRARY_COL_NAME,
+            row.y + 3,
+            &truncate_to_width(
+                entry.title(),
+                library_col_favourite(rect, whdload_entry).saturating_sub(LIBRARY_COL_NAME + 12),
+            ),
+            colour,
+            1,
+            scale,
+        );
+        let tick = library_favourite_box(rect, whdload_entry, drawn);
+        draw_tick_box(
+            frame,
+            tick.x,
+            tick.y,
+            state.library.db.is_favourite(&entry.relative),
+            TICK_GREEN,
+            scale,
+        );
+        if hover == Some(UiControl::LauncherLibraryFavourite(drawn)) {
+            draw_outline(frame, tick, PANEL_TEXT_HILIGHT, scale);
+        }
+    }
+
+    let visible = library_visible_rows(rect, whdload_entry);
+    if entries.len() > visible {
+        for (control, at) in library_arrow_rects(rect, whdload_entry) {
+            let up = matches!(control, UiControl::LauncherLibraryScroll(d) if d < 0);
+            let live = match up {
+                true => state.library.scroll > 0,
+                false => state.library.scroll + visible < entries.len(),
+            };
+            draw_scroll_arrow(frame, at, up, live, hover == Some(control), scale);
+        }
+    }
+
+    // The favourites, which are the same games under a shorter heading.
+    let favourites = library_favourites_rect(rect, whdload_entry);
+    draw_panel_text(
+        frame,
+        favourites.x,
+        favourites.y.saturating_sub(14),
+        "Favourites:",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    draw_library_box(frame, favourites, scale);
+    for (x, title) in [
+        (favourites.x + 4 + LIBRARY_COL_NAME, "Game"),
+        (library_remove_heading_x(rect, whdload_entry), "Remove"),
+    ] {
+        draw_panel_text(frame, x, favourites.y + 5, title, PANEL_TEXT_DIM, 1, scale);
+    }
+    // From the database rather than from the library, so a favourite whose
+    // package has been deleted is still listed -- and can still be taken
+    // off, which is most of the reason its Remove tick is there.
+    let favourite_rows = library_favourite_rows(rect, whdload_entry);
+    for (drawn, (key, name)) in state
+        .library
+        .db
+        .favourites()
+        .skip(state.library.favourite_scroll)
+        .take(favourite_rows)
+        .enumerate()
+    {
+        let row = library_favourite_row_rect(rect, whdload_entry, drawn);
+        let chosen = state.library.focus == launcher::LibraryFocus::Favourites
+            && state.library.favourite_scroll + drawn == state.library.favourite_selected;
+        if chosen {
+            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
+        } else if hover == Some(UiControl::LauncherLibraryFavouritePick(drawn)) {
+            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE_HOVER, scale);
+        }
+        // One no longer in the library is dimmed: still listed, still
+        // removable, but there is nothing to launch.
+        let present = entries.iter().any(|entry| entry.relative == key);
+        let colour = match (chosen, present) {
+            (true, _) => MENU_HILIGHT_TEXT,
+            (false, true) => PANEL_TEXT,
+            (false, false) => PANEL_TEXT_DIM,
+        };
+        draw_panel_text(
+            frame,
+            row.x + 4 + LIBRARY_COL_NAME,
+            row.y + 3,
+            &truncate_to_width(
+                name,
+                library_col_favourite(rect, whdload_entry).saturating_sub(LIBRARY_COL_NAME + 12),
+            ),
+            colour,
+            1,
+            scale,
+        );
+        let tick = library_remove_box(rect, whdload_entry, drawn);
+        draw_tick_box(frame, tick.x, tick.y, false, TICK_GREEN, scale);
+        if hover == Some(UiControl::LauncherLibraryFavouriteRemove(drawn)) {
+            draw_outline(frame, tick, PANEL_TEXT_HILIGHT, scale);
+        }
+    }
+
+    let starred = state.library.db.favourite_count();
+    if starred > favourite_rows {
+        for (control, at) in library_favourite_arrow_rects(rect, whdload_entry) {
+            let up = matches!(control, UiControl::LauncherLibraryFavouriteScroll(d) if d < 0);
+            let live = match up {
+                true => state.library.favourite_scroll > 0,
+                false => state.library.favourite_scroll + favourite_rows < starred,
+            };
+            draw_scroll_arrow(frame, at, up, live, hover == Some(control), scale);
+        }
+    }
+
+    draw_library_cover(frame, rect, state, scale);
+
+    // The two buttons that say when work happens, in the gap between the
+    // lists. A third slot is left beside them: the row is sized for three
+    // so gaining one later does not move the two that are here.
+    let buttons = library_button_rects(rect, whdload_entry);
+    for (at, (label, control, enabled)) in [
+        ("Refresh", UiControl::LauncherLibraryRefresh, !busy),
+        // Nothing to look up until the folder has been read, so Scan waits
+        // for a Refresh that found something.
+        (
+            "Scan",
+            UiControl::LauncherLibraryUpdate,
+            !busy && !entries.is_empty(),
+        ),
+        (
+            "Update",
+            UiControl::LauncherLibraryEdit,
+            !busy && state.library_selection().is_some(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        draw_text_button(
+            frame,
+            buttons[at],
+            label,
+            enabled,
+            hover == Some(control),
+            scale,
+        );
+    }
+}
+
+/// A list box, sunk into the panel like an entry field so it reads as
+/// something to look into rather than a raised control.
+#[cfg(feature = "game-library")]
+fn draw_library_box(frame: &mut [u8], at: Rect, scale: usize) {
+    fill_rect(frame, scale_rect(at, scale), ENTRY_BG, scale);
+    draw_outline(frame, at, BUTTON_EDGE_LIGHT, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(
+            Rect {
+                x: at.x + 1,
+                y: at.y + 1,
+                w: at.w.saturating_sub(2),
+                h: at.h.saturating_sub(2),
+            },
+            scale,
+        ),
+        BUTTON_EDGE_DARK,
+        BUTTON_EDGE_LIGHT,
+        scale,
+    );
+}
+
+/// The cover art box, and what the database says under it.
+#[cfg(feature = "game-library")]
+fn draw_library_cover(frame: &mut [u8], rect: Rect, state: &LauncherState, scale: usize) {
+    let whdload_entry = state.setup.whdload_enabled();
+    // The frame is the size the layout reserves, whatever shape the picture
+    // in it turns out to be: it is where the eye expects the art to be, and
+    // the writing under it starts on the same line for every game.
+    // Amiga box art is portrait almost without exception, so the frame is
+    // cut for that and the rare landscape scan is letterboxed into it --
+    // black above and below beats a frame that changes shape and drags the
+    // metadata down the page with it.
+    let widest = library_cover_rect(rect, whdload_entry);
+    let entry = state.library_selection();
+    let art = entry
+        .and_then(|entry| entry.game.as_ref())
+        .and_then(|game| game.front_sha1.as_deref())
+        .and_then(|sha1| state.library.covers.get(sha1));
+    let (frame_rect, box_rect) = (widest, library_art_rect(rect, whdload_entry));
+
+    // The mount: a button-faced border raised out of the panel, with the
+    // picture recessed into it. Two bevels facing opposite ways is what
+    // makes the frame read as having thickness.
+    fill_rect(frame, scale_rect(frame_rect, scale), BUTTON_FACE, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(frame_rect, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+    if let Some(art) = art {
+        draw_cover_art(frame, box_rect, art, scale);
+    }
+    draw_rect_bevel(
+        frame,
+        scale_rect(box_rect, scale),
+        BUTTON_EDGE_DARK,
+        BUTTON_EDGE_LIGHT,
+        scale,
+    );
+
+    let Some(entry) = entry else {
+        return;
+    };
+    // Two different nothings: a package the catalogue has never heard of,
+    // and one it knows but has no picture for.
+    let missing: &[&str] = match (&entry.game, art.is_some()) {
+        (_, true) => &[],
+        (None, _) => &["not in the", "database"],
+        (Some(_), _) => &["No cover art"],
+    };
+    {
+        for (line, text) in missing.iter().copied().enumerate() {
+            let w = text.chars().count() * font::GLYPH_W;
+            draw_panel_text(
+                frame,
+                box_rect.x + box_rect.w.saturating_sub(w) / 2,
+                box_rect.y + box_rect.h / 2 - 8 * missing.len() + line * 12,
+                text,
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
+    }
+
+    // Under the art: what the database knows, each label dimmed above its
+    // value, and a value too long for the column wrapped rather than cut.
+    // It starts under the frame, which is one size for every game, so it
+    // starts on the same line each time whatever shape the picture is.
+    // The block stops above the action bar: a developer credited to nine
+    // people would otherwise run down over the Run button and off the
+    // panel. Each value is held to two lines as well, so one long field
+    // cannot crowd out the ones under it -- what is cut is only what is
+    // drawn, never what is stored.
+    let floor = launcher_action_y(rect).saturating_sub(6);
+    let mut y = widest.y + widest.h + 8;
+    let game = entry.game.as_ref();
+    let mut show = |label: &str, value: Option<&str>, y: &mut usize| {
+        let Some(value) = value.filter(|v| !v.is_empty()) else {
+            return;
+        };
+        // Label and one line at least, or there is no point starting.
+        if *y + 24 > floor {
+            return;
+        }
+        draw_panel_text(frame, widest.x, *y, label, PANEL_TEXT_DIM, 1, scale);
+        *y += 12;
+        let mut lines = wrap_to_width(value, widest.w);
+        let over = lines.len() > LIBRARY_FIELD_LINES;
+        lines.truncate(LIBRARY_FIELD_LINES);
+        let last = lines.len().saturating_sub(1);
+        for (at, line) in lines.into_iter().enumerate() {
+            if *y + 12 > floor {
+                break;
+            }
+            // The panel marks a cut with a tilde, so a credit that goes
+            // on does not read as one that stopped. Room is made for the
+            // mark rather than hoping the line is short enough.
+            let line = match over && at == last {
+                true => {
+                    let mut cut = line;
+                    while cut.chars().count() * font::GLYPH_W + font::GLYPH_W > widest.w {
+                        cut.pop();
+                    }
+                    format!("{cut}~")
+                }
+                false => line,
+            };
+            draw_panel_text(frame, widest.x, *y, &line, PANEL_TEXT, 1, scale);
+            *y += 12;
+        }
+        *y += 4;
+    };
+    show("Year", game.and_then(|g| g.year.as_deref()), &mut y);
+    show(
+        "Publisher",
+        game.and_then(|g| g.publisher.as_deref()),
+        &mut y,
+    );
+    show(
+        "Developer",
+        game.and_then(|g| g.developer.as_deref()),
+        &mut y,
+    );
+    show("Players", game.and_then(|g| g.players.as_deref()), &mut y);
+
+    // Which release this is. Shown only when there is something to say:
+    // what somebody typed, or -- where the library holds this game under
+    // one title more than once -- the package's own name, since nothing
+    // else separates `CannonFodder2_v1.11_0104` from `_v1.12_Fr_2578`.
+    // Without the extension: it is the same on both and says nothing about
+    // which release either is.
+    //
+    // A game held once and never edited has no version and no row, and
+    // neither has one the catalogue has never heard of -- two packages the
+    // scan could not name are two rows that say nothing already, and a
+    // file name under them is not the answer to which release they are.
+    let version = game
+        .and_then(|g| g.version.as_deref())
+        .filter(|v| !v.is_empty())
+        .or_else(|| (entry.duplicated && game.is_some()).then_some(entry.file_name.as_str()));
+    if let Some(version) = version.filter(|_| y + 24 <= floor) {
+        draw_panel_text(frame, widest.x, y, "Version", PANEL_TEXT_DIM, 1, scale);
+        y += 12;
+        // Two lines, because a package name is longer than the column and
+        // both ends of it matter: `CannonFodder2_v1.11_0104.lha` says
+        // which game at the front and which release at the back. Anything
+        // past that is cut, which nothing typed here should reach -- the
+        // editor stops at what these two lines hold.
+        for line in wrap_to_width(version, widest.w)
+            .into_iter()
+            .take(LIBRARY_VERSION_LINES)
+        {
+            if y + 12 > floor {
+                break;
+            }
+            draw_panel_text(frame, widest.x, y, &line, PANEL_TEXT, 1, scale);
+            y += 12;
+        }
+    }
+}
+
+/// Draw a cover into `into`, scaled to fit and centred, keeping its shape.
+///
+/// Nearest-neighbour, like everything else the panel draws: the launcher
+/// renders at one scale and is blown up whole, so smoothing here would be
+/// undone by the magnification above it anyway.
+#[cfg(feature = "game-library")]
+fn draw_cover_art(frame: &mut [u8], into: Rect, art: &crate::gamelib::cover::Image, scale: usize) {
+    let Some(at) = fit_within(art.width, art.height, into) else {
+        return;
+    };
+    for y in 0..at.h {
+        let from_y = y * art.height / at.h;
+        for x in 0..at.w {
+            let from = (from_y * art.width + x * art.width / at.w) * 4;
+            let Some(px) = art.pixels.get(from..from + 4) else {
+                continue;
+            };
+            // Drawn opaque: cover art has no transparency worth honouring,
+            // and one that does reads better over the box's own fill.
+            let colour = rgba(px[0] as u32, px[1] as u32, px[2] as u32);
+            fill_rect(
+                frame,
+                scale_rect(
+                    Rect {
+                        x: at.x + x,
+                        y: at.y + y,
+                        w: 1,
+                        h: 1,
+                    },
+                    scale,
+                ),
+                colour,
+                scale,
+            );
+        }
+    }
+}
+
+/// The largest rectangle of `w` by `h`'s shape that fits inside `into`,
+/// centred. `None` if either is empty, which is nothing to draw.
+///
+/// Covers are portrait and the box is close to square, so a picture drawn
+/// to the box's own shape would be visibly stretched.
+#[cfg(feature = "game-library")]
+fn fit_within(w: usize, h: usize, into: Rect) -> Option<Rect> {
+    if w == 0 || h == 0 || into.w == 0 || into.h == 0 {
+        return None;
+    }
+    // Whichever side runs out first sets the scale; the other is left a
+    // margin, split evenly.
+    let (fit_w, fit_h) = if w * into.h >= h * into.w {
+        (into.w, (into.w * h / w).clamp(1, into.h))
+    } else {
+        ((into.h * w / h).clamp(1, into.w), into.h)
+    };
+    Some(Rect {
+        x: into.x + (into.w - fit_w) / 2,
+        y: into.y + (into.h - fit_h) / 2,
+        w: fit_w,
+        h: fit_h,
+    })
+}
+
+/// The same as [`wrap_to_width`], but with the lines evened up.
+///
+/// A greedy wrap fills each line to the brim and leaves whatever is left
+/// on the last one, which for a sentence a little wider than its box means
+/// a full line and a single trailing word. It takes the same number of
+/// lines to say it with the break in a sensible place, so the column is
+/// narrowed a character at a time for as long as the line count holds.
+#[cfg(feature = "game-library")]
+fn wrap_balanced(text: &str, width: usize) -> Vec<String> {
+    let mut best = wrap_to_width(text, width);
+    if best.len() < 2 {
+        return best;
+    }
+    let lines = best.len();
+    let mut narrow = width;
+    while narrow > font::GLYPH_W {
+        narrow -= font::GLYPH_W;
+        let tried = wrap_to_width(text, narrow);
+        if tried.len() != lines {
+            break;
+        }
+        best = tried;
+    }
+    best
+}
+
+/// Break text into lines that fit `width`, at spaces where there are any.
+/// A single word longer than the column is broken across lines rather than
+/// left to run off the panel.
+#[cfg(feature = "game-library")]
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    let per_line = (width / font::GLYPH_W).max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let would_be = if line.is_empty() {
+            word.chars().count()
+        } else {
+            line.chars().count() + 1 + word.chars().count()
+        };
+        if would_be > per_line && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if word.chars().count() > per_line {
+            // Nothing to break at, so it is broken anyway -- across as
+            // many lines as it needs. A package name is one long word and
+            // taking only its first line would drop the part that says
+            // which release it is.
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let mut rest: Vec<char> = word.chars().collect();
+            while rest.len() > per_line {
+                lines.push(rest.drain(..per_line).collect());
+            }
+            line = rest.into_iter().collect();
+            continue;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 fn draw_host_disk_page(
     frame: &mut [u8],
     rect: Rect,
@@ -5449,42 +6735,7 @@ fn draw_host_disk_page(
             } else {
                 scroll + HOST_DISK_VISIBLE_ROWS < disks.len()
             };
-            let scaled = scale_rect(arrow, scale);
-            fill_rect(frame, scaled, BUTTON_FACE, scale);
-            draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-            let colour = if !live {
-                BUTTON_TEXT_DISABLED
-            } else if hover == Some(control) {
-                PANEL_TEXT_HILIGHT
-            } else {
-                BUTTON_TEXT
-            };
-            // A triangle, drawn as stacked runs: three rows is enough to read
-            // as an arrow at this size, and it needs no glyph.
-            for step in 0..3usize {
-                let width = 1 + step * 2;
-                // Widening downwards is an up arrow (narrow tip at the top);
-                // widening upwards is a down arrow.
-                let y = if up {
-                    arrow.y + 4 + step
-                } else {
-                    arrow.y + 4 + (2 - step)
-                };
-                fill_rect(
-                    frame,
-                    scale_rect(
-                        Rect {
-                            x: arrow.x + HOST_DISK_ARROW / 2 - width / 2 - 1,
-                            y,
-                            w: width,
-                            h: 1,
-                        },
-                        scale,
-                    ),
-                    colour,
-                    scale,
-                );
-            }
+            draw_scroll_arrow(frame, arrow, up, live, hover == Some(control), scale);
         }
     }
 
@@ -5644,12 +6895,83 @@ fn truncate_to_width(text: &str, avail_px: usize) -> String {
     format!("{kept}~")
 }
 
+/// Which slice of a line a box shows, and where in it the caret lands.
+///
+/// Answers `(first character shown, cell the caret is on)` for a line of
+/// `len` characters in a box `cells` wide. The caret is kept off the edges
+/// where there is text either side of it -- half a box of lead means
+/// stepping through a long value moves the block, and only shifts the text
+/// once the block reaches an end.
+fn edit_window(len: usize, caret: usize, cells: usize) -> (usize, usize) {
+    let first = caret
+        .saturating_sub(cells / 2)
+        .min(len.saturating_sub(cells));
+    (first, caret - first)
+}
+
+/// Draw a line that is being typed into, with a block over the caret.
+///
+/// Every editable box in the launcher goes through here -- the value boxes
+/// on the configuration pages and both WHDLoad dialogs -- so a caret means
+/// the same thing wherever it is seen. A block rather than a bar: the font
+/// is an 8x8 cell grid with no sub-pixel anywhere in it, and a one-pixel
+/// line between two cells is easy to miss on a scaled-up panel.
+///
+/// The window on the text slides to keep the caret in view, so typing at
+/// the end of something longer than the box pushes the head off the left
+/// and stepping back to the front brings it home. An "..." marks a head
+/// that has been scrolled past, and the caret cell is left free at the
+/// right so a caret past the last character has somewhere to sit.
+#[allow(clippy::too_many_arguments)]
+fn draw_edit_line(
+    frame: &mut [u8],
+    x: usize,
+    y: usize,
+    text: &str,
+    caret: usize,
+    color: u32,
+    bg: u32,
+    avail_px: usize,
+    scale: usize,
+) {
+    let chars: Vec<char> = text.chars().collect();
+    // One cell is the caret's, so a full box still shows where typing goes.
+    let cells = (avail_px / font::GLYPH_W).saturating_sub(1).max(1);
+    let caret = caret.min(chars.len());
+    let (first, cell) = edit_window(chars.len(), caret, cells);
+    let mut shown: Vec<char> = chars.iter().skip(first).take(cells + 1).copied().collect();
+    // Say the head was scrolled past, where the three cells it takes do not
+    // land under the block: a caret sitting on a dot would be a lie about
+    // what deleting there would remove.
+    if first > 0 && cell >= 3 {
+        shown[..3].fill('.');
+    }
+    let shown: String = shown.into_iter().collect();
+    draw_panel_text(frame, x, y, &shown, color, 1, scale);
+    // Half a cell wide: enough to be seen against the text at any scale,
+    // narrow enough to leave most of the character it stands on legible.
+    // It blinks, so it is also read as a caret rather than as a mark in
+    // the value; out of phase, nothing is drawn and the character shows
+    // whole.
+    if !crate::video::caret_lit() {
+        return;
+    }
+    let block = Rect {
+        x: x + cell * font::GLYPH_W,
+        y,
+        w: (font::GLYPH_W / 2).max(1),
+        h: font::GLYPH_H,
+    };
+    fill_rect(frame, scale_rect(block, scale), color, scale);
+    let _ = bg;
+}
+
 /// Clip `text` to `avail_px`, keeping the TAIL and prefixing an ASCII "..."
-/// when it does not fit -- for a host directory the meaningful end (the leaf
-/// dir) stays visible, and for a field being typed into it is the caret. The
-/// bitmap font is ASCII-only, so a real ellipsis glyph cannot be drawn; "..."
-/// is the closest it can render. Mirrors [`truncate_to_width`], which keeps
-/// the head instead.
+/// when it does not fit, so a host directory's meaningful end (the leaf
+/// dir) stays visible. The bitmap font is ASCII-only, so a real ellipsis
+/// glyph cannot be drawn; "..." is the closest it can render. Mirrors
+/// [`truncate_to_width`], which keeps the head instead, and
+/// [`draw_edit_line`], which shows a window around the caret.
 fn clip_text_tail(text: &str, avail_px: usize) -> String {
     let max_chars = avail_px / font::GLYPH_W;
     let len = text.chars().count();
@@ -6193,8 +7515,6 @@ fn draw_launcher_row(
             let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
             let text = if let Some(reason) = reason.filter(|_| greyed_shows_reason) {
                 reason.to_string()
-            } else if editing {
-                format!("{}_", state.edit_buffer())
             } else {
                 setup.value_label(r.field)
             };
@@ -6218,7 +7538,21 @@ fn draw_launcher_row(
             } else {
                 PANEL_TEXT
             };
-            draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
+            if editing {
+                draw_edit_line(
+                    frame,
+                    value.x + 4,
+                    value.y + 6,
+                    state.edit_buffer(),
+                    state.edit_caret().at(),
+                    PANEL_TEXT_HILIGHT,
+                    PANEL_BG,
+                    value.w.saturating_sub(8),
+                    scale,
+                );
+            } else {
+                draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
+            }
             // Status column: the "Bootable" label then a tick box, ticked when
             // the drive is bootable.
             let cell = launcher_bootable_rect(rect, row_y);
@@ -6427,6 +7761,36 @@ fn draw_launcher_row(
                 scale,
             );
         }
+        #[cfg(feature = "game-library")]
+        RowKind::Account => {
+            // Where Browse would be, because it is the same shape of thing:
+            // the button that fills the column in. The column itself says
+            // whether this session is signed in, and is empty when it is
+            // not -- there is no account setting to report, only a session.
+            let (button, _) = launcher_path_rects(rect, row_y);
+            let signed_in = state.openretro.is_some();
+            if signed_in {
+                draw_panel_text(
+                    frame,
+                    launcher_control_x(rect),
+                    button.y + 6,
+                    "logged in",
+                    PANEL_TEXT,
+                    1,
+                    scale,
+                );
+            }
+            draw_text_button(
+                frame,
+                button,
+                if signed_in { "Log out" } else { "Log in" },
+                true,
+                hover == Some(UiControl::LauncherOpenRetroLogin),
+                scale,
+            );
+        }
+        #[cfg(not(feature = "game-library"))]
+        RowKind::Account => {}
         RowKind::Drive => {
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
@@ -6487,23 +7851,35 @@ fn draw_launcher_row(
                     scale,
                 );
                 let editing = state.editing() == Some(EditTarget::DriveName(r.field));
-                let (label, color) = if editing {
-                    (format!("{}_", state.edit_buffer()), PANEL_TEXT_HILIGHT)
-                } else if let Some(name) = setup.drive_name(r.field) {
+                let (label, color) = if let Some(name) = setup.drive_name(r.field) {
                     (name.to_string(), PANEL_TEXT)
                 } else {
                     ("(volume)".to_string(), PANEL_TEXT_DIM)
                 };
-                let shown = truncate_to_width(&label, name_box.w.saturating_sub(8));
-                draw_panel_text(
-                    frame,
-                    name_box.x + 4,
-                    name_box.y + 6,
-                    &shown,
-                    color,
-                    1,
-                    scale,
-                );
+                if editing {
+                    draw_edit_line(
+                        frame,
+                        name_box.x + 4,
+                        name_box.y + 6,
+                        state.edit_buffer(),
+                        state.edit_caret().at(),
+                        PANEL_TEXT_HILIGHT,
+                        PANEL_BG,
+                        name_box.w.saturating_sub(8),
+                        scale,
+                    );
+                } else {
+                    let shown = truncate_to_width(&label, name_box.w.saturating_sub(8));
+                    draw_panel_text(
+                        frame,
+                        name_box.x + 4,
+                        name_box.y + 6,
+                        &shown,
+                        color,
+                        1,
+                        scale,
+                    );
+                }
             }
             draw_text_button(
                 frame,
@@ -6521,6 +7897,20 @@ fn draw_launcher_row(
                 hover == Some(UiControl::LauncherClear(r.field)),
                 scale,
             );
+            // A support archive with nothing chosen offers to fetch its
+            // own, from the same place and against the same digest the
+            // packaging script uses.
+            #[cfg(feature = "game-library")]
+            if row_archive(r.field).is_some() && setup.path(r.field).is_none() {
+                draw_text_button(
+                    frame,
+                    launcher_download_rect(rect, row_y),
+                    "Download",
+                    true,
+                    hover == Some(UiControl::LauncherWhdloadDownload(r.field)),
+                    scale,
+                );
+            }
         }
     }
 }
@@ -6702,18 +8092,22 @@ fn draw_launcher_board_option(
                 BUTTON_EDGE_LIGHT,
                 scale,
             );
-            let text = if editing {
-                format!("{}_", state.edit_buffer())
+            if editing {
+                draw_edit_line(
+                    frame,
+                    vbox.x + 4,
+                    row_y + 8,
+                    state.edit_buffer(),
+                    state.edit_caret().at(),
+                    PANEL_TEXT_HILIGHT,
+                    PANEL_BG,
+                    vbox.w.saturating_sub(8),
+                    scale,
+                );
             } else {
-                value.clone()
-            };
-            let color = if editing {
-                PANEL_TEXT_HILIGHT
-            } else {
-                PANEL_TEXT
-            };
-            let shown = truncate_to_width(&text, vbox.w.saturating_sub(8));
-            draw_panel_text(frame, vbox.x + 4, row_y + 8, &shown, color, 1, scale);
+                let shown = truncate_to_width(&value, vbox.w.saturating_sub(8));
+                draw_panel_text(frame, vbox.x + 4, row_y + 8, &shown, PANEL_TEXT, 1, scale);
+            }
         }
     }
 }
@@ -6769,7 +8163,9 @@ fn draw_launcher(
         scale,
     );
     // Vertical category-tab column.
-    for (i, &tab) in launcher::TABS.iter().enumerate() {
+    let whdload_entry = state.setup.whdload_enabled();
+    let strip = launcher::tabs(whdload_entry);
+    for (i, &tab) in strip.iter().enumerate() {
         draw_launcher_chip(
             frame,
             launcher_tab_rect(rect, i),
@@ -6831,6 +8227,10 @@ fn draw_launcher(
             false,
             scale,
         );
+    }
+    #[cfg(feature = "game-library")]
+    if state.tab == LauncherTab::WhdloadLibrary {
+        draw_library_page(frame, rect, state, hover, scale);
     }
     if state.tab == LauncherTab::HostDisk {
         draw_host_disk_page(frame, rect, state, hover, scale);
@@ -6999,10 +8399,10 @@ fn draw_launcher(
     if let Some(status) = &state.status {
         let color = match status.kind {
             launcher::StatusKind::Ok => PANEL_TEXT_HILIGHT,
-            // Neither done nor wrong: the plain panel colour, so a line that
-            // is only reporting progress does not read as either.
-            launcher::StatusKind::Busy => PANEL_TEXT,
-            launcher::StatusKind::Error => PANEL_TEXT_ACCENT,
+            // Work in progress and a failure share the warning colour:
+            // both are "not finished, and worth your attention", and only
+            // a line that says something worked has earned the green.
+            launcher::StatusKind::Busy | launcher::StatusKind::Error => PANEL_TEXT_ACCENT,
         };
         // Kept inside the panel. A failure explains itself at whatever length
         // it needs to, and one long enough to run past the edge is drawn over
@@ -7030,6 +8430,271 @@ fn draw_launcher(
             scale,
         );
     }
+    // Over everything, because it is the only thing being answered while
+    // it is up.
+    #[cfg(feature = "game-library")]
+    if state.login.is_some() {
+        draw_login_dialog(frame, rect, state, hover, scale);
+    }
+    #[cfg(feature = "game-library")]
+    if state.meta.is_some() {
+        draw_meta_dialog(frame, rect, state, hover, scale);
+    }
+}
+
+/// The metadata editor.
+#[cfg(feature = "game-library")]
+fn draw_meta_dialog(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let Some(meta) = &state.meta else { return };
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = meta_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    draw_title_bar(
+        frame,
+        dialog,
+        "Update metadata",
+        hover == Some(UiControl::MetaCancel),
+        scale,
+    );
+
+    // The art, drawn the way the Library page draws it, and clickable.
+    let art = meta_art_rect(rect);
+    fill_rect(frame, scale_rect(art, scale), BUTTON_FACE, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(art, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    let inner = Rect {
+        x: art.x + LIBRARY_COVER_BEZEL,
+        y: art.y + LIBRARY_COVER_BEZEL,
+        w: art.w - 2 * LIBRARY_COVER_BEZEL,
+        h: art.h - 2 * LIBRARY_COVER_BEZEL,
+    };
+    fill_rect(frame, scale_rect(inner, scale), ENTRY_BG, scale);
+    let picture = meta
+        .art
+        .as_deref()
+        .and_then(|key| state.library.covers.get(key));
+    match picture {
+        Some(picture) => draw_cover_art(frame, inner, picture, scale),
+        None => {
+            for (line, text) in ["Click to", "choose art"].into_iter().enumerate() {
+                let w = text.len() * font::GLYPH_W;
+                draw_panel_text(
+                    frame,
+                    inner.x + inner.w.saturating_sub(w) / 2,
+                    inner.y + inner.h / 2 - 12 + line * 12,
+                    text,
+                    PANEL_TEXT_DIM,
+                    1,
+                    scale,
+                );
+            }
+        }
+    }
+    draw_rect_bevel(
+        frame,
+        scale_rect(inner, scale),
+        BUTTON_EDGE_DARK,
+        BUTTON_EDGE_LIGHT,
+        scale,
+    );
+    if hover == Some(UiControl::MetaArt) {
+        draw_outline(frame, art, PANEL_TEXT_HILIGHT, scale);
+    }
+
+    for field in launcher::MetaField::ALL {
+        let box_rect = meta_field_rect(rect, field);
+        draw_panel_text(
+            frame,
+            art.x + art.w + 12,
+            box_rect.y + 5,
+            field.label(),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+        draw_outline(
+            frame,
+            box_rect,
+            if meta.focus == field {
+                PANEL_TEXT_HILIGHT
+            } else {
+                BUTTON_EDGE_DARK
+            },
+            scale,
+        );
+        // The focused box carries the caret, and the window on the text
+        // follows it: metadata is amended more often than typed fresh, so
+        // the middle of a value has to be reachable.
+        let value = meta.value(field);
+        if meta.focus == field {
+            draw_edit_line(
+                frame,
+                box_rect.x + 5,
+                box_rect.y + 5,
+                value,
+                meta.caret.at(),
+                PANEL_TEXT,
+                ENTRY_BG,
+                box_rect.w.saturating_sub(10),
+                scale,
+            );
+        } else {
+            draw_panel_text(
+                frame,
+                box_rect.x + 5,
+                box_rect.y + 5,
+                &truncate_to_width(value, box_rect.w.saturating_sub(10)),
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
+
+    for (at, (label, control)) in [
+        ("Save", UiControl::MetaSave),
+        ("Clear", UiControl::MetaClear),
+        ("Cancel", UiControl::MetaCancel),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        draw_text_button(
+            frame,
+            meta_button_rects(rect)[at],
+            label,
+            true,
+            hover == Some(control),
+            scale,
+        );
+    }
+}
+
+/// The OpenRetro sign-in dialog.
+///
+/// The password is drawn as a run of asterisks, one per character typed:
+/// the [`crate::gamelib::Secret`] behind it is never turned into display
+/// text, so what is on screen cannot be a second copy of it.
+#[cfg(feature = "game-library")]
+fn draw_login_dialog(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    use launcher::LoginField;
+    let Some(login) = &state.login else { return };
+    // Everything behind it is dimmed rather than merely covered: a dialog
+    // that only overlaps the page still looks like part of it.
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = login_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    // Its own title bar, the same as the panel's: a window over a window
+    // should look like one, close gadget included.
+    draw_title_bar(
+        frame,
+        dialog,
+        "Log in to OpenRetro",
+        hover == Some(UiControl::LoginCancel),
+        scale,
+    );
+    for field in [LoginField::User, LoginField::Pass] {
+        let box_rect = login_field_rect(rect, field);
+        let (label, shown) = match field {
+            LoginField::User => ("Username", login.user.clone()),
+            LoginField::Pass => ("Password", "*".repeat(login.pass.chars())),
+        };
+        draw_panel_text(
+            frame,
+            dialog.x + 12,
+            box_rect.y + 5,
+            label,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+        draw_outline(
+            frame,
+            box_rect,
+            if login.focus == field {
+                PANEL_TEXT_HILIGHT
+            } else {
+                BUTTON_EDGE_DARK
+            },
+            scale,
+        );
+        // The focused box carries the caret, and the window on the text
+        // follows it. The mask is one asterisk a character, so the caret
+        // steps through a password exactly as it does through a name.
+        if login.focus == field {
+            draw_edit_line(
+                frame,
+                box_rect.x + 5,
+                box_rect.y + 5,
+                &shown,
+                login.caret.at(),
+                PANEL_TEXT,
+                ENTRY_BG,
+                box_rect.w.saturating_sub(10),
+                scale,
+            );
+        } else {
+            draw_panel_text(
+                frame,
+                box_rect.x + 5,
+                box_rect.y + 5,
+                &truncate_to_width(&shown, box_rect.w.saturating_sub(10)),
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
+    let (ok, cancel) = login_button_rects(rect);
+    draw_text_button(
+        frame,
+        ok,
+        "OK",
+        !login.sending,
+        hover == Some(UiControl::LoginOk),
+        scale,
+    );
+    draw_text_button(
+        frame,
+        cancel,
+        "Cancel",
+        true,
+        hover == Some(UiControl::LoginCancel),
+        scale,
+    );
 }
 
 pub fn draw_panel_layer(
@@ -7496,6 +9161,127 @@ pub fn hex_dump_row(addr: u32, bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::config::{JoystickInputMode, PixelAspect, WarpSpeed};
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_favourites_arrows_appear_and_its_rows_follow_the_scroll() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 716,
+            h: 581,
+        };
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::WhdloadLibrary;
+        let whdload_entry = state.setup.whdload_enabled();
+        let rows = library_favourite_rows(rect, whdload_entry);
+        assert!(rows > 1, "the box holds rows to scroll: {rows}");
+
+        // A list that fits has no arrows: the corner is a row's, not a
+        // button's, so a click there picks the game under it.
+        for at in 0..rows {
+            state
+                .library
+                .db
+                .toggle_favourite(&format!("Game{at}.lha"), &format!("Game {at}"));
+        }
+        let [(up, up_at), (down, down_at)] = library_favourite_arrow_rects(rect, whdload_entry);
+        let hit = |state: &LauncherState, at: Rect| {
+            launcher_control_at(rect, state, (at.x as i32 + 2, at.y as i32 + 2))
+        };
+        assert_ne!(hit(&state, up_at), Some(up));
+        assert_ne!(hit(&state, down_at), Some(down));
+
+        // One more than fits, and they appear.
+        state.library.db.toggle_favourite("GameN.lha", "Game N");
+        assert_eq!(hit(&state, up_at), Some(up));
+        assert_eq!(hit(&state, down_at), Some(down));
+
+        // The rows are drawn positions: scrolled down, the top row is the
+        // scroll's, so clicking it removes the right favourite.
+        let first = library_favourite_row_rect(rect, whdload_entry, 0);
+        let click = (first.x as i32 + 40, first.y as i32 + 2);
+        assert_eq!(
+            launcher_control_at(rect, &state, click),
+            Some(UiControl::LauncherLibraryFavouritePick(0))
+        );
+        state.scroll_favourites(1, rows);
+        assert_eq!(state.library.favourite_scroll, 1);
+        assert_eq!(
+            launcher_control_at(rect, &state, click),
+            Some(UiControl::LauncherLibraryFavouritePick(0)),
+            "still the top drawn row; the window under it moved"
+        );
+
+        // And the last drawn row is the last one there is: scrolled to the
+        // end, the rows below it are not clickable.
+        state.scroll_favourites(100, rows);
+        let past = library_favourite_row_rect(rect, whdload_entry, rows - 1);
+        assert_eq!(
+            launcher_control_at(rect, &state, (past.x as i32 + 40, past.y as i32 + 2)),
+            Some(UiControl::LauncherLibraryFavouritePick(rows - 1))
+        );
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_balanced_wrap_does_not_leave_one_word_alone() {
+        let g = font::GLYPH_W;
+        let text = "Update the \"Game library\" path in the WHDLoad settings";
+        // Greedy: a full line, then the one word that did not fit.
+        let greedy = wrap_to_width(text, 45 * g);
+        assert_eq!(greedy.len(), 2);
+        assert_eq!(greedy[1], "settings");
+
+        // Balanced: the same two lines, broken where it reads.
+        let even = wrap_balanced(text, 45 * g);
+        assert_eq!(even.len(), 2, "the line count is what it was");
+        assert!(
+            even[1].split_whitespace().count() > 1,
+            "still one word alone: {even:?}"
+        );
+        let longest = even.iter().map(|l| l.chars().count()).max().unwrap();
+        assert!(
+            longest < greedy[0].chars().count(),
+            "no narrower than greedy: {even:?}"
+        );
+        // What is said is still what was passed in.
+        assert_eq!(even.join(" "), text);
+
+        // Text that fits is left alone rather than split for the sake of it.
+        assert_eq!(wrap_balanced("Short", 45 * g), vec!["Short".to_string()]);
+    }
+
+    #[test]
+    fn an_edit_window_keeps_the_caret_in_the_box() {
+        // Short enough to fit: the whole line is shown from the start, and
+        // the caret sits where it is.
+        assert_eq!(edit_window(5, 0, 10), (0, 0));
+        assert_eq!(edit_window(5, 5, 10), (0, 5));
+
+        // Longer than the box. Near the front nothing scrolls yet...
+        assert_eq!(edit_window(40, 0, 10), (0, 0));
+        assert_eq!(edit_window(40, 4, 10), (0, 4));
+        // ...and past half a box the text starts moving under a caret that
+        // stays put, rather than the caret walking into the edge.
+        assert_eq!(edit_window(40, 20, 10), (15, 5));
+        assert_eq!(edit_window(40, 21, 10), (16, 5));
+        // At the end the window stops: the tail is shown and the caret
+        // walks the last cells, which is where typing leaves it.
+        assert_eq!(edit_window(40, 40, 10), (30, 10));
+        assert_eq!(edit_window(40, 38, 10), (30, 8));
+
+        // The caret is always inside the box it is drawn in.
+        for len in 0..40 {
+            for caret in 0..=len {
+                for cells in 1..12 {
+                    let (first, cell) = edit_window(len, caret, cells);
+                    assert!(first <= caret, "{len}/{caret}/{cells}: {first}");
+                    assert!(cell <= cells, "{len}/{caret}/{cells}: {cell}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn clip_path_keeps_the_file_name() {
@@ -8594,6 +10380,307 @@ mod tests {
         );
     }
 
+    /// A Library page with a few games in it, for the previews.
+    #[cfg(feature = "game-library")]
+    fn library_preview_state() -> LauncherState {
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::WhdloadLibrary;
+
+        state.library.db.set_known(vec![
+            crate::gamelib::Known {
+                file: "GoldenAxe_v1.5_0017.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Golden Axe".to_string(),
+                    year: Some("1990".to_string()),
+                    publisher: Some("Virgin".to_string()),
+                    // Long enough that before the two-line cap it ran down
+                    // over the Run button and off the panel.
+                    developer: Some(
+                        "Adventuresoft UK Ltd - Teoman Irmak, Matt Ellis, Antony M. Scott, \
+                         Graham Lilley, Alan Bridgman, Brian Howarth, Richard Turner"
+                            .to_string(),
+                    ),
+                    players: Some("1 - 2 (2)".to_string()),
+                    front_sha1: std::env::var("WHDLOAD_COVER_SHA1").ok(),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "JamesPond2_v2.0_AGA_1354.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "James Pond 2: Codename RoboCod".to_string(),
+                    year: Some("1991".to_string()),
+                    publisher: Some("Millennium".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            // Two releases of one game, which is what the Version row is
+            // for: nothing else tells them apart in the list.
+            crate::gamelib::Known {
+                file: "CannonFodder2_v1.12_Fr_2578.zip".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Cannon Fodder 2".to_string(),
+                    year: Some("1994".to_string()),
+                    publisher: Some("Virgin".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "CannonFodder2_v1.11_0104.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Cannon Fodder 2".to_string(),
+                    year: Some("1994".to_string()),
+                    publisher: Some("Virgin".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "SimCity_v1.0_2193.lha".to_string(),
+                game: None,
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Lotus2_v1.2_0451.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Lotus Turbo Challenge 2".to_string(),
+                    year: Some("1991".to_string()),
+                    publisher: Some("Gremlin".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Turrican2_v2.1_1120.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Turrican II".to_string(),
+                    year: Some("1991".to_string()),
+                    publisher: Some("Rainbow Arts".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "SensibleSoccer_v1.1_0788.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Sensible Soccer".to_string(),
+                    year: Some("1992".to_string()),
+                    publisher: Some("Renegade".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Superfrog_v1.0_0233.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Superfrog".to_string(),
+                    year: Some("1993".to_string()),
+                    publisher: Some("Team17".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "ChaosEngine_v2.0_0912.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "The Chaos Engine".to_string(),
+                    year: Some("1993".to_string()),
+                    publisher: Some("Renegade".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Xenon2_v1.0_0355.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Xenon 2: Megablast".to_string(),
+                    year: Some("1989".to_string()),
+                    publisher: Some("Image Works".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Turrican_v1.3_0087.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Turrican".to_string(),
+                    year: Some("1990".to_string()),
+                    publisher: Some("Rainbow Arts".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Lemmings_v1.1_0621.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Lemmings".to_string(),
+                    year: Some("1991".to_string()),
+                    publisher: Some("Psygnosis".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "Pinball_Dreams_v1.0_0498.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Pinball Dreams".to_string(),
+                    year: Some("1992".to_string()),
+                    publisher: Some("21st Century".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "SpeedBall2_v1.2_0733.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Speedball 2".to_string(),
+                    year: Some("1990".to_string()),
+                    publisher: Some("Image Works".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+        ]);
+        state
+            .library
+            .db
+            .toggle_favourite("GoldenAxe_v1.5_0017.lha", "Golden Axe");
+        // One whose package is not in the library, which is what the
+        // Remove tick beside it is for.
+        state
+            .library
+            .db
+            .toggle_favourite("Deleted_v1.0_0001.lha", "A Deleted Game");
+        // More than the box holds, so the preview covers a favourites list
+        // with its scroll arrows up rather than only the short case.
+        for (file, name) in [
+            ("Lotus2_v1.2_0451.lha", "Lotus Turbo Challenge 2"),
+            ("Turrican2_v2.1_1120.lha", "Turrican II"),
+            ("SensibleSoccer_v1.1_0788.lha", "Sensible Soccer"),
+            ("Superfrog_v1.0_0233.lha", "Superfrog"),
+            ("ChaosEngine_v2.0_0912.lha", "The Chaos Engine"),
+            ("Xenon2_v1.0_0355.lha", "Xenon 2: Megablast"),
+        ] {
+            state.library.db.toggle_favourite(file, name);
+        }
+        state.library.db_loaded = true;
+        let want_art = std::env::var("WHDLOAD_COVERS").is_ok_and(|covers| {
+            state.library.covers = crate::gamelib::Covers::new(covers.into());
+            true
+        });
+        // A folder of packages, so the list has something in it. The store
+        // above supplies the metadata; this is only what is on the disk.
+        if let Ok(games) = std::env::var("WHDLOAD_GAMES") {
+            state
+                .setup
+                .set_path(LauncherField::WhdloadGames, games.into());
+            state.refresh_library(std::path::Path::new("/nonexistent"));
+        }
+        // Land on the game the preview has art and a full set of metadata
+        // for, rather than on whatever sorts first: an empty art frame and
+        // three filled rows is the case the other previews cover.
+        let golden = state
+            .library
+            .games
+            .entries()
+            .iter()
+            .position(|entry| entry.game.as_ref().is_some_and(|g| g.name == "Golden Axe"));
+        if let Some(at) = golden {
+            state.select_library_game(at);
+        }
+        // The window loop asks for the selected game's art each frame
+        // and draws it when it lands; a preview renders once, so it
+        // waits for the picture rather than rendering the empty box.
+        if want_art {
+            state.poll_library_covers();
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if state.poll_library_covers() {
+                    break;
+                }
+            }
+        }
+        state
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_version_runs_to_two_lines_and_no_further() {
+        // A package name is longer than the column and both ends matter:
+        // which game at the front, which release at the back.
+        let name = "CannonFodder2_v1.11_0104.lha";
+        let column = LIBRARY_COVER + 2 * LIBRARY_COVER_BEZEL;
+        let lines = wrap_to_width(name, column);
+        assert!(lines.len() <= LIBRARY_VERSION_LINES, "{lines:?}");
+        assert_eq!(lines.concat(), name, "the whole name should be shown");
+
+        // Two releases stay distinguishable across the wrap, which is the
+        // point of showing it at all.
+        let other = wrap_to_width("CannonFodder2_v1.12_Fr_2578.zip", column);
+        assert_ne!(lines, other);
+
+        // The editor stops where the page stops showing.
+        assert_eq!(library_version_max(), 34);
+        assert!(name.chars().count() <= library_version_max());
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn cover_art_keeps_its_shape_inside_the_box() {
+        let box_rect = Rect {
+            x: 100,
+            y: 50,
+            w: 120,
+            h: 130,
+        };
+
+        // A cover is portrait: it fills the height and is centred across.
+        let at = fit_within(600, 800, box_rect).expect("fits");
+        assert_eq!((at.w, at.h), (97, 130));
+        assert_eq!(at.y, 50, "a portrait cover should fill the height");
+        assert!(at.x >= box_rect.x && at.x + at.w <= box_rect.x + box_rect.w);
+        // Centred to the pixel the odd margin allows.
+        let (left, right) = (at.x - box_rect.x, box_rect.w - at.w - (at.x - box_rect.x));
+        assert!(left.abs_diff(right) <= 1, "off centre: {left} and {right}");
+
+        // A landscape one fills the width instead, with the margin above
+        // and below.
+        let at = fit_within(800, 400, box_rect).expect("fits");
+        assert_eq!((at.w, at.h), (120, 60));
+        assert_eq!(at.x, 100);
+        let (top, bottom) = (at.y - box_rect.y, box_rect.h - at.h - (at.y - box_rect.y));
+        assert!(top.abs_diff(bottom) <= 1, "off centre: {top} and {bottom}");
+
+        // Square art in a not-quite-square box still keeps its shape.
+        let at = fit_within(64, 64, box_rect).expect("fits");
+        assert_eq!(at.w, at.h);
+
+        // A picture far wider than it is tall does not collapse to nothing,
+        // and one with no pixels is not drawn at all.
+        assert_eq!(fit_within(4000, 1, box_rect).expect("fits").h, 1);
+        assert!(fit_within(0, 10, box_rect).is_none());
+        assert!(fit_within(10, 0, box_rect).is_none());
+        assert!(fit_within(10, 10, Rect { w: 0, ..box_rect }).is_none());
+    }
+
     #[test]
     fn panels_render_into_their_rects() {
         use super::super::window::{texture_height, texture_width};
@@ -9575,6 +11662,126 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-rom");
+
+        // The Library page, with WHDLoad beside it in the strip and
+        // a couple of games standing in for a real folder.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let state = library_preview_state();
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-whdload-library");
+        }
+
+        // The sign-in dialog, over the Configuration page it is opened
+        // from, with something typed into both boxes.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::Whdload;
+            let mut login = launcher::LoginDialog {
+                user: "hobbo91".to_string(),
+                ..Default::default()
+            };
+            login.focus_on(launcher::LoginField::Pass);
+            for c in "not-a-real-password".chars() {
+                login.insert(c);
+            }
+            // Part-way back through it, which is what the caret is for.
+            for _ in 0..8 {
+                login.caret_move(launcher::CaretMove::Left);
+            }
+            state.login = Some(login);
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-openretro-login");
+        }
+
+        // The metadata editor, over the Library page it is opened from.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = library_preview_state();
+            state.open_meta_editor();
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-meta-editor");
+        }
+
+        // Both lists run to their far end, where the arrows swap over:
+        // the one pointing back into the list lights and the one pointing
+        // off it greys.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let state = library_preview_state();
+            let mut ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            let rect = launcher_panel_rect(&ui).expect("the launcher is up");
+            if let Some(Panel::Launcher(state)) = ui.panel.as_mut() {
+                let whdload_entry = state.setup.whdload_enabled();
+                state.scroll_library(isize::MAX, library_visible_rows(rect, whdload_entry));
+                state.scroll_favourites(isize::MAX, library_favourite_rows(rect, whdload_entry));
+            }
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-whdload-library-scrolled");
+        }
+
+        // An empty Library page: nothing scanned yet, so Scan is greyed
+        // and the art frame is drawn at the size it reserves.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::WhdloadLibrary;
+            state.library.db_loaded = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-whdload-library-empty");
+        }
+
+        // One of two releases of the same game: the Version row says which,
+        // since nothing else in the list does.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = library_preview_state();
+            state.select_library_game(0);
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-whdload-library-version");
+        }
 
         // The Storage tab, whose six sub-page links wrap onto a second row.
         let mut frame = vec![0u8; w * h * 4];

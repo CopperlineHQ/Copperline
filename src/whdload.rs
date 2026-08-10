@@ -99,6 +99,13 @@ pub fn find_whdboot_assets() -> Option<WhdbootAssets> {
         }
     }
 
+    // Where the launcher's Download button and tools/fetch-whdload.sh put
+    // them. Tried before the development tree so a fetched copy wins over
+    // a stale checked-out one.
+    if let Some(dir) = crate::paths::whdload_support_dir() {
+        dirs.push(dir);
+    }
+
     dirs.push(PathBuf::from("assets").join("whdboot"));
 
     dirs.into_iter().find_map(|dir| {
@@ -478,6 +485,34 @@ pub struct PreparedGame {
     pub staged_kicks: Vec<String>,
 }
 
+/// The library directory a package unpacks into.
+///
+/// An `.lha` keeps the bare stem it has always used, so no existing
+/// library entry moves -- the entry is where saves live, and relocating
+/// one makes a person's savegames look lost.
+///
+/// Anything else keeps its extension. Somebody holding the same game as
+/// both an `.lha` and a `.zip` has a duplicate, which is their business:
+/// it lists twice and both play, with a set of saves each, rather than
+/// the second one refusing to start because the first had taken the name.
+fn library_entry_name(game: &Path) -> String {
+    let file = game
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // By name, not by asking the filesystem: the caller has already
+    // established this is a file, and `stem_of` drops only an extension
+    // this recognises -- `S.W.I.V.lha` keeps its dots.
+    let keeps_stem = matches!(
+        crate::package::Kind::of_name(&file),
+        Some(crate::package::Kind::Lha)
+    );
+    sanitize_game_name(match keeps_stem {
+        true => crate::package::stem_of(&file),
+        false => &file,
+    })
+}
+
 /// Keep a game's library directory name readable and filesystem-safe.
 fn sanitize_game_name(stem: &str) -> String {
     let name: String = stem
@@ -520,7 +555,12 @@ fn find_slaves(dir: &Path) -> Result<Vec<PathBuf>> {
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("slave"))
             {
-                out.push(path.strip_prefix(root).unwrap().to_path_buf());
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                // `__MACOSX/._Foo.Slave` ends in `.Slave` and sorts before
+                // the real one. Booting it starts nothing.
+                if !crate::package::is_rubbish(&rel) {
+                    out.push(rel);
+                }
             }
         }
         Ok(())
@@ -584,9 +624,7 @@ pub fn game_and_options(raw: &RawConfig) -> (Option<PathBuf>, Options) {
                     }
                 }
             }
-            let lib = library
-                .clone()
-                .or_else(|| crate::paths::config_dir().map(|d| d.join("whdload")));
+            let lib = library.clone().or_else(crate::paths::whdload_save_dir);
             if let Some(lib) = lib {
                 kickstart_dirs.push(lib.join("Kickstarts"));
             }
@@ -599,13 +637,32 @@ pub fn game_and_options(raw: &RawConfig) -> (Option<PathBuf>, Options) {
             library,
             kickstart_dirs,
             extra_args: raw.whdload.args.clone(),
-            assets: None,
+            assets: configured_assets(raw),
         },
     )
 }
 
-/// Stage `game` (an `.lha` archive or a directory holding a `.slave`) and
-/// return the mountable result.
+/// The support archives the configuration names, if it names either.
+///
+/// `None` leaves [`prepare`] to search, which is what an installation that
+/// has never been told anything wants. Naming one and not the other is
+/// meant to work: the half that was named is used, and the half that was
+/// not still comes from the search.
+fn configured_assets(raw: &RawConfig) -> Option<WhdbootAssets> {
+    let whd = raw.whdload.whd_package.as_ref().map(PathBuf::from);
+    let skick = raw.whdload.skick_package.as_ref().map(PathBuf::from);
+    if whd.is_none() && skick.is_none() {
+        return None;
+    }
+    let found = find_whdboot_assets();
+    Some(WhdbootAssets {
+        whdload_archive: whd.or_else(|| found.as_ref().map(|f| f.whdload_archive.clone()))?,
+        skick_archive: skick.or_else(|| found.and_then(|f| f.skick_archive)),
+    })
+}
+
+/// Stage `game` -- an `.lha` or `.zip` archive, or a directory holding a
+/// `.slave` -- and return the mountable result.
 pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
     if !game.exists() {
         bail!("WHDLoad game {} does not exist", game.display());
@@ -616,31 +673,54 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
             whdload_archive: assets.whdload_archive.clone(),
             skick_archive: assets.skick_archive.clone(),
         },
-        None => find_whdboot_assets().with_context(|| {
-            format!(
-                "the WHDLoad support archive {WHDLOAD_USR_ARCHIVE} was not found; \
-                 run tools/fetch-whdload.sh (development) or reinstall Copperline \
-                 (release bundles include it), or point COPPERLINE_WHDBOOT_DIR at \
-                 a directory holding it"
-            )
-        })?,
+        None => match find_whdboot_assets() {
+            Some(assets) => assets,
+            None => {
+                // The status bar gets the one sentence that says what is
+                // wrong; what to do about it goes to the log, where there
+                // is room for it.
+                log::error!(
+                    "whdload: {WHDLOAD_USR_ARCHIVE} was not found. Press Download on \
+                     the WHDLoad page, run tools/fetch-whdload.sh, or point \
+                     COPPERLINE_WHDBOOT_DIR at a directory holding it."
+                );
+                bail!("Missing WHDLoad support archive");
+            }
+        },
+    };
+    // A path that was configured and then moved or deleted fails the same
+    // way as one that was never there, and says the same thing.
+    if !assets.whdload_archive.is_file() {
+        log::error!(
+            "whdload: {} is not there. Set [whdload] whd_package, or clear it and \
+             press Download on the WHDLoad page.",
+            assets.whdload_archive.display()
+        );
+        bail!("Missing WHDLoad support archive");
+    }
+    let assets = WhdbootAssets {
+        skick_archive: assets.skick_archive.filter(|skick| {
+            skick.is_file() || {
+                log::warn!(
+                    "whdload: missing SKick support archive at {}; Kickstart images \
+                     will be staged without .RTB relocation tables",
+                    skick.display()
+                );
+                false
+            }
+        }),
+        ..assets
     };
 
     let library = match &opts.library {
         Some(dir) => dir.clone(),
-        None => crate::paths::config_dir()
-            .map(|dir| dir.join("whdload"))
-            .context(
-                "no per-user directory available for the WHDLoad game library; \
+        None => crate::paths::whdload_save_dir().context(
+            "no per-user directory available for the WHDLoad game library; \
                  set [whdload] library in the configuration",
-            )?,
+        )?,
     };
 
-    let stem = game
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let game_home = library.join(sanitize_game_name(&stem));
+    let game_home = library.join(library_entry_name(game));
 
     // --- Game volume -------------------------------------------------------
     let game_dir = if game.is_dir() {
@@ -689,7 +769,7 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
             }
             std::fs::create_dir_all(&staging)
                 .with_context(|| format!("creating {}", staging.display()))?;
-            let files = lha::extract_to_dir(game, &staging)
+            let files = crate::package::extract_to_dir(game, &staging)
                 .with_context(|| format!("extracting {}", game.display()))?;
             std::fs::rename(&staging, &dest)
                 .with_context(|| format!("promoting extraction into {}", dest.display()))?;
@@ -850,9 +930,8 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
     }
     if assets.skick_archive.is_none() && !staged_kicks.is_empty() {
         log::warn!(
-            "whdload: {SKICK_ARCHIVE} not found next to {}; Kickstart images staged \
-             without .RTB relocation tables",
-            assets.whdload_archive.display()
+            "whdload: missing SKick support archive ({SKICK_ARCHIVE}); Kickstart \
+             images staged without .RTB relocation tables"
         );
     }
 
@@ -890,18 +969,24 @@ pub fn remember_game(raw: &mut RawConfig, game: &Path) {
 /// configuration (a `[machine]` profile, `rom`, `[memory]` sizes, CLI
 /// overrides, which land in the raw config before this) always wins.
 pub fn apply_to_raw(raw: &mut RawConfig, prepared: &PreparedGame) {
-    if raw.machine.profile.is_none() {
+    // `machine_type = "copperline"` means what it says: boot the package on
+    // the machine this configuration describes, whatever that is. The two
+    // staged volumes below still go on -- without them there is nothing to
+    // boot -- but nothing here decides the machine.
+    let derive =
+        raw.whdload.machine_type.unwrap_or_default() == crate::config::WhdloadMachine::Auto;
+    if derive && raw.machine.profile.is_none() {
         // The canonical WHDLoad host: 68020 + AGA satisfies every slave
         // requirement flag, and OCS/ECS programs run under the slave's own
         // hardware bending, exactly as on a real A1200.
         raw.machine.profile = Some("A1200".to_string());
     }
-    if raw.memory.fast.is_none() {
+    if derive && raw.memory.fast.is_none() {
         // Preload wants room for the whole game on top of ws_ExpMem; the
         // full Zorro II 8 MiB is the canonical WHDLoad recommendation.
         raw.memory.fast = Some("8M".to_string());
     }
-    if raw.rom.is_none() {
+    if derive && raw.rom.is_none() {
         match &prepared.machine_rom {
             Some(rom) => raw.rom = Some(rom.to_string_lossy().into_owned()),
             None => log::warn!(
@@ -927,6 +1012,62 @@ pub fn apply_to_raw(raw: &mut RawConfig, prepared: &PreparedGame) {
 
 #[cfg(test)]
 mod tests {
+    /// Somebody's own WHDLoad and Soft-Kicker archives are used, not
+    /// overridden by the copies Copperline knows how to fetch.
+    ///
+    /// The pinned digests are a convenience for getting started, not a
+    /// requirement: a person testing a new WHDLoad release, or one who
+    /// keeps their own build, points the configuration at it and that is
+    /// what gets staged.
+    #[test]
+    fn each_package_format_unpacks_somewhere_of_its_own() {
+        // Holding the same game as both an .lha and a .zip is a
+        // duplicate, which is the person's business: both play, with a set
+        // of saves each. The .lha keeps the bare-stem entry it has always
+        // used, so no existing library moves -- that is where saves live.
+        assert_eq!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.lha")),
+            "GoldenAxe_v1"
+        );
+        assert_eq!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.zip")),
+            "GoldenAxe_v1.zip"
+        );
+        assert_ne!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.lha")),
+            library_entry_name(Path::new("/g/GoldenAxe_v1.zip"))
+        );
+        // Only a recognised extension comes off, so a title with dots in
+        // it keeps them.
+        assert_eq!(library_entry_name(Path::new("/g/S.W.I.V.lha")), "S.W.I.V");
+    }
+
+    #[test]
+    fn a_hand_set_support_archive_is_the_one_used() {
+        use crate::config::RawConfig;
+        let mut raw = RawConfig::default();
+        assert!(
+            super::configured_assets(&raw).is_none(),
+            "an unconfigured build should search rather than insist"
+        );
+
+        raw.whdload.whd_package = Some("/my/WHDLoad_usr.lha".to_string());
+        raw.whdload.skick_package = Some("/my/skick.lha".to_string());
+        let assets = super::configured_assets(&raw).expect("both were named");
+        assert_eq!(assets.whdload_archive, Path::new("/my/WHDLoad_usr.lha"));
+        assert_eq!(
+            assets.skick_archive.as_deref(),
+            Some(Path::new("/my/skick.lha"))
+        );
+
+        // Naming one and not the other works: the half that was named is
+        // used and the other still comes from the search, so somebody
+        // testing a new WHDLoad keeps the Soft-Kicker they already had.
+        raw.whdload.skick_package = None;
+        let assets = super::configured_assets(&raw).expect("one was named");
+        assert_eq!(assets.whdload_archive, Path::new("/my/WHDLoad_usr.lha"));
+    }
+
     use super::*;
     use crate::lha::tests::{build_lha, temp_dir};
 
@@ -1465,5 +1606,47 @@ mod tests {
         assert_eq!(raw.machine.profile.as_deref(), Some("A4000"));
         assert_eq!(raw.memory.fast.as_deref(), Some("2M"));
         assert_eq!(raw.rom.as_deref(), Some("my.rom"));
+    }
+
+    /// `machine_type = "copperline"` boots the package on the machine the
+    /// configuration describes, which includes the parts of it that were
+    /// never named: nothing is derived, not even into empty fields.
+    #[test]
+    fn machine_type_copperline_derives_nothing_but_still_mounts() {
+        let prepared = PreparedGame {
+            boot_dir: PathBuf::from("/lib/game/boot"),
+            game_dir: PathBuf::from("/lib/game/game"),
+            slave_rel: PathBuf::from("Game.Slave"),
+            slave: SlaveInfo::default(),
+            machine_rom: Some(PathBuf::from(
+                "/lib/game/boot/Devs/Kickstarts/kick40068.A1200",
+            )),
+            staged_kicks: vec![],
+        };
+        let mut raw = RawConfig::default();
+        raw.whdload.machine_type = Some(crate::config::WhdloadMachine::Copperline);
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(raw.machine.profile, None, "the machine is the config's");
+        assert_eq!(raw.memory.fast, None);
+        assert_eq!(raw.rom, None, "including which ROM it boots");
+
+        // The volumes are not part of the machine: without them the game
+        // has nothing to boot from, whichever setting is chosen.
+        assert_eq!(raw.filesys.len(), 2);
+        assert_eq!(raw.filesys[0].volume.as_deref(), Some(BOOT_VOLUME));
+        assert_eq!(raw.filesys[1].volume.as_deref(), Some(GAME_VOLUME));
+
+        // Auto is the default, and derives as before.
+        let mut raw = RawConfig::default();
+        raw.whdload.machine_type = Some(crate::config::WhdloadMachine::Auto);
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(raw.machine.profile.as_deref(), Some("A1200"));
+        let mut raw = RawConfig::default();
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(
+            raw.machine.profile.as_deref(),
+            Some("A1200"),
+            "unset = auto"
+        );
     }
 }

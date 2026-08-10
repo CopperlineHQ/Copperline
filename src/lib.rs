@@ -47,6 +47,12 @@ pub mod floppy;
 // wasm32 browser build cannot do.
 #[cfg(feature = "fluxbridge")]
 pub mod fluxbridge;
+// The WHDLoad game library: the launcher's Library page, the local game
+// database, and the OpenRetro sync that fills it. Gated because it is the
+// only part of Copperline that makes network requests of its own, and so
+// the only part that needs an HTTP client and a TLS stack.
+#[cfg(feature = "game-library")]
+pub mod gamelib;
 #[cfg(feature = "frontend")]
 pub mod gamepad;
 pub mod gary;
@@ -73,6 +79,7 @@ pub mod midi;
 #[cfg(feature = "mt32")]
 pub mod mt32;
 pub mod net;
+pub mod package;
 pub mod parallel;
 pub mod paths;
 pub mod picasso2;

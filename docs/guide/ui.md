@@ -191,10 +191,10 @@ Disk images can be dropped anywhere on the emulator window:
   multi-selection in the disk dialog.
 - **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
-- **WHDLoad packages** (`.lha`, or a bare `.slave`) reboot the machine
-  straight into the game through the [WHDLoad booter](whdload.md), keeping
-  any explicit machine choices; dropped on the configuration screen they
-  fill its **Storage -> WHDLoad** game field instead.
+- **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
+  machine straight into the game through the [WHDLoad booter](whdload.md),
+  keeping any explicit machine choices; dropped on the configuration
+  screen they fill the **WHDLoad** page's game field instead.
 - **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
   notice points at the machine-configuration screen, which also refuses
   such drops while it is open.
@@ -494,18 +494,16 @@ The layout is:
   whatever the chosen interface does not honour. See [](fluxbridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a block of buttons at
-  the top links to six sub-pages: **Host Folder**, for host directories
+  the top links to five sub-pages: **Host Folder**, for host directories
   served live as AmigaDOS volumes (up to four mounts, each with a boot
   priority and a read-write/read-only **Access** field -- the config file
   itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
   the first four); **Host Disk**, for a real disk of this computer's (see
   [](host-disks.md)); **Boot Priority**, which sets each hard-disk drive's
   synthesized-RDB boot priority (see below); **Create Image...**, which
-  makes new ADF and HDF images (see below); **CD** (image, insert delay,
-  CD32 NVRAM); and **WHDLoad**, which picks a WHDLoad game package plus its
-  optional Kickstart-image and game-library directories (see
-  [](whdload.md); Run then boots straight into the game). Each sub-page has
-  a **< Back** button in that block that returns to Storage),
+  makes new ADF and HDF images (see below); and **CD** (image, insert
+  delay, CD32 NVRAM). Each sub-page has a **< Back** button in that block
+  that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
@@ -524,6 +522,8 @@ The layout is:
   input recordings and save-state replays non-reproducible while it flows),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
+  *WHDLoad* (your game collection, and the settings games boot with -- see
+  [](whdload.md)),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, monitor bezel
@@ -539,7 +539,8 @@ The layout is:
   or SCSI drive has an image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
-  raw HDF). A setting that does not apply to the chosen machine is greyed and
+  raw HDF).
+  A setting that does not apply to the chosen machine is greyed and
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
   and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
   IDE.

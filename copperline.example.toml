@@ -386,7 +386,8 @@ video = "PAL"
 
 
 # Direct WHDLoad boot (docs/guide/whdload.md): boot straight into a
-# WHDLoad-installed game package. The package is extracted into the game
+# WHDLoad-installed game package -- an .lha, a .zip, or a plain folder
+# holding the installed tree. The package is unpacked into the game
 # library once (savegames persist there), a boot volume is synthesized
 # around the real WHDLoad program (support archives ship with releases, or
 # tools/fetch-whdload.sh), Kickstart images from `kickstarts` are
@@ -394,10 +395,21 @@ video = "PAL"
 # is derived from the slave header (A1200, 8M fast) unless [machine]/rom/
 # [memory] choices above say otherwise. --whdload GAME overrides `game`.
 # [whdload]
-# game = "Turrican.lha"       # .lha archive or a directory holding a .slave
-# library = ""                # game library; default: <config dir>/whdload
+# game = "Turrican.lha"       # .lha, .zip, or a folder with a .slave
+# library = ""                # unpacked games and saves; default:
+#                             # <config dir>/whdload/save
 # kickstarts = "/data/amiga/kickstarts"
 # args = "ButtonWait"         # extra WHDLoad command-line options
+# machine_type = "auto"       # or "copperline" to boot on this machine
+# whd_package = ""            # your own WHDLoad_usr.lha
+# skick_package = ""          # your own skick*.lha
+#
+# The launcher's Library page only. `enabled = false` removes the WHDLoad
+# page and everything behind it; a game named above still boots.
+# enabled = true
+# games = ""                  # the folder the Library page lists
+# library_db = ""             # default: <config>/whdload/support/launcher.db
+# library_cache = ""          # default: <config>/whdload/support/cache
 
 
 # Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,

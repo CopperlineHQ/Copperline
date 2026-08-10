@@ -34,6 +34,69 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(name))
 }
 
+/// Where WHDLoad keeps everything of its own: the support archives, the
+/// extracted games and their saves, and the game database.
+///
+/// One place, named once. Every WHDLoad setting that says `(default)`
+/// means somewhere under here, so a person who never sets any of them
+/// still knows where to look, and a person who moves one knows what they
+/// are moving it away from.
+pub fn whdload_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("whdload"))
+}
+
+/// Where the support archives are looked for and downloaded to.
+pub fn whdload_support_dir() -> Option<PathBuf> {
+    whdload_dir().map(|dir| dir.join("support"))
+}
+
+/// Where games are unpacked and their saves kept, when `[whdload] library`
+/// does not say otherwise. Beside the support archives rather than loose
+/// in `whdload/`, so what Copperline downloaded and what the guest wrote
+/// are told apart at a glance.
+///
+/// An installation that already has games directly under `whdload/` --
+/// where this used to be -- carries on using it. The library directory is
+/// where saves live, so moving it would leave somebody's savegames and
+/// highscores behind under a name nothing looks at any more.
+pub fn whdload_save_dir() -> Option<PathBuf> {
+    let whdload = whdload_dir()?;
+    let save = whdload.join("save");
+    if save.is_dir() || !holds_unpacked_games(&whdload) {
+        return Some(save);
+    }
+    log::info!(
+        "whdload: keeping the existing game library in {} (new installations use {})",
+        whdload.display(),
+        save.display()
+    );
+    Some(whdload)
+}
+
+/// Whether a directory holds games unpacked by an earlier version: an
+/// entry with the `.source` marker staging writes beside each one.
+fn holds_unpacked_games(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().join(".source").is_file())
+}
+
+/// The scanned library, when `[whdload] library_db` does not say otherwise.
+/// Beside the support archives, which is the other thing under `whdload/`
+/// that Copperline rather than the guest put there.
+pub fn whdload_library_db() -> Option<PathBuf> {
+    whdload_support_dir().map(|dir| dir.join("launcher.db"))
+}
+
+/// What a scan downloaded, when `[whdload] library_cache` does not say
+/// otherwise. Safe to delete: it is rebuilt by the next scan.
+pub fn whdload_library_cache() -> Option<PathBuf> {
+    whdload_support_dir().map(|dir| dir.join("cache"))
+}
+
 /// Directory holding the numbered save-state slots.
 pub fn state_slot_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("states"))

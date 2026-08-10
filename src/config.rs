@@ -2862,11 +2862,17 @@ pub(crate) struct RawWhdload {
     /// `--whdload` overrides it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) game: Option<String>,
-    /// Game library directory (extracted packages, their saves, and the
-    /// staged boot volumes); defaults to `whdload/` in the per-user
-    /// configuration directory.
+    /// Where extracted packages, their saves and the staged boot volumes
+    /// live; defaults to `whdload/` in the per-user configuration
+    /// directory. The launcher calls it the save directory, which is the
+    /// part of it a person cares about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) library: Option<String>,
+    /// A directory of WHDLoad packages, searched for games to list. Unlike
+    /// `game` -- one package -- this is a collection, and the launcher's
+    /// Library page lists what is in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) games: Option<String>,
     /// Directory scanned for Kickstart images to stage into
     /// `Devs:Kickstarts/` (and to boot the machine from). When unset, the
     /// directory of an explicit `rom` and `<library>/Kickstarts` are tried.
@@ -2875,6 +2881,65 @@ pub(crate) struct RawWhdload {
     /// Extra options appended to the generated WHDLoad command line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) args: Option<String>,
+    /// The WHDLoad distribution archive (`WHDLoad_usr.lha`). When unset the
+    /// copy bundled with the release is used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) whd_package: Option<String>,
+    /// The Soft-Kicker archive (`skick*.lha`), whose `.RTB` relocation
+    /// tables accompany raw Kickstart images. When unset the bundled copy
+    /// is used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skick_package: Option<String>,
+    /// Which machine a package boots on: `auto` derives one from the slave
+    /// header, `copperline` uses the machine this configuration describes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_type: Option<WhdloadMachine>,
+    /// Where the scanned library is written: one entry a game, with the
+    /// metadata a scan resolved for it. Defaults to `whdload/library/db.json`
+    /// in the per-user configuration directory.
+    ///
+    /// Configuration-file only, deliberately: it and `library_cache` say
+    /// where the Library page keeps its own working files, which is not
+    /// part of describing a machine and so has no row in the launcher.
+    /// Parsed and ignored in a build without the `game-library` feature, so
+    /// a configuration written by a full build still loads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library_db: Option<String>,
+    /// Where a scan keeps what it downloaded -- cover art, and the snapshot
+    /// of the online database it matched against. Defaults to
+    /// `whdload/library/cache`. Throwing it away costs a re-download and
+    /// nothing else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library_cache: Option<String>,
+    /// Whether the launcher offers WHDLoad at all: its entry in the
+    /// left-hand navigation, the Library and Configuration pages behind
+    /// it, and the work those do. Defaults to on.
+    ///
+    /// Off, the launcher does none of it -- no entry, no pages, no game
+    /// database read, no cover worker, no scan. It does not stop a game
+    /// booting: `--whdload` and `[whdload] game` are explicit instructions
+    /// and still do what they say, so scripts and headless runs are
+    /// unaffected.
+    ///
+    /// Library-only, and ignored as the `library_*` keys are without the
+    /// feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+}
+
+/// Which machine a WHDLoad package boots on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WhdloadMachine {
+    /// Derive it from the slave header: the canonical WHDLoad host, an
+    /// A1200 with 8 MiB of fast RAM, which satisfies every slave flag.
+    #[default]
+    Auto,
+    /// Boot the package on the machine this configuration describes,
+    /// whatever that is. An explicit `[machine]`, `rom` or `[memory]` wins
+    /// under `auto` too; this makes the whole machine the choice rather
+    /// than the parts that were named.
+    Copperline,
 }
 
 /// One `[[filesys]]` entry (experimental): a host directory exported to the

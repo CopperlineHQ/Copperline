@@ -176,9 +176,13 @@ pub enum LauncherTab {
     FluxBridge,
     BootPriority,
     HostFs,
-    /// Direct WHDLoad boot (src/whdload.rs): the game package to boot and
-    /// the staging directories, reached from the Storage tab.
+    /// Direct WHDLoad boot (src/whdload.rs): the game to launch and what
+    /// staging draws on, reached from the Storage tab.
     Whdload,
+    /// The games found beside the one chosen to launch, with what the game
+    /// database says about them. Only in a build with the library.
+    #[cfg(feature = "game-library")]
+    WhdloadLibrary,
     /// Real host storage -- an SD card, a CF card, an Amiga's own hard
     /// drive -- attached in place of a disk image. Drawn as its own layout
     /// rather than a list of settings rows, because choosing a disk is a
@@ -222,6 +226,38 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::AvAudio,
 ];
 
+/// The strip with WHDLoad in it, between Zorro and A/V & Emu. This is the
+/// usual one: the entry is there unless somebody has turned WHDLoad off.
+#[cfg(feature = "game-library")]
+const WHDLOAD_TABS: &[LauncherTab] = &[
+    LauncherTab::System,
+    LauncherTab::Cpu,
+    LauncherTab::Memory,
+    LauncherTab::Rom,
+    LauncherTab::Floppy,
+    LauncherTab::Storage,
+    LauncherTab::Input,
+    LauncherTab::IoPorts,
+    LauncherTab::Zorro,
+    LauncherTab::WhdloadLibrary,
+    LauncherTab::AvAudio,
+];
+
+/// The left-hand strip. WHDLoad has an entry of its own unless it has been
+/// turned off in A/V & Emu -> Emulation.
+///
+/// It lands on the Library rather than on the settings behind it: picking
+/// a game is the reason to go there, and the settings are one click away
+/// on the page itself.
+pub fn tabs(whdload_enabled: bool) -> &'static [LauncherTab] {
+    #[cfg(feature = "game-library")]
+    if whdload_enabled {
+        return WHDLOAD_TABS;
+    }
+    let _ = whdload_enabled;
+    TABS
+}
+
 impl LauncherTab {
     pub fn label(self) -> &'static str {
         match self {
@@ -235,6 +271,11 @@ impl LauncherTab {
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Folder",
             LauncherTab::Whdload => "WHDLoad",
+            // The strip's own name for it. Inside the WHDLoad pages the
+            // nav chips say Settings... and Library, from their own
+            // labels, so this one is free to say which tab it is.
+            #[cfg(feature = "game-library")]
+            LauncherTab::WhdloadLibrary => "WHDLoad",
             LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
             LauncherTab::IoPorts => "I/O Ports",
@@ -254,9 +295,14 @@ impl LauncherTab {
     /// the A/V & Emu one.
     pub fn strip_tab(self) -> LauncherTab {
         match self {
+            // The settings page lights the Library entry: they are two
+            // views of one thing, reached through one strip entry.
+            #[cfg(feature = "game-library")]
+            LauncherTab::Whdload => LauncherTab::WhdloadLibrary,
+            #[cfg(not(feature = "game-library"))]
+            LauncherTab::Whdload => LauncherTab::Storage,
             LauncherTab::Cd
             | LauncherTab::HostFs
-            | LauncherTab::Whdload
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
             | LauncherTab::CreateFloppy
@@ -273,9 +319,14 @@ impl LauncherTab {
     /// top nav row instead).
     pub fn parent_tab(self) -> Option<LauncherTab> {
         match self {
+            // With the library, WHDLoad is a strip entry of its own and its
+            // two pages switch between each other on the nav row, so there
+            // is nowhere for Back to go. Without it, the one page is still
+            // a Storage sub-page.
+            #[cfg(not(feature = "game-library"))]
+            LauncherTab::Whdload => Some(LauncherTab::Storage),
             LauncherTab::Cd
             | LauncherTab::HostFs
-            | LauncherTab::Whdload
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
             | LauncherTab::CreateFloppy
@@ -295,6 +346,8 @@ impl LauncherTab {
             LauncherTab::Storage => STORAGE_NAV,
             LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmulation => AV_NAV,
             LauncherTab::CreateFloppy | LauncherTab::CreateHard => CREATE_NAV,
+            #[cfg(feature = "game-library")]
+            LauncherTab::Whdload | LauncherTab::WhdloadLibrary => WHDLOAD_NAV,
             _ => &[],
         }
     }
@@ -315,14 +368,23 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     // rather than attaching something: nothing on its pages describes this
     // machine, which is why they are pages of their own.
     ("Create Image...", LauncherTab::CreateFloppy),
-    // Four to a row, so these two wrap onto a second.
+    // Four to a row, so this one wraps onto a second.
     ("CD", LauncherTab::Cd),
-    ("WHDLoad", LauncherTab::Whdload),
 ];
 
 /// The workshop's two pages. Reached from Storage, so they show a Back
 /// button *and* this nav: one says where you came from, the other which of
 /// the two you are on.
+/// WHDLoad's two pages: what a package boots with, and which package.
+/// Only a build with the library has the second, so only that one splits.
+#[cfg(feature = "game-library")]
+const WHDLOAD_NAV: &[(&str, LauncherTab)] = &[
+    // The library first: it is what the strip entry opens on, and what
+    // somebody is there for. The settings behind it are one click away.
+    ("Library", LauncherTab::WhdloadLibrary),
+    ("Settings...", LauncherTab::Whdload),
+];
+
 const CREATE_NAV: &[(&str, LauncherTab)] = &[
     ("Floppy Disk", LauncherTab::CreateFloppy),
     ("Hard Disk", LauncherTab::CreateHard),
@@ -472,6 +534,12 @@ pub enum LauncherField {
     WhdloadGame,
     WhdloadKickstarts,
     WhdloadLibrary,
+    WhdloadWhdPackage,
+    WhdloadSkickPackage,
+    WhdloadMachine,
+    WhdloadOpenRetro,
+    WhdloadEnabled,
+    WhdloadGames,
     // Serial. Present only with the `midi` feature, the only build carrying
     // serial rows at all.
     #[cfg(feature = "midi")]
@@ -602,6 +670,10 @@ pub enum RowKind {
     /// options AmigaDOS's own filesystem carries, greyed for a family that
     /// has none.
     FsVariant,
+    /// An account: whether this session is signed in, with the button that
+    /// signs it in where a Browse would be. Nothing is stored, so the row
+    /// reports the session rather than a setting.
+    Account,
 }
 
 /// One settings row: a label, the field it edits, and how to edit it.
@@ -680,6 +752,31 @@ impl LauncherField {
         matches!(
             self,
             LauncherField::WhdloadKickstarts | LauncherField::WhdloadLibrary
+        ) || cfg!(feature = "game-library") && self.is_whdload_games_field()
+    }
+
+    /// The game library, which is a folder of packages rather than one of
+    /// them. Its own predicate because the field only exists in a build
+    /// with the library, and `matches!` cannot be written conditionally.
+    pub fn is_whdload_games_field(self) -> bool {
+        #[cfg(feature = "game-library")]
+        {
+            self == LauncherField::WhdloadGames
+        }
+        #[cfg(not(feature = "game-library"))]
+        {
+            false
+        }
+    }
+
+    /// Whether this field names a `.lha` archive rather than a directory:
+    /// the game to launch, and the two support packages.
+    pub fn is_whdload_archive_field(self) -> bool {
+        matches!(
+            self,
+            LauncherField::WhdloadGame
+                | LauncherField::WhdloadWhdPackage
+                | LauncherField::WhdloadSkickPackage
         )
     }
 
@@ -690,8 +787,11 @@ impl LauncherField {
         matches!(
             self,
             LauncherField::WhdloadGame
+                | LauncherField::WhdloadGames
                 | LauncherField::WhdloadKickstarts
                 | LauncherField::WhdloadLibrary
+                | LauncherField::WhdloadWhdPackage
+                | LauncherField::WhdloadSkickPackage
         )
     }
 }
@@ -825,14 +925,42 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
-// The WHDLoad sub-page: the game package to boot, then the two directories
-// staging draws on (src/whdload.rs). Drive rows like the Host FS mounts so
-// the whole host path shows; the staged volumes mount under fixed names
+// The WHDLoad Settings page: the game to launch, then what staging
+// draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
+// whole host path shows; the staged volumes mount under fixed names
 // (WHDBoot:/WHDGame:), so there is no volume box to fill.
-const WHDLOAD_ROWS: [Row; 3] = [
-    row(F::WhdloadGame, "Game package", Drive),
-    row(F::WhdloadKickstarts, "Kickstart images", Drive),
-    row(F::WhdloadLibrary, "Game library", Drive),
+//
+// Pinning, the account and the game folder belong to the game library, so
+// they are only here in a build that has one. Their settings still
+// round-trip through a save either way -- a configuration written by a full
+// build loads in a slim one without losing them.
+#[cfg(not(feature = "game-library"))]
+const WHDLOAD_ROWS: [Row; 8] = [
+    section_header("WHDLoad Settings:"),
+    // What to boot, and how: what a person changes per game.
+    row(F::WhdloadGame, "Launch game", Drive),
+    row(F::WhdloadMachine, "Machine type", Cycle),
+    // Then the places things live, set once and left.
+    section_header("Directories:"),
+    row(F::WhdloadWhdPackage, "WHDLoad package", Drive),
+    row(F::WhdloadSkickPackage, "SKick package", Drive),
+    row(F::WhdloadKickstarts, "Kickstart ROMs", Drive),
+    row(F::WhdloadLibrary, "Save data", Drive),
+];
+#[cfg(feature = "game-library")]
+const WHDLOAD_ROWS: [Row; 10] = [
+    section_header("WHDLoad Settings:"),
+    // What to boot, and how: what a person changes per game.
+    row(F::WhdloadGame, "Launch game", Drive),
+    row(F::WhdloadMachine, "Machine type", Cycle),
+    row(F::WhdloadOpenRetro, "OpenRetro", RowKind::Account),
+    // Then the places things live, set once and left.
+    section_header("Directories:"),
+    row(F::WhdloadWhdPackage, "WHDLoad package", Drive),
+    row(F::WhdloadSkickPackage, "SKick package", Drive),
+    row(F::WhdloadKickstarts, "Kickstart ROMs", Drive),
+    row(F::WhdloadGames, "Game library", Drive),
+    row(F::WhdloadLibrary, "Save data", Drive),
 ];
 // The MIDI endpoint rows appear only when the serial port is in MIDI mode, so
 // the Serial section shows just the Device / Mode selector otherwise. The
@@ -917,11 +1045,22 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppySounds, "Floppy sounds", Toggle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
+#[cfg(not(feature = "game-library"))]
 const EMULATION_ROWS: [Row; 4] = [
     row(F::PowerOn, "Power on startup", Toggle),
     row(F::RealtimePriority, "Realtime priority", Toggle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
+];
+#[cfg(feature = "game-library")]
+const EMULATION_ROWS: [Row; 5] = [
+    row(F::PowerOn, "Power on startup", Toggle),
+    row(F::RealtimePriority, "Realtime priority", Toggle),
+    row(F::PacingBudget, "Pacing budget", Cycle),
+    row(F::Warp, "Warp speed", Cycle),
+    // Off, the strip loses its WHDLoad entry and the pages behind it stop
+    // doing anything at all -- no database read, no cover worker, no scan.
+    row(F::WhdloadEnabled, "WHDLoad", Cycle),
 ];
 /// The floppy page. Every option the format carries is on it; nothing on
 /// it reads or writes the machine's configuration.
@@ -1019,6 +1158,9 @@ pub fn rows(
         }
         LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
         LauncherTab::Whdload => Cow::Borrowed(&WHDLOAD_ROWS),
+        // The Library draws a list of games rather than rows of settings.
+        #[cfg(feature = "game-library")]
+        LauncherTab::WhdloadLibrary => Cow::Borrowed(&[]),
         // Drawn as its own layout: a disk table and its buttons, not rows.
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
@@ -1633,6 +1775,8 @@ pub struct MachineSetup {
     /// First row shown in the disk table. The list can be longer than the
     /// box, and a disk that cannot be scrolled to cannot be chosen.
     host_disk_scroll: usize,
+    /// How fast a held scroll over that table is running.
+    host_disk_scroll_rate: ScrollRate,
     /// Why the last tick was refused. Read once by the caller, which puts it
     /// on the status line with every other warning; cleared by the next tick,
     /// because the situation it describes is the one being changed.
@@ -1692,6 +1836,24 @@ pub struct MachineSetup {
     whdload_kickstarts: Option<PathBuf>,
     whdload_library: Option<PathBuf>,
     whdload_args: Option<String>,
+    /// The WHDLoad distribution and Soft-Kicker archives, when they are not
+    /// the copies the release ships with.
+    whdload_whd_package: Option<PathBuf>,
+    whdload_skick_package: Option<PathBuf>,
+    /// Which machine a package boots on.
+    whdload_machine: crate::config::WhdloadMachine,
+    /// Where the game database lives, and whether WHDLoad has a link of its
+    /// own in the left-hand navigation. Both belong to the library, so a
+    /// build without it carries them through a save untouched rather than
+    /// editing or dropping them.
+    /// Where the Library page keeps its scanned library and its downloads.
+    /// Configuration-file only -- see `RawWhdload::library_db` -- so they
+    /// are held here rather than being launcher fields with rows.
+    whdload_library_db: Option<PathBuf>,
+    whdload_library_cache: Option<PathBuf>,
+    whdload_enabled: bool,
+    /// A directory of packages, which the Library page lists.
+    whdload_games: Option<PathBuf>,
     // Serial port. Carried in every build so a config's `[serial]` block
     // round-trips; only edited in the I/O Ports tab's Serial section, which a
     // `midi` build shows.
@@ -1877,6 +2039,7 @@ impl MachineSetup {
             host_disk_warning: None,
             host_disk_selected: Vec::new(),
             host_disk_scroll: 0,
+            host_disk_scroll_rate: ScrollRate::default(),
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
@@ -1928,6 +2091,15 @@ impl MachineSetup {
             whdload_kickstarts: raw.whdload.kickstarts.as_deref().map(PathBuf::from),
             whdload_library: raw.whdload.library.as_deref().map(PathBuf::from),
             whdload_args: raw.whdload.args.clone(),
+            whdload_whd_package: raw.whdload.whd_package.as_deref().map(PathBuf::from),
+            whdload_skick_package: raw.whdload.skick_package.as_deref().map(PathBuf::from),
+            whdload_machine: raw.whdload.machine_type.unwrap_or_default(),
+            whdload_library_db: raw.whdload.library_db.as_deref().map(PathBuf::from),
+            whdload_library_cache: raw.whdload.library_cache.as_deref().map(PathBuf::from),
+            // On unless told otherwise: a fresh installation should find
+            // the page there rather than have to be told to show it.
+            whdload_enabled: raw.whdload.enabled.unwrap_or(true),
+            whdload_games: raw.whdload.games.as_deref().map(PathBuf::from),
             serial_mode: cfg.serial.mode,
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
@@ -2339,6 +2511,19 @@ impl MachineSetup {
         raw.whdload.kickstarts = self.whdload_kickstarts.as_deref().map(path_string);
         raw.whdload.library = self.whdload_library.as_deref().map(path_string);
         raw.whdload.args = self.whdload_args.clone();
+        raw.whdload.whd_package = self.whdload_whd_package.as_deref().map(path_string);
+        raw.whdload.skick_package = self.whdload_skick_package.as_deref().map(path_string);
+        // Only written when it is not the default, so a saved file stays
+        // the short list of what differs from the profile.
+        raw.whdload.machine_type = (self.whdload_machine
+            != crate::config::WhdloadMachine::default())
+        .then_some(self.whdload_machine);
+        raw.whdload.library_db = self.whdload_library_db.as_deref().map(path_string);
+        raw.whdload.library_cache = self.whdload_library_cache.as_deref().map(path_string);
+        // Only written when it is off, since on is the default and a
+        // configuration file should say what differs from it.
+        raw.whdload.enabled = (!self.whdload_enabled).then_some(false);
+        raw.whdload.games = self.whdload_games.as_deref().map(path_string);
         // A/V and emulation
         if self.overscan != base.overscan {
             raw.display.overscan = Some(overscan_name(self.overscan).to_string());
@@ -2937,6 +3122,11 @@ impl MachineSetup {
     }
 
     /// The current boolean of a toggle field.
+    /// Whether WHDLoad has a link of its own in the left-hand strip.
+    pub fn whdload_enabled(&self) -> bool {
+        self.whdload_enabled
+    }
+
     pub fn toggle_value(&self, field: LauncherField) -> bool {
         match field {
             F::Rtc => self.rtc,
@@ -2993,6 +3183,9 @@ impl MachineSetup {
             F::WhdloadGame => self.whdload_game.as_deref(),
             F::WhdloadKickstarts => self.whdload_kickstarts.as_deref(),
             F::WhdloadLibrary => self.whdload_library.as_deref(),
+            F::WhdloadWhdPackage => self.whdload_whd_package.as_deref(),
+            F::WhdloadSkickPackage => self.whdload_skick_package.as_deref(),
+            F::WhdloadGames => self.whdload_games.as_deref(),
             _ => None,
         }
     }
@@ -3114,8 +3307,24 @@ impl MachineSetup {
                 .is_some_and(crate::config::is_cd_image_path)
     }
 
+    /// Where a WHDLoad game's machine comes from: the slave's own header,
+    /// or this configuration.
+    pub fn whdload_machine(&self) -> crate::config::WhdloadMachine {
+        self.whdload_machine
+    }
+
     pub fn value_label(&self, field: LauncherField) -> String {
         match field {
+            F::WhdloadMachine => match self.whdload_machine {
+                crate::config::WhdloadMachine::Auto => "Auto".to_string(),
+                crate::config::WhdloadMachine::Copperline => "Copperline".to_string(),
+            },
+            F::WhdloadEnabled => if self.whdload_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+            .to_string(),
             F::Chipset => chipset_name(self.chipset).to_string(),
             F::Rtg => rtg_card_name(self.rtg).to_string(),
             F::Agnus => match self.agnus {
@@ -3359,10 +3568,15 @@ impl MachineSetup {
                     _ => label,
                 }
             }
-            // The WHDLoad staging directories derive sensible defaults when
-            // unset (see whdload::game_and_options), so their placeholder
-            // says so; the game itself has no default.
-            F::WhdloadKickstarts | F::WhdloadLibrary => self.path_label(field, "(default)"),
+            // The WHDLoad directories all have a place they go when unset,
+            // under the one WHDLoad directory (crate::paths::whdload_dir),
+            // so their placeholder says the setting is doing something
+            // rather than nothing. The game itself has no default, and the
+            // two support archives are either there or not.
+            F::WhdloadKickstarts | F::WhdloadLibrary | F::WhdloadGames => {
+                self.path_label(field, "(default)")
+            }
+            F::WhdloadWhdPackage | F::WhdloadSkickPackage => self.path_label(field, "(none)"),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -3424,6 +3638,18 @@ impl MachineSetup {
     /// Step a cycle/stepper field forward (`forward`) or backward.
     pub fn cycle(&mut self, field: LauncherField, forward: bool) {
         match field {
+            F::WhdloadEnabled => {
+                self.whdload_enabled = !self.whdload_enabled;
+                let _ = forward;
+            }
+            F::WhdloadMachine => {
+                use crate::config::WhdloadMachine as M;
+                self.whdload_machine = match self.whdload_machine {
+                    M::Auto => M::Copperline,
+                    M::Copperline => M::Auto,
+                };
+                let _ = forward;
+            }
             F::Chipset => self.chipset = cycle_slice(&CHIPSETS, self.chipset, forward),
             F::Rtg => {
                 let cards = if cpu_is_32bit(self.cpu) {
@@ -3822,6 +4048,9 @@ impl MachineSetup {
             F::WhdloadGame => self.whdload_game = Some(path),
             F::WhdloadKickstarts => self.whdload_kickstarts = Some(path),
             F::WhdloadLibrary => self.whdload_library = Some(path),
+            F::WhdloadWhdPackage => self.whdload_whd_package = Some(path),
+            F::WhdloadSkickPackage => self.whdload_skick_package = Some(path),
+            F::WhdloadGames => self.whdload_games = Some(path),
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = Some(path);
@@ -3870,6 +4099,9 @@ impl MachineSetup {
             F::ParallelOutput => self.parallel_output = None,
             F::WhdloadGame => self.whdload_game = None,
             F::WhdloadKickstarts => self.whdload_kickstarts = None,
+            F::WhdloadWhdPackage => self.whdload_whd_package = None,
+            F::WhdloadSkickPackage => self.whdload_skick_package = None,
+            F::WhdloadGames => self.whdload_games = None,
             F::WhdloadLibrary => self.whdload_library = None,
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
@@ -4169,6 +4401,10 @@ impl MachineSetup {
     /// First row shown in the table.
     pub fn host_disk_scroll(&self) -> usize {
         self.host_disk_scroll
+    }
+
+    pub fn host_disk_scroll_rate(&mut self) -> &mut ScrollRate {
+        &mut self.host_disk_scroll_rate
     }
 
     /// Move the window over the list, stopping at either end. `visible` is
@@ -4746,6 +4982,184 @@ pub enum EditTarget {
     SerialAddr(LauncherField),
 }
 
+/// Where typing goes in a text field, as a character index into it.
+///
+/// One of these sits beside every editable line in the launcher -- the value
+/// boxes on the configuration pages and the boxes in the WHDLoad dialogs --
+/// so all of them insert, delete and step alike, and all of them draw the
+/// same block over the character the caret is on. Without it a box can only
+/// be typed at the end, which is no way to correct a long path or amend
+/// metadata that is nearly right.
+///
+/// Characters, not bytes: the fields hold whatever a name or a title is
+/// spelt with, and stepping half way into one would split it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Caret(usize);
+
+impl Caret {
+    /// Past the last character, which is where opening a box for editing
+    /// puts it: what is already in there is usually a thing to add to.
+    pub fn end_of(text: &str) -> Self {
+        Self::at_end_of_len(text.chars().count())
+    }
+
+    /// The same for a line whose text is not to be handed out -- a masked
+    /// password, which is counted rather than read.
+    pub fn at_end_of_len(len: usize) -> Self {
+        Self(len)
+    }
+
+    /// Which character the caret is on, for drawing the block.
+    pub fn at(self) -> usize {
+        self.0
+    }
+
+    /// Pull the caret back inside a line it may now be off the end of --
+    /// the focus moved to a shorter field, or the value was replaced.
+    fn clamp(&mut self, text: &str) {
+        self.0 = self.0.min(text.chars().count());
+    }
+
+    pub fn left(&mut self) {
+        self.0 = self.0.saturating_sub(1);
+    }
+
+    pub fn right(&mut self, text: &str) {
+        self.right_of(text.chars().count());
+    }
+
+    /// Step right within a line of `len` characters.
+    pub fn right_of(&mut self, len: usize) {
+        self.0 = (self.0 + 1).min(len);
+    }
+
+    pub fn home(&mut self) {
+        self.0 = 0;
+    }
+
+    pub fn end(&mut self, text: &str) {
+        self.0 = text.chars().count();
+    }
+
+    /// The same for a counted line.
+    pub fn end_of_len(&mut self, len: usize) {
+        self.0 = len;
+    }
+
+    /// The byte offset the caret sits at, which is the end of the string
+    /// when it is past the last character.
+    fn byte_in(self, text: &str) -> usize {
+        text.char_indices()
+            .nth(self.0)
+            .map_or(text.len(), |(at, _)| at)
+    }
+
+    /// Insert at the caret and step over what was typed.
+    pub fn insert(&mut self, text: &mut String, c: char) {
+        // Against a line that was changed without the caret being told --
+        // a field reset, a value replaced wholesale -- rather than reaching
+        // off the end of it.
+        self.clamp(text);
+        let at = self.byte_in(text);
+        text.insert(at, c);
+        self.0 += 1;
+    }
+
+    /// Delete the character before the caret, as Backspace does. False when
+    /// there is nothing behind it.
+    pub fn backspace(&mut self, text: &mut String) -> bool {
+        self.clamp(text);
+        if self.0 == 0 {
+            return false;
+        }
+        self.left();
+        let at = self.byte_in(text);
+        text.remove(at);
+        true
+    }
+
+    /// Delete the character the caret is on, as Delete does. False at the
+    /// end of the line, where it is on nothing.
+    pub fn delete(&mut self, text: &mut String) -> bool {
+        let at = self.byte_in(text);
+        if at >= text.len() {
+            return false;
+        }
+        text.remove(at);
+        true
+    }
+}
+
+/// How fast a held scroll runs.
+///
+/// A list can be a few hundred rows and a keypress is one of them, so
+/// reaching the far end a row at a time is a lot of pressing. Holding it
+/// instead runs through five speeds, a second at each, and the last one
+/// crosses a library in about a second. Starting slow is the point: most
+/// scrolling is a few rows, and a control that leapt away on the first
+/// repeat would overshoot every time.
+///
+/// Every list in the launcher scrolls through one of these -- the WHDLoad
+/// games and favourites, the host disks -- and both ways of driving them,
+/// a held arrow key and a held scroll-arrow button, go through the same
+/// one, so they run at the same speed as each other.
+///
+/// Letting go and pressing again starts from the bottom: the speed is
+/// measured from when the run of scrolling began, and a gap longer than a
+/// repeat begins a new run.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollRate {
+    /// When the last movement was, to tell a continued scroll from a fresh
+    /// one.
+    last: Option<std::time::Instant>,
+    /// When the run of scrolling this movement belongs to began, which is
+    /// what the speed is worked out from.
+    started: Option<std::time::Instant>,
+}
+
+impl ScrollRate {
+    /// Rows a step, a stage a second. The last is what a long list needs
+    /// and the first is what a short one does.
+    const STAGES: [usize; 5] = [1, 3, 7, 14, 24];
+    /// How long each stage lasts before the next takes over.
+    const STAGE: std::time::Duration = std::time::Duration::from_secs(1);
+    /// The gap after which a movement starts a new run rather than
+    /// continuing one. Longer than the repeat of anything being held --
+    /// the button repeat here, or a host keyboard's -- and shorter than a
+    /// pause that means to stop.
+    const CONTINUES_WITHIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// How many rows this step should move, given when it arrived.
+    pub fn rows_for_step(&mut self, now: std::time::Instant) -> usize {
+        let continued = self
+            .last
+            .is_some_and(|last| now.duration_since(last) <= Self::CONTINUES_WITHIN);
+        let started = match continued {
+            true => self.started.unwrap_or(now),
+            false => now,
+        };
+        self.started = Some(started);
+        self.last = Some(now);
+        let stage = now.duration_since(started).as_millis() / Self::STAGE.as_millis();
+        Self::STAGES[(stage as usize).min(Self::STAGES.len() - 1)]
+    }
+
+    /// Back to the first stage, for a press that is deliberately a new one
+    /// rather than the continuation of an old one.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Which way a caret is being stepped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretMove {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
 /// The most an address box accepts: a DNS name is up to 253 characters
 /// (254 with a trailing root dot), and ":65535" is six more. Anything
 /// longer cannot be a host:port, so the box stops there.
@@ -5108,6 +5522,800 @@ pub struct LauncherState {
     /// focus (a plugin string option or a drive volume name).
     editing: Option<EditTarget>,
     edit_buffer: String,
+    /// Where typing goes in `edit_buffer`.
+    edit_caret: Caret,
+    /// The Library page: the games found, which is chosen, and where the
+    /// list is scrolled to. Held here rather than in the setup for the
+    /// same reason the workshop is -- none of it describes a machine.
+    #[cfg(feature = "game-library")]
+    pub library: LibraryPage,
+    /// The signed-in OpenRetro session, for as long as the launcher is
+    /// open. Shared with a running scan rather than handed over, so the
+    /// row can still say it is signed in while one is going.
+    #[cfg(feature = "game-library")]
+    pub openretro: Option<std::sync::Arc<crate::gamelib::openretro::Session>>,
+    /// The sign-in dialog, when it is up.
+    #[cfg(feature = "game-library")]
+    pub login: Option<LoginDialog>,
+    /// The metadata editor, when it is up.
+    #[cfg(feature = "game-library")]
+    pub meta: Option<MetaDialog>,
+}
+
+/// What the Library page is showing.
+#[cfg(feature = "game-library")]
+#[derive(Debug, Default, Clone)]
+pub struct LibraryPage {
+    /// The game database, read once when the page is first opened.
+    pub db: crate::gamelib::Database,
+    /// Whether the database has been read yet, so an empty one is not
+    /// re-read on every frame.
+    pub db_loaded: bool,
+    /// The games found beside the chosen one.
+    pub games: crate::gamelib::Library,
+    /// Which of the two lists the keyboard is walking, and which row is
+    /// chosen in it. Only the focused list draws a chosen row: a game
+    /// highlighted in both at once reads as two selections.
+    pub focus: LibraryFocus,
+    /// Which entry is chosen, as an index into `games`.
+    pub selected: usize,
+    /// Which row of the favourites list is chosen, as a position in it.
+    pub favourite_selected: usize,
+    /// The first row drawn, for scrolling.
+    pub scroll: usize,
+    /// The same for the favourites list, which scrolls on its own: a
+    /// collection can be favourited past the handful of rows the box shows.
+    pub favourite_scroll: usize,
+    /// How fast a continued scroll is running. One per list, so leaving one
+    /// part-way through and picking up the other starts the other at a row
+    /// a notch rather than at whatever speed the first had reached.
+    pub scroll_rate: ScrollRate,
+    pub favourite_scroll_rate: ScrollRate,
+    /// Cover art, fetched for whatever is selected and kept afterwards.
+    pub covers: crate::gamelib::Covers,
+}
+
+/// A package's own name, without the folders above it or its extension.
+#[cfg(feature = "game-library")]
+fn file_stem_of(relative: &str) -> &str {
+    let base = relative.rsplit(['/', '\\']).next().unwrap_or(relative);
+    base.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(base)
+}
+
+/// Which of the Library page's two lists is being walked.
+#[cfg(feature = "game-library")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LibraryFocus {
+    #[default]
+    Games,
+    Favourites,
+}
+
+/// One field of the metadata editor.
+#[cfg(feature = "game-library")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetaField {
+    #[default]
+    Name,
+    Year,
+    Publisher,
+    Developer,
+    Players,
+    Version,
+}
+
+#[cfg(feature = "game-library")]
+impl MetaField {
+    pub const ALL: [MetaField; 6] = [
+        MetaField::Name,
+        MetaField::Year,
+        MetaField::Publisher,
+        MetaField::Developer,
+        MetaField::Players,
+        MetaField::Version,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MetaField::Name => "Name",
+            MetaField::Year => "Year",
+            MetaField::Publisher => "Publisher",
+            MetaField::Developer => "Developer",
+            MetaField::Players => "Players",
+            MetaField::Version => "Version",
+        }
+    }
+
+    fn at(self) -> usize {
+        MetaField::ALL.iter().position(|&f| f == self).unwrap_or(0)
+    }
+}
+
+/// The metadata editor, while it is open.
+///
+/// Everything in it is a copy: nothing reaches the store until Save, so
+/// Cancel really is "leave it as it was", and Clear is something you can
+/// change your mind about.
+#[cfg(feature = "game-library")]
+#[derive(Debug, Clone, Default)]
+pub struct MetaDialog {
+    /// The package being edited, by the name the store files it under.
+    pub file: String,
+    /// The values, in [`MetaField::ALL`] order.
+    pub values: [String; 6],
+    /// The cache key of the art, which is a catalogue digest for art that
+    /// was downloaded and a `manual-` name for art somebody chose.
+    pub art: Option<String>,
+    pub focus: MetaField,
+    /// Where typing goes in the focused field. Metadata is more often
+    /// amended than typed fresh, so being able to step into what is already
+    /// there is most of the point of the editor.
+    pub caret: Caret,
+}
+
+#[cfg(feature = "game-library")]
+impl MetaDialog {
+    pub fn value(&self, field: MetaField) -> &str {
+        &self.values[field.at()]
+    }
+
+    pub fn value_mut(&mut self, field: MetaField) -> &mut String {
+        &mut self.values[field.at()]
+    }
+
+    /// Move the focus to another box, putting the caret at the end of what
+    /// that one holds.
+    pub fn focus_on(&mut self, field: MetaField) {
+        self.focus = field;
+        self.caret = Caret::end_of(self.value(field));
+    }
+
+    /// Type into the focused box at the caret, up to what it accepts.
+    pub fn insert(&mut self, c: char, most: usize) {
+        if self.value(self.focus).chars().count() >= most {
+            return;
+        }
+        let focus = self.focus;
+        let mut caret = self.caret;
+        caret.insert(self.value_mut(focus), c);
+        self.caret = caret;
+    }
+
+    /// Step the caret through the focused box.
+    pub fn caret_move(&mut self, to: CaretMove) {
+        let len = self.value(self.focus).chars().count();
+        match to {
+            CaretMove::Left => self.caret.left(),
+            CaretMove::Right => self.caret.right_of(len),
+            CaretMove::Home => self.caret.home(),
+            CaretMove::End => self.caret.end_of_len(len),
+        }
+    }
+
+    /// Whether there is anything left to save. An editor emptied and saved
+    /// hands the package back to the scan rather than pinning it empty.
+    pub fn is_empty(&self) -> bool {
+        self.art.is_none() && self.values.iter().all(|v| v.trim().is_empty())
+    }
+}
+
+/// Which box of the sign-in dialog is being typed into.
+#[cfg(feature = "game-library")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginField {
+    User,
+    Pass,
+}
+
+/// The sign-in dialog, while it is open.
+///
+/// Nothing here is kept: the password is traded for a token when OK is
+/// pressed and wiped on the way out, and the token lives no longer than the
+/// session. See [`crate::gamelib::Secret`] for what that costs to do
+/// properly.
+#[cfg(feature = "game-library")]
+#[derive(Debug)]
+pub struct LoginDialog {
+    pub user: String,
+    pub pass: crate::gamelib::Secret,
+    pub focus: LoginField,
+    /// Where typing goes in the focused box, as in the metadata editor: one
+    /// dialog behaving differently from the other is one more thing to
+    /// learn. It steps over the mask in the password box, which is what the
+    /// mask is drawn a character at a time for.
+    pub caret: Caret,
+    /// Set while the sign-in request is in flight, so a second Return does
+    /// not start a second one.
+    pub sending: bool,
+}
+
+/// A cloned launcher state does not carry a half-typed password. That is
+/// the only sensible thing a copy of a credential could be, and it is why
+/// this is written rather than derived.
+#[cfg(feature = "game-library")]
+impl Clone for LoginDialog {
+    fn clone(&self) -> LoginDialog {
+        LoginDialog::default()
+    }
+}
+
+#[cfg(feature = "game-library")]
+impl Default for LoginDialog {
+    fn default() -> LoginDialog {
+        LoginDialog {
+            user: String::new(),
+            pass: crate::gamelib::Secret::new(),
+            focus: LoginField::User,
+            caret: Caret::default(),
+            sending: false,
+        }
+    }
+}
+
+#[cfg(feature = "game-library")]
+impl LoginDialog {
+    /// How many characters the focused box holds. The password is counted
+    /// rather than read: the caret needs its length, not its text.
+    fn focused_len(&self) -> usize {
+        match self.focus {
+            LoginField::User => self.user.chars().count(),
+            LoginField::Pass => self.pass.chars(),
+        }
+    }
+
+    /// Move to the other box, with the caret at the end of what it holds.
+    pub fn focus_on(&mut self, field: LoginField) {
+        self.focus = field;
+        self.caret = Caret::at_end_of_len(self.focused_len());
+    }
+
+    /// Type at the caret, up to what the box takes.
+    pub fn insert(&mut self, c: char) {
+        match self.focus {
+            LoginField::User if self.user.chars().count() < USER_MAX => {
+                let mut caret = self.caret;
+                caret.insert(&mut self.user, c);
+                self.caret = caret;
+            }
+            // Full: the character is dropped and the caret stays put.
+            LoginField::User => {}
+            // The Secret bounds itself, and says nothing about how full it
+            // is, so the caret follows only a character that went in.
+            LoginField::Pass => {
+                let was = self.pass.chars();
+                self.pass.insert_at(self.caret.at(), c);
+                if self.pass.chars() == was {
+                    return;
+                }
+                self.caret.right_of(self.pass.chars());
+            }
+        }
+    }
+
+    /// Delete backwards from the caret.
+    pub fn backspace(&mut self) {
+        if self.caret.at() == 0 {
+            return;
+        }
+        match self.focus {
+            LoginField::User => {
+                let mut caret = self.caret;
+                caret.backspace(&mut self.user);
+                self.caret = caret;
+            }
+            LoginField::Pass => {
+                self.caret.left();
+                self.pass.remove_at(self.caret.at());
+            }
+        }
+    }
+
+    /// Delete the character the caret is on.
+    pub fn delete(&mut self) {
+        match self.focus {
+            LoginField::User => {
+                let mut caret = self.caret;
+                caret.delete(&mut self.user);
+                self.caret = caret;
+            }
+            LoginField::Pass => {
+                self.pass.remove_at(self.caret.at());
+            }
+        }
+    }
+
+    /// Step the caret through the focused box.
+    pub fn caret_move(&mut self, to: CaretMove) {
+        let len = self.focused_len();
+        match to {
+            CaretMove::Left => self.caret.left(),
+            CaretMove::Right => self.caret.right_of(len),
+            CaretMove::Home => self.caret.home(),
+            CaretMove::End => self.caret.end_of_len(len),
+        }
+    }
+}
+
+/// The longest an OpenRetro user name is taken to be. Nothing documents a
+/// limit; this is a box, not a validator, and a name past it is a paste
+/// that went somewhere it did not belong.
+#[cfg(feature = "game-library")]
+const USER_MAX: usize = 64;
+
+/// The support directory under a given configuration directory. The same
+/// place [`crate::paths::whdload_support_dir`] names, spelled from a root
+/// the caller chose so a test can point somewhere else.
+#[cfg(feature = "game-library")]
+fn whdload_support_under(config_dir: &std::path::Path) -> PathBuf {
+    config_dir.join("whdload").join("support")
+}
+
+#[cfg(feature = "game-library")]
+impl MachineSetup {
+    /// Where the scanned library is kept: `[whdload] library_db`, or the
+    /// default under the configuration directory.
+    pub fn library_db(&self, config_dir: &std::path::Path) -> PathBuf {
+        self.whdload_library_db
+            .clone()
+            .unwrap_or_else(|| whdload_support_under(config_dir).join("launcher.db"))
+    }
+
+    /// Where a scan keeps what it downloaded: `[whdload] library_cache`, or
+    /// the default beside the library it belongs to.
+    pub fn library_cache(&self, config_dir: &std::path::Path) -> PathBuf {
+        self.whdload_library_cache
+            .clone()
+            .unwrap_or_else(|| whdload_support_under(config_dir).join("cache"))
+    }
+
+    /// Adopt whatever is already sitting where WHDLoad would have put it.
+    ///
+    /// A person who has run the packaging script, or downloaded once and
+    /// then started a fresh configuration, should not have to point at the
+    /// same files again. Only fills a setting that is empty, so a chosen
+    /// path is never quietly replaced -- and only adopts an archive whose
+    /// digest is right, since a half-finished download in the right place
+    /// with the right name is exactly what should *not* be adopted.
+    pub fn adopt_whdload_defaults(&mut self) {
+        for archive in crate::gamelib::support::Archive::ALL {
+            let field = match archive {
+                crate::gamelib::support::Archive::Whdload => F::WhdloadWhdPackage,
+                crate::gamelib::support::Archive::Skick => F::WhdloadSkickPackage,
+            };
+            if self.path(field).is_none() {
+                if let Some(at) = archive.found_locally() {
+                    self.set_path(field, at);
+                }
+            }
+        }
+        // Kickstart images are somebody's own collection rather than a
+        // known file, so the test is that the directory has anything in it
+        // at all.
+        if self.path(F::WhdloadKickstarts).is_none() {
+            if let Some(dir) = crate::gamelib::support::default_kickstart_dir() {
+                if crate::gamelib::support::holds_anything(&dir) {
+                    self.set_path(F::WhdloadKickstarts, dir);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "game-library")]
+impl LauncherState {
+    /// Bring the Library page up to date with what the configuration says.
+    ///
+    /// Called when the page is drawn or clicked rather than when the
+    /// settings change: the game and the database path are ordinary path
+    /// fields that anything may set -- a Browse, a drop, a loaded config --
+    /// and one place that notices beats a dozen that have to remember to.
+    pub fn refresh_library(&mut self, config_dir: &std::path::Path) {
+        // Turned off, the page does nothing at all: no store read, no
+        // cover worker started, nothing held. Whatever a previous session
+        // left in memory goes with it.
+        if !self.setup.whdload_enabled() {
+            if self.library.db_loaded {
+                self.library = LibraryPage::default();
+            }
+            return;
+        }
+        // No game library means nothing to list -- and nothing to show in
+        // the favourites either. They are kept in the store, so without
+        // this a fresh install with no library set still listed whatever a
+        // previous one had starred.
+        if self.library_folder().is_none() {
+            if self.library.db_loaded {
+                self.library = LibraryPage::default();
+            }
+            return;
+        }
+        if !self.library.db_loaded {
+            self.library.db = crate::gamelib::Database::load(&self.setup.library_db(config_dir));
+            // The covers subdirectory of the cache, not the cache itself:
+            // that is where a scan writes them.
+            self.library.covers = crate::gamelib::Covers::new(crate::gamelib::scan::covers_path(
+                &self.setup.library_cache(config_dir),
+            ));
+            self.library.db_loaded = true;
+        }
+        // From the store, not from the disk: opening a page is not a
+        // reason to walk a collection of several thousand packages. The
+        // Refresh button is.
+        match self.library_folder() {
+            Some(folder) if !self.library.games.covers(&folder) => {
+                self.library.games = crate::gamelib::Library::known(&folder, &self.library.db);
+                self.select_running_game();
+            }
+            None => self.library.games = crate::gamelib::Library::default(),
+            _ => {}
+        }
+        // A list that shrank under the selection must not leave it past the
+        // end, where nothing would be drawn as chosen.
+        self.library.selected = self
+            .library
+            .selected
+            .min(self.library.games.len().saturating_sub(1));
+    }
+
+    /// Put the selection on the game the configuration names, so opening
+    /// the page while one is running shows which.
+    fn select_running_game(&mut self) {
+        if let Some(at) = self
+            .setup
+            .path(F::WhdloadGame)
+            .and_then(|game| self.library.games.position(game))
+        {
+            self.library.selected = at;
+        }
+    }
+
+    /// The entry the list is on, if the list has any.
+    /// Keep the cover art up with the selection: collect anything that has
+    /// arrived, and ask for what is being looked at now. Answers whether
+    /// the page changed and should be drawn again.
+    ///
+    /// Here rather than at each place a game is chosen, because every route
+    /// to a selection -- a click, an arrow key, the favourites list, a
+    /// config that named a game -- has to end up asking.
+    pub fn poll_library_covers(&mut self) -> bool {
+        let arrived = self.library.covers.poll();
+        // The selection and the few either side of it. Reading ahead is
+        // what makes a steady scroll find each cover already decoded
+        // instead of waiting for it at every step.
+        let at = self.library.selected;
+        let entries = self.library.games.entries();
+        let window: Vec<Option<&str>> = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .game
+                    .as_ref()
+                    .and_then(|game| game.front_sha1.as_deref())
+            })
+            .collect();
+        self.library.covers.want_around(window.into_iter(), at);
+        // And whatever the editor is showing, which after a picture has
+        // been chosen is not the selection's art any more.
+        if let Some(key) = self.meta.as_ref().and_then(|meta| meta.art.clone()) {
+            self.library.covers.want(&key);
+        }
+        arrived
+    }
+
+    /// The folder the list is of.
+    ///
+    /// A game library is a collection and is searched all the way down;
+    /// without one, the folder holding the chosen game stands in, so
+    /// pointing at any package still lists its neighbours. The library
+    /// wins where both are set: it is the deliberate answer to "where are
+    /// my games", and the other is a guess from one of them.
+    /// The folder the Library page lists, which is the one that was set
+    /// and nothing else.
+    ///
+    /// It used to fall back to the folder holding the chosen game, so that
+    /// pointing at a package listed its neighbours. That made Clear look
+    /// broken -- emptying the setting left the list full of whatever sat
+    /// beside the launch game -- and it hid the one thing the empty page
+    /// has to say, which is where to set the folder.
+    pub fn library_folder(&self) -> Option<PathBuf> {
+        self.setup
+            .path(F::WhdloadGames)
+            .map(std::path::Path::to_path_buf)
+    }
+
+    pub fn library_selection(&self) -> Option<&crate::gamelib::Entry> {
+        match self.library.focus {
+            LibraryFocus::Games => self.library.games.entries().get(self.library.selected),
+            // A favourite whose package is no longer there has no entry,
+            // and so nothing to show beside it.
+            LibraryFocus::Favourites => {
+                let key = self.favourite_key(self.library.favourite_selected)?;
+                self.library
+                    .games
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.relative == key)
+            }
+        }
+    }
+
+    /// The key of the favourite on that row.
+    pub fn favourite_key(&self, drawn: usize) -> Option<&str> {
+        self.library.db.favourites().nth(drawn).map(|(key, _)| key)
+    }
+
+    /// Choose a game, which is also to say launch it when Run is pressed:
+    /// the selection *is* the configured game rather than something that
+    /// has to be copied across on the way out.
+    pub fn select_library_game(&mut self, index: usize) {
+        let Some(entry) = self.library.games.entries().get(index) else {
+            return;
+        };
+        let path = entry.path.clone();
+        self.library.focus = LibraryFocus::Games;
+        self.library.selected = index;
+        self.setup.set_path(F::WhdloadGame, path);
+        self.status = None;
+    }
+
+    /// Mark or unmark the game at `index` in the list.
+    pub fn toggle_library_favourite(&mut self, index: usize) {
+        let Some(entry) = self.library.games.entries().get(index) else {
+            return;
+        };
+        // The name is kept with the mark, so the favourite still reads as
+        // a game once its package is gone.
+        // The package, not the game: a collection holds the same game
+        // several times over, and starring one of them stars that one.
+        let (file, title) = (entry.relative.clone(), entry.title().to_string());
+        self.library.db.toggle_favourite(&file, &title);
+    }
+
+    /// Choose a favourite: the game to launch, without also being the row
+    /// highlighted in the list above. Two highlights for one choice is
+    /// two choices as far as anyone reading the page is concerned.
+    pub fn select_favourite(&mut self, drawn: usize) {
+        let Some(key) = self.favourite_key(drawn).map(str::to_string) else {
+            return;
+        };
+        self.library.focus = LibraryFocus::Favourites;
+        self.library.favourite_selected = drawn;
+        self.status = None;
+        // A favourite whose package has been deleted is still a row worth
+        // landing on -- its Remove tick is the point of it -- but there is
+        // nothing to launch.
+        let path = self
+            .library
+            .games
+            .entries()
+            .iter()
+            .find(|entry| entry.relative == key)
+            .map(|entry| entry.path.clone());
+        if let Some(path) = path {
+            self.setup.set_path(F::WhdloadGame, path);
+        }
+    }
+
+    /// Open the metadata editor on whatever is selected.
+    pub fn open_meta_editor(&mut self) -> bool {
+        let Some(entry) = self.library_selection() else {
+            return false;
+        };
+        // The store keys on the path under the game folder; the version
+        // offered below is the package's own name, which is what tells one
+        // release from another. Without its extension -- `.lha` against
+        // `.zip` is how it was packed, not which release it is.
+        let file = entry.relative.clone();
+        let base = entry.file_name.clone();
+        let duplicated = entry.duplicated;
+        let game = entry.game.clone();
+        let mut dialog = MetaDialog {
+            file,
+            focus: MetaField::Name,
+            art: game.as_ref().and_then(|g| g.front_sha1.clone()),
+            ..Default::default()
+        };
+        if let Some(game) = &game {
+            for (field, value) in [
+                (MetaField::Name, Some(game.name.clone())),
+                (MetaField::Year, game.year.clone()),
+                (MetaField::Publisher, game.publisher.clone()),
+                (MetaField::Developer, game.developer.clone()),
+                (MetaField::Players, game.players.clone()),
+                (MetaField::Version, game.version.clone()),
+            ] {
+                *dialog.value_mut(field) = value.unwrap_or_default();
+            }
+        }
+        // Nothing stored, the game has metadata, and the library holds it
+        // more than once: offer the file name, which is the only thing that
+        // separates them. Blank for a game held once, and blank for one the
+        // scan could not name at all -- filling in a version for a package
+        // with nothing else known about it says nothing.
+        if dialog.value(MetaField::Version).is_empty() && duplicated && game.is_some() {
+            *dialog.value_mut(MetaField::Version) = base;
+        }
+        // The caret goes to the end of the first box, which is where typing
+        // would go anyway and where the block is expected to be.
+        dialog.focus_on(MetaField::Name);
+        self.meta = Some(dialog);
+        self.status = None;
+        true
+    }
+
+    /// Commit the editor into the store, and answer where to save it.
+    ///
+    /// An editor with nothing in it clears the entry and hands it back to
+    /// the scan; anything else is marked as hand-filled, which is what
+    /// stops the next scan overwriting it.
+    pub fn commit_meta_editor(&mut self) {
+        let Some(dialog) = self.meta.take() else {
+            return;
+        };
+        // Keeping the digest means a later scan still recognises the
+        // package without opening it again.
+        let held_digest = self
+            .library
+            .db
+            .entry(&dialog.file)
+            .and_then(|k| k.slave_sha1.clone());
+        let field = |f: MetaField| {
+            let value = dialog.value(f).trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
+        let entry = if dialog.is_empty() {
+            crate::gamelib::Known {
+                file: dialog.file.clone(),
+                game: None,
+                slave_sha1: held_digest,
+                manual: false,
+            }
+        } else {
+            crate::gamelib::Known {
+                file: dialog.file.clone(),
+                game: Some(crate::gamelib::Game {
+                    // Kept, so a re-sync can still recognise the record
+                    // this started life as.
+                    uuid: self
+                        .library
+                        .db
+                        .entry(&dialog.file)
+                        .and_then(|k| k.game.as_ref())
+                        .map(|g| g.uuid.clone())
+                        .unwrap_or_default(),
+                    // A name left blank falls back to what the list would
+                    // have shown anyway -- the file's own name, without
+                    // the folders it sits in or its extension.
+                    name: field(MetaField::Name)
+                        .unwrap_or_else(|| file_stem_of(&dialog.file).to_string()),
+                    year: field(MetaField::Year),
+                    publisher: field(MetaField::Publisher),
+                    developer: field(MetaField::Developer),
+                    players: field(MetaField::Players),
+                    version: field(MetaField::Version),
+                    front_sha1: dialog.art.clone(),
+                }),
+                slave_sha1: held_digest,
+                manual: true,
+            }
+        };
+        self.library.db.set_entry(entry);
+    }
+
+    /// Move the selection in whichever list is focused.
+    pub fn step_library_focus(&mut self, delta: isize, visible: usize) {
+        match self.library.focus {
+            LibraryFocus::Games => self.step_library(delta, visible),
+            LibraryFocus::Favourites => {
+                let len = self.library.db.favourite_count();
+                if len == 0 {
+                    return;
+                }
+                let at = (self.library.favourite_selected as isize + delta)
+                    .clamp(0, len as isize - 1) as usize;
+                self.select_favourite(at);
+                self.scroll_favourites_into_view(visible);
+            }
+        }
+    }
+
+    /// Take a favourite off from the favourites list itself.
+    pub fn remove_favourite(&mut self, at: usize) {
+        if let Some(key) = self.favourite_key(at).map(str::to_string) {
+            self.library.db.remove_favourite(&key);
+        }
+        // The list just got shorter under both the selection and the scroll,
+        // either of which can now be off the end of it.
+        self.clamp_favourites();
+    }
+
+    /// Keep the favourites selection and scroll inside a list that may have
+    /// shrunk -- a removal here, or a database re-read that dropped some.
+    fn clamp_favourites(&mut self) {
+        let last = self.library.db.favourite_count().saturating_sub(1);
+        self.library.favourite_selected = self.library.favourite_selected.min(last);
+        self.library.favourite_scroll = self.library.favourite_scroll.min(last);
+    }
+
+    /// Re-read the game folder: the one thing that walks the disk, and the
+    /// only way a package that was not there before gets into the store.
+    ///
+    /// What it finds goes into the store rather than only into the list, so
+    /// the page shows the same thing when it is next opened and after a
+    /// restart. Metadata already resolved is carried across -- reading the
+    /// folder again must not be a way to lose the work a scan did.
+    ///
+    /// Answers how many packages are in the folder, and how many of those
+    /// have nothing known about them yet.
+    pub fn rescan_library(&mut self, config_dir: &std::path::Path) -> (usize, usize) {
+        self.refresh_library(config_dir);
+        let Some(folder) = self.library_folder() else {
+            return (0, 0);
+        };
+        let fresh = self
+            .library
+            .db
+            .merge_found(crate::gamelib::scan::packages(&folder));
+        self.save_library_database(config_dir);
+        self.library.games = crate::gamelib::Library::known(&folder, &self.library.db);
+        self.select_running_game();
+        self.library.selected = self
+            .library
+            .selected
+            .min(self.library.games.len().saturating_sub(1));
+        (self.library.games.len(), fresh)
+    }
+
+    /// Write the database out, so a favourite outlives the session.
+    pub fn save_library_database(&self, config_dir: &std::path::Path) {
+        let at = self.setup.library_db(config_dir);
+        if let Err(e) = self.library.db.save(&at) {
+            log::warn!("game library: could not save {}: {e}", at.display());
+        }
+    }
+
+    /// Move the selection by `delta` rows, keeping it in view.
+    pub fn step_library(&mut self, delta: isize, visible: usize) {
+        let len = self.library.games.len();
+        if len == 0 {
+            return;
+        }
+        let at = (self.library.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.select_library_game(at);
+        self.scroll_library_into_view(visible);
+    }
+
+    /// Scroll the list by `delta` rows without moving the selection.
+    pub fn scroll_library(&mut self, delta: isize, visible: usize) {
+        let last_start = self.library.games.len().saturating_sub(visible);
+        let at = self.library.scroll as isize + delta;
+        self.library.scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
+    pub fn scroll_favourites(&mut self, delta: isize, visible: usize) {
+        let last_start = self.library.db.favourite_count().saturating_sub(visible);
+        let at = self.library.favourite_scroll as isize + delta;
+        self.library.favourite_scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
+    fn scroll_favourites_into_view(&mut self, visible: usize) {
+        let at = self.library.favourite_selected;
+        if at < self.library.favourite_scroll {
+            self.library.favourite_scroll = at;
+        } else if visible > 0 && at >= self.library.favourite_scroll + visible {
+            self.library.favourite_scroll = at + 1 - visible;
+        }
+    }
+
+    /// Bring the selection into the drawn rows, moving as little as will do.
+    fn scroll_library_into_view(&mut self, visible: usize) {
+        let at = self.library.selected;
+        if at < self.library.scroll {
+            self.library.scroll = at;
+        } else if visible > 0 && at >= self.library.scroll + visible {
+            self.library.scroll = at + 1 - visible;
+        }
+    }
 }
 
 impl LauncherState {
@@ -5465,6 +6673,7 @@ impl LauncherState {
         }
         self.edit_buffer = self.workshop_value(field);
         self.editing = Some(EditTarget::NewImageText(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -5482,6 +6691,7 @@ impl LauncherState {
             self.edit_buffer.push_str(addr);
         }
         self.editing = Some(EditTarget::SerialAddr(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -5490,7 +6700,19 @@ impl LauncherState {
         // Read the host devices as the screen opens so the pickers show what is
         // connected now.
         setup.refresh_host_devices();
+        // Likewise the WHDLoad support files: anything already sitting
+        // where they go fills its own row rather than asking again.
+        #[cfg(feature = "game-library")]
+        setup.adopt_whdload_defaults();
         let mut state = Self {
+            #[cfg(feature = "game-library")]
+            library: LibraryPage::default(),
+            #[cfg(feature = "game-library")]
+            openretro: None,
+            #[cfg(feature = "game-library")]
+            login: None,
+            #[cfg(feature = "game-library")]
+            meta: None,
             setup,
             workshop: ImageWorkshop::default(),
             tab: LauncherTab::System,
@@ -5498,6 +6720,7 @@ impl LauncherState {
             rom_notes: Default::default(),
             editing: None,
             edit_buffer: String::new(),
+            edit_caret: Caret::default(),
         };
         // Name the ROMs the incoming configuration already carries.
         state.sync_rom_notes();
@@ -5564,6 +6787,7 @@ impl LauncherState {
             .map(|b| b.value(opt))
             .unwrap_or_default();
         self.editing = Some(EditTarget::BoardOption { board, opt });
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -5571,6 +6795,7 @@ impl LauncherState {
     pub fn begin_edit_drive_name(&mut self, field: LauncherField) {
         self.edit_buffer = self.setup.drive_name(field).unwrap_or_default().to_string();
         self.editing = Some(EditTarget::DriveName(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -5587,6 +6812,7 @@ impl LauncherState {
             None => String::new(),
         };
         self.editing = Some(EditTarget::DriveBootpri(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -5597,12 +6823,14 @@ impl LauncherState {
         if let EditTarget::NewImageText(field) = target {
             if let Some(limit) = workshop_digit_limit(field) {
                 // A boot priority is the one signed figure here.
-                let minus_ok =
-                    field == F::NewHardBootPri && c == '-' && self.edit_buffer.is_empty();
+                let minus_ok = field == F::NewHardBootPri
+                    && c == '-'
+                    && self.edit_caret.at() == 0
+                    && !self.edit_buffer.starts_with('-');
                 if (!c.is_ascii_digit() && !minus_ok) || self.edit_buffer.len() >= limit {
                     return;
                 }
-                self.edit_buffer.push(c);
+                self.edit_caret.insert(&mut self.edit_buffer, c);
                 return;
             }
             if let Some(limit) = workshop_text_limit(field) {
@@ -5615,7 +6843,7 @@ impl LauncherState {
                 if self.edit_buffer.chars().count() >= limit {
                     return;
                 }
-                self.edit_buffer.push(c);
+                self.edit_caret.insert(&mut self.edit_buffer, c);
                 return;
             }
         }
@@ -5630,18 +6858,44 @@ impl LauncherState {
         }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
-            let minus_ok = c == '-' && self.edit_buffer.is_empty();
+            let minus_ok =
+                c == '-' && self.edit_caret.at() == 0 && !self.edit_buffer.starts_with('-');
             if !(c.is_ascii_digit() || minus_ok) {
                 return;
             }
         }
-        self.edit_buffer.push(c);
+        self.edit_caret.insert(&mut self.edit_buffer, c);
     }
 
     pub fn edit_backspace(&mut self) {
         if self.editing.is_some() {
-            self.edit_buffer.pop();
+            self.edit_caret.backspace(&mut self.edit_buffer);
         }
+    }
+
+    /// Delete forwards, from the character the caret is on.
+    pub fn edit_delete(&mut self) {
+        if self.editing.is_some() {
+            self.edit_caret.delete(&mut self.edit_buffer);
+        }
+    }
+
+    /// Step the caret through the box being typed in.
+    pub fn edit_caret_move(&mut self, to: CaretMove) {
+        if self.editing.is_none() {
+            return;
+        }
+        match to {
+            CaretMove::Left => self.edit_caret.left(),
+            CaretMove::Right => self.edit_caret.right(&self.edit_buffer),
+            CaretMove::Home => self.edit_caret.home(),
+            CaretMove::End => self.edit_caret.end(&self.edit_buffer),
+        }
+    }
+
+    /// Where the caret is in the box being typed in, for drawing it.
+    pub fn edit_caret(&self) -> Caret {
+        self.edit_caret
     }
 
     /// Commit the edit buffer to the focused field. A drive name that would
@@ -7199,6 +8453,7 @@ mod tests {
                 library: Some("/whd/library".to_string()),
                 kickstarts: Some("/roms/kickstarts".to_string()),
                 args: Some("NoVBRMove ButtonWait".to_string()),
+                ..crate::config::RawWhdload::default()
             },
             ..RawConfig::default()
         };
@@ -7235,9 +8490,32 @@ mod tests {
         assert_eq!(raw.whdload.game.as_deref(), Some("/g/game.lha"));
         assert_eq!(raw.whdload.kickstarts.as_deref(), Some("/k"));
         assert_eq!(raw.whdload.library.as_deref(), Some("/l"));
-        // The WHDLoad volumes have fixed names, so no volume box applies.
-        assert!(!setup.drive_name_applies(F::WhdloadGame));
-        for field in [F::WhdloadGame, F::WhdloadKickstarts, F::WhdloadLibrary] {
+        // The WHDLoad volumes have fixed names, so no path row here ever
+        // grows a volume box -- an editable name with nothing to name.
+        // Every one of them, so a row added later is not left with a box
+        // that cannot be typed into.
+        for field in [
+            F::WhdloadGame,
+            F::WhdloadGames,
+            F::WhdloadKickstarts,
+            F::WhdloadLibrary,
+            F::WhdloadWhdPackage,
+            F::WhdloadSkickPackage,
+        ] {
+            setup.set_path(field, PathBuf::from("/somewhere"));
+            assert!(
+                !setup.drive_name_applies(field),
+                "{field:?} offers a volume box"
+            );
+        }
+        for field in [
+            F::WhdloadGame,
+            F::WhdloadGames,
+            F::WhdloadKickstarts,
+            F::WhdloadLibrary,
+            F::WhdloadWhdPackage,
+            F::WhdloadSkickPackage,
+        ] {
             setup.clear_path(field);
             assert_eq!(setup.path(field), None);
         }
@@ -7317,20 +8595,366 @@ mod tests {
     }
 
     #[test]
-    fn the_whdload_sub_page_hangs_off_the_storage_tab() {
-        // The sub-page keeps the Storage strip entry lit, returns to Storage
-        // via Back, and is reachable from the Storage nav row.
-        assert_eq!(LauncherTab::Whdload.strip_tab(), LauncherTab::Storage);
+    fn the_machine_type_cycle_reports_which_machine_it_means() {
+        use crate::config::WhdloadMachine as M;
+        let mut setup = MachineSetup::default();
+        // Auto is the default: the slave header says what the game wants.
+        assert_eq!(setup.whdload_machine(), M::Auto);
+        assert_eq!(setup.value_label(F::WhdloadMachine), "Auto");
+
+        // The two settings are one cycle apart either way round, so the
+        // reading after a press is the reading the line describes.
+        setup.cycle(F::WhdloadMachine, true);
+        assert_eq!(setup.whdload_machine(), M::Copperline);
+        assert_eq!(setup.value_label(F::WhdloadMachine), "Copperline");
+        setup.cycle(F::WhdloadMachine, true);
+        assert_eq!(setup.whdload_machine(), M::Auto);
+        setup.cycle(F::WhdloadMachine, false);
+        assert_eq!(setup.whdload_machine(), M::Copperline, "and backwards");
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_version_is_offered_only_for_a_named_game_the_library_holds_twice() {
+        use crate::gamelib::{Game, Known, Library};
+        let named = |name: &str| {
+            Some(Game {
+                name: name.to_string(),
+                year: Some("1994".to_string()),
+                ..Game::default()
+            })
+        };
+        let known = |file: &str, game: Option<Game>| Known {
+            file: file.to_string(),
+            game,
+            manual: false,
+            slave_sha1: None,
+        };
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.library.db.set_known(vec![
+            // The same game packed twice, which is what a version is for.
+            known("CannonFodder2_v1.11_0104.lha", named("Cannon Fodder 2")),
+            known("CannonFodder2_v1.12_Fr_2578.zip", named("Cannon Fodder 2")),
+            // Held once: nothing to tell apart.
+            known("Turrican_v1.3_0087.lha", named("Turrican")),
+            // Two the scan could not name. They share a title only because
+            // the title falls back to the file name.
+            known("Mystery/Thing.lha", None),
+            known("Elsewhere/Thing.zip", None),
+        ]);
+        state.library.games = Library::known(Path::new("/games"), &state.library.db);
+        state.library.db_loaded = true;
+
+        let version_of = |state: &mut LauncherState, title: &str| {
+            let at = state
+                .library
+                .games
+                .entries()
+                .iter()
+                .position(|e| e.title() == title)
+                .expect("the entry is in the library");
+            state.select_library_game(at);
+            assert!(state.open_meta_editor(), "the editor opens");
+            let value = state
+                .meta
+                .as_ref()
+                .unwrap()
+                .value(MetaField::Version)
+                .to_string();
+            state.meta = None;
+            value
+        };
+
+        // The package's own name, and not how it was packed: `.lha`
+        // against `.zip` is the same on both and says nothing about which
+        // release either one is.
         assert_eq!(
-            LauncherTab::Whdload.parent_tab(),
-            Some(LauncherTab::Storage)
+            version_of(&mut state, "Cannon Fodder 2"),
+            "CannonFodder2_v1.11_0104"
         );
-        assert!(LauncherTab::Storage
+        // Held once, so there is nothing to separate it from.
+        assert_eq!(version_of(&mut state, "Turrican"), "");
+        // Unnamed by the scan: a file name under a row that already says
+        // nothing is not the answer to which release it is.
+        assert_eq!(version_of(&mut state, "Thing"), "");
+    }
+
+    #[test]
+    fn a_held_scroll_climbs_five_stages_and_starts_again_when_let_go() {
+        use std::time::{Duration, Instant};
+        // What a held button does: a step every 60 ms, which is what the
+        // stages have to be read against -- they are a second of holding
+        // each, not a count of steps.
+        const EVERY: Duration = Duration::from_millis(60);
+        let start = Instant::now();
+        let mut rate = ScrollRate::default();
+
+        // The first step of a run always moves one row, so a click to nudge
+        // the list by one does that and nothing more.
+        assert_eq!(rate.rows_for_step(start), 1);
+
+        // Held, it works through a stage a second. Sampled just after each
+        // second, which is where the stage that second belongs to shows.
+        let mut at = start;
+        let mut seen = Vec::new();
+        for second in 0..5 {
+            let until = start + Duration::from_millis(second * 1000 + 500);
+            let mut rows = 0;
+            while at < until {
+                rows = rate.rows_for_step(at);
+                at += EVERY;
+            }
+            seen.push(rows);
+        }
+        assert_eq!(seen, vec![1, 3, 7, 14, 24]);
+
+        // The last stage is the ceiling: holding it longer does not keep
+        // making it faster.
+        for _ in 0..100 {
+            assert_eq!(rate.rows_for_step(at), 24, "past the last stage");
+            at += EVERY;
+        }
+
+        // Letting go and pressing again starts from the bottom: a gap
+        // longer than a repeat says the run ended...
+        at += Duration::from_millis(400);
+        assert_eq!(rate.rows_for_step(at), 1, "a pause ended the run");
+
+        // ...and so does a press that says so outright, which is what the
+        // mouse does, since a quick re-click can land inside that gap.
+        for _ in 0..80 {
+            at += EVERY;
+            rate.rows_for_step(at);
+        }
+        assert!(rate.rows_for_step(at) > 1, "mid-run");
+        rate.reset();
+        assert_eq!(rate.rows_for_step(at), 1);
+    }
+
+    #[test]
+    fn a_caret_edits_where_it_stands() {
+        let mut text = "Golden Axe".to_string();
+        let mut caret = Caret::end_of(&text);
+        assert_eq!(caret.at(), 10);
+
+        // Typing goes in at the caret and the caret steps over it.
+        caret.left();
+        caret.left();
+        caret.left();
+        for c in "the ".chars() {
+            caret.insert(&mut text, c);
+        }
+        assert_eq!(text, "Golden the Axe");
+        assert_eq!(caret.at(), 11);
+
+        // Backspace takes what is behind, Delete what is under, and
+        // neither moves the other's way.
+        assert!(caret.backspace(&mut text));
+        assert_eq!(text, "Golden theAxe");
+        assert_eq!(caret.at(), 10);
+        assert!(caret.delete(&mut text));
+        assert_eq!(text, "Golden thexe");
+        assert_eq!(caret.at(), 10, "delete leaves the caret where it was");
+
+        // Neither runs off its end.
+        caret.home();
+        assert!(!caret.backspace(&mut text));
+        caret.end(&text);
+        assert!(!caret.delete(&mut text));
+        assert_eq!(text, "Golden thexe");
+
+        // Stepping stops at both ends rather than wrapping.
+        caret.home();
+        caret.left();
+        assert_eq!(caret.at(), 0);
+        caret.end(&text);
+        caret.right(&text);
+        assert_eq!(caret.at(), text.chars().count());
+        let _ = &text;
+
+        // Characters, not bytes: a title with an accent in it steps one
+        // letter at a time and is never cut in half.
+        let mut text = "Ishido".to_string();
+        let mut caret = Caret::end_of(&text);
+        caret.left();
+        caret.insert(&mut text, 'ó');
+        assert_eq!(text, "Ishidóo");
+        assert_eq!(caret.at(), 6);
+        assert!(caret.backspace(&mut text));
+        assert_eq!(text, "Ishido");
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_sign_in_caret_steps_through_the_mask() {
+        let mut login = LoginDialog::default();
+        for c in "hobbo".chars() {
+            login.insert(c);
+        }
+        assert_eq!(login.user, "hobbo");
+        assert_eq!(login.caret.at(), 5);
+
+        // Correcting the middle of a name, without retyping the end.
+        login.caret_move(CaretMove::Left);
+        login.insert('9');
+        login.insert('1');
+        assert_eq!(login.user, "hobb91o");
+        login.delete();
+        assert_eq!(login.user, "hobb91");
+
+        // The password is edited the same way, through the mask: the caret
+        // counts characters, and the text itself never comes back out.
+        login.focus_on(LoginField::Pass);
+        assert_eq!(login.caret.at(), 0, "an empty box starts at the front");
+        for c in "sekrit".chars() {
+            login.insert(c);
+        }
+        assert_eq!(login.pass.chars(), 6);
+        login.caret_move(CaretMove::Home);
+        login.insert('X');
+        assert_eq!(login.pass.expose(), "Xsekrit");
+        assert_eq!(login.caret.at(), 1);
+        login.backspace();
+        assert_eq!(login.pass.expose(), "sekrit");
+        assert_eq!(login.caret.at(), 0);
+        // Backspace at the front does nothing, rather than eating forwards.
+        login.backspace();
+        assert_eq!(login.pass.expose(), "sekrit");
+        login.delete();
+        assert_eq!(login.pass.expose(), "ekrit");
+
+        // Moving between boxes puts the caret at the end of the one moved
+        // to, not wherever it was in the one left behind.
+        login.caret_move(CaretMove::End);
+        login.focus_on(LoginField::User);
+        assert_eq!(login.caret.at(), login.user.chars().count());
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_metadata_caret_amends_a_field_in_place() {
+        let mut meta = MetaDialog {
+            file: "Turrican.lha".to_string(),
+            ..Default::default()
+        };
+        *meta.value_mut(MetaField::Name) = "Turican".to_string();
+        *meta.value_mut(MetaField::Year) = "1990".to_string();
+        meta.focus_on(MetaField::Name);
+        assert_eq!(meta.caret.at(), 7);
+
+        // The missing letter goes in where it belongs.
+        for _ in 0..4 {
+            meta.caret_move(CaretMove::Left);
+        }
+        meta.insert('r', 64);
+        assert_eq!(meta.value(MetaField::Name), "Turrican");
+
+        // A full box takes nothing more, wherever the caret is.
+        meta.caret_move(CaretMove::Home);
+        meta.insert('X', 8);
+        assert_eq!(meta.value(MetaField::Name), "Turrican");
+
+        // Moving on lands the caret at the end of the next box, and never
+        // past the end of a shorter one.
+        meta.focus_on(MetaField::Year);
+        assert_eq!(meta.caret.at(), 4);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_favourites_list_scrolls_and_stays_inside_itself() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        for at in 0..10 {
+            state
+                .library
+                .db
+                .toggle_favourite(&format!("Game{at}.lha"), &format!("Game {at}"));
+        }
+        assert_eq!(state.library.db.favourite_count(), 10);
+
+        // Four rows on screen: the scroll stops with the last four in it
+        // rather than running off the end into blank rows.
+        state.scroll_favourites(3, 4);
+        assert_eq!(state.library.favourite_scroll, 3);
+        state.scroll_favourites(100, 4);
+        assert_eq!(state.library.favourite_scroll, 6);
+        state.scroll_favourites(-100, 4);
+        assert_eq!(state.library.favourite_scroll, 0);
+
+        // Walking the list with the keyboard drags the window after it.
+        state.library.focus = LibraryFocus::Favourites;
+        for _ in 0..9 {
+            state.step_library_focus(1, 4);
+        }
+        assert_eq!(state.library.favourite_selected, 9);
+        assert_eq!(state.library.favourite_scroll, 6, "the last row is drawn");
+        state.step_library_focus(-9, 4);
+        assert_eq!(state.library.favourite_selected, 0);
+        assert_eq!(state.library.favourite_scroll, 0);
+
+        // Removing from the end takes the selection and the window with it,
+        // so neither is left pointing past a list that just got shorter.
+        state.library.favourite_selected = 9;
+        state.library.favourite_scroll = 6;
+        state.remove_favourite(9);
+        assert_eq!(state.library.db.favourite_count(), 9);
+        assert_eq!(state.library.favourite_selected, 8);
+        assert_eq!(state.library.favourite_scroll, 6);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_whdload_entry_sits_between_zorro_and_av() {
+        // Where it is, and that turning it off takes out that one entry
+        // and leaves every other in place.
+        let with: Vec<LauncherTab> = tabs(true).to_vec();
+        let without: Vec<LauncherTab> = tabs(false).to_vec();
+
+        let at = with
+            .iter()
+            .position(|&t| t == LauncherTab::WhdloadLibrary)
+            .expect("the strip carries WHDLoad");
+        assert_eq!(with[at - 1], LauncherTab::Zorro);
+        assert_eq!(with[at + 1], LauncherTab::AvAudio);
+
+        // Off, it is gone -- and nothing else moved relative to itself.
+        assert!(!without.contains(&LauncherTab::WhdloadLibrary));
+        let mut minus = with.clone();
+        minus.remove(at);
+        assert_eq!(minus, without, "turning it off moved something else");
+    }
+
+    #[test]
+    fn whdload_is_its_own_strip_entry_and_opens_on_the_library() {
+        // It left Storage: the nav row there no longer offers it, and
+        // neither page returns to it.
+        assert!(!LauncherTab::Storage
             .nav_options()
             .iter()
-            .any(|&(label, tab)| label == "WHDLoad" && tab == LauncherTab::Whdload));
-        // The row table: the game package plus the two staging directories,
-        // all path rows with a Browse button.
+            .any(|&(_, tab)| tab == LauncherTab::Whdload));
+        // Both pages light the one entry, which is the Library -- what the
+        // strip opens on, and what the nav row lists first.
+        assert_eq!(
+            LauncherTab::Whdload.strip_tab(),
+            LauncherTab::WhdloadLibrary
+        );
+        assert_eq!(
+            LauncherTab::WhdloadLibrary.strip_tab(),
+            LauncherTab::WhdloadLibrary
+        );
+        assert_eq!(LauncherTab::Whdload.parent_tab(), None);
+        assert_eq!(LauncherTab::WhdloadLibrary.parent_tab(), None);
+        assert_eq!(
+            LauncherTab::WhdloadLibrary.nav_options().first(),
+            Some(&("Library", LauncherTab::WhdloadLibrary))
+        );
+        // And the entry is in the strip when WHDLoad is on, and gone when
+        // it is off.
+        assert!(tabs(true).contains(&LauncherTab::WhdloadLibrary));
+        assert!(!tabs(false).contains(&LauncherTab::WhdloadLibrary));
+        // The row table: the game to launch, then what staging draws on.
+        // The last two belong to the library, so they are only here in a
+        // build that has one.
         let rows = rows(
             LauncherTab::Whdload,
             ParallelDevice::None,
@@ -7338,12 +8962,38 @@ mod tests {
             false,
         );
         let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Game package", "Kickstart images", "Game library"]);
-        assert!(rows.iter().all(|r| r.kind == RowKind::Drive));
-        // The two directories browse as folders; the package browses as a file.
+        // What to boot and how first, then the places things live.
+        let mut want = vec!["WHDLoad Settings:", "Launch game", "Machine type"];
+        if cfg!(feature = "game-library") {
+            want.push("OpenRetro");
+        }
+        want.extend([
+            "Directories:",
+            "WHDLoad package",
+            "SKick package",
+            "Kickstart ROMs",
+        ]);
+        if cfg!(feature = "game-library") {
+            want.push("Game library");
+        }
+        want.push("Save data");
+        assert_eq!(labels, want);
+        // Every path row is a Drive row, so the whole host path shows.
+        assert!(rows
+            .iter()
+            .filter(|r| r.field.is_whdload_path_field())
+            .all(|r| r.kind == RowKind::Drive));
+        // Directories browse as folders; the archives browse as files.
         assert!(!F::WhdloadGame.is_whdload_dir_field());
+        assert!(F::WhdloadGame.is_whdload_archive_field());
+        assert!(F::WhdloadWhdPackage.is_whdload_archive_field());
+        assert!(F::WhdloadSkickPackage.is_whdload_archive_field());
         assert!(F::WhdloadKickstarts.is_whdload_dir_field());
         assert!(F::WhdloadLibrary.is_whdload_dir_field());
+        // The game library is a folder of packages, so it browses as one.
+        // Picking it with a file chooser is how it stayed unset.
+        #[cfg(feature = "game-library")]
+        assert!(F::WhdloadGames.is_whdload_dir_field());
     }
 
     #[test]
@@ -8708,7 +10358,6 @@ mod tests {
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
             LauncherTab::BootPriority,
-            LauncherTab::Whdload,
         ] {
             assert!(!TABS.contains(&t));
             // Each keeps the Storage strip tab highlighted and returns to it.
@@ -8734,7 +10383,6 @@ mod tests {
                 LauncherTab::BootPriority,
                 LauncherTab::CreateFloppy,
                 LauncherTab::Cd,
-                LauncherTab::Whdload,
             ]
         );
 

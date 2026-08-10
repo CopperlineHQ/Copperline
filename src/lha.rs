@@ -123,6 +123,42 @@ pub fn read_archive(archive: &Path) -> Result<Vec<ArchiveEntry>> {
     Ok(entries)
 }
 
+/// Read the first member whose path satisfies `want`, decompressing only
+/// that one.
+///
+/// [`read_archive`] decompresses everything, which is right when
+/// everything is wanted and wrong when one small file is: a WHDLoad
+/// package is tens of megabytes and its slave is a few kilobytes. Members
+/// that do not match are skipped through the archive rather than decoded.
+pub fn read_first(archive: &Path, want: impl Fn(&Path) -> bool) -> Result<Option<ArchiveEntry>> {
+    let mut reader = delharc::parse_file(archive)
+        .with_context(|| format!("opening LHA archive {}", archive.display()))?;
+    loop {
+        let header = reader.header();
+        let is_dir = header.is_directory();
+        let path = sanitize_member_path(&header.parse_pathname())?;
+        if !is_dir && want(&path) {
+            if !reader.is_decoder_supported() {
+                bail!(
+                    "archive member {} uses an unsupported compression method",
+                    path.display()
+                );
+            }
+            let mut data = Vec::new();
+            reader
+                .read_to_end(&mut data)
+                .with_context(|| format!("decompressing archive member {}", path.display()))?;
+            if !reader.crc_is_ok() {
+                bail!("archive member {} fails its CRC check", path.display());
+            }
+            return Ok(Some(ArchiveEntry { path, data }));
+        }
+        if !reader.next_file()? {
+            return Ok(None);
+        }
+    }
+}
+
 /// List the (normalized, relative) file member paths of an `.lha` archive
 /// without keeping their contents.
 pub fn list_files(archive: &Path) -> Result<Vec<PathBuf>> {

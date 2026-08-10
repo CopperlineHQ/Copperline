@@ -1,10 +1,9 @@
 # WHDLoad games
 
 WHDLoad is the Amiga community's standard for running floppy games from a
-hard disk: a game is "installed" once into a directory with a `.slave`
+hard disk. A game is installed once into a directory holding a `.slave`
 loader beside its data, and the WHDLoad program boots it from AmigaOS,
-taking the machine over the way the original disk would have. Installed
-games travel as `.lha` archives.
+taking the machine over the way the original disk would have.
 
 Copperline boots such a package directly:
 
@@ -12,11 +11,11 @@ Copperline boots such a package directly:
 copperline --whdload "Turrican.lha"
 ```
 
-No Workbench disk, no hand-built hard-drive image, no startup-sequence of
-your own. Copperline extracts the archive (once), synthesizes a minimal
-boot volume around the real WHDLoad program, derives a suitable machine
-from the slave itself, and boots. The same launch works from a
-configuration file:
+There is no Workbench disk to prepare and no hard-drive image to build.
+Copperline unpacks the package, builds a boot volume around the WHDLoad
+program, works out a suitable machine from the package itself, and boots.
+
+The same launch works from a configuration file:
 
 ```toml
 [whdload]
@@ -24,65 +23,59 @@ game = "Turrican.lha"
 kickstarts = "/data/amiga/kickstarts"
 ```
 
-or from the launcher's **Storage -> WHDLoad** page, or by dropping a
-`.lha` file onto the window.
+from the launcher's **WHDLoad** page, or by dropping a package onto the
+window.
+
+## Package formats
+
+A package can be any of three things, and they all work the same way:
+
+- an **`.lha`** archive, which is what most installers produce;
+- a **`.zip`**, which is what you get when a browser packs a folder;
+- a **plain folder** holding an installed game.
+
+Copperline finds the `.slave` wherever it sits, so an archive that keeps
+the game a folder or two down needs no unpacking first. `.lzh` is
+accepted in place of `.lha`, and `.slav` in place of `.slave`.
+
+The same game kept in two formats is listed twice, and both entries play.
+Each has its own unpacked copy and its own saves.
 
 ## What you need
 
-- **The game package**: an `.lha` archive holding a `.slave` file and the
-  game data (the shape every WHDLoad install produces). A directory
-  containing the same tree also works and is mounted in place.
-- **Kickstart images, from your own collection.** These are copyrighted
-  and never ship with Copperline. Two distinct needs meet here:
-  - The emulated machine itself boots best from a Kickstart 3.1 (40.068
-    A1200) image, the canonical WHDLoad host. Without one the bundled
-    AROS ROM is used instead, and while simple slaves run, many WHDLoad
-    programs need the real Kickstart -- expect reduced compatibility.
-  - Many slaves (OCS/ECS-era games especially) additionally load a raw
-    Kickstart image at run time from `Devs:Kickstarts/` -- typically
-    Kickstart 1.3 -- and refuse to start without it.
-- **The WHDLoad support archives**, which release bundles already
-  include: the unmodified WHDLoad distribution (`WHDLoad_usr.lha`,
-  freeware since release 18.2) and the Soft-Kicker package
-  (`skick346.lha`) whose `.RTB` relocation tables accompany the raw
-  Kickstart images. Building from source, fetch them once with
-  `tools/fetch-whdload.sh`; `COPPERLINE_WHDBOOT_DIR` points at a
-  directory holding them if you keep them elsewhere.
+**Kickstart images from your own collection.** These are copyrighted and
+do not ship with Copperline. They are wanted for two separate reasons:
 
-Kickstart images are identified by **content, not filename**: Copperline
-computes the same CRC-16 WHDLoad uses over each candidate file in the
-`kickstarts` directory, after undoing the usual dump variations
-(byte-swapped EPROM images, doubled 256 KiB dumps, Cloanto Amiga Forever
-`rom.key` encryption -- put `rom.key` in the same directory). A file
-called `KICK13.ROM` that is really Kickstart 1.2, or a 3.1 dump that is
-actually the A600 revision, is recognized for what it is and staged under
-its proper `Devs:Kickstarts/` name. If a slave demands an image you do
-not have, the error names the file, size, and checksum it wants.
+- The emulated machine boots best from a Kickstart 3.1 (40.068 A1200)
+  image. Without one Copperline falls back to the bundled AROS ROM; simple
+  games still run, but many WHDLoad titles need the real Kickstart.
+- Many games -- OCS and ECS titles especially -- load a Kickstart image of
+  their own at run time, usually 1.3, and refuse to start without it.
 
-## What gets staged, and where saves live
+Point **Kickstart ROMs** (or `kickstarts`) at the directory holding them.
+The file names do not matter: Copperline identifies each image by its
+contents, so a file called `KICK13.ROM` that is really Kickstart 1.2 is
+recognised for what it is. Encrypted Cloanto Amiga Forever images work if
+`rom.key` sits in the same directory. If a game asks for an image you do
+not have, the error names it.
 
-Each game gets a directory in the **game library** (by default
-`whdload/` inside the per-user configuration directory, e.g.
-`~/.config/copperline/whdload/`):
+**The WHDLoad support files.** Release builds already include them.
+Building from source, either press **Download** on the Settings page or
+run `tools/fetch-whdload.sh` once. To use copies you already have, set
+`whd_package` and `skick_package`; naming one and leaving the other unset
+is fine.
 
-```text
-<library>/<Game>/
-  boot/     the synthesized boot volume (WHDBoot:), regenerated each run:
-            C/WHDLoad, S/Startup-Sequence, Devs/Kickstarts/*
-  game/     the extracted package (WHDGame:), extracted once, then reused
-```
+## Saves and unpacked games
 
-Both are mounted live through the host-directory service
-([`[[filesys]]`](configuration.md)), so everything the game writes --
-savegames, highscores, configuration -- lands in `game/` on the host and
-**persists across runs**. Delete a game's `game/` directory to force a
-fresh extraction; delete a savegame file to undo a save. Passing a
-directory as the game mounts that directory itself, so saves persist
-there instead.
+Each game gets a directory under `whdload/save/` in your configuration
+directory, for example `~/.config/copperline/whdload/save/Turrican/`.
+Everything the game writes -- savegames, high scores, its own settings --
+lands there and stays across runs.
 
-The generated `Startup-Sequence` runs
-`WHDLoad <slave> Preload SplashDelay=0`. Extra WHDLoad options (see the
-WHDLoad documentation for the full set) can be appended:
+Delete a game's directory to unpack it fresh. Launching a plain folder
+uses that folder directly, so its saves stay with it.
+
+Extra WHDLoad options can be passed through:
 
 ```toml
 [whdload]
@@ -90,48 +83,130 @@ game = "Lotus2.lha"
 args = "ButtonWait NoAutoVec"
 ```
 
-## The derived machine
+See the WHDLoad documentation for the full set.
 
-The slave header declares what the installed program needs: AGA, a 68020,
-chip-memory size, expansion memory. Copperline boots every WHDLoad game
-on the canonical WHDLoad host -- an A1200 (68EC020, AGA, 2 MiB chip) with
-8 MiB of fast RAM -- which satisfies every slave requirement flag;
-OCS/ECS games run under the slave's own hardware bending exactly as they
-do on a real A1200.
+## Which machine a game boots on
 
-Anything you set explicitly wins over the derivation: a `[machine]`
-profile, `rom`, or `[memory]` sizes in the configuration (or their CLI
-equivalents such as `--model` and `--fast`) are left untouched, so
-`copperline --whdload game.lha --model A4000` boots the package on an
-A4000 instead.
+By default Copperline reads what the game needs from the package and boots
+it on a suitable machine -- an A1200 with 8 MiB of fast RAM, which is what
+WHDLoad games expect. OCS and ECS titles run correctly on it, as they do
+on real hardware.
 
-Everything composes with the rest of the CLI: `--screenshot-after`,
-scripted input, save states, `--record-input` all work, so a WHDLoad game
-is scriptable and deterministic like any other Copperline run.
+Anything you set yourself wins. A `[machine]` profile, a `rom`, or
+`[memory]` sizes in your configuration are left alone, so
+`copperline --whdload game.lha --model A4000` boots the game on an A4000.
+
+**Machine type** on the Settings page chooses between the two:
+
+- **Auto** takes the machine from the game.
+- **Copperline** boots it on the machine your configuration describes.
+
+Pressing it shows which one you have chosen.
+
+Everything else about the run behaves normally: `--screenshot-after`,
+scripted input, save states and `--record-input` all work.
+
+## The Library page
+
+The launcher's **WHDLoad** entry opens on the Library, which lists the
+games in your collection with their cover art and details, and keeps a
+second list of favourites.
+
+Point **Game library** on the Settings page at the folder holding your
+games. Sub-folders are searched too, so a collection filed by letter or by
+genre works, and `.lha` files, zips and folders can be mixed together.
+Clearing this setting empties the list.
+
+Three buttons control the list:
+
+- **Refresh** re-reads the folder and picks up games you have added or
+  removed. Details already found are kept.
+- **Scan** looks up each game on [OpenRetro](https://openretro.org) and
+  fills in its name, year, publisher, developer, number of players and
+  cover art. It tells you how many entries it updated.
+- **Update** opens the details editor for the selected game.
+
+Tick **Favourite** to add a game to the favourites list; **Remove** takes
+it off again. Favourites are kept per game file, so one release of a game
+can be starred without starring the others.
+
+Select a game and press **Run** to play it.
+
+### Where the details come from
+
+**Scan** matches each of your games against the OpenRetro database, mostly
+by name. Collections name their files in every imaginable way, so the
+match allows for the usual differences: capitals, spaces and underscores,
+version numbers in the file name, and so on. Most games are recognised.
+
+Some are not, and a few are matched to the wrong game. Use **Update** to
+correct anything the scan got wrong. Once you have edited a game's
+details, later scans leave it alone -- including after you rename the file.
+
+Scanning needs an OpenRetro account, which is free. Sign in with **Log
+in** on the Settings page. Cover art does not need an account.
+
+### The details editor
+
+**Update** opens a dialog for the selected game: name, year, publisher,
+developer, players, version, and the cover art. Click the art to choose a
+PNG of your own; it is scaled to fit.
+
+**Save** keeps your changes, **Clear** empties the fields, and **Cancel**
+leaves the game as it was. Clearing a game's details and saving hands it
+back to the scan.
+
+### Versions
+
+Collections often hold the same game more than once -- different releases,
+an AGA version, a translation. These all match the same database entry, so
+after a scan they appear as identical-looking rows.
+
+Where that happens, Copperline fills in a **Version** for each of them
+from the file name, so you can tell them apart. Edit it in **Update** to
+something clearer -- "CD32 v1.1", say -- and that is what the page shows.
+Games your collection holds only once have no version unless you give them
+one.
+
+### Turning it off
+
+**A/V & Emu -> Emulation -> WHDLoad** removes the WHDLoad entry from the
+launcher. Games still boot from `--whdload` and from `[whdload] game`.
 
 ## Configuration reference
 
 ```toml
 [whdload]
-game = "path/to/Game.lha"   # .lha archive or directory with a .slave
-library = "..."             # game library; default: <config dir>/whdload
-kickstarts = "..."          # directory scanned for Kickstart images
+game = "path/to/Game.lha"   # .lha, .zip, or a folder holding the game
+library = "..."             # unpacked games and saves; default: <config>/whdload/save
+kickstarts = "..."          # directory holding your Kickstart images
 args = "..."                # extra WHDLoad command-line options
+machine_type = "auto"       # or "copperline" to boot on this machine
+whd_package = "..."         # your own WHDLoad_usr.lha
+skick_package = "..."       # your own skick*.lha
+
+# Launcher only.
+enabled = true              # false removes the WHDLoad page
+games = "..."               # the folder the Library page lists
+library_db = "..."          # default: <config>/whdload/support/launcher.db
+library_cache = "..."       # default: <config>/whdload/support/cache
 ```
 
-When `kickstarts` is not set, the directory of an explicit `rom` and
-`<library>/Kickstarts` are scanned, and a `Kickstarts/` directory next to
-the support archives is always tried last.
+With `kickstarts` unset, Copperline looks beside an explicit `rom`, in
+`<library>/Kickstarts`, and finally beside the support files.
+
+`library_db` holds your library: one entry per game, with its details,
+your favourites and any edits you have made. `library_cache` holds what a
+scan downloaded. The cache can be deleted at any time and is rebuilt by
+the next scan; deleting the library loses your favourites and edits.
 
 ## Notes and limitations
 
-- The boot volume runs the real WHDLoad, so WHDLoad's own behaviour
-  applies: its splash window appears briefly, its quit key (default
-  `*` on the numeric pad, or as the slave defines) exits back to the
-  boot shell.
-- Per-game tuning beyond the slave header (a title that wants NTSC, or
-  custom controls) is what `args` and the explicit machine overrides are
-  for; Copperline does not ship a per-game settings database.
-- One game boots per run: `--whdload` builds the machine around the
-  package. To browse a collection, keep packages in a directory and pick
-  from the launcher.
+- The boot volume runs the real WHDLoad, so its own behaviour applies: the
+  splash window appears briefly, and its quit key (`*` on the numeric pad
+  unless the game says otherwise) exits back to the boot shell.
+- Cover art you supply must be a PNG.
+- Copperline has no per-game settings database. A game that wants
+  something unusual -- NTSC timing, particular controls -- is handled with
+  `args` and the machine settings.
+- One game boots per run.
