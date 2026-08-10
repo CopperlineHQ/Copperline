@@ -494,7 +494,7 @@ The layout is:
   whatever the chosen interface does not honour. See [](fluxbridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a block of buttons at
-  the top links to six sub-pages: **Host Folder**, for host directories
+  the top links to five sub-pages: **Host Folder**, for host directories
   served live as AmigaDOS volumes (up to four mounts, each with a boot
   priority and a read-write/read-only **Access** field -- the config file
   itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
@@ -504,9 +504,8 @@ The layout is:
   makes new ADF and HDF images (see below); and **CD** (image, insert
   delay, CD32 NVRAM). Each sub-page has a **< Back** button in that block
   that returns to Storage),
-  *WHDLoad* (the game library, and the settings a package boots with --
-  see [](whdload.md); its entry can be turned off in A/V & Emu ->
-  Emulation),
+  *WHDLoad* (your game collection, and the settings games boot with -- see
+  [](whdload.md)),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
