@@ -1775,6 +1775,8 @@ pub struct MachineSetup {
     /// First row shown in the disk table. The list can be longer than the
     /// box, and a disk that cannot be scrolled to cannot be chosen.
     host_disk_scroll: usize,
+    /// How fast a held scroll over that table is running.
+    host_disk_scroll_rate: ScrollRate,
     /// Why the last tick was refused. Read once by the caller, which puts it
     /// on the status line with every other warning; cleared by the next tick,
     /// because the situation it describes is the one being changed.
@@ -2037,6 +2039,7 @@ impl MachineSetup {
             host_disk_warning: None,
             host_disk_selected: Vec::new(),
             host_disk_scroll: 0,
+            host_disk_scroll_rate: ScrollRate::default(),
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
@@ -4394,6 +4397,10 @@ impl MachineSetup {
         self.host_disk_scroll
     }
 
+    pub fn host_disk_scroll_rate(&mut self) -> &mut ScrollRate {
+        &mut self.host_disk_scroll_rate
+    }
+
     /// Move the window over the list, stopping at either end. `visible` is
     /// how many rows the box shows, which is the caller's geometry to know.
     pub fn scroll_host_disks(&mut self, delta: isize, visible: usize) {
@@ -4969,6 +4976,184 @@ pub enum EditTarget {
     SerialAddr(LauncherField),
 }
 
+/// Where typing goes in a text field, as a character index into it.
+///
+/// One of these sits beside every editable line in the launcher -- the value
+/// boxes on the configuration pages and the boxes in the WHDLoad dialogs --
+/// so all of them insert, delete and step alike, and all of them draw the
+/// same block over the character the caret is on. Without it a box can only
+/// be typed at the end, which is no way to correct a long path or amend
+/// metadata that is nearly right.
+///
+/// Characters, not bytes: the fields hold whatever a name or a title is
+/// spelt with, and stepping half way into one would split it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Caret(usize);
+
+impl Caret {
+    /// Past the last character, which is where opening a box for editing
+    /// puts it: what is already in there is usually a thing to add to.
+    pub fn end_of(text: &str) -> Self {
+        Self::at_end_of_len(text.chars().count())
+    }
+
+    /// The same for a line whose text is not to be handed out -- a masked
+    /// password, which is counted rather than read.
+    pub fn at_end_of_len(len: usize) -> Self {
+        Self(len)
+    }
+
+    /// Which character the caret is on, for drawing the block.
+    pub fn at(self) -> usize {
+        self.0
+    }
+
+    /// Pull the caret back inside a line it may now be off the end of --
+    /// the focus moved to a shorter field, or the value was replaced.
+    pub fn clamp(&mut self, text: &str) {
+        self.0 = self.0.min(text.chars().count());
+    }
+
+    pub fn left(&mut self) {
+        self.0 = self.0.saturating_sub(1);
+    }
+
+    pub fn right(&mut self, text: &str) {
+        self.right_of(text.chars().count());
+    }
+
+    /// Step right within a line of `len` characters.
+    pub fn right_of(&mut self, len: usize) {
+        self.0 = (self.0 + 1).min(len);
+    }
+
+    pub fn home(&mut self) {
+        self.0 = 0;
+    }
+
+    pub fn end(&mut self, text: &str) {
+        self.0 = text.chars().count();
+    }
+
+    /// The same for a counted line.
+    pub fn end_of_len(&mut self, len: usize) {
+        self.0 = len;
+    }
+
+    /// The byte offset the caret sits at, which is the end of the string
+    /// when it is past the last character.
+    pub fn byte_in(self, text: &str) -> usize {
+        text.char_indices()
+            .nth(self.0)
+            .map_or(text.len(), |(at, _)| at)
+    }
+
+    /// Insert at the caret and step over what was typed.
+    pub fn insert(&mut self, text: &mut String, c: char) {
+        // Against a line that was changed without the caret being told --
+        // a field reset, a value replaced wholesale -- rather than reaching
+        // off the end of it.
+        self.clamp(text);
+        let at = self.byte_in(text);
+        text.insert(at, c);
+        self.0 += 1;
+    }
+
+    /// Delete the character before the caret, as Backspace does. False when
+    /// there is nothing behind it.
+    pub fn backspace(&mut self, text: &mut String) -> bool {
+        self.clamp(text);
+        if self.0 == 0 {
+            return false;
+        }
+        self.left();
+        let at = self.byte_in(text);
+        text.remove(at);
+        true
+    }
+
+    /// Delete the character the caret is on, as Delete does. False at the
+    /// end of the line, where it is on nothing.
+    pub fn delete(&mut self, text: &mut String) -> bool {
+        let at = self.byte_in(text);
+        if at >= text.len() {
+            return false;
+        }
+        text.remove(at);
+        true
+    }
+}
+
+/// How fast a held scroll runs.
+///
+/// A list can be a few hundred rows and a keypress is one of them, so
+/// reaching the far end a row at a time is a lot of pressing. Holding it
+/// instead runs through five speeds, a second at each, and the last one
+/// crosses a library in about a second. Starting slow is the point: most
+/// scrolling is a few rows, and a control that leapt away on the first
+/// repeat would overshoot every time.
+///
+/// Every list in the launcher scrolls through one of these -- the WHDLoad
+/// games and favourites, the host disks -- and both ways of driving them,
+/// a held arrow key and a held scroll-arrow button, go through the same
+/// one, so they run at the same speed as each other.
+///
+/// Letting go and pressing again starts from the bottom: the speed is
+/// measured from when the run of scrolling began, and a gap longer than a
+/// repeat begins a new run.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollRate {
+    /// When the last movement was, to tell a continued scroll from a fresh
+    /// one.
+    last: Option<std::time::Instant>,
+    /// When the run of scrolling this movement belongs to began, which is
+    /// what the speed is worked out from.
+    started: Option<std::time::Instant>,
+}
+
+impl ScrollRate {
+    /// Rows a step, a stage a second. The last is what a long list needs
+    /// and the first is what a short one does.
+    const STAGES: [usize; 5] = [1, 3, 7, 14, 24];
+    /// How long each stage lasts before the next takes over.
+    const STAGE: std::time::Duration = std::time::Duration::from_secs(1);
+    /// The gap after which a movement starts a new run rather than
+    /// continuing one. Longer than the repeat of anything being held --
+    /// the button repeat here, or a host keyboard's -- and shorter than a
+    /// pause that means to stop.
+    const CONTINUES_WITHIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// How many rows this step should move, given when it arrived.
+    pub fn rows_for_step(&mut self, now: std::time::Instant) -> usize {
+        let continued = self
+            .last
+            .is_some_and(|last| now.duration_since(last) <= Self::CONTINUES_WITHIN);
+        let started = match continued {
+            true => self.started.unwrap_or(now),
+            false => now,
+        };
+        self.started = Some(started);
+        self.last = Some(now);
+        let stage = now.duration_since(started).as_millis() / Self::STAGE.as_millis();
+        Self::STAGES[(stage as usize).min(Self::STAGES.len() - 1)]
+    }
+
+    /// Back to the first stage, for a press that is deliberately a new one
+    /// rather than the continuation of an old one.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Which way a caret is being stepped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretMove {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
 /// The most an address box accepts: a DNS name is up to 253 characters
 /// (254 with a trailing root dot), and ":65535" is six more. Anything
 /// longer cannot be a host:port, so the box stops there.
@@ -5331,6 +5516,8 @@ pub struct LauncherState {
     /// focus (a plugin string option or a drive volume name).
     editing: Option<EditTarget>,
     edit_buffer: String,
+    /// Where typing goes in `edit_buffer`.
+    edit_caret: Caret,
     /// The Library page: the games found, which is chosen, and where the
     /// list is scrolled to. Held here rather than in the setup for the
     /// same reason the workshop is -- none of it describes a machine.
@@ -5370,8 +5557,14 @@ pub struct LibraryPage {
     pub favourite_selected: usize,
     /// The first row drawn, for scrolling.
     pub scroll: usize,
-    /// How fast a continued scroll is running.
-    pub scroll_rate: crate::gamelib::ScrollRate,
+    /// The same for the favourites list, which scrolls on its own: a
+    /// collection can be favourited past the handful of rows the box shows.
+    pub favourite_scroll: usize,
+    /// How fast a continued scroll is running. One per list, so leaving one
+    /// part-way through and picking up the other starts the other at a row
+    /// a notch rather than at whatever speed the first had reached.
+    pub scroll_rate: ScrollRate,
+    pub favourite_scroll_rate: ScrollRate,
     /// Cover art, fetched for whatever is selected and kept afterwards.
     pub covers: crate::gamelib::Covers,
 }
@@ -5448,6 +5641,10 @@ pub struct MetaDialog {
     /// was downloaded and a `manual-` name for art somebody chose.
     pub art: Option<String>,
     pub focus: MetaField,
+    /// Where typing goes in the focused field. Metadata is more often
+    /// amended than typed fresh, so being able to step into what is already
+    /// there is most of the point of the editor.
+    pub caret: Caret,
 }
 
 #[cfg(feature = "game-library")]
@@ -5458,6 +5655,35 @@ impl MetaDialog {
 
     pub fn value_mut(&mut self, field: MetaField) -> &mut String {
         &mut self.values[field.at()]
+    }
+
+    /// Move the focus to another box, putting the caret at the end of what
+    /// that one holds.
+    pub fn focus_on(&mut self, field: MetaField) {
+        self.focus = field;
+        self.caret = Caret::end_of(self.value(field));
+    }
+
+    /// Type into the focused box at the caret, up to what it accepts.
+    pub fn insert(&mut self, c: char, most: usize) {
+        if self.value(self.focus).chars().count() >= most {
+            return;
+        }
+        let focus = self.focus;
+        let mut caret = self.caret;
+        caret.insert(self.value_mut(focus), c);
+        self.caret = caret;
+    }
+
+    /// Step the caret through the focused box.
+    pub fn caret_move(&mut self, to: CaretMove) {
+        let len = self.value(self.focus).chars().count();
+        match to {
+            CaretMove::Left => self.caret.left(),
+            CaretMove::Right => self.caret.right_of(len),
+            CaretMove::Home => self.caret.home(),
+            CaretMove::End => self.caret.end_of_len(len),
+        }
     }
 
     /// Whether there is anything left to save. An editor emptied and saved
@@ -5487,6 +5713,11 @@ pub struct LoginDialog {
     pub user: String,
     pub pass: crate::gamelib::Secret,
     pub focus: LoginField,
+    /// Where typing goes in the focused box, as in the metadata editor: one
+    /// dialog behaving differently from the other is one more thing to
+    /// learn. It steps over the mask in the password box, which is what the
+    /// mask is drawn a character at a time for.
+    pub caret: Caret,
     /// Set while the sign-in request is in flight, so a second Return does
     /// not start a second one.
     pub sending: bool,
@@ -5509,10 +5740,101 @@ impl Default for LoginDialog {
             user: String::new(),
             pass: crate::gamelib::Secret::new(),
             focus: LoginField::User,
+            caret: Caret::default(),
             sending: false,
         }
     }
 }
+
+#[cfg(feature = "game-library")]
+impl LoginDialog {
+    /// How many characters the focused box holds. The password is counted
+    /// rather than read: the caret needs its length, not its text.
+    fn focused_len(&self) -> usize {
+        match self.focus {
+            LoginField::User => self.user.chars().count(),
+            LoginField::Pass => self.pass.chars(),
+        }
+    }
+
+    /// Move to the other box, with the caret at the end of what it holds.
+    pub fn focus_on(&mut self, field: LoginField) {
+        self.focus = field;
+        self.caret = Caret::at_end_of_len(self.focused_len());
+    }
+
+    /// Type at the caret, up to what the box takes.
+    pub fn insert(&mut self, c: char) {
+        match self.focus {
+            LoginField::User if self.user.chars().count() < USER_MAX => {
+                let mut caret = self.caret;
+                caret.insert(&mut self.user, c);
+                self.caret = caret;
+            }
+            // Full: the character is dropped and the caret stays put.
+            LoginField::User => {}
+            // The Secret bounds itself, and says nothing about how full it
+            // is, so the caret follows only a character that went in.
+            LoginField::Pass => {
+                let was = self.pass.chars();
+                self.pass.insert_at(self.caret.at(), c);
+                if self.pass.chars() == was {
+                    return;
+                }
+                self.caret.right_of(self.pass.chars());
+            }
+        }
+    }
+
+    /// Delete backwards from the caret.
+    pub fn backspace(&mut self) {
+        if self.caret.at() == 0 {
+            return;
+        }
+        match self.focus {
+            LoginField::User => {
+                let mut caret = self.caret;
+                caret.backspace(&mut self.user);
+                self.caret = caret;
+            }
+            LoginField::Pass => {
+                self.caret.left();
+                self.pass.remove_at(self.caret.at());
+            }
+        }
+    }
+
+    /// Delete the character the caret is on.
+    pub fn delete(&mut self) {
+        match self.focus {
+            LoginField::User => {
+                let mut caret = self.caret;
+                caret.delete(&mut self.user);
+                self.caret = caret;
+            }
+            LoginField::Pass => {
+                self.pass.remove_at(self.caret.at());
+            }
+        }
+    }
+
+    /// Step the caret through the focused box.
+    pub fn caret_move(&mut self, to: CaretMove) {
+        let len = self.focused_len();
+        match to {
+            CaretMove::Left => self.caret.left(),
+            CaretMove::Right => self.caret.right_of(len),
+            CaretMove::Home => self.caret.home(),
+            CaretMove::End => self.caret.end_of_len(len),
+        }
+    }
+}
+
+/// The longest an OpenRetro user name is taken to be. Nothing documents a
+/// limit; this is a box, not a validator, and a name past it is a paste
+/// that went somewhere it did not belong.
+#[cfg(feature = "game-library")]
+const USER_MAX: usize = 64;
 
 /// The support directory under a given configuration directory. The same
 /// place [`crate::paths::whdload_support_dir`] names, spelled from a root
@@ -5805,6 +6127,9 @@ impl LauncherState {
         if dialog.value(MetaField::Version).is_empty() && duplicated && game.is_some() {
             *dialog.value_mut(MetaField::Version) = base;
         }
+        // The caret goes to the end of the first box, which is where typing
+        // would go anyway and where the block is expected to be.
+        dialog.focus_on(MetaField::Name);
         self.meta = Some(dialog);
         self.status = None;
         true
@@ -5881,15 +6206,27 @@ impl LauncherState {
                 let at = (self.library.favourite_selected as isize + delta)
                     .clamp(0, len as isize - 1) as usize;
                 self.select_favourite(at);
+                self.scroll_favourites_into_view(visible);
             }
         }
     }
 
     /// Take a favourite off from the favourites list itself.
-    pub fn remove_favourite(&mut self, drawn: usize) {
-        if let Some(key) = self.favourite_key(drawn).map(str::to_string) {
+    pub fn remove_favourite(&mut self, at: usize) {
+        if let Some(key) = self.favourite_key(at).map(str::to_string) {
             self.library.db.remove_favourite(&key);
         }
+        // The list just got shorter under both the selection and the scroll,
+        // either of which can now be off the end of it.
+        self.clamp_favourites();
+    }
+
+    /// Keep the favourites selection and scroll inside a list that may have
+    /// shrunk -- a removal here, or a database re-read that dropped some.
+    pub fn clamp_favourites(&mut self) {
+        let last = self.library.db.favourite_count().saturating_sub(1);
+        self.library.favourite_selected = self.library.favourite_selected.min(last);
+        self.library.favourite_scroll = self.library.favourite_scroll.min(last);
     }
 
     /// Re-read the game folder: the one thing that walks the disk, and the
@@ -5945,6 +6282,21 @@ impl LauncherState {
         let last_start = self.library.games.len().saturating_sub(visible);
         let at = self.library.scroll as isize + delta;
         self.library.scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
+    pub fn scroll_favourites(&mut self, delta: isize, visible: usize) {
+        let last_start = self.library.db.favourite_count().saturating_sub(visible);
+        let at = self.library.favourite_scroll as isize + delta;
+        self.library.favourite_scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
+    fn scroll_favourites_into_view(&mut self, visible: usize) {
+        let at = self.library.favourite_selected;
+        if at < self.library.favourite_scroll {
+            self.library.favourite_scroll = at;
+        } else if visible > 0 && at >= self.library.favourite_scroll + visible {
+            self.library.favourite_scroll = at + 1 - visible;
+        }
     }
 
     /// Bring the selection into the drawn rows, moving as little as will do.
@@ -6313,6 +6665,7 @@ impl LauncherState {
         }
         self.edit_buffer = self.workshop_value(field);
         self.editing = Some(EditTarget::NewImageText(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -6330,6 +6683,7 @@ impl LauncherState {
             self.edit_buffer.push_str(addr);
         }
         self.editing = Some(EditTarget::SerialAddr(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -6358,6 +6712,7 @@ impl LauncherState {
             rom_notes: Default::default(),
             editing: None,
             edit_buffer: String::new(),
+            edit_caret: Caret::default(),
         };
         // Name the ROMs the incoming configuration already carries.
         state.sync_rom_notes();
@@ -6424,6 +6779,7 @@ impl LauncherState {
             .map(|b| b.value(opt))
             .unwrap_or_default();
         self.editing = Some(EditTarget::BoardOption { board, opt });
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -6431,6 +6787,7 @@ impl LauncherState {
     pub fn begin_edit_drive_name(&mut self, field: LauncherField) {
         self.edit_buffer = self.setup.drive_name(field).unwrap_or_default().to_string();
         self.editing = Some(EditTarget::DriveName(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -6447,6 +6804,7 @@ impl LauncherState {
             None => String::new(),
         };
         self.editing = Some(EditTarget::DriveBootpri(field));
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
 
@@ -6457,12 +6815,14 @@ impl LauncherState {
         if let EditTarget::NewImageText(field) = target {
             if let Some(limit) = workshop_digit_limit(field) {
                 // A boot priority is the one signed figure here.
-                let minus_ok =
-                    field == F::NewHardBootPri && c == '-' && self.edit_buffer.is_empty();
+                let minus_ok = field == F::NewHardBootPri
+                    && c == '-'
+                    && self.edit_caret.at() == 0
+                    && !self.edit_buffer.starts_with('-');
                 if (!c.is_ascii_digit() && !minus_ok) || self.edit_buffer.len() >= limit {
                     return;
                 }
-                self.edit_buffer.push(c);
+                self.edit_caret.insert(&mut self.edit_buffer, c);
                 return;
             }
             if let Some(limit) = workshop_text_limit(field) {
@@ -6475,7 +6835,7 @@ impl LauncherState {
                 if self.edit_buffer.chars().count() >= limit {
                     return;
                 }
-                self.edit_buffer.push(c);
+                self.edit_caret.insert(&mut self.edit_buffer, c);
                 return;
             }
         }
@@ -6490,18 +6850,44 @@ impl LauncherState {
         }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
-            let minus_ok = c == '-' && self.edit_buffer.is_empty();
+            let minus_ok =
+                c == '-' && self.edit_caret.at() == 0 && !self.edit_buffer.starts_with('-');
             if !(c.is_ascii_digit() || minus_ok) {
                 return;
             }
         }
-        self.edit_buffer.push(c);
+        self.edit_caret.insert(&mut self.edit_buffer, c);
     }
 
     pub fn edit_backspace(&mut self) {
         if self.editing.is_some() {
-            self.edit_buffer.pop();
+            self.edit_caret.backspace(&mut self.edit_buffer);
         }
+    }
+
+    /// Delete forwards, from the character the caret is on.
+    pub fn edit_delete(&mut self) {
+        if self.editing.is_some() {
+            self.edit_caret.delete(&mut self.edit_buffer);
+        }
+    }
+
+    /// Step the caret through the box being typed in.
+    pub fn edit_caret_move(&mut self, to: CaretMove) {
+        if self.editing.is_none() {
+            return;
+        }
+        match to {
+            CaretMove::Left => self.edit_caret.left(),
+            CaretMove::Right => self.edit_caret.right(&self.edit_buffer),
+            CaretMove::Home => self.edit_caret.home(),
+            CaretMove::End => self.edit_caret.end(&self.edit_buffer),
+        }
+    }
+
+    /// Where the caret is in the box being typed in, for drawing it.
+    pub fn edit_caret(&self) -> Caret {
+        self.edit_caret
     }
 
     /// Commit the edit buffer to the focused field. A drive name that would
@@ -8264,6 +8650,229 @@ mod tests {
         // Unnamed by the scan: a file name under a row that already says
         // nothing is not the answer to which release it is.
         assert_eq!(version_of(&mut state, "Thing"), "");
+    }
+
+    #[test]
+    fn a_held_scroll_climbs_five_stages_and_starts_again_when_let_go() {
+        use std::time::{Duration, Instant};
+        // What a held button does: a step every 60 ms, which is what the
+        // stages have to be read against -- they are a second of holding
+        // each, not a count of steps.
+        const EVERY: Duration = Duration::from_millis(60);
+        let start = Instant::now();
+        let mut rate = ScrollRate::default();
+
+        // The first step of a run always moves one row, so a click to nudge
+        // the list by one does that and nothing more.
+        assert_eq!(rate.rows_for_step(start), 1);
+
+        // Held, it works through a stage a second. Sampled just after each
+        // second, which is where the stage that second belongs to shows.
+        let mut at = start;
+        let mut seen = Vec::new();
+        for second in 0..5 {
+            let until = start + Duration::from_millis(second * 1000 + 500);
+            let mut rows = 0;
+            while at < until {
+                rows = rate.rows_for_step(at);
+                at += EVERY;
+            }
+            seen.push(rows);
+        }
+        assert_eq!(seen, vec![1, 3, 7, 14, 24]);
+
+        // The last stage is the ceiling: holding it longer does not keep
+        // making it faster.
+        for _ in 0..100 {
+            assert_eq!(rate.rows_for_step(at), 24, "past the last stage");
+            at += EVERY;
+        }
+
+        // Letting go and pressing again starts from the bottom: a gap
+        // longer than a repeat says the run ended...
+        at += Duration::from_millis(400);
+        assert_eq!(rate.rows_for_step(at), 1, "a pause ended the run");
+
+        // ...and so does a press that says so outright, which is what the
+        // mouse does, since a quick re-click can land inside that gap.
+        for _ in 0..80 {
+            at += EVERY;
+            rate.rows_for_step(at);
+        }
+        assert!(rate.rows_for_step(at) > 1, "mid-run");
+        rate.reset();
+        assert_eq!(rate.rows_for_step(at), 1);
+    }
+
+    #[test]
+    fn a_caret_edits_where_it_stands() {
+        let mut text = "Golden Axe".to_string();
+        let mut caret = Caret::end_of(&text);
+        assert_eq!(caret.at(), 10);
+
+        // Typing goes in at the caret and the caret steps over it.
+        caret.left();
+        caret.left();
+        caret.left();
+        for c in "the ".chars() {
+            caret.insert(&mut text, c);
+        }
+        assert_eq!(text, "Golden the Axe");
+        assert_eq!(caret.at(), 11);
+
+        // Backspace takes what is behind, Delete what is under, and
+        // neither moves the other's way.
+        assert!(caret.backspace(&mut text));
+        assert_eq!(text, "Golden theAxe");
+        assert_eq!(caret.at(), 10);
+        assert!(caret.delete(&mut text));
+        assert_eq!(text, "Golden thexe");
+        assert_eq!(caret.at(), 10, "delete leaves the caret where it was");
+
+        // Neither runs off its end.
+        caret.home();
+        assert!(!caret.backspace(&mut text));
+        caret.end(&text);
+        assert!(!caret.delete(&mut text));
+        assert_eq!(text, "Golden thexe");
+
+        // Stepping stops at both ends rather than wrapping.
+        caret.home();
+        caret.left();
+        assert_eq!(caret.at(), 0);
+        caret.end(&text);
+        caret.right(&text);
+        assert_eq!(caret.at(), text.chars().count());
+        let _ = &text;
+
+        // Characters, not bytes: a title with an accent in it steps one
+        // letter at a time and is never cut in half.
+        let mut text = "Ishido".to_string();
+        let mut caret = Caret::end_of(&text);
+        caret.left();
+        caret.insert(&mut text, 'ó');
+        assert_eq!(text, "Ishidóo");
+        assert_eq!(caret.at(), 6);
+        assert!(caret.backspace(&mut text));
+        assert_eq!(text, "Ishido");
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_sign_in_caret_steps_through_the_mask() {
+        let mut login = LoginDialog::default();
+        for c in "hobbo".chars() {
+            login.insert(c);
+        }
+        assert_eq!(login.user, "hobbo");
+        assert_eq!(login.caret.at(), 5);
+
+        // Correcting the middle of a name, without retyping the end.
+        login.caret_move(CaretMove::Left);
+        login.insert('9');
+        login.insert('1');
+        assert_eq!(login.user, "hobb91o");
+        login.delete();
+        assert_eq!(login.user, "hobb91");
+
+        // The password is edited the same way, through the mask: the caret
+        // counts characters, and the text itself never comes back out.
+        login.focus_on(LoginField::Pass);
+        assert_eq!(login.caret.at(), 0, "an empty box starts at the front");
+        for c in "sekrit".chars() {
+            login.insert(c);
+        }
+        assert_eq!(login.pass.chars(), 6);
+        login.caret_move(CaretMove::Home);
+        login.insert('X');
+        assert_eq!(login.pass.expose(), "Xsekrit");
+        assert_eq!(login.caret.at(), 1);
+        login.backspace();
+        assert_eq!(login.pass.expose(), "sekrit");
+        assert_eq!(login.caret.at(), 0);
+        // Backspace at the front does nothing, rather than eating forwards.
+        login.backspace();
+        assert_eq!(login.pass.expose(), "sekrit");
+        login.delete();
+        assert_eq!(login.pass.expose(), "ekrit");
+
+        // Moving between boxes puts the caret at the end of the one moved
+        // to, not wherever it was in the one left behind.
+        login.caret_move(CaretMove::End);
+        login.focus_on(LoginField::User);
+        assert_eq!(login.caret.at(), login.user.chars().count());
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_metadata_caret_amends_a_field_in_place() {
+        let mut meta = MetaDialog {
+            file: "Turrican.lha".to_string(),
+            ..Default::default()
+        };
+        *meta.value_mut(MetaField::Name) = "Turican".to_string();
+        *meta.value_mut(MetaField::Year) = "1990".to_string();
+        meta.focus_on(MetaField::Name);
+        assert_eq!(meta.caret.at(), 7);
+
+        // The missing letter goes in where it belongs.
+        for _ in 0..4 {
+            meta.caret_move(CaretMove::Left);
+        }
+        meta.insert('r', 64);
+        assert_eq!(meta.value(MetaField::Name), "Turrican");
+
+        // A full box takes nothing more, wherever the caret is.
+        meta.caret_move(CaretMove::Home);
+        meta.insert('X', 8);
+        assert_eq!(meta.value(MetaField::Name), "Turrican");
+
+        // Moving on lands the caret at the end of the next box, and never
+        // past the end of a shorter one.
+        meta.focus_on(MetaField::Year);
+        assert_eq!(meta.caret.at(), 4);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_favourites_list_scrolls_and_stays_inside_itself() {
+        let mut state = LauncherState::new(MachineSetup::default());
+        for at in 0..10 {
+            state
+                .library
+                .db
+                .toggle_favourite(&format!("Game{at}.lha"), &format!("Game {at}"));
+        }
+        assert_eq!(state.library.db.favourite_count(), 10);
+
+        // Four rows on screen: the scroll stops with the last four in it
+        // rather than running off the end into blank rows.
+        state.scroll_favourites(3, 4);
+        assert_eq!(state.library.favourite_scroll, 3);
+        state.scroll_favourites(100, 4);
+        assert_eq!(state.library.favourite_scroll, 6);
+        state.scroll_favourites(-100, 4);
+        assert_eq!(state.library.favourite_scroll, 0);
+
+        // Walking the list with the keyboard drags the window after it.
+        state.library.focus = LibraryFocus::Favourites;
+        for _ in 0..9 {
+            state.step_library_focus(1, 4);
+        }
+        assert_eq!(state.library.favourite_selected, 9);
+        assert_eq!(state.library.favourite_scroll, 6, "the last row is drawn");
+        state.step_library_focus(-9, 4);
+        assert_eq!(state.library.favourite_selected, 0);
+        assert_eq!(state.library.favourite_scroll, 0);
+
+        // Removing from the end takes the selection and the window with it,
+        // so neither is left pointing past a list that just got shorter.
+        state.library.favourite_selected = 9;
+        state.library.favourite_scroll = 6;
+        state.remove_favourite(9);
+        assert_eq!(state.library.db.favourite_count(), 9);
+        assert_eq!(state.library.favourite_selected, 8);
+        assert_eq!(state.library.favourite_scroll, 6);
     }
 
     #[test]

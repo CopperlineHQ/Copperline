@@ -175,6 +175,13 @@ Progress and failures appear on the status line at the bottom; the log
 has the detail. A scan can be stopped at any point and keeps what it had
 resolved, and pressing Run stops it.
 
+Either list scrolls when it holds more than it shows, by the arrows in its
+top and bottom right corners or by the arrow keys -- the same arrows the
+host-disk picker uses, each greyed at its end of the list. Held, either
+works up through five speeds, a second at each, the last of which crosses
+a few thousand games in a second or so. Letting go and pressing again
+starts from the slowest, so nudging the list by one row still does that.
+
 ### Matching
 
 A package is matched to a catalogue entry by the SHA-1 of its slave where
@@ -206,7 +213,10 @@ back to the service. The connection is HTTPS.
 
 **Update** opens a dialog for the selected game: name, year, publisher,
 developer, players, and the cover art. Clicking the art picks a PNG,
-which is scaled to the size the fetched covers are.
+which is scaled to the size the fetched covers are. The boxes are the
+launcher's, so they are typed into the same way -- Tab or a click moves
+between them, and the block marking where typing goes is moved with
+Left/Right, which is what amending a title one letter out needs.
 
 **Save** marks the entry as yours, and scans leave it alone from then on
 -- including after the file is renamed, because the entry is recognised

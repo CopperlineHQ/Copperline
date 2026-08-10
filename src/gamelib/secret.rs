@@ -55,6 +55,53 @@ impl Secret {
 
     pub fn pop(&mut self) {
         self.text.pop();
+        self.wipe_tail(1);
+    }
+
+    /// Insert at a character index, which is how a caret part-way through
+    /// the box types. Bounded exactly as [`push`](Self::push) is.
+    ///
+    /// Indices rather than a borrowed `&str`, so the text still leaves this
+    /// type in only one place: [`expose`](Self::expose).
+    pub fn insert_at(&mut self, caret: usize, c: char) {
+        if self.text.len() + c.len_utf8() <= MAX_LEN {
+            let at = self.byte_of(caret);
+            self.text.insert(at, c);
+        }
+    }
+
+    /// Remove the character at an index. False when the index is past the
+    /// end, where there is none.
+    pub fn remove_at(&mut self, caret: usize) -> bool {
+        let at = self.byte_of(caret);
+        if at >= self.text.len() {
+            return false;
+        }
+        let was = self.text.len();
+        self.text.remove(at);
+        self.wipe_tail(was - self.text.len());
+        true
+    }
+
+    /// The byte offset a character index lands on, or the end of the text.
+    fn byte_of(&self, caret: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(caret)
+            .map_or(self.text.len(), |(at, _)| at)
+    }
+
+    /// Zero the bytes a shortening just left behind the end of the string.
+    ///
+    /// `String::remove` and `String::pop` shift the tail down and move the
+    /// length; the characters they dropped are still in the allocation.
+    /// `Zeroizing` would get them at drop, but a password deleted mid-typing
+    /// should not sit in memory until the dialog closes.
+    fn wipe_tail(&mut self, bytes: usize) {
+        let vec = unsafe { self.text.as_mut_vec() };
+        for byte in vec.spare_capacity_mut().iter_mut().take(bytes) {
+            byte.write(0);
+        }
     }
 
     pub fn clear(&mut self) {

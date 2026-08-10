@@ -174,57 +174,6 @@ fn sort_key(title: &str) -> (u8, String) {
     (group, folded)
 }
 
-/// How fast a held scroll runs.
-///
-/// A library is a few hundred games and a wheel notch is one row, so
-/// reaching the far end a row at a time is a lot of turning. Speed builds
-/// while the scrolling continues and falls back to one row as soon as it
-/// pauses, so a short flick still moves by one and a long drag crosses the
-/// list.
-#[derive(Debug, Clone)]
-pub struct ScrollRate {
-    /// When the last movement was, to tell a continued scroll from a fresh
-    /// one.
-    last: Option<std::time::Instant>,
-    /// Rows per notch, which grows while the scrolling keeps up.
-    rate: f32,
-}
-
-impl Default for ScrollRate {
-    fn default() -> Self {
-        Self {
-            last: None,
-            rate: 1.0,
-        }
-    }
-}
-
-impl ScrollRate {
-    /// The gap after which a scroll counts as a new one rather than a
-    /// continuation. About three frames: longer than the gap between
-    /// notches of a turning wheel, shorter than a pause meaning to stop.
-    const CONTINUES_WITHIN: std::time::Duration = std::time::Duration::from_millis(120);
-    /// How much faster each continued notch goes.
-    const GROWTH: f32 = 1.35;
-    /// The ceiling, in rows per notch. Fast enough to cross a long list in
-    /// a second or so, slow enough to stop where you meant to.
-    const FASTEST: f32 = 24.0;
-
-    /// How many rows this notch should move, given when it arrived.
-    pub fn rows_for_notch(&mut self, now: std::time::Instant) -> usize {
-        let continued = self
-            .last
-            .is_some_and(|last| now.duration_since(last) <= Self::CONTINUES_WITHIN);
-        self.rate = if continued {
-            (self.rate * Self::GROWTH).min(Self::FASTEST)
-        } else {
-            1.0
-        };
-        self.last = Some(now);
-        self.rate as usize
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,30 +334,5 @@ mod tests {
         // shows nothing, which is what it would show anyway.
         let library = refreshed(Path::new("/no/such/folder"), &mut Database::new());
         assert!(library.is_empty());
-    }
-
-    #[test]
-    fn scrolling_speeds_up_while_it_continues_and_resets_when_it_stops() {
-        use std::time::{Duration, Instant};
-        let mut rate = ScrollRate::default();
-        let start = Instant::now();
-
-        // The first notch of a scroll always moves one row, so a flick to
-        // nudge the list by one does that and nothing more.
-        assert_eq!(rate.rows_for_notch(start), 1);
-
-        // Kept up, it builds.
-        let mut at = start;
-        let mut rows = 0;
-        for _ in 0..12 {
-            at += Duration::from_millis(30);
-            rows = rate.rows_for_notch(at);
-        }
-        assert!(rows > 1, "a continued scroll did not speed up");
-        assert!(rows <= 24, "a continued scroll ran away: {rows} rows");
-
-        // And a pause puts it back to one.
-        at += Duration::from_millis(400);
-        assert_eq!(rate.rows_for_notch(at), 1);
     }
 }

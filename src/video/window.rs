@@ -1000,6 +1000,11 @@ pub struct App {
     /// needs the un-mapped coordinate alongside the mapped pixel.
     last_cursor_phys: Option<winit::dpi::PhysicalPosition<f64>>,
     volume_dragging: bool,
+    /// A scroll arrow held down: which control, and when its next repeat is
+    /// due. A click moves one row and lets go; keeping the button down
+    /// starts the list running after a pause, the way a held key does. Any
+    /// of the launcher's scrolling lists can be the one being held.
+    scroll_hold: Option<(UiControl, Instant)>,
     /// True while the frame analyzer selector is following a held left
     /// mouse button.
     analyzer_dragging: bool,
@@ -1564,6 +1569,51 @@ fn clipboard_line() -> String {
 #[cfg(feature = "game-library")]
 const STATUS_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How long a scroll arrow must be held before it starts repeating. Long
+/// enough that clicking to move one row never runs on by accident, short
+/// enough that holding it does not feel broken -- the pause a host keyboard
+/// takes before a held key repeats.
+const SCROLL_HOLD_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+/// The gap between repeats thereafter. Well inside the window
+/// [`ScrollRate`](crate::video::launcher::ScrollRate) counts as one
+/// continued scroll, so the run builds through its stages while the button
+/// is down rather than restarting under it.
+const SCROLL_HOLD_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// Which of the launcher's scrolling lists an arrow belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollList {
+    #[cfg(feature = "game-library")]
+    Games,
+    #[cfg(feature = "game-library")]
+    Favourites,
+    HostDisks,
+}
+
+/// Whether a control is a scroll arrow, and if so which way it goes (`-1`
+/// up, `1` down) and which list it drives.
+fn scroll_arrow_of(control: UiControl) -> Option<(isize, ScrollList)> {
+    match control {
+        #[cfg(feature = "game-library")]
+        UiControl::LauncherLibraryScroll(d) => Some((d.signum(), ScrollList::Games)),
+        #[cfg(feature = "game-library")]
+        UiControl::LauncherLibraryFavouriteScroll(d) => Some((d.signum(), ScrollList::Favourites)),
+        UiControl::LauncherHostDiskScroll(d) => Some((d.signum(), ScrollList::HostDisks)),
+        _ => None,
+    }
+}
+
+/// The control that scrolls `list` by `rows`.
+fn scroll_arrow_for(list: ScrollList, rows: isize) -> UiControl {
+    match list {
+        #[cfg(feature = "game-library")]
+        ScrollList::Games => UiControl::LauncherLibraryScroll(rows),
+        #[cfg(feature = "game-library")]
+        ScrollList::Favourites => UiControl::LauncherLibraryFavouriteScroll(rows),
+        ScrollList::HostDisks => UiControl::LauncherHostDiskScroll(rows),
+    }
+}
+
 /// A sign-in in flight: the request runs on a worker so a slow or
 /// unreachable service cannot freeze the launcher mid-dialog.
 #[cfg(feature = "game-library")]
@@ -1778,6 +1828,7 @@ impl App {
             last_display_cursor_pos: None,
             last_cursor_phys: None,
             volume_dragging: false,
+            scroll_hold: None,
             analyzer_dragging: false,
             mouse_captured: false,
             capture_suspended_by_ui: false,
@@ -3381,6 +3432,7 @@ impl ApplicationHandler for App {
                         let was_volume_dragging = self.volume_dragging;
                         self.volume_dragging = false;
                         self.analyzer_dragging = false;
+                        self.scroll_hold = None;
                         if was_volume_dragging {
                             return;
                         }
@@ -3391,6 +3443,14 @@ impl ApplicationHandler for App {
                         if let Some(control) =
                             self.cursor_pos.and_then(|p| self.main_ui_control_at(p))
                         {
+                            // A scroll arrow keeps running while it is held,
+                            // and a fresh press starts the ramp again rather
+                            // than picking up the speed the last one reached.
+                            if scroll_arrow_of(control).is_some() {
+                                self.scroll_hold =
+                                    Some((control, Instant::now() + SCROLL_HOLD_DELAY));
+                                self.reset_scroll_rate(control);
+                            }
                             self.activate_ui_control_with_event_loop(control, Some(event_loop));
                             self.ensure_tool_windows_for_open_panels(event_loop);
                             return;
@@ -3898,6 +3958,7 @@ impl ApplicationHandler for App {
         self.poll_login();
         #[cfg(feature = "game-library")]
         self.poll_library_scan();
+        self.repeat_held_scroll();
         #[cfg(feature = "game-library")]
         if self
             .launcher_state_mut()
@@ -3932,11 +3993,16 @@ impl ApplicationHandler for App {
         // A status line waiting to clear itself keeps the loop awake too,
         // or it would sit there until something else woke it.
         let writing_image = self.image_job.is_some() || downloading || self.status_until.is_some();
-        event_loop.set_control_flow(if running || osd_active || calibrating || writing_image {
-            ControlFlow::Poll
-        } else {
-            ControlFlow::Wait
-        });
+        // A held scroll arrow has no event of its own to wake on: the button
+        // went down once and the repeats are this loop's own doing.
+        let scrolling = self.scroll_hold.is_some();
+        event_loop.set_control_flow(
+            if running || osd_active || calibrating || writing_image || scrolling {
+                ControlFlow::Poll
+            } else {
+                ControlFlow::Wait
+            },
+        );
         if writing_image && !running {
             // Nothing else paces the loop while the machine is off; check
             // back at a human rate rather than spinning a core on it.
@@ -6226,15 +6292,29 @@ impl App {
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouritePick(drawn) => {
                 if let Some(state) = self.launcher_state_mut() {
-                    state.select_favourite(drawn);
+                    let at = state.library.favourite_scroll + drawn;
+                    state.select_favourite(at);
                 }
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouriteRemove(drawn) => {
                 let config = crate::paths::config_dir().unwrap_or_default();
                 if let Some(state) = self.launcher_state_mut() {
-                    state.remove_favourite(drawn);
+                    let at = state.library.favourite_scroll + drawn;
+                    state.remove_favourite(at);
                     state.save_library_database(&config);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryFavouriteScroll(delta) => {
+                let pinned = self
+                    .launcher_state()
+                    .is_some_and(|state| state.setup.whdload_enabled());
+                let visible = crate::video::ui::launcher_panel_rect(&self.ui)
+                    .map(|rect| crate::video::ui::library_favourite_rows(rect, pinned))
+                    .unwrap_or(1);
+                if let Some(state) = self.launcher_state_mut() {
+                    state.scroll_favourites(delta, visible);
                 }
             }
             #[cfg(feature = "game-library")]
@@ -6246,7 +6326,7 @@ impl App {
             #[cfg(feature = "game-library")]
             UiControl::LoginField(field) => {
                 if let Some(login) = self.launcher_login_mut() {
-                    login.focus = field;
+                    login.focus_on(field);
                 }
             }
             #[cfg(feature = "game-library")]
@@ -6262,7 +6342,7 @@ impl App {
             #[cfg(feature = "game-library")]
             UiControl::MetaField(field) => {
                 if let Some(meta) = self.launcher_meta_mut() {
-                    meta.focus = field;
+                    meta.focus_on(field);
                 }
             }
             #[cfg(feature = "game-library")]
@@ -6785,7 +6865,7 @@ impl App {
     /// that is not the one this was written on still types what it says.
     #[cfg(feature = "game-library")]
     fn login_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
-        use crate::video::launcher::LoginField;
+        use crate::video::launcher::{CaretMove, LoginField};
         if self
             .launcher_state()
             .is_none_or(|state| state.login.is_none())
@@ -6821,28 +6901,22 @@ impl App {
             // Anything else typed with a command modifier held is a
             // shortcut that is not ours, not text.
             _ if held && code != KeyCode::Tab && code != KeyCode::Backspace => {}
-            KeyCode::Tab => {
-                login.focus = match login.focus {
-                    LoginField::User => LoginField::Pass,
-                    LoginField::Pass => LoginField::User,
-                };
-            }
-            KeyCode::Backspace => match login.focus {
-                LoginField::User => {
-                    login.user.pop();
-                }
-                LoginField::Pass => login.pass.pop(),
-            },
+            KeyCode::Tab => login.focus_on(match login.focus {
+                LoginField::User => LoginField::Pass,
+                LoginField::Pass => LoginField::User,
+            }),
+            KeyCode::Backspace => login.backspace(),
+            KeyCode::Delete => login.delete(),
+            KeyCode::ArrowLeft => login.caret_move(CaretMove::Left),
+            KeyCode::ArrowRight => login.caret_move(CaretMove::Right),
+            KeyCode::Home => login.caret_move(CaretMove::Home),
+            KeyCode::End => login.caret_move(CaretMove::End),
             _ => {
                 // Printable characters only: a control code typed into a
                 // password is a character nobody can see and nobody meant.
                 let typed = text.unwrap_or_default();
                 for c in typed.chars().filter(|c| !c.is_control()) {
-                    match login.focus {
-                        LoginField::User if login.user.chars().count() < 64 => login.user.push(c),
-                        LoginField::User => {}
-                        LoginField::Pass => login.pass.push(c),
-                    }
+                    login.insert(c);
                 }
             }
         }
@@ -6857,7 +6931,7 @@ impl App {
     /// differently is two things to learn.
     #[cfg(feature = "game-library")]
     fn meta_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
-        use crate::video::launcher::MetaField;
+        use crate::video::launcher::{CaretMove, MetaField};
         if self
             .launcher_state()
             .is_none_or(|state| state.meta.is_none())
@@ -6883,11 +6957,10 @@ impl App {
         {
             let line = clipboard_line();
             if let Some(meta) = self.launcher_meta_mut() {
-                let focus = meta.focus;
-                let most = meta_field_max(focus);
-                let value = meta.value_mut(focus);
-                let room = most.saturating_sub(value.chars().count());
-                value.extend(line.chars().take(room));
+                let most = meta_field_max(meta.focus);
+                for c in line.chars().filter(|c| !c.is_control()) {
+                    meta.insert(c, most);
+                }
             }
             self.request_redraw();
             return true;
@@ -6901,18 +6974,26 @@ impl App {
             _ if held && code != KeyCode::Tab && code != KeyCode::Backspace => {}
             KeyCode::Tab => {
                 let at = MetaField::ALL.iter().position(|&f| f == focus).unwrap_or(0);
-                meta.focus = MetaField::ALL[(at + 1) % MetaField::ALL.len()];
+                meta.focus_on(MetaField::ALL[(at + 1) % MetaField::ALL.len()]);
             }
             KeyCode::Backspace => {
-                meta.value_mut(focus).pop();
+                let mut caret = meta.caret;
+                caret.backspace(meta.value_mut(focus));
+                meta.caret = caret;
             }
+            KeyCode::Delete => {
+                let mut caret = meta.caret;
+                caret.delete(meta.value_mut(focus));
+                meta.caret = caret;
+            }
+            KeyCode::ArrowLeft => meta.caret_move(CaretMove::Left),
+            KeyCode::ArrowRight => meta.caret_move(CaretMove::Right),
+            KeyCode::Home => meta.caret_move(CaretMove::Home),
+            KeyCode::End => meta.caret_move(CaretMove::End),
             _ => {
                 let most = meta_field_max(focus);
                 for c in text.unwrap_or_default().chars().filter(|c| !c.is_control()) {
-                    let value = meta.value_mut(focus);
-                    if value.chars().count() < most {
-                        value.push(c);
-                    }
+                    meta.insert(c, most);
                 }
             }
         }
@@ -6930,13 +7011,7 @@ impl App {
         let line = clipboard_line();
         if let Some(login) = self.launcher_login_mut() {
             for c in line.chars().filter(|c| !c.is_control()) {
-                match login.focus {
-                    crate::video::launcher::LoginField::User if login.user.chars().count() < 64 => {
-                        login.user.push(c)
-                    }
-                    crate::video::launcher::LoginField::User => {}
-                    crate::video::launcher::LoginField::Pass => login.pass.push(c),
-                }
+                login.insert(c);
             }
         }
         self.request_redraw();
@@ -6945,8 +7020,8 @@ impl App {
     /// Walk the Library's lists with the arrow keys, and launch with
     /// Return.
     ///
-    /// Held, the arrows accelerate the way the wheel does and through the
-    /// same rate: a key repeating is a scroll continuing, and the two
+    /// Held, the arrows accelerate through the same rate the scroll-arrow
+    /// buttons use: a key repeating is a scroll continuing, and the two
     /// should not build up at different speeds.
     #[cfg(feature = "game-library")]
     fn library_handle_key(&mut self, code: KeyCode) -> bool {
@@ -6980,7 +7055,7 @@ impl App {
             let rows = match step {
                 isize::MIN | isize::MAX => step,
                 _ => {
-                    let rate = state.library.scroll_rate.rows_for_notch(Instant::now());
+                    let rate = state.library.scroll_rate.rows_for_step(Instant::now());
                     step * rate.max(1) as isize
                 }
             };
@@ -7008,6 +7083,7 @@ impl App {
     /// Feed a key to a focused plugin-option text field. Returns false (so the
     /// key falls through) when no field is being edited.
     fn launcher_handle_edit_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
+        use crate::video::launcher::CaretMove;
         let handled = {
             let Some(state) = self.launcher_state_mut() else {
                 return false;
@@ -7017,7 +7093,12 @@ impl App {
             }
             match code {
                 KeyCode::Backspace => state.edit_backspace(),
+                KeyCode::Delete => state.edit_delete(),
                 KeyCode::Enter | KeyCode::NumpadEnter => state.edit_commit(),
+                KeyCode::ArrowLeft => state.edit_caret_move(CaretMove::Left),
+                KeyCode::ArrowRight => state.edit_caret_move(CaretMove::Right),
+                KeyCode::Home => state.edit_caret_move(CaretMove::Home),
+                KeyCode::End => state.edit_caret_move(CaretMove::End),
                 _ => {
                     // Prefer the layout- and shift-aware text the platform
                     // reports, so volume names can contain lowercase letters,
@@ -8226,6 +8307,68 @@ impl App {
     /// the last one's wording reaches the status line, which is the part
     /// that genuinely only wants the newest.
     #[cfg(feature = "game-library")]
+    /// The rate the given list's scrolling runs at.
+    fn scroll_rate_of(
+        &mut self,
+        list: ScrollList,
+    ) -> Option<&mut crate::video::launcher::ScrollRate> {
+        let state = self.launcher_state_mut()?;
+        Some(match list {
+            #[cfg(feature = "game-library")]
+            ScrollList::Games => &mut state.library.scroll_rate,
+            #[cfg(feature = "game-library")]
+            ScrollList::Favourites => &mut state.library.favourite_scroll_rate,
+            ScrollList::HostDisks => state.setup.host_disk_scroll_rate(),
+        })
+    }
+
+    /// Put a list's scrolling back to its first stage, for a press that is
+    /// deliberately a new one.
+    fn reset_scroll_rate(&mut self, control: UiControl) {
+        let Some((_, list)) = scroll_arrow_of(control) else {
+            return;
+        };
+        if let Some(rate) = self.scroll_rate_of(list) {
+            rate.reset();
+        }
+    }
+
+    /// Keep a held scroll arrow running.
+    ///
+    /// The button going down scrolled one row already; this is what happens
+    /// if it is not let go. Nothing moves for [`SCROLL_HOLD_DELAY`], so a
+    /// deliberate single click stays a single row, and after that a repeat
+    /// lands every [`SCROLL_HOLD_EVERY`] -- close enough together that the
+    /// list's [`ScrollRate`](crate::video::launcher::ScrollRate) counts them
+    /// as one run and works through its stages, exactly as it does for a
+    /// held arrow key. Letting go, or sliding off the arrow, stops it.
+    fn repeat_held_scroll(&mut self) {
+        let Some((control, due)) = self.scroll_hold else {
+            return;
+        };
+        let Some((direction, list)) = scroll_arrow_of(control) else {
+            return;
+        };
+        // Sliding off the arrow stops it, the way letting go does: a button
+        // that kept firing from under the pointer would be a button you
+        // cannot get away from.
+        if self.cursor_pos.and_then(|p| self.main_ui_control_at(p)) != Some(control) {
+            self.scroll_hold = None;
+            return;
+        }
+        let now = Instant::now();
+        if now < due {
+            return;
+        }
+        self.scroll_hold = Some((control, now + SCROLL_HOLD_EVERY));
+        let Some(rate) = self.scroll_rate_of(list) else {
+            return;
+        };
+        let rows = direction * rate.rows_for_step(now).max(1) as isize;
+        self.activate_ui_control_with_event_loop(scroll_arrow_for(list, rows), None);
+        self.request_redraw();
+    }
+
     fn poll_library_scan(&mut self) {
         use crate::gamelib::Progress;
         let Some(scan) = &self.library_scan else {

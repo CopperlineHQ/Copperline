@@ -25,6 +25,6 @@ pub mod support;
 
 pub use cover::Covers;
 pub use db::{Catalogue, Database, Game, Known};
-pub use library::{Entry, Library, ScrollRate};
+pub use library::{Entry, Library};
 pub use scan::{Progress, Scan};
 pub use secret::Secret;

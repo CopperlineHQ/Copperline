@@ -540,7 +540,13 @@ The layout is:
   or SCSI drive has an image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
-  raw HDF). A setting that does not apply to the chosen machine is greyed and
+  raw HDF).
+  Every box that can be typed into behaves the same way: clicking it starts
+  the edit, a block marks where typing goes, Left/Right and Home/End move
+  it, Backspace and Delete take the character behind and under it, Enter
+  commits and Escape cancels. A value longer than its box scrolls under the
+  block rather than being typed at blind.
+  A setting that does not apply to the chosen machine is greyed and
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
   and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
   IDE.
