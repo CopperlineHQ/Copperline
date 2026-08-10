@@ -7199,6 +7199,7 @@ mod tests {
                 library: Some("/whd/library".to_string()),
                 kickstarts: Some("/roms/kickstarts".to_string()),
                 args: Some("NoVBRMove ButtonWait".to_string()),
+                ..crate::config::RawWhdload::default()
             },
             ..RawConfig::default()
         };

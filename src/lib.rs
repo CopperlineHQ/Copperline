@@ -73,6 +73,7 @@ pub mod midi;
 #[cfg(feature = "mt32")]
 pub mod mt32;
 pub mod net;
+pub mod package;
 pub mod parallel;
 pub mod paths;
 pub mod picasso2;
