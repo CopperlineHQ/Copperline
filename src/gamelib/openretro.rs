@@ -27,6 +27,8 @@
 use std::io::Read;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use super::Secret;
 
 /// Where the service lives. Not configurable: a "server" setting is a way
@@ -136,7 +138,7 @@ impl Session {
         let reply = agent
             .post(&format!("{BASE}/api/auth"))
             .content_type("application/x-www-form-urlencoded")
-            .send(&body);
+            .send(body.as_str());
         let text = read_reply(reply)?;
         let json: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| Error::Malformed(e.to_string()))?;
@@ -160,7 +162,7 @@ impl Session {
             .agent
             .post(&format!("{BASE}/api/deauth"))
             .content_type("application/x-www-form-urlencoded")
-            .send(&body);
+            .send(body.as_str());
     }
 
     /// Fetch the games changed since `cursor`, as one page.
@@ -299,8 +301,11 @@ fn agent() -> ureq::Agent {
 /// `application/x-www-form-urlencoded`, escaping everything that is not
 /// unreserved -- a password is exactly the kind of string that contains
 /// the characters this is for.
-fn form(fields: &[(&str, &str)]) -> String {
-    let mut out = String::new();
+fn form(fields: &[(&str, &str)]) -> Zeroizing<String> {
+    // Zeroizing, because this is the password again: percent-encoding
+    // leaves every unreserved byte of it verbatim, and a plain String would
+    // hand the whole credential back to the allocator unwiped.
+    let mut out = Zeroizing::new(String::new());
     for (key, value) in fields {
         if !out.is_empty() {
             out.push('&');
@@ -312,7 +317,14 @@ fn form(fields: &[(&str, &str)]) -> String {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                     out.push(byte as char)
                 }
-                _ => out.push_str(&format!("%{byte:02X}")),
+                // Written a digit at a time rather than through `format!`,
+                // whose temporary would be one more unwiped copy.
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    out.push('%');
+                    out.push(HEX[(byte >> 4) as usize] as char);
+                    out.push(HEX[(byte & 0xf) as usize] as char);
+                }
             }
         }
     }
@@ -444,7 +456,7 @@ mod tests {
         // The characters a generated passphrase is full of are exactly the
         // ones that would otherwise end the field or the body.
         let body = form(&[("password", "a&b=c d+e%f")]);
-        assert_eq!(body, "password=a%26b%3Dc%20d%2Be%25f");
+        assert_eq!(body.as_str(), "password=a%26b%3Dc%20d%2Be%25f");
         assert!(!body[9..].contains('&'), "a value ended the field early");
     }
 

@@ -54,8 +54,12 @@ impl Secret {
     }
 
     pub fn pop(&mut self) {
+        let was = self.text.len();
         self.text.pop();
-        self.wipe_tail(1);
+        // As many bytes as the character occupied, not one: a password with
+        // an accent in it would otherwise leave the rest of that character
+        // behind the end of the string.
+        self.wipe_tail(was - self.text.len());
     }
 
     /// Insert at a character index, which is how a caret part-way through
@@ -97,6 +101,19 @@ impl Secret {
     /// length; the characters they dropped are still in the allocation.
     /// `Zeroizing` would get them at drop, but a password deleted mid-typing
     /// should not sit in memory until the dialog closes.
+    /// The whole buffer, live bytes and spare capacity together, so a test
+    /// can see that what was deleted was actually overwritten.
+    ///
+    /// # Safety
+    /// The caller must not write through it: the string's own invariants
+    /// still hold over the first `len` bytes.
+    #[cfg(test)]
+    pub unsafe fn text_for_test(&mut self) -> &[u8] {
+        let vec = unsafe { self.text.as_mut_vec() };
+        let (ptr, cap) = (vec.as_ptr(), vec.capacity());
+        unsafe { std::slice::from_raw_parts(ptr, cap) }
+    }
+
     fn wipe_tail(&mut self, bytes: usize) {
         let vec = unsafe { self.text.as_mut_vec() };
         for byte in vec.spare_capacity_mut().iter_mut().take(bytes) {
@@ -144,6 +161,31 @@ impl std::fmt::Debug for Secret {
 
 #[cfg(test)]
 mod tests {
+    /// Deleting a multi-byte character wipes all of it.
+    ///
+    /// `pop` used to clear one byte whatever it removed, so a password with
+    /// an accent in it left the rest of that character in the spare
+    /// capacity until the whole buffer dropped.
+    #[test]
+    fn popping_a_multibyte_character_wipes_all_of_it() {
+        let mut secret = Secret::new();
+        for c in "aé".chars() {
+            secret.push(c);
+        }
+        assert_eq!(secret.expose(), "aé");
+        let len = secret.expose().len();
+        secret.pop();
+        assert_eq!(secret.expose(), "a");
+        // The two bytes of the character just removed are zero, not just
+        // the last of them.
+        let now = secret.expose().len();
+        let vec = unsafe { secret.text_for_test() };
+        assert!(
+            vec[now..len].iter().all(|&b| b == 0),
+            "part of the deleted character is still there"
+        );
+    }
+
     use super::*;
 
     #[test]
