@@ -3461,6 +3461,48 @@ fn launcher_panel_edits_machine_setup() {
     assert!(state.setup.build_config().is_ok());
 }
 
+/// A value the commit refuses keeps the focus AND blocks the click that
+/// interrupted the typing: cycling the serial mode away would hide the very
+/// box being fixed, and Save/Run would quietly act on the previous value.
+#[cfg(feature = "midi")]
+#[test]
+fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
+    use crate::config::SerialMode;
+    use crate::video::launcher::{EditTarget, LauncherField};
+
+    let mut app = test_app();
+    app.open_launcher();
+    // Dial the serial port out and type an address with no port in it.
+    match app.ui.panel.as_mut() {
+        Some(Panel::Launcher(state)) => {
+            while state.setup.serial_mode() != SerialMode::TcpConnect {
+                state.setup.cycle(LauncherField::SerialMode, true);
+            }
+            state.begin_edit_serial_addr(LauncherField::SerialConnect);
+            for c in "no-port".chars() {
+                state.edit_push(c);
+            }
+        }
+        _ => panic!("launcher did not open"),
+    }
+    // The mode-cycle click commits the box first; the refusal wins.
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: LauncherField::SerialMode,
+        forward: true,
+    });
+    match &app.ui.panel {
+        Some(Panel::Launcher(state)) => {
+            assert_eq!(state.setup.serial_mode(), SerialMode::TcpConnect);
+            assert_eq!(
+                state.editing(),
+                Some(EditTarget::SerialAddr(LauncherField::SerialConnect))
+            );
+            assert!(state.status.is_some(), "the rejection is explained");
+        }
+        _ => panic!("launcher closed unexpectedly"),
+    }
+}
+
 #[test]
 fn launcher_run_keeps_panel_open_on_error() {
     use crate::video::launcher::LauncherField;

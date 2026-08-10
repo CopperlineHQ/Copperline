@@ -4735,9 +4735,10 @@ pub enum EditTarget {
     SerialAddr(LauncherField),
 }
 
-/// The most an address box accepts. Long enough for a fully qualified name
-/// and a port, short enough that a mashed key never fills the buffer.
-const SERIAL_ADDR_MAX: usize = 96;
+/// The most an address box accepts: a DNS name is up to 253 characters
+/// (254 with a trailing root dot), and ":65535" is six more. Anything
+/// longer cannot be a host:port, so the box stops there.
+const SERIAL_ADDR_MAX: usize = 260;
 
 /// Why a typed serial address is not the `host:port` the TCP modes need,
 /// or `None` when it is one.

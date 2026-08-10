@@ -5779,15 +5779,17 @@ impl App {
             UiControl::LauncherCycle { field, forward } => {
                 if let Some(state) = self.launcher_state_mut() {
                     // Reaching for another control ends the typing, the way
-                    // Enter does: what is in the box counts.
+                    // Enter does: what is in the box counts. A value the
+                    // commit refuses keeps the focus and blocks the click --
+                    // cycling on regardless could hide the very row being
+                    // edited (the serial mode carries its address box).
                     state.edit_commit();
-                    let refused = state.editing().is_some();
-                    if LauncherState::is_workshop(field) {
-                        state.workshop_cycle(field, forward);
-                    } else {
-                        state.setup.cycle(field, forward);
-                    }
-                    if !refused {
+                    if state.editing().is_none() {
+                        if LauncherState::is_workshop(field) {
+                            state.workshop_cycle(field, forward);
+                        } else {
+                            state.setup.cycle(field, forward);
+                        }
                         state.status = None;
                     }
                 }
@@ -5795,13 +5797,12 @@ impl App {
             UiControl::LauncherToggle(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_commit();
-                    let refused = state.editing().is_some();
-                    if LauncherState::is_workshop(field) {
-                        state.workshop_toggle_flip(field);
-                    } else {
-                        state.setup.toggle(field);
-                    }
-                    if !refused {
+                    if state.editing().is_none() {
+                        if LauncherState::is_workshop(field) {
+                            state.workshop_toggle_flip(field);
+                        } else {
+                            state.setup.toggle(field);
+                        }
                         state.status = None;
                     }
                 }
@@ -7421,9 +7422,16 @@ impl App {
     }
 
     fn launcher_save(&mut self) {
-        // Capture a name/option typed but not yet committed with Enter.
+        // Capture a name/option typed but not yet committed with Enter. A
+        // value the commit refuses keeps the focus and blocks the save:
+        // writing the file anyway would silently save the previous value
+        // while the box shows the rejected one.
         if let Some(state) = self.launcher_state_mut() {
             state.edit_commit();
+            if state.editing().is_some() {
+                self.request_redraw();
+                return;
+            }
         }
         let toml = match self.launcher_state().map(|s| s.setup.to_toml()) {
             Some(Ok(text)) => text,
@@ -7462,9 +7470,16 @@ impl App {
     /// machine-construction errors all stay in the panel as a status line;
     /// only success swaps the live machine.
     fn launcher_run(&mut self) {
-        // Capture a name/option typed but not yet committed with Enter.
+        // Capture a name/option typed but not yet committed with Enter. A
+        // value the commit refuses keeps the focus and blocks the run,
+        // which would otherwise boot against the previous value while the
+        // box shows the rejected one.
         if let Some(state) = self.launcher_state_mut() {
             state.edit_commit();
+            if state.editing().is_some() {
+                self.request_redraw();
+                return;
+            }
         }
         let raw = match self.launcher_state().map(|s| s.setup.to_raw()) {
             Some(raw) => raw,
