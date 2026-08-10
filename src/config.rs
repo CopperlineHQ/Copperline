@@ -5660,6 +5660,15 @@ pub fn rom_identification(path: &Path) -> Option<String> {
     crate::romdb::describe_file(path).map(|id| id.label().to_string())
 }
 
+/// The `ROM:` line the About panel and the ROM-load OSD show: the file's
+/// name, with the identification beside it when the image is a known one.
+pub fn about_rom_line(name: &str, identification: Option<&str>) -> String {
+    match identification {
+        Some(id) => format!("ROM: {name} ({id})"),
+        None => format!("ROM: {name}"),
+    }
+}
+
 /// Emulated-machine summary lines for the About window.
 pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     let mut lines = Vec::new();
@@ -5691,10 +5700,10 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     if let Some(name) = cfg.rom_path.file_name() {
         // The file name is whatever the dumper called it; the identification
         // says which Kickstart it actually is.
-        match rom_identification(&cfg.rom_path) {
-            Some(id) => lines.push(format!("ROM: {} ({id})", name.to_string_lossy())),
-            None => lines.push(format!("ROM: {}", name.to_string_lossy())),
-        }
+        lines.push(about_rom_line(
+            &name.to_string_lossy(),
+            rom_identification(&cfg.rom_path).as_deref(),
+        ));
     }
     let drives = cfg
         .floppy_connected
@@ -9921,9 +9930,15 @@ mod tests {
 
         // A recognised image: the About line carries the version beside the
         // file name. The bytes of a real Kickstart are not in the tree, so
-        // the entry is checked through the table the line is built from.
+        // the composition is exercised through the same helper the panel
+        // uses, fed the label of a real table entry.
         let entry = crate::romdb::identify_crc(0x1483A091, 512 * 1024).expect("KS 3.1 A1200");
         assert_eq!(entry.label, "Kickstart 3.1 (40.68) A1200");
+        assert_eq!(
+            about_rom_line("kick40068.A1200", Some(entry.label)),
+            "ROM: kick40068.A1200 (Kickstart 3.1 (40.68) A1200)"
+        );
+        assert_eq!(about_rom_line("mystery.rom", None), "ROM: mystery.rom");
     }
 
     fn temp_adf() -> Result<PathBuf> {

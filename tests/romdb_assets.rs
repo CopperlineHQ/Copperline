@@ -39,7 +39,7 @@ fn asset(name: &str) -> Option<std::path::PathBuf> {
 /// Local ROM dumps and what the table must call them. The file names are the
 /// ones the other ignored suites use (see `tests/README.md`); a collection
 /// keeping the same images under other names simply skips these rows.
-const KNOWN_ROMS: [(&str, &str); 9] = [
+const KNOWN_ROMS: [(&str, &str); 12] = [
     ("kick13.rom", "Kickstart 1.3 (34.5) A500/A1000/A2000"),
     ("KICK13.ROM", "Kickstart 1.3 (34.5) A500/A1000/A2000"),
     ("kickstart205.rom", "Kickstart 2.05 (37.299) A600"),
@@ -61,9 +61,30 @@ const KNOWN_ROMS: [(&str, &str); 9] = [
         "CD32 extended ROM (40.60)",
     ),
     (
+        "CDTV Extended-ROM v1.0 (1991)(Commodore)(CDTV)[!].rom",
+        "CDTV extended ROM v1.0",
+    ),
+    (
+        "CDTV Extended-ROM v2.7 (1992)(Commodore)(CDTV).rom",
+        "CDTV extended ROM v2.7",
+    ),
+    (
+        "CDTV Extended-ROM v2.30 (1992)(Commodore)(A570).rom",
+        "CDTV/A570 extended ROM v2.30",
+    ),
+    (
         "Amiga 1000 ROM Bootstrap (1985)(Commodore)(A1000)[!].rom",
         "A1000 bootstrap ROM",
     ),
+];
+
+/// ROM-shaped images the table must NOT claim to know: diagnostic and test
+/// ROMs a collection keeps beside its Kickstarts. Wrongly identifying one
+/// as a Kickstart would be worse than naming nothing.
+const NOT_KICKSTARTS: [&str; 3] = [
+    "diagrom.rom",
+    "ROMTestProg31.49-262.rom",
+    "ROMTestProg31.49-524.rom",
 ];
 
 #[test]
@@ -87,6 +108,29 @@ fn real_rom_dumps_identify_as_their_kickstart_version() {
     }
     if checked == 0 {
         eprintln!("skipping: no known Kickstart ROM in the asset directory");
+    }
+}
+
+#[test]
+#[ignore = "needs local diagnostic ROM images (see tests/README.md)"]
+fn diagnostic_roms_are_not_mistaken_for_kickstarts() {
+    let mut checked = 0;
+    for name in NOT_KICKSTARTS {
+        let Some(path) = asset(name) else {
+            continue;
+        };
+        let data = std::fs::read(&path).expect("ROM reads");
+        assert_eq!(
+            romdb::describe(&data).map(|id| id.label()),
+            None,
+            "{}: wrongly identified",
+            path.display()
+        );
+        eprintln!("{name}: not identified, as it must be");
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("skipping: no diagnostic ROM in the asset directory");
     }
 }
 

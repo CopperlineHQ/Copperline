@@ -8024,15 +8024,22 @@ impl App {
             match result {
                 Ok(identified) => {
                     let name = display_file_name(&main_path);
+                    let rom_line = crate::config::about_rom_line(&name, identified);
                     match identified {
-                        Some(id) => {
-                            info!("boot ROM loaded: {} ({id})", main_path.display());
-                            self.show_osd(format!("ROM: {name} ({id})"));
-                        }
-                        None => {
-                            info!("boot ROM loaded: {}", main_path.display());
-                            self.show_osd(format!("ROM: {name}"));
-                        }
+                        Some(id) => info!("boot ROM loaded: {} ({id})", main_path.display()),
+                        None => info!("boot ROM loaded: {}", main_path.display()),
+                    }
+                    self.show_osd(rom_line.clone());
+                    // The About panel's machine lines are cached from the
+                    // configuration; the chip in the machine just changed,
+                    // so its ROM line has to follow the swap.
+                    match self
+                        .about_machine_lines
+                        .iter_mut()
+                        .find(|l| l.starts_with("ROM: "))
+                    {
+                        Some(line) => *line = rom_line,
+                        None => self.about_machine_lines.push(rom_line),
                     }
                     self.powered_on = true;
                     self.cpu_halted = false;
