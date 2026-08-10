@@ -92,18 +92,25 @@ struct Pending {
 impl Queue {
     /// Put one at the front of the queue, which is the back of the vector:
     /// the worker pops from there, so the most recent ask is served first.
-    fn push(&self, sha1: String) {
+    ///
+    /// The queue is bounded, so a fast scroll pushes older asks off the
+    /// back. Those are handed back rather than dropped: the caller marked
+    /// them as on their way, and something that is never coming has to stop
+    /// being marked so, or it can never be asked for again and the window
+    /// loop stays awake waiting for it.
+    fn push(&self, sha1: String) -> Vec<String> {
         let Ok(mut pending) = self.pending.lock() else {
-            return;
+            return vec![sha1];
         };
         if !pending.open {
-            return;
+            return vec![sha1];
         }
         pending.wanted.retain(|held| held != &sha1);
         pending.wanted.push(sha1);
         let over = pending.wanted.len().saturating_sub(QUEUE_DEPTH);
-        pending.wanted.drain(..over);
+        let dropped = pending.wanted.drain(..over).collect();
         self.woken.notify_one();
+        dropped
     }
 
     /// Wait for work and take the newest. `None` once nobody is waiting for
@@ -248,6 +255,12 @@ impl Covers {
     /// while it is: a picture that lands with nothing watching for it sits
     /// there unseen until some other event happens to wake the loop, which
     /// is what "it appears the second time you scroll past" was.
+    /// Whether this digest is still on its way.
+    #[cfg(test)]
+    pub fn is_wanted(&self, sha1: &str) -> bool {
+        matches!(self.held.get(sha1), Some(Held::Wanted))
+    }
+
     pub fn pending(&self) -> bool {
         self.held.values().any(|held| matches!(held, Held::Wanted))
     }
@@ -267,7 +280,11 @@ impl Covers {
             return;
         }
         self.held.insert(sha1.to_string(), Held::Wanted);
-        self.queue.push(sha1.to_string());
+        for dropped in self.queue.push(sha1.to_string()) {
+            // Pushed off the back of the queue: forget it was asked for, so
+            // scrolling back to it asks again.
+            self.held.remove(&dropped);
+        }
     }
 
     /// Ask for what is being looked at, and for its neighbours after it.
@@ -453,6 +470,48 @@ fn decode(png: &[u8]) -> Option<Image> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cover pushed off the bounded queue is handed back, so the caller
+    /// can stop counting it as on its way.
+    ///
+    /// The queue holds a fixed number and scrolling fast asks for more than
+    /// that, so the oldest asks are dropped. Dropped silently, they would
+    /// stay marked as wanted for ever: the picture could never be asked for
+    /// again -- scrolling back to it would show an empty frame -- and
+    /// `pending` would stay true, holding the window loop awake with
+    /// nothing to wait for.
+    ///
+    /// Tested against the queue rather than through `Covers`, whose worker
+    /// takes entries off concurrently.
+    #[test]
+    fn a_full_queue_hands_back_what_it_pushed_off() {
+        let queue = Queue {
+            pending: Mutex::new(Pending {
+                wanted: Vec::new(),
+                open: true,
+            }),
+            woken: Condvar::new(),
+        };
+        // Fill it exactly: nothing has been pushed off yet.
+        for i in 0..QUEUE_DEPTH {
+            assert!(
+                queue.push(format!("sha{i}")).is_empty(),
+                "dropped something while there was still room"
+            );
+        }
+        // One more, and the oldest comes back.
+        assert_eq!(queue.push("newest".to_string()), vec!["sha0".to_string()]);
+        assert_eq!(queue.push("newer".to_string()), vec!["sha1".to_string()]);
+
+        // Asking again for something already queued moves it rather than
+        // growing the queue, so nothing is pushed off for it.
+        assert!(queue.push("newest".to_string()).is_empty());
+
+        // A closed queue takes nothing, and says so by handing it straight
+        // back -- otherwise it would be marked wanted and never arrive.
+        queue.close();
+        assert_eq!(queue.push("late".to_string()), vec!["late".to_string()]);
+    }
 
     fn encode(w: u32, h: u32, colour: png::ColorType, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
