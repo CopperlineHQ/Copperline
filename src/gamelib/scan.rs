@@ -225,7 +225,6 @@ fn run(
     // a session brings it up to date from where it left off.
     let at = catalogue_path(cache);
     let mut catalogue = Catalogue::load(&at);
-    let had = catalogue.len();
     // How many entries the online database contributed, or `None` if it
     // was never asked. A scan that says nothing about this is a scan a
     // person reasonably reads as having checked when it has not.
@@ -238,10 +237,13 @@ fn run(
         // what makes the next scan resume rather than start again -- and
         // a connection that drops on page forty of fifty should cost the
         // last ten pages, not the first forty.
-        if catalogue.len() != had {
-            if let Err(e) = catalogue.save(&at) {
-                log::warn!("game library: could not cache the catalogue: {e}");
-            }
+        // Saved whatever came back, not only when the count moved: a page
+        // can revise entries that already existed, or bring nothing but a
+        // newer cursor, and both leave the length alone. Discarding those
+        // would have the next scan download the same pages again, which is
+        // the opposite of what the cursor is for.
+        if let Err(e) = catalogue.save(&at) {
+            log::warn!("game library: could not cache the catalogue: {e}");
         }
         if let Err((why, _)) = outcome {
             // A sync that failed is not a scan that failed, as long as
@@ -512,6 +514,13 @@ fn fetch_art(wanted: &[String], covers: &Path, stop: &AtomicBool, tx: &Sender<Pr
 /// Write one cover, through a temporary so a download cut off half way
 /// does not leave a broken file the next scan would take for done.
 fn write_cover(covers: &Path, sha1: &str, png: &[u8]) {
+    // A 200 is not a picture: a service having a bad day answers with an
+    // HTML error page, and cached under a .png name it would be "present"
+    // for ever and never fetched again.
+    if !super::cover::is_png(png) {
+        log::warn!("game library: cover {sha1} was not a PNG; not cached");
+        return;
+    }
     let at = super::cover::cover_file(covers, sha1);
     let temp = at.with_extension("png.partial");
     if std::fs::write(&temp, png).is_ok() && std::fs::rename(&temp, &at).is_err() {
@@ -763,6 +772,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cache);
     }
 
+    /// The smallest thing `is_png` accepts, for tests that only care that
+    /// the bytes are a picture.
+    fn one_pixel_png() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 0])
+                .unwrap();
+        }
+        out
+    }
+
     #[test]
     fn a_scan_writes_its_art_where_the_launcher_reads_it() {
         // These drifted apart once -- the scan wrote cache/covers and the
@@ -773,13 +799,23 @@ mod tests {
         let covers = covers_path(&cache);
         std::fs::create_dir_all(&covers).unwrap();
         let sha1 = "a".repeat(40);
-        write_cover(&covers, &sha1, b"not really a png");
+        write_cover(&covers, &sha1, &one_pixel_png());
 
         let at = crate::gamelib::cover::cover_file(&covers, &sha1);
         assert!(at.is_file(), "the scan wrote nothing readable");
         assert!(at.starts_with(&covers), "the art left the covers directory");
         // And what a scan checks before fetching is the same file it wrote.
         assert!(!covers.join(format!("{sha1}.png.partial")).exists());
+
+        // A 200 that is not a picture -- a service answering with an HTML
+        // error page -- is refused rather than cached. Cached, it would be
+        // "present" for ever and the real cover never fetched.
+        let other = "b".repeat(40);
+        write_cover(&covers, &other, b"<html>down for maintenance</html>");
+        assert!(
+            !crate::gamelib::cover::cover_file(&covers, &other).exists(),
+            "a non-PNG body was cached as art"
+        );
         let _ = std::fs::remove_dir_all(&cache);
     }
 
