@@ -6281,7 +6281,6 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("game.dms"), DroppedMediaKind::Floppy);
     assert_eq!(kind("dump.scp"), DroppedMediaKind::Floppy);
     assert_eq!(kind("game.adf.gz"), DroppedMediaKind::Floppy);
-    assert_eq!(kind("game.zip"), DroppedMediaKind::Floppy);
     assert_eq!(kind("mystery"), DroppedMediaKind::Floppy);
     assert_eq!(kind("game.CUE"), DroppedMediaKind::Cd);
     assert_eq!(kind("game.iso"), DroppedMediaKind::Cd);
@@ -6289,9 +6288,16 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("disk.HDZ"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);
+    // Every shape a WHDLoad package comes in, since the launcher and the
+    // CLI take all of them: a dropped zip used to be handed to the floppy
+    // bay as a disk image.
     assert_eq!(kind("game.lha"), DroppedMediaKind::WhdloadGame);
     assert_eq!(kind("Game.LHA"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("game.lzh"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("game.zip"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("game.ZIP"), DroppedMediaKind::WhdloadGame);
     assert_eq!(kind("x.slave"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("x.slav"), DroppedMediaKind::WhdloadGame);
 }
 
 #[test]

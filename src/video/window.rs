@@ -4214,7 +4214,14 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         Some("cue") | Some("iso") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("hdz") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
-        Some("lha") | Some("slave") => DroppedMediaKind::WhdloadGame,
+        // Every shape `package` accepts, or a dropped zip would be taken
+        // for a disk image and handed to the floppy bay.
+        Some(ext)
+            if crate::package::EXTENSIONS.contains(&ext)
+                || crate::package::SLAVE_EXTENSIONS.contains(&ext) =>
+        {
+            DroppedMediaKind::WhdloadGame
+        }
         _ => DroppedMediaKind::Floppy,
     }
 }
@@ -4225,8 +4232,8 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
 /// as given.
 fn whdload_game_config_path(path: PathBuf) -> PathBuf {
     let is_slave = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("slave"));
+        .file_name()
+        .is_some_and(|name| crate::package::is_slave_name(&name.to_string_lossy()));
     if is_slave {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             return dir.to_path_buf();
