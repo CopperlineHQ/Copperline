@@ -4697,10 +4697,11 @@ fn host_disk_row_rect(rect: Rect, index: usize) -> Rect {
 
 // --- the WHDLoad Library page ---------------------------------------------
 
-/// The games list runs from the top of the Memory tab to the bottom of I/O
-/// Ports, and the favourites list fills what is left below it, so both are
-/// worked out from the strip rather than from a row count. These are what
-/// that comes to, and what the scrolling and hit-testing count in.
+/// The games list starts level with the top of the Memory tab and is as
+/// tall as the art frame beside it; the favourites list fills what is left
+/// below, down to the status line. Both are worked out from the panel
+/// rather than from a row count, so these are what that comes to -- and
+/// what the scrolling and hit-testing count in.
 ///
 /// `whdload_entry` is whether the strip carries the WHDLoad entry -- see
 /// [`launcher::tabs`] -- since the strip is a row longer when it does, and

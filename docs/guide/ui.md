@@ -504,8 +504,6 @@ The layout is:
   makes new ADF and HDF images (see below); and **CD** (image, insert
   delay, CD32 NVRAM). Each sub-page has a **< Back** button in that block
   that returns to Storage),
-  *WHDLoad* (your game collection, and the settings games boot with -- see
-  [](whdload.md)),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
@@ -524,6 +522,8 @@ The layout is:
   input recordings and save-state replays non-reproducible while it flows),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
+  *WHDLoad* (your game collection, and the settings games boot with -- see
+  [](whdload.md)),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, monitor bezel

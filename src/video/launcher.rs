@@ -226,7 +226,7 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::AvAudio,
 ];
 
-/// The strip with WHDLoad in it, between Storage and Input. This is the
+/// The strip with WHDLoad in it, between Zorro and A/V & Emu. This is the
 /// usual one: the entry is there unless somebody has turned WHDLoad off.
 #[cfg(feature = "game-library")]
 const WHDLOAD_TABS: &[LauncherTab] = &[
@@ -236,10 +236,10 @@ const WHDLOAD_TABS: &[LauncherTab] = &[
     LauncherTab::Rom,
     LauncherTab::Floppy,
     LauncherTab::Storage,
-    LauncherTab::WhdloadLibrary,
     LauncherTab::Input,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
+    LauncherTab::WhdloadLibrary,
     LauncherTab::AvAudio,
 ];
 
@@ -8900,6 +8900,28 @@ mod tests {
         assert_eq!(state.library.db.favourite_count(), 9);
         assert_eq!(state.library.favourite_selected, 8);
         assert_eq!(state.library.favourite_scroll, 6);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_whdload_entry_sits_between_zorro_and_av() {
+        // Where it is, and that turning it off takes out that one entry
+        // and leaves every other in place.
+        let with: Vec<LauncherTab> = tabs(true).to_vec();
+        let without: Vec<LauncherTab> = tabs(false).to_vec();
+
+        let at = with
+            .iter()
+            .position(|&t| t == LauncherTab::WhdloadLibrary)
+            .expect("the strip carries WHDLoad");
+        assert_eq!(with[at - 1], LauncherTab::Zorro);
+        assert_eq!(with[at + 1], LauncherTab::AvAudio);
+
+        // Off, it is gone -- and nothing else moved relative to itself.
+        assert!(!without.contains(&LauncherTab::WhdloadLibrary));
+        let mut minus = with.clone();
+        minus.remove(at);
+        assert_eq!(minus, without, "turning it off moved something else");
     }
 
     #[test]
