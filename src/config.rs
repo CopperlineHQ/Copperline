@@ -5637,6 +5637,29 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
     );
 }
 
+/// What a boot-ROM path holds, in words: the Kickstart version an image
+/// checksums to (see [`crate::romdb`]), `"bundled AROS"` for the
+/// open-source ROM Copperline ships in place of a Kickstart, or `None` for
+/// an image no table entry names.
+///
+/// This reads the file, so it belongs on the paths that run once -- the
+/// start-up banner, the About panel, a ROM chosen in the configuration
+/// screen -- and never in a per-frame one.
+pub fn rom_identification(path: &Path) -> Option<String> {
+    // The sentinel survives when no ROM was named and none was resolved
+    // (a save state carries its own ROM image), and the resolved AROS pair
+    // is named by its file names: neither is in the checksum table, and
+    // both are worth saying out loud rather than leaving blank.
+    let aros = path == Path::new(BUNDLED_AROS_ROM)
+        || path.file_name().is_some_and(|name| {
+            name == crate::romsearch::AROS_MAIN_FILE || name == crate::romsearch::AROS_EXT_FILE
+        });
+    if aros {
+        return Some("bundled AROS".to_string());
+    }
+    crate::romdb::describe_file(path).map(|id| id.label().to_string())
+}
+
 /// Emulated-machine summary lines for the About window.
 pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     let mut lines = Vec::new();
@@ -5666,7 +5689,12 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     }
     lines.push(ram);
     if let Some(name) = cfg.rom_path.file_name() {
-        lines.push(format!("ROM: {}", name.to_string_lossy()));
+        // The file name is whatever the dumper called it; the identification
+        // says which Kickstart it actually is.
+        match rom_identification(&cfg.rom_path) {
+            Some(id) => lines.push(format!("ROM: {} ({id})", name.to_string_lossy())),
+            None => lines.push(format!("ROM: {}", name.to_string_lossy())),
+        }
     }
     let drives = cfg
         .floppy_connected
@@ -9845,6 +9873,57 @@ mod tests {
         };
         let err = load_overrides(&overrides).unwrap_err();
         assert!(err.to_string().contains("unknown chipset"), "{err:#}");
+    }
+
+    /// The About window's ROM line names the image as well as the file: the
+    /// checksum table (src/romdb.rs) says which Kickstart a dump is, and the
+    /// ROM Copperline ships in place of one says so.
+    #[test]
+    fn the_about_rom_line_names_the_image_it_can_identify() {
+        // No ROM named: the sentinel is the bundled AROS, whether or not it
+        // has been resolved to a real path yet.
+        let mut cfg = Config::default();
+        assert_eq!(
+            rom_identification(Path::new(BUNDLED_AROS_ROM)).as_deref(),
+            Some("bundled AROS")
+        );
+        assert_eq!(
+            rom_identification(
+                Path::new("/opt/share/copperline/aros")
+                    .join(crate::romsearch::AROS_MAIN_FILE)
+                    .as_path()
+            )
+            .as_deref(),
+            Some("bundled AROS")
+        );
+
+        // A file that is not a known ROM adds nothing to the line.
+        let unknown = temp_path("not-a-rom.rom");
+        fs::write(&unknown, vec![0xA5u8; 4096]).unwrap();
+        assert_eq!(rom_identification(&unknown), None);
+        cfg.rom_path = unknown.clone();
+        let name = unknown.file_name().unwrap().to_string_lossy().into_owned();
+        let lines = about_machine_lines(&cfg);
+        assert!(
+            lines.iter().any(|l| *l == format!("ROM: {name}")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_file(&unknown);
+
+        // A directory, a missing file and an over-large one are all just
+        // unknown rather than an error or a panic.
+        assert_eq!(rom_identification(Path::new("/no/such/rom.rom")), None);
+        assert_eq!(rom_identification(&std::env::temp_dir()), None);
+        let huge = temp_path("huge.rom");
+        fs::write(&huge, vec![0u8; 3 * 1024 * 1024]).unwrap();
+        assert_eq!(rom_identification(&huge), None);
+        let _ = fs::remove_file(&huge);
+
+        // A recognised image: the About line carries the version beside the
+        // file name. The bytes of a real Kickstart are not in the tree, so
+        // the entry is checked through the table the line is built from.
+        let entry = crate::romdb::identify_crc(0x1483A091, 512 * 1024).expect("KS 3.1 A1200");
+        assert_eq!(entry.label, "Kickstart 3.1 (40.68) A1200");
     }
 
     fn temp_adf() -> Result<PathBuf> {

@@ -4988,7 +4988,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
-                RowKind::SectionHeader | RowKind::BootpriHeader => {}
+                RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
                 RowKind::Text => {
                     if launcher_text_rect(rect, row_y).contains(pos) {
                         return Some(UiControl::LauncherNewImageEdit(r.field));
@@ -5802,6 +5802,25 @@ fn draw_launcher_row(
         );
         return;
     }
+    // The ROM tab's identification line: what the image on the row above
+    // checksums to, greyed and indented under it. Nothing is drawn for an
+    // image no checksum names, or for an empty row.
+    if r.kind == RowKind::Note {
+        if let Some(note) = state.rom_note(r.field) {
+            let x = launcher_pane_x(rect) + 8;
+            let avail = (rect.x + rect.w).saturating_sub(x + LAUNCH_MARGIN);
+            draw_panel_text(
+                frame,
+                x,
+                row_y + 4,
+                &truncate_to_width(note, avail),
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
+        return;
+    }
     // The greyed column titles above the Boot Priority rows.
     if r.kind == RowKind::BootpriHeader {
         for (x, title) in [
@@ -5871,7 +5890,7 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader | RowKind::BootpriHeader => {}
+        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
@@ -7486,6 +7505,67 @@ mod tests {
             h >= TITLE_H
                 + SHORTCUT_ROWS.len() * SHORTCUT_ROW_H
                 + SHORTCUT_NOTES.len() * SHORTCUT_NOTE_H
+        );
+    }
+
+    /// The ROM tab's identification line is drawn under its path row, in the
+    /// greyed note colour, and only once there is something to say: an image
+    /// no checksum names leaves the line blank rather than an empty box.
+    #[test]
+    fn the_rom_tab_draws_its_identification_line_under_the_path_row() {
+        use super::super::window::{texture_height, texture_width};
+        let scale = 1;
+        let (w, h) = (texture_width(scale), texture_height(scale));
+        // Pixels painted in the note colour on the note row (row 1, under
+        // the Kickstart ROM path row).
+        let note_row_pixels = |frame: &[u8], rect: Rect| {
+            let row_y = launcher_row_y(rect, 1);
+            let mut lit = 0;
+            for y in row_y..row_y + LAUNCH_ROW_H {
+                for x in launcher_pane_x(rect)..rect.x + rect.w - LAUNCH_MARGIN {
+                    let p = (y * w + x) * 4;
+                    if frame[p..p + 4] == PANEL_TEXT_DIM.to_le_bytes() {
+                        lit += 1;
+                    }
+                }
+            }
+            lit
+        };
+        let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
+
+        let mut setup = launcher::MachineSetup::default();
+        setup.set_path(
+            LauncherField::Rom,
+            std::path::PathBuf::from("mystery-dump.rom"),
+        );
+        let mut unknown = LauncherState::new(setup.clone());
+        unknown.tab = LauncherTab::Rom;
+        let mut known = LauncherState::new(setup);
+        known.tab = LauncherTab::Rom;
+        known.set_rom_note_for_test(LauncherField::Rom, "Kickstart 3.1 (40.68) A1200");
+
+        let mut blank_frame = vec![0u8; w * h * 4];
+        let ui = UiState {
+            panel: Some(panel_of(unknown)),
+            ..Default::default()
+        };
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        draw(&mut blank_frame, scale, &ui, None, None);
+        assert_eq!(
+            note_row_pixels(&blank_frame, rect),
+            0,
+            "an unidentified image must leave the note line empty"
+        );
+
+        let mut frame = vec![0u8; w * h * 4];
+        let ui = UiState {
+            panel: Some(panel_of(known)),
+            ..Default::default()
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        assert!(
+            note_row_pixels(&frame, rect) > 0,
+            "the identification is drawn under the ROM path row"
         );
     }
 
@@ -9372,6 +9452,33 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-whdload");
+
+        // The ROM tab: each path row with the identification of the image on
+        // it greyed underneath.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(MachineModel::Cd32));
+        setup.set_path(
+            LauncherField::Rom,
+            std::path::PathBuf::from("kick40060.CD32"),
+        );
+        setup.set_path(
+            LauncherField::ExtendedRom,
+            std::path::PathBuf::from("cd32ext.rom"),
+        );
+        let mut state = LauncherState::new(setup);
+        state.tab = LauncherTab::Rom;
+        state.set_rom_note_for_test(LauncherField::Rom, "Kickstart 3.1 (40.60) CD32");
+        state.set_rom_note_for_test(LauncherField::ExtendedRom, "CD32 extended ROM (40.60)");
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "launcher-rom");
 
         // The Storage tab, whose six sub-page links wrap onto a second row.
         let mut frame = vec![0u8; w * h * 4];

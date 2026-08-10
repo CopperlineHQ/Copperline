@@ -555,6 +555,12 @@ pub enum RowKind {
     /// The greyed `Drive` / `Priority` / `Status` column titles above the Boot
     /// Priority rows. Non-interactive; its `field` is inert.
     BootpriHeader,
+    /// A greyed, non-interactive line under the row it belongs to, carrying
+    /// something looked up rather than set: the ROM tab's identification of
+    /// the chosen image (see [`crate::romdb`]). Its `field` is the row it
+    /// annotates, so it is hidden and greyed along with it, and it draws
+    /// nothing when there is nothing to say.
+    Note,
     /// A floppy drive's media row: an image path with Browse/Clear, or the
     /// real interface in use with a Configure button once bridged.
     FloppyMedia,
@@ -719,9 +725,14 @@ const MEMORY_ROWS: [Row; 6] = [
     row(F::AccelRam, "Accelerator RAM", Cycle),
     row(F::Z3Ram, "Zorro III RAM", Cycle),
 ];
-const ROM_ROWS: [Row; 2] = [
+// Each ROM row is followed by a greyed line naming what the chosen image
+// checksums to ("Kickstart 3.1 (40.68) A1200"), since a ROM file's name says
+// only what its dumper called it.
+const ROM_ROWS: [Row; 4] = [
     row(F::Rom, "Kickstart ROM", PathRow),
+    row(F::Rom, "", RowKind::Note),
     row(F::ExtendedRom, "Extended ROM", PathRow),
+    row(F::ExtendedRom, "", RowKind::Note),
 ];
 // Each drive is a greyed "DFn:" heading with its settings indented under it. The
 // heading is keyed on the drive's image field so `row_hidden` drops it along
@@ -4979,6 +4990,16 @@ impl FsFamily {
     }
 }
 
+/// What a ROM row's chosen image turned out to be, remembered against the
+/// path it was read from. Identification opens and checksums the file, which
+/// a redraw must never do, so it happens only when the path in the field
+/// changes (see [`LauncherState::sync_rom_notes`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RomNote {
+    path: Option<PathBuf>,
+    text: Option<String>,
+}
+
 /// The full interactive state of the open configuration panel.
 #[derive(Debug, Clone)]
 pub struct LauncherState {
@@ -4988,6 +5009,9 @@ pub struct LauncherState {
     pub workshop: ImageWorkshop,
     pub tab: LauncherTab,
     pub status: Option<StatusMessage>,
+    /// The Kickstart / extended ROM identifications shown on the ROM tab,
+    /// in that order.
+    rom_notes: [RomNote; 2],
     /// The text field being typed into, and the edit buffer, when one has
     /// focus (a plugin string option or a drive volume name).
     editing: Option<EditTarget>,
@@ -5332,14 +5356,59 @@ impl LauncherState {
         // Read the host devices as the screen opens so the pickers show what is
         // connected now.
         setup.refresh_host_devices();
-        Self {
+        let mut state = Self {
             setup,
             workshop: ImageWorkshop::default(),
             tab: LauncherTab::System,
             status: None,
+            rom_notes: Default::default(),
             editing: None,
             edit_buffer: String::new(),
+        };
+        // Name the ROMs the incoming configuration already carries.
+        state.sync_rom_notes();
+        state
+    }
+
+    /// Re-identify the ROM images when the chosen files change.
+    ///
+    /// Identification opens and checksums the image, so it must never happen
+    /// on a redraw: the result is kept against the path it came from and this
+    /// does nothing at all while that path stays put. Call it wherever a
+    /// control may have changed the configuration (browsing to an image,
+    /// clearing a row, resetting to defaults, loading a config file).
+    pub fn sync_rom_notes(&mut self) {
+        for (slot, field) in [(0, F::Rom), (1, F::ExtendedRom)] {
+            let path = self.setup.path(field).map(Path::to_path_buf);
+            if self.rom_notes[slot].path == path {
+                continue;
+            }
+            self.rom_notes[slot].text = path.as_deref().and_then(crate::config::rom_identification);
+            self.rom_notes[slot].path = path;
         }
+    }
+
+    /// What the image on a ROM row was identified as, for its [`RowKind::Note`]
+    /// line. `None` for an image no checksum names, and for every other field.
+    pub fn rom_note(&self, field: LauncherField) -> Option<&str> {
+        let slot = match field {
+            F::Rom => 0,
+            F::ExtendedRom => 1,
+            _ => return None,
+        };
+        self.rom_notes[slot].text.as_deref()
+    }
+
+    /// Stand in for a recognised image, so the ROM tab can be drawn and
+    /// tested without a real Kickstart on the host.
+    #[cfg(test)]
+    pub fn set_rom_note_for_test(&mut self, field: LauncherField, text: &str) {
+        let slot = match field {
+            F::ExtendedRom => 1,
+            _ => 0,
+        };
+        self.rom_notes[slot].path = self.setup.path(field).map(Path::to_path_buf);
+        self.rom_notes[slot].text = Some(text.to_string());
     }
 
     /// The text field currently being edited, if any.
@@ -6995,6 +7064,78 @@ mod tests {
             assert_eq!(setup.path(field), None);
         }
         assert_eq!(setup.to_raw().whdload, crate::config::RawWhdload::default());
+    }
+
+    #[test]
+    fn the_rom_tab_carries_an_identification_line_under_each_path_row() {
+        // Each ROM path row is followed by a note row keyed on the same
+        // field, so the identification is hidden and greyed with its row.
+        let rows = rows(
+            LauncherTab::Rom,
+            ParallelDevice::None,
+            SerialMode::Off,
+            false,
+        );
+        let shape: Vec<(&str, RowKind, LauncherField)> =
+            rows.iter().map(|r| (r.label, r.kind, r.field)).collect();
+        assert_eq!(
+            shape,
+            [
+                ("Kickstart ROM", RowKind::Path, F::Rom),
+                ("", RowKind::Note, F::Rom),
+                ("Extended ROM", RowKind::Path, F::ExtendedRom),
+                ("", RowKind::Note, F::ExtendedRom),
+            ]
+        );
+
+        let mut state = LauncherState::new(MachineSetup::default());
+        // Nothing chosen: the value column says the machine boots the
+        // bundled AROS, and there is no image to identify.
+        assert_eq!(state.setup.value_label(F::Rom), "(bundled AROS)");
+        assert_eq!(state.rom_note(F::Rom), None);
+        assert_eq!(state.rom_note(F::ExtendedRom), None);
+
+        // A file that is not a known ROM (and here does not exist at all)
+        // leaves the line blank rather than claiming anything.
+        state
+            .setup
+            .set_path(F::Rom, PathBuf::from("/roms/mystery.rom"));
+        state.sync_rom_notes();
+        assert_eq!(state.rom_note(F::Rom), None);
+
+        // A recognised image: the note names the Kickstart, and the value
+        // column still shows the file the user picked.
+        state.set_rom_note_for_test(F::Rom, "Kickstart 3.1 (40.68) A1200");
+        assert_eq!(state.setup.value_label(F::Rom), "mystery.rom");
+        assert_eq!(state.rom_note(F::Rom), Some("Kickstart 3.1 (40.68) A1200"));
+        // The identification is cached against the path: syncing again with
+        // the same file in the field must not read (and so re-identify) it.
+        state.sync_rom_notes();
+        assert_eq!(state.rom_note(F::Rom), Some("Kickstart 3.1 (40.68) A1200"));
+        // Choosing another file does re-identify, and clearing the row drops
+        // the note with it.
+        state
+            .setup
+            .set_path(F::Rom, PathBuf::from("/roms/other.rom"));
+        state.sync_rom_notes();
+        assert_eq!(state.rom_note(F::Rom), None);
+        state.set_rom_note_for_test(F::Rom, "Kickstart 1.3 (34.5) A500/A1000/A2000");
+        state.setup.clear_path(F::Rom);
+        state.sync_rom_notes();
+        assert_eq!(state.rom_note(F::Rom), None);
+        // The extended ROM keeps its own line.
+        assert_eq!(state.rom_note(F::ExtendedRom), None);
+        state
+            .setup
+            .set_path(F::ExtendedRom, PathBuf::from("/roms/cd32-ext.rom"));
+        state.set_rom_note_for_test(F::ExtendedRom, "CD32 extended ROM (40.60)");
+        assert_eq!(state.rom_note(F::Rom), None);
+        assert_eq!(
+            state.rom_note(F::ExtendedRom),
+            Some("CD32 extended ROM (40.60)")
+        );
+        // Only the ROM rows have one.
+        assert_eq!(state.rom_note(F::Df0Image), None);
     }
 
     #[test]

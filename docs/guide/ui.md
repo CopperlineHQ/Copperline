@@ -373,9 +373,13 @@ Shown only when something is on the port.
   Kickstart, then optionally a second file for the extended ROM (512 KiB at
   $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
   extended ROM). The machine then cold-resets, as if the chip had been
-  swapped and the power cycled.
+  swapped and the power cycled. The OSD names the image it fitted -- the
+  file name plus the Kickstart it was identified as, e.g.
+  `ROM: kick40068.A1200 (Kickstart 3.1 (40.68) A1200)`.
 - **Keyboard Shortcuts...**: the shortcut reference.
-- **About...**: app version plus a summary of the emulated machine, and
+- **About...**: app version plus a summary of the emulated machine -- its
+  `ROM:` line names the boot ROM file and, for a released image, which
+  Kickstart it is (identified by checksum, see [](configuration)) -- and
   credits including Copperline's contributors and Patreon sponsors (see
   `CREDITS.md`). Builds
   made from an untagged git commit append the short commit ID to the version
@@ -424,7 +428,11 @@ The layout is:
   *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
   *ROM*
   (Kickstart and
-  extended ROM), *Floppy* (drive count and speed, then each wired drive as a
+  extended ROM, each with a greyed line under it naming what the chosen
+  image is -- `Kickstart 3.1 (40.68) A1200` -- identified by checksum rather
+  than by file name, and left blank for an image Copperline does not know;
+  see [](configuration)),
+  *Floppy* (drive count and speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
   drives that are not enabled are hidden rather than greyed. Each drive also
   carries a **Physical drive** tick box that hands the bay to a physical
