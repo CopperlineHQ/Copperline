@@ -132,6 +132,10 @@ can be starred without starring the others.
 
 Select a game and press **Run** to play it.
 
+Once there are twenty games or more, a row of letter buttons appears
+above the list. Click one to jump to the first game starting with it;
+letters your collection has no games under are greyed.
+
 ### Where the details come from
 
 **Scan** matches each of your games against the OpenRetro database, mostly

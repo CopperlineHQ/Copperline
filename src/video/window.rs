@@ -6336,6 +6336,18 @@ impl App {
                 }
             }
             #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryJump(bucket) => {
+                let whdload_entry = self
+                    .launcher_state()
+                    .is_some_and(|state| state.setup.whdload_enabled());
+                let visible = crate::video::ui::launcher_panel_rect(&self.ui)
+                    .map(|rect| crate::video::ui::library_visible_rows(rect, whdload_entry))
+                    .unwrap_or(1);
+                if let Some(state) = self.launcher_state_mut() {
+                    state.jump_to_bucket(bucket, visible);
+                }
+            }
+            #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouriteScroll(delta) => {
                 let whdload_entry = self
                     .launcher_state()

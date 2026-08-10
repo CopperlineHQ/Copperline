@@ -5151,6 +5151,38 @@ impl ScrollRate {
     }
 }
 
+/// The buckets the A-Z shortcut row offers, in the order it draws them.
+///
+/// Digits first, then everything that starts with neither a digit nor a
+/// letter, then the alphabet. A game is filed by the first character of the
+/// name the list shows for it, so what you click matches what you read.
+#[cfg(feature = "game-library")]
+pub const AZ_BUCKETS: usize = 28;
+
+/// The label on bucket `at`.
+#[cfg(feature = "game-library")]
+pub fn az_label(at: usize) -> &'static str {
+    const LETTERS: [&str; 26] = [
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+        "S", "T", "U", "V", "W", "X", "Y", "Z",
+    ];
+    match at {
+        0 => "0-9",
+        1 => "#",
+        _ => LETTERS.get(at - 2).copied().unwrap_or("#"),
+    }
+}
+
+/// Which bucket a title belongs to.
+#[cfg(feature = "game-library")]
+pub fn az_bucket_of(title: &str) -> usize {
+    match title.chars().next() {
+        Some(c) if c.is_ascii_digit() => 0,
+        Some(c) if c.is_ascii_alphabetic() => 2 + (c.to_ascii_uppercase() as usize - 'A' as usize),
+        _ => 1,
+    }
+}
+
 /// Which way a caret is being stepped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaretMove {
@@ -6290,6 +6322,35 @@ impl LauncherState {
         let last_start = self.library.games.len().saturating_sub(visible);
         let at = self.library.scroll as isize + delta;
         self.library.scroll = at.clamp(0, last_start as isize) as usize;
+    }
+
+    /// Which buckets the list has games in, so the row can grey the rest.
+    pub fn az_buckets_present(&self) -> [bool; AZ_BUCKETS] {
+        let mut present = [false; AZ_BUCKETS];
+        for entry in self.library.games.entries() {
+            if let Some(slot) = present.get_mut(az_bucket_of(entry.title())) {
+                *slot = true;
+            }
+        }
+        present
+    }
+
+    /// Jump the list to the first game in a bucket, and choose it.
+    pub fn jump_to_bucket(&mut self, bucket: usize, visible: usize) {
+        let Some(at) = self
+            .library
+            .games
+            .entries()
+            .iter()
+            .position(|entry| az_bucket_of(entry.title()) == bucket)
+        else {
+            return;
+        };
+        self.select_library_game(at);
+        // The letter's first game at the top of the box rather than merely
+        // on screen: the point of the jump is to see what is under it.
+        let last_start = self.library.games.len().saturating_sub(visible);
+        self.library.scroll = at.min(last_start);
     }
 
     pub fn scroll_favourites(&mut self, delta: isize, visible: usize) {
@@ -8611,6 +8672,61 @@ mod tests {
         assert_eq!(setup.whdload_machine(), M::Auto);
         setup.cycle(F::WhdloadMachine, false);
         assert_eq!(setup.whdload_machine(), M::Copperline, "and backwards");
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn the_az_row_files_games_and_jumps_to_them() {
+        use crate::gamelib::{Game, Known, Library};
+        assert_eq!(az_label(0), "0-9");
+        assert_eq!(az_label(1), "#");
+        assert_eq!(az_label(2), "A");
+        assert_eq!(az_label(AZ_BUCKETS - 1), "Z");
+
+        // Filed by the first character of the name shown, whatever case.
+        assert_eq!(az_bucket_of("Turrican"), az_bucket_of("turrican"));
+        assert_eq!(az_bucket_of("Zool"), AZ_BUCKETS - 1);
+        assert_eq!(az_bucket_of("1943"), 0);
+        assert_eq!(az_bucket_of("+4 Bonus"), 1, "neither letter nor digit");
+        assert_eq!(az_bucket_of(""), 1, "nothing to file it under");
+
+        let named = |name: &str| {
+            Some(Game {
+                name: name.to_string(),
+                ..Game::default()
+            })
+        };
+        let known = |file: &str, name: &str| Known {
+            file: file.to_string(),
+            game: named(name),
+            manual: false,
+            slave_sha1: None,
+        };
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.library.db.set_known(vec![
+            known("a.lha", "Alien Breed"),
+            known("t1.lha", "Turrican"),
+            known("t2.lha", "Turrican II"),
+            known("z.lha", "Zool"),
+        ]);
+        state.library.games = Library::known(Path::new("/games"), &state.library.db);
+
+        let present = state.az_buckets_present();
+        assert!(present[az_bucket_of("Alien Breed")]);
+        assert!(present[az_bucket_of("Turrican")]);
+        assert!(!present[0], "no game starts with a digit");
+        assert!(!present[az_bucket_of("Xenon")], "nothing under X");
+
+        // Jumping lands on the first of that letter, and chooses it.
+        state.jump_to_bucket(az_bucket_of("Turrican"), 2);
+        let at = state.library.selected;
+        assert_eq!(state.library.games.entries()[at].title(), "Turrican");
+        assert_eq!(state.library.scroll, at, "it is put at the top of the box");
+
+        // A letter with nothing under it does nothing at all.
+        let before = state.library.selected;
+        state.jump_to_bucket(az_bucket_of("Xenon"), 2);
+        assert_eq!(state.library.selected, before);
     }
 
     #[cfg(feature = "game-library")]
