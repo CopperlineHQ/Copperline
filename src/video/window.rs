@@ -6,6 +6,8 @@
 //! wgpu presentation stay on the main thread.
 
 use super::deinterlace::{Deinterlacer, OUT_HEIGHT};
+#[cfg(feature = "game-library")]
+use super::launcher::StatusKind;
 use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage};
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
@@ -1034,6 +1036,21 @@ pub struct App {
     /// Files from DroppedFile events, coalesced in about_to_wait: winit
     /// delivers one event per file, and a multi-file drop must act once.
     pending_dropped_files: Vec<PathBuf>,
+    /// A support archive being fetched by the WHDLoad page.
+    #[cfg(feature = "game-library")]
+    whdload_job: Option<WhdloadDownload>,
+    /// A library scan, while one is running. Held here rather than in the
+    /// launcher state for the same reason the other jobs are: it owns a
+    /// worker and a channel, neither of which a cloned state could carry.
+    #[cfg(feature = "game-library")]
+    library_scan: Option<crate::gamelib::Scan>,
+    /// A sign-in in flight.
+    #[cfg(feature = "game-library")]
+    login_job: Option<LoginJob>,
+    /// When a status line that reports something finished should go away.
+    /// A failure stays until something replaces it; only a success has a
+    /// reason to clear itself.
+    status_until: Option<std::time::Instant>,
     /// A disk image being written by the launcher's workshop. A large,
     /// fully-allocated image takes long enough that writing it on this
     /// thread would look like a hang, so it runs on a worker and the loop
@@ -1507,6 +1524,52 @@ impl ImageToMake {
     }
 }
 
+/// A WHDLoad support archive being fetched, and the row waiting for it.
+#[cfg(feature = "game-library")]
+/// The most any metadata field takes. Long enough for the longest game
+/// title anyone has, short enough that a paste of a whole document does
+/// not become the name of a game.
+#[cfg(feature = "game-library")]
+const META_FIELD_MAX: usize = 120;
+
+/// The first line of the host clipboard, trimmed.
+///
+/// One line of it: what these boxes hold is a password or a title, not a
+/// document, and a newline in the middle of one is a paste that went wrong.
+#[cfg(feature = "game-library")]
+fn clipboard_line() -> String {
+    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+        Ok(text) => text.lines().next().unwrap_or_default().trim().to_string(),
+        Err(e) => {
+            log::warn!("launcher: clipboard unavailable: {e}");
+            String::new()
+        }
+    }
+}
+
+/// How long a status line that reports something finished stays up. Long
+/// enough to read, short enough that it is gone before it can be mistaken
+/// for the state of things now.
+#[cfg(feature = "game-library")]
+const STATUS_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A sign-in in flight: the request runs on a worker so a slow or
+/// unreachable service cannot freeze the launcher mid-dialog.
+#[cfg(feature = "game-library")]
+struct LoginJob {
+    rx: std::sync::mpsc::Receiver<
+        Result<crate::gamelib::openretro::Session, crate::gamelib::openretro::Error>,
+    >,
+}
+
+/// A WHDLoad support archive being fetched, and the row waiting for it.
+#[cfg(feature = "game-library")]
+struct WhdloadDownload {
+    rx: std::sync::mpsc::Receiver<Result<PathBuf, crate::gamelib::support::Error>>,
+    field: crate::video::launcher::LauncherField,
+    archive: crate::gamelib::support::Archive,
+}
+
 /// An image being written on a worker thread, and what to call it when it
 /// lands.
 struct ImageJob {
@@ -1717,6 +1780,13 @@ impl App {
             osd: None,
             drop_hover: false,
             pending_dropped_files: Vec::new(),
+            #[cfg(feature = "game-library")]
+            library_scan: None,
+            #[cfg(feature = "game-library")]
+            login_job: None,
+            status_until: None,
+            #[cfg(feature = "game-library")]
+            whdload_job: None,
             image_job: None,
             disk_playlists,
             disk_write_protected,
@@ -3811,7 +3881,46 @@ impl ApplicationHandler for App {
         // launcher is up with the machine off -- nothing else would wake
         // the loop to notice it finished.
         self.poll_image_job();
-        let writing_image = self.image_job.is_some();
+        #[cfg(feature = "game-library")]
+        self.poll_whdload_download();
+        #[cfg(feature = "game-library")]
+        self.poll_login();
+        #[cfg(feature = "game-library")]
+        self.poll_library_scan();
+        #[cfg(feature = "game-library")]
+        if self
+            .launcher_state_mut()
+            .is_some_and(|state| state.poll_library_covers())
+        {
+            self.request_redraw();
+        }
+        // A line that reported something finished takes itself down.
+        if self
+            .status_until
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.status_until = None;
+            if let Some(state) = self.launcher_state_mut() {
+                state.status = None;
+            }
+            self.request_redraw();
+        }
+        #[cfg(feature = "game-library")]
+        let downloading = self.whdload_job.is_some()
+            || self.library_scan.is_some()
+            || self.login_job.is_some()
+            // A cover on its way needs the loop awake to collect it. It
+            // arrives on a worker, and nothing else would wake the loop to
+            // notice -- which is a picture that only appears the next time
+            // you happen to press something.
+            || self
+                .launcher_state()
+                .is_some_and(|state| state.library.covers.pending());
+        #[cfg(not(feature = "game-library"))]
+        let downloading = false;
+        // A status line waiting to clear itself keeps the loop awake too,
+        // or it would sit there until something else woke it.
+        let writing_image = self.image_job.is_some() || downloading || self.status_until.is_some();
         event_loop.set_control_flow(if running || osd_active || calibrating || writing_image {
             ControlFlow::Poll
         } else {
@@ -4735,8 +4844,33 @@ impl App {
             ),
             // A command line wants held-key repeat for typing and editing.
             Some(ToolPanelKind::Console) => true,
+            #[cfg(feature = "game-library")]
+            _ => self.launcher_accepts_repeat(code),
+            #[cfg(not(feature = "game-library"))]
             _ => false,
         }
+    }
+
+    /// Whether a held key should keep arriving on a launcher page.
+    ///
+    /// The Library list walks with the arrows and speeds up while they are
+    /// held, which needs the repeats to reach it -- without this, holding
+    /// one does nothing at all. The sign-in dialog is a text field, where
+    /// held Backspace clearing a box is what anyone would expect.
+    #[cfg(feature = "game-library")]
+    fn launcher_accepts_repeat(&self, code: KeyCode) -> bool {
+        use crate::video::launcher::LauncherTab;
+        let Some(state) = self.launcher_state() else {
+            return false;
+        };
+        if state.login.is_some() {
+            return true;
+        }
+        state.tab == LauncherTab::WhdloadLibrary
+            && matches!(
+                code,
+                KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Home | KeyCode::End
+            )
     }
 
     fn should_drop_repeated_main_key(
@@ -5973,6 +6107,15 @@ impl App {
                     if tab == crate::video::launcher::LauncherTab::HostDisk {
                         state.setup.refresh_host_disks();
                     }
+                    // Likewise the Library: a package added since the
+                    // launcher opened should be in the list when the page
+                    // is, and the database may have been synced meanwhile.
+                    #[cfg(feature = "game-library")]
+                    if tab == crate::video::launcher::LauncherTab::WhdloadLibrary {
+                        let at = crate::paths::config_dir().unwrap_or_default();
+                        state.library.games = crate::gamelib::Library::default();
+                        state.refresh_library(&at);
+                    }
                 }
             }
             UiControl::LauncherCycle { field, forward } => {
@@ -6035,6 +6178,106 @@ impl App {
                 }
             }
             UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherWhdloadDownload(field) => self.whdload_download(field),
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryScroll(delta) => {
+                // How many rows are on screen comes from the panel's own
+                // size, so the scroll stops where the list does.
+                let pinned = self
+                    .launcher_state()
+                    .is_some_and(|state| state.setup.whdload_enabled());
+                let visible = crate::video::ui::launcher_panel_rect(&self.ui)
+                    .map(|rect| crate::video::ui::library_visible_rows(rect, pinned))
+                    .unwrap_or(1);
+                if let Some(state) = self.launcher_state_mut() {
+                    state.scroll_library(delta, visible);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryPick(drawn) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    let at = state.library.scroll + drawn;
+                    state.select_library_game(at);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryFavourite(drawn) => {
+                let config = crate::paths::config_dir().unwrap_or_default();
+                if let Some(state) = self.launcher_state_mut() {
+                    let at = state.library.scroll + drawn;
+                    state.toggle_library_favourite(at);
+                    // Written out as it changes, so a favourite survives a
+                    // session that ends any way at all.
+                    state.save_library_database(&config);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryFavouritePick(drawn) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.select_favourite(drawn);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryFavouriteRemove(drawn) => {
+                let config = crate::paths::config_dir().unwrap_or_default();
+                if let Some(state) = self.launcher_state_mut() {
+                    state.remove_favourite(drawn);
+                    state.save_library_database(&config);
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryRefresh => self.library_refresh(),
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryUpdate => self.library_update_metadata(),
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherOpenRetroLogin => self.openretro_login_or_out(),
+            #[cfg(feature = "game-library")]
+            UiControl::LoginField(field) => {
+                if let Some(login) = self.launcher_login_mut() {
+                    login.focus = field;
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LauncherLibraryEdit => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    if !state.open_meta_editor() {
+                        state.status = Some(StatusMessage::err("Choose a game first"));
+                    }
+                }
+                self.request_redraw();
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::MetaField(field) => {
+                if let Some(meta) = self.launcher_meta_mut() {
+                    meta.focus = field;
+                }
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::MetaArt => self.meta_choose_art(),
+            #[cfg(feature = "game-library")]
+            UiControl::MetaSave => self.meta_save(),
+            #[cfg(feature = "game-library")]
+            UiControl::MetaClear => {
+                if let Some(meta) = self.launcher_meta_mut() {
+                    // Only in the editor: nothing is lost until Save.
+                    meta.values = Default::default();
+                    meta.art = None;
+                }
+                self.request_redraw();
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::MetaCancel => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.meta = None;
+                }
+                self.request_redraw();
+            }
+            #[cfg(feature = "game-library")]
+            UiControl::LoginOk => self.login_submit(),
+            #[cfg(feature = "game-library")]
+            UiControl::LoginCancel => self.login_close(),
             UiControl::LauncherFsFamily { field, family } => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_commit();
@@ -6472,6 +6715,12 @@ impl App {
             if self.input_map_handle_key(code) {
                 return true;
             }
+            // So do the launcher's dialogs: each is the only thing being
+            // answered while it is up, Escape included.
+            #[cfg(feature = "game-library")]
+            if self.login_handle_key(code, text) || self.meta_handle_key(code, text) {
+                return true;
+            }
             if code == KeyCode::Escape {
                 // While typing into a plugin option, Escape cancels the edit
                 // rather than closing the panel.
@@ -6507,10 +6756,223 @@ impl App {
             if self.launcher_handle_edit_key(code, text) {
                 return true;
             }
+            #[cfg(feature = "game-library")]
+            if self.library_handle_key(code) {
+                return true;
+            }
             return false;
         }
         self.default_tool_key_kind()
             .is_some_and(|kind| self.ui_handle_tool_key(kind, code))
+    }
+
+    /// Type into the sign-in dialog, and answer it.
+    ///
+    /// Return is OK and Escape is Cancel, Tab moves between the two boxes,
+    /// and everything else goes into whichever has focus. Characters come
+    /// from the text winit gives rather than from key codes, so a keyboard
+    /// that is not the one this was written on still types what it says.
+    #[cfg(feature = "game-library")]
+    fn login_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
+        use crate::video::launcher::LoginField;
+        if self
+            .launcher_state()
+            .is_none_or(|state| state.login.is_none())
+        {
+            return false;
+        }
+        match code {
+            KeyCode::Escape => {
+                self.login_close();
+                self.request_redraw();
+                return true;
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.login_submit();
+                self.request_redraw();
+                return true;
+            }
+            _ => {}
+        }
+        // Cmd+V on macOS, Ctrl+V anywhere: a password long enough to be
+        // worth having is a password worth pasting.
+        if code == KeyCode::KeyV
+            && (host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key())
+        {
+            self.login_paste();
+            return true;
+        }
+        let held = host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key();
+        let Some(login) = self.launcher_login_mut() else {
+            return false;
+        };
+        match code {
+            // Anything else typed with a command modifier held is a
+            // shortcut that is not ours, not text.
+            _ if held && code != KeyCode::Tab && code != KeyCode::Backspace => {}
+            KeyCode::Tab => {
+                login.focus = match login.focus {
+                    LoginField::User => LoginField::Pass,
+                    LoginField::Pass => LoginField::User,
+                };
+            }
+            KeyCode::Backspace => match login.focus {
+                LoginField::User => {
+                    login.user.pop();
+                }
+                LoginField::Pass => login.pass.pop(),
+            },
+            _ => {
+                // Printable characters only: a control code typed into a
+                // password is a character nobody can see and nobody meant.
+                let typed = text.unwrap_or_default();
+                for c in typed.chars().filter(|c| !c.is_control()) {
+                    match login.focus {
+                        LoginField::User if login.user.chars().count() < 64 => login.user.push(c),
+                        LoginField::User => {}
+                        LoginField::Pass => login.pass.push(c),
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// Type into the metadata editor, and answer it.
+    ///
+    /// Return saves, Escape cancels, Tab walks the fields. The same
+    /// shape as the sign-in dialog, because two dialogs that behave
+    /// differently is two things to learn.
+    #[cfg(feature = "game-library")]
+    fn meta_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
+        use crate::video::launcher::MetaField;
+        if self
+            .launcher_state()
+            .is_none_or(|state| state.meta.is_none())
+        {
+            return false;
+        }
+        match code {
+            KeyCode::Escape => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.meta = None;
+                }
+                self.request_redraw();
+                return true;
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.meta_save();
+                return true;
+            }
+            _ => {}
+        }
+        if code == KeyCode::KeyV
+            && (host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key())
+        {
+            let line = clipboard_line();
+            if let Some(meta) = self.launcher_meta_mut() {
+                let focus = meta.focus;
+                meta.value_mut(focus).push_str(&line);
+            }
+            self.request_redraw();
+            return true;
+        }
+        let held = host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key();
+        let Some(meta) = self.launcher_meta_mut() else {
+            return false;
+        };
+        let focus = meta.focus;
+        match code {
+            _ if held && code != KeyCode::Tab && code != KeyCode::Backspace => {}
+            KeyCode::Tab => {
+                let at = MetaField::ALL.iter().position(|&f| f == focus).unwrap_or(0);
+                meta.focus = MetaField::ALL[(at + 1) % MetaField::ALL.len()];
+            }
+            KeyCode::Backspace => {
+                meta.value_mut(focus).pop();
+            }
+            _ => {
+                for c in text.unwrap_or_default().chars().filter(|c| !c.is_control()) {
+                    let value = meta.value_mut(focus);
+                    if value.chars().count() < META_FIELD_MAX {
+                        value.push(c);
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// Paste the host clipboard into whichever box has focus.
+    ///
+    /// One line of it: a password manager hands over a password, not a
+    /// document, and a newline in the middle of one is a paste that went
+    /// wrong rather than a password with a newline in it.
+    #[cfg(feature = "game-library")]
+    fn login_paste(&mut self) {
+        let line = clipboard_line();
+        if let Some(login) = self.launcher_login_mut() {
+            for c in line.chars().filter(|c| !c.is_control()) {
+                match login.focus {
+                    crate::video::launcher::LoginField::User if login.user.chars().count() < 64 => {
+                        login.user.push(c)
+                    }
+                    crate::video::launcher::LoginField::User => {}
+                    crate::video::launcher::LoginField::Pass => login.pass.push(c),
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Walk the Library's lists with the arrow keys, and launch with
+    /// Return.
+    ///
+    /// Held, the arrows accelerate the way the wheel does and through the
+    /// same rate: a key repeating is a scroll continuing, and the two
+    /// should not build up at different speeds.
+    #[cfg(feature = "game-library")]
+    fn library_handle_key(&mut self, code: KeyCode) -> bool {
+        use crate::video::launcher::LauncherTab;
+        if self
+            .launcher_state()
+            .is_none_or(|state| state.tab != LauncherTab::WhdloadLibrary)
+        {
+            return false;
+        }
+        // Return launches what is chosen, which is what Run would do: on
+        // this page the selection is the game, so the two are one action.
+        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            self.launcher_run();
+            return true;
+        }
+        let step = match code {
+            KeyCode::ArrowUp => -1,
+            KeyCode::ArrowDown => 1,
+            KeyCode::Home => isize::MIN,
+            KeyCode::End => isize::MAX,
+            _ => return false,
+        };
+        let pinned = self
+            .launcher_state()
+            .is_some_and(|state| state.setup.whdload_enabled());
+        let visible = crate::video::ui::launcher_panel_rect(&self.ui)
+            .map(|rect| crate::video::ui::library_visible_rows(rect, pinned))
+            .unwrap_or(1);
+        if let Some(state) = self.launcher_state_mut() {
+            let rows = match step {
+                isize::MIN | isize::MAX => step,
+                _ => {
+                    let rate = state.library.scroll_rate.rows_for_notch(Instant::now());
+                    step * rate.max(1) as isize
+                }
+            };
+            state.step_library_focus(rows, visible);
+        }
+        self.request_redraw();
+        true
     }
 
     /// Cancel an in-progress plugin-option text edit, if one is focused.
@@ -7314,13 +7776,17 @@ impl App {
             // or a CHD (a raw .bin is a cue sheet's payload, not loadable
             // alone).
             LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "chd"]),
-            // A WHDLoad package as distributed (.lha), or a bare .slave
-            // picked inside an already-extracted one (stored as its
-            // directory, which is what the stager mounts). Both cases
-            // spelled out like the ROM filters.
-            LauncherField::WhdloadGame => {
-                dialog.add_filter("WHDLoad packages", &["lha", "LHA", "slave", "Slave"])
-            }
+            // A WHDLoad package however it arrived: as distributed
+            // (`.lha`), zipped, or as a bare `.slave` picked inside an
+            // already-extracted one (stored as its directory, which is
+            // what the stager mounts). Spelled in both cases like the ROM
+            // filters, since the dialog matches exactly.
+            LauncherField::WhdloadGame => dialog.add_filter(
+                "WHDLoad packages",
+                &[
+                    "lha", "LHA", "lzh", "LZH", "zip", "ZIP", "slave", "Slave", "slav", "Slav",
+                ],
+            ),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
             // SCSI units take hard disks or CD images (a cue/iso/chd
             // attaches a CD-ROM drive at that ID).
@@ -7413,6 +7879,421 @@ impl App {
     ///
     /// The file is chosen first: the save dialog is where a user cancels,
     /// and nothing is written until they have named somewhere to write it.
+    /// Fetch a WHDLoad support archive, and point its row at what landed.
+    ///
+    /// On a worker for the same reason an image write is: the archives are
+    /// a megabyte or two over somebody else's link, and a window that stops
+    /// answering is read as a hung program.
+    #[cfg(feature = "game-library")]
+    fn whdload_download(&mut self, field: crate::video::launcher::LauncherField) {
+        use crate::gamelib::support::Archive;
+        let archive = match field {
+            crate::video::launcher::LauncherField::WhdloadWhdPackage => Archive::Whdload,
+            crate::video::launcher::LauncherField::WhdloadSkickPackage => Archive::Skick,
+            _ => return,
+        };
+        if self.whdload_job.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::gamelib::support::download(archive));
+        });
+        self.whdload_job = Some(WhdloadDownload { rx, field, archive });
+        self.set_launcher_status(crate::video::launcher::StatusMessage::busy(format!(
+            "Downloading {}...",
+            archive.file_name()
+        )));
+    }
+
+    /// Collect a finished download and point the row at it.
+    #[cfg(feature = "game-library")]
+    fn poll_whdload_download(&mut self) {
+        let Some(job) = &self.whdload_job else { return };
+        let landed = match job.rx.try_recv() {
+            Ok(landed) => landed,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(crate::gamelib::support::Error::Fetch("stopped".into()))
+            }
+        };
+        let job = self.whdload_job.take().expect("checked above");
+        let status = match landed {
+            Ok(at) => {
+                info!(
+                    "whdload: fetched {} to {}",
+                    job.archive.file_name(),
+                    at.display()
+                );
+                let name = job.archive.file_name().to_string();
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.set_path(job.field, at);
+                }
+                crate::video::launcher::StatusMessage::ok(format!("Downloaded {name}"))
+            }
+            Err(e) => {
+                warn!("whdload: {} download failed: {e}", job.archive.file_name());
+                crate::video::launcher::StatusMessage::err(e.to_string())
+            }
+        };
+        self.set_launcher_status(status);
+        self.request_redraw();
+    }
+
+    /// The one button: sign in when signed out, and out when in.
+    #[cfg(feature = "game-library")]
+    fn openretro_login_or_out(&mut self) {
+        let signed_in = self
+            .launcher_state()
+            .is_some_and(|state| state.openretro.is_some());
+        if !signed_in {
+            if let Some(state) = self.launcher_state_mut() {
+                state.edit_commit();
+                state.login = Some(crate::video::launcher::LoginDialog::default());
+                state.status = None;
+            }
+            return;
+        }
+        // Signing out hands the token back rather than merely forgetting
+        // it, so the session ends at the service too and not just here.
+        // Whatever the dialog was still holding goes with it.
+        self.login_close();
+        self.login_job = None;
+        if let Some(state) = self.launcher_state_mut() {
+            if let Some(session) = state.openretro.take() {
+                match std::sync::Arc::try_unwrap(session) {
+                    // Handing the token back is a request, and a request
+                    // to a service that is not answering must not be the
+                    // launcher standing still. Nothing waits on it.
+                    Ok(session) => {
+                        std::thread::spawn(move || session.close());
+                    }
+                    // A scan still holds it. Dropping our handle is all
+                    // that is left to do; the scan gives it back when it
+                    // finishes with it.
+                    Err(shared) => drop(shared),
+                }
+            }
+        }
+        // And a scan running on that session has nothing to sync with.
+        self.stop_library_scan();
+        self.set_launcher_status(StatusMessage::ok("Logged out of OpenRetro"));
+        self.clear_status_in(STATUS_LINGER);
+        self.request_redraw();
+    }
+
+    /// The dialog being typed into, if one is up.
+    #[cfg(feature = "game-library")]
+    fn launcher_login_mut(&mut self) -> Option<&mut crate::video::launcher::LoginDialog> {
+        self.launcher_state_mut()?.login.as_mut()
+    }
+
+    #[cfg(feature = "game-library")]
+    fn launcher_meta_mut(&mut self) -> Option<&mut crate::video::launcher::MetaDialog> {
+        self.launcher_state_mut()?.meta.as_mut()
+    }
+
+    /// Choose a picture for the selected game, and put it in the cache
+    /// under a name of its own.
+    ///
+    /// PNG only, because a PNG decoder is all Copperline carries. The file
+    /// is decoded before it is kept, so what goes into the cache is
+    /// something that will draw rather than something that merely has the
+    /// right extension.
+    #[cfg(feature = "game-library")]
+    fn meta_choose_art(&mut self) {
+        let Some(picked) = rfd::FileDialog::new()
+            .set_title("Choose cover art")
+            .add_filter("PNG image", &["png"])
+            .pick_file()
+        else {
+            return;
+        };
+        let config = crate::paths::config_dir().unwrap_or_default();
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        let Some(file) = state.meta.as_ref().map(|meta| meta.file.clone()) else {
+            return;
+        };
+        let png = match std::fs::read(&picked) {
+            Ok(png) => png,
+            Err(e) => {
+                log::warn!("game library: cannot read {}: {e}", picked.display());
+                state.status = Some(StatusMessage::err("Could not read that file"));
+                return;
+            }
+        };
+        // Brought to the same bound the fetched covers have, so the cache
+        // holds one kind of thing and a photograph of a box does not sit
+        // in there at several megabytes.
+        let Some(png) = crate::gamelib::cover::normalise(&png) else {
+            state.status = Some(StatusMessage::err("Cover art must be a PNG image"));
+            return;
+        };
+        // Named after the package rather than after the bytes, so choosing
+        // a different picture replaces the old one instead of leaving it
+        // in the cache with nothing pointing at it.
+        let key = format!("manual-{}", crate::gamelib::Database::key_for(&file));
+        let cache = state.setup.library_cache(&config);
+        let at =
+            crate::gamelib::cover::cover_file(&crate::gamelib::scan::covers_path(&cache), &key);
+        if let Err(e) = crate::paths::ensure_parent(&at).and_then(|()| std::fs::write(&at, &png)) {
+            log::warn!("game library: cannot write {}: {e}", at.display());
+            state.status = Some(StatusMessage::err("Could not save that image"));
+            return;
+        }
+        if let Some(meta) = &mut state.meta {
+            meta.art = Some(key.clone());
+        }
+        // Drop whatever was held under that name, so the new picture is
+        // read rather than the one it replaced.
+        state.library.covers.forget_one(&key);
+        state.status = None;
+        self.request_redraw();
+    }
+
+    /// Commit the editor and write the store.
+    #[cfg(feature = "game-library")]
+    fn meta_save(&mut self) {
+        let config = crate::paths::config_dir().unwrap_or_default();
+        if let Some(state) = self.launcher_state_mut() {
+            state.commit_meta_editor();
+            state.save_library_database(&config);
+            // The list is rebuilt so a changed name sorts where it belongs.
+            state.library.games = Default::default();
+            state.refresh_library(&config);
+            state.status = Some(StatusMessage::ok("Metadata saved"));
+        }
+        self.clear_status_in(STATUS_LINGER);
+        self.request_redraw();
+    }
+
+    /// Put the dialog away, wiping what was typed on the way out rather
+    /// than leaving it for the allocator to hand on.
+    #[cfg(feature = "game-library")]
+    fn login_close(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            if let Some(login) = &mut state.login {
+                login.pass.clear();
+            }
+            state.login = None;
+        }
+    }
+
+    /// Trade what was typed for a token, on a worker.
+    #[cfg(feature = "game-library")]
+    fn login_submit(&mut self) {
+        if self.login_job.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        let Some(login) = &mut state.login else {
+            return;
+        };
+        if login.user.trim().is_empty() || login.pass.is_empty() {
+            state.status = Some(StatusMessage::err("Enter a username and a password"));
+            return;
+        }
+        login.sending = true;
+        let user = login.user.trim().to_string();
+        // Moved to the worker rather than copied: `Secret` is not `Clone`
+        // for exactly this reason, and taking it leaves the dialog holding
+        // an empty one.
+        let pass = std::mem::take(&mut login.pass);
+        state.status = Some(StatusMessage::busy("Logging in to OpenRetro..."));
+        std::thread::spawn(move || {
+            let opened = crate::gamelib::openretro::Session::open(
+                &user,
+                &pass,
+                crate::gamelib::openretro::DEVICE_ID,
+            );
+            drop(pass);
+            let _ = tx.send(opened);
+        });
+        self.login_job = Some(LoginJob { rx });
+    }
+
+    /// Collect a finished sign-in.
+    #[cfg(feature = "game-library")]
+    fn poll_login(&mut self) {
+        let Some(job) = &self.login_job else { return };
+        let landed = match job.rx.try_recv() {
+            Ok(landed) => landed,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(
+                crate::gamelib::openretro::Error::Offline("the request stopped".into()),
+            ),
+        };
+        self.login_job = None;
+        let status = match landed {
+            Ok(session) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.openretro = Some(std::sync::Arc::new(session));
+                }
+                StatusMessage::ok("Logged in to OpenRetro")
+            }
+            Err(e) => {
+                // The status bar gets the one thing to do something
+                // about; the log gets the whole of it.
+                log::warn!("openretro: sign-in failed: {e}");
+                StatusMessage::err(match e {
+                    crate::gamelib::openretro::Error::Unauthorized => "Wrong username or password",
+                    _ => "Could not reach OpenRetro",
+                })
+            }
+        };
+        self.login_close();
+        self.set_launcher_status(status);
+        self.clear_status_in(STATUS_LINGER);
+        self.request_redraw();
+    }
+
+    /// Re-read the game folder. Cheap: it lists files and reads back what
+    /// the last scan resolved, and asks the service nothing.
+    #[cfg(feature = "game-library")]
+    fn library_refresh(&mut self) {
+        let config = crate::paths::config_dir().unwrap_or_default();
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        let (found, fresh) = state.rescan_library(&config);
+        state.status = Some(match (found, fresh) {
+            (0, _) => StatusMessage::err("No packages found in the game library"),
+            (found, 0) => StatusMessage::ok(format!("Found {found} games")),
+            (found, fresh) => {
+                StatusMessage::ok(format!("Found {found} games, {fresh} without metadata"))
+            }
+        });
+        self.clear_status_in(STATUS_LINGER);
+        self.request_redraw();
+    }
+
+    /// Resolve metadata and art for everything in the game folder.
+    #[cfg(feature = "game-library")]
+    fn library_update_metadata(&mut self) {
+        if self.library_scan.is_some() {
+            return;
+        }
+        let config = crate::paths::config_dir().unwrap_or_default();
+        let Some(state) = self.launcher_state() else {
+            return;
+        };
+        let Some(folder) = state.library_folder() else {
+            self.set_launcher_status(StatusMessage::err("No game library set"));
+            self.clear_status_in(STATUS_LINGER);
+            return;
+        };
+        let cache = state.setup.library_cache(&config);
+        let session = state.openretro.clone();
+        // What the last scan worked out about each package, so this one
+        // opens only the archives it has not seen.
+        let held = state
+            .library
+            .db
+            .known()
+            .iter()
+            .filter_map(|k| Some((k.file.clone(), k.slave_sha1.clone()?)))
+            .collect();
+        self.library_scan = Some(crate::gamelib::Scan::start(folder, cache, session, held));
+        self.set_launcher_status(StatusMessage::busy("Starting the scan..."));
+        self.request_redraw();
+    }
+
+    /// Move a scan along, and take its results as they arrive.
+    ///
+    /// Every message is acted on rather than only the newest: a poll that
+    /// catches up on several at once still carries the one that delivered
+    /// the metadata, and dropping it would lose a whole scan's work. Only
+    /// the last one's wording reaches the status line, which is the part
+    /// that genuinely only wants the newest.
+    #[cfg(feature = "game-library")]
+    fn poll_library_scan(&mut self) {
+        use crate::gamelib::Progress;
+        let Some(scan) = &self.library_scan else {
+            return;
+        };
+        let said = scan.poll();
+        if said.is_empty() {
+            return;
+        }
+        let config = crate::paths::config_dir().unwrap_or_default();
+        let mut status = None;
+        for progress in said {
+            let text = progress.message();
+            let kind = match progress {
+                // The metadata, as soon as it is known: names, years and
+                // publishers fill in while the art is still being
+                // fetched, and a scan interrupted after this point has
+                // still delivered everything but the pictures.
+                Progress::Matched { known, .. } => {
+                    if let Some(state) = self.launcher_state_mut() {
+                        state.library.db.set_known(known);
+                        state.save_library_database(&config);
+                        // Rebuilt against what was just resolved, so a
+                        // changed name sorts where it now belongs.
+                        state.library.games = Default::default();
+                        state.refresh_library(&config);
+                    }
+                    StatusKind::Busy
+                }
+                // Art that has just landed: only the ones that came back
+                // empty are looked for again, so nothing already decoded
+                // is thrown away and read a second time.
+                Progress::Art { .. } => {
+                    if let Some(state) = self.launcher_state_mut() {
+                        state.library.covers.forget_missing();
+                    }
+                    StatusKind::Busy
+                }
+                Progress::Done { complete, .. } => {
+                    if let Some(state) = self.launcher_state_mut() {
+                        state.library.covers.forget();
+                    }
+                    self.library_scan = None;
+                    match complete {
+                        true => StatusKind::Ok,
+                        false => StatusKind::Busy,
+                    }
+                }
+                Progress::Failed(_) => {
+                    self.library_scan = None;
+                    StatusKind::Error
+                }
+                _ => StatusKind::Busy,
+            };
+            status = Some(StatusMessage { text, kind });
+        }
+        if let Some(status) = status {
+            let settled = !matches!(status.kind, StatusKind::Busy);
+            self.set_launcher_status(status);
+            if settled {
+                self.clear_status_in(STATUS_LINGER);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Stop a scan and forget it. Pressing Run is the end of the launcher,
+    /// and a worker fetching art for a page nobody is looking at is work
+    /// taken from the machine that was just started.
+    #[cfg(feature = "game-library")]
+    fn stop_library_scan(&mut self) {
+        if let Some(scan) = self.library_scan.take() {
+            scan.stop();
+            log::info!("game library: scan stopped");
+        }
+    }
+
+    /// Have the status line clear itself after `linger`.
+    #[cfg(feature = "game-library")]
+    fn clear_status_in(&mut self, linger: std::time::Duration) {
+        self.status_until = Some(std::time::Instant::now() + linger);
+    }
+
     fn launcher_create_image(&mut self, field: crate::video::launcher::LauncherField) {
         use crate::video::launcher::LauncherField as F;
         // Whatever is half-typed counts: pressing a button is as much an
@@ -7610,6 +8491,13 @@ impl App {
                         // Re-read host device lists so the loaded setup's pickers
                         // are populated, not stuck on "Default"/"None".
                         state.setup.refresh_host_devices();
+                        // The loaded configuration may name a different
+                        // library and a different cache. Everything the
+                        // page held belongs to the one before it.
+                        #[cfg(feature = "game-library")]
+                        {
+                            state.library = Default::default();
+                        }
                         state.status = Some(StatusMessage::ok(format!(
                             "Loaded {}",
                             display_file_name(&path)
@@ -7688,6 +8576,11 @@ impl App {
                 return;
             }
         }
+        // Whoever pressed Run is done with the launcher, and a scan still
+        // fetching art would be taking host time from the machine that is
+        // about to start.
+        #[cfg(feature = "game-library")]
+        self.stop_library_scan();
         let raw = match self.launcher_state().map(|s| s.setup.to_raw()) {
             Some(raw) => raw,
             None => return,
