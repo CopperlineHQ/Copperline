@@ -183,7 +183,7 @@ const STATUS_BAR_HEIGHT: usize = 44;
 /// plus the status bar below it unless it is hidden (in which case the display
 /// scales to fill the whole window).
 fn window_present_height() -> usize {
-    present_height() + mt32_panel_height() + status_bar_height()
+    present_height() + mt32_panel_height() + keyboard_panel_height() + status_bar_height()
 }
 
 /// Scanlines the CRT pass draws across the display rect: the emulated field
@@ -231,11 +231,11 @@ fn status_bar_height() -> usize {
     }
 }
 
-/// Where the status bar starts: below the display, and below the MT-32
-/// panel when one is up. The bar sits at the very bottom either way; the
-/// panel takes the strip immediately above it.
+/// Where the status bar starts: below the display and below whichever
+/// strips are up. The bar sits at the very bottom either way; the strips
+/// take the room immediately above it.
 fn status_bar_top() -> usize {
-    present_height() + mt32_panel_height()
+    keyboard_panel_top() + keyboard_panel_height()
 }
 
 /// The MT-32 panel's height, or 0 while it is not shown. It sits between the
@@ -246,6 +246,21 @@ fn mt32_panel_height() -> usize {
         return mt32panel::MT32_PANEL_HEIGHT;
     }
     0
+}
+
+/// Where the on-screen keyboard starts: under the display and under the
+/// MT-32's panel, the way a keyboard sits below whatever is on the desk.
+fn keyboard_panel_top() -> usize {
+    present_height() + mt32_panel_height()
+}
+
+/// The on-screen keyboard's height, or 0 while it is not shown.
+fn keyboard_panel_height() -> usize {
+    if super::keyboard_panel_shown() {
+        kbdpanel::KBD_PANEL_HEIGHT
+    } else {
+        0
+    }
 }
 const STATUS_LABEL_X: usize = 18;
 const STATUS_LED_X: usize = 58;
@@ -297,18 +312,26 @@ const SHOT_BUTTON_X: usize = FB_WIDTH - 190;
 const SHOT_BUTTON_W: usize = 22;
 const VOLUME_SLIDER_X: usize = ui::MENU_BUTTON_X - 10 - VOLUME_SLIDER_W;
 const VOLUME_SLIDER_Y: usize = STATUS_CONTROL_Y + 7;
-const VOLUME_SLIDER_W: usize = 72;
+// The slider is as wide as the slot between the media controls and the menu
+// button leaves once the two icon toggles below have taken their 24 pixels
+// each: the bar has one free run of x, and every control on it competes for
+// the same worst case (four floppies plus a CD, ending at x=372).
+const VOLUME_SLIDER_W: usize = 48;
 const VOLUME_SLIDER_H: usize = 8;
 const VOLUME_KNOB_W: usize = 8;
 const VOLUME_KNOB_H: usize = 16;
 const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 16;
-// Joystick input-source toggle: a compact icon button just left of the volume
-// glyph, in the otherwise-free slot before the right-hand control cluster. The
-// widest media layout (four floppies plus a CD) ends at x=372, so a 22px button
-// here clears both the media controls and the speaker glyph; this is verified by
-// `joystick_toggle_clears_worst_case_media`.
+// Joystick input-source and on-screen-keyboard toggles: compact icon buttons
+// just left of the volume glyph, in the otherwise-free slot before the
+// right-hand control cluster. The widest media layout (four floppies plus a
+// CD) ends at x=372, so the pair of 22px buttons here clears both the media
+// controls and the speaker glyph; this is verified by
+// `joystick_toggle_clears_worst_case_media` and
+// `keyboard_toggle_clears_worst_case_media`.
 const JOY_TOGGLE_W: usize = 22;
 const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
+const KBD_TOGGLE_W: usize = 22;
+const KBD_TOGGLE_X: usize = JOY_TOGGLE_X - 2 - KBD_TOGGLE_W;
 // The standard-window and TV-aperture constants live in
 // `video/present_common.rs` with the presentation helpers they anchor
 // (re-exported through `use present::*` below). Both the live window and
@@ -645,6 +668,25 @@ fn rawkey_index(rawkey: u8) -> usize {
     (rawkey & 0x7F) as usize
 }
 
+/// Where a rawkey transition came from.
+///
+/// Two things can have a key down at once -- a finger on the host keyboard
+/// and a click on the on-screen keyboard -- and each keeps its own held
+/// table so its own repeats and stale releases are dropped. What the
+/// machine is told is the *aggregate*: the key is down for it while either
+/// source holds it, and only a change in that aggregate is enqueued,
+/// recorded, or noted for replay. Without that, pressing a cap the host is
+/// already holding would be swallowed as a duplicate while its release
+/// still went through, cutting the host's key short -- and the strip would
+/// go on drawing a latch the keyboard MCU never heard about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySource {
+    /// The host keyboard, both the focused and raw-device paths.
+    Host,
+    /// The on-screen keyboard strip.
+    Panel,
+}
+
 fn rawkey_is_held(held_rawkeys: &[bool; 128], rawkey: u8) -> bool {
     held_rawkeys[rawkey_index(rawkey)]
 }
@@ -921,7 +963,19 @@ pub struct App {
     /// impl catches every exit path, including the headless captures).
     record_input_path: Option<PathBuf>,
     modifiers: ModifiersState,
+    /// Rawkeys the host keyboard is holding down (both the focused
+    /// `KeyboardInput` path and the raw-device qualifier path feed it).
+    /// One of the two sources behind [`App::amiga_rawkey_held`]; see
+    /// [`KeySource`] for why the machine is told about the aggregate
+    /// rather than about either source on its own.
     held_rawkeys: [bool; 128],
+    /// Rawkeys the on-screen keyboard is holding down: the cap under the
+    /// mouse and every latched qualifier. The other source.
+    panel_held_rawkeys: [bool; 128],
+    /// Physical state of the qualifier keys as the raw-device listener
+    /// sees them, which is not a source of its own: it is what stops a
+    /// winit `ModifiersState` update from releasing a qualifier the
+    /// hardware still has down (see `update_host_modifiers`).
     raw_device_held_rawkeys: [bool; 128],
     main_window_focused: bool,
     /// Whether the user has sized the main window themselves, in which case
@@ -1095,6 +1149,11 @@ pub struct App {
     /// hardware this is firmware -- so it is kept here.
     #[cfg(feature = "mt32")]
     mt32_panel: mt32panel::Mt32Panel,
+    /// The on-screen Amiga keyboard: which cap the mouse is holding, which
+    /// qualifiers are latched, and which legends the caps wear. Whether the
+    /// strip is up at all is `video::keyboard_panel_shown`, because the
+    /// canvas height is derived from it.
+    kbd_panel: kbdpanel::KbdPanelState,
     /// Mapped host keys currently held for keyboard joystick emulation.
     keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
     /// Host-key to controller-control bindings, loaded from the per-user
@@ -1635,6 +1694,7 @@ impl App {
             record_input_path: record_input,
             modifiers: ModifiersState::empty(),
             held_rawkeys: [false; 128],
+            panel_held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
             window_manually_sized: false,
@@ -1688,6 +1748,7 @@ impl App {
             rewind_armed,
             #[cfg(feature = "mt32")]
             mt32_panel: mt32panel::Mt32Panel::default(),
+            kbd_panel: kbdpanel::KbdPanelState::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
@@ -3161,8 +3222,14 @@ impl ApplicationHandler for App {
                     });
                 #[cfg(not(feature = "mt32"))]
                 let mt32_hover_changed = false;
+                // The keycaps light under the pointer the same way.
+                let kbd_hover_changed = kbdpanel::shown_panel_rect(keyboard_panel_top())
+                    .is_some_and(|panel| {
+                        kbdpanel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
+                    });
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
                     || mt32_hover_changed
+                    || kbd_hover_changed
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
                 {
                     self.request_redraw();
@@ -3216,6 +3283,9 @@ impl ApplicationHandler for App {
                     self.volume_dragging = false;
                     self.analyzer_dragging = false;
                     self.set_mouse_captured(false);
+                    // The button that was holding a keycap will lift over
+                    // some other window, where no MouseInput reaches us.
+                    self.release_keyboard_panel_key();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -3286,6 +3356,27 @@ impl ApplicationHandler for App {
                             if let Some(control) = mt32panel::control_at(panel, pos) {
                                 let left = button == MouseButton::Left;
                                 self.press_mt32_control(control, left, pos);
+                            }
+                            return;
+                        }
+                    }
+                }
+                // A cap on the on-screen keyboard is let go wherever the
+                // pointer has got to: one mouse button holds one key, so
+                // the lift ends it even if the hand slid off the strip.
+                if !pressed && button == MouseButton::Left && self.release_keyboard_panel_key() {
+                    return;
+                }
+                // The keyboard strip sits between the MT-32's panel and the
+                // status bar and takes its own clicks, as they both do.
+                if pressed && !self.mouse_captured && button == MouseButton::Left {
+                    if let (Some(pos), Some(panel)) = (
+                        self.cursor_pos,
+                        kbdpanel::shown_panel_rect(keyboard_panel_top()),
+                    ) {
+                        if panel.contains(pos) {
+                            if let Some(control) = kbdpanel::control_at(panel, pos) {
+                                self.press_keyboard_panel_control(control);
                             }
                             return;
                         }
@@ -3416,6 +3507,7 @@ impl ApplicationHandler for App {
                     paused: self.paused,
                     media,
                     joystick_input_mode: self.joystick_input_mode,
+                    keyboard_panel_shown: super::keyboard_panel_shown(),
                     hover,
                     control_connected,
                 };
@@ -3428,6 +3520,9 @@ impl ApplicationHandler for App {
                 let mt32_panel = super::mt32_panel_shown()
                     .then(|| self.mt32_panel_view())
                     .flatten();
+                // The Caps Lock lamp is the MCU's, so it is read fresh
+                // every frame rather than mirrored from the clicks.
+                let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
@@ -3516,6 +3611,9 @@ impl ApplicationHandler for App {
                     #[cfg(feature = "mt32")]
                     if let Some(panel) = &mt32_panel {
                         mt32panel::draw(frame, panel, present_height(), r.texture_scale);
+                    }
+                    if let Some(panel) = &kbd_panel {
+                        kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
                     }
                     if !super::status_bar_hidden() {
                         draw_status_bar(frame, &view, r.texture_scale);
@@ -4946,6 +5044,7 @@ impl App {
             mt32_attached,
             mt32_input,
             mt32_panel: crate::video::mt32_panel_shown(),
+            keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
             sampler_inputs: &sampler_inputs,
@@ -5124,6 +5223,7 @@ impl App {
                 self.show_osd(format!("Autofire: {label}"));
                 self.request_redraw();
             }
+            A::ToggleKeyboardPanel => self.toggle_keyboard_panel(),
 
             #[cfg(feature = "midi")]
             A::SetMidiInput(name) => {
@@ -5329,6 +5429,101 @@ impl App {
             let _ = self.resync_canvas_height();
         }
         self.request_redraw();
+    }
+
+    /// Show or hide the on-screen keyboard, resizing the presentation to
+    /// match. Like the MT-32's panel, the strip takes height from the
+    /// canvas and the draw helpers size themselves from the flag, so the
+    /// two have to move together. Every route in goes through here.
+    fn set_keyboard_panel_shown(&mut self, shown: bool) {
+        if shown == crate::video::keyboard_panel_shown() {
+            return;
+        }
+        if !shown {
+            // The strip is going away with keys still down on it; hand
+            // them back before it does, or the guest is left holding them.
+            self.release_keyboard_panel_holds();
+        }
+        // Decide before the flag flips whether the window still matches the
+        // canvas, so a manual resize survives.
+        let was_canvas_sized = self.window_is_canvas_sized();
+        crate::video::set_keyboard_panel_shown(shown);
+        if self.resync_canvas_height() {
+            self.follow_canvas_change(was_canvas_sized);
+        } else {
+            crate::video::set_keyboard_panel_shown(!shown);
+            let _ = self.resync_canvas_height();
+        }
+        self.request_redraw();
+    }
+
+    fn toggle_keyboard_panel(&mut self) {
+        let shown = !crate::video::keyboard_panel_shown();
+        self.set_keyboard_panel_shown(shown);
+        self.show_osd(if shown {
+            "On-screen keyboard shown"
+        } else {
+            "On-screen keyboard hidden"
+        });
+    }
+
+    /// A click on the on-screen keyboard. The strip works out what it
+    /// means; what comes back is rawkey transitions for the machine.
+    fn press_keyboard_panel_control(&mut self, control: kbdpanel::KbdControl) {
+        let outcome = self.kbd_panel.press(control, Instant::now());
+        let close = outcome.close;
+        self.apply_keyboard_panel_outcome(outcome);
+        if close {
+            self.set_keyboard_panel_shown(false);
+        }
+        self.request_redraw();
+    }
+
+    /// The mouse button lifted. True when it was holding a keycap, in
+    /// which case this click was the keyboard's and nobody else's.
+    fn release_keyboard_panel_key(&mut self) -> bool {
+        if !self.kbd_panel.holding_key() {
+            return false;
+        }
+        let outcome = self.kbd_panel.release(Instant::now());
+        self.apply_keyboard_panel_outcome(outcome);
+        self.request_redraw();
+        true
+    }
+
+    /// Hand the strip's key transitions to the machine. They go through
+    /// the same door as a host keystroke -- recorded by `--record-input`
+    /// and noted for replay exactly as a real one is -- but as their own
+    /// source, so a cap and a host key can hold the same rawkey without
+    /// either cutting the other short (see [`KeySource`]).
+    fn apply_keyboard_panel_outcome(&mut self, outcome: kbdpanel::KbdOutcome) {
+        for (rawkey, pressed) in outcome.keys {
+            self.handle_amiga_key_event_from(KeySource::Panel, rawkey, pressed);
+        }
+    }
+
+    /// Let go of everything the on-screen keyboard is holding, through the
+    /// aggregate path, so the machine hears the releases and the drawn
+    /// latches match what it believes.
+    ///
+    /// Called wherever the machine or its keyboard is about to be replaced
+    /// or restarted: a latch is a host-side affordance and has no business
+    /// outliving the machine it was latched against.
+    fn release_keyboard_panel_holds(&mut self) {
+        let outcome = self.kbd_panel.release_all();
+        self.apply_keyboard_panel_outcome(outcome);
+    }
+
+    /// What the strip looks like this frame, with the Caps Lock lamp read
+    /// off the keyboard MCU rather than mirrored from the clicks: a
+    /// save-state load moves that lamp with no key pressed.
+    fn keyboard_panel_view(&mut self) -> kbdpanel::KbdPanelView {
+        let caps_lit = self.emu.bus().keyboard.caps_lock_led();
+        let hover = self
+            .cursor_pos
+            .zip(kbdpanel::shown_panel_rect(keyboard_panel_top()))
+            .and_then(|(pos, panel)| kbdpanel::control_at(panel, pos));
+        self.kbd_panel.view(caps_lit, hover)
     }
 
     /// The synth the panel is driving, when one is fitted and switched on.
@@ -5569,12 +5764,15 @@ impl App {
     /// resized, in which case the caller has to put its flag back: the draw
     /// helpers size themselves from the flag, so a taller canvas over a
     /// shorter buffer would index past it.
-    #[cfg(feature = "mt32")]
+    ///
+    /// Shared by every strip that takes a slice of the canvas -- the MT-32
+    /// panel and the on-screen keyboard -- since what has to follow the
+    /// change is the same in each case.
     fn resync_canvas_height(&mut self) -> bool {
         if let Some(r) = self.render.as_mut() {
             let surface = r.window.inner_size();
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
-                warn!("resize texture buffer for the MT-32 panel failed: {e}");
+                warn!("resize texture buffer for a canvas-height change failed: {e}");
                 return false;
             }
         }
@@ -5586,7 +5784,7 @@ impl App {
                     texture_width(tool.texture_scale) as u32,
                     texture_height(tool.texture_scale) as u32,
                 ) {
-                    warn!("resize tool texture buffer for the MT-32 panel failed: {e}");
+                    warn!("resize tool texture buffer for a canvas-height change failed: {e}");
                 }
                 tool.window.request_redraw();
             }
@@ -5625,6 +5823,7 @@ impl App {
                 self.cycle_joystick_input_mode();
                 self.request_redraw();
             }
+            BarControl::Keyboard => self.toggle_keyboard_panel(),
             BarControl::Volume => {}
         }
     }
@@ -7578,6 +7777,11 @@ impl App {
     /// powering it on. The previous (placeholder or running) machine, and its
     /// audio sink, are dropped here.
     fn run_machine(&mut self, emu: Emulator, cfg: &Config, raw: RawConfig) {
+        // Anything the on-screen keyboard is holding belongs to the
+        // machine being replaced, and has to be handed back while that
+        // machine is still here: the new one would otherwise come up with
+        // caps drawn latched that its keyboard MCU never heard of.
+        self.release_keyboard_panel_holds();
         self.emu = emu;
         // Any heat map the analyzer pane armed went with the machine that
         // was just replaced, so the pane owns nothing on this one until it
@@ -7956,6 +8160,12 @@ impl App {
     }
 
     fn load_state_from_path(&mut self, path: &std::path::Path) -> bool {
+        // The restored machine carries its own keyboard state, so the
+        // strip lets go of its holds against the machine that is still
+        // here. Done before the attempt rather than after a success: a
+        // release sent into the restored machine would be a key it never
+        // saw pressed.
+        self.release_keyboard_panel_holds();
         match self.emu.load_state(path) {
             Ok(outcome) => {
                 info!(
@@ -10761,12 +10971,44 @@ impl App {
         }
     }
 
+    /// Whether the machine is being told `rawkey` is down -- by the host
+    /// keyboard, by the on-screen one, or by both.
+    fn amiga_rawkey_held(&self, rawkey: u8) -> bool {
+        rawkey_is_held(&self.held_rawkeys, rawkey)
+            || rawkey_is_held(&self.panel_held_rawkeys, rawkey)
+    }
+
+    /// A transition from the host keyboard.
     fn handle_amiga_key_event(&mut self, rawkey: u8, pressed: bool) {
-        if rawkey_transition_is_duplicate(&self.held_rawkeys, rawkey, pressed) {
+        self.handle_amiga_key_event_from(KeySource::Host, rawkey, pressed);
+    }
+
+    /// A transition from `source`, reaching the machine only when it moves
+    /// the aggregate held state (see [`KeySource`]).
+    fn handle_amiga_key_event_from(&mut self, source: KeySource, rawkey: u8, pressed: bool) {
+        let idx = rawkey_index(rawkey);
+        let held = match source {
+            KeySource::Host => &self.held_rawkeys,
+            KeySource::Panel => &self.panel_held_rawkeys,
+        };
+        // Per-source: a winit auto-repeat re-presses a key this source
+        // already has down, and a source can be told to let go of
+        // something it never took.
+        if rawkey_transition_is_duplicate(held, rawkey, pressed) {
             return;
         }
-        let idx = rawkey_index(rawkey);
-        self.held_rawkeys[idx] = pressed;
+        let was_held = self.amiga_rawkey_held(rawkey);
+        match source {
+            KeySource::Host => self.held_rawkeys[idx] = pressed,
+            KeySource::Panel => self.panel_held_rawkeys[idx] = pressed,
+        }
+        // The other source is holding the same key, so the aggregate did
+        // not move: the machine already believes what this transition
+        // would tell it, and a recorded or replayed copy of it would
+        // reproduce the second holder rather than the keystroke.
+        if was_held == self.amiga_rawkey_held(rawkey) {
+            return;
+        }
 
         // Ctrl+Amiga+Amiga is no longer consumed host-side: the chord
         // travels to the keyboard MCU like every other transition, and
@@ -11062,6 +11304,10 @@ impl App {
     /// Power off: drop into a cold-boot state (RAM cleared) and park the
     /// test screen, so a later power-on comes up as a clean power cycle.
     fn power_off(&mut self) {
+        // A key held on the on-screen keyboard is let go before the power
+        // goes, so the cold-boot machine starts with the caps up and
+        // nothing latched against the machine that just stopped.
+        self.release_keyboard_panel_holds();
         self.powered_on = false;
         self.paused = false;
         self.sync_live_audio_suspension();
@@ -11103,6 +11349,11 @@ impl App {
     }
 
     fn reset_emulator(&mut self, clear_host_keys: bool) {
+        // The strip's latches are a host-side affordance: they must not
+        // ride through a reset and be re-reported by the MCU's power-up
+        // stream, which is what `begin_power_up` does with anything the
+        // matrix still shows held.
+        self.release_keyboard_panel_holds();
         if let Err(e) = self.emu.keyboard_reset() {
             error!("keyboard reset failed: {e:#}");
             self.cpu_halted = true;
@@ -11429,6 +11680,7 @@ mod console;
 mod control;
 mod crt_shader;
 mod host_input;
+mod kbdpanel;
 #[cfg(feature = "mt32")]
 mod mt32panel;
 mod present;

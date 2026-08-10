@@ -149,12 +149,57 @@ pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// Per-thread answers for the two strips that take height from the canvas,
+// in test builds only.
+//
+// Both flags have to be process-global in a running window: every draw
+// helper sizes and clips itself from the canvas height they decide, so a
+// parameter would have to be threaded through all of them. That is fine
+// for one window on one thread, but `cargo test` runs its tests in
+// parallel threads inside one process, where a test that put a strip up
+// would move the canvas under another test's buffer -- and the helpers,
+// which clamp against the height as it is *now*, would write past the end
+// of a buffer allocated for the shorter one. Each test thread therefore
+// carries its own answer, and the shared flag stays at its default for any
+// thread that never set one.
+#[cfg(test)]
+thread_local! {
+    static KEYBOARD_PANEL_SHOWN_LOCAL: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+    static MT32_PANEL_SHOWN_LOCAL: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the on-screen Amiga keyboard is shown under the display
+/// (status-bar button / menu). Main thread only, like [`SQUARE_PIXEL_ASPECT`];
+/// the atomic only satisfies `static` safety.
+static KEYBOARD_PANEL_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_keyboard_panel_shown(shown: bool) {
+    #[cfg(test)]
+    KEYBOARD_PANEL_SHOWN_LOCAL.with(|flag| flag.set(Some(shown)));
+    #[cfg(not(test))]
+    KEYBOARD_PANEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn keyboard_panel_shown() -> bool {
+    #[cfg(test)]
+    if let Some(shown) = KEYBOARD_PANEL_SHOWN_LOCAL.with(std::cell::Cell::get) {
+        return shown;
+    }
+    KEYBOARD_PANEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the MT-32's front panel is shown under the display
 /// (`[serial] mt32_panel`, toggled live from the menu). Main thread only,
 /// like [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
 static MT32_PANEL_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_mt32_panel_shown(shown: bool) {
+    #[cfg(test)]
+    MT32_PANEL_SHOWN_LOCAL.with(|flag| flag.set(Some(shown)));
+    #[cfg(not(test))]
     MT32_PANEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -179,6 +224,10 @@ pub fn mt32_lcd() -> crate::config::Mt32Lcd {
 }
 
 pub fn mt32_panel_shown() -> bool {
+    #[cfg(test)]
+    if let Some(shown) = MT32_PANEL_SHOWN_LOCAL.with(std::cell::Cell::get) {
+        return shown;
+    }
     MT32_PANEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
 }
 

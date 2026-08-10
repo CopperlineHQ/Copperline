@@ -89,6 +89,9 @@ Status Bar*):
   keyboard icon showing which source drives the joystick port. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
   [](#controller-ports).
+- **Keyboard toggle** (just left of the joystick toggle): a small keyboard
+  icon, lit while the on-screen Amiga keyboard is up. Click it to show or
+  hide it (see [](#on-screen-keyboard)).
 - **Volume slider**: drag, or scroll the mouse wheel over it for 5% steps.
 - **Hamburger menu button**: opens the pop-up menu (below).
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
@@ -96,6 +99,52 @@ Status Bar*):
 - **Pause / power / reboot buttons.** Pause freezes emulation while staying
   powered; power cold-boots (clears RAM) or powers off back to the test
   screen; reboot is a warm reset.
+
+(on-screen-keyboard)=
+## On-screen keyboard
+
+The keyboard button in the status bar, or *Input Settings > On-Screen
+Keyboard*, draws an Amiga keyboard in a strip between the display and the
+status bar. The window grows to make room for it: the picture keeps its
+size, the canvas gets taller, and hiding the keyboard gives the height
+back. A window you have resized yourself keeps its size, and the display
+reflows into it as usual.
+
+It is an **A600** -- the one Amiga keyboard with no numeric keypad, so the
+whole machine fits the window's width at a usable cap size. Clicking a cap
+sends that key's rawkey to the emulated keyboard MCU over the same
+authentic serial protocol a host keystroke uses, and is recorded the same
+way, so on-screen keys are captured by `--record-input` and replay from the
+resulting `--script` file. The two keyboards are independent holders of the
+same key: pressing a cap the host keyboard is already holding down changes
+nothing for the machine, and the key comes up only when the last of the two
+lets go.
+
+The keyboard is the way to reach the keys a host keyboard has no
+equivalent of -- Help, both Amiga keys, and the `#`/`~` key beside Return --
+and the way to drive a session entirely with the mouse.
+
+- **Qualifiers latch.** A mouse has one button, so Ctrl, both Shifts, both
+  Alts and both Amiga keys stay down when you click them: click one and it
+  is held for the next keystroke, then released with it. Click it twice in
+  quick succession to lock it down until you click it again; click a locked
+  one to let it go. Press and *hold* one instead, and it behaves like the
+  real key, coming up when the button does. A latched qualifier is drawn
+  with an orange ring, a locked one filled orange.
+- **Ctrl+Amiga+Amiga** is typed by latching the three, as any other chord
+  is. The moment the chord completes, the keyboard lets go of all three --
+  the MCU's reset protocol is already running, and qualifiers still held
+  would be reported held again through the power-up stream.
+- **Caps Lock** carries a lamp in the corner of its cap, driven by the
+  keyboard MCU itself rather than by the clicks, so it follows a
+  save-state load or a guest that toggles the key in software.
+- **UK/US legends.** The chip marked UK/US in the cursor notch swaps the
+  five caps a US A600 prints differently (`2`, `3`, `'`, and the two keys a
+  US machine ships blank). It changes what the caps say, not what they
+  send: the guest's own keymap decides that.
+- **The X chip** above it puts the keyboard away, the same as the status
+  bar button. It sits in the slot farthest from the cursor keys, so a
+  missed arrow cannot fold the keyboard away mid-game.
 
 ## Performance overlay
 
@@ -296,6 +345,8 @@ tool window or overlay.
   *held* fire button on live gamepad and keyboard input. Scripted input is
   never gated; see the `[input]` section of
   [Configuration](configuration.md).
+- **On-Screen Keyboard** (also the status-bar keyboard icon): draws an
+  Amiga keyboard under the display; see [](#on-screen-keyboard).
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Input Mapping...**: edits which host keys drive the controller controls,
   for both keyboard mappings; see [](#input-mapping).
@@ -654,8 +705,10 @@ continues.
 
 `Cmd+Shift+R` on macOS or `Alt+Shift+R` on Linux/Windows (or the menu's
 "Record Input") starts logging every input event that reaches the emulated
-machine -- key presses with their hold times, mouse buttons and motion,
-joystick / CD32-pad controls, analogue pot positions, and floppy inserts,
+machine -- key presses with their hold times (typed on the host keyboard
+or clicked on the [on-screen one](#on-screen-keyboard), which reaches the
+machine by the same path), mouse buttons and motion, joystick / CD32-pad
+controls, analogue pot positions, and floppy inserts,
 on whichever port carries each device -- each stamped
 with its emulated time. Pressing it again stops the recording and writes
 `copperline-input-<YYYYMMDDHHmmSS>.clscript` in the working directory: a plain
