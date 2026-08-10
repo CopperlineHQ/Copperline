@@ -16,11 +16,12 @@
 //!    and all of it before one. Without a signed-in session it is used as
 //!    it stands -- local first, always -- and a scan with neither a session
 //!    nor a snapshot is the one case that has nothing to work from.
-//! 2. **Reading.** Enough packages are opened to find out whether the
-//!    catalogue can identify them by the digest of their WHDLoad slave.
-//!    Where it can, every package is read and matched exactly; where it
-//!    cannot, the reading stops after the probe. See [`slave_digests`].
-//! 3. **Matching.** What the digests did not answer is looked up by name.
+//! 2. **Reading.** Each package is opened far enough to take the digest
+//!    of its WHDLoad slave, which identifies both the game and the
+//!    package itself across a rename. Only packages not read before.
+//!    See [`slave_digests`].
+//! 3. **Matching.** By that digest where the catalogue knows it, and by
+//!    name otherwise.
 //! 4. **Art.** Covers the catalogue points at and the cache has not got are
 //!    fetched. This is the long part of a first scan, and the part a second
 //!    one skips entirely.
@@ -404,7 +405,8 @@ fn read_digests(
                 }
                 let slot = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&at) = todo.get(slot) else { return };
-                if let Some(sha1) = read_slave_digest(&folder.join(&files[at])) {
+                let at_path = crate::package::under(folder, &files[at]);
+                if let Some(sha1) = read_slave_digest(&at_path) {
                     let _ = found_tx.send((at, sha1));
                 }
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;

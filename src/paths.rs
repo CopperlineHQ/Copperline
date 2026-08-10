@@ -50,6 +50,40 @@ pub fn whdload_support_dir() -> Option<PathBuf> {
     whdload_dir().map(|dir| dir.join("support"))
 }
 
+/// Where games are unpacked and their saves kept, when `[whdload] library`
+/// does not say otherwise. Beside the support archives rather than loose
+/// in `whdload/`, so what Copperline downloaded and what the guest wrote
+/// are told apart at a glance.
+///
+/// An installation that already has games directly under `whdload/` --
+/// where this used to be -- carries on using it. The library directory is
+/// where saves live, so moving it would leave somebody's savegames and
+/// highscores behind under a name nothing looks at any more.
+pub fn whdload_save_dir() -> Option<PathBuf> {
+    let whdload = whdload_dir()?;
+    let save = whdload.join("save");
+    if save.is_dir() || !holds_unpacked_games(&whdload) {
+        return Some(save);
+    }
+    log::info!(
+        "whdload: keeping the existing game library in {} (new installations use {})",
+        whdload.display(),
+        save.display()
+    );
+    Some(whdload)
+}
+
+/// Whether a directory holds games unpacked by an earlier version: an
+/// entry with the `.source` marker staging writes beside each one.
+fn holds_unpacked_games(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().join(".source").is_file())
+}
+
 /// The scanned library, when `[whdload] library_db` does not say otherwise.
 /// Beside the support archives, which is the other thing under `whdload/`
 /// that Copperline rather than the guest put there.

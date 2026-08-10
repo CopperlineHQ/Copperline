@@ -99,6 +99,11 @@ Each game gets a directory in the **game library** (by default
   game/     the unpacked package (WHDGame:), unpacked once, then reused
 ```
 
+The library defaults to `whdload/save/`, beside the `whdload/support/`
+the archives live in. An installation that already has games directly
+under `whdload/` -- where this used to be -- carries on using them where
+they are, since that is where its saves are.
+
 Both are mounted live through the host-directory service
 ([`[[filesys]]`](configuration.md)), so everything the game writes --
 savegames, highscores, configuration -- lands in `game/` on the host and
@@ -209,6 +214,25 @@ by its slave's digest rather than its name. **Clear** empties the fields;
 saving an empty entry hands it back to the scan. **Cancel** changes
 nothing.
 
+### Versions
+
+Collections carry the same game several times over -- `1.0`, `1.1`,
+`CD32`, a German release -- and there is no standard to how installers
+name them, so every one of them matches the same catalogue entry and the
+list shows a run of rows that read alike.
+
+**Version** is a metadata field like any other, except that the catalogue
+has no opinion about it. Where the library holds a named game under one
+title more than once, the page shows the package's own file name without
+its extension -- `.lha` against `.zip` is how it was packed, not which
+release it is. Edit it in **Update** to whatever tells them apart --
+"CD32 v1.1" -- and that is shown instead.
+
+A game held once, with nothing typed, has no version and no row. Neither
+has one the scan could not name: a file name under a row that says
+nothing else is not the answer to which release it is. Two
+lines is what the column shows and what the field accepts.
+
 ### Turning it off
 
 **A/V & Emu -> Emulation -> WHDLoad** is on by default. Off, the
@@ -224,7 +248,7 @@ runs are unaffected.
 ```toml
 [whdload]
 game = "path/to/Game.lha"   # .lha, .zip, or a folder with a .slave
-library = "..."             # game library; default: <config dir>/whdload
+library = "..."             # unpacked games and saves; default: <config>/whdload/save
 kickstarts = "..."          # directory scanned for Kickstart images
 args = "..."                # extra WHDLoad command-line options
 machine_type = "auto"       # or "copperline" to boot on this machine

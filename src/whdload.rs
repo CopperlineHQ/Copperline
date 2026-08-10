@@ -496,17 +496,20 @@ pub struct PreparedGame {
 /// it lists twice and both play, with a set of saves each, rather than
 /// the second one refusing to start because the first had taken the name.
 fn library_entry_name(game: &Path) -> String {
-    let name = |part: Option<&std::ffi::OsStr>| {
-        part.map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
+    let file = game
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // By name, not by asking the filesystem: the caller has already
+    // established this is a file, and `stem_of` drops only an extension
+    // this recognises -- `S.W.I.V.lha` keeps its dots.
     let keeps_stem = matches!(
-        crate::package::Kind::of(game),
+        crate::package::Kind::of_name(&file),
         Some(crate::package::Kind::Lha)
     );
-    sanitize_game_name(&match keeps_stem {
-        true => name(game.file_stem()),
-        false => name(game.file_name()),
+    sanitize_game_name(match keeps_stem {
+        true => crate::package::stem_of(&file),
+        false => &file,
     })
 }
 
@@ -621,9 +624,7 @@ pub fn game_and_options(raw: &RawConfig) -> (Option<PathBuf>, Options) {
                     }
                 }
             }
-            let lib = library
-                .clone()
-                .or_else(|| crate::paths::config_dir().map(|d| d.join("whdload")));
+            let lib = library.clone().or_else(crate::paths::whdload_save_dir);
             if let Some(lib) = lib {
                 kickstart_dirs.push(lib.join("Kickstarts"));
             }
@@ -713,12 +714,10 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
 
     let library = match &opts.library {
         Some(dir) => dir.clone(),
-        None => crate::paths::config_dir()
-            .map(|dir| dir.join("whdload"))
-            .context(
-                "no per-user directory available for the WHDLoad game library; \
+        None => crate::paths::whdload_save_dir().context(
+            "no per-user directory available for the WHDLoad game library; \
                  set [whdload] library in the configuration",
-            )?,
+        )?,
     };
 
     let game_home = library.join(library_entry_name(game));
@@ -1014,6 +1013,29 @@ mod tests {
     /// requirement: a person testing a new WHDLoad release, or one who
     /// keeps their own build, points the configuration at it and that is
     /// what gets staged.
+    #[test]
+    fn each_package_format_unpacks_somewhere_of_its_own() {
+        // Holding the same game as both an .lha and a .zip is a
+        // duplicate, which is the person's business: both play, with a set
+        // of saves each. The .lha keeps the bare-stem entry it has always
+        // used, so no existing library moves -- that is where saves live.
+        assert_eq!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.lha")),
+            "GoldenAxe_v1"
+        );
+        assert_eq!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.zip")),
+            "GoldenAxe_v1.zip"
+        );
+        assert_ne!(
+            library_entry_name(Path::new("/g/GoldenAxe_v1.lha")),
+            library_entry_name(Path::new("/g/GoldenAxe_v1.zip"))
+        );
+        // Only a recognised extension comes off, so a title with dots in
+        // it keeps them.
+        assert_eq!(library_entry_name(Path::new("/g/S.W.I.V.lha")), "S.W.I.V");
+    }
+
     #[test]
     fn a_hand_set_support_archive_is_the_one_used() {
         use crate::config::RawConfig;

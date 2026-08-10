@@ -4725,6 +4725,22 @@ const LIBRARY_COVER_BEZEL: usize = 5;
 /// Between the game list and the row of buttons under it.
 #[cfg(feature = "game-library")]
 const LIBRARY_BUTTON_GAP: usize = 8;
+/// How many lines the version under the cover runs to.
+#[cfg(feature = "game-library")]
+const LIBRARY_VERSION_LINES: usize = 2;
+/// How many lines each catalogue field under the cover runs to. A
+/// developer is sometimes credited to nine people, and without a limit
+/// that one field pushes everything under it off the panel.
+#[cfg(feature = "game-library")]
+const LIBRARY_FIELD_LINES: usize = 2;
+
+/// The most a version may be, in characters: what fits the column it is
+/// drawn in, over [`LIBRARY_VERSION_LINES`] lines. The editor stops there
+/// too, since there is no use in typing what the page cannot show.
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn library_version_max() -> usize {
+    LIBRARY_VERSION_LINES * (LIBRARY_COVER + 2 * LIBRARY_COVER_BEZEL) / font::GLYPH_W
+}
 #[cfg(feature = "game-library")]
 const LIBRARY_COVER_GAP: usize = 12;
 /// Where each column starts, from the inside edge of the box. Two columns:
@@ -6011,7 +6027,7 @@ fn draw_library_page(
             frame,
             tick.x,
             tick.y,
-            state.library.db.is_favourite(&entry.file_name),
+            state.library.db.is_favourite(&entry.relative),
             TICK_GREEN,
             scale,
         );
@@ -6074,7 +6090,7 @@ fn draw_library_page(
         // removable, but there is nothing to launch.
         let present = entries
             .iter()
-            .any(|entry| crate::gamelib::Database::key_for(&entry.file_name) == key);
+            .any(|entry| entry.relative == key);
         let colour = match (chosen, present) {
             (true, _) => MENU_HILIGHT_TEXT,
             (false, true) => PANEL_TEXT,
@@ -6228,22 +6244,88 @@ fn draw_library_cover(frame: &mut [u8], rect: Rect, state: &LauncherState, scale
     // value, and a value too long for the column wrapped rather than cut.
     // Hung off the reserved frame rather than off this cover's, so a short
     // one does not pull the writing up the page.
+    // The block stops above the action bar: a developer credited to nine
+    // people would otherwise run down over the Run button and off the
+    // panel. Each value is held to two lines as well, so one long field
+    // cannot crowd out the ones under it -- what is cut is only what is
+    // drawn, never what is stored.
+    let floor = launcher_action_y(rect).saturating_sub(6);
     let mut y = widest.y + widest.h + 8;
-    let Some(game) = &entry.game else { return };
-    for (label, value) in [
-        ("Year", game.year.as_deref()),
-        ("Publisher", game.publisher.as_deref()),
-        ("Developer", game.developer.as_deref()),
-        ("Players", game.players.as_deref()),
-    ] {
-        let Some(value) = value else { continue };
-        draw_panel_text(frame, widest.x, y, label, PANEL_TEXT_DIM, 1, scale);
+    let game = entry.game.as_ref();
+    let mut show = |label: &str, value: Option<&str>, y: &mut usize| {
+        let Some(value) = value.filter(|v| !v.is_empty()) else {
+            return;
+        };
+        // Label and one line at least, or there is no point starting.
+        if *y + 24 > floor {
+            return;
+        }
+        draw_panel_text(frame, widest.x, *y, label, PANEL_TEXT_DIM, 1, scale);
+        *y += 12;
+        let mut lines = wrap_to_width(value, widest.w);
+        let over = lines.len() > LIBRARY_FIELD_LINES;
+        lines.truncate(LIBRARY_FIELD_LINES);
+        let last = lines.len().saturating_sub(1);
+        for (at, line) in lines.into_iter().enumerate() {
+            if *y + 12 > floor {
+                break;
+            }
+            // The panel marks a cut with a tilde, so a credit that goes
+            // on does not read as one that stopped. Room is made for the
+            // mark rather than hoping the line is short enough.
+            let line = match over && at == last {
+                true => {
+                    let mut cut = line;
+                    while cut.chars().count() * font::GLYPH_W + font::GLYPH_W > widest.w {
+                        cut.pop();
+                    }
+                    format!("{cut}~")
+                }
+                false => line,
+            };
+            draw_panel_text(frame, widest.x, *y, &line, PANEL_TEXT, 1, scale);
+            *y += 12;
+        }
+        *y += 4;
+    };
+    show("Year", game.and_then(|g| g.year.as_deref()), &mut y);
+    show("Publisher", game.and_then(|g| g.publisher.as_deref()), &mut y);
+    show("Developer", game.and_then(|g| g.developer.as_deref()), &mut y);
+    show("Players", game.and_then(|g| g.players.as_deref()), &mut y);
+
+    // Which release this is. Shown only when there is something to say:
+    // what somebody typed, or -- where the library holds this game under
+    // one title more than once -- the package's own name, since nothing
+    // else separates `CannonFodder2_v1.11_0104` from `_v1.12_Fr_2578`.
+    // Without the extension: it is the same on both and says nothing about
+    // which release either is.
+    //
+    // A game held once and never edited has no version and no row, and
+    // neither has one the catalogue has never heard of -- two packages the
+    // scan could not name are two rows that say nothing already, and a
+    // file name under them is not the answer to which release they are.
+    let version = game
+        .and_then(|g| g.version.as_deref())
+        .filter(|v| !v.is_empty())
+        .or_else(|| (entry.duplicated && game.is_some()).then_some(entry.file_name.as_str()));
+    if let Some(version) = version.filter(|_| y + 24 <= floor) {
+        draw_panel_text(frame, widest.x, y, "Version", PANEL_TEXT_DIM, 1, scale);
         y += 12;
-        for line in wrap_to_width(value, widest.w) {
+        // Two lines, because a package name is longer than the column and
+        // both ends of it matter: `CannonFodder2_v1.11_0104.lha` says
+        // which game at the front and which release at the back. Anything
+        // past that is cut, which nothing typed here should reach -- the
+        // editor stops at what these two lines hold.
+        for line in wrap_to_width(version, widest.w)
+            .into_iter()
+            .take(LIBRARY_VERSION_LINES)
+        {
+            if y + 12 > floor {
+                break;
+            }
             draw_panel_text(frame, widest.x, y, &line, PANEL_TEXT, 1, scale);
             y += 12;
         }
-        y += 4;
     }
 }
 
@@ -6311,8 +6393,8 @@ fn fit_within(w: usize, h: usize, into: Rect) -> Option<Rect> {
 }
 
 /// Break text into lines that fit `width`, at spaces where there are any.
-/// A single word longer than the column is cut rather than left to run off
-/// the panel.
+/// A single word longer than the column is broken across lines rather than
+/// left to run off the panel.
 #[cfg(feature = "game-library")]
 fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     let per_line = (width / font::GLYPH_W).max(1);
@@ -6328,12 +6410,18 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
             lines.push(std::mem::take(&mut line));
         }
         if word.chars().count() > per_line {
-            // Nothing to break at: take what fits and move on, rather than
-            // drawing past the edge of the box.
+            // Nothing to break at, so it is broken anyway -- across as
+            // many lines as it needs. A package name is one long word and
+            // taking only its first line would drop the part that says
+            // which release it is.
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
-            lines.push(word.chars().take(per_line).collect());
+            let mut rest: Vec<char> = word.chars().collect();
+            while rest.len() > per_line {
+                lines.push(rest.drain(..per_line).collect());
+            }
+            line = rest.into_iter().collect();
             continue;
         }
         if !line.is_empty() {
@@ -9958,7 +10046,13 @@ mod tests {
                     name: "Golden Axe".to_string(),
                     year: Some("1990".to_string()),
                     publisher: Some("Virgin".to_string()),
-                    developer: Some("Probe Software".to_string()),
+                    // Long enough that before the two-line cap it ran down
+                    // over the Run button and off the panel.
+                    developer: Some(
+                        "Adventuresoft UK Ltd - Teoman Irmak, Matt Ellis, Antony M. Scott, \
+                         Graham Lilley, Alan Bridgman, Brian Howarth, Richard Turner"
+                            .to_string(),
+                    ),
                     players: Some("1 - 2 (2)".to_string()),
                     front_sha1: std::env::var("WHDLOAD_COVER_SHA1").ok(),
                     ..crate::gamelib::Game::default()
@@ -9977,9 +10071,27 @@ mod tests {
                 manual: false,
                 slave_sha1: None,
             },
+            // Two releases of one game, which is what the Version row is
+            // for: nothing else tells them apart in the list.
             crate::gamelib::Known {
-                file: "KingsQuest5_v1.3.lha".to_string(),
-                game: None,
+                file: "CannonFodder2_v1.12_Fr_2578.zip".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Cannon Fodder 2".to_string(),
+                    year: Some("1994".to_string()),
+                    publisher: Some("Virgin".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
+                manual: false,
+                slave_sha1: None,
+            },
+            crate::gamelib::Known {
+                file: "CannonFodder2_v1.11_0104.lha".to_string(),
+                game: Some(crate::gamelib::Game {
+                    name: "Cannon Fodder 2".to_string(),
+                    year: Some("1994".to_string()),
+                    publisher: Some("Virgin".to_string()),
+                    ..crate::gamelib::Game::default()
+                }),
                 manual: false,
                 slave_sha1: None,
             },
@@ -10043,6 +10155,27 @@ mod tests {
             }
         }
         state
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_version_runs_to_two_lines_and_no_further() {
+        // A package name is longer than the column and both ends matter:
+        // which game at the front, which release at the back.
+        let name = "CannonFodder2_v1.11_0104.lha";
+        let column = LIBRARY_COVER + 2 * LIBRARY_COVER_BEZEL;
+        let lines = wrap_to_width(name, column);
+        assert!(lines.len() <= LIBRARY_VERSION_LINES, "{lines:?}");
+        assert_eq!(lines.concat(), name, "the whole name should be shown");
+
+        // Two releases stay distinguishable across the wrap, which is the
+        // point of showing it at all.
+        let other = wrap_to_width("CannonFodder2_v1.12_Fr_2578.zip", column);
+        assert_ne!(lines, other);
+
+        // The editor stops where the page stops showing.
+        assert_eq!(library_version_max(), 34);
+        assert!(name.chars().count() <= library_version_max());
     }
 
     #[cfg(feature = "game-library")]
@@ -11140,6 +11273,23 @@ mod tests {
             };
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-whdload-library-empty");
+        }
+
+        // One of two releases of the same game: the Version row says which,
+        // since nothing else in the list does.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = library_preview_state();
+            state.select_library_game(0);
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-whdload-library-version");
         }
 
         // The Storage tab, whose six sub-page links wrap onto a second row.

@@ -57,6 +57,17 @@ pub struct Game {
     pub developer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub players: Option<String>,
+    /// Which release of the game this package is.
+    ///
+    /// The one field the catalogue has no opinion about: there is no
+    /// standard to how installers name a release, so
+    /// `CannonFodder2_v1.12_Fr_2578` and `CannonFodder2_v1.11_0104` are
+    /// the same catalogued game and nothing in the record separates them.
+    /// A person can put whatever tells them apart in here -- "CD32 v1.1"
+    /// -- and where a library holds several under one title the page
+    /// offers the file name, which is the only honest answer to hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// The digest of the cover art, to fetch it by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub front_sha1: Option<String>,
@@ -96,15 +107,17 @@ pub struct Known {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Database {
     format: u32,
-    /// The games marked as favourites: the key their file name reduces to,
-    /// against the name to show for it.
+    /// The packages marked as favourites: the path the store files each
+    /// under, against the name to show for it.
     ///
     /// Kept here rather than in the machine configuration because a
-    /// favourite is not a setting of any machine, and keyed by match key
-    /// rather than by path so moving a collection does not lose them. The
-    /// name is kept with it so a favourite whose game has been deleted
-    /// still reads as a game rather than as the flattened key it is filed
-    /// under -- which is the state it most needs to be removable from.
+    /// favourite is not a setting of any machine. Keyed by the package
+    /// rather than by the game, because a collection holds the same game
+    /// several times over and starring one of them should star that one --
+    /// marking every release of Cannon Fodder 2 because one was picked is
+    /// not what anybody meant. The name is kept with it so a favourite
+    /// whose package has been deleted still reads as a game rather than as
+    /// a path, which is the state it most needs to be removable from.
     #[serde(default)]
     favourites: std::collections::BTreeMap<String, String>,
     /// Sorted by `file`, which is what makes this store fast to open: the
@@ -276,20 +289,18 @@ impl Database {
     }
 
     /// Whether a package is a favourite.
-    pub fn is_favourite(&self, file_name: &str) -> bool {
-        self.favourites
-            .contains_key(&match_key(&strip_package_name(file_name)))
+    pub fn is_favourite(&self, file: &str) -> bool {
+        self.favourites.contains_key(file)
     }
 
     /// Mark or unmark a favourite, answering whether it is one now.
     /// `title` is what to call it in the favourites list, which matters
     /// once the game itself is gone and there is nothing left to ask.
-    pub fn toggle_favourite(&mut self, file_name: &str, title: &str) -> bool {
-        let key = match_key(&strip_package_name(file_name));
-        if self.favourites.remove(&key).is_some() {
+    pub fn toggle_favourite(&mut self, file: &str, title: &str) -> bool {
+        if self.favourites.remove(file).is_some() {
             false
         } else {
-            self.favourites.insert(key, title.to_string());
+            self.favourites.insert(file.to_string(), title.to_string());
             true
         }
     }
@@ -308,10 +319,18 @@ impl Database {
             .map(|(key, name)| (key.as_str(), name.as_str()))
     }
 
-    /// The key a package is filed under, for lining a library entry up
-    /// against the favourites without going through the database.
-    pub fn key_for(file_name: &str) -> String {
-        match_key(&strip_package_name(file_name))
+    /// A file name to keep a package's own cover art under.
+    ///
+    /// Per package rather than per game: two releases of one game are two
+    /// entries and may want two pictures. Reduced to letters and digits
+    /// so it is a name every filesystem accepts, and prefixed so hand-set
+    /// art is never mistaken for a catalogue digest.
+    pub fn art_key(file: &str) -> String {
+        let safe: String = file
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("manual-{safe}")
     }
 
     /// How many are marked, so a page can tell an empty list from a
@@ -498,6 +517,9 @@ impl Catalogue {
                 publisher: field("publisher"),
                 developer: field("developer"),
                 players: field("players"),
+                // Not a catalogue field: the sync has no opinion about
+                // which release a package is.
+                version: None,
                 front_sha1: field("front_sha1"),
             };
             match self.games.iter_mut().find(|g| g.uuid == uuid) {
@@ -1169,18 +1191,16 @@ mod tests {
         // Survives the session, without anything in the machine's config.
         let back = Database::load(&path);
         assert!(back.is_favourite("GoldenAxe_v1.5_0017.lha"));
-        // Kept by name rather than by path, so a collection that moved --
-        // or a package renamed to a newer install -- keeps its mark.
-        assert!(back.is_favourite("GoldenAxe_v2.0_9999.lha"));
+        // Kept per package: a collection holds the same game several
+        // times over, and starring one of them marks that one rather than
+        // every release of it.
+        assert!(!back.is_favourite("GoldenAxe_v2.0_9999.lha"));
 
         // The title is kept with it, so a favourite whose package has been
         // deleted still has something to show in the list.
         assert_eq!(
             back.favourites().collect::<Vec<_>>(),
-            [(
-                Database::key_for("GoldenAxe_v1.5_0017.lha").as_str(),
-                "Golden Axe"
-            )]
+            [("GoldenAxe_v1.5_0017.lha", "Golden Axe")]
         );
 
         // And it can be taken off again, by the tick beside the game or by
@@ -1189,7 +1209,7 @@ mod tests {
         assert!(!back.toggle_favourite("GoldenAxe_v1.5_0017.lha", "Golden Axe"));
         assert_eq!(back.favourite_count(), 0);
         assert!(back.toggle_favourite("GoldenAxe_v1.5_0017.lha", "Golden Axe"));
-        back.remove_favourite(&Database::key_for("GoldenAxe_v1.5_0017.lha"));
+        back.remove_favourite("GoldenAxe_v1.5_0017.lha");
         assert_eq!(back.favourite_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1236,6 +1256,50 @@ mod tests {
         );
         let text = to_readable_json(&db).expect("serialises");
         assert_eq!(text.lines().filter(|l| l.starts_with("    {")).count(), 2);
+    }
+
+    #[test]
+    fn a_version_is_kept_and_survives_a_scan() {
+        // Not a catalogue field: a sync has no opinion about which release
+        // a package is, so a version only ever comes from a person -- and
+        // has to survive the scan that would otherwise overwrite it.
+        let mut db = Database::new();
+        db.set_entry(Known {
+            file: "CannonFodder2_v1.11_0104.lha".to_string(),
+            game: Some(Game {
+                name: "Cannon Fodder 2".to_string(),
+                version: Some("CD32 v1.1".to_string()),
+                ..Game::default()
+            }),
+            slave_sha1: Some("aa".to_string()),
+            manual: true,
+        });
+        db.set_known(vec![Known {
+            file: "CannonFodder2_v1.11_0104.lha".to_string(),
+            game: Some(Game {
+                name: "Cannon Fodder 2".to_string(),
+                ..Game::default()
+            }),
+            slave_sha1: Some("aa".to_string()),
+            manual: false,
+        }]);
+        assert_eq!(
+            db.match_file("CannonFodder2_v1.11_0104.lha")
+                .and_then(|g| g.version.as_deref()),
+            Some("CD32 v1.1")
+        );
+
+        // And through the store on disk.
+        let dir = std::env::temp_dir().join(format!("copperline-version-{}", std::process::id()));
+        let at = dir.join("db.json");
+        db.save(&at).unwrap();
+        assert_eq!(
+            Database::load(&at)
+                .match_file("CannonFodder2_v1.11_0104.lha")
+                .and_then(|g| g.version.as_deref()),
+            Some("CD32 v1.1")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

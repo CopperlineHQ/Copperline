@@ -1526,11 +1526,22 @@ impl ImageToMake {
 
 /// A WHDLoad support archive being fetched, and the row waiting for it.
 #[cfg(feature = "game-library")]
-/// The most any metadata field takes. Long enough for the longest game
-/// title anyone has, short enough that a paste of a whole document does
-/// not become the name of a game.
+/// The most a metadata field takes.
+///
+/// Long enough for the longest game title anyone has, short enough that a
+/// paste of a whole document does not become the name of a game. The
+/// version is shorter still: the page shows it on two lines under the
+/// cover, and there is no use in typing what it cannot show.
 #[cfg(feature = "game-library")]
 const META_FIELD_MAX: usize = 120;
+
+#[cfg(feature = "game-library")]
+fn meta_field_max(field: crate::video::launcher::MetaField) -> usize {
+    match field {
+        crate::video::launcher::MetaField::Version => crate::video::ui::library_version_max(),
+        _ => META_FIELD_MAX,
+    }
+}
 
 /// The first line of the host clipboard, trimmed.
 ///
@@ -6873,7 +6884,10 @@ impl App {
             let line = clipboard_line();
             if let Some(meta) = self.launcher_meta_mut() {
                 let focus = meta.focus;
-                meta.value_mut(focus).push_str(&line);
+                let most = meta_field_max(focus);
+                let value = meta.value_mut(focus);
+                let room = most.saturating_sub(value.chars().count());
+                value.extend(line.chars().take(room));
             }
             self.request_redraw();
             return true;
@@ -6893,9 +6907,10 @@ impl App {
                 meta.value_mut(focus).pop();
             }
             _ => {
+                let most = meta_field_max(focus);
                 for c in text.unwrap_or_default().chars().filter(|c| !c.is_control()) {
                     let value = meta.value_mut(focus);
-                    if value.chars().count() < META_FIELD_MAX {
+                    if value.chars().count() < most {
                         value.push(c);
                     }
                 }
@@ -8034,7 +8049,7 @@ impl App {
         // Named after the package rather than after the bytes, so choosing
         // a different picture replaces the old one instead of leaving it
         // in the cache with nothing pointing at it.
-        let key = format!("manual-{}", crate::gamelib::Database::key_for(&file));
+        let key = crate::gamelib::Database::art_key(&file);
         let cache = state.setup.library_cache(&config);
         let at =
             crate::gamelib::cover::cover_file(&crate::gamelib::scan::covers_path(&cache), &key);

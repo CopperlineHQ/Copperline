@@ -396,7 +396,8 @@ video = "PAL"
 # [memory] choices above say otherwise. --whdload GAME overrides `game`.
 # [whdload]
 # game = "Turrican.lha"       # .lha, .zip, or a folder with a .slave
-# library = ""                # game library; default: <config dir>/whdload
+# library = ""                # unpacked games and saves; default:
+#                             # <config dir>/whdload/save
 # kickstarts = "/data/amiga/kickstarts"
 # args = "ButtonWait"         # extra WHDLoad command-line options
 # machine_type = "auto"       # or "copperline" to boot on this machine

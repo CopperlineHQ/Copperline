@@ -5402,16 +5402,18 @@ pub enum MetaField {
     Publisher,
     Developer,
     Players,
+    Version,
 }
 
 #[cfg(feature = "game-library")]
 impl MetaField {
-    pub const ALL: [MetaField; 5] = [
+    pub const ALL: [MetaField; 6] = [
         MetaField::Name,
         MetaField::Year,
         MetaField::Publisher,
         MetaField::Developer,
         MetaField::Players,
+        MetaField::Version,
     ];
 
     pub fn label(self) -> &'static str {
@@ -5421,6 +5423,7 @@ impl MetaField {
             MetaField::Publisher => "Publisher",
             MetaField::Developer => "Developer",
             MetaField::Players => "Players",
+            MetaField::Version => "Version",
         }
     }
 
@@ -5440,7 +5443,7 @@ pub struct MetaDialog {
     /// The package being edited, by the name the store files it under.
     pub file: String,
     /// The values, in [`MetaField::ALL`] order.
-    pub values: [String; 5],
+    pub values: [String; 6],
     /// The cache key of the art, which is a catalogue digest for art that
     /// was downloaded and a `manual-` name for art somebody chose.
     pub art: Option<String>,
@@ -5701,7 +5704,7 @@ impl LauncherState {
                     .games
                     .entries()
                     .iter()
-                    .find(|entry| crate::gamelib::Database::key_for(&entry.file_name) == key)
+                    .find(|entry| entry.relative == key)
             }
         }
     }
@@ -5732,8 +5735,10 @@ impl LauncherState {
         };
         // The name is kept with the mark, so the favourite still reads as
         // a game once its package is gone.
-        let (name, title) = (entry.file_name.clone(), entry.title().to_string());
-        self.library.db.toggle_favourite(&name, &title);
+        // The package, not the game: a collection holds the same game
+        // several times over, and starring one of them stars that one.
+        let (file, title) = (entry.relative.clone(), entry.title().to_string());
+        self.library.db.toggle_favourite(&file, &title);
     }
 
     /// Choose a favourite: the game to launch, without also being the row
@@ -5754,7 +5759,7 @@ impl LauncherState {
             .games
             .entries()
             .iter()
-            .find(|entry| crate::gamelib::Database::key_for(&entry.file_name) == key)
+            .find(|entry| entry.relative == key)
             .map(|entry| entry.path.clone());
         if let Some(path) = path {
             self.setup.set_path(F::WhdloadGame, path);
@@ -5766,7 +5771,13 @@ impl LauncherState {
         let Some(entry) = self.library_selection() else {
             return false;
         };
+        // The store keys on the path under the game folder; the version
+        // offered below is the package's own name, which is what tells one
+        // release from another. Without its extension -- `.lha` against
+        // `.zip` is how it was packed, not which release it is.
         let file = entry.relative.clone();
+        let base = entry.file_name.clone();
+        let duplicated = entry.duplicated;
         let game = entry.game.clone();
         let mut dialog = MetaDialog {
             file,
@@ -5781,9 +5792,18 @@ impl LauncherState {
                 (MetaField::Publisher, game.publisher.clone()),
                 (MetaField::Developer, game.developer.clone()),
                 (MetaField::Players, game.players.clone()),
+                (MetaField::Version, game.version.clone()),
             ] {
                 *dialog.value_mut(field) = value.unwrap_or_default();
             }
+        }
+        // Nothing stored, the game has metadata, and the library holds it
+        // more than once: offer the file name, which is the only thing that
+        // separates them. Blank for a game held once, and blank for one the
+        // scan could not name at all -- filling in a version for a package
+        // with nothing else known about it says nothing.
+        if dialog.value(MetaField::Version).is_empty() && duplicated && game.is_some() {
+            *dialog.value_mut(MetaField::Version) = base;
         }
         self.meta = Some(dialog);
         self.status = None;
@@ -5839,6 +5859,7 @@ impl LauncherState {
                     publisher: field(MetaField::Publisher),
                     developer: field(MetaField::Developer),
                     players: field(MetaField::Players),
+                    version: field(MetaField::Version),
                     front_sha1: dialog.art.clone(),
                 }),
                 slave_sha1: held_digest,
@@ -8177,6 +8198,72 @@ mod tests {
         );
         // Only the ROM rows have one.
         assert_eq!(state.rom_note(F::Df0Image), None);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
+    fn a_version_is_offered_only_for_a_named_game_the_library_holds_twice() {
+        use crate::gamelib::{Game, Known, Library};
+        let named = |name: &str| {
+            Some(Game {
+                name: name.to_string(),
+                year: Some("1994".to_string()),
+                ..Game::default()
+            })
+        };
+        let known = |file: &str, game: Option<Game>| Known {
+            file: file.to_string(),
+            game,
+            manual: false,
+            slave_sha1: None,
+        };
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.library.db.set_known(vec![
+            // The same game packed twice, which is what a version is for.
+            known("CannonFodder2_v1.11_0104.lha", named("Cannon Fodder 2")),
+            known("CannonFodder2_v1.12_Fr_2578.zip", named("Cannon Fodder 2")),
+            // Held once: nothing to tell apart.
+            known("Turrican_v1.3_0087.lha", named("Turrican")),
+            // Two the scan could not name. They share a title only because
+            // the title falls back to the file name.
+            known("Mystery/Thing.lha", None),
+            known("Elsewhere/Thing.zip", None),
+        ]);
+        state.library.games = Library::known(Path::new("/games"), &state.library.db);
+        state.library.db_loaded = true;
+
+        let version_of = |state: &mut LauncherState, title: &str| {
+            let at = state
+                .library
+                .games
+                .entries()
+                .iter()
+                .position(|e| e.title() == title)
+                .expect("the entry is in the library");
+            state.select_library_game(at);
+            assert!(state.open_meta_editor(), "the editor opens");
+            let value = state
+                .meta
+                .as_ref()
+                .unwrap()
+                .value(MetaField::Version)
+                .to_string();
+            state.meta = None;
+            value
+        };
+
+        // The package's own name, and not how it was packed: `.lha`
+        // against `.zip` is the same on both and says nothing about which
+        // release either one is.
+        assert_eq!(
+            version_of(&mut state, "Cannon Fodder 2"),
+            "CannonFodder2_v1.11_0104"
+        );
+        // Held once, so there is nothing to separate it from.
+        assert_eq!(version_of(&mut state, "Turrican"), "");
+        // Unnamed by the scan: a file name under a row that already says
+        // nothing is not the answer to which release it is.
+        assert_eq!(version_of(&mut state, "Thing"), "");
     }
 
     #[test]

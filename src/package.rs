@@ -102,6 +102,19 @@ pub fn stem_of(name: &str) -> &str {
     }
 }
 
+/// A stored relative path resolved under `folder`.
+///
+/// The store writes `/` whatever the host uses, so a library scanned on
+/// one machine still matches on another. Windows takes `/` in a path
+/// happily enough, but joining a component at a time says so outright
+/// rather than relying on it, and what comes out carries the host's own
+/// separator for everything downstream.
+pub fn under(folder: &Path, relative: &str) -> PathBuf {
+    let mut at = folder.to_path_buf();
+    at.extend(relative.split('/').filter(|part| !part.is_empty()));
+    at
+}
+
 /// Whether a name is a WHDLoad slave.
 pub fn is_slave_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, tail)| {
@@ -356,6 +369,13 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
 }
 
 /// Every file under a directory, relative to it, links not followed.
+///
+/// Ordered shallowest first and then by name, which is the order
+/// `whdload::find_slaves` prefers a slave in -- and, more to the point,
+/// an order at all: a directory is read in whatever order the filesystem
+/// feels like, so an unsorted walk would hash a different slave on
+/// different runs and the digest that identifies a package would move
+/// under it.
 fn walk(root: &Path) -> Result<Vec<PathBuf>> {
     fn step(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entries =
@@ -376,6 +396,7 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
     }
     let mut out = Vec::new();
     step(root, root, &mut out)?;
+    out.sort_by_key(|p| (p.components().count(), p.to_string_lossy().to_lowercase()));
     Ok(out)
 }
 
@@ -407,6 +428,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_path_resolves_under_the_folder() {
+        // The store keeps `/` whatever the host wrote it on.
+        let at = under(Path::new("/games"), "A/Zool_v1.0.lha");
+        assert_eq!(at, Path::new("/games").join("A").join("Zool_v1.0.lha"));
+        assert_eq!(
+            under(Path::new("/games"), "Zool.lha"),
+            Path::new("/games").join("Zool.lha")
+        );
+        // Nothing odd from an empty or slash-heavy relative.
+        assert_eq!(under(Path::new("/games"), ""), Path::new("/games"));
+        assert_eq!(
+            under(Path::new("/games"), "A//B.lha"),
+            Path::new("/games").join("A").join("B.lha")
+        );
+    }
+
+    #[test]
     fn a_member_never_leaves_the_archive() {
         // A ZIP stores whatever string the writer chose.
         assert_eq!(
@@ -433,6 +471,29 @@ mod tests {
             member_path("/Game/Game.slave").as_deref(),
             Some(Path::new("Game/Game.slave"))
         );
+    }
+
+    #[test]
+    fn a_folder_is_read_in_a_settled_order() {
+        // A directory is read in whatever order the filesystem feels
+        // like. The digest that identifies a package is taken from the
+        // first slave found, so an unsettled order would move it between
+        // runs and a rename would stop being recognisable.
+        let dir = std::env::temp_dir().join(format!("copperline-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/deep")).unwrap();
+        for at in ["data/deep/Zzz.slave", "data/Bbb.slave", "Aaa.slave"] {
+            std::fs::write(dir.join(at), b"x").unwrap();
+        }
+        // Compared as paths, not as text: `display()` uses the host's
+        // separator, so a string comparison here would pass on Unix and
+        // fail on Windows for no reason anybody cares about.
+        let listed = walk(&dir).unwrap();
+        assert_eq!(
+            listed,
+            ["Aaa.slave", "data/Bbb.slave", "data/deep/Zzz.slave"].map(PathBuf::from)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

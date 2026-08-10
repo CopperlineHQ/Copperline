@@ -1485,7 +1485,8 @@ hook entirely and never see the mounts.
 ```toml
 [whdload]
 game = "Turrican.lha"       # .lha, .zip, or a folder with a .slave
-# library = "..."           # game library; default: <config dir>/whdload
+# library = "..."           # unpacked games and saves; default:
+#                           # <config dir>/whdload/save
 # kickstarts = "..."        # directory scanned for Kickstart images
 # args = "ButtonWait"       # extra WHDLoad command-line options
 # machine_type = "auto"     # or "copperline" to boot on this machine

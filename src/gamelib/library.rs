@@ -33,11 +33,31 @@ pub struct Entry {
     pub file_name: String,
     /// What the database says, when the name matched an entry.
     pub game: Option<Game>,
+    /// Whether something else in the list is shown under the same title.
+    ///
+    /// Collections carry a game several times over --
+    /// `CannonFodder2_v1.11_0104`, `_v1.12_Fr_2578`, `_v1.1_De_0241` --
+    /// and every one matches the same catalogue entry, so the list shows a
+    /// run of rows all reading "Cannon Fodder 2" with nothing to tell them
+    /// apart. Where that happens the page shows a version as well.
+    pub duplicated: bool,
 }
 
 impl Entry {
     /// What to call it: the catalogued name where there is one, and the
     /// file's own otherwise.
+    /// The package's own file name, extension and all.
+    ///
+    /// What tells one version of a game from another: there is no standard
+    /// to how installers name them -- `_v1.12_0104`, `_v1.1_Fr_2578`,
+    /// `_CD32`, `_AGA` -- so the name itself is the only honest answer.
+    pub fn file(&self) -> &str {
+        self.relative
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&self.relative)
+    }
+
     pub fn title(&self) -> &str {
         match &self.game {
             Some(game) => &game.name,
@@ -90,16 +110,22 @@ impl Library {
                 let base = relative.rsplit(['/', '\\']).next().unwrap_or(&relative);
                 Entry {
                     game: db.match_file(&relative).cloned(),
-                    file_name: base
-                        .rsplit_once('.')
-                        .map(|(stem, _)| stem.to_string())
-                        .unwrap_or_else(|| base.to_string()),
-                    path: folder.join(&relative),
+                    file_name: crate::package::stem_of(base).to_string(),
+                    path: crate::package::under(folder, &relative),
                     relative,
+                    duplicated: false,
                 }
             })
             .collect();
         entries.sort_by_key(|entry| sort_key(entry.title()));
+        // Sorted by what is shown, so anything sharing a title is adjacent
+        // and one pass settles it.
+        for i in 0..entries.len() {
+            let same = |a: usize, b: usize| entries[a].title() == entries[b].title();
+            let before = i > 0 && same(i - 1, i);
+            let after = i + 1 < entries.len() && same(i + 1, i);
+            entries[i].duplicated = before || after;
+        }
         Library {
             folder: Some(folder.to_path_buf()),
             entries,

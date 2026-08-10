@@ -124,11 +124,166 @@ pub fn glyph(ch: char) -> &'static [u8; 8] {
     }
 }
 
+/// Text as this font can actually draw it.
+///
+/// The bitmap is printable ASCII, and [`glyph`] answers a blank cell for
+/// anything else -- so "Ishidó" draws as "Ishid " and reads as a spelling
+/// mistake rather than as a missing glyph. The catalogue is full of names
+/// like it, and somebody typing a version of their own may well use one
+/// too, so the nearest ASCII is substituted instead: accents are dropped,
+/// ligatures and sharp s are spelled out, and the typographic quotes and
+/// dashes a database picks up become their ASCII equivalents.
+///
+/// Borrowed and untouched for the ordinary case, which is nearly every
+/// string the panel draws.
+pub fn renderable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c.is_ascii() {
+            true => out.push(c),
+            false => out.push_str(fold(c)),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// One non-ASCII character as printable ASCII. Empty for a combining
+/// mark, which has already been applied to the letter before it.
+fn fold(c: char) -> &'static str {
+    match c {
+        'À'..='Å' | 'à'..='å' | 'Ā' | 'ā' | 'Ă' | 'ă' | 'Ą' | 'ą' => {
+            if c.is_uppercase() {
+                "A"
+            } else {
+                "a"
+            }
+        }
+        'Æ' => "AE",
+        'æ' => "ae",
+        'Ç' | 'ç' | 'Ć' | 'ć' | 'Č' | 'č' => {
+            if c.is_uppercase() {
+                "C"
+            } else {
+                "c"
+            }
+        }
+        'Ð' | 'ð' | 'Ď' | 'ď' => {
+            if c.is_uppercase() {
+                "D"
+            } else {
+                "d"
+            }
+        }
+        'È'..='Ë' | 'è'..='ë' | 'Ē' | 'ē' | 'Ę' | 'ę' | 'Ě' | 'ě' => {
+            if c.is_uppercase() {
+                "E"
+            } else {
+                "e"
+            }
+        }
+        'Ì'..='Ï' | 'ì'..='ï' | 'Ī' | 'ī' => {
+            if c.is_uppercase() {
+                "I"
+            } else {
+                "i"
+            }
+        }
+        'Ñ' | 'ñ' | 'Ń' | 'ń' | 'Ň' | 'ň' => {
+            if c.is_uppercase() {
+                "N"
+            } else {
+                "n"
+            }
+        }
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' | 'Ō' | 'ō' | 'Ő' | 'ő' => {
+            if c.is_uppercase() {
+                "O"
+            } else {
+                "o"
+            }
+        }
+        'Œ' => "OE",
+        'œ' => "oe",
+        'Ř' | 'ř' => {
+            if c.is_uppercase() {
+                "R"
+            } else {
+                "r"
+            }
+        }
+        'Š' | 'š' | 'Ś' | 'ś' | 'Ş' | 'ş' => {
+            if c.is_uppercase() {
+                "S"
+            } else {
+                "s"
+            }
+        }
+        'ß' => "ss",
+        'Ť' | 'ť' | 'Ţ' | 'ţ' => {
+            if c.is_uppercase() {
+                "T"
+            } else {
+                "t"
+            }
+        }
+        'Ù'..='Ü' | 'ù'..='ü' | 'Ū' | 'ū' | 'Ů' | 'ů' | 'Ű' | 'ű' => {
+            if c.is_uppercase() {
+                "U"
+            } else {
+                "u"
+            }
+        }
+        'Ý' | 'ý' | 'ÿ' | 'Ÿ' => {
+            if c.is_uppercase() {
+                "Y"
+            } else {
+                "y"
+            }
+        }
+        'Ž' | 'ž' | 'Ź' | 'ź' | 'Ż' | 'ż' => {
+            if c.is_uppercase() {
+                "Z"
+            } else {
+                "z"
+            }
+        }
+        'Ł' | 'ł' => {
+            if c.is_uppercase() {
+                "L"
+            } else {
+                "l"
+            }
+        }
+        // Punctuation a catalogue picks up from wherever it was typed.
+        '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => "'",
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => "\"",
+        '\u{2013}' | '\u{2014}' | '\u{2212}' => "-",
+        '\u{2026}' => "...",
+        '\u{00D7}' => "x",
+        '\u{00A0}' | '\u{202F}' | '\u{2007}' => " ",
+        '\u{00B0}' => "o",
+        '\u{00A9}' => "(c)",
+        '\u{00AE}' => "(R)",
+        '\u{2122}' => "(TM)",
+        // Combining marks belong to the letter before them, which has
+        // already been folded.
+        '\u{0300}'..='\u{036F}' => "",
+        // Something outside all of it: a visible mark beats a silent gap.
+        _ => "?",
+    }
+}
+
 /// Device-pixel width of `text` rendered at `px` device pixels per font
 /// pixel. Each glyph cell is [`GLYPH_W`] font pixels wide (the cell
 /// already includes inter-character spacing).
 pub fn text_width(text: &str, px: usize) -> usize {
-    text.chars().count() * GLYPH_W * px
+    // Measured as it will be drawn: folding can change the count, and a
+    // width that disagreed with the glyphs would misplace everything
+    // laid out against it.
+    renderable(text).chars().count() * GLYPH_W * px
 }
 
 /// Device-pixel height of one text row at `px` device pixels per font
@@ -155,6 +310,9 @@ pub fn draw_text(
 ) -> usize {
     let bytes = color.to_le_bytes();
     let mut cursor_x = x;
+    // Folded here rather than at every call site, so nothing the panel
+    // draws can quietly lose a letter to a glyph this font has not got.
+    let text = renderable(text);
     for ch in text.chars() {
         let g = glyph(ch);
         for (row_idx, row) in g.iter().enumerate() {
@@ -203,6 +361,32 @@ mod tests {
     fn text_metrics_scale_with_pixel_size() {
         assert_eq!(text_width("AB", 2), 2 * GLYPH_W * 2);
         assert_eq!(text_height(3), GLYPH_H * 3);
+    }
+
+    #[test]
+    fn text_the_font_cannot_draw_is_folded_rather_than_lost() {
+        // The catalogue is full of these -- "Ishido: The Way of Stones" is
+        // spelt with an accent -- and an unmapped glyph draws as a blank,
+        // so the name read as a spelling mistake.
+        assert_eq!(renderable("Ishid\u{f3}"), "Ishido");
+        assert_eq!(renderable("Gr\u{fc}\u{df}e"), "Grusse");
+        assert_eq!(renderable("Fran\u{e7}ais"), "Francais");
+        assert_eq!(renderable("\u{c6}on"), "AEon");
+        assert_eq!(renderable("caf\u{e9} \u{2014} bar"), "cafe - bar");
+        assert_eq!(renderable("don\u{2019}t"), "don't");
+        // Nothing is done to text that needs nothing.
+        assert!(matches!(
+            renderable("Cannon Fodder 2"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // And the width agrees with what is drawn, or everything laid out
+        // against it lands in the wrong place.
+        assert_eq!(
+            text_width("Gr\u{fc}\u{df}e", 1),
+            "Grusse".chars().count() * GLYPH_W
+        );
+        // Something outside the table is visible rather than a gap.
+        assert_eq!(renderable("\u{4e2d}"), "?");
     }
 
     #[test]
