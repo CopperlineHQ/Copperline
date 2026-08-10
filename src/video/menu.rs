@@ -54,6 +54,8 @@ pub enum MenuAction {
     SetPortDevice(usize, PortDevice),
     SetJoystickInput(JoystickInputMode),
     SetAutofire(u8),
+    /// Show or hide the on-screen Amiga keyboard.
+    ToggleKeyboardPanel,
 
     // Serial / parallel, present only when something is on the port.
     /// `None` unplugs the cable: a MIDI interface with nothing connected.
@@ -406,6 +408,8 @@ pub struct MenuState<'a> {
     pub input_recording: bool,
     pub autofire_hz: u8,
     pub joystick_input_mode: JoystickInputMode,
+    /// Whether the on-screen Amiga keyboard is up.
+    pub keyboard_panel: bool,
     pub port_devices: [PortDevice; 2],
     pub pixel_aspect: PixelAspect,
     pub scaling: DisplayScaling,
@@ -658,6 +662,13 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu("Port 2 Device", port(1)),
         MenuRow::submenu("Joystick Input", joystick),
         MenuRow::submenu("Autofire", autofire),
+        // An Amiga keyboard drawn under the display, for the keys a host
+        // keyboard has no equivalent of and for driving a session by mouse.
+        MenuRow::toggle(
+            "On-Screen Keyboard",
+            MenuAction::ToggleKeyboardPanel,
+            s.keyboard_panel,
+        ),
         MenuRow::action("Calibrate Gamepad...", MenuAction::OpenCalibration),
         MenuRow::action("Input Mapping...", MenuAction::OpenInputMapping),
     ]
@@ -1015,6 +1026,7 @@ mod tests {
             input_recording: false,
             autofire_hz: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
+            keyboard_panel: false,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,

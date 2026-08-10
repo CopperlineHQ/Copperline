@@ -306,9 +306,10 @@ impl KeyboardMcu {
         }
     }
 
-    /// The Caps Lock LED, driven by the keyboard MCU itself. Not yet
-    /// surfaced in the UI; kept as the accessor a status-bar LED needs.
-    #[allow(dead_code)]
+    /// The Caps Lock LED, driven by the keyboard MCU itself. The lamp on
+    /// the on-screen keyboard's Caps cap is this, polled: it moves on a
+    /// save-state load with no key pressed, so it cannot be mirrored from
+    /// keystrokes.
     pub fn caps_lock_led(&self) -> bool {
         self.caps_lock_on
     }

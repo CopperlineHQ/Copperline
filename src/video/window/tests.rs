@@ -11,23 +11,24 @@ use super::{
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_tv_aperture_to_window, copy_window_present_frame, cursor_position_in_texture,
     draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
-    host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv,
-    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
-    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
-    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
-    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
-    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
-    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
-    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
-    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
-    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
-    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
-    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
-    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
-    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
-    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X,
-    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
+    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect,
+    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
+    plan_present_scaling_for, power_button_rect, present_height, presentation_pixels_equal,
+    presentation_source_y_offset, raw_device_qualifier_family_held, raw_device_qualifier_rawkey,
+    rawkey_is_held, rawkey_transition_is_duplicate, reboot_button_rect,
+    repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
+    shot_button_rect, should_render_emulated_frame, standard_window_top_row,
+    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
+    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row, tv_source_h_bounds,
+    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
+    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
+    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
+    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
+    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
+    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
+    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
+    TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -72,6 +73,7 @@ fn view(status: FrontPanelStatus, powered_on: bool, paused: bool) -> StatusBarVi
         paused,
         media: single_drive_media(),
         joystick_input_mode: JoystickInputMode::Gamepad,
+        keyboard_panel_shown: false,
         hover: None,
         control_connected: false,
     }
@@ -1147,6 +1149,237 @@ fn joystick_toggle_clears_worst_case_media() {
 }
 
 #[test]
+fn keyboard_toggle_clears_worst_case_media() {
+    // It shares the joystick toggle's slot, one button further left, so it
+    // is the one the widest media layout (four floppies plus a CD) reaches
+    // first -- and it must not.
+    let toggle = keyboard_toggle_rect();
+    let joystick = joystick_toggle_rect();
+    let layout = bar_layout(&media(4, Some(true)));
+    let media_right = layout
+        .cd_eject
+        .into_iter()
+        .chain(layout.drive_eject.into_iter().flatten())
+        .map(|r| r.x + r.w)
+        .max()
+        .unwrap();
+    assert!(
+        media_right <= toggle.x,
+        "media right edge {media_right} overlaps keyboard toggle at {}",
+        toggle.x
+    );
+    assert!(
+        toggle.x + toggle.w <= joystick.x,
+        "the two toggles overlap each other"
+    );
+    // And it answers to a click in the middle of it.
+    let layout = bar_layout(&single_drive_media());
+    let center = (
+        (toggle.x + toggle.w / 2) as i32,
+        (toggle.y + toggle.h / 2) as i32,
+    );
+    assert_eq!(control_at(center, &layout), Some(BarControl::Keyboard));
+}
+
+/// Holds the canvas-height lock for a test that puts the on-screen
+/// keyboard up, and takes the strip down again however the test ends -- a
+/// failed assertion must not leave the flag set for everything after it.
+struct KeyboardUp(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl KeyboardUp {
+    fn shown() -> Self {
+        let guard = super::canvas_height_test_lock();
+        crate::video::set_keyboard_panel_shown(true);
+        Self(guard)
+    }
+
+    /// The same lock without putting the strip up, for a test that does
+    /// its own showing and hiding.
+    fn hidden() -> Self {
+        let guard = super::canvas_height_test_lock();
+        crate::video::set_keyboard_panel_shown(false);
+        Self(guard)
+    }
+}
+
+impl Drop for KeyboardUp {
+    fn drop(&mut self) {
+        crate::video::set_keyboard_panel_shown(false);
+    }
+}
+
+/// The strip's own rect this frame, with the keyboard up.
+fn shown_keyboard_panel() -> super::Rect {
+    kbdpanel::shown_panel_rect(super::keyboard_panel_top()).expect("the keyboard is up")
+}
+
+/// Where on the canvas the cap carrying `rawkey` is, with the keyboard up.
+fn keycap_center(rawkey: u8) -> (i32, i32) {
+    let panel = shown_keyboard_panel();
+    for y in panel.y..panel.y + panel.h {
+        for x in panel.x..panel.x + panel.w {
+            if kbdpanel::control_at(panel, (x as i32, y as i32))
+                == Some(kbdpanel::KbdControl::Key(rawkey))
+            {
+                return (x as i32 + 4, y as i32 + 4);
+            }
+        }
+    }
+    panic!("no cap for rawkey {rawkey:#04x}");
+}
+
+/// Click a cap the way the window event does: press on the way down,
+/// release on the way up.
+fn click_keycap(app: &mut super::App, rawkey: u8) {
+    let panel = shown_keyboard_panel();
+    let control = kbdpanel::control_at(panel, keycap_center(rawkey)).expect("a cap is there");
+    app.press_keyboard_panel_control(control);
+    app.release_keyboard_panel_key();
+}
+
+/// Showing the keyboard grows the canvas by exactly the strip, and hiding
+/// it gives the height back. The picture itself never changes size.
+#[test]
+fn the_keyboard_toggle_grows_and_shrinks_the_canvas() {
+    let _guard = KeyboardUp::hidden();
+    let mut app = test_app();
+    let closed = super::window_present_height();
+    assert!(!crate::video::keyboard_panel_shown());
+
+    app.activate_bar_control(BarControl::Keyboard);
+    assert!(crate::video::keyboard_panel_shown());
+    assert_eq!(
+        super::window_present_height(),
+        closed + kbdpanel::KBD_PANEL_HEIGHT,
+        "the canvas gained exactly the strip"
+    );
+    // The display keeps its own height; the strip came out of the window.
+    assert_eq!(super::status_bar_top(), present_height() + KBD_HEIGHT);
+
+    app.activate_bar_control(BarControl::Keyboard);
+    assert!(!crate::video::keyboard_panel_shown());
+    assert_eq!(super::window_present_height(), closed);
+}
+
+const KBD_HEIGHT: usize = kbdpanel::KBD_PANEL_HEIGHT;
+
+/// Clicking a cap presses the Amiga key on the way down and releases it on
+/// the way up, through the same door a host keystroke uses.
+#[test]
+fn clicking_a_cap_types_its_rawkey() {
+    let _guard = KeyboardUp::shown();
+    let mut app = test_app();
+    let panel = shown_keyboard_panel();
+    let control = kbdpanel::control_at(panel, keycap_center(0x20)).expect("the A cap");
+    assert_eq!(control, kbdpanel::KbdControl::Key(0x20));
+
+    app.press_keyboard_panel_control(control);
+    assert!(rawkey_is_held(&app.held_rawkeys, 0x20), "A went down");
+    assert!(
+        app.emu.bus().keyboard.is_held(0x20),
+        "and the matrix saw it"
+    );
+
+    assert!(app.release_keyboard_panel_key(), "the lift was the strip's");
+    assert!(!rawkey_is_held(&app.held_rawkeys, 0x20), "and came back up");
+    assert!(!app.emu.bus().keyboard.is_held(0x20));
+    // With nothing held, a lift belongs to whoever else wants it.
+    assert!(!app.release_keyboard_panel_key());
+}
+
+/// Caps Lock is the MCU's latch: the strip sends the press and nothing
+/// else, and the lamp on the cap is read back from the MCU.
+#[test]
+fn the_caps_cap_types_and_follows_the_mcus_lamp() {
+    let _guard = KeyboardUp::shown();
+    let mut app = test_app();
+    assert!(!app.emu.bus().keyboard.caps_lock_led());
+
+    click_keycap(&mut app, 0x62);
+    assert!(app.emu.bus().keyboard.caps_lock_led(), "the lamp came on");
+    assert!(app.keyboard_panel_view().caps_lit, "and the cap shows it");
+    // A second click puts it out again: one press per click, never two.
+    click_keycap(&mut app, 0x62);
+    assert!(!app.emu.bus().keyboard.caps_lock_led());
+    assert!(!app.keyboard_panel_view().caps_lit);
+}
+
+/// A qualifier clicked on its own is held for the next keystroke and let
+/// go with it, which is how a one-button mouse types a shifted character.
+#[test]
+fn a_latched_qualifier_is_released_with_the_key_it_qualified() {
+    let _guard = KeyboardUp::shown();
+    let mut app = test_app();
+
+    click_keycap(&mut app, AMIGA_RAWKEY_LEFT_SHIFT);
+    assert!(
+        rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        "Shift stayed down after the click"
+    );
+
+    let panel = shown_keyboard_panel();
+    let a = kbdpanel::control_at(panel, keycap_center(0x20)).unwrap();
+    app.press_keyboard_panel_control(a);
+    assert!(
+        rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        "still down across the keystroke"
+    );
+    app.release_keyboard_panel_key();
+    assert!(!rawkey_is_held(&app.held_rawkeys, 0x20));
+    assert!(
+        !rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        "and came up with it"
+    );
+}
+
+/// Ctrl+Amiga+Amiga starts the MCU's reset flow, and the strip lets go of
+/// all three: latched qualifiers would be reported held through the
+/// power-up stream and reset the machine again on the next keystroke.
+#[test]
+fn the_reset_chord_lets_go_of_every_latched_qualifier() {
+    let _guard = KeyboardUp::shown();
+    let mut app = test_app();
+    const CTRL: u8 = 0x63;
+    const LEFT_AMIGA: u8 = 0x66;
+    const RIGHT_AMIGA: u8 = 0x67;
+
+    click_keycap(&mut app, CTRL);
+    click_keycap(&mut app, LEFT_AMIGA);
+    assert!(rawkey_is_held(&app.held_rawkeys, CTRL));
+    assert!(rawkey_is_held(&app.held_rawkeys, LEFT_AMIGA));
+
+    // The third completes the chord, and the strip comes off the keyboard.
+    let panel = shown_keyboard_panel();
+    let ramiga = kbdpanel::control_at(panel, keycap_center(RIGHT_AMIGA)).unwrap();
+    app.press_keyboard_panel_control(ramiga);
+    for raw in [CTRL, LEFT_AMIGA, RIGHT_AMIGA] {
+        assert!(
+            !rawkey_is_held(&app.held_rawkeys, raw),
+            "{raw:#04x} was let go"
+        );
+    }
+    let view = app.keyboard_panel_view();
+    for raw in [CTRL, LEFT_AMIGA, RIGHT_AMIGA] {
+        assert_eq!(view.latch[usize::from(raw)], kbdpanel::Latch::None);
+        assert!(!view.down[usize::from(raw)]);
+    }
+}
+
+/// Hiding the keyboard with a key still down on it hands that key back:
+/// the strip is gone, so nothing is left to release it.
+#[test]
+fn hiding_the_keyboard_releases_what_it_was_holding() {
+    let _guard = KeyboardUp::shown();
+    let mut app = test_app();
+    click_keycap(&mut app, 0x63); // Ctrl, latched
+    assert!(rawkey_is_held(&app.held_rawkeys, 0x63));
+
+    app.set_keyboard_panel_shown(false);
+    assert!(!rawkey_is_held(&app.held_rawkeys, 0x63), "handed back");
+    assert!(!app.emu.bus().keyboard.is_held(0x63));
+}
+
+#[test]
 fn joystick_toggle_is_hit_tested_and_draws_each_mode() {
     let layout = bar_layout(&single_drive_media());
     let toggle = joystick_toggle_rect();
@@ -1839,6 +2072,7 @@ fn status_bar_draws_cd_buttons_only_on_cd_machines() {
         paused: false,
         media: bar,
         joystick_input_mode: JoystickInputMode::Gamepad,
+        keyboard_panel_shown: false,
         hover: None,
         control_connected: false,
     };

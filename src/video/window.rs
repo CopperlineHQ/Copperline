@@ -183,7 +183,7 @@ const STATUS_BAR_HEIGHT: usize = 44;
 /// plus the status bar below it unless it is hidden (in which case the display
 /// scales to fill the whole window).
 fn window_present_height() -> usize {
-    present_height() + mt32_panel_height() + status_bar_height()
+    present_height() + mt32_panel_height() + keyboard_panel_height() + status_bar_height()
 }
 
 /// Scanlines the CRT pass draws across the display rect: the emulated field
@@ -231,11 +231,11 @@ fn status_bar_height() -> usize {
     }
 }
 
-/// Where the status bar starts: below the display, and below the MT-32
-/// panel when one is up. The bar sits at the very bottom either way; the
-/// panel takes the strip immediately above it.
+/// Where the status bar starts: below the display and below whichever
+/// strips are up. The bar sits at the very bottom either way; the strips
+/// take the room immediately above it.
 fn status_bar_top() -> usize {
-    present_height() + mt32_panel_height()
+    keyboard_panel_top() + keyboard_panel_height()
 }
 
 /// The MT-32 panel's height, or 0 while it is not shown. It sits between the
@@ -246,6 +246,38 @@ fn mt32_panel_height() -> usize {
         return mt32panel::MT32_PANEL_HEIGHT;
     }
     0
+}
+
+/// Where the on-screen keyboard starts: under the display and under the
+/// MT-32's panel, the way a keyboard sits below whatever is on the desk.
+fn keyboard_panel_top() -> usize {
+    present_height() + mt32_panel_height()
+}
+
+/// Serialises the tests that put one of the canvas-height strips up. The
+/// flags behind them are process-global (they have to be: the draw helpers
+/// size themselves from them), so a test reading `window_present_height`
+/// while another has a strip up would be measuring the other one's canvas.
+#[cfg(test)]
+pub(super) static CANVAS_HEIGHT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take that lock, ignoring a poisoning left by a test that failed while
+/// holding it -- the flags are reset by each test that takes it, and one
+/// failure should not cascade into every other.
+#[cfg(test)]
+pub(super) fn canvas_height_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CANVAS_HEIGHT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// The on-screen keyboard's height, or 0 while it is not shown.
+fn keyboard_panel_height() -> usize {
+    if super::keyboard_panel_shown() {
+        kbdpanel::KBD_PANEL_HEIGHT
+    } else {
+        0
+    }
 }
 const STATUS_LABEL_X: usize = 18;
 const STATUS_LED_X: usize = 58;
@@ -297,18 +329,26 @@ const SHOT_BUTTON_X: usize = FB_WIDTH - 190;
 const SHOT_BUTTON_W: usize = 22;
 const VOLUME_SLIDER_X: usize = ui::MENU_BUTTON_X - 10 - VOLUME_SLIDER_W;
 const VOLUME_SLIDER_Y: usize = STATUS_CONTROL_Y + 7;
-const VOLUME_SLIDER_W: usize = 72;
+// The slider is as wide as the slot between the media controls and the menu
+// button leaves once the two icon toggles below have taken their 24 pixels
+// each: the bar has one free run of x, and every control on it competes for
+// the same worst case (four floppies plus a CD, ending at x=372).
+const VOLUME_SLIDER_W: usize = 48;
 const VOLUME_SLIDER_H: usize = 8;
 const VOLUME_KNOB_W: usize = 8;
 const VOLUME_KNOB_H: usize = 16;
 const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 16;
-// Joystick input-source toggle: a compact icon button just left of the volume
-// glyph, in the otherwise-free slot before the right-hand control cluster. The
-// widest media layout (four floppies plus a CD) ends at x=372, so a 22px button
-// here clears both the media controls and the speaker glyph; this is verified by
-// `joystick_toggle_clears_worst_case_media`.
+// Joystick input-source and on-screen-keyboard toggles: compact icon buttons
+// just left of the volume glyph, in the otherwise-free slot before the
+// right-hand control cluster. The widest media layout (four floppies plus a
+// CD) ends at x=372, so the pair of 22px buttons here clears both the media
+// controls and the speaker glyph; this is verified by
+// `joystick_toggle_clears_worst_case_media` and
+// `keyboard_toggle_clears_worst_case_media`.
 const JOY_TOGGLE_W: usize = 22;
 const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
+const KBD_TOGGLE_W: usize = 22;
+const KBD_TOGGLE_X: usize = JOY_TOGGLE_X - 2 - KBD_TOGGLE_W;
 // The standard-window and TV-aperture constants live in
 // `video/present_common.rs` with the presentation helpers they anchor
 // (re-exported through `use present::*` below). Both the live window and
@@ -1095,6 +1135,11 @@ pub struct App {
     /// hardware this is firmware -- so it is kept here.
     #[cfg(feature = "mt32")]
     mt32_panel: mt32panel::Mt32Panel,
+    /// The on-screen Amiga keyboard: which cap the mouse is holding, which
+    /// qualifiers are latched, and which legends the caps wear. Whether the
+    /// strip is up at all is `video::keyboard_panel_shown`, because the
+    /// canvas height is derived from it.
+    kbd_panel: kbdpanel::KbdPanelState,
     /// Mapped host keys currently held for keyboard joystick emulation.
     keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
     /// Host-key to controller-control bindings, loaded from the per-user
@@ -1688,6 +1733,7 @@ impl App {
             rewind_armed,
             #[cfg(feature = "mt32")]
             mt32_panel: mt32panel::Mt32Panel::default(),
+            kbd_panel: kbdpanel::KbdPanelState::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
@@ -3161,8 +3207,14 @@ impl ApplicationHandler for App {
                     });
                 #[cfg(not(feature = "mt32"))]
                 let mt32_hover_changed = false;
+                // The keycaps light under the pointer the same way.
+                let kbd_hover_changed = kbdpanel::shown_panel_rect(keyboard_panel_top())
+                    .is_some_and(|panel| {
+                        kbdpanel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
+                    });
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
                     || mt32_hover_changed
+                    || kbd_hover_changed
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
                 {
                     self.request_redraw();
@@ -3216,6 +3268,9 @@ impl ApplicationHandler for App {
                     self.volume_dragging = false;
                     self.analyzer_dragging = false;
                     self.set_mouse_captured(false);
+                    // The button that was holding a keycap will lift over
+                    // some other window, where no MouseInput reaches us.
+                    self.release_keyboard_panel_key();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -3286,6 +3341,27 @@ impl ApplicationHandler for App {
                             if let Some(control) = mt32panel::control_at(panel, pos) {
                                 let left = button == MouseButton::Left;
                                 self.press_mt32_control(control, left, pos);
+                            }
+                            return;
+                        }
+                    }
+                }
+                // A cap on the on-screen keyboard is let go wherever the
+                // pointer has got to: one mouse button holds one key, so
+                // the lift ends it even if the hand slid off the strip.
+                if !pressed && button == MouseButton::Left && self.release_keyboard_panel_key() {
+                    return;
+                }
+                // The keyboard strip sits between the MT-32's panel and the
+                // status bar and takes its own clicks, as they both do.
+                if pressed && !self.mouse_captured && button == MouseButton::Left {
+                    if let (Some(pos), Some(panel)) = (
+                        self.cursor_pos,
+                        kbdpanel::shown_panel_rect(keyboard_panel_top()),
+                    ) {
+                        if panel.contains(pos) {
+                            if let Some(control) = kbdpanel::control_at(panel, pos) {
+                                self.press_keyboard_panel_control(control);
                             }
                             return;
                         }
@@ -3416,6 +3492,7 @@ impl ApplicationHandler for App {
                     paused: self.paused,
                     media,
                     joystick_input_mode: self.joystick_input_mode,
+                    keyboard_panel_shown: super::keyboard_panel_shown(),
                     hover,
                     control_connected,
                 };
@@ -3428,6 +3505,9 @@ impl ApplicationHandler for App {
                 let mt32_panel = super::mt32_panel_shown()
                     .then(|| self.mt32_panel_view())
                     .flatten();
+                // The Caps Lock lamp is the MCU's, so it is read fresh
+                // every frame rather than mirrored from the clicks.
+                let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
@@ -3516,6 +3596,9 @@ impl ApplicationHandler for App {
                     #[cfg(feature = "mt32")]
                     if let Some(panel) = &mt32_panel {
                         mt32panel::draw(frame, panel, present_height(), r.texture_scale);
+                    }
+                    if let Some(panel) = &kbd_panel {
+                        kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
                     }
                     if !super::status_bar_hidden() {
                         draw_status_bar(frame, &view, r.texture_scale);
@@ -4946,6 +5029,7 @@ impl App {
             mt32_attached,
             mt32_input,
             mt32_panel: crate::video::mt32_panel_shown(),
+            keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
             sampler_inputs: &sampler_inputs,
@@ -5124,6 +5208,7 @@ impl App {
                 self.show_osd(format!("Autofire: {label}"));
                 self.request_redraw();
             }
+            A::ToggleKeyboardPanel => self.toggle_keyboard_panel(),
 
             #[cfg(feature = "midi")]
             A::SetMidiInput(name) => {
@@ -5329,6 +5414,89 @@ impl App {
             let _ = self.resync_canvas_height();
         }
         self.request_redraw();
+    }
+
+    /// Show or hide the on-screen keyboard, resizing the presentation to
+    /// match. Like the MT-32's panel, the strip takes height from the
+    /// canvas and the draw helpers size themselves from the flag, so the
+    /// two have to move together. Every route in goes through here.
+    fn set_keyboard_panel_shown(&mut self, shown: bool) {
+        if shown == crate::video::keyboard_panel_shown() {
+            return;
+        }
+        if !shown {
+            // The strip is going away with keys still down on it; hand
+            // them back before it does, or the guest is left holding them.
+            let outcome = self.kbd_panel.release_all();
+            self.apply_keyboard_panel_outcome(outcome);
+        }
+        // Decide before the flag flips whether the window still matches the
+        // canvas, so a manual resize survives.
+        let was_canvas_sized = self.window_is_canvas_sized();
+        crate::video::set_keyboard_panel_shown(shown);
+        if self.resync_canvas_height() {
+            self.follow_canvas_change(was_canvas_sized);
+        } else {
+            crate::video::set_keyboard_panel_shown(!shown);
+            let _ = self.resync_canvas_height();
+        }
+        self.request_redraw();
+    }
+
+    fn toggle_keyboard_panel(&mut self) {
+        let shown = !crate::video::keyboard_panel_shown();
+        self.set_keyboard_panel_shown(shown);
+        self.show_osd(if shown {
+            "On-screen keyboard shown"
+        } else {
+            "On-screen keyboard hidden"
+        });
+    }
+
+    /// A click on the on-screen keyboard. The strip works out what it
+    /// means; what comes back is rawkey transitions for the machine.
+    fn press_keyboard_panel_control(&mut self, control: kbdpanel::KbdControl) {
+        let outcome = self.kbd_panel.press(control, Instant::now());
+        let close = outcome.close;
+        self.apply_keyboard_panel_outcome(outcome);
+        if close {
+            self.set_keyboard_panel_shown(false);
+        }
+        self.request_redraw();
+    }
+
+    /// The mouse button lifted. True when it was holding a keycap, in
+    /// which case this click was the keyboard's and nobody else's.
+    fn release_keyboard_panel_key(&mut self) -> bool {
+        if !self.kbd_panel.holding_key() {
+            return false;
+        }
+        let outcome = self.kbd_panel.release(Instant::now());
+        self.apply_keyboard_panel_outcome(outcome);
+        self.request_redraw();
+        true
+    }
+
+    /// Hand the strip's key transitions to the machine. They go through
+    /// the same door as a host keystroke, so an on-screen press is
+    /// de-duplicated, recorded by `--record-input`, and noted for replay
+    /// exactly as a real one is.
+    fn apply_keyboard_panel_outcome(&mut self, outcome: kbdpanel::KbdOutcome) {
+        for (rawkey, pressed) in outcome.keys {
+            self.handle_amiga_key_event(rawkey, pressed);
+        }
+    }
+
+    /// What the strip looks like this frame, with the Caps Lock lamp read
+    /// off the keyboard MCU rather than mirrored from the clicks: a
+    /// save-state load moves that lamp with no key pressed.
+    fn keyboard_panel_view(&mut self) -> kbdpanel::KbdPanelView {
+        let caps_lit = self.emu.bus().keyboard.caps_lock_led();
+        let hover = self
+            .cursor_pos
+            .zip(kbdpanel::shown_panel_rect(keyboard_panel_top()))
+            .and_then(|(pos, panel)| kbdpanel::control_at(panel, pos));
+        self.kbd_panel.view(caps_lit, hover)
     }
 
     /// The synth the panel is driving, when one is fitted and switched on.
@@ -5569,12 +5737,15 @@ impl App {
     /// resized, in which case the caller has to put its flag back: the draw
     /// helpers size themselves from the flag, so a taller canvas over a
     /// shorter buffer would index past it.
-    #[cfg(feature = "mt32")]
+    ///
+    /// Shared by every strip that takes a slice of the canvas -- the MT-32
+    /// panel and the on-screen keyboard -- since what has to follow the
+    /// change is the same in each case.
     fn resync_canvas_height(&mut self) -> bool {
         if let Some(r) = self.render.as_mut() {
             let surface = r.window.inner_size();
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
-                warn!("resize texture buffer for the MT-32 panel failed: {e}");
+                warn!("resize texture buffer for a canvas-height change failed: {e}");
                 return false;
             }
         }
@@ -5586,7 +5757,7 @@ impl App {
                     texture_width(tool.texture_scale) as u32,
                     texture_height(tool.texture_scale) as u32,
                 ) {
-                    warn!("resize tool texture buffer for the MT-32 panel failed: {e}");
+                    warn!("resize tool texture buffer for a canvas-height change failed: {e}");
                 }
                 tool.window.request_redraw();
             }
@@ -5625,6 +5796,7 @@ impl App {
                 self.cycle_joystick_input_mode();
                 self.request_redraw();
             }
+            BarControl::Keyboard => self.toggle_keyboard_panel(),
             BarControl::Volume => {}
         }
     }
@@ -11374,6 +11546,7 @@ mod console;
 mod control;
 mod crt_shader;
 mod host_input;
+mod kbdpanel;
 #[cfg(feature = "mt32")]
 mod mt32panel;
 mod present;

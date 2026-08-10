@@ -9457,6 +9457,7 @@ mod tests {
             input_recording: false,
             autofire_hz: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
+            keyboard_panel: false,
             port_devices: [
                 crate::bus::PortDevice::Mouse,
                 crate::bus::PortDevice::Joystick,

@@ -108,12 +108,19 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         hover == Some(BarControl::Joystick),
         texture_scale,
     );
+    draw_keyboard_button(
+        frame,
+        scale_rect(keyboard_toggle_rect(), texture_scale),
+        view.keyboard_panel_shown,
+        hover == Some(BarControl::Keyboard),
+        texture_scale,
+    );
     if view.control_connected {
         // A remote control-protocol client is attached; tag the bar so a
         // machine that pauses or steps "by itself" is explicable.
         draw_text(
             frame,
-            (JOY_TOGGLE_X.saturating_sub(44)) * texture_scale,
+            (KBD_TOGGLE_X.saturating_sub(44)) * texture_scale,
             (status_bar_top() + STATUS_CONTROL_Y + 2) * texture_scale,
             "CCP",
             STATUS_TEXT,
@@ -186,6 +193,8 @@ pub(super) struct StatusBarView {
     pub(super) media: MediaBar,
     /// Active host joystick source, shown by the status-bar toggle icon.
     pub(super) joystick_input_mode: JoystickInputMode,
+    /// Whether the on-screen keyboard is up, so its toggle can show it.
+    pub(super) keyboard_panel_shown: bool,
     pub(super) hover: Option<BarControl>,
     /// A control-protocol client is attached (--control-gui).
     pub(super) control_connected: bool,
@@ -200,6 +209,8 @@ pub(super) enum BarControl {
     Screenshot,
     Menu,
     Joystick,
+    /// Show or hide the on-screen Amiga keyboard.
+    Keyboard,
     Volume,
     DriveLoad(usize),
     DriveSwap(usize),
@@ -335,6 +346,9 @@ pub(super) fn control_at(pos: (i32, i32), layout: &BarLayout) -> Option<BarContr
     }
     if joystick_toggle_rect().contains(pos) {
         return Some(BarControl::Joystick);
+    }
+    if keyboard_toggle_rect().contains(pos) {
+        return Some(BarControl::Keyboard);
     }
     if volume_control_hit_rect().contains(pos) {
         return Some(BarControl::Volume);
@@ -487,6 +501,15 @@ pub(super) fn joystick_toggle_rect() -> Rect {
         x: JOY_TOGGLE_X,
         y: status_bar_top() + STATUS_CONTROL_Y,
         w: JOY_TOGGLE_W,
+        h: STATUS_CONTROL_H,
+    }
+}
+
+pub(super) fn keyboard_toggle_rect() -> Rect {
+    Rect {
+        x: KBD_TOGGLE_X,
+        y: status_bar_top() + STATUS_CONTROL_Y,
+        w: KBD_TOGGLE_W,
         h: STATUS_CONTROL_H,
     }
 }
@@ -1383,9 +1406,33 @@ pub(super) fn draw_gamepad_glyph(frame: &mut [u8], rect: Rect, texture_scale: us
     cell(15, 12, 2, 2, BUTTON_EDGE_DARK);
 }
 
+/// The on-screen keyboard's toggle: the same little keyboard the joystick
+/// toggle wears in its key-mapping mode, lit while the strip is up and dark
+/// while it is away, so the button says which it is without a caption.
+pub(super) fn draw_keyboard_button(
+    frame: &mut [u8],
+    rect: Rect,
+    shown: bool,
+    hover: bool,
+    texture_scale: usize,
+) {
+    draw_button_base(frame, rect, hover, texture_scale);
+    let keys = if shown {
+        BUTTON_GLYPH
+    } else {
+        BUTTON_GLYPH_DISABLED
+    };
+    draw_keyboard_glyph_in(frame, rect, keys, texture_scale);
+}
+
 /// A small keyboard: a recessed dark case holding two rows of green keys and a
 /// space bar.
 pub(super) fn draw_keyboard_glyph(frame: &mut [u8], rect: Rect, texture_scale: usize) {
+    draw_keyboard_glyph_in(frame, rect, BUTTON_GLYPH, texture_scale);
+}
+
+/// The same keyboard with its keys in a chosen colour.
+fn draw_keyboard_glyph_in(frame: &mut [u8], rect: Rect, keys: u32, texture_scale: usize) {
     let s = texture_scale;
     let mut cell = |x: usize, y: usize, w: usize, h: usize, color: u32| {
         fill_rect(
@@ -1404,11 +1451,11 @@ pub(super) fn draw_keyboard_glyph(frame: &mut [u8], rect: Rect, texture_scale: u
     cell(3, 6, 16, 11, BUTTON_EDGE_DARK);
     // Two rows of keys.
     for &kx in &[5, 8, 11, 14] {
-        cell(kx, 8, 2, 2, BUTTON_GLYPH);
-        cell(kx, 11, 2, 2, BUTTON_GLYPH);
+        cell(kx, 8, 2, 2, keys);
+        cell(kx, 11, 2, 2, keys);
     }
     // Space bar.
-    cell(7, 14, 8, 2, BUTTON_GLYPH);
+    cell(7, 14, 8, 2, keys);
 }
 
 /// The pause symbol: two short vertical bars flanking the centre.

@@ -149,6 +149,20 @@ pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the on-screen Amiga keyboard is shown under the display
+/// (status-bar button / menu). Main thread only, like [`SQUARE_PIXEL_ASPECT`];
+/// the atomic only satisfies `static` safety.
+static KEYBOARD_PANEL_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_keyboard_panel_shown(shown: bool) {
+    KEYBOARD_PANEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn keyboard_panel_shown() -> bool {
+    KEYBOARD_PANEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the MT-32's front panel is shown under the display
 /// (`[serial] mt32_panel`, toggled live from the menu). Main thread only,
 /// like [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
