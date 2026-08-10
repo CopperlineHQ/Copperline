@@ -3909,7 +3909,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
         Some("cue") | Some("iso") | Some("chd") => DroppedMediaKind::Cd,
-        Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
+        Some("hdf") | Some("hdz") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         Some("lha") | Some("slave") => DroppedMediaKind::WhdloadGame,
         _ => DroppedMediaKind::Floppy,
@@ -7112,9 +7112,9 @@ impl App {
             | LauncherField::ScsiUnit4
             | LauncherField::ScsiUnit5
             | LauncherField::ScsiUnit6 => dialog
-                .add_filter("Hard disk images", &["hdf", "img", "bin"])
+                .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
                 .add_filter("CD images", &["cue", "iso", "chd"]),
-            _ => dialog.add_filter("Hard disk images", &["hdf", "img", "bin"]),
+            _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
             dialog = dialog.set_directory(dir);

@@ -314,12 +314,13 @@ slow = "512K"
 # for multiple disks: a Zorro board's own boot ROM carries scsi.device and
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
-# same images as [ide]: RDB HDFs, bare partition hardfiles, or host
-# directories. A path ending in .cue, .iso, or .chd attaches a SCSI CD-ROM
-# drive at that ID instead (read-only; mount it in the guest with a CD filesystem
-# pointed at the controller's scsi.device and that unit number). CD audio
-# tracks play through the machine's audio output, and discs swap at runtime
-# (status-bar CD buttons, drag-and-drop, --insert-cd-after).
+# same images as [ide]: RDB HDFs, bare partition hardfiles, gzip-compressed
+# hardfiles (.hdz), or host directories. A path ending in .cue, .iso, or .chd
+# attaches a SCSI CD-ROM drive at that ID instead (read-only; mount it in the
+# guest with a CD filesystem pointed at the controller's scsi.device and that
+# unit number). CD audio tracks play through the machine's audio output, and
+# discs swap at runtime (status-bar CD buttons, drag-and-drop,
+# --insert-cd-after).
 #
 # controller picks the host adapter:
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
@@ -365,9 +366,12 @@ video = "PAL"
 # IDE hard-disk images, on the machines with a built-in IDE port: A600, A1200,
 # and A4000. Raw flat HDF images opened read/write; both full images with their
 # own RDB and bare partition hardfiles (boot block "DOS\x..", size a multiple
-# of 256 KiB) work - the latter get a synthesized RDB on the fly. A path may
-# also name a host directory, mounted as an in-memory FFS volume (guest
-# writes are not synced back to the host).
+# of 256 KiB) work - the latter get a synthesized RDB on the fly. A gzip-
+# compressed hardfile (.hdz, or a gzipped .hdf: it is the content that decides,
+# not the name) is unpacked into memory at open time, so the guest may write to
+# it but nothing goes back to the compressed file. A path may also name a host
+# directory, mounted as an in-memory FFS volume (guest writes are likewise not
+# synced back to the host).
 #
 # A drive may be given as a table instead of a bare path, to set the FFS volume
 # label of a directory mount (name) and/or the boot priority of the synthesized

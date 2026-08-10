@@ -52,6 +52,7 @@ pub mod gamepad;
 pub mod gary;
 pub mod gayle;
 pub mod gdbstub;
+pub(crate) mod gzip;
 pub mod harddrive;
 pub mod heatmap;
 pub mod hostsocket;

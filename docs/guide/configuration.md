@@ -1216,7 +1216,7 @@ profile = "A600"             # IDE needs a machine with an IDE port
 
 [ide]
 master = "AmigaSYS.hdf"      # raw flat HDF, read/write
-# slave = "scratch.hdf"
+# slave = "scratch.hdz"      # gzip-compressed hardfile, writes not kept
 ```
 
 Images are opened read/write. Both kinds of HDF work directly:
@@ -1229,6 +1229,16 @@ Images are opened read/write. Both kinds of HDF work directly:
   of 256 KiB so the partition is an exact cylinder count. Writes to the
   partition go back to the image file; writes to the synthesized RDB area
   (re-partitioning) live only for the session.
+
+A **gzip-compressed hardfile** attaches too -- the `.hdz` convention, or a
+plainly gzipped `.hdf`. Like the floppy formats it is recognised by content
+and not by name, so the extension is free. Deflate cannot be read a sector
+at a time, so the image is unpacked into memory when the drive opens: the
+guest sees an ordinary writable disk of either kind above, but the writes
+live only in that unpacked copy -- nothing goes back to the compressed
+file, and changes are lost at exit. An image that unpacks to more than
+1 GiB is refused rather than held in host RAM; decompress that one to a
+plain hardfile and attach it instead.
 
 A path may also name a **host directory**: its tree is built into an
 in-memory FFS volume at startup (volume name = directory name, files and
@@ -1326,8 +1336,8 @@ A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
 
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`
-partition, named after the SCSI ID), and host directories built into
-in-memory FFS volumes -- including the
+partition, named after the SCSI ID), gzip-compressed hardfiles (`.hdz`),
+and host directories built into in-memory FFS volumes -- including the
 `{ path = "...", name = "...", bootpri = N }` table form that overrides a
 directory mount's volume name and the synthesized partition's boot
 priority. The HDD activity LED covers SCSI traffic too.

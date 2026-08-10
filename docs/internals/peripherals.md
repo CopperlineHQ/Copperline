@@ -163,10 +163,12 @@ no boot ROM to configure.
 
 All IDE and SCSI drives share the `harddrive.rs` sector backend: raw
 HDF images, bare partition hardfiles wrapped in a synthesized RDB
-(bootable `DHn` named after the unit), and host directories built into
-in-memory FFS volumes by `dirfs.rs` (whose volume label defaults to the
-directory name, or a `name` override configured on the drive). The
-SCSI-2 target layer in
+(bootable `DHn` named after the unit), gzip-compressed hardfiles (`.hdz`,
+sniffed by gzip magic and unpacked by `gzip.rs` into memory at open time
+because deflate has no random access, which is what makes their writes
+session-only), and host directories built into in-memory FFS volumes by
+`dirfs.rs` (whose volume label defaults to the directory name, or a `name`
+override configured on the drive). The SCSI-2 target layer in
 `scsi.rs` answers INQUIRY, MODE SENSE pages 3/4, READ CAPACITY,
 READ/WRITE(6)/(10), REQUEST SENSE, and the no-op housekeeping commands,
 with sense state kept per target.
