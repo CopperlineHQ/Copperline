@@ -453,7 +453,10 @@ The layout is:
   **Parallel:** / **Ethernet:** headings, with each port's options indented
   beneath it: serial mode and MIDI endpoints, with the emulated MT-32's ROM
   images, front panel and display style when it is the chosen output (see
-  [The MT-32](mt32.md)); the
+  [The MT-32](mt32.md)), and, for the two TCP modes, the address box that
+  mode needs -- **Connect** (`tcp-connect`) for the `host:port` to dial, or
+  **Listen** (`tcp`) for the local bind address, each typed into by clicking
+  it; the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --

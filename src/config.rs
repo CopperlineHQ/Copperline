@@ -779,13 +779,18 @@ pub struct SerialConfig {
     pub mt32_panel: bool,
     /// How that panel's display is lit.
     pub mt32_lcd: Mt32Lcd,
-    /// TCP listen address for [`SerialMode::Tcp`]; `None` means the
-    /// default `127.0.0.1:1234` (the port UAE's `TCP:` serial uses).
+    /// TCP listen address for [`SerialMode::Tcp`]; `None` means
+    /// [`SERIAL_TCP_DEFAULT_LISTEN`].
     pub listen: Option<String>,
     /// Remote `host:port` for [`SerialMode::TcpConnect`]. Required in that
     /// mode (there is no sensible default host to dial).
     pub connect: Option<String>,
 }
+
+/// Where [`SerialMode::Tcp`] listens with no `[serial] listen` of its own:
+/// the loopback interface on the port UAE's `TCP:` serial device uses, so a
+/// terminal pointed at either lands in the same place.
+pub const SERIAL_TCP_DEFAULT_LISTEN: &str = "127.0.0.1:1234";
 
 /// How the MT-32's front-panel display is lit.
 ///

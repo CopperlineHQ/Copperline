@@ -1061,9 +1061,14 @@ With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
 `mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial section) and the
-in-window **MIDI In / MIDI Out** menu items select the MIDI endpoints
-interactively.
+`mode = "midi"`. The launcher's **I/O Ports** tab (Serial section) sets all
+of this interactively: **Device / Mode** picks the mode, and the mode brings
+its own address box with it -- **Connect** under `tcp-connect` for the
+remote to dial, **Listen** under `tcp` for the local bind address (it shows
+the `127.0.0.1:1234` default until something else is typed). Either box
+takes a `host:port`, with an IPv6 literal in brackets
+(`[::1]:1337`); clearing it unsets the key. The in-window
+**MIDI In / MIDI Out** menu items select the MIDI endpoints.
 
 The browser build has its own serial transport (the page bridges the port
 to a WebSocket); see [the browser chapter](browser.md).

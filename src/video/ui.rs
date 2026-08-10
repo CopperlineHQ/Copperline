@@ -758,6 +758,8 @@ pub enum UiControl {
     LauncherDriveNameEdit(LauncherField),
     /// A free-text box on a Create Image page (a volume or device name).
     LauncherNewImageEdit(LauncherField),
+    /// A serial TCP address box on the I/O Ports tab (Connect or Listen).
+    LauncherSerialAddrEdit(LauncherField),
     /// The Create button on a Create Image page.
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.
@@ -4191,6 +4193,10 @@ const LAUNCH_CLEAR_W: usize = 54;
 const LAUNCH_PATH_VALUE_W: usize = 216;
 /// Width of the editable volume-name box on a drive row.
 const LAUNCH_NAME_W: usize = 96;
+/// Width of the serial TCP address box. Far wider than a volume name's,
+/// because a host name and a port together are a long string and the port
+/// is at the far end of it -- the part a reader most needs to see.
+const LAUNCH_ADDR_W: usize = LAUNCH_PATH_VALUE_W;
 const LAUNCH_REMOVE_W: usize = 70;
 const LAUNCH_CONTROL_H: usize = 20;
 
@@ -4338,13 +4344,18 @@ fn launcher_nav_rows(slots: usize) -> usize {
     slots.max(1).div_ceil(LAUNCH_NAV_PER_ROW)
 }
 
-/// A free-text value box on a Create Image row: where a value would sit, at
-/// the width a volume or device name needs.
-fn launcher_text_rect(rect: Rect, row_y: usize) -> Rect {
+/// A free-text value box: where a value would sit, at the width its content
+/// needs -- a volume or device name on a Create Image row, or the longer
+/// `host:port` of a serial address on the I/O Ports tab.
+fn launcher_text_rect(rect: Rect, row_y: usize, field: LauncherField) -> Rect {
     Rect {
         x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
         y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
-        w: LAUNCH_NAME_W,
+        w: if LauncherState::is_serial_addr(field) {
+            LAUNCH_ADDR_W
+        } else {
+            LAUNCH_NAME_W
+        },
         h: LAUNCH_CONTROL_H,
     }
 }
@@ -4422,8 +4433,10 @@ fn indefinite_article(size: &str) -> &'static str {
     }
 }
 
-/// Draw a workshop value box: what the setting holds, or what is being
-/// typed into it, with a caret while it has the focus.
+/// Draw a free-text/number value box: what the setting holds, or what is
+/// being typed into it, with a caret while it has the focus. Used by the
+/// Create Image pages and by the Serial section's TCP address boxes, so it
+/// reads the value through `row_value` rather than from either store.
 fn draw_launcher_value_box(
     frame: &mut [u8],
     box_rect: Rect,
@@ -4440,15 +4453,23 @@ fn draw_launcher_value_box(
         BUTTON_EDGE_LIGHT,
         scale,
     );
-    let typing = state.editing() == Some(EditTarget::NewImageText(field));
+    let typing = state.typing_in_value_box(field);
     let (text, color) = if typing {
         (format!("{}_", state.edit_buffer()), PANEL_TEXT_HILIGHT)
     } else if disabled {
-        (state.workshop_value(field), PANEL_TEXT_DIM)
+        (state.row_value(field), PANEL_TEXT_DIM)
     } else {
-        (state.workshop_value(field), PANEL_TEXT)
+        (state.row_value(field), PANEL_TEXT)
     };
-    let shown = truncate_to_width(&text, box_rect.w.saturating_sub(8));
+    let avail = box_rect.w.saturating_sub(8);
+    // A value that is too long loses its head while it is being typed and
+    // its tail otherwise: what matters when typing is where the caret is,
+    // and it is at the end.
+    let shown = if typing {
+        clip_text_tail(&text, avail)
+    } else {
+        truncate_to_width(&text, avail)
+    };
     // A short figure between two arrows reads as belonging to them when it
     // is centred, and as a stray left-aligned word when it is not.
     let x = if centred {
@@ -4990,8 +5011,14 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 // Non-interactive rows.
                 RowKind::SectionHeader | RowKind::BootpriHeader => {}
                 RowKind::Text => {
-                    if launcher_text_rect(rect, row_y).contains(pos) {
-                        return Some(UiControl::LauncherNewImageEdit(r.field));
+                    if launcher_text_rect(rect, row_y, r.field).contains(pos) {
+                        // The same widget serves two stores: a Create Image
+                        // word, and a serial address on the machine.
+                        return Some(if LauncherState::is_serial_addr(r.field) {
+                            UiControl::LauncherSerialAddrEdit(r.field)
+                        } else {
+                            UiControl::LauncherNewImageEdit(r.field)
+                        });
                     }
                 }
                 RowKind::Size => {
@@ -5617,12 +5644,13 @@ fn truncate_to_width(text: &str, avail_px: usize) -> String {
     format!("{kept}~")
 }
 
-/// Clip a path to `avail_px`, keeping the TAIL and prefixing an ASCII "..."
+/// Clip `text` to `avail_px`, keeping the TAIL and prefixing an ASCII "..."
 /// when it does not fit -- for a host directory the meaningful end (the leaf
-/// dir) stays visible. The bitmap font is ASCII-only, so a real ellipsis
-/// glyph cannot be drawn; "..." is the closest it can render. Mirrors
-/// [`truncate_to_width`], which keeps the head instead.
-fn clip_path_tail(text: &str, avail_px: usize) -> String {
+/// dir) stays visible, and for a field being typed into it is the caret. The
+/// bitmap font is ASCII-only, so a real ellipsis glyph cannot be drawn; "..."
+/// is the closest it can render. Mirrors [`truncate_to_width`], which keeps
+/// the head instead.
+fn clip_text_tail(text: &str, avail_px: usize) -> String {
     let max_chars = avail_px / font::GLYPH_W;
     let len = text.chars().count();
     if len <= max_chars {
@@ -5668,7 +5696,7 @@ pub(super) fn clip_path_to_chars(text: &str, max_chars: usize) -> String {
         prefixed
     } else {
         // The file name alone does not fit; fall back to a plain tail clip.
-        clip_path_tail(name, max_chars * font::GLYPH_W)
+        clip_text_tail(name, max_chars * font::GLYPH_W)
     }
 }
 
@@ -5875,7 +5903,7 @@ fn draw_launcher_row(
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
-                launcher_text_rect(rect, row_y),
+                launcher_text_rect(rect, row_y, r.field),
                 state,
                 r.field,
                 disabled,
@@ -7552,6 +7580,9 @@ mod tests {
                             launcher_toggle_rect(rect, row_y),
                             launcher_drive_name_rect(rect, row_y),
                             launcher_bootable_rect(rect, row_y),
+                            // The widest of these: a serial address box is
+                            // sized for a host name and a port.
+                            launcher_text_rect(rect, row_y, r.field),
                         ];
                         for b in boxes {
                             let label = r.label;
@@ -8147,6 +8178,46 @@ mod tests {
         assert_eq!(ui.control_at(body), Some(UiControl::PanelBody));
         // Outside the panel: nothing.
         assert_eq!(ui.control_at((0, 0)), None);
+    }
+
+    /// Clicking a serial address box opens *that* edit, not the Create Image
+    /// one the free-text widget was first built for.
+    #[cfg(feature = "midi")]
+    #[test]
+    fn the_serial_address_box_hit_tests_to_its_own_edit() {
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::IoPorts;
+        while state.setup.serial_mode() != crate::config::SerialMode::TcpConnect {
+            state.setup.cycle(LauncherField::SerialMode, true);
+        }
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        let Some(Panel::Launcher(state)) = ui.panel.as_ref() else {
+            unreachable!()
+        };
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let index = launcher::rows(
+            state.tab,
+            state.setup.parallel_device(),
+            state.setup.serial_mode(),
+            state.setup.midi_out_is_mt32(),
+        )
+        .iter()
+        .filter(|r| !state.setup.row_hidden(r.field))
+        .position(|r| r.field == LauncherField::SerialConnect)
+        .expect("no Connect row in tcp-connect mode");
+        let row_y = launcher_row_y(rect, index);
+        let box_rect = launcher_text_rect(rect, row_y, LauncherField::SerialConnect);
+        assert_eq!(
+            ui.control_at((box_rect.x as i32 + 4, box_rect.y as i32 + 4)),
+            Some(UiControl::LauncherSerialAddrEdit(
+                LauncherField::SerialConnect
+            ))
+        );
     }
 
     #[test]
@@ -9341,6 +9412,31 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-printer");
+
+        // I/O Ports with the serial port dialling out: the Connect address
+        // box the tcp-connect mode brings with it, mid-edit so the caret and
+        // the highlight show too.
+        #[cfg(feature = "midi")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::IoPorts;
+            while state.setup.serial_mode() != crate::config::SerialMode::TcpConnect {
+                state.setup.cycle(LauncherField::SerialMode, true);
+            }
+            state.begin_edit_serial_addr(LauncherField::SerialConnect);
+            for c in "bbs.example.com:1337".chars() {
+                state.edit_push(c);
+            }
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-serial-tcp");
+        }
 
         // The Host Folder sub-page reached from the Storage tab.
         let mut frame = vec![0u8; w * h * 4];
