@@ -969,18 +969,24 @@ pub fn remember_game(raw: &mut RawConfig, game: &Path) {
 /// configuration (a `[machine]` profile, `rom`, `[memory]` sizes, CLI
 /// overrides, which land in the raw config before this) always wins.
 pub fn apply_to_raw(raw: &mut RawConfig, prepared: &PreparedGame) {
-    if raw.machine.profile.is_none() {
+    // `machine_type = "copperline"` means what it says: boot the package on
+    // the machine this configuration describes, whatever that is. The two
+    // staged volumes below still go on -- without them there is nothing to
+    // boot -- but nothing here decides the machine.
+    let derive =
+        raw.whdload.machine_type.unwrap_or_default() == crate::config::WhdloadMachine::Auto;
+    if derive && raw.machine.profile.is_none() {
         // The canonical WHDLoad host: 68020 + AGA satisfies every slave
         // requirement flag, and OCS/ECS programs run under the slave's own
         // hardware bending, exactly as on a real A1200.
         raw.machine.profile = Some("A1200".to_string());
     }
-    if raw.memory.fast.is_none() {
+    if derive && raw.memory.fast.is_none() {
         // Preload wants room for the whole game on top of ws_ExpMem; the
         // full Zorro II 8 MiB is the canonical WHDLoad recommendation.
         raw.memory.fast = Some("8M".to_string());
     }
-    if raw.rom.is_none() {
+    if derive && raw.rom.is_none() {
         match &prepared.machine_rom {
             Some(rom) => raw.rom = Some(rom.to_string_lossy().into_owned()),
             None => log::warn!(
@@ -1600,5 +1606,47 @@ mod tests {
         assert_eq!(raw.machine.profile.as_deref(), Some("A4000"));
         assert_eq!(raw.memory.fast.as_deref(), Some("2M"));
         assert_eq!(raw.rom.as_deref(), Some("my.rom"));
+    }
+
+    /// `machine_type = "copperline"` boots the package on the machine the
+    /// configuration describes, which includes the parts of it that were
+    /// never named: nothing is derived, not even into empty fields.
+    #[test]
+    fn machine_type_copperline_derives_nothing_but_still_mounts() {
+        let prepared = PreparedGame {
+            boot_dir: PathBuf::from("/lib/game/boot"),
+            game_dir: PathBuf::from("/lib/game/game"),
+            slave_rel: PathBuf::from("Game.Slave"),
+            slave: SlaveInfo::default(),
+            machine_rom: Some(PathBuf::from(
+                "/lib/game/boot/Devs/Kickstarts/kick40068.A1200",
+            )),
+            staged_kicks: vec![],
+        };
+        let mut raw = RawConfig::default();
+        raw.whdload.machine_type = Some(crate::config::WhdloadMachine::Copperline);
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(raw.machine.profile, None, "the machine is the config's");
+        assert_eq!(raw.memory.fast, None);
+        assert_eq!(raw.rom, None, "including which ROM it boots");
+
+        // The volumes are not part of the machine: without them the game
+        // has nothing to boot from, whichever setting is chosen.
+        assert_eq!(raw.filesys.len(), 2);
+        assert_eq!(raw.filesys[0].volume.as_deref(), Some(BOOT_VOLUME));
+        assert_eq!(raw.filesys[1].volume.as_deref(), Some(GAME_VOLUME));
+
+        // Auto is the default, and derives as before.
+        let mut raw = RawConfig::default();
+        raw.whdload.machine_type = Some(crate::config::WhdloadMachine::Auto);
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(raw.machine.profile.as_deref(), Some("A1200"));
+        let mut raw = RawConfig::default();
+        apply_to_raw(&mut raw, &prepared);
+        assert_eq!(
+            raw.machine.profile.as_deref(),
+            Some("A1200"),
+            "unset = auto"
+        );
     }
 }
