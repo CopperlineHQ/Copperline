@@ -3307,6 +3307,12 @@ impl MachineSetup {
                 .is_some_and(crate::config::is_cd_image_path)
     }
 
+    /// Where a WHDLoad game's machine comes from: the slave's own header,
+    /// or this configuration.
+    pub fn whdload_machine(&self) -> crate::config::WhdloadMachine {
+        self.whdload_machine
+    }
+
     pub fn value_label(&self, field: LauncherField) -> String {
         match field {
             F::WhdloadMachine => match self.whdload_machine {
@@ -8584,6 +8590,25 @@ mod tests {
         );
         // Only the ROM rows have one.
         assert_eq!(state.rom_note(F::Df0Image), None);
+    }
+
+    #[test]
+    fn the_machine_type_cycle_reports_which_machine_it_means() {
+        use crate::config::WhdloadMachine as M;
+        let mut setup = MachineSetup::default();
+        // Auto is the default: the slave header says what the game wants.
+        assert_eq!(setup.whdload_machine(), M::Auto);
+        assert_eq!(setup.value_label(F::WhdloadMachine), "Auto");
+
+        // The two settings are one cycle apart either way round, so the
+        // reading after a press is the reading the line describes.
+        setup.cycle(F::WhdloadMachine, true);
+        assert_eq!(setup.whdload_machine(), M::Copperline);
+        assert_eq!(setup.value_label(F::WhdloadMachine), "Copperline");
+        setup.cycle(F::WhdloadMachine, true);
+        assert_eq!(setup.whdload_machine(), M::Auto);
+        setup.cycle(F::WhdloadMachine, false);
+        assert_eq!(setup.whdload_machine(), M::Copperline, "and backwards");
     }
 
     #[cfg(feature = "game-library")]

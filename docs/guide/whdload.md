@@ -138,6 +138,12 @@ A4000 instead. `machine_type = "copperline"` makes that the rule rather
 than the exception: the package boots on whatever machine the
 configuration describes.
 
+**Machine type** on the Configuration page is the same setting. It cycles
+between `Auto` and `Copperline`, and since neither word says what it does,
+pressing it puts the answer on the status line for a few seconds: "WHDLoad
+uses the Slave file machine type", or "WHDLoad uses the Copperline defined
+machine type".
+
 Everything composes with the rest of the CLI: `--screenshot-after`,
 scripted input, save states, `--record-input` all work, so a WHDLoad game
 is scriptable and deterministic like any other Copperline run.

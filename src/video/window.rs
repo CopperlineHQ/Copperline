@@ -1569,6 +1569,12 @@ fn clipboard_line() -> String {
 #[cfg(feature = "game-library")]
 const STATUS_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How long the WHDLoad machine-type line stays. Shorter than
+/// [`STATUS_LINGER`]: it explains a setting that has just been changed, and
+/// is read straight away, rather than reporting the end of something that
+/// finished while you were looking elsewhere.
+const WHDLOAD_MACHINE_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// How long a scroll arrow must be held before it starts repeating. Long
 /// enough that clicking to move one row never runs on by accident, short
 /// enough that holding it does not feel broken -- the pause a host keyboard
@@ -6212,6 +6218,10 @@ impl App {
                         state.status = None;
                     }
                 }
+                // Which machine a WHDLoad game boots on is the one cycle
+                // here whose two settings look alike from the outside: both
+                // say a word, and neither word says what it does.
+                self.say_whdload_machine(field);
             }
             UiControl::LauncherToggle(field) => {
                 if let Some(state) = self.launcher_state_mut() {
@@ -8446,8 +8456,33 @@ impl App {
         }
     }
 
+    /// Say what the WHDLoad machine-type setting just became.
+    ///
+    /// The row cycles between two words, "Auto" and "Copperline", and a
+    /// word is not an explanation: the first takes the machine from the
+    /// slave's own header, the second from whatever this configuration
+    /// describes. The line says which, and takes itself down again -- it
+    /// answers a press, rather than warning of something to be dealt with.
+    fn say_whdload_machine(&mut self, field: crate::video::launcher::LauncherField) {
+        use crate::video::launcher::LauncherField as F;
+        if field != F::WhdloadMachine {
+            return;
+        }
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        let said = match state.setup.whdload_machine() {
+            crate::config::WhdloadMachine::Auto => "WHDLoad uses the Slave file machine type",
+            crate::config::WhdloadMachine::Copperline => {
+                "WHDLoad uses the Copperline defined machine type"
+            }
+        };
+        state.status = Some(StatusMessage::ok(said));
+        self.clear_status_in(WHDLOAD_MACHINE_LINGER);
+        self.request_redraw();
+    }
+
     /// Have the status line clear itself after `linger`.
-    #[cfg(feature = "game-library")]
     fn clear_status_in(&mut self, linger: std::time::Duration) {
         self.status_until = Some(std::time::Instant::now() + linger);
     }
