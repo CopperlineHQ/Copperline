@@ -1145,7 +1145,6 @@ mod tests {
 
         // The drawing helpers clamp against the presentation texture, so the
         // panel is drawn where it really sits and the strip cropped out.
-        let _guard = crate::video::window::canvas_height_test_lock();
         crate::video::set_mt32_panel_shown(true);
         let scale = 2;
         let (w, h) = (texture_width(scale), texture_height(scale));

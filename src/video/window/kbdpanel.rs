@@ -749,9 +749,15 @@ impl KbdPanelState {
     }
 
     /// Let go of everything the strip is holding: the cap under the mouse
-    /// and every latched qualifier. Used by the reset chord, by hiding the
-    /// keyboard, and when the machine those keys were pressed on is
-    /// replaced.
+    /// and every latched qualifier.
+    ///
+    /// Used by the reset chord and the close chip here, and by the window
+    /// for every machine-lifecycle change that invalidates a latch --
+    /// hiding the strip, running a new machine, loading a save state,
+    /// powering off, and rebooting (`App::release_keyboard_panel_holds`).
+    /// A latch is a host-side affordance, and one that outlived its
+    /// machine would be drawn down over a keyboard MCU that has never
+    /// heard of it.
     pub fn release_all(&mut self) -> KbdOutcome {
         let mut out = KbdOutcome::default();
         if let Some(rawkey) = self.pressed.take() {
@@ -966,8 +972,8 @@ fn draw_caps_led(frame: &mut [u8], cap: Rect, fill: u32, lit: bool, scale: usize
 /// What is printed on a cap: the main legend, with the shifted one above
 /// it, smaller and dimmer, as the cap prints them.
 fn draw_cap_legends(frame: &mut [u8], cap: Rect, main: Legend, shift: Legend, scale: usize) {
-    let main_px = legend_px(main, cap.w);
-    let main_h = font::GLYPH_H * main_px;
+    let main_px = legend_px(main);
+    let main_h = legend_height(main, main_px);
     if shift == Legend::None {
         let y = cap.y + cap.h.saturating_sub(main_h) / 2;
         draw_legend(frame, cap, y, main, main_px, CAP_INK, scale);
@@ -998,16 +1004,16 @@ fn draw_cap_legends(frame: &mut [u8], cap: Rect, main: Legend, shift: Legend, sc
     );
 }
 
-/// How large a legend is printed: as large as the cap takes, which puts
-/// the character legends at double size and the word legends -- Ctrl,
-/// Shift, Bksp -- at the size a real cap prints them, small.
-fn legend_px(legend: Legend, cap_w: usize) -> usize {
+/// How large a legend is printed.
+///
+/// A cap prints a character legend large and a word legend -- Esc, Ctrl,
+/// Shift, Alt, Bksp -- in a smaller face, and so does this: one character
+/// at double size, anything longer at single. Sizing by what fits the cap
+/// instead would put Alt and Ctrl, two qualifiers of the same width in the
+/// same row, at different sizes, and F10 at a different size from F9.
+fn legend_px(legend: Legend) -> usize {
     match legend {
-        Legend::Text(s) if font::text_width(s, 2) > cap_w => 1,
-        // The Amiga mark is drawn half again as large as a letter: the
-        // left key's is an outline, and an outline of a two-pixel stroke
-        // has nothing left inside it.
-        Legend::Amiga { .. } => 3,
+        Legend::Text(s) if s.chars().count() > 1 => 1,
         _ => 2,
     }
 }
@@ -1017,7 +1023,16 @@ fn legend_width(legend: Legend, px: usize) -> usize {
         Legend::None => 0,
         Legend::Text(s) => font::text_width(s, px),
         Legend::Pound | Legend::Arrow(_) => font::GLYPH_W * px,
-        Legend::Amiga { .. } => amiga_width(px),
+        // Drawn at its own size, in canvas pixels, rather than as a glyph
+        // scaled by whole font pixels.
+        Legend::Amiga { .. } => AMIGA_W,
+    }
+}
+
+fn legend_height(legend: Legend, px: usize) -> usize {
+    match legend {
+        Legend::Amiga { .. } => AMIGA_H,
+        _ => font::GLYPH_H * px,
     }
 }
 
@@ -1048,7 +1063,7 @@ fn draw_legend(
         }
         Legend::Pound => blit_glyph(frame, x, y, &POUND, px, ink, scale),
         Legend::Arrow(dir) => blit_glyph(frame, x, y, arrow_glyph(dir), px, ink, scale),
-        Legend::Amiga { hollow } => draw_amiga_mark(frame, x, y, px, hollow, ink, scale),
+        Legend::Amiga { hollow } => draw_amiga_mark(frame, x, y, hollow, ink, scale),
     }
 }
 
@@ -1104,69 +1119,80 @@ fn blit_glyph(
     }
 }
 
-/// The Amiga key's mark: an A leaning to the right, drawn rather than
-/// typed because the font has no italic and shearing an upright A a pixel
-/// at a time breaks its strokes into steps. Bit 0 of a row is its
-/// leftmost pixel, as in the font.
-static AMIGA_A: [u8; 8] = [0x30, 0x30, 0x78, 0xD8, 0xFC, 0xCC, 0x66, 0x00];
+// The Amiga key's mark: a capital A leaning to the right.
+//
+// Drawn from its own geometry in canvas pixels rather than from a font
+// cell scaled by whole font pixels. The font has no italic, and shearing
+// an upright A by a whole font pixel per row turns each stroke into a
+// staircase of blocks; laid out this way each stroke is a straight line
+// whose lean only ever steps a single pixel at a time.
 
-fn amiga_width(px: usize) -> usize {
-    font::GLYPH_W * px
+/// How tall the mark is, in canvas pixels: half a key, which leaves the
+/// moulding around it on a 1u cap.
+const AMIGA_H: usize = KEY_UNIT / 2;
+/// How far the apex stands right of the foot -- a quarter of the height,
+/// the lean an Amiga keycap's A wears.
+const AMIGA_SHEAR: usize = AMIGA_H / 4;
+/// Half the spread of the legs at the foot.
+const AMIGA_HALF: usize = AMIGA_H * 2 / 5;
+/// Stroke weight. Three rather than two so the left key's outline has
+/// something inside its contour: the outline of a two-pixel stroke is the
+/// whole stroke, and the two marks would come out identical.
+const AMIGA_STROKE: usize = 3;
+/// Where the crossbar sits, measured down the letter.
+const AMIGA_BAR_Y: usize = AMIGA_H * 62 / 100;
+/// The legs reach `AMIGA_HALF` either side of the stem at the foot and
+/// the apex stands `AMIGA_SHEAR` right of it, so the widest row is
+/// whichever of those two is larger.
+const AMIGA_W: usize = AMIGA_HALF
+    + AMIGA_STROKE
+    + if AMIGA_SHEAR > AMIGA_HALF {
+        AMIGA_SHEAR
+    } else {
+        AMIGA_HALF
+    };
+
+/// The letter, as the pixels it covers.
+///
+/// Row by row: the lean runs off linearly from the apex to the foot and
+/// the legs splay the other way, so both strokes are straight lines, and
+/// the crossbar is the run between them at [`AMIGA_BAR_Y`].
+fn amiga_mask() -> [[bool; AMIGA_W]; AMIGA_H] {
+    let mut mask = [[false; AMIGA_W]; AMIGA_H];
+    let last = AMIGA_H - 1;
+    for (y, row) in mask.iter_mut().enumerate() {
+        let lean = AMIGA_SHEAR * (last - y) / last;
+        let span = AMIGA_HALF * y / last;
+        let stem = lean + AMIGA_HALF;
+        let (left, right) = (stem - span, stem + span);
+        for x in left..left + AMIGA_STROKE {
+            row[x] = true;
+        }
+        for x in right..right + AMIGA_STROKE {
+            row[x] = true;
+        }
+        if (AMIGA_BAR_Y..AMIGA_BAR_Y + AMIGA_STROKE).contains(&y) {
+            for cell in row.iter_mut().take(right + AMIGA_STROKE).skip(left) {
+                *cell = true;
+            }
+        }
+    }
+    mask
 }
 
 /// The mark, filled on the right key and outlined on the left, as the
 /// case prints the pair.
-///
-/// The outline is taken after the letter is scaled up, so it is a real
-/// one-pixel edge around a two-pixel stroke rather than the whole stroke
-/// (every pixel of which has an empty neighbour at mark resolution).
-fn draw_amiga_mark(
-    frame: &mut [u8],
-    x: usize,
-    y: usize,
-    px: usize,
-    hollow: bool,
-    ink: u32,
-    scale: usize,
-) {
-    const MAX_W: usize = 8 * 3;
-    const MAX_H: usize = 8 * 3;
-    let (w, h) = (amiga_width(px), font::GLYPH_H * px);
-    if w > MAX_W || h > MAX_H {
-        return;
-    }
-    let mut mask = [[false; MAX_W]; MAX_H];
-    for (row_idx, row) in AMIGA_A.iter().enumerate() {
-        for col in 0..font::GLYPH_W {
-            if row & (1 << col) == 0 {
-                continue;
-            }
-            for dy in 0..px {
-                for dx in 0..px {
-                    mask[row_idx * px + dy][col * px + dx] = true;
-                }
-            }
-        }
-    }
-    for (row, cells) in mask.iter().enumerate().take(h) {
-        for (col, &set) in cells.iter().enumerate().take(w) {
+fn draw_amiga_mark(frame: &mut [u8], x: usize, y: usize, hollow: bool, ink: u32, scale: usize) {
+    let mask = amiga_mask();
+    for (row, cells) in mask.iter().enumerate() {
+        for (col, &set) in cells.iter().enumerate() {
             if !set {
                 continue;
             }
-            if hollow {
-                // An inner pixel is one whose four neighbours are all part
-                // of the letter; the rest are its edge.
-                let inner = row > 0
-                    && col > 0
-                    && row + 1 < h
-                    && col + 1 < w
-                    && mask[row - 1][col]
-                    && mask[row + 1][col]
-                    && mask[row][col - 1]
-                    && mask[row][col + 1];
-                if inner {
-                    continue;
-                }
+            // Outlined: keep only the edge of the letter, which is every
+            // pixel that has a neighbour outside it.
+            if hollow && amiga_interior(&mask, row, col) {
+                continue;
             }
             fill_rect(
                 frame,
@@ -1184,6 +1210,19 @@ fn draw_amiga_mark(
             );
         }
     }
+}
+
+/// Whether the pixel at (`row`, `col`) is surrounded by the letter on all
+/// four sides, and so is inside it rather than on its edge.
+fn amiga_interior(mask: &[[bool; AMIGA_W]; AMIGA_H], row: usize, col: usize) -> bool {
+    row > 0
+        && col > 0
+        && row + 1 < AMIGA_H
+        && col + 1 < AMIGA_W
+        && mask[row - 1][col]
+        && mask[row + 1][col]
+        && mask[row][col - 1]
+        && mask[row][col + 1]
 }
 
 /// A notch chip: the same moulding as the status bar's own buttons, so the
@@ -1278,16 +1317,17 @@ mod tests {
         panel_rect(500)
     }
 
-    /// Holds the canvas-height lock while the strip is up, and takes it
-    /// down again however the test ends: the flag is process-global, and a
-    /// failed assertion must not leave it set for everything after it.
-    struct KeyboardUp(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    /// Puts the strip up for the length of a test and takes it down again
+    /// however the test ends. The flag is this thread's own in a test
+    /// build (see `crate::video::set_keyboard_panel_shown`), so it costs
+    /// no other test anything -- but a test that left it set would still
+    /// mislead the next one to run on the same thread.
+    struct KeyboardUp;
 
     impl KeyboardUp {
         fn shown() -> Self {
-            let guard = crate::video::window::canvas_height_test_lock();
             crate::video::set_keyboard_panel_shown(true);
-            Self(guard)
+            Self
         }
     }
 

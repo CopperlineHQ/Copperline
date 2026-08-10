@@ -112,10 +112,13 @@ reflows into it as usual.
 
 It is an **A600** -- the one Amiga keyboard with no numeric keypad, so the
 whole machine fits the window's width at a usable cap size. Clicking a cap
-sends that key's rawkey to the emulated keyboard MCU, exactly as a host
-keystroke does: the same de-duplication, the same authentic serial
-protocol, and the same recording, so on-screen keys are captured by
-`--record-input` and replay from the resulting `--script` file.
+sends that key's rawkey to the emulated keyboard MCU over the same
+authentic serial protocol a host keystroke uses, and is recorded the same
+way, so on-screen keys are captured by `--record-input` and replay from the
+resulting `--script` file. The two keyboards are independent holders of the
+same key: pressing a cap the host keyboard is already holding down changes
+nothing for the machine, and the key comes up only when the last of the two
+lets go.
 
 The keyboard is the way to reach the keys a host keyboard has no
 equivalent of -- Help, both Amiga keys, and the `#`/`~` key beside Return --

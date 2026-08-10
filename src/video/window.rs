@@ -254,23 +254,6 @@ fn keyboard_panel_top() -> usize {
     present_height() + mt32_panel_height()
 }
 
-/// Serialises the tests that put one of the canvas-height strips up. The
-/// flags behind them are process-global (they have to be: the draw helpers
-/// size themselves from them), so a test reading `window_present_height`
-/// while another has a strip up would be measuring the other one's canvas.
-#[cfg(test)]
-pub(super) static CANVAS_HEIGHT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Take that lock, ignoring a poisoning left by a test that failed while
-/// holding it -- the flags are reset by each test that takes it, and one
-/// failure should not cascade into every other.
-#[cfg(test)]
-pub(super) fn canvas_height_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    CANVAS_HEIGHT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
 /// The on-screen keyboard's height, or 0 while it is not shown.
 fn keyboard_panel_height() -> usize {
     if super::keyboard_panel_shown() {
@@ -685,6 +668,25 @@ fn rawkey_index(rawkey: u8) -> usize {
     (rawkey & 0x7F) as usize
 }
 
+/// Where a rawkey transition came from.
+///
+/// Two things can have a key down at once -- a finger on the host keyboard
+/// and a click on the on-screen keyboard -- and each keeps its own held
+/// table so its own repeats and stale releases are dropped. What the
+/// machine is told is the *aggregate*: the key is down for it while either
+/// source holds it, and only a change in that aggregate is enqueued,
+/// recorded, or noted for replay. Without that, pressing a cap the host is
+/// already holding would be swallowed as a duplicate while its release
+/// still went through, cutting the host's key short -- and the strip would
+/// go on drawing a latch the keyboard MCU never heard about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySource {
+    /// The host keyboard, both the focused and raw-device paths.
+    Host,
+    /// The on-screen keyboard strip.
+    Panel,
+}
+
 fn rawkey_is_held(held_rawkeys: &[bool; 128], rawkey: u8) -> bool {
     held_rawkeys[rawkey_index(rawkey)]
 }
@@ -961,7 +963,19 @@ pub struct App {
     /// impl catches every exit path, including the headless captures).
     record_input_path: Option<PathBuf>,
     modifiers: ModifiersState,
+    /// Rawkeys the host keyboard is holding down (both the focused
+    /// `KeyboardInput` path and the raw-device qualifier path feed it).
+    /// One of the two sources behind [`App::amiga_rawkey_held`]; see
+    /// [`KeySource`] for why the machine is told about the aggregate
+    /// rather than about either source on its own.
     held_rawkeys: [bool; 128],
+    /// Rawkeys the on-screen keyboard is holding down: the cap under the
+    /// mouse and every latched qualifier. The other source.
+    panel_held_rawkeys: [bool; 128],
+    /// Physical state of the qualifier keys as the raw-device listener
+    /// sees them, which is not a source of its own: it is what stops a
+    /// winit `ModifiersState` update from releasing a qualifier the
+    /// hardware still has down (see `update_host_modifiers`).
     raw_device_held_rawkeys: [bool; 128],
     main_window_focused: bool,
     /// Whether the user has sized the main window themselves, in which case
@@ -1680,6 +1694,7 @@ impl App {
             record_input_path: record_input,
             modifiers: ModifiersState::empty(),
             held_rawkeys: [false; 128],
+            panel_held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
             window_manually_sized: false,
@@ -5427,8 +5442,7 @@ impl App {
         if !shown {
             // The strip is going away with keys still down on it; hand
             // them back before it does, or the guest is left holding them.
-            let outcome = self.kbd_panel.release_all();
-            self.apply_keyboard_panel_outcome(outcome);
+            self.release_keyboard_panel_holds();
         }
         // Decide before the flag flips whether the window still matches the
         // canvas, so a manual resize survives.
@@ -5478,13 +5492,26 @@ impl App {
     }
 
     /// Hand the strip's key transitions to the machine. They go through
-    /// the same door as a host keystroke, so an on-screen press is
-    /// de-duplicated, recorded by `--record-input`, and noted for replay
-    /// exactly as a real one is.
+    /// the same door as a host keystroke -- recorded by `--record-input`
+    /// and noted for replay exactly as a real one is -- but as their own
+    /// source, so a cap and a host key can hold the same rawkey without
+    /// either cutting the other short (see [`KeySource`]).
     fn apply_keyboard_panel_outcome(&mut self, outcome: kbdpanel::KbdOutcome) {
         for (rawkey, pressed) in outcome.keys {
-            self.handle_amiga_key_event(rawkey, pressed);
+            self.handle_amiga_key_event_from(KeySource::Panel, rawkey, pressed);
         }
+    }
+
+    /// Let go of everything the on-screen keyboard is holding, through the
+    /// aggregate path, so the machine hears the releases and the drawn
+    /// latches match what it believes.
+    ///
+    /// Called wherever the machine or its keyboard is about to be replaced
+    /// or restarted: a latch is a host-side affordance and has no business
+    /// outliving the machine it was latched against.
+    fn release_keyboard_panel_holds(&mut self) {
+        let outcome = self.kbd_panel.release_all();
+        self.apply_keyboard_panel_outcome(outcome);
     }
 
     /// What the strip looks like this frame, with the Caps Lock lamp read
@@ -7716,6 +7743,11 @@ impl App {
     /// powering it on. The previous (placeholder or running) machine, and its
     /// audio sink, are dropped here.
     fn run_machine(&mut self, emu: Emulator, cfg: &Config, raw: RawConfig) {
+        // Anything the on-screen keyboard is holding belongs to the
+        // machine being replaced, and has to be handed back while that
+        // machine is still here: the new one would otherwise come up with
+        // caps drawn latched that its keyboard MCU never heard of.
+        self.release_keyboard_panel_holds();
         self.emu = emu;
         // Any heat map the analyzer pane armed went with the machine that
         // was just replaced, so the pane owns nothing on this one until it
@@ -8094,6 +8126,12 @@ impl App {
     }
 
     fn load_state_from_path(&mut self, path: &std::path::Path) -> bool {
+        // The restored machine carries its own keyboard state, so the
+        // strip lets go of its holds against the machine that is still
+        // here. Done before the attempt rather than after a success: a
+        // release sent into the restored machine would be a key it never
+        // saw pressed.
+        self.release_keyboard_panel_holds();
         match self.emu.load_state(path) {
             Ok(outcome) => {
                 info!(
@@ -10878,12 +10916,44 @@ impl App {
         }
     }
 
+    /// Whether the machine is being told `rawkey` is down -- by the host
+    /// keyboard, by the on-screen one, or by both.
+    fn amiga_rawkey_held(&self, rawkey: u8) -> bool {
+        rawkey_is_held(&self.held_rawkeys, rawkey)
+            || rawkey_is_held(&self.panel_held_rawkeys, rawkey)
+    }
+
+    /// A transition from the host keyboard.
     fn handle_amiga_key_event(&mut self, rawkey: u8, pressed: bool) {
-        if rawkey_transition_is_duplicate(&self.held_rawkeys, rawkey, pressed) {
+        self.handle_amiga_key_event_from(KeySource::Host, rawkey, pressed);
+    }
+
+    /// A transition from `source`, reaching the machine only when it moves
+    /// the aggregate held state (see [`KeySource`]).
+    fn handle_amiga_key_event_from(&mut self, source: KeySource, rawkey: u8, pressed: bool) {
+        let idx = rawkey_index(rawkey);
+        let held = match source {
+            KeySource::Host => &self.held_rawkeys,
+            KeySource::Panel => &self.panel_held_rawkeys,
+        };
+        // Per-source: a winit auto-repeat re-presses a key this source
+        // already has down, and a source can be told to let go of
+        // something it never took.
+        if rawkey_transition_is_duplicate(held, rawkey, pressed) {
             return;
         }
-        let idx = rawkey_index(rawkey);
-        self.held_rawkeys[idx] = pressed;
+        let was_held = self.amiga_rawkey_held(rawkey);
+        match source {
+            KeySource::Host => self.held_rawkeys[idx] = pressed,
+            KeySource::Panel => self.panel_held_rawkeys[idx] = pressed,
+        }
+        // The other source is holding the same key, so the aggregate did
+        // not move: the machine already believes what this transition
+        // would tell it, and a recorded or replayed copy of it would
+        // reproduce the second holder rather than the keystroke.
+        if was_held == self.amiga_rawkey_held(rawkey) {
+            return;
+        }
 
         // Ctrl+Amiga+Amiga is no longer consumed host-side: the chord
         // travels to the keyboard MCU like every other transition, and
@@ -11179,6 +11249,10 @@ impl App {
     /// Power off: drop into a cold-boot state (RAM cleared) and park the
     /// test screen, so a later power-on comes up as a clean power cycle.
     fn power_off(&mut self) {
+        // A key held on the on-screen keyboard is let go before the power
+        // goes, so the cold-boot machine starts with the caps up and
+        // nothing latched against the machine that just stopped.
+        self.release_keyboard_panel_holds();
         self.powered_on = false;
         self.paused = false;
         self.sync_live_audio_suspension();
@@ -11220,6 +11294,11 @@ impl App {
     }
 
     fn reset_emulator(&mut self, clear_host_keys: bool) {
+        // The strip's latches are a host-side affordance: they must not
+        // ride through a reset and be re-reported by the MCU's power-up
+        // stream, which is what `begin_power_up` does with anything the
+        // matrix still shows held.
+        self.release_keyboard_panel_holds();
         if let Err(e) = self.emu.keyboard_reset() {
             error!("keyboard reset failed: {e:#}");
             self.cpu_halted = true;

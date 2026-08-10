@@ -1181,24 +1181,24 @@ fn keyboard_toggle_clears_worst_case_media() {
     assert_eq!(control_at(center, &layout), Some(BarControl::Keyboard));
 }
 
-/// Holds the canvas-height lock for a test that puts the on-screen
-/// keyboard up, and takes the strip down again however the test ends -- a
-/// failed assertion must not leave the flag set for everything after it.
-struct KeyboardUp(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+/// Puts the on-screen keyboard up for the length of a test and takes it
+/// down again however the test ends. The flag is this thread's own in a
+/// test build (see `crate::video::set_keyboard_panel_shown`), so it costs
+/// no other test anything -- but a test that left it set would still
+/// mislead the next one to run on the same thread.
+struct KeyboardUp;
 
 impl KeyboardUp {
     fn shown() -> Self {
-        let guard = super::canvas_height_test_lock();
         crate::video::set_keyboard_panel_shown(true);
-        Self(guard)
+        Self
     }
 
-    /// The same lock without putting the strip up, for a test that does
-    /// its own showing and hiding.
+    /// The strip explicitly down, for a test that does its own showing and
+    /// hiding and wants to start from a known state.
     fn hidden() -> Self {
-        let guard = super::canvas_height_test_lock();
         crate::video::set_keyboard_panel_shown(false);
-        Self(guard)
+        Self
     }
 }
 
@@ -1208,14 +1208,16 @@ impl Drop for KeyboardUp {
     }
 }
 
-/// The strip's own rect this frame, with the keyboard up.
-fn shown_keyboard_panel() -> super::Rect {
-    kbdpanel::shown_panel_rect(super::keyboard_panel_top()).expect("the keyboard is up")
+/// Where the strip sits. Its geometry does not depend on the strip being
+/// up, so a test that only clicks caps needs neither the shown flag nor
+/// the lock that serialises it.
+fn keyboard_panel_rect() -> super::Rect {
+    kbdpanel::panel_rect(super::keyboard_panel_top())
 }
 
-/// Where on the canvas the cap carrying `rawkey` is, with the keyboard up.
+/// Where on the canvas the cap carrying `rawkey` is.
 fn keycap_center(rawkey: u8) -> (i32, i32) {
-    let panel = shown_keyboard_panel();
+    let panel = keyboard_panel_rect();
     for y in panel.y..panel.y + panel.h {
         for x in panel.x..panel.x + panel.w {
             if kbdpanel::control_at(panel, (x as i32, y as i32))
@@ -1231,7 +1233,7 @@ fn keycap_center(rawkey: u8) -> (i32, i32) {
 /// Click a cap the way the window event does: press on the way down,
 /// release on the way up.
 fn click_keycap(app: &mut super::App, rawkey: u8) {
-    let panel = shown_keyboard_panel();
+    let panel = keyboard_panel_rect();
     let control = kbdpanel::control_at(panel, keycap_center(rawkey)).expect("a cap is there");
     app.press_keyboard_panel_control(control);
     app.release_keyboard_panel_key();
@@ -1267,38 +1269,41 @@ const KBD_HEIGHT: usize = kbdpanel::KBD_PANEL_HEIGHT;
 /// the way up, through the same door a host keystroke uses.
 #[test]
 fn clicking_a_cap_types_its_rawkey() {
-    let _guard = KeyboardUp::shown();
     let mut app = test_app();
-    let panel = shown_keyboard_panel();
+    let panel = keyboard_panel_rect();
     let control = kbdpanel::control_at(panel, keycap_center(0x20)).expect("the A cap");
     assert_eq!(control, kbdpanel::KbdControl::Key(0x20));
 
     app.press_keyboard_panel_control(control);
-    assert!(rawkey_is_held(&app.held_rawkeys, 0x20), "A went down");
+    assert!(app.amiga_rawkey_held(0x20), "A went down");
     assert!(
         app.emu.bus().keyboard.is_held(0x20),
         "and the matrix saw it"
     );
+    // The host keyboard is not holding it: the strip is its own source.
+    assert!(!rawkey_is_held(&app.held_rawkeys, 0x20));
 
     assert!(app.release_keyboard_panel_key(), "the lift was the strip's");
-    assert!(!rawkey_is_held(&app.held_rawkeys, 0x20), "and came back up");
+    assert!(!app.amiga_rawkey_held(0x20), "and came back up");
     assert!(!app.emu.bus().keyboard.is_held(0x20));
     // With nothing held, a lift belongs to whoever else wants it.
     assert!(!app.release_keyboard_panel_key());
 }
 
-/// Caps Lock is the MCU's latch: the strip sends the press and nothing
-/// else, and the lamp on the cap is read back from the MCU.
+/// Caps Lock is an ordinary key with a lamp: the strip sends the press and
+/// release pair a real cap sends, and the MCU -- which owns the latch --
+/// toggles the lamp on the press and discards the release. The cap reads
+/// the lamp back from the MCU rather than mirroring the clicks.
 #[test]
 fn the_caps_cap_types_and_follows_the_mcus_lamp() {
-    let _guard = KeyboardUp::shown();
     let mut app = test_app();
     assert!(!app.emu.bus().keyboard.caps_lock_led());
 
     click_keycap(&mut app, 0x62);
     assert!(app.emu.bus().keyboard.caps_lock_led(), "the lamp came on");
     assert!(app.keyboard_panel_view().caps_lit, "and the cap shows it");
-    // A second click puts it out again: one press per click, never two.
+    // A second click puts it out again: the release the strip sends in
+    // between changes nothing, so the lamp toggles once per click.
     click_keycap(&mut app, 0x62);
     assert!(!app.emu.bus().keyboard.caps_lock_led());
     assert!(!app.keyboard_panel_view().caps_lit);
@@ -1308,26 +1313,25 @@ fn the_caps_cap_types_and_follows_the_mcus_lamp() {
 /// go with it, which is how a one-button mouse types a shifted character.
 #[test]
 fn a_latched_qualifier_is_released_with_the_key_it_qualified() {
-    let _guard = KeyboardUp::shown();
     let mut app = test_app();
 
     click_keycap(&mut app, AMIGA_RAWKEY_LEFT_SHIFT);
     assert!(
-        rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        app.amiga_rawkey_held(AMIGA_RAWKEY_LEFT_SHIFT),
         "Shift stayed down after the click"
     );
 
-    let panel = shown_keyboard_panel();
+    let panel = keyboard_panel_rect();
     let a = kbdpanel::control_at(panel, keycap_center(0x20)).unwrap();
     app.press_keyboard_panel_control(a);
     assert!(
-        rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        app.amiga_rawkey_held(AMIGA_RAWKEY_LEFT_SHIFT),
         "still down across the keystroke"
     );
     app.release_keyboard_panel_key();
-    assert!(!rawkey_is_held(&app.held_rawkeys, 0x20));
+    assert!(!app.amiga_rawkey_held(0x20));
     assert!(
-        !rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT),
+        !app.amiga_rawkey_held(AMIGA_RAWKEY_LEFT_SHIFT),
         "and came up with it"
     );
 }
@@ -1337,7 +1341,6 @@ fn a_latched_qualifier_is_released_with_the_key_it_qualified() {
 /// power-up stream and reset the machine again on the next keystroke.
 #[test]
 fn the_reset_chord_lets_go_of_every_latched_qualifier() {
-    let _guard = KeyboardUp::shown();
     let mut app = test_app();
     const CTRL: u8 = 0x63;
     const LEFT_AMIGA: u8 = 0x66;
@@ -1345,24 +1348,185 @@ fn the_reset_chord_lets_go_of_every_latched_qualifier() {
 
     click_keycap(&mut app, CTRL);
     click_keycap(&mut app, LEFT_AMIGA);
-    assert!(rawkey_is_held(&app.held_rawkeys, CTRL));
-    assert!(rawkey_is_held(&app.held_rawkeys, LEFT_AMIGA));
+    assert!(app.amiga_rawkey_held(CTRL));
+    assert!(app.amiga_rawkey_held(LEFT_AMIGA));
 
     // The third completes the chord, and the strip comes off the keyboard.
-    let panel = shown_keyboard_panel();
+    let panel = keyboard_panel_rect();
     let ramiga = kbdpanel::control_at(panel, keycap_center(RIGHT_AMIGA)).unwrap();
     app.press_keyboard_panel_control(ramiga);
     for raw in [CTRL, LEFT_AMIGA, RIGHT_AMIGA] {
-        assert!(
-            !rawkey_is_held(&app.held_rawkeys, raw),
-            "{raw:#04x} was let go"
-        );
+        assert!(!app.amiga_rawkey_held(raw), "{raw:#04x} was let go");
     }
     let view = app.keyboard_panel_view();
     for raw in [CTRL, LEFT_AMIGA, RIGHT_AMIGA] {
         assert_eq!(view.latch[usize::from(raw)], kbdpanel::Latch::None);
         assert!(!view.down[usize::from(raw)]);
     }
+}
+
+/// A key the host and the strip are both holding stays down for the
+/// machine until the last of the two lets go. Neither source can cut the
+/// other short, which is what a single de-duplicating table would do: the
+/// second press would be swallowed and the first release believed.
+#[test]
+fn a_key_held_by_both_sources_stays_down_until_both_let_go() {
+    let mut app = test_app();
+
+    // The host takes A first.
+    app.handle_amiga_key_event(0x20, true);
+    assert!(app.emu.bus().keyboard.is_held(0x20));
+
+    // Then the same cap is clicked. The machine already believes A is
+    // down, so nothing new reaches it -- and nothing is recorded either.
+    let panel = keyboard_panel_rect();
+    let a = kbdpanel::control_at(panel, keycap_center(0x20)).unwrap();
+    app.press_keyboard_panel_control(a);
+    assert!(app.emu.bus().keyboard.is_held(0x20));
+
+    // The cap comes up: the host still has it, so the key stays down.
+    app.release_keyboard_panel_key();
+    assert!(
+        app.emu.bus().keyboard.is_held(0x20),
+        "the host is still holding A"
+    );
+    assert!(app.amiga_rawkey_held(0x20));
+
+    // Only the last holder's release reaches the machine.
+    app.handle_amiga_key_event(0x20, false);
+    assert!(!app.emu.bus().keyboard.is_held(0x20), "and now it is up");
+    assert!(!app.amiga_rawkey_held(0x20));
+}
+
+/// The other way round: a qualifier latched on the strip survives a host
+/// tap of the same key, and the machine sees one continuous hold rather
+/// than the host's release cutting the latch short.
+#[test]
+fn a_latched_qualifier_survives_a_host_tap_of_the_same_key() {
+    let mut app = test_app();
+    const SHIFT: u8 = AMIGA_RAWKEY_LEFT_SHIFT;
+
+    click_keycap(&mut app, SHIFT); // latched down by the strip
+    assert!(app.emu.bus().keyboard.is_held(SHIFT));
+
+    // A host press and release of the same qualifier while it is latched.
+    app.handle_amiga_key_event(SHIFT, true);
+    app.handle_amiga_key_event(SHIFT, false);
+    assert!(
+        app.emu.bus().keyboard.is_held(SHIFT),
+        "the strip still has it latched"
+    );
+
+    // And the drawn latch agrees with the machine throughout: the panel
+    // shows it locked down for exactly as long as the machine holds it.
+    assert!(
+        app.keyboard_panel_view().down[usize::from(SHIFT)] || {
+            app.keyboard_panel_view().latch[usize::from(SHIFT)] != kbdpanel::Latch::None
+        }
+    );
+
+    // The keystroke the latch was armed for takes it with it.
+    click_keycap(&mut app, 0x20);
+    assert!(!app.emu.bus().keyboard.is_held(SHIFT), "the latch cleared");
+    assert!(!app.amiga_rawkey_held(SHIFT));
+    let view = app.keyboard_panel_view();
+    assert_eq!(view.latch[usize::from(SHIFT)], kbdpanel::Latch::None);
+    assert!(!view.down[usize::from(SHIFT)]);
+}
+
+/// What the strip draws is what the machine believes, even when the host
+/// had the same key first: the qualifier's press is swallowed as a
+/// duplicate transition, but the strip's own hold is still recorded, so
+/// its latch is not left over a machine that never heard of it.
+#[test]
+fn the_drawn_latch_matches_what_the_machine_holds() {
+    let mut app = test_app();
+    const SHIFT: u8 = AMIGA_RAWKEY_LEFT_SHIFT;
+
+    app.handle_amiga_key_event(SHIFT, true); // the host has it first
+    click_keycap(&mut app, SHIFT); // and the cap latches it
+    let view = app.keyboard_panel_view();
+    assert_eq!(view.latch[usize::from(SHIFT)], kbdpanel::Latch::OneShot);
+    assert!(
+        app.emu.bus().keyboard.is_held(SHIFT),
+        "drawn latched, and really down"
+    );
+
+    // The host lets go. The strip's latch is still there, so the machine
+    // must still have the key -- the host's release is not the last one.
+    app.handle_amiga_key_event(SHIFT, false);
+    assert_eq!(
+        app.keyboard_panel_view().latch[usize::from(SHIFT)],
+        kbdpanel::Latch::OneShot
+    );
+    assert!(
+        app.emu.bus().keyboard.is_held(SHIFT),
+        "the drawn latch is not a lie"
+    );
+
+    // And when the latch goes, so does the key.
+    click_keycap(&mut app, 0x20);
+    assert!(!app.emu.bus().keyboard.is_held(SHIFT));
+    assert_eq!(
+        app.keyboard_panel_view().latch[usize::from(SHIFT)],
+        kbdpanel::Latch::None
+    );
+}
+
+/// Running a new machine (the launcher's Run) lets go of the strip's
+/// holds against the machine being replaced, so neither it nor the new one
+/// is left with a key down that nothing will lift.
+#[test]
+fn running_a_new_machine_lets_go_of_the_strips_keys() {
+    let mut app = test_app();
+    click_keycap(&mut app, 0x63); // Ctrl, latched
+    assert!(app.emu.bus().keyboard.is_held(0x63));
+
+    let raw = crate::config::RawConfig::default();
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("default config");
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+
+    assert!(
+        !app.amiga_rawkey_held(0x63),
+        "the latch went with the machine"
+    );
+    assert!(
+        !app.emu.bus().keyboard.is_held(0x63),
+        "and the new machine never saw it"
+    );
+    let view = app.keyboard_panel_view();
+    assert_eq!(view.latch[0x63], kbdpanel::Latch::None);
+    assert!(!view.down[0x63]);
+}
+
+/// Powering off does the same: the cold-boot machine comes up with the
+/// caps drawn up and nothing latched against the machine that stopped.
+#[test]
+fn powering_off_lets_go_of_the_strips_keys() {
+    let mut app = test_app();
+    click_keycap(&mut app, 0x63);
+    assert!(app.emu.bus().keyboard.is_held(0x63));
+
+    app.toggle_power();
+    assert!(!app.powered_on);
+    assert!(!app.amiga_rawkey_held(0x63), "handed back with the power");
+    assert!(!app.emu.bus().keyboard.is_held(0x63));
+    assert_eq!(app.keyboard_panel_view().latch[0x63], kbdpanel::Latch::None);
+}
+
+/// And a reboot: a latch that rode through would be re-reported by the
+/// MCU's power-up stream, which is exactly what starts the reset again.
+#[test]
+fn rebooting_lets_go_of_the_strips_keys() {
+    let mut app = test_app();
+    click_keycap(&mut app, 0x63);
+    assert!(app.emu.bus().keyboard.is_held(0x63));
+
+    app.activate_bar_control(BarControl::Reboot);
+    assert!(!app.amiga_rawkey_held(0x63));
+    assert!(!app.emu.bus().keyboard.is_held(0x63));
+    assert_eq!(app.keyboard_panel_view().latch[0x63], kbdpanel::Latch::None);
 }
 
 /// Hiding the keyboard with a key still down on it hands that key back:
@@ -1372,10 +1536,10 @@ fn hiding_the_keyboard_releases_what_it_was_holding() {
     let _guard = KeyboardUp::shown();
     let mut app = test_app();
     click_keycap(&mut app, 0x63); // Ctrl, latched
-    assert!(rawkey_is_held(&app.held_rawkeys, 0x63));
+    assert!(app.amiga_rawkey_held(0x63));
 
     app.set_keyboard_panel_shown(false);
-    assert!(!rawkey_is_held(&app.held_rawkeys, 0x63), "handed back");
+    assert!(!app.amiga_rawkey_held(0x63), "handed back");
     assert!(!app.emu.bus().keyboard.is_held(0x63));
 }
 
@@ -2126,7 +2290,7 @@ fn status_bar_draws_cd_led_on_cd_machines() {
     v.media = media(1, Some(true));
     draw_status_bar(&mut frame, &v, scale);
     let cd = led_row_rect(3, 4);
-    assert!(cd.y + cd.h <= present_height() + super::STATUS_BAR_HEIGHT);
+    assert!(cd.y + cd.h <= super::status_bar_top() + super::STATUS_BAR_HEIGHT);
     assert_eq!(
         pixel(&frame, cd.x + cd.w / 2, cd.y + cd.h / 2, scale),
         CD_LED_OFF.to_le_bytes()
@@ -3113,11 +3277,15 @@ fn test_app_with_audio_and_cpu(
 /// The same fixture running a guest program: `program` (big-endian 68000
 /// words) is laid down at the reset PC, replacing the head of the NOP
 /// sled. An empty program leaves the plain sled.
-fn test_app_with_audio_cpu_and_program(
+/// The emulator the fixtures run: a NOP-sled ROM with reset vectors
+/// pointing into it, half a meg of chip RAM, unpaced. Built on its own so a
+/// test can make a second machine and hand it to `run_machine`, which is
+/// what the launcher's Run does.
+fn test_emulator(
     audio: Box<dyn AudioSink>,
     cpu: crate::config::CpuModel,
     program: &[u16],
-) -> super::App {
+) -> crate::emulator::Emulator {
     use crate::chipset::paula::Paula;
     use crate::config::PacingBudget;
     use crate::emulator::Emulator;
@@ -3155,7 +3323,7 @@ fn test_app_with_audio_cpu_and_program(
         Paula::new(Box::new(StdoutSink::new()), audio),
         FloppyController::default(),
     );
-    let emu = Emulator::new(
+    Emulator::new(
         bus,
         cpu,
         false,
@@ -3164,7 +3332,15 @@ fn test_app_with_audio_cpu_and_program(
         2,
         false,
     )
-    .expect("test emulator");
+    .expect("test emulator")
+}
+
+fn test_app_with_audio_cpu_and_program(
+    audio: Box<dyn AudioSink>,
+    cpu: crate::config::CpuModel,
+    program: &[u16],
+) -> super::App {
+    let emu = test_emulator(audio, cpu, program);
     super::App::new(
         emu,
         true,
