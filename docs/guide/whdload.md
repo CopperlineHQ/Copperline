@@ -140,9 +140,9 @@ configuration describes.
 
 **Machine type** on the Configuration page is the same setting. It cycles
 between `Auto` and `Copperline`, and since neither word says what it does,
-pressing it puts the answer on the status line for a few seconds: "WHDLoad
-uses the Slave file machine type", or "WHDLoad uses the Copperline defined
-machine type".
+pressing it puts the answer on the status line for a few seconds:
+"WHDLoad uses the Slave file machine type...", or "WHDLoad uses the
+Copperline defined machine type...".
 
 Everything composes with the rest of the CLI: `--screenshot-after`,
 scripted input, save states, `--record-input` all work, so a WHDLoad game
@@ -221,7 +221,7 @@ back to the service. The connection is HTTPS.
 developer, players, and the cover art. Clicking the art picks a PNG,
 which is scaled to the size the fetched covers are. The boxes are the
 launcher's, so they are typed into the same way -- Tab or a click moves
-between them, and the block marking where typing goes is moved with
+between them, and the caret marking where typing goes is moved with
 Left/Right, which is what amending a title one letter out needs.
 
 **Save** marks the entry as yours, and scans leave it alone from then on

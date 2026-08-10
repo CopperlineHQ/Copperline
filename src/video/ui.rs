@@ -2814,15 +2814,21 @@ fn draw_console(frame: &mut [u8], rect: Rect, panel: &ConsolePanel, scale: usize
     let scaled = scale_rect(entry, scale);
     fill_rect(frame, scaled, ENTRY_BG, scale);
     draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
-    let mut prompt = format!("> {}_", panel.input);
-    prompt.truncate(84);
-    draw_panel_text(
+    // The same caret every other box in the UI draws, at the end of the
+    // line because that is the only place this one can type: the console
+    // appends and backspaces, and keeps its arrow keys for the history.
+    // (It also clips to the box, where the old fixed truncation could cut
+    // a multi-byte character in half and panic.)
+    let prompt = format!("> {}", panel.input);
+    draw_edit_line(
         frame,
         entry.x + 6,
         entry.y + (CONSOLE_INPUT_H - 8) / 2,
         &prompt,
+        prompt.chars().count(),
         ENTRY_TEXT,
-        1,
+        ENTRY_BG,
+        entry.w.saturating_sub(12),
         scale,
     );
 }
@@ -6907,18 +6913,22 @@ fn draw_edit_line(
     }
     let shown: String = shown.into_iter().collect();
     draw_panel_text(frame, x, y, &shown, color, 1, scale);
+    // Half a cell wide: enough to be seen against the text at any scale,
+    // narrow enough to leave most of the character it stands on legible.
+    // It blinks, so it is also read as a caret rather than as a mark in
+    // the value; out of phase, nothing is drawn and the character shows
+    // whole.
+    if !crate::video::caret_lit() {
+        return;
+    }
     let block = Rect {
         x: x + cell * font::GLYPH_W,
         y,
-        w: font::GLYPH_W,
+        w: (font::GLYPH_W / 2).max(1),
         h: font::GLYPH_H,
     };
     fill_rect(frame, scale_rect(block, scale), color, scale);
-    // The character under the block, drawn in the background so the block
-    // reads as inverse video rather than as a character painted out.
-    if let Some(&c) = chars.get(caret) {
-        draw_panel_text(frame, block.x, y, &c.to_string(), bg, 1, scale);
-    }
+    let _ = bg;
 }
 
 /// Clip `text` to `avail_px`, keeping the TAIL and prefixing an ASCII "..."

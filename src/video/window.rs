@@ -1005,6 +1005,10 @@ pub struct App {
     /// starts the list running after a pause, the way a held key does. Any
     /// of the launcher's scrolling lists can be the one being held.
     scroll_hold: Option<(UiControl, Instant)>,
+    /// When the text caret next changes between lit and dark. `None` when
+    /// nothing is being typed into, which is also what puts it back to lit
+    /// for whichever box opens next.
+    caret_flip_at: Option<Instant>,
     /// True while the frame analyzer selector is following a held left
     /// mouse button.
     analyzer_dragging: bool,
@@ -1569,6 +1573,11 @@ fn clipboard_line() -> String {
 #[cfg(feature = "game-library")]
 const STATUS_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How long the text caret stays lit, and then out. Half a second each way
+/// is about the rate a host's own text cursor blinks at; slower reads as
+/// something still loading, faster as something wrong.
+const CARET_BLINK: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// How long the WHDLoad machine-type line stays. Shorter than
 /// [`STATUS_LINGER`]: it explains a setting that has just been changed, and
 /// is read straight away, rather than reporting the end of something that
@@ -1835,6 +1844,7 @@ impl App {
             last_cursor_phys: None,
             volume_dragging: false,
             scroll_hold: None,
+            caret_flip_at: None,
             analyzer_dragging: false,
             mouse_captured: false,
             capture_suspended_by_ui: false,
@@ -3999,11 +4009,14 @@ impl ApplicationHandler for App {
         // A status line waiting to clear itself keeps the loop awake too,
         // or it would sit there until something else woke it.
         let writing_image = self.image_job.is_some() || downloading || self.status_until.is_some();
+        // Likewise the caret: it has no event of its own either, and a panel
+        // with a box open in it is otherwise perfectly still.
+        let typing = self.blink_caret();
         // A held scroll arrow has no event of its own to wake on: the button
         // went down once and the repeats are this loop's own doing.
         let scrolling = self.scroll_hold.is_some();
         event_loop.set_control_flow(
-            if running || osd_active || calibrating || writing_image || scrolling {
+            if running || osd_active || calibrating || writing_image || scrolling || typing {
                 ControlFlow::Poll
             } else {
                 ControlFlow::Wait
@@ -8456,6 +8469,45 @@ impl App {
         }
     }
 
+    /// Blink the caret in whatever is being typed into, and answer whether
+    /// there is anything.
+    ///
+    /// A redraw is asked for when the phase turns over and not otherwise: a
+    /// caret that changes twice a second is no reason to repaint sixty
+    /// times a second. With nothing being typed into it is left lit, so the
+    /// next box to open starts visible rather than starting dark.
+    fn blink_caret(&mut self) -> bool {
+        let typing = self.launcher_state().is_some_and(|state| {
+            #[cfg(feature = "game-library")]
+            let dialog = state.login.is_some() || state.meta.is_some();
+            #[cfg(not(feature = "game-library"))]
+            let dialog = false;
+            state.editing().is_some() || dialog
+        }) || matches!(self.ui.panel, Some(Panel::Console(_)));
+        let light = |on: bool, at: Option<Instant>, app: &mut Self| {
+            app.caret_flip_at = at;
+            if crate::video::caret_lit() != on {
+                crate::video::set_caret_lit(on);
+                app.request_redraw();
+            }
+        };
+        if !typing {
+            light(true, None, self);
+            return false;
+        }
+        let now = Instant::now();
+        match self.caret_flip_at {
+            // Opening a box starts the phase, lit.
+            None => light(true, Some(now + CARET_BLINK), self),
+            Some(at) if now >= at => {
+                let on = !crate::video::caret_lit();
+                light(on, Some(now + CARET_BLINK), self);
+            }
+            Some(_) => {}
+        }
+        true
+    }
+
     /// Say what the WHDLoad machine-type setting just became.
     ///
     /// The row cycles between two words, "Auto" and "Copperline", and a
@@ -8472,9 +8524,9 @@ impl App {
             return;
         };
         let said = match state.setup.whdload_machine() {
-            crate::config::WhdloadMachine::Auto => "WHDLoad uses the Slave file machine type",
+            crate::config::WhdloadMachine::Auto => "WHDLoad uses the Slave file machine type...",
             crate::config::WhdloadMachine::Copperline => {
-                "WHDLoad uses the Copperline defined machine type"
+                "WHDLoad uses the Copperline defined machine type..."
             }
         };
         state.status = Some(StatusMessage::ok(said));
