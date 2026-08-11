@@ -1205,6 +1205,15 @@ impl Bus {
             off @ 0x0E0..=0x0FF => {
                 let idx = ((off - 0x0E0) / 4) as usize;
                 if idx < if self.aga_enabled() { 8 } else { 6 } {
+                    // BPLxPT is one live counter in Agnus: bitplane DMA and
+                    // the end-of-line modulo adds advance it with carry
+                    // across the 16-bit register boundary, and a half write
+                    // replaces only that half of the advanced value. Merge
+                    // the write into the live DMA pointer, not into the
+                    // last-written latch, so software that rewrites only
+                    // BPLxPTL keeps the DMA-advanced high half (a common
+                    // Copper-bandwidth trick on 8-bitplane AGA screens).
+                    self.denise.bplpt[idx] = self.display_dma_bplpt[idx];
                     if off & 2 == 0 {
                         self.denise.set_bplpt_high(idx, val);
                     } else {

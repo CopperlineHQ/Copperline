@@ -39,6 +39,15 @@ raw-DDFSTRT unit rounding to preserve their 40-word rows, and the lo-res
 FMODE=3 landscape needs packed first-eight CCK plane slots instead of
 spreading those slots across the 32-CCK unit.
 
+Like SPRxPT below, each BPLxPT is one live counter: bitplane fetches
+advance it and the end-of-line modulo adds to the full pointer, carrying
+across the 16-bit register boundary, and it is never reloaded at vertical
+blank -- software rewrites the pointers each field. A BPLxPTH/PTL write
+replaces only that half of the DMA-advanced value, which programs exploit
+to flip 8-bitplane double buffers with half the Copper writes: the modulo
+is sized so the end-of-frame carry lands the high half on the next
+buffer, and only the PTL half is rewritten per frame.
+
 Agnus revisions are modelled independently of Denise (machines shipped
 mixed): OCS (8370/8371), ECS 8372A (1M chip RAM reach), ECS 8375 (2M), and
 AGA Alice (2M, HRM IDs $23/$33). VPOSR bits 8-14 report the chipset ID:

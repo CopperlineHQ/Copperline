@@ -3244,6 +3244,66 @@ fn ocs_bitplane_dma_capture_extends_equal_ddf_window_to_hard_stop() {
 }
 
 #[test]
+fn bplxptl_half_write_merges_into_dma_advanced_live_pointer() {
+    // BPLxPT is one live counter in Agnus: fetches and the end-of-line
+    // modulo advance it with carry across the 16-bit register boundary,
+    // and a BPLxPTL write replaces only the low half of that advanced
+    // value. Software leans on this to flip 8-bitplane double buffers
+    // with half the Copper writes: the modulo is sized so the carry
+    // lands the high half on the next buffer, then only PTL is rewritten.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x3E;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0040;
+    bus.denise.bplcon0 = 0x1000;
+    assert!(!bus.custom_write(0x0E0, 2, 0x0001)); // BPL1PTH
+    assert!(!bus.custom_write(0x0E2, 2, 0xFFF8)); // BPL1PTL
+    assert!(!bus.custom_write(0x108, 2, 0x0010)); // BPL1MOD
+
+    // Two lores words fetched (0x1FFF8 -> 0x1FFFC), then the line-end
+    // modulo add carries into the high word: 0x1FFFC + 0x10 = 0x2000C.
+    bus.advance_chipset(10);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0002_000C);
+
+    // A PTL-only rewrite keeps the DMA-advanced high half, not the high
+    // half of the last register write.
+    assert!(!bus.custom_write(0x0E2, 2, 0x0100));
+    assert_eq!(bus.display_dma_bplpt[0], 0x0002_0100);
+    assert_eq!(bus.denise.bplpt[0], 0x0002_0100);
+}
+
+#[test]
+fn bitplane_pointers_carry_across_vertical_blank_without_reload() {
+    // Real Agnus never reloads BPLxPT at the top of a field: the counter
+    // keeps its end-of-frame value until software rewrites it. Snapping
+    // back to the last-written latch would break PTL-only buffer flips.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x3E;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0040;
+    bus.denise.bplcon0 = 0x1000;
+    assert!(!bus.custom_write(0x0E0, 2, 0x0000));
+    assert!(!bus.custom_write(0x0E2, 2, 0x0100));
+
+    bus.advance_chipset(10);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0104);
+
+    // Stop bitplane DMA and run past the next vertical blank; the live
+    // pointer must survive the frame boundary untouched.
+    bus.agnus.dmacon = DMACON_DMAEN;
+    bus.advance_chipset(80_000);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0104);
+}
+
+#[test]
 fn aga_lores_eight_plane_dma_capture_fetches_all_eight_streams() {
     // FMODE=0 lo-res with BPLCON0 BPU3 set: Alice schedules all eight
     // plane streams inside the eight-colour-clock fetch unit (plane 8 in
@@ -4345,6 +4405,7 @@ fn beam_timed_bitplane_pointer_changes_later_fallback_fetch_rows() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.denise.bplpt[0] = 0x0100;
+    bus.display_dma_bplpt[0] = 0x0100;
     write_chip_word(&mut bus, 0x0100, 0x4000);
     write_chip_word(&mut bus, 0x0102, 0x4000);
     write_chip_word(&mut bus, 0x0200, 0x0000);
@@ -4381,6 +4442,7 @@ fn beam_timed_bitplane_pointer_changes_later_fallback_fetch_words() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.denise.bplpt[0] = 0x0100;
+    bus.display_dma_bplpt[0] = 0x0100;
     write_chip_word(&mut bus, 0x0100, 0x0000);
     write_chip_word(&mut bus, 0x0102, 0x0000);
     write_chip_word(&mut bus, 0x0104, 0x4000);
