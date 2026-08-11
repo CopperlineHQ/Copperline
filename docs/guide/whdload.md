@@ -132,9 +132,11 @@ can be starred without starring the others.
 
 Select a game and press **Run** to play it.
 
-Once there are twenty games or more, a row of letter buttons appears
-above the list. Click one to jump to the first game starting with it;
-letters your collection has no games under are greyed.
+Once there are twenty games or more, a row of shortcut buttons appears
+above the list: **0-9** for games whose names start with a number, then
+**#** for anything starting with neither a number nor a letter, then A to
+Z. Click one to jump to the first game under it. Buttons your collection
+has nothing under are greyed.
 
 ### Where the details come from
 

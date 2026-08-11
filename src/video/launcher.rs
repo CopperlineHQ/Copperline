@@ -5174,9 +5174,18 @@ pub fn az_label(at: usize) -> &'static str {
 }
 
 /// Which bucket a title belongs to.
+///
+/// The initial is folded to ASCII first, the same way the panel folds it
+/// to draw it: "Élite" is drawn as "Elite" and sorted among the E's, so it
+/// answers to E rather than sitting under `#` where nobody would look for
+/// it.
 #[cfg(feature = "game-library")]
 pub fn az_bucket_of(title: &str) -> usize {
-    match title.chars().next() {
+    let first = title.chars().next().map(|c| match c.is_ascii() {
+        true => c,
+        false => crate::video::font::fold(c).chars().next().unwrap_or(c),
+    });
+    match first {
         Some(c) if c.is_ascii_digit() => 0,
         Some(c) if c.is_ascii_alphabetic() => 2 + (c.to_ascii_uppercase() as usize - 'A' as usize),
         _ => 1,
@@ -5974,6 +5983,13 @@ impl LauncherState {
         // reason to walk a collection of several thousand packages. The
         // Refresh button is.
         match self.library_folder() {
+            // A store built from another folder is not this folder's list:
+            // its entries are paths under somewhere else, and showing them
+            // here offers games that are not there. Refresh is what reads
+            // the folder and makes the store this one's.
+            Some(folder) if !self.library.db.lists(&folder) => {
+                self.library.games = crate::gamelib::Library::default();
+            }
             Some(folder) if !self.library.games.covers(&folder) => {
                 self.library.games = crate::gamelib::Library::known(&folder, &self.library.db);
                 self.select_running_game();
@@ -6288,6 +6304,7 @@ impl LauncherState {
             .library
             .db
             .merge_found(crate::gamelib::scan::packages(&folder));
+        self.library.db.set_folder(&folder);
         self.save_library_database(config_dir);
         self.library.games = crate::gamelib::Library::known(&folder, &self.library.db);
         self.select_running_game();
@@ -8676,6 +8693,43 @@ mod tests {
 
     #[cfg(feature = "game-library")]
     #[test]
+    fn a_store_from_another_folder_is_not_this_folders_list() {
+        use crate::gamelib::Known;
+        // A store carrying a collection listed somewhere else -- which is
+        // what a fresh configuration pointed at a new folder meets.
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.library.db.set_known(
+            (0..40)
+                .map(|at| Known {
+                    file: format!("Old{at}.lha"),
+                    game: None,
+                    manual: false,
+                    slave_sha1: None,
+                })
+                .collect(),
+        );
+        state.library.db.set_folder(Path::new("/games/old"));
+        state.library.db_loaded = true;
+
+        // Pointed at a different folder, the page offers none of them: they
+        // are paths under somewhere else and none of them is here.
+        state
+            .setup
+            .set_path(F::WhdloadGames, PathBuf::from("/games/new"));
+        state.refresh_library(Path::new("/nonexistent"));
+        assert!(
+            state.library.games.is_empty(),
+            "another folder's games were listed as this one's"
+        );
+
+        // Once the store says it lists this folder, they are its list.
+        state.library.db.set_folder(Path::new("/games/new"));
+        state.refresh_library(Path::new("/nonexistent"));
+        assert_eq!(state.library.games.len(), 40);
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
     fn the_az_row_files_games_and_jumps_to_them() {
         use crate::gamelib::{Game, Known, Library};
         assert_eq!(az_label(0), "0-9");
@@ -8688,6 +8742,12 @@ mod tests {
         assert_eq!(az_bucket_of("Zool"), AZ_BUCKETS - 1);
         assert_eq!(az_bucket_of("1943"), 0);
         assert_eq!(az_bucket_of("+4 Bonus"), 1, "neither letter nor digit");
+        // Folded the way the panel draws it: "Élite" reads as "Elite" and
+        // sorts among the E's, so it answers to E.
+        assert_eq!(az_bucket_of("Élite"), az_bucket_of("Elite"));
+        assert_eq!(az_bucket_of("Ätzen"), az_bucket_of("Atzen"));
+        // Something with no ASCII at all still has somewhere to go.
+        assert_eq!(az_bucket_of("中"), 1);
         assert_eq!(az_bucket_of(""), 1, "nothing to file it under");
 
         let named = |name: &str| {

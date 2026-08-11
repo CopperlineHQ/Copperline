@@ -120,6 +120,15 @@ pub struct Database {
     /// a path, which is the state it most needs to be removable from.
     #[serde(default)]
     favourites: std::collections::BTreeMap<String, String>,
+    /// The game folder the known entries were listed from.
+    ///
+    /// Entries are filed by their path under that folder, so pointed at a
+    /// different one they describe packages that are not there. Remembered
+    /// so the page can tell the two apart: a store built somewhere else is
+    /// not this folder's list, whatever it holds. Absent in stores written
+    /// before this was kept, which reads the same as "somewhere else".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<String>,
     /// Sorted by `file`, which is what makes this store fast to open: the
     /// order comes off disk with the parse and lookup is a binary search,
     /// so there is no index to build before the page can draw.
@@ -135,6 +144,7 @@ impl Default for Database {
         Database {
             format: FORMAT,
             favourites: std::collections::BTreeMap::new(),
+            folder: None,
             known: Vec::new(),
         }
     }
@@ -289,6 +299,16 @@ impl Database {
     }
 
     /// Whether a package is a favourite.
+    /// Whether the known entries were listed from `folder`.
+    pub fn lists(&self, folder: &Path) -> bool {
+        self.folder.as_deref() == Some(&*folder.to_string_lossy())
+    }
+
+    /// Record which folder the known entries were listed from.
+    pub fn set_folder(&mut self, folder: &Path) {
+        self.folder = Some(folder.to_string_lossy().into_owned());
+    }
+
     pub fn is_favourite(&self, file: &str) -> bool {
         self.favourites.contains_key(file)
     }
