@@ -727,6 +727,7 @@ async function boot() {
     else if (configMonoAudio !== null) machine.set_mono_audio(configMonoAudio);
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     if (overscanMode !== null) machine.set_overscan?.(overscanMode);
+    machine.set_monitor_bezel?.(monitorBezelOn());
     machine.set_deinterlace?.(deinterlaceEnabled);
     machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
@@ -3451,6 +3452,22 @@ function togglePause() {
 // Firefox has neither for ClipboardItem in all versions. Both paths are
 // driven from a click, which is the user gesture the clipboard API
 // requires.
+//
+// Captures keep the TV aperture too: a drawn bezel widens the live
+// presentation to the tube aperture, so the capture drops it around the
+// buffer read and puts it back -- each flip re-presents the held frame
+// in place without stepping the machine, and blobOf's executor reads
+// the buffer synchronously (only the canvas encode is async), so the
+// flip is invisible to the page.
+function withTvAperture(f) {
+  const bezel = monitorBezelOn();
+  if (bezel) emu.set_monitor_bezel?.(false);
+  try {
+    return f();
+  } finally {
+    if (bezel) emu.set_monitor_bezel?.(true);
+  }
+}
 async function copyScreenshot() {
   if (!emu || !running) return;
   const blobOf = () =>
@@ -3503,11 +3520,11 @@ async function copyScreenshot() {
     }
     // Safari requires the ClipboardItem to be constructed with the promise
     // inside the gesture; Chrome and Firefox accept that form too.
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobOf() })]);
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': withTvAperture(blobOf) })]);
     setLoadStatus('screenshot copied to the clipboard');
   } catch (e) {
     try {
-      const url = URL.createObjectURL(await blobOf());
+      const url = URL.createObjectURL(await withTvAperture(blobOf));
       const a = document.createElement('a');
       a.href = url;
       a.download = `copperline-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
@@ -3696,6 +3713,7 @@ function restoreState(bytes, source) {
   else if (configMonoAudio !== null) emu.set_mono_audio(configMonoAudio);
   if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
   if (overscanMode !== null) emu.set_overscan?.(overscanMode);
+  emu.set_monitor_bezel?.(monitorBezelOn());
   emu.set_deinterlace?.(deinterlaceEnabled);
   emu.set_phosphor?.(phosphorPersistence);
   // Port fittings live on the machine, so the pads plugged into the host go
@@ -4758,6 +4776,13 @@ function monitorPictureScale() {
   return style ? MONITOR_OPENING_SCALE : 1;
 }
 
+// Whether a monitor front is drawn around the picture. The wasm side
+// widens its standard-scan presentation to the tube aperture while one
+// is (set_monitor_bezel): the whole captured raster, the desktop's tube
+// view, so the frame's rounded corners crop into overscan border rather
+// than into the picture.
+const monitorBezelOn = () => !!monitorGl && MONITOR_COMPOSITION[monitorMode].bezel !== null;
+
 // Build the WebGL2 monitor renderer, or return null to keep the 2D path
 // (no WebGL2, or - defensively - a shader that does not compile, in which
 // case the canvas node is replaced so a fresh 2D context is possible).
@@ -5717,6 +5742,10 @@ function setMonitorMode(mode, remember) {
   monitorSel.value = mode;
   if (remember) storePref(MONITOR_STORAGE_KEY, mode);
   syncShellChrome();
+  // A drawn frame widens the emulated presentation to the tube aperture;
+  // the wasm re-presents the held frame under the new crop on the spot,
+  // so the redraw below picks it up even while paused.
+  emu?.set_monitor_bezel?.(monitorBezelOn());
   // The emulated picture did not change, so redraw the held texture now;
   // with no machine at all the choice previews on the powered-off monitor.
   if (emu && running) presentFrame(true);

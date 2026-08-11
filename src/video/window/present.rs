@@ -740,11 +740,19 @@ pub(super) fn copy_window_present_frame(
     texture_scale: usize,
     overscan: Overscan,
     tv_aperture_rows: Option<usize>,
+    tube_glass: bool,
 ) {
     // The TV aperture is a standard-scan crop; standard scans always render
-    // the classic canvas width.
+    // the classic canvas width. With a monitor bezel drawn the crop widens
+    // to the tube aperture: the whole rendered field of the same standard,
+    // which the bezel shaders underscan inside the tube face.
     match tv_aperture_rows {
         Some(aperture_rows) if overscan == Overscan::Tv && src_width == FB_WIDTH => {
+            let (source_y, aperture_rows) = if tube_glass {
+                (0, tube_aperture_rows(aperture_rows))
+            } else {
+                (TV_PRESENT_SOURCE_Y, aperture_rows)
+            };
             copy_tv_aperture_to_window(
                 src_fb,
                 src_rows,
@@ -752,6 +760,7 @@ pub(super) fn copy_window_present_frame(
                 texture_scale,
                 aperture_rows,
                 present_height(),
+                source_y,
             )
         }
         _ => copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale),
@@ -771,6 +780,10 @@ pub(super) fn copy_window_present_frame(
 /// rather than replicating the edge columns, which carry picture when a
 /// display fetches or parks sprites in the deepest overscan (the Gen-X
 /// logo slide-in streaks).
+///
+/// `source_y` is the woven row the crop starts at: `TV_PRESENT_SOURCE_Y`
+/// for the TV aperture, 0 for the tube aperture (whose row count spans
+/// the whole rendered field).
 pub(super) fn copy_tv_aperture_to_window(
     src_fb: &[u32],
     src_rows: usize,
@@ -778,6 +791,7 @@ pub(super) fn copy_tv_aperture_to_window(
     texture_scale: usize,
     aperture_rows: usize,
     present_rows: usize,
+    source_y: usize,
 ) {
     debug_assert!(src_fb.len() >= src_rows * FB_WIDTH);
     let dst_stride = texture_width(texture_scale) * 4;
@@ -806,7 +820,7 @@ pub(super) fn copy_tv_aperture_to_window(
             }
             continue;
         };
-        let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows - 1);
+        let src_y = (source_y + crop_y).min(src_rows - 1);
         let row = &src_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
         let dst_off = y * dst_stride;
         match texture_scale {

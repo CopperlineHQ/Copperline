@@ -60,9 +60,12 @@ badge, logotype and power lamp -- and *Classic* with the plain rounded
 frame Copperline drew before the 1084 arrived. *CRT filter*, *1084
 cabinet* and *Classic bezel* select each half alone, and *Plain* is the
 undecorated blit the page always had -- also what a browser without
-WebGL2 falls back to (the select hides there). As on the desktop, the
-CRT pass suspends itself on programmable scans, which have no 15 kHz
-line structure to draw; the bezel stays. The selected monitor fronts the page before anything boots
+WebGL2 falls back to (the select hides there). As on the desktop, a
+drawn frame also widens what its tube shows: the whole captured raster,
+border colour to the glass edges, so the opening's rounded corners crop
+into overscan border the way a real tube's do, not into the picture.
+And as on the desktop, the CRT pass suspends itself on programmable
+scans, which have no 15 kHz line structure to draw; the bezel stays. The selected monitor fronts the page before anything boots
 too -- the powered-off tube, dark glass in the moulded frame, rather
 than a bare black rectangle -- and while a bezel mode is up the page
 shell's own thin border around the canvas hides, since the moulded case
@@ -368,6 +371,10 @@ through wasm-bindgen; the page's JavaScript drives everything from
   bezel-mask black columns of the full framebuffer. PAL and NTSC share the
   one canvas shape -- both apertures fill the same 4:3 glass, so an NTSC
   scan's shorter 428-row crop is scaled onto the same 540 output rows.
+  While the page draws a monitor bezel (`set_monitor_bezel`), the crop
+  widens to the tube aperture: the whole rendered field, 668x570, an
+  NTSC field's 470 rows scaled onto the same 570 -- the browser
+  counterpart of the desktop's tube view.
   Non-standard frames (true overscan, programmable scans) keep the full
   716-pixel width, as on the desktop, and a programmable super-hi-res scan
   carries its double (1432-pixel, 35 ns pitch) canvas straight to the
@@ -593,6 +600,11 @@ horizontal overscan like a CRT bezel and presents standard screens
 as the captured TV aperture, `"full"` presents the whole overscan field;
 unknown names are ignored. The last completed frame is re-presented
 under the new aperture immediately, so a paused page only has to blit.
+`set_monitor_bezel(drawn)` tells the emulator a monitor front is drawn
+around the picture, which widens the standard-scan crop from the TV
+aperture to the tube aperture (the whole rendered field, the desktop's
+tube view); full overscan and programmable scans are unaffected, and the
+last completed frame is re-presented like `set_overscan`.
 Front-panel status getters mirror the desktop status bar's LED block and
 are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
 booleans, `caps_lock_led()` returns the keyboard MCU's own Caps Lock lamp
@@ -614,10 +626,10 @@ and anything else (presented as the full framebuffer), so size the canvas
 from both every frame rather than assuming fixed dimensions.
 `present_crt_lines()` describes the same presentation for a page-side CRT
 shader pass: the emulated field lines it shows (270 on the standard 50 Hz
-TV aperture, 214 on a 60 Hz scan, half the presented rows in full
-overscan), and 0 when a scanline effect has nothing honest to draw -- no
-frame yet, or a programmable scan, where the desktop suspends its CRT
-preset too.
+TV aperture, 214 on a 60 Hz scan, 285 and 235 under the tube aperture of
+a drawn bezel, half the presented rows in full overscan), and 0 when a
+scanline effect has nothing honest to draw -- no frame yet, or a
+programmable scan, where the desktop suspends its CRT preset too.
 
 `www/try.js`, `www/render-stride.js`, and `www/audio-worklet.js` are the
 reference implementation of

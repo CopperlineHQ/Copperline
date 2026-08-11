@@ -242,6 +242,11 @@ pub struct WebEmu {
     /// masks the deep horizontal overscan like a CRT bezel (the default),
     /// `Full` presents everything Denise produced.
     overscan: Overscan,
+    /// Whether the page is drawing a monitor bezel around the picture,
+    /// which widens the standard-scan crop from the TV aperture to the
+    /// tube aperture (the desktop's tube view). See
+    /// [`Self::set_monitor_bezel`].
+    monitor_bezel: bool,
     /// Aperture/recentring decisions latched across border-only frames,
     /// as on the desktop: the blank frames a screen change emits keep the
     /// previous presentation geometry instead of snapping to the full
@@ -319,6 +324,7 @@ impl WebEmu {
             mouse_pending: (0, 0),
             serial,
             overscan: Overscan::Tv,
+            monitor_bezel: false,
             presentation_latch: present_common::PresentationLatch::default(),
             repeated_frame_detector: bitplane::RepeatedFrameDetector::default(),
             last_run_core_ms: 0.0,
@@ -554,7 +560,23 @@ impl WebEmu {
             // keeps one shape for both video standards -- their apertures
             // fill the same 4:3 glass -- so a 60 Hz crop's rows scale onto
             // the 50 Hz aperture's native row count (whole-row selection,
-            // like the desktop present copy).
+            // like the desktop present copy). While the page draws a
+            // monitor bezel, the crop widens to the tube aperture: the
+            // whole rendered field from woven row 0, both standards scaled
+            // onto the 50 Hz field's row count -- the desktop's tube view.
+            let (source_y, source_rows, destination_rows) = if self.monitor_bezel {
+                (
+                    0,
+                    present_common::tube_aperture_rows(aperture_rows),
+                    present_common::TUBE_PAL_PRESENT_HEIGHT,
+                )
+            } else {
+                (
+                    present_common::TV_PRESENT_SOURCE_Y,
+                    aperture_rows,
+                    present_common::TV_GLASS_PRESENT_ROWS,
+                )
+            };
             (self.present_rows, self.present_width) =
                 self.deinterlacer.present_field_region_into_elapsed(
                     &self.fb,
@@ -564,18 +586,18 @@ impl WebEmu {
                     base.long_field,
                     double_rows,
                     present_common::TV_CAPTURED_SOURCE_X,
-                    present_common::TV_PRESENT_SOURCE_Y,
-                    aperture_rows,
+                    source_y,
+                    source_rows,
                     present_common::TV_CAPTURED_WIDTH,
-                    present_common::TV_GLASS_PRESENT_ROWS,
+                    destination_rows,
                     elapsed_fields,
                     &mut self.present,
                 );
-            // Two woven rows per emulated field line, and the aperture's
-            // rows fill the glass exactly, so the aperture is the line
-            // count whatever row count it was scaled onto (the desktop's
+            // Two woven rows per emulated field line, and the crop's rows
+            // fill the glass exactly, so the crop is the line count
+            // whatever row count it was scaled onto (the desktop's
             // crt_scanline_count, without its bezel-padding rescale).
-            self.present_crt_lines = (aperture_rows / 2).max(1) as f32;
+            self.present_crt_lines = (source_rows / 2).max(1) as f32;
         } else {
             (self.present_rows, self.present_width) = self.deinterlacer.present_field_into_elapsed(
                 &self.fb,
@@ -631,7 +653,8 @@ impl WebEmu {
 
     /// Emulated field lines the presentation buffer shows, for a page-side
     /// CRT shader pass to key its scanline pitch: 270 on the standard 50 Hz
-    /// TV aperture, 214 on a 60 Hz scan, half the presented rows in full
+    /// TV aperture, 214 on a 60 Hz scan (285 and 235 under the tube
+    /// aperture of a drawn bezel), half the presented rows in full
     /// overscan. 0 means the pass has nothing to draw -- no frame yet, or a
     /// programmable scan, whose lines are not a 15 kHz raster (the desktop
     /// suspends its CRT preset there too). Tracks the presentation, so it
@@ -1021,6 +1044,31 @@ impl WebEmu {
         // the frame's content has not changed, but its presentation has,
         // so the repaint below must run the pipeline, not match.
         self.presentation_latch.reset();
+        self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+        self.render_completed_frame();
+    }
+
+    /// Whether the page is drawing a monitor bezel around the picture. A
+    /// drawn bezel widens the standard-scan presentation from the TV
+    /// aperture to the tube aperture -- every rendered row of the field,
+    /// the desktop's tube view -- because a real 1084's visible raster
+    /// exceeds even the whole captured field; the bezel's rounded corners
+    /// then crop into the extra overscan border instead of into the
+    /// picture. Full overscan and programmable scans are unaffected. The
+    /// last completed frame is re-presented under the new aperture, like
+    /// `set_overscan`, so a paused page repaints without stepping the
+    /// machine.
+    pub fn set_monitor_bezel(&mut self, drawn: bool) {
+        if drawn == self.monitor_bezel {
+            return;
+        }
+        self.monitor_bezel = drawn;
+        // The frame's content has not changed, but its presentation has,
+        // so the repaint below must run the pipeline, not match the reuse
+        // detector. The latch keeps its decisions: the tube aperture is a
+        // translation of the same classification, not a new geometry
+        // judgement.
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();

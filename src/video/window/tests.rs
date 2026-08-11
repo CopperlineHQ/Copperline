@@ -27,8 +27,9 @@ use super::{
     FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
     POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
     STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
-    TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
+    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
+    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
+    VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -837,6 +838,23 @@ fn crt_scanline_count_follows_what_the_present_copy_shows() {
     assert_eq!(
         crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, None),
         (woven / 2) as f32
+    );
+
+    // A drawn bezel widens the copy to the tube aperture -- the whole
+    // rendered field -- and the line count follows: 285 lines fill the
+    // 4:3 rect, and the 60 Hz field's 234 lines cover the square canvas's
+    // content rows between its bezel bands.
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, Some(TUBE_PAL_PRESENT_HEIGHT)),
+        (TUBE_PAL_PRESENT_HEIGHT / 2) as f32
+    );
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, Some(TUBE_PAL_PRESENT_HEIGHT)),
+        285.0
+    );
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, Some(TUBE_NTSC_PRESENT_HEIGHT)),
+        (TUBE_NTSC_PRESENT_HEIGHT / 2) as f32
     );
 }
 
@@ -2711,6 +2729,7 @@ fn tv_window_copy_fills_the_glass_from_the_captured_aperture() {
         scale,
         TV_PAL_PRESENT_HEIGHT,
         crate::video::PRESENT_HEIGHT_TV,
+        TV_PRESENT_SOURCE_Y,
     );
 
     // On the 4:3 glass the aperture fills the full texture width: the
@@ -2768,6 +2787,7 @@ fn tv_window_copy_black_pads_never_replicate_edge_columns() {
             scale,
             TV_PAL_PRESENT_HEIGHT,
             rows,
+            TV_PRESENT_SOURCE_Y,
         );
 
         // The square canvas centres the aperture rows between vertical
@@ -2822,10 +2842,103 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
         scale,
         Overscan::Tv,
         None,
+        false,
     );
 
     assert_eq!(pixel(&frame, 0, 0, scale), left_overscan.to_le_bytes());
     assert_ne!(pixel(&frame, 0, 0, scale), standard_crop_edge.to_le_bytes());
+}
+
+#[test]
+fn tube_window_copy_shows_the_whole_field_when_a_bezel_is_drawn() {
+    use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+    let scale = 1;
+    // Markers on the first and last woven rows, both outside the TV
+    // aperture (rows 18..558): the tube aperture starts at row 0 and
+    // spans the whole field, so both must reach the glass; the plain TV
+    // copy must show neither.
+    let mut src = vec![rgba(40, 40, 40); OUT_PIXELS];
+    let top = rgba(200, 30, 30);
+    let bottom = rgba(30, 30, 200);
+    src[..FB_WIDTH].fill(top);
+    src[(OUT_HEIGHT - 1) * FB_WIDTH..].fill(bottom);
+
+    let rows = present_height();
+    let mut tube = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    copy_window_present_frame(
+        &src,
+        OUT_HEIGHT,
+        FB_WIDTH,
+        &mut tube,
+        scale,
+        Overscan::Tv,
+        Some(TV_PAL_PRESENT_HEIGHT),
+        true,
+    );
+    assert_eq!(pixel(&tube, FB_WIDTH / 2, 0, scale), top.to_le_bytes());
+    assert_eq!(
+        pixel(&tube, FB_WIDTH / 2, rows - 1, scale),
+        bottom.to_le_bytes()
+    );
+
+    let mut tv = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    copy_window_present_frame(
+        &src,
+        OUT_HEIGHT,
+        FB_WIDTH,
+        &mut tv,
+        scale,
+        Overscan::Tv,
+        Some(TV_PAL_PRESENT_HEIGHT),
+        false,
+    );
+    assert_ne!(pixel(&tv, FB_WIDTH / 2, 0, scale), top.to_le_bytes());
+    assert_ne!(
+        pixel(&tv, FB_WIDTH / 2, rows - 1, scale),
+        bottom.to_le_bytes()
+    );
+}
+
+#[test]
+fn tube_window_copy_stops_at_the_rendered_ntsc_field() {
+    use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+    let scale = 1;
+    // A 60 Hz field renders TUBE_NTSC_PRESENT_HEIGHT woven rows; the
+    // buffer rows below them are stale history and must never reach the
+    // glass, while the field's own first and last rows must.
+    let mut src = vec![rgba(40, 40, 40); OUT_PIXELS];
+    let top = rgba(200, 30, 30);
+    let bottom = rgba(30, 30, 200);
+    let stale = rgba(200, 0, 200);
+    src[..FB_WIDTH].fill(top);
+    src[(TUBE_NTSC_PRESENT_HEIGHT - 1) * FB_WIDTH..TUBE_NTSC_PRESENT_HEIGHT * FB_WIDTH]
+        .fill(bottom);
+    src[TUBE_NTSC_PRESENT_HEIGHT * FB_WIDTH..].fill(stale);
+
+    let rows = present_height();
+    let mut tube = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    copy_window_present_frame(
+        &src,
+        OUT_HEIGHT,
+        FB_WIDTH,
+        &mut tube,
+        scale,
+        Overscan::Tv,
+        Some(TV_NTSC_PRESENT_HEIGHT),
+        true,
+    );
+    assert_eq!(pixel(&tube, FB_WIDTH / 2, 0, scale), top.to_le_bytes());
+    assert_eq!(
+        pixel(&tube, FB_WIDTH / 2, rows - 1, scale),
+        bottom.to_le_bytes()
+    );
+    for y in 0..rows {
+        assert_ne!(
+            pixel(&tube, FB_WIDTH / 2, y, scale),
+            stale.to_le_bytes(),
+            "stale post-field row reached the glass at output row {y}"
+        );
+    }
 }
 
 #[test]

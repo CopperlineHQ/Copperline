@@ -669,6 +669,14 @@ its aspect inside the opening. Three settings:
 `true` and `false` are still read, from when there was only the one frame
 to turn on; `true` means `"1084"`.
 
+A drawn bezel also changes what its tube shows: the glass presents the
+whole captured raster -- every rendered line, with all the overscan border
+the framebuffer captures -- rather than the tighter TV aperture the plain
+window crops to. The raster fills the glass edge to edge the way a real
+set's overscanned picture does, border colour and all, and the opening's
+rounded corners crop into that border instead of into the picture, which
+the extra border keeps clear of the arcs.
+
 The bezel is independent of `shader` and composes with any preset: with
 `"crt"` the bowed tube face sits inside the opening for the full monitor
 look. Cmd+M (macOS) / Alt+M turns it off and back on to whichever front is

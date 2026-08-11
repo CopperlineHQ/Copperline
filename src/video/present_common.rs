@@ -82,6 +82,37 @@ pub const TV_NTSC_PRESENT_HEIGHT: usize =
 // screen.
 pub const TV_GLASS_PRESENT_ROWS: usize = TV_PAL_PRESENT_HEIGHT;
 
+// The tube aperture, for the live window while a monitor bezel is drawn:
+// a real 1084's glass shows more of the raster than the TV aperture
+// keeps -- roughly 52 us of each line and ~288 of a 50 Hz scan's lines,
+// which exceeds even the whole captured field -- so the drawn tube
+// presents every captured row of the scan, resampled onto the same
+// glass. The raster stays flush with the glass, as a real set's
+// overscanned raster is: the border colour reaches the glass edges, and
+// the tube's rounded corners crop into that border instead of into the
+// standard window, which the extra rows keep clear of the arcs. One
+// height per standard, like the TV aperture's pair: the whole 285-line
+// 50 Hz field (PAL_LINES beam lines less the 28 the capture starts at),
+// and the 235 lines a 263-line 60 Hz field scans -- both sized for the
+// standard's full frame, so a short interlaced field's missing last
+// line shows as the black row `blank_rows_past_frame_end` already
+// leaves past its frame wrap, exactly like the vertical blank it is.
+// Captures (screenshots, frame dumps, recordings, headless runs) are
+// presentation-independent and keep the TV aperture.
+pub const TUBE_PAL_PRESENT_HEIGHT: usize = OUT_HEIGHT;
+pub const TUBE_NTSC_PRESENT_HEIGHT: usize = OUT_HEIGHT
+    - 2 * (crate::chipset::agnus::PAL_LINES - crate::chipset::agnus::NTSC_LINES) as usize;
+
+/// The tube-glass crop for a scan the TV aperture already classified:
+/// the whole rendered field of the same standard, taken from woven row 0.
+pub const fn tube_aperture_rows(tv_aperture_rows: usize) -> usize {
+    if tv_aperture_rows >= TV_PAL_PRESENT_HEIGHT {
+        TUBE_PAL_PRESENT_HEIGHT
+    } else {
+        TUBE_NTSC_PRESENT_HEIGHT
+    }
+}
+
 // The TV aperture clipped to columns the framebuffer actually captures, for
 // frontends whose frame should end on real pixels instead of black bezel
 // (the browser canvas hugs its border on every side). The margin is the
@@ -107,6 +138,10 @@ const _: () = {
     );
     assert!(TV_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
     assert!(TV_NTSC_PRESENT_HEIGHT < TV_PAL_PRESENT_HEIGHT);
+    // Each standard's TV aperture sits inside its tube aperture, so the
+    // tube view only ever adds raster around the TV view.
+    assert!(TV_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= TUBE_PAL_PRESENT_HEIGHT);
+    assert!(TV_PRESENT_SOURCE_Y + TV_NTSC_PRESENT_HEIGHT <= TUBE_NTSC_PRESENT_HEIGHT);
 };
 
 /// One glass pixel of the 4:3 TV presentation: the captured aperture's
@@ -672,6 +707,17 @@ mod tests {
         // unscanned buffer rows as picture.
         let rendered_woven_rows = 2 * (262 - 0x1C);
         assert!(TV_PRESENT_SOURCE_Y + TV_NTSC_PRESENT_HEIGHT <= rendered_woven_rows);
+    }
+
+    #[test]
+    fn tube_aperture_spans_exactly_the_rendered_field() {
+        // The tube glass of a drawn bezel shows every rendered row of the
+        // scan the TV aperture classified -- no more (stale buffer rows
+        // below a 60 Hz field must never show) and no less: the full
+        // 263-line NTSC frame, not the short interlaced field's 262
+        // (whose missing last line is blanked black past its frame wrap).
+        assert_eq!(tube_aperture_rows(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
+        assert_eq!(tube_aperture_rows(TV_NTSC_PRESENT_HEIGHT), 2 * (263 - 0x1C));
     }
 
     fn v_window_fixture(field_rows: usize, total_rows: usize) -> Vec<u32> {
