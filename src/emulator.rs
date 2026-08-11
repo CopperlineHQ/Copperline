@@ -1427,13 +1427,17 @@ impl Emulator {
         remaining = remaining.saturating_sub(accounting.budget_debit);
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
+        if remaining == 0 {
+            // `stats.frames` counts completed host execution quanta. A
+            // fine-grained stop may cross an emulated video frame without
+            // completing this quantum; counting that crossing here and the
+            // resumed remainder in `step_frame` would make observation alter
+            // the reported frame rate.
+            self.stats.frames = self.stats.frames.saturating_add(1);
+        }
 
         let frame_after = self.bus().emulated_frames();
         if frame_after != frame_before {
-            self.stats.frames = self
-                .stats
-                .frames
-                .saturating_add(frame_after.saturating_sub(frame_before));
             self.tt_capture_if_due()?;
             self.tt_poll_reverse_watch()?;
         }

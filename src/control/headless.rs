@@ -1143,6 +1143,7 @@ mod tests {
                 emu.bus().agnus.hpos,
                 emu.machine.pc(),
                 emu.retired_instructions(),
+                emu.stats.frames,
             )
         };
         assert_eq!(position(&staged), position(&single));
