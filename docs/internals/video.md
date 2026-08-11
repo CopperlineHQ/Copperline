@@ -548,7 +548,7 @@ framebuffer):
   captured-aperture geometry invariants are const-evaluated beside the
   definitions. While a monitor bezel is drawn, the live window widens this
   vertical crop to the *tube aperture* (`TUBE_*_PRESENT_HEIGHT`): the whole
-  rendered field -- 570 woven rows on a 50 Hz scan, 468 on a 60 Hz one,
+  rendered field -- 570 woven rows on a 50 Hz scan, 470 on a 60 Hz one,
   from woven row 0 -- resampled onto the same glass, because a real 1084's
   visible raster exceeds even the whole captured field. The widening is a
   live-window decision keyed to the bezel style alone (not to the bezel
@@ -671,7 +671,7 @@ copies the standard scan's aperture crop (`TV_PAL_PRESENT_HEIGHT`, 540
 rows, or `TV_NTSC_PRESENT_HEIGHT`, 428) rather than the whole woven
 buffer, so its count comes from the aperture -- 270 lines on a 50 Hz scan
 and 214 on a 60 Hz one, against 285 for a standard field in `"full"`
-overscan, or the tube aperture's 285/234 while a bezel widens the copy --
+overscan, or the tube aperture's 285/235 while a bezel widens the copy --
 and is rescaled by the rect/content ratio when the
 square-pixel canvas pads the aperture with bezel rows. Interlaced content is deliberately drawn at field-line pitch over the
 woven frame: one gap per emulated line, which is what a 15 kHz set fed an

@@ -92,12 +92,16 @@ pub const TV_GLASS_PRESENT_ROWS: usize = TV_PAL_PRESENT_HEIGHT;
 // the tube's rounded corners crop into that border instead of into the
 // standard window, which the extra rows keep clear of the arcs. One
 // height per standard, like the TV aperture's pair: the whole 285-line
-// 50 Hz field (313 beam lines less the 28 the capture starts at), and
-// the 234 lines a 262-line 60 Hz field scans. Captures (screenshots,
-// frame dumps, recordings, headless runs) are presentation-independent
-// and keep the TV aperture.
+// 50 Hz field (PAL_LINES beam lines less the 28 the capture starts at),
+// and the 235 lines a 263-line 60 Hz field scans -- both sized for the
+// standard's full frame, so a short interlaced field's missing last
+// line shows as the black row `blank_rows_past_frame_end` already
+// leaves past its frame wrap, exactly like the vertical blank it is.
+// Captures (screenshots, frame dumps, recordings, headless runs) are
+// presentation-independent and keep the TV aperture.
 pub const TUBE_PAL_PRESENT_HEIGHT: usize = OUT_HEIGHT;
-pub const TUBE_NTSC_PRESENT_HEIGHT: usize = OUT_HEIGHT - 2 * (313 - 262);
+pub const TUBE_NTSC_PRESENT_HEIGHT: usize = OUT_HEIGHT
+    - 2 * (crate::chipset::agnus::PAL_LINES - crate::chipset::agnus::NTSC_LINES) as usize;
 
 /// The tube-glass crop for a scan the TV aperture already classified:
 /// the whole rendered field of the same standard, taken from woven row 0.
@@ -709,9 +713,11 @@ mod tests {
     fn tube_aperture_spans_exactly_the_rendered_field() {
         // The tube glass of a drawn bezel shows every rendered row of the
         // scan the TV aperture classified -- no more (stale buffer rows
-        // below a 60 Hz field must never show) and no less.
+        // below a 60 Hz field must never show) and no less: the full
+        // 263-line NTSC frame, not the short interlaced field's 262
+        // (whose missing last line is blanked black past its frame wrap).
         assert_eq!(tube_aperture_rows(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
-        assert_eq!(tube_aperture_rows(TV_NTSC_PRESENT_HEIGHT), 2 * (262 - 0x1C));
+        assert_eq!(tube_aperture_rows(TV_NTSC_PRESENT_HEIGHT), 2 * (263 - 0x1C));
     }
 
     fn v_window_fixture(field_rows: usize, total_rows: usize) -> Vec<u32> {
