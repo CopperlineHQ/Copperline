@@ -541,8 +541,9 @@ impl Emulator {
         Ok(())
     }
 
-    /// Cold power-on reset: clears RAM and returns the machine to its
-    /// fresh power-cycled state, distinct from the warm keyboard reset.
+    /// Cold power-on reset: reinitialises RAM with the configured policy and
+    /// returns the machine to its fresh power-cycled state, distinct from the
+    /// warm keyboard reset.
     pub fn power_on_reset(&mut self) -> Result<()> {
         log::info!("cold power-on reset");
         self.bus_mut().power_on_reset();
@@ -2548,6 +2549,21 @@ pub fn build_machine(
             );
         }
     }
+    // System RAM is physically undefined after power is applied. Zero stays
+    // the compatibility default; fixed and deterministic pseudo-random modes
+    // help guest developers expose reads made before their own writes. Do this
+    // before Bus::new so its first renderer snapshot sees the same bytes as
+    // the CPU and DMA engines.
+    mem.power_on_reset_with(cfg.ram_init);
+    match cfg.ram_init {
+        crate::memory::RamInit::Zero => {}
+        crate::memory::RamInit::Pattern { word } => {
+            info!("memory: fixed cold-start fill, word {word:#06X}");
+        }
+        crate::memory::RamInit::Random { seed } => {
+            info!("memory: deterministic pseudo-random cold-start fill, seed {seed:#018X}");
+        }
+    }
     let mut cd_image = match &cfg.cd_image_path {
         Some(path) => {
             let image = crate::cdrom::CdImage::load(path)?;
@@ -2575,6 +2591,7 @@ pub fn build_machine(
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }
     let mut bus = Bus::new(mem, paula, floppy);
+    bus.set_ram_init(cfg.ram_init);
     // The printer attaches here (its byte sink is `Send`). A sampler owns a
     // cpal capture stream that is `!Send` on some hosts, so the frontend builds
     // and attaches it on the main thread from a `SamplerRequest` instead.

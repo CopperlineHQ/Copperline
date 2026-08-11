@@ -193,6 +193,7 @@ model = "68000"       # 68000, 68010, 68EC020, 68020, 68030, 68040, 68060
 chip = "512K"         # OCS 512K, ECS/AGA up to 2M
 fast = "0"            # Zorro II autoconfig fast RAM, up to 8M
 slow = "512K"         # A500 trapdoor RAM at $C00000, up to 512K
+# init = "random"     # deterministic garbage fill; or fixed "pattern:0x5555"
 
 [chipset]
 revision = "OCS"      # OCS, ECS, or AGA (picks the Agnus/Denise revisions)
