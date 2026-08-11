@@ -1096,7 +1096,9 @@ impl Debugger {
     }
 
     pub fn is_breakpoint(&self, pc: u32) -> bool {
-        self.breakpoints.contains(&pc) || self.alert_break == Some(pc)
+        let pc = pc & UI_ADDR_MASK;
+        self.breakpoints.iter().any(|&bp| (bp & UI_ADDR_MASK) == pc)
+            || self.alert_break.map(|a| a & UI_ADDR_MASK) == Some(pc)
     }
 
     pub fn catches_vector(&self, vector: u16) -> bool {
@@ -1126,6 +1128,7 @@ fn parse_hex(s: &str) -> Option<u32> {
     let s = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
+        .or_else(|| s.strip_prefix('$'))
         .unwrap_or(s);
     u32::from_str_radix(s, 16).ok()
 }
@@ -1179,7 +1182,11 @@ fn parse_u16_auto(s: &str) -> Option<u16> {
     if s.is_empty() {
         return None;
     }
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+    if let Some(hex) = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .or_else(|| s.strip_prefix('$'))
+    {
         u16::from_str_radix(hex, 16).ok()
     } else {
         s.parse::<u16>().ok()
@@ -1606,5 +1613,41 @@ mod tests {
         // Unassigned offsets fall back to hex.
         assert_eq!(custom_reg_name(0x068), "$068");
         assert_eq!(custom_reg_name(0x0AC), "$0AC");
+    }
+
+    #[test]
+    fn parse_hex_accepts_dollar_prefix_and_auto_u16() {
+        assert_eq!(parse_hex("$C033C2"), Some(0xC033C2));
+        assert_eq!(parse_u16_auto("$1F"), Some(0x1F));
+        assert_eq!(parse_exception_catch("vec $03"), Some(3));
+    }
+
+    #[test]
+    fn headless_is_breakpoint_masks_addresses() {
+        let dbg = Debugger {
+            breakpoints: vec![0x00C0_33C2],
+            watches: Vec::new(),
+            dumps: Vec::new(),
+            trace: false,
+            trace_full: false,
+            trace_lo: 0,
+            trace_hi: u32::MAX,
+            catches: Vec::new(),
+            catch_alert: false,
+            alert_break: None,
+            after_secs: 0.0,
+            until_secs: f64::INFINITY,
+            max_hits: 200,
+            hits: 0,
+            shot_prefix: None,
+            shot_seq: 0,
+            trace_lines: 0,
+            copper_dump: None,
+            copper_dumped: false,
+            ram_dump: None,
+            ram_dumped: false,
+        };
+        assert!(dbg.is_breakpoint(0xFFC0_33C2));
+        assert!(dbg.is_breakpoint(0x00C0_33C2));
     }
 }

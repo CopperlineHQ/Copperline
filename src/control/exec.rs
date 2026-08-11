@@ -1354,6 +1354,7 @@ fn parse_reg_name(name: &str) -> Result<usize, CtlError> {
         b"pc" => return Ok(17),
         b"sr" => return Ok(16),
         b"sp" => return Ok(15),
+        b"fp" => return Ok(14),
         _ => {}
     }
     if bytes.len() == 2 && bytes[1].is_ascii_digit() {
@@ -1367,7 +1368,7 @@ fn parse_reg_name(name: &str) -> Result<usize, CtlError> {
         }
     }
     Err(CtlError::invalid_params(format!(
-        "unknown register: {name} (want d0-d7, a0-a7, sp, sr, pc)"
+        "unknown register: {name} (want d0-d7, a0-a7, fp, sp, sr, pc)"
     )))
 }
 

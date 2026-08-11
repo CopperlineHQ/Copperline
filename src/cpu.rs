@@ -685,7 +685,10 @@ impl M68kMachine {
             .map(|d| {
                 d.watches
                     .iter()
-                    .flat_map(|w| (0..w.len.div_ceil(2)).map(move |k| w.addr + k * 2))
+                    .flat_map(|w| {
+                        let base = w.addr & !1;
+                        (0..w.len.div_ceil(2)).map(move |k| base + k * 2)
+                    })
                     .collect()
             })
             .unwrap_or_default();
