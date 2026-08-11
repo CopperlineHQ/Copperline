@@ -6,7 +6,10 @@ tool window alongside the emulated display. Closing it restores the pause
 state from before it opened. The debugger, frame analyzer, and the
 command-line [console](console) are independent tool windows, so all three
 can stay open while you compare CPU/chipset state with the captured bus
-trace.
+trace. Each takes its keys and clicks through its own window, and the main
+window keeps driving the Amiga: press **Run** and you can play the machine
+-- keyboard, mouse, and mouse capture included -- while the tool windows
+watch it.
 Everything the debugger shows comes from
 side-effect-free peeks -- inspecting memory or registers never disturbs the
 emulated machine -- and stepping drives the same cycle-exact core as normal
@@ -236,8 +239,9 @@ bit `$4000` set, after ten earlier qualifying passes.
 | &lt; Step | -- | Step one instruction *backward* (see [](reverse)) |
 | &lt; Run | -- | Run *backward* to the previous breakpoint hit |
 
-The `R`/`S`/`O`/`U`/`F`/`L` keys work whenever the box is unfocused (while it
-is focused they are text input). **Run to $**, **Step Over**, **Step Out**,
+The `R`/`S`/`O`/`U`/`F`/`L` keys act while the debugger window has the focus
+and the box is unfocused (while it is focused they are text input); in the
+main window those keys belong to the Amiga. **Run to $**, **Step Over**, **Step Out**,
 and **Line** are bounded by an instruction budget so a never-returning call
 or never-reached address cannot wedge the UI; if the budget runs out, the
 debugger stays paused. Step Out detects the return by the stack pointer

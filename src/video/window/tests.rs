@@ -4938,7 +4938,8 @@ fn modal_panel_swallows_amiga_key_presses() {
     assert!(app.ui_handle_key(KeyCode::Escape, None));
     assert!(app.ui.panel.is_none());
 
-    // Hex entry: digits accumulate, Enter commits to the memory view.
+    // Hex entry arrives through the debugger's own tool window: digits
+    // accumulate, Enter commits to the memory view.
     app.open_debugger();
     if let Some(panel) = app.debugger_panel.as_mut() {
         panel.entry_active = true;
@@ -4950,9 +4951,9 @@ fn modal_panel_swallows_amiga_key_presses() {
         KeyCode::Digit0,
         KeyCode::Digit1,
     ] {
-        assert!(app.ui_handle_key(key, None));
+        assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, key));
     }
-    assert!(app.ui_handle_key(KeyCode::Enter, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Enter));
     match app.debugger_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.entry, "C001");
@@ -4961,6 +4962,42 @@ fn modal_panel_swallows_amiga_key_presses() {
         }
         _ => panic!("debugger panel should be open"),
     }
+}
+
+/// The debugger and frame analyzer live in their own tool windows, so an
+/// open one must not swallow the main window's input: keys, pointer
+/// motion, and clicks keep driving the Amiga while the machine runs
+/// under them. Each window's own Escape closes it; a main-window Escape
+/// belongs to the Amiga.
+#[test]
+fn tool_windows_are_not_modal_over_the_main_window() {
+    let mut app = test_app();
+    app.open_debugger();
+    app.open_frame_analyzer();
+    assert!(
+        !app.modal_ui_active(),
+        "tool panels must not gate main-window Amiga input"
+    );
+    assert!(
+        !app.ui_handle_key(KeyCode::KeyS, None),
+        "a main-window key is not claimed by a tool panel"
+    );
+    assert!(
+        !app.ui_handle_key(KeyCode::Escape, None),
+        "a main-window Escape reaches the Amiga"
+    );
+    assert!(app.debugger_panel.is_some());
+    assert!(app.frame_analyzer_panel.is_some());
+
+    // Both windows still borrow the cursor: an automatic re-grab while
+    // one is open would trap the pointer its controls need.
+    assert!(app.ui_wants_cursor());
+
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::Escape));
+    assert!(app.frame_analyzer_panel.is_none());
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Escape));
+    assert!(app.debugger_panel.is_none());
+    assert!(!app.ui_wants_cursor());
 }
 
 #[test]
@@ -4977,8 +5014,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         _ => panic!("frame analyzer panel should be open"),
     };
 
-    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowRight));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowDown));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, start_hpos + 1);
@@ -4987,8 +5024,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         _ => panic!("frame analyzer panel should be open"),
     }
 
-    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowLeft));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowUp));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, start_hpos);
@@ -5001,8 +5038,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         panel.selected_hpos = 0;
         panel.selected_vpos = 0;
     }
-    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowLeft));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowUp));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, 0);
@@ -5026,8 +5063,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         panel.selected_hpos = max_hpos;
         panel.selected_vpos = max_vpos;
     }
-    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowRight));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowDown));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, max_hpos);
@@ -5051,7 +5088,7 @@ fn frame_analyzer_underlay_toggles_and_renders() {
     assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
 
     // The U key ticks the checkbox on.
-    assert!(app.ui_handle_key(KeyCode::KeyU, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::KeyU));
     assert!(app
         .frame_analyzer_panel
         .as_ref()
@@ -6289,14 +6326,14 @@ fn debugger_keys_step_and_pin_disassembly() {
 
     // S steps one instruction while the entry box is unfocused.
     let pc_before = app.emu.machine.pc();
-    assert!(app.ui_handle_key(KeyCode::KeyS, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::KeyS));
     assert_eq!(app.emu.machine.pc(), pc_before.wrapping_add(2));
 
     // R toggles run; the explicit choice survives closing the panel.
     assert!(app.paused);
-    assert!(app.ui_handle_key(KeyCode::KeyR, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::KeyR));
     assert!(!app.paused);
-    assert!(app.ui_handle_key(KeyCode::KeyR, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::KeyR));
     assert!(app.paused);
 
     // On the CPU tab, Enter pins the disassembly origin to the typed
@@ -6305,7 +6342,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry_active = true;
         panel.entry = "FC0010".to_string();
     }
-    assert!(app.ui_handle_key(KeyCode::Enter, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Enter));
     match app.debugger_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.disasm_addr, Some(0xFC0010));
@@ -6319,7 +6356,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry_active = true;
         panel.entry.clear();
     }
-    assert!(app.ui_handle_key(KeyCode::Enter, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Enter));
     match app.debugger_panel.as_ref() {
         Some(panel) => assert_eq!(panel.disasm_addr, None),
         _ => panic!("debugger panel should be open"),
@@ -6332,7 +6369,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry.clear();
     }
     let pc_before = app.emu.machine.pc();
-    assert!(app.ui_handle_key(KeyCode::KeyS, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::KeyS));
     assert_eq!(app.emu.machine.pc(), pc_before);
     assert_eq!(
         app.debugger_panel.as_ref().map(|p| p.entry.as_str()),
@@ -7496,14 +7533,14 @@ fn frame_analyzer_m_key_toggles_between_the_beam_and_memory_tabs() {
     let tab = |app: &super::App| app.frame_analyzer_panel.as_ref().map(|panel| panel.tab);
     assert_eq!(tab(&app), Some(AnalyzerTab::Beam));
 
-    assert!(app.ui_handle_key(KeyCode::KeyM, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::KeyM));
     assert_eq!(tab(&app), Some(AnalyzerTab::Memory));
     assert!(
         app.emu.bus().heat_map().is_some(),
         "arriving on the Memory tab arms the map"
     );
 
-    assert!(app.ui_handle_key(KeyCode::KeyM, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::KeyM));
     assert_eq!(tab(&app), Some(AnalyzerTab::Beam));
 }
 
@@ -7528,21 +7565,21 @@ fn frame_analyzer_cursor_keys_move_the_pinned_cell_on_the_memory_tab() {
     // With nothing pinned the first arrow starts from the centre cell, and
     // the beam selection the Beam tab owns is left where it was.
     let centre = heatmap::CELLS / 2 + heatmap::GRID / 2;
-    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowRight));
     assert_eq!(pinned(&app), Some(centre + 1));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowDown));
     assert_eq!(pinned(&app), Some(centre + 1 + heatmap::GRID));
     assert_eq!(beam_slot(&app), slot_before);
 
     // The grid's edges clamp: the selection never wraps into the next row.
     app.activate_ui_control(UiControl::AnalyzerHeatPick { x: 0, y: 0 });
-    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowLeft));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowUp));
     assert_eq!(pinned(&app), Some(0));
     let last = (heatmap::GRID - 1) as u8;
     app.activate_ui_control(UiControl::AnalyzerHeatPick { x: last, y: last });
-    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowRight));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::ArrowDown));
     assert_eq!(pinned(&app), Some(heatmap::CELLS - 1));
 }
 
