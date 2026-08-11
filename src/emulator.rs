@@ -73,6 +73,12 @@ pub struct Emulator {
     cpu_jit: bool,
     audio_profile: AudioRuntimeProfile,
     real_pacing_profile: RealPacingProfile,
+    /// Unfinished host execution quantum left by instruction-granular control
+    /// stepping. Keeping this cursor in the emulator makes a debugger pause a
+    /// transparent split of the same quantum instead of starting a fresh one
+    /// when frame-granular execution resumes.
+    realtime_quantum_remaining: usize,
+    realtime_quantum_cpu_idle: bool,
     /// Monotonic count of retired CPU instructions since power-on -- the
     /// position coordinate for reverse debugging. Kept outside the
     /// serialized machine state so capturing it is free and the save-state
@@ -447,6 +453,8 @@ impl Emulator {
             cpu_jit: false,
             audio_profile: AudioRuntimeProfile::new(),
             real_pacing_profile: RealPacingProfile::new(),
+            realtime_quantum_remaining: 0,
+            realtime_quantum_cpu_idle: false,
             retired_instructions: 0,
             tt_ring: None,
             tt_input: None,
@@ -529,6 +537,7 @@ impl Emulator {
         self.bus_mut().reset_for_keyboard_reset();
         self.machine.reset_after_bus_reset();
         self.stats = EmuStats::default();
+        self.reset_realtime_quantum();
         Ok(())
     }
 
@@ -539,6 +548,7 @@ impl Emulator {
         self.bus_mut().power_on_reset();
         self.machine.reset_after_bus_reset();
         self.stats = EmuStats::default();
+        self.reset_realtime_quantum();
         Ok(())
     }
 
@@ -639,6 +649,7 @@ impl Emulator {
         // The CPU clock travels with the state; re-derive the host pacing math
         // from it so an accelerated/slower restored CPU is paced correctly.
         self.reconfigure_pacing_for_cpu_clock();
+        self.reset_realtime_quantum();
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
         Ok(StateLoadOutcome {
@@ -790,6 +801,7 @@ impl Emulator {
         self.bus_mut().paula.set_stereo_separation(separation);
         self.bus_mut().paula.set_led_filter_mode(filter);
         self.retired_instructions = pos;
+        self.reset_realtime_quantum();
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
         Ok(())
@@ -1396,30 +1408,45 @@ impl Emulator {
         Ok(())
     }
 
+    /// Execute one control/debug slice as part of the same real-time quantum
+    /// used by [`Self::step_frame`]. An exact mid-quantum stop leaves the
+    /// unused budget here, so a later resume cannot move hardware events by
+    /// changing an otherwise invisible host scheduling boundary.
+    pub fn debug_step_realtime(&mut self) -> Result<()> {
+        if self.stats.started_at.is_none() {
+            self.stats.started_at = Some(crate::timebase::Instant::now());
+        }
+        let frame_before = self.bus().emulated_frames();
+        let mut remaining = self.realtime_quantum_remaining;
+        let mut cpu_idle = self.realtime_quantum_cpu_idle;
+        if remaining == 0 {
+            remaining = self.instruction_budget();
+            cpu_idle = false;
+        }
+        let accounting = self.run_one_step(&mut cpu_idle, remaining)?;
+        remaining = remaining.saturating_sub(accounting.budget_debit);
+        self.realtime_quantum_remaining = remaining;
+        self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
+
+        let frame_after = self.bus().emulated_frames();
+        if frame_after != frame_before {
+            self.stats.frames = self
+                .stats
+                .frames
+                .saturating_add(frame_after.saturating_sub(frame_before));
+            self.tt_capture_if_due()?;
+            self.tt_poll_reverse_watch()?;
+        }
+        Ok(())
+    }
+
     /// Execute one instruction with the same STOP/idle fast-forward handling as
     /// the real-time loop: a CPU halted in STOP makes no progress under a
     /// single-instruction slice, so advance devices to the next event and let
     /// the wake-up interrupt fire. Shared by the run-to / step-over / step-out
     /// helpers so they all step a STOPped CPU forward instead of spinning.
     fn debug_step_one_with_idle(&mut self) -> Result<()> {
-        let run = self.execute_cpu_slice(1)?;
-        self.machine.refresh_irq_line();
-        if run.cpu_stopped {
-            let chunk = self.idle_fast_forward_chunk(INSTRUCTIONS_PER_REALTIME_SLICE);
-            let run = self.execute_cpu_slice(chunk)?;
-            let accounting = real_slice_accounting(
-                &run,
-                chunk,
-                self.cpu_cycles_per_instruction,
-                self.real_pacing_budget_mode,
-            );
-            if run.cpu_stopped {
-                let idle_cck = accounting.slice_cck.saturating_sub(run.bus_advanced_cck);
-                self.bus_mut().advance_cpu_idle_devices(idle_cck);
-            }
-            self.machine.refresh_irq_line();
-        }
-        Ok(())
+        self.debug_step_realtime()
     }
 
     /// Run until the CPU reaches `target_pc` (masked to the bus width), up
@@ -1558,7 +1585,12 @@ impl Emulator {
         // Host cost of this frame for the performance overlay: everything
         // in this call except the real-time pacing sleep.
         let busy_started = Instant::now();
-        let mut remaining = self.instruction_budget();
+        let mut remaining = self.realtime_quantum_remaining;
+        let mut cpu_idle = self.realtime_quantum_cpu_idle;
+        if remaining == 0 {
+            remaining = self.instruction_budget();
+            cpu_idle = false;
+        }
         // Cycle-step while the CPU is actively executing so every chip
         // register write lands at the correct beam position (one
         // instruction per slice, with the chipset advanced for that
@@ -1568,7 +1600,6 @@ impl Emulator {
         // then drop straight back to single-instruction stepping so the
         // wake-up interrupt handler, which often performs mid-frame
         // display writes, is cycle-accurate too.
-        let mut cpu_idle = false;
         while remaining > 0 {
             let accounting = self.run_one_step(&mut cpu_idle, remaining)?;
             remaining = remaining.saturating_sub(accounting.budget_debit);
@@ -1579,6 +1610,8 @@ impl Emulator {
                 break;
             }
         }
+        self.realtime_quantum_remaining = remaining;
+        self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
         // Pace presentation to wall-clock only for the interactive window;
         // headless runs advance the deterministic core unthrottled.
         let slept = if self.paced {
@@ -1588,6 +1621,11 @@ impl Emulator {
         };
         self.stats.busy += busy_started.elapsed().saturating_sub(slept);
         Ok(())
+    }
+
+    fn reset_realtime_quantum(&mut self) {
+        self.realtime_quantum_remaining = 0;
+        self.realtime_quantum_cpu_idle = false;
     }
 
     /// One iteration of the cycle-stepping loop: pick a slice size (a single

@@ -9,7 +9,7 @@
 //! debugger is not practical.
 //!
 //! Configuration (all optional; the debugger stays disabled unless at least one
-//! of BREAK / WATCH / TRACE is set). Addresses are hex, with or without `0x`:
+//! debugging action is set). Addresses are hex, with or without `0x`:
 //!
 //! ```text
 //! COPPERLINE_DBG_BREAK   = comma-separated PCs to break on     e.g. "C033C2,C033C8"
@@ -38,6 +38,9 @@
 //!                      first activates. "auto"/"1" uses the live COP1LC;
 //!                      "ADDR" / "ADDR:LEN" dumps LEN instructions from ADDR
 //!                      e.g. "auto:64" or "C00100:200"
+//! COPPERLINE_DBG_LISTCHECK = comma-separated AmigaOS Exec List header addresses;
+//!                      after each instruction, report the first duplicate node
+//!                      or unterminated chain       e.g. "16D6,16E4"
 //! ```
 //!
 //! Reverse debugging ("rr"-style) is armed by a separate group of knobs,
@@ -980,6 +983,59 @@ pub struct CopperDumpReq {
     pub count: u32,
 }
 
+/// A structural failure found while walking one or more AmigaOS Exec `List`s.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecListViolation {
+    Duplicate {
+        node: u32,
+        first_head: u32,
+        second_head: u32,
+    },
+    Unterminated {
+        head: u32,
+        limit: usize,
+    },
+}
+
+/// Walk AmigaOS Exec `List` successor links and find the first node which is
+/// present twice, either through a cycle or in two configured lists. A valid
+/// list ends at its embedded tail sentinel, whose successor is null. The node
+/// limit catches a corrupt chain that keeps visiting unique addresses.
+pub(crate) fn find_exec_list_violation(
+    headers: &[u32],
+    node_limit: usize,
+    mut read_long: impl FnMut(u32) -> u32,
+) -> Option<ExecListViolation> {
+    let mut seen = Vec::new();
+    for &head in headers {
+        let mut node = read_long(head);
+        let mut nodes = 0usize;
+        while node != 0 {
+            let successor = read_long(node);
+            if successor == 0 {
+                break;
+            }
+            if let Some(&(first_head, _)) = seen.iter().find(|(_, seen_node)| *seen_node == node) {
+                return Some(ExecListViolation::Duplicate {
+                    node,
+                    first_head,
+                    second_head: head,
+                });
+            }
+            if nodes >= node_limit {
+                return Some(ExecListViolation::Unterminated {
+                    head,
+                    limit: node_limit,
+                });
+            }
+            seen.push((head, node));
+            nodes += 1;
+            node = successor;
+        }
+    }
+    None
+}
+
 pub struct Debugger {
     pub breakpoints: Vec<u32>,
     pub watches: Vec<Watch>,
@@ -1018,6 +1074,12 @@ pub struct Debugger {
     /// debugger is active.
     pub ram_dump: Option<RamDumpReq>,
     pub ram_dumped: bool,
+    /// COPPERLINE_DBG_LISTCHECK: exec List header addresses to verify after
+    /// every instruction while the window is active. Reports the first
+    /// instruction after which a node appears twice (within one list or
+    /// across the listed lists) or a chain does not terminate.
+    pub listcheck: Vec<u32>,
+    pub listcheck_reported: bool,
 }
 
 impl Debugger {
@@ -1034,6 +1096,7 @@ impl Debugger {
         let catch_alert = crate::envcfg::flag("COPPERLINE_DBG_CATCHALERT");
         let copper_dump = parse_copper_dump("COPPERLINE_DBG_COPPER");
         let ram_dump = parse_ram_dump("COPPERLINE_DBG_RAMDUMP");
+        let listcheck = parse_addr_list("COPPERLINE_DBG_LISTCHECK");
         if breakpoints.is_empty()
             && watches.is_empty()
             && !trace
@@ -1041,6 +1104,7 @@ impl Debugger {
             && !catch_alert
             && copper_dump.is_none()
             && ram_dump.is_none()
+            && listcheck.is_empty()
         {
             return None;
         }
@@ -1070,9 +1134,11 @@ impl Debugger {
             copper_dumped: false,
             ram_dump,
             ram_dumped: false,
+            listcheck,
+            listcheck_reported: false,
         };
         log::info!(
-            "debugger armed: breaks={:?} catches={:?} catch_alert={} watches={} dumps={} trace={} window=[{},{}) max_hits={}",
+            "debugger armed: breaks={:?} catches={:?} catch_alert={} watches={} dumps={} trace={} listcheck={} window=[{},{}) max_hits={}",
             dbg.breakpoints
                 .iter()
                 .map(|pc| format!("{pc:#X}"))
@@ -1082,6 +1148,7 @@ impl Debugger {
             dbg.watches.len(),
             dbg.dumps.len(),
             dbg.trace,
+            dbg.listcheck.len(),
             dbg.after_secs,
             dbg.until_secs,
             dbg.max_hits,
@@ -1294,6 +1361,76 @@ pub fn reverse_config_from_env() -> Option<ReverseConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_list_check_accepts_disjoint_terminated_lists() {
+        let memory = std::collections::HashMap::from([
+            (0x100, 0x200),
+            (0x200, 0x104),
+            (0x104, 0),
+            (0x110, 0x300),
+            (0x300, 0x114),
+            (0x114, 0),
+        ]);
+        assert_eq!(
+            find_exec_list_violation(&[0x100, 0x110], 16, |addr| {
+                memory.get(&addr).copied().unwrap_or(0)
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn exec_list_check_finds_cross_list_membership_and_cycles() {
+        let shared = std::collections::HashMap::from([
+            (0x100, 0x200),
+            (0x110, 0x200),
+            (0x200, 0x104),
+            (0x104, 0),
+        ]);
+        assert_eq!(
+            find_exec_list_violation(&[0x100, 0x110], 16, |addr| {
+                shared.get(&addr).copied().unwrap_or(0)
+            }),
+            Some(ExecListViolation::Duplicate {
+                node: 0x200,
+                first_head: 0x100,
+                second_head: 0x110,
+            })
+        );
+
+        let cycle =
+            std::collections::HashMap::from([(0x100, 0x200), (0x200, 0x300), (0x300, 0x200)]);
+        assert_eq!(
+            find_exec_list_violation(&[0x100], 16, |addr| {
+                cycle.get(&addr).copied().unwrap_or(0)
+            }),
+            Some(ExecListViolation::Duplicate {
+                node: 0x200,
+                first_head: 0x100,
+                second_head: 0x100,
+            })
+        );
+    }
+
+    #[test]
+    fn exec_list_check_caps_a_unique_unterminated_chain() {
+        let memory = std::collections::HashMap::from([
+            (0x100, 0x200),
+            (0x200, 0x300),
+            (0x300, 0x400),
+            (0x400, 0x500),
+        ]);
+        assert_eq!(
+            find_exec_list_violation(&[0x100], 1, |addr| {
+                memory.get(&addr).copied().unwrap_or(0)
+            }),
+            Some(ExecListViolation::Unterminated {
+                head: 0x100,
+                limit: 1,
+            })
+        );
+    }
 
     #[test]
     fn interactive_breakpoints_toggle_mask_and_arm() {

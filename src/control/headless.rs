@@ -562,14 +562,12 @@ impl Session {
                 kill_after: false,
             })
         };
-        let mut cpu_idle = false;
-
         // Bounded verbs run to completion without polling; they are
         // over in at most RUN_BUDGET instructions.
         match kind {
             ResumeKind::Step { n } => {
                 for _ in 0..*n {
-                    self.emu.debug_step_for_gdb(&mut cpu_idle)?;
+                    self.emu.debug_step_realtime()?;
                     self.input.apply_due_scheduled(&mut self.emu);
                     self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {
@@ -684,12 +682,13 @@ impl Session {
             match target {
                 Some(RunTarget::Pc(pc)) => {
                     // Instruction-granular so the landing is exact;
-                    // debug_step_for_gdb keeps reverse-debug captures
-                    // happening at frame crossings. The hit itself is
-                    // seen by the checks at the top of the loop.
+                    // The real-time debug slice keeps reverse-debug captures
+                    // happening at frame crossings and preserves the host
+                    // quantum across an exact stop. The hit itself is seen
+                    // by the checks at the top of the loop.
                     let mask = self.emu.machine.ui_addr_mask();
                     for _ in 0..PC_POLL_CHUNK {
-                        self.emu.debug_step_for_gdb(&mut cpu_idle)?;
+                        self.emu.debug_step_realtime()?;
                         if self.emu.machine.pc() & mask == pc & mask
                             || self.emu.machine.ui_debug_stop_pending()
                         {
@@ -704,7 +703,7 @@ impl Session {
                     // instruction boundary at or past it.
                     let cck = cck_target.expect("guarded by is_some_and");
                     while self.emu.bus().emulated_cck() < cck {
-                        self.emu.debug_step_for_gdb(&mut cpu_idle)?;
+                        self.emu.debug_step_realtime()?;
                         if self.emu.machine.ui_debug_stop_pending() {
                             break;
                         }
@@ -983,6 +982,12 @@ mod tests {
         emu
     }
 
+    fn stopped_control_test_emulator() -> Emulator {
+        let mut emu = control_test_emulator();
+        emu.bus_mut().mem.rom[0x10..0x14].copy_from_slice(&[0x4E, 0x72, 0x20, 0x00]);
+        emu
+    }
+
     /// Run one connection against an existing machine and its
     /// machine-lifetime input state. This is the ownership hand-off the
     /// real accept loop performs after every disconnect.
@@ -1109,6 +1114,38 @@ mod tests {
             assert_eq!(stop["reason"], "target");
             assert_eq!(stop["vpos"], 150);
         });
+    }
+
+    #[test]
+    fn staged_run_until_is_transparent_while_the_cpu_is_stopped() {
+        let (single, _, _, _) = run_machine_session(
+            stopped_control_test_emulator(),
+            MachineInputState::default(),
+            |c| {
+                c.auth();
+                c.result("run_until", json!({"cck": 200_000}));
+            },
+        );
+        let (staged, _, _, _) = run_machine_session(
+            stopped_control_test_emulator(),
+            MachineInputState::default(),
+            |c| {
+                c.auth();
+                c.result("run_until", json!({"cck": 100_000}));
+                c.result("run_until", json!({"cck": 200_000}));
+            },
+        );
+        let position = |emu: &Emulator| {
+            (
+                emu.bus().emulated_cck(),
+                emu.bus().emulated_frames(),
+                emu.bus().agnus.vpos,
+                emu.bus().agnus.hpos,
+                emu.machine.pc(),
+                emu.retired_instructions(),
+            )
+        };
+        assert_eq!(position(&staged), position(&single));
     }
 
     #[test]

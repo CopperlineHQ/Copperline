@@ -509,9 +509,8 @@ impl App {
             match verb.kind {
                 ResumeKind::Step { n } => {
                     label = "instruction step";
-                    let mut cpu_idle = false;
                     for _ in 0..n {
-                        self.emu.debug_step_for_gdb(&mut cpu_idle)?;
+                        self.emu.debug_step_realtime()?;
                         if self.emu.machine.ui_debug_stop_pending() {
                             break;
                         }
@@ -693,9 +692,8 @@ impl App {
             if current >= cck || cck - current < CCK_FINE_WINDOW {
                 // Land on the first instruction boundary at or past the
                 // target (bounded: less than a frame away).
-                let mut cpu_idle = false;
                 while self.emu.bus().emulated_cck() < cck {
-                    if let Err(e) = self.emu.debug_step_for_gdb(&mut cpu_idle) {
+                    if let Err(e) = self.emu.debug_step_realtime() {
                         error!("emulator step halted: {e:?}");
                         self.cpu_halted = true;
                         break;
