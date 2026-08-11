@@ -324,7 +324,11 @@ tool window or overlay.
   the tube sunk into its moulding, and the model badge, the Copperline name
   and the power lamp along the bottom), or **Classic** (the plainer rounded
   frame Copperline drew first). The picture gets a little smaller to make
-  room for either. `Cmd+M` / `Alt+M` turns the chosen front off and back
+  room for either, and the tube shows a little more of it: the whole
+  captured raster fills the glass edge to edge, border colour and all,
+  so the opening's rounded corners crop into the overscan border the way
+  a real tube's do, not into the picture.
+  `Cmd+M` / `Alt+M` turns the chosen front off and back
   on; it never changes which. Session-only; the start-up value is
   `[display] bezel` (see [Configuration](configuration.md)). A window
   effect only, like the shader: screenshots, frame dumps and recordings

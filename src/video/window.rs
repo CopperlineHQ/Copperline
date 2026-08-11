@@ -3754,6 +3754,12 @@ impl ApplicationHandler for App {
                             // board's screen.
                             self.present_tv_aperture_rows
                                 .filter(|_| self.rtg_present_dims.is_none()),
+                            // A drawn bezel shows the tube aperture. Keyed to
+                            // the style alone, not bezel_active: an open
+                            // overlay suspends the bezel *pass*, and the
+                            // picture must not jump between apertures when a
+                            // panel opens over it.
+                            self.bezel.is_on(),
                         );
                         // The tint models the monitor on the Amiga's video
                         // output, so RTG board scanout stays untinted here
@@ -3833,12 +3839,22 @@ impl ApplicationHandler for App {
                         let scanlines = crt_scanline_count(
                             self.present_rows,
                             present_height(),
-                            // The same branch copy_window_present_frame took.
-                            self.present_tv_aperture_rows.filter(|_| {
-                                self.overscan == Overscan::Tv
-                                    && self.rtg_present_dims.is_none()
-                                    && self.present_width == FB_WIDTH
-                            }),
+                            // The same branch copy_window_present_frame took,
+                            // tube aperture included: the line count follows
+                            // the rows the copy actually put on the glass.
+                            self.present_tv_aperture_rows
+                                .filter(|_| {
+                                    self.overscan == Overscan::Tv
+                                        && self.rtg_present_dims.is_none()
+                                        && self.present_width == FB_WIDTH
+                                })
+                                .map(|rows| {
+                                    if self.bezel.is_on() {
+                                        tube_aperture_rows(rows)
+                                    } else {
+                                        rows
+                                    }
+                                }),
                         );
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;

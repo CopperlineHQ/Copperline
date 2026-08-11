@@ -546,7 +546,16 @@ framebuffer):
   so intentional border content remains visible. `COPPERLINE_SHOT_RAW=1`
   bypasses presentation and writes the raw 716x570 woven framebuffer. The
   captured-aperture geometry invariants are const-evaluated beside the
-  definitions.
+  definitions. While a monitor bezel is drawn, the live window widens this
+  vertical crop to the *tube aperture* (`TUBE_*_PRESENT_HEIGHT`): the whole
+  rendered field -- 570 woven rows on a 50 Hz scan, 468 on a 60 Hz one,
+  from woven row 0 -- resampled onto the same glass, because a real 1084's
+  visible raster exceeds even the whole captured field. The widening is a
+  live-window decision keyed to the bezel style alone (not to the bezel
+  *pass*, which an open overlay suspends -- the picture must not jump
+  between apertures when a panel opens); captures keep the TV aperture, so
+  screenshots stay byte-identical with headless runs whatever front is
+  drawn.
 - **Full-overscan horizontal recentring**: in `"full"` presentation, a standard
   (non-overscan) display is recentred because the framebuffer captures a deep
   slab of left overscan that would otherwise push the picture right of centre.
@@ -662,7 +671,8 @@ copies the standard scan's aperture crop (`TV_PAL_PRESENT_HEIGHT`, 540
 rows, or `TV_NTSC_PRESENT_HEIGHT`, 428) rather than the whole woven
 buffer, so its count comes from the aperture -- 270 lines on a 50 Hz scan
 and 214 on a 60 Hz one, against 285 for a standard field in `"full"`
-overscan -- and is rescaled by the rect/content ratio when the
+overscan, or the tube aperture's 285/234 while a bezel widens the copy --
+and is rescaled by the rect/content ratio when the
 square-pixel canvas pads the aperture with bezel rows. Interlaced content is deliberately drawn at field-line pitch over the
 woven frame: one gap per emulated line, which is what a 15 kHz set fed an
 interlaced signal looks like, rather than one per woven row.
