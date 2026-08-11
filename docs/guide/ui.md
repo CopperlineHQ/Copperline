@@ -35,7 +35,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
-| `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
+| `Esc` | `Esc` | Close an open menu or overlay panel (in a tool window, that window); otherwise passed through to the Amiga |
 | `Ctrl+Amiga+Amiga` | `Ctrl+Amiga+Amiga` | Keyboard reset (warm reboot) |
 
 Host modifiers that are passed through to the emulated keyboard map onto
@@ -243,10 +243,14 @@ start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
 the launcher's A/V & Emu page (Video category).
 
 Tool windows are separate native windows so the emulated display remains visible;
-the debugger and frame analyzer can be open at the same time. Overlay panels
-are drawn over the display. While either kind is open, key presses and display
-clicks stay in the UI instead of reaching the Amiga; `Esc` closes the focused
-tool window or overlay.
+the debugger and frame analyzer can be open at the same time. They take their
+keys and clicks through their own windows, and the main window keeps driving
+the Amiga while they are open -- resume the machine from the debugger and you
+can play on while watching it. Overlay panels are drawn over the display and
+*are* modal: while one is open, key presses and display clicks stay in the UI
+instead of reaching the Amiga. `Esc` in a tool window closes that window;
+`Esc` in the main window closes the menu or overlay panel, and otherwise
+belongs to the Amiga.
 
 ### Tools
 
@@ -816,13 +820,15 @@ the guest is the first one aimed at it -- otherwise a single click on a
 gadget arrives as two, close enough together to read as a double click.
 
 While an overlay panel is open, host cursor motion is not fed to the
-emulated mouse. Tool windows likewise keep the debugger or analyzer
-interaction separate from Amiga mouse input. A panel or tool window
-opened while the mouse was captured borrows the cursor and hands the
-capture back when the last of them closes, so a visit to the debugger
-does not leave the machine uncaptured -- which matters most in
-fullscreen, where there is no desktop to reach for. An explicit
-`Cmd/Alt+G` release settles it the other way: the capture stays off.
+emulated mouse. Tool windows are not modal that way: with the debugger
+or analyzer open, motion and clicks over the main window's display still
+drive the Amiga, and the capture click and shortcut work as usual. A
+panel or tool window opened while the mouse was captured borrows the
+cursor and hands the capture back when the last of them closes, so a
+visit to the debugger does not leave the machine uncaptured -- which
+matters most in fullscreen, where there is no desktop to reach for. An
+explicit `Cmd/Alt+G` release settles it the other way: the capture
+stays off.
 
 Uncaptured, host cursor motion over the display still drives the
 emulated mouse, and `[input] mouse_sensitivity` scales it the same way

@@ -4476,7 +4476,7 @@ impl App {
     }
 
     /// Take the grab if `[input] mouse_capture = "auto"` and the moment is
-    /// right for it: the window holds the focus, nothing modal wants the
+    /// right for it: the window holds the focus, nothing else wants the
     /// cursor, and there is a mouse on a port to drive.
     ///
     /// Deliberately driven by discrete events (focus gain, entering
@@ -4487,7 +4487,7 @@ impl App {
         if self.mouse_capture != crate::config::MouseCapture::Auto
             || self.mouse_captured
             || !self.main_window_focused
-            || self.modal_ui_active()
+            || self.ui_wants_cursor()
             || self.mouse_port().is_none()
         {
             return;
@@ -4504,11 +4504,11 @@ impl App {
         }
     }
 
-    /// Re-take a capture the UI borrowed, once no modal UI still wants the
+    /// Re-take a capture the UI borrowed, once nothing still wants the
     /// cursor. A no-op unless `suspend_mouse_capture_for_ui` recorded one,
     /// so a session that was never captured is never surprised by a grab.
     fn restore_mouse_capture_after_ui(&mut self) {
-        if !self.capture_suspended_by_ui || self.modal_ui_active() {
+        if !self.capture_suspended_by_ui || self.ui_wants_cursor() {
             return;
         }
         // Same guard the click-to-capture path applies: with no mouse left
@@ -4868,9 +4868,6 @@ impl App {
     }
 
     fn main_ui_control_at(&self, pos: (i32, i32)) -> Option<UiControl> {
-        if self.ui.panel.is_none() && self.tool_panel_open() && !self.ui.menu_open {
-            return None;
-        }
         self.ui.control_at(pos)
     }
 
@@ -4883,12 +4880,26 @@ impl App {
             != current.and_then(|pos| self.main_ui_control_at(pos))
     }
 
-    fn tool_panel_open(&self) -> bool {
-        self.debugger_panel.is_some() || self.frame_analyzer_panel.is_some()
+    /// Whether main-window UI is claiming the keyboard and pointer: the
+    /// menu, or an overlay panel drawn over the display. The debugger,
+    /// frame analyzer, and console are separate tool windows with their
+    /// own event routing, so they are deliberately not modal here -- while
+    /// one is open (even mid-run), the main window keeps driving the Amiga.
+    fn modal_ui_active(&self) -> bool {
+        self.ui.active()
     }
 
-    fn modal_ui_active(&self) -> bool {
-        self.ui.active() || self.tool_panel_open()
+    /// Whether any UI surface has a claim on the host cursor: main-window
+    /// UI, or an open tool window. Tool windows are not modal over the
+    /// main window's input, but an automatic grab taken while one is open
+    /// would trap the cursor its controls need, so the auto-capture paths
+    /// wait until the last of them closes. An explicit capture (a display
+    /// click or the shortcut) is always honoured.
+    fn ui_wants_cursor(&self) -> bool {
+        self.ui.active()
+            || ToolPanelKind::ALL
+                .into_iter()
+                .any(|kind| self.tool_panel_is_open(kind))
     }
 
     fn tool_window(&self, kind: ToolPanelKind) -> Option<&ToolWindow> {
@@ -6909,10 +6920,11 @@ impl App {
             if self.library_handle_key(code) {
                 return true;
             }
-            return false;
         }
-        self.default_tool_key_kind()
-            .is_some_and(|kind| self.ui_handle_tool_key(kind, code))
+        // Tool panels (debugger, frame analyzer, console) take their keys
+        // through their own windows' events, never from the main window:
+        // an unclaimed key here belongs to the Amiga.
+        false
     }
 
     /// Type into the sign-in dialog, and answer it.
@@ -7178,16 +7190,6 @@ impl App {
             self.request_redraw();
         }
         handled
-    }
-
-    fn default_tool_key_kind(&self) -> Option<ToolPanelKind> {
-        if self.debugger_panel.is_some() {
-            Some(ToolPanelKind::Debugger)
-        } else if self.frame_analyzer_panel.is_some() {
-            Some(ToolPanelKind::FrameAnalyzer)
-        } else {
-            None
-        }
     }
 
     fn ui_handle_tool_key(&mut self, kind: ToolPanelKind, code: KeyCode) -> bool {
