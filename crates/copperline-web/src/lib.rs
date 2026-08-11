@@ -653,7 +653,7 @@ impl WebEmu {
 
     /// Emulated field lines the presentation buffer shows, for a page-side
     /// CRT shader pass to key its scanline pitch: 270 on the standard 50 Hz
-    /// TV aperture, 214 on a 60 Hz scan (285 and 234 under the tube
+    /// TV aperture, 214 on a 60 Hz scan (285 and 235 under the tube
     /// aperture of a drawn bezel), half the presented rows in full
     /// overscan. 0 means the pass has nothing to draw -- no frame yet, or a
     /// programmable scan, whose lines are not a 15 kHz raster (the desktop

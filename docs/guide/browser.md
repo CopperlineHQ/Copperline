@@ -373,7 +373,7 @@ through wasm-bindgen; the page's JavaScript drives everything from
   scan's shorter 428-row crop is scaled onto the same 540 output rows.
   While the page draws a monitor bezel (`set_monitor_bezel`), the crop
   widens to the tube aperture: the whole rendered field, 668x570, an
-  NTSC field's 468 rows scaled onto the same 570 -- the browser
+  NTSC field's 470 rows scaled onto the same 570 -- the browser
   counterpart of the desktop's tube view.
   Non-standard frames (true overscan, programmable scans) keep the full
   716-pixel width, as on the desktop, and a programmable super-hi-res scan
@@ -626,7 +626,7 @@ and anything else (presented as the full framebuffer), so size the canvas
 from both every frame rather than assuming fixed dimensions.
 `present_crt_lines()` describes the same presentation for a page-side CRT
 shader pass: the emulated field lines it shows (270 on the standard 50 Hz
-TV aperture, 214 on a 60 Hz scan, 285 and 234 under the tube aperture of
+TV aperture, 214 on a 60 Hz scan, 285 and 235 under the tube aperture of
 a drawn bezel, half the presented rows in full overscan), and 0 when a
 scanline effect has nothing honest to draw -- no frame yet, or a
 programmable scan, where the desktop suspends its CRT preset too.

@@ -3452,6 +3452,22 @@ function togglePause() {
 // Firefox has neither for ClipboardItem in all versions. Both paths are
 // driven from a click, which is the user gesture the clipboard API
 // requires.
+//
+// Captures keep the TV aperture too: a drawn bezel widens the live
+// presentation to the tube aperture, so the capture drops it around the
+// buffer read and puts it back -- each flip re-presents the held frame
+// in place without stepping the machine, and blobOf's executor reads
+// the buffer synchronously (only the canvas encode is async), so the
+// flip is invisible to the page.
+function withTvAperture(f) {
+  const bezel = monitorBezelOn();
+  if (bezel) emu.set_monitor_bezel?.(false);
+  try {
+    return f();
+  } finally {
+    if (bezel) emu.set_monitor_bezel?.(true);
+  }
+}
 async function copyScreenshot() {
   if (!emu || !running) return;
   const blobOf = () =>
@@ -3504,11 +3520,11 @@ async function copyScreenshot() {
     }
     // Safari requires the ClipboardItem to be constructed with the promise
     // inside the gesture; Chrome and Firefox accept that form too.
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobOf() })]);
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': withTvAperture(blobOf) })]);
     setLoadStatus('screenshot copied to the clipboard');
   } catch (e) {
     try {
-      const url = URL.createObjectURL(await blobOf());
+      const url = URL.createObjectURL(await withTvAperture(blobOf));
       const a = document.createElement('a');
       a.href = url;
       a.download = `copperline-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
