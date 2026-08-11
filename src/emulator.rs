@@ -1168,6 +1168,7 @@ impl Emulator {
         before_pos: u64,
     ) -> Result<crate::timetravel::ReverseOutcome<crate::timetravel::WriteRecord>> {
         use crate::timetravel::ReverseOutcome;
+        let addr = addr & self.machine.ui_addr_mask();
         let mut interval_end = before_pos;
         loop {
             let anchor = match self
