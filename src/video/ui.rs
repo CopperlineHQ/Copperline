@@ -792,6 +792,9 @@ pub enum UiControl {
     /// Scroll the favourites list by that many rows.
     #[cfg(feature = "game-library")]
     LauncherLibraryFavouriteScroll(isize),
+    /// Jump the games list to the first game in that A-Z bucket.
+    #[cfg(feature = "game-library")]
+    LauncherLibraryJump(usize),
     /// Open the OpenRetro sign-in dialog.
     #[cfg(feature = "game-library")]
     LauncherOpenRetroLogin,
@@ -5079,6 +5082,101 @@ fn login_button_rects(rect: Rect) -> (Rect, Rect) {
     )
 }
 
+/// One A-Z shortcut button.
+///
+/// Its own drawer rather than [`draw_text_button`], for the hover: the lift
+/// a button's face gets is a couple of shades across seven visible pixels,
+/// which at this size is no answer to the pointer at all. Hovered, the
+/// whole face goes to the blue the chosen list row uses, so there is no
+/// mistaking which letter is under it. A letter with nothing behind it
+/// does not answer.
+#[cfg(feature = "game-library")]
+fn draw_az_button(
+    frame: &mut [u8],
+    rect: Rect,
+    label: &str,
+    live: bool,
+    hovered: bool,
+    scale: usize,
+) {
+    let scaled = scale_rect(rect, scale);
+    fill_rect(
+        frame,
+        scaled,
+        if hovered {
+            MENU_HILIGHT_BG
+        } else {
+            BUTTON_FACE
+        },
+        scale,
+    );
+    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    let colour = match (live, hovered) {
+        (_, true) => MENU_HILIGHT_TEXT,
+        (true, false) => BUTTON_TEXT,
+        (false, false) => BUTTON_TEXT_DISABLED,
+    };
+    let text_w = label.chars().count() * font::GLYPH_W;
+    let x = rect.x + rect.w.saturating_sub(text_w) / 2;
+    let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
+    draw_panel_text(frame, x, y, label, colour, 1, scale);
+}
+
+/// The A-Z shortcut buttons, from just after the "Games:" label to the
+/// right edge of the list below them.
+///
+/// Each is barely wider than the character on it -- the row has to hold
+/// twenty-eight of them across the width of the list -- except the digits
+/// bucket, which carries three characters and is given the room for them.
+/// The leftover pixels are spread one apiece from the left, so the last
+/// button ends exactly on the list's right edge rather than a few pixels
+/// short of it.
+#[cfg(feature = "game-library")]
+fn library_az_rects(rect: Rect, whdload_entry: bool) -> Vec<Rect> {
+    use launcher::AZ_BUCKETS;
+    let table = library_table_rect(rect, whdload_entry);
+    let label = "Games:".len() * font::GLYPH_W;
+    let x = table.x + label + LIBRARY_AZ_GAP;
+    let width = (table.x + table.w).saturating_sub(x);
+    let wide = 3 * font::GLYPH_W + 2;
+    let narrow_count = AZ_BUCKETS - 1;
+    let narrow = width.saturating_sub(wide) / narrow_count;
+    // What the division left over, one pixel to each of the first buttons.
+    let mut spare = width.saturating_sub(wide + narrow * narrow_count);
+    let mut at = x;
+    (0..AZ_BUCKETS)
+        .map(|bucket| {
+            let mut w = if bucket == 0 { wide } else { narrow };
+            if spare > 0 {
+                w += 1;
+                spare -= 1;
+            }
+            let r = Rect {
+                x: at,
+                y: table.y.saturating_sub(15),
+                w: w.saturating_sub(1),
+                h: LIBRARY_AZ_H,
+            };
+            at += w;
+            r
+        })
+        .collect()
+}
+
+/// How many games a list needs before the A-Z row appears.
+///
+/// A short list is read rather than navigated: with a screenful or so in
+/// front of you, twenty-eight buttons to reach one of them is in the way.
+#[cfg(feature = "game-library")]
+const LIBRARY_AZ_MIN_GAMES: usize = 20;
+
+/// How far the shortcut row starts after the "Games:" label, and how tall
+/// its buttons are: the label's own line, so the row costs no height.
+#[cfg(feature = "game-library")]
+const LIBRARY_AZ_GAP: usize = 6;
+#[cfg(feature = "game-library")]
+const LIBRARY_AZ_H: usize = 11;
+
 /// The scroll arrows for a list, inside its own frame: up in the top right
 /// corner, down in the bottom right. Both Library lists use it, each with
 /// its own pair of controls.
@@ -5930,6 +6028,16 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 return Some(control);
             }
         }
+        if state.library.games.len() >= LIBRARY_AZ_MIN_GAMES {
+            for (bucket, at) in library_az_rects(rect, whdload_entry)
+                .into_iter()
+                .enumerate()
+            {
+                if at.contains(pos) {
+                    return Some(UiControl::LauncherLibraryJump(bucket));
+                }
+            }
+        }
         let starred = state.library.db.favourite_count();
         let rows = library_favourite_rows(rect, whdload_entry);
         if starred > rows {
@@ -6028,6 +6136,19 @@ fn draw_library_page(
         state.status.as_ref().map(|s| s.kind),
         Some(launcher::StatusKind::Busy)
     );
+
+    // The shortcut row shares the label's line, so it costs no height.
+    if entries.len() >= LIBRARY_AZ_MIN_GAMES {
+        let present = state.az_buckets_present();
+        for (bucket, at) in library_az_rects(rect, whdload_entry)
+            .into_iter()
+            .enumerate()
+        {
+            let live = present.get(bucket).copied().unwrap_or(false);
+            let hovered = live && hover == Some(UiControl::LauncherLibraryJump(bucket));
+            draw_az_button(frame, at, launcher::az_label(bucket), live, hovered, scale);
+        }
+    }
 
     draw_panel_text(
         frame,
@@ -9164,6 +9285,55 @@ mod tests {
 
     #[cfg(feature = "game-library")]
     #[test]
+    fn the_az_row_appears_only_once_the_list_is_worth_indexing() {
+        use crate::gamelib::{Game, Known, Library};
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 716,
+            h: 581,
+        };
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::WhdloadLibrary;
+        let stock = |n: usize| {
+            (0..n)
+                .map(|at| Known {
+                    file: format!("game{at}.lha"),
+                    game: Some(Game {
+                        name: format!("Game {at}"),
+                        ..Game::default()
+                    }),
+                    manual: false,
+                    slave_sha1: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let fill = |state: &mut LauncherState, n: usize| {
+            state.library.db.set_known(stock(n));
+            state.library.games = Library::known(std::path::Path::new("/games"), &state.library.db);
+        };
+        let whdload_entry = state.setup.whdload_enabled();
+        let first = library_az_rects(rect, whdload_entry)[0];
+        let hit = |state: &LauncherState| {
+            launcher_control_at(rect, state, (first.x as i32 + 1, first.y as i32 + 1))
+        };
+
+        // A short list is read rather than indexed, so the row is not there
+        // -- and the pixels it would occupy answer to nothing.
+        fill(&mut state, LIBRARY_AZ_MIN_GAMES - 1);
+        assert_eq!(hit(&state), None, "the row is up on a short list");
+
+        // One more game and it appears.
+        fill(&mut state, LIBRARY_AZ_MIN_GAMES);
+        assert_eq!(
+            hit(&state),
+            Some(UiControl::LauncherLibraryJump(0)),
+            "the row is missing on a list long enough for it"
+        );
+    }
+
+    #[cfg(feature = "game-library")]
+    #[test]
     fn the_favourites_arrows_appear_and_its_rows_follow_the_scroll() {
         let rect = Rect {
             x: 0,
@@ -11662,6 +11832,63 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-rom");
+
+        // The Library page with the A-Z shortcut row up, since that is the
+        // part whose fit across the width is worth looking at.
+        #[cfg(feature = "game-library")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = library_preview_state();
+            // The row appears on the size of the list, so the preview
+            // needs a list that reaches it.
+            let mut more: Vec<crate::gamelib::Known> = state.library.db.known().to_vec();
+            for (at, name) in [
+                "Agony",
+                "Battle Squadron",
+                "Deluxe Galaga",
+                "Elite",
+                "Frontier",
+                "Hired Guns",
+                "It Came from the Desert",
+                "Kick Off 2",
+                "Moonstone",
+                "North & South",
+                "Obitus",
+                "Rick Dangerous",
+                "Utopia",
+                "Walker",
+                "Xenon",
+                "Yo! Joe!",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                more.push(crate::gamelib::Known {
+                    file: format!("filler{at}.lha"),
+                    game: Some(crate::gamelib::Game {
+                        name: name.to_string(),
+                        ..crate::gamelib::Game::default()
+                    }),
+                    manual: false,
+                    slave_sha1: None,
+                });
+            }
+            state.library.db.set_known(more);
+            state.library.games =
+                crate::gamelib::Library::known(std::path::Path::new("/games"), &state.library.db);
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            // With a letter under the pointer: the hover is the part that
+            // has to read at this size.
+            let over = launcher::az_bucket_of("Golden Axe");
+            let hover = Some(UiControl::LauncherLibraryJump(over));
+            draw(&mut frame, scale, &ui, hover, None);
+            save(&frame, "launcher-whdload-library-az");
+        }
 
         // The Library page, with WHDLoad beside it in the strip and
         // a couple of games standing in for a real folder.

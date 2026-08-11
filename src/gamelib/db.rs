@@ -120,6 +120,21 @@ pub struct Database {
     /// a path, which is the state it most needs to be removable from.
     #[serde(default)]
     favourites: std::collections::BTreeMap<String, String>,
+    /// The game folder the known entries were listed from.
+    ///
+    /// Entries are filed by their path under that folder, so pointed at a
+    /// different one they describe packages that are not there. Remembered
+    /// so the page can tell the two apart: a store built somewhere else is
+    /// not this folder's list, whatever it holds. Absent in stores written
+    /// before this was kept, which reads the same as "somewhere else".
+    ///
+    /// Reading is derived; writing is not. [`to_readable_json`] emits this
+    /// file field by field, so a field added here and not added there is
+    /// simply never saved, whatever its serde attribute says -- which for
+    /// this one meant a store that came from nowhere on every launch, and
+    /// a Refresh needed every time to see a list that had not changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<String>,
     /// Sorted by `file`, which is what makes this store fast to open: the
     /// order comes off disk with the parse and lookup is a binary search,
     /// so there is no index to build before the page can draw.
@@ -135,6 +150,7 @@ impl Default for Database {
         Database {
             format: FORMAT,
             favourites: std::collections::BTreeMap::new(),
+            folder: None,
             known: Vec::new(),
         }
     }
@@ -289,6 +305,16 @@ impl Database {
     }
 
     /// Whether a package is a favourite.
+    /// Whether the known entries were listed from `folder`.
+    pub fn lists(&self, folder: &Path) -> bool {
+        self.folder.as_deref() == Some(&*folder.to_string_lossy())
+    }
+
+    /// Record which folder the known entries were listed from.
+    pub fn set_folder(&mut self, folder: &Path) {
+        self.folder = Some(folder.to_string_lossy().into_owned());
+    }
+
     pub fn is_favourite(&self, file: &str) -> bool {
         self.favourites.contains_key(file)
     }
@@ -930,6 +956,11 @@ pub fn strip_package_name(file_name: &str) -> String {
 fn to_readable_json(db: &Database) -> std::io::Result<String> {
     let mut out = String::from("{\n");
     out.push_str(&format!("  \"format\": {},\n", db.format));
+    if let Some(folder) = &db.folder {
+        out.push_str("  \"folder\": ");
+        out.push_str(&encode(folder)?);
+        out.push_str(",\n");
+    }
     out.push_str("  \"favourites\": ");
     out.push_str(&encode(&db.favourites)?);
     out.push_str(",\n  \"known\": [\n");
@@ -993,6 +1024,32 @@ fn hex(bytes: &[u8; 16]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The folder a store was listed from survives being written and read.
+    ///
+    /// If it did not, every launch would meet a store that claimed to come
+    /// from nowhere and would show no games until Refresh -- which is the
+    /// whole list, every time.
+    #[test]
+    fn the_folder_a_store_lists_survives_a_round_trip() {
+        let at =
+            std::env::temp_dir().join(format!("copperline-db-folder-{}.json", std::process::id()));
+        let mut db = Database::new();
+        db.set_known(vec![Known {
+            file: "Turrican.lha".to_string(),
+            game: None,
+            manual: false,
+            slave_sha1: None,
+        }]);
+        db.set_folder(Path::new("/games/mine"));
+        db.save(&at).unwrap();
+
+        let back = Database::load(&at);
+        assert!(back.lists(Path::new("/games/mine")), "the folder was lost");
+        assert!(!back.lists(Path::new("/games/other")));
+        assert_eq!(back.known().len(), 1);
+        let _ = std::fs::remove_file(&at);
+    }
+
     /// Two packages that differ only in punctuation get different art.
     ///
     /// The key was the path with every separator flattened to `_`, which

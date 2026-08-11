@@ -152,7 +152,7 @@ pub fn renderable(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// One non-ASCII character as printable ASCII. Empty for a combining
 /// mark, which has already been applied to the letter before it.
-fn fold(c: char) -> &'static str {
+pub fn fold(c: char) -> &'static str {
     match c {
         'À'..='Å' | 'à'..='å' | 'Ā' | 'ā' | 'Ă' | 'ă' | 'Ą' | 'ą' => {
             if c.is_uppercase() {
