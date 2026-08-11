@@ -1472,7 +1472,16 @@ impl ControlState {
         // shift moves the picture two lo-res H units.
         let gulp = self.fetch_period() as i32;
         let align = |hpos: i32| -> i32 {
-            (hpos.div_euclid(gulp) * gulp).max(BITPLANE_DDF_HARD_START as i32)
+            let aligned = hpos.div_euclid(gulp) * gulp;
+            if self.fetch_quantum() == 1 {
+                aligned.max(BITPLANE_DDF_HARD_START as i32)
+            } else {
+                // Wide-FMODE placement stays linear in the gulp grid below
+                // the hardwired start window (see `fetch_origin_native_shift`):
+                // an AGA scroller fetching from DDFSTRT $18 hides its whole
+                // first 64-px gulp (the scroll seam) left of the DIW edge.
+                aligned
+            }
         };
         let standard_ddf = if hires_like { 0x003C } else { 0x0038 };
         let aligned_start =
@@ -1569,9 +1578,15 @@ impl ControlState {
                 // slots (vAmigaTS Agnus/DDF oldhwstop3/4 A500 photos).
                 hpos.div_euclid(gulp) * gulp + if hpos.rem_euclid(gulp) != 0 { gulp } else { 0 }
             } else {
-                // Wide-FMODE gulps clamp to the DDF hard start: placement
-                // before the first usable fetch position is not visible.
-                (hpos.div_euclid(gulp) * gulp).max(BITPLANE_DDF_HARD_START as i32)
+                // Wide-FMODE placement floors to the gulp grid and stays
+                // linear below the hardwired start window, like FMODE=0: a
+                // lores FMODE=3 scroller fetching 6 gulps from DDFSTRT $18
+                // ($18/$B8, 48-byte interleaved rows) parks its whole first
+                // 64-px gulp (the scroll-seam wrap columns) left of the DIW
+                // edge on real AGA. Clamping to the hard start pushed the
+                // picture 48 px right: the seam became visible and the right
+                // edge was cropped.
+                hpos.div_euclid(gulp) * gulp
             }
         };
         let ddf_native_shift = (align(effective_ddf_start_hpos(

@@ -112,6 +112,16 @@ cannot change at runtime (see [](../internals/architecture)).
   `auto` reads the live COP1LC; an explicit address disassembles from
   there. COUNT defaults to 256 instructions (`auto:64` works too).
 
+`COPPERLINE_DBG_LISTCHECK=HEAD[,HEAD...]`
+: Walk the successor links of the listed AmigaOS Exec `List` headers after
+  every instruction in the active debugger window. The first node found twice
+  (a cycle within one list or membership in two lists), or a chain that does
+  not terminate within 4096 nodes, emits a normal `DBG LISTCHECK` report with
+  the just-retired PC and registers. This is intentionally expensive: use
+  `AFTER`/`UNTIL` to bracket the suspected corruption, and begin the window
+  while the lists are still valid so the reported PC identifies the first
+  instruction after which the bad linkage is observable.
+
 `COPPERLINE_DBG_AFTER=SECS` / `COPPERLINE_DBG_UNTIL=SECS`
 : Activity window in emulated seconds. Outside the window the debugger is
   inert, which keeps traces focused and runs fast: combined with

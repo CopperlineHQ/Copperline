@@ -120,6 +120,11 @@ response carries `"replay_unsafe": true` while time travel is armed),
 and where a host-timed `pause` lands is inherently wall-clock, like a
 GDB Ctrl-C. Every deterministic stop condition is detected by the core
 per instruction regardless of how often the server polls the socket.
+Exact `run_until` stops also retain the unused part of the current execution
+quantum. Resuming after one stop therefore continues the same quantum that an
+uninterrupted run would have used: adding intermediate `run_until` samples,
+including samples while the CPU is in `STOP`, does not shift a later device
+interrupt or Copper/CPU race.
 
 ## Streaming observability
 
