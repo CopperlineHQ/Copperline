@@ -140,7 +140,11 @@ impl Bus {
         self.sprite_dma_frame_start_ptr = self.display_dma_sprpt;
         self.current_frame_collision_may_have_dual_playfield =
             self.current_frame_render_base.bplcon0 & 0x0400 != 0;
-        self.display_dma_bplpt = self.denise.bplpt;
+        // BPLxPT carries across the field boundary the same way: real Agnus
+        // never reloads bitplane pointers at vertical blank -- software
+        // rewrites them (fully, or half by half relying on the DMA-advanced
+        // other half) before the next display window starts. The register
+        // write path merges half writes into `display_dma_bplpt` directly.
         self.display_dma_sprpt = self.denise.sprpt;
         self.reset_display_sprite_dma_states();
         self.display_dma_clipped_rows_advanced = false;
@@ -1622,7 +1626,10 @@ impl Bus {
             fmode: self.agnus.fmode(),
             clxcon: self.denise.clxcon,
             clxcon2: self.denise.clxcon2,
-            bplpt: self.denise.bplpt,
+            // The render replay models the live BPLxPT counters, which DMA
+            // and modulo adds keep advancing; `denise.bplpt` is only the
+            // last-written latch for the debugger's register view.
+            bplpt: self.display_dma_bplpt,
             bpldat: self.denise.bpldat,
             sprpt: self.denise.sprpt,
             sprpos: self.denise.sprpos,
