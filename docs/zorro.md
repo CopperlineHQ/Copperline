@@ -425,10 +425,11 @@ zorro II board "Copperline" autoconfigured at 0x00E90000
 Once configured, accesses inside a board's window are routed by
 `ZorroChain::region_at` into the board's backing storage. RAM-backed board
 space is external-bus memory: it runs at the CPU clock and does not contend
-on the chip bus (see [](internals/timing)). A power-on reset
-(`ZorroChain::power_on_reset`) returns every board to the unconfigured
-state and clears its RAM, exactly like real hardware losing its config on
-reset.
+on the chip bus (see [](internals/timing)). The standalone
+`ZorroChain::power_on_reset` API returns every board to the unconfigured state
+and zeroes its RAM by default. A machine-level cold boot returns it to the same
+unconfigured state but uses the selected `[memory] init` fill policy for the
+RAM.
 
 Device-backed boards (`BoardBacking` other than `Ram`) differ in three
 ways:

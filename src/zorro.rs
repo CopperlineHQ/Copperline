@@ -528,9 +528,16 @@ impl ZorroChain {
 
     /// Return all boards to unconfigured with zeroed RAM (cold power-on).
     pub fn power_on_reset(&mut self) {
+        self.power_on_reset_with(|_, ram| ram.fill(0));
+    }
+
+    /// Return all boards to unconfigured and initialise each RAM-backed
+    /// aperture through `fill`. The bank index gives a deterministic caller a
+    /// stable stream discriminator without exposing the private Board layout.
+    pub(crate) fn power_on_reset_with(&mut self, mut fill: impl FnMut(usize, &mut [u8])) {
         self.warm_reset();
-        for board in &mut self.boards {
-            board.ram.fill(0);
+        for (idx, board) in self.boards.iter_mut().enumerate() {
+            fill(idx, &mut board.ram);
         }
     }
 

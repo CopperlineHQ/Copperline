@@ -97,8 +97,9 @@ Status Bar*):
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
   `Alt+S` on Linux/Windows).
 - **Pause / power / reboot buttons.** Pause freezes emulation while staying
-  powered; power cold-boots (clears RAM) or powers off back to the test
-  screen; reboot is a warm reset.
+  powered; power cold-boots (reinitialising RAM with the Memory page's
+  Power-on fill policy) or powers off back to the test screen; reboot is a
+  warm reset.
 
 (on-screen-keyboard)=
 ## On-screen keyboard
@@ -484,7 +485,8 @@ The layout is:
   overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
   FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
   see `[cpu] jit` in [](configuration)),
-  *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
+  *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed
+  16-bit word -- plus chip/fast/slow/motherboard/accelerator/Zorro III RAM),
   *ROM*
   (Kickstart and
   extended ROM, each with a greyed line under it naming what the chosen

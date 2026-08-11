@@ -210,6 +210,15 @@ fast = "0"
 # Set to 0 to disable.
 slow = "512K"
 
+# Cold power-on contents for writable system RAM. "zero" is the compatibility
+# default. "random" fills chip, slow, motherboard, accelerator, WCS, and Zorro
+# RAM with a deterministic pseudo-random pattern to expose guest reads before
+# writes; use "random:SEED" (decimal or 0x hexadecimal) to vary the pattern.
+# A fixed 16-bit word can be repeated in Amiga byte order with
+# "pattern:0x5555" (a bare "0x5555" is also accepted).
+# The same seed produces byte-identical RAM on every run and cold reset.
+# init = "random"
+
 # Zorro III autoconfig RAM. Kickstart assigns the base address (usually
 # $40000000). Needs a CPU with a 32-bit address bus (68020 and later;
 # not the 24-bit 68000/68010/68EC020). Must be 0 or a power of two from

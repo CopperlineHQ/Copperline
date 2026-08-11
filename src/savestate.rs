@@ -174,7 +174,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      acquisition until the complete state has decoded. Wasmtime also moved
 //      from 36.0.12 to the security-fixed 36.0.13; plugin snapshots replay
 //      through that runtime, so states from the older codegen are refused.
-pub const STATE_VERSION: u32 = 50;
+//  51: Bus gained the cold-power-on RAM initialisation policy, so a state
+//      restored and later power-cycled repeats its zero or seeded pseudo-random
+//      pattern.
+pub const STATE_VERSION: u32 = 51;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -298,7 +301,7 @@ mod tests {
     use crate::chipset::paula::Paula;
     use crate::config::CpuModel;
     use crate::floppy::FloppyController;
-    use crate::memory::{Memory, ROM_SIZE};
+    use crate::memory::{Memory, RamInit, CHIP_RAM_BASE, ROM_SIZE};
     use crate::serial::NullSerialSink;
     use crate::zorro::ZorroChain;
 
@@ -583,6 +586,24 @@ mod tests {
             "the restored timeline must resume where the save left off"
         );
         assert_eq!(restored.bus().mem.chip_ram, machine.bus().mem.chip_ram);
+    }
+
+    #[test]
+    fn ram_initialisation_policy_survives_a_save_state() {
+        let init = RamInit::Random { seed: 0x1234_5678 };
+        let mut machine = test_machine();
+        machine.bus_mut().set_ram_init(init);
+        let descriptor = MachineDescriptor::default();
+        let mut blob = Vec::new();
+        save_to_writer(&machine, &descriptor, &mut blob).unwrap();
+
+        let mut restored = test_machine();
+        load_from_reader(&mut restored, blob.as_slice()).unwrap();
+        restored.bus_mut().power_on_reset();
+
+        let mut expected = vec![0; restored.bus().mem.chip_ram.len()];
+        init.fill(&mut expected, CHIP_RAM_BASE);
+        assert_eq!(restored.bus().mem.chip_ram, expected);
     }
 
     #[test]
