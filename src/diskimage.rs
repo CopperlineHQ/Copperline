@@ -475,7 +475,11 @@ fn checksum(block: &mut [u8], chk_long: usize) {
 /// The rest of the field is cleared, so a shorter name never leaves the
 /// tail of a longer one behind it.
 fn put_bstr(block: &mut [u8], long: usize, max: usize, s: &str) {
-    let bytes: Vec<u8> = s.bytes().take(max).collect();
+    let bytes: Vec<u8> = s
+        .chars()
+        .map(|c| if (c as u32) <= 0xFF { c as u8 } else { b'?' })
+        .take(max)
+        .collect();
     let at = long * 4;
     block[at..at + 1 + max].fill(0);
     block[at] = bytes.len() as u8;
@@ -1870,5 +1874,13 @@ mod tests {
         let bitmap_blocks = longs.div_ceil(longs_per_block);
         let ext = bitmap_blocks.saturating_sub(25).div_ceil(longs_per_block);
         assert_eq!(free, bits - 1 - bitmap_blocks - ext, "free block count");
+    }
+
+    #[test]
+    fn put_bstr_encodes_latin1_volume_names() {
+        let mut b = [0u8; BLOCK_BYTES];
+        put_bstr(&mut b, 0, 30, "Späße");
+        assert_eq!(b[0], 5);
+        assert_eq!(&b[1..6], &[b'S', b'p', 0xE4, 0xDF, b'e']);
     }
 }
