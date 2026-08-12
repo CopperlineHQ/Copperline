@@ -1671,12 +1671,18 @@ function updatePadStatus(releasedPort1) {
 // default still has to be suppressed on every repeat or holding a cursor
 // key scrolls the page. Track which codes the first keydown consumed.
 const consumedKeys = new Set();
+// Codes whose keydown the page itself spent (Esc releasing the mouse):
+// the guest never saw the down, so the keyup must not reach it either.
+const pageSpentKeys = new Set();
 window.addEventListener('keydown', (e) => {
   if (!emu || !running) return;
   if (e.repeat) {
     if (consumedKeys.has(e.code)) e.preventDefault();
     return;
   }
+  // A fresh keydown supersedes any page-spent claim on the code: if this
+  // press reaches the guest, its release must too.
+  pageSpentKeys.delete(e.code);
   // Esc with the mouse captured releases it and goes no further. In the
   // page the browser enforces that gesture itself (this branch never
   // sees the key); in fullscreen, keyboard lock hands Escape to the page
@@ -1686,6 +1692,7 @@ window.addEventListener('keydown', (e) => {
   // pointer is free.
   if (e.code === 'Escape' && document.pointerLockElement) {
     document.exitPointerLock?.();
+    pageSpentKeys.add(e.code);
     consumedKeys.add(e.code);
     e.preventDefault();
     return;
@@ -1701,7 +1708,14 @@ window.addEventListener('keyup', (e) => {
   // Delete before the running check: a hold that spans an emulator stop
   // or a focus loss must not leave a stale entry behind.
   const consumed = consumedKeys.delete(e.code);
+  const pageSpent = pageSpentKeys.delete(e.code);
   if (!emu || !running) return;
+  // The page spent the down, so the guest never saw it; forwarding the
+  // up would land an unmatched release code.
+  if (pageSpent) {
+    e.preventDefault();
+    return;
+  }
   if (joystickKey(e.code, false) || emu.key_event(e.code, false) || consumed) {
     e.preventDefault();
   }
