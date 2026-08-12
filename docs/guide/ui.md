@@ -790,6 +790,14 @@ reachable however Copperline was launched:
 | macOS | `~/.config/copperline/states/` |
 | Windows | `%APPDATA%\copperline\states\` |
 
+For a self-contained installation, create an empty file named `portable.txt`
+beside the Copperline executable (or beside the downloaded `.AppImage`) and
+restart Copperline. That folder then becomes the host-data directory, so
+quick-save slots live in its `states/` subdirectory. Gamepad calibration,
+keyboard mappings, the default WHDLoad library and other per-user host data are
+stored in that folder too. Delete `portable.txt` to return to the platform
+location above; Copperline does not move existing files in either direction.
+
 Because they are per user and not per machine, a slot may hold a state from
 a different Amiga than the one running. That is safe: as above, the state
 carries its own machine and the load reconfigures to match it and says so.
@@ -924,7 +932,8 @@ cannot bleed into the next binding.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
-`%APPDATA%\copperline\` on Windows).
+`%APPDATA%\copperline\` on Windows, or beside the executable in
+[portable mode](#quick-save-slots)).
 
 ## Input mapping
 

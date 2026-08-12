@@ -68,9 +68,11 @@ is fine.
 ## Saves and unpacked games
 
 Each game gets a directory under `whdload/save/` in your configuration
-directory, for example `~/.config/copperline/whdload/save/Turrican/`.
-Everything the game writes -- savegames, high scores, its own settings --
-lands there and stays across runs.
+directory, for example `~/.config/copperline/whdload/save/Turrican/`, or
+`whdload/save/Turrican/` beside the executable when
+[portable mode](ui.md#quick-save-slots) is enabled. Everything the game writes
+-- savegames, high scores, its own settings -- lands there and stays across
+runs.
 
 Delete a game's directory to unpack it fresh. Launching a plain folder
 uses that folder directly, so its saves stay with it.
