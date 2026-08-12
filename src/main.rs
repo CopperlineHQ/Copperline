@@ -2219,6 +2219,7 @@ fn main() -> Result<()> {
         config::resolve_shader(cfg.shader.clone()),
         config::resolve_shader_strength(cfg.shader_strength),
         config::resolve_bezel(cfg.bezel),
+        config::resolve_bezel_stickers(cfg.bezel_stickers.clone()),
         config::resolve_perf_overlay(cfg.perf_overlay),
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
@@ -2346,6 +2347,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_shader(config::ShaderMode::None),
         config::resolve_shader_strength(1.0),
         config::resolve_bezel(config::BezelStyle::None),
+        config::resolve_bezel_stickers(None),
         config::resolve_perf_overlay(false),
         config::resolve_tint(config::Tint::None),
         // The config-screen placeholder is always a normal windowed UI.

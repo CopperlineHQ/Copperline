@@ -1116,6 +1116,10 @@ pub struct App {
     /// choosing one. Never [`BezelStyle::None`]: turning the bezel off
     /// leaves this pointing at what was on.
     bezel_last: BezelStyle,
+    /// Folder of PNG stickers drawn onto the bezel ([display]
+    /// bezel_stickers), kept so a machine switch can re-read it. The
+    /// loaded sheet lives in [`Render::sticker_pass`].
+    bezel_stickers_path: Option<std::path::PathBuf>,
     /// Performance overlay in effect ([display] perf_overlay, Cmd/Alt+P):
     /// a live emulation-performance readout in the top-right of the
     /// display. Presentation only, like the OSD: captures never include it.
@@ -1311,6 +1315,10 @@ struct Render {
     /// CRT pass, so switching style or turning it off works live; each
     /// style's shader is compiled the first time that style is drawn.
     bezel_shader: bezel::BezelShader,
+    /// The sticker decals drawn over the bezel pass (see [`stickers`]).
+    /// Built with the window whatever the setting, like the passes above;
+    /// it draws nothing until a sheet is loaded into it.
+    sticker_pass: stickers::StickerPass,
     /// True while the host window is minimized (Windows delivers a 0x0
     /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
     /// consuming swapchain frames, so once the in-flight buffers fill,
@@ -1710,6 +1718,7 @@ impl App {
         shader: crate::config::ShaderMode,
         shader_strength: f32,
         bezel: BezelStyle,
+        bezel_stickers: Option<PathBuf>,
         perf_overlay: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
@@ -1899,6 +1908,7 @@ impl App {
             shader_strength,
             bezel,
             bezel_last: last_bezel_style(bezel),
+            bezel_stickers_path: bezel_stickers,
             perf_overlay,
             perf: PerfOverlay::default(),
             tint,
@@ -3042,6 +3052,8 @@ impl ApplicationHandler for App {
         let mut crt_shader =
             crt_shader::CrtShader::new(pixels.device(), pixels.render_texture_format());
         let bezel_shader = bezel::BezelShader::new(pixels.device(), pixels.render_texture_format());
+        let sticker_pass =
+            stickers::StickerPass::new(pixels.device(), pixels.render_texture_format());
         // A user shader can only be compiled once the device exists (too
         // early for `reload_custom_shader`, which needs the built `Render`).
         // A bad one drops back to no shader rather than failing the session:
@@ -3067,12 +3079,18 @@ impl ApplicationHandler for App {
             rtg_texture,
             crt_shader,
             bezel_shader,
+            sticker_pass,
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
         // After the window exists, so the overlay has somewhere to be drawn.
         if let Some(msg) = shader_error {
             self.show_osd(format!("CRT shader: off (custom failed: {msg})"));
+        }
+        // The sticker sheet is CPU-side, but its pass lives in `Render`, so
+        // it loads here too; a bad folder falls back to no stickers.
+        if let Err(msg) = self.reload_bezel_stickers() {
+            self.show_osd(format!("Bezel stickers: off ({msg})"));
         }
         // Paint at least once so the status bar (and power button) is
         // visible immediately, even when the machine starts powered off
@@ -3906,6 +3924,7 @@ impl ApplicationHandler for App {
                         // borrows rather than reached through `r` inside.
                         let crt = &mut r.crt_shader;
                         let bezel_shader = &mut r.bezel_shader;
+                        let sticker_pass = &mut r.sticker_pass;
                         r.pixels.render_with(|encoder, target, ctx| {
                             ctx.scaling_renderer.render(encoder, target);
                             let (uniforms, viewport) = crt_shader::uniforms_for(
@@ -3940,6 +3959,17 @@ impl ApplicationHandler for App {
                                     viewport,
                                     bezel_style,
                                     bezel::uniforms_from(&uniforms, viewport, opening, crt_active),
+                                );
+                                // Decals stick to the plastic, so they ride
+                                // the bezel pass: suspended with it, never
+                                // drawn over a bare picture.
+                                sticker_pass.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    encoder,
+                                    target,
+                                    viewport,
+                                    opening,
                                 );
                             } else {
                                 crt.render(
@@ -9108,6 +9138,9 @@ impl App {
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         self.bezel = crate::config::resolve_bezel(cfg.bezel);
         self.bezel_last = last_bezel_style(self.bezel);
+        self.bezel_stickers_path =
+            crate::config::resolve_bezel_stickers(cfg.bezel_stickers.clone());
+        let sticker_error = self.reload_bezel_stickers().err();
         self.perf_overlay = crate::config::resolve_perf_overlay(cfg.perf_overlay);
         self.perf = PerfOverlay::default();
         self.set_tint(crate::config::resolve_tint(cfg.tint));
@@ -9135,11 +9168,19 @@ impl App {
         self.paused = false;
         self.reset_render_pipeline();
         // The last overlay set here is the one that gets drawn, so a shader
-        // that failed to load has to travel in this message rather than in
-        // one of its own.
-        self.show_osd(match shader_error {
-            Some(msg) => format!("Machine started (CRT shader: off, custom failed: {msg})"),
-            None => "Machine started".to_string(),
+        // or sticker folder that failed to load has to travel in this
+        // message rather than in one of its own.
+        let mut notes = Vec::new();
+        if let Some(msg) = shader_error {
+            notes.push(format!("CRT shader: off, custom failed: {msg}"));
+        }
+        if let Some(msg) = sticker_error {
+            notes.push(format!("stickers: off, {msg}"));
+        }
+        self.show_osd(if notes.is_empty() {
+            "Machine started".to_string()
+        } else {
+            format!("Machine started ({})", notes.join("; "))
         });
         self.request_redraw();
     }
@@ -12048,6 +12089,35 @@ impl App {
     /// caller to fold into whatever overlay it is already showing. A failure
     /// leaves no pipeline, so the caller falls back to no shader rather than
     /// to a stale one.
+    /// Load the configured sticker folder into the decal pass, or clear it
+    /// when none is configured. The full message goes to the log; the
+    /// returned one-line summary is for the caller's overlay, exactly as
+    /// [`Self::reload_custom_shader`] reports. A failure leaves no sheet,
+    /// so the front falls back to bare plastic rather than a stale set.
+    fn reload_bezel_stickers(&mut self) -> Result<(), String> {
+        let path = self.bezel_stickers_path.clone();
+        let Some(r) = self.render.as_mut() else {
+            return Ok(());
+        };
+        match path {
+            None => {
+                r.sticker_pass.set_sheet(None);
+                Ok(())
+            }
+            Some(dir) => match stickers::load_sheet(&dir) {
+                Ok(sheet) => {
+                    r.sticker_pass.set_sheet(Some(sheet));
+                    Ok(())
+                }
+                Err(msg) => {
+                    r.sticker_pass.set_sheet(None);
+                    error!("[display] bezel_stickers: {msg}");
+                    Err(msg.lines().next().unwrap_or_default().to_string())
+                }
+            },
+        }
+    }
+
     fn reload_custom_shader(&mut self) -> Result<(), String> {
         let fail = |msg: String| {
             error!("[display] shader: {msg}");
@@ -12996,6 +13066,7 @@ mod mt32panel;
 mod present;
 mod rtg_texture;
 mod statusbar;
+mod stickers;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};
 

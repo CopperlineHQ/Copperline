@@ -275,6 +275,12 @@ pub struct Config {
     /// (`[display] bezel`). The `Cmd+M` / `Alt+M` toggle turns it off and
     /// back on live without affecting this start-up value.
     pub bezel: BezelStyle,
+    /// Folder of PNG stickers drawn onto the monitor bezel
+    /// (`[display] bezel_stickers`). Each PNG in the folder becomes a
+    /// decal on the drawn front; an optional `stickers.toml` in the folder
+    /// places each one, and without it they line up along the cabinet's
+    /// top band. Drawn only while a bezel is; never in captures.
+    pub bezel_stickers: Option<PathBuf>,
     /// Show the performance overlay at start (`[display] perf_overlay`, or
     /// `--perf-overlay`): a live emulation-performance readout in the
     /// top-right of the display. The `Cmd+P` / `Alt+P` toggle flips it live
@@ -2139,6 +2145,7 @@ impl Default for Config {
             shader: ShaderMode::None,
             shader_strength: 1.0,
             bezel: BezelStyle::None,
+            bezel_stickers: None,
             perf_overlay: false,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
@@ -2877,6 +2884,10 @@ pub(crate) struct RawDisplay {
     /// the one frame to turn on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bezel: Option<RawBezel>,
+    /// Folder of PNG stickers drawn onto the bezel; unset or empty draws
+    /// none. An optional `stickers.toml` inside places them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bezel_stickers: Option<String>,
     /// Performance overlay in the top-right of the display (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) perf_overlay: Option<bool>,
@@ -4036,6 +4047,11 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
         };
+        let bezel_stickers = match raw.display.bezel_stickers.as_deref().map(str::trim) {
+            None => defaults.bezel_stickers.clone(),
+            Some("") => None,
+            Some(p) => Some(PathBuf::from(p)),
+        };
         let perf_overlay = raw.display.perf_overlay.unwrap_or(defaults.perf_overlay);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
@@ -4633,6 +4649,7 @@ impl TryFrom<RawConfig> for Config {
             shader,
             shader_strength,
             bezel,
+            bezel_stickers,
             perf_overlay,
             tint,
             menu_scale,
@@ -6045,6 +6062,17 @@ pub fn resolve_bezel(from_config: BezelStyle) -> BezelStyle {
     }
 }
 
+/// Resolve the bezel sticker folder: the `COPPERLINE_BEZEL_STICKERS` env
+/// var overrides the `[display] bezel_stickers` config for one run; an
+/// empty value disables stickers the config turned on.
+pub fn resolve_bezel_stickers(from_config: Option<PathBuf>) -> Option<PathBuf> {
+    match crate::envcfg::var("COPPERLINE_BEZEL_STICKERS") {
+        Some(v) if v.trim().is_empty() => None,
+        Some(v) => Some(PathBuf::from(v.trim())),
+        None => from_config,
+    }
+}
+
 /// Resolve the performance overlay: the `COPPERLINE_PERF_OVERLAY` env var
 /// (0/false/off/no disables, anything else enables) overrides the
 /// `[display] perf_overlay` config for one run.
@@ -7108,6 +7136,22 @@ mod tests {
             assert_eq!(parse_bezel(style.label())?, style);
         }
         assert!(parse_config("[display]\nbezel = \"1084s\"\n").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn display_bezel_stickers_names_a_folder_and_defaults_to_none() -> Result<()> {
+        assert_eq!(parse_config("")?.bezel_stickers, None);
+        let cfg = parse_config("[display]\nbezel_stickers = \"decals/retro32\"\n")?;
+        assert_eq!(
+            cfg.bezel_stickers.as_deref(),
+            Some(Path::new("decals/retro32"))
+        );
+        // Written but empty means none, not a folder called "".
+        assert_eq!(
+            parse_config("[display]\nbezel_stickers = \"  \"\n")?.bezel_stickers,
+            None
+        );
         Ok(())
     }
 

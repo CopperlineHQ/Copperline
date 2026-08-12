@@ -351,7 +351,10 @@ belongs to the Amiga.
   on; it never changes which. Session-only; the start-up value is
   `[display] bezel` (see [Configuration](configuration.md)). A window
   effect only, like the shader: screenshots, frame dumps and recordings
-  never include it.
+  never include it. A folder of PNG stickers can be drawn onto either
+  front -- die-cut decals on the plastic, riding the same toggle -- via
+  `[display] bezel_stickers` (no menu item; see
+  [Configuration](configuration.md)).
 - **Performance** (also `Cmd+P` / `Alt+P`): show or hide the
   [performance overlay](#performance-overlay). Session-only; the start-up
   value is `[display] perf_overlay` (see

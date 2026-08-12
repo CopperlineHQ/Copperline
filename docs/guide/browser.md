@@ -723,6 +723,24 @@ elements, and pages without them are untouched:
   the other modes; a shell that wants no part of that can simply not
   style a border. It hides itself -- and the page keeps its
   plain 2D blit -- in a browser without WebGL2.
+- `#bezel-stickers` (a `<script type="application/json">` element): PNG
+  stickers drawn onto the monitor front while a bezel mode is up, the
+  desktop's `[display] bezel_stickers` for a hosting page -- community
+  logos as die-cut decals on the plastic, with a soft drop shadow and the
+  plastic's lighting. The element's content is a JSON array of up to 16
+  entries with the same keys as the desktop folder's `stickers.toml`
+  ([the configuration chapter](configuration.md)): `image` (a URL,
+  resolved against the page -- typically a `stickers/` folder beside it),
+  optional `x`/`y` (the sticker's centre as fractions of the canvas, as a
+  pair), `width` (fraction of the canvas width; height follows the
+  image's aspect), `rotate` (degrees clockwise) and `opacity`. Entries
+  without `x`/`y` line up along the cabinet's top band in written order
+  with a slight alternating tilt, exactly as the desktop lays a bare
+  folder out. The decals are drawn on the canvas itself, so they follow
+  the plastic through resizes and fullscreen, and never appear in
+  screenshots, which capture the presentation buffer. Cross-origin images
+  are requested with CORS and skipped (with a console note) when the host
+  refuses. Without the element, or without WebGL2, no stickers are drawn.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always

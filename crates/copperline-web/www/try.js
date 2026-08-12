@@ -5625,6 +5625,55 @@ void main() {
 }
 `;
 
+  // Sticker decals over the drawn bezel, ported from
+  // shaders/bezel_stickers.wgsl (the desktop's [display] bezel_stickers):
+  // one pass per sticker over the rotated quad's bounding viewport,
+  // sampling the sticker image with a soft drop shadow off its own
+  // silhouette and a slight vertical tone so a die-cut logo reads as
+  // stuck to the lit plastic. The desktop packs an atlas and instances
+  // the quads; here each sticker is its own texture and draw call, but
+  // the fragment arithmetic is the same -- keep them in step.
+  const FS_STICKER = `#version 300 es
+${FS_COMMON}
+uniform vec4 u_geo; // xy: sticker centre in viewport px, zw: half-size px
+uniform vec4 u_rot; // xy: cos/sin of the tilt, z: opacity, w: shadow px
+
+// The sticker's texels at a quad position ([-1, 1] spans the sticker),
+// transparent outside its bounds.
+vec4 decal(vec2 local) {
+  vec2 t = clamp(local * 0.5 + 0.5, 0.0, 1.0);
+  float inside = step(abs(local.x), 1.0) * step(abs(local.y), 1.0);
+  return texture(u_tex, t) * inside;
+}
+
+void main() {
+  vec2 p = v_uv * u_size.xy - u_geo.xy;
+  // Un-rotate into sticker space: the inverse of the clockwise tilt.
+  vec2 q = vec2(p.x * u_rot.x + p.y * u_rot.y, p.y * u_rot.x - p.x * u_rot.y);
+  vec2 half_size = max(u_geo.zw, vec2(0.5));
+  vec2 local = q / half_size;
+  vec4 c = decal(local);
+  // The shadow is the silhouette dropped down-right, softened by taps
+  // at the offset and half again beyond it.
+  vec2 o = vec2(u_rot.w) / half_size;
+  float sh = decal(local - o).a
+    + decal(local - o - vec2(o.x * 0.5, 0.0)).a
+    + decal(local - o - vec2(0.0, o.y * 0.5)).a
+    + decal(local - o * 1.5).a;
+  float shadow = sh * 0.25 * 0.38;
+  // Stuck to lit plastic: a touch brighter toward the light at the top.
+  // The sRGB texture sampled to linear, toned, and encoded back, like
+  // the desktop's sRGB target.
+  float tone = 1.04 - 0.07 * clamp(local.y * 0.5 + 0.5, 0.0, 1.0);
+  float a_decal = c.a * u_rot.z;
+  float a_shadow = shadow * u_rot.z;
+  // Premultiplied out (the pass blends ONE, ONE_MINUS_SRC_ALPHA): the
+  // decal over its own shadow.
+  fragColor = vec4(srgb_encode(c.rgb * tone) * a_decal,
+                   a_decal + a_shadow * (1.0 - a_decal));
+}
+`;
+
   const program = (fsSrc, label) => {
     const compile = (type, src) => {
       const sh = gl.createShader(type);
@@ -5660,12 +5709,18 @@ void main() {
     crt: null,
     bezel1084: null,
     bezelClassic: null,
+    sticker: null,
+    // Bumped by every (re)build, so per-sticker textures uploaded on a
+    // lost context are told apart from live ones (bezelStickerTexture).
+    gen: 0,
   };
   const build = () => {
     renderer.plain = program(FS_PLAIN, 'monitor plain');
     renderer.crt = program(FS_CRT, 'monitor crt');
     renderer.bezel1084 = program(FS_BEZEL_1084, 'monitor 1084 bezel');
     renderer.bezelClassic = program(FS_BEZEL_CLASSIC, 'monitor classic bezel');
+    renderer.sticker = program(FS_STICKER, 'monitor stickers');
+    renderer.gen += 1;
     renderer.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, renderer.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -5869,11 +5924,158 @@ function monitorDraw(width, rows, crtLines) {
         crtOn ? 1.0 : 0.0,
       );
     });
+    if (bezelStickers.length && monitorGl.sticker) {
+      // Decals stick to the plastic, so they ride the bezel pass; the
+      // slot walk mirrors the desktop's stickers.rs instances(): placed
+      // entries at their fractions of the canvas, the rest rowed along
+      // the cabinet's top band (its bottom is the opening's top, oy).
+      const band = Math.max(oy, 0);
+      const autoH = Math.max(band * 0.52, 8);
+      const margin = w * 0.055;
+      const gap = autoH * 0.45;
+      const shadow = Math.min(Math.max(h * 0.004, 1), 6);
+      let cursor = margin;
+      let tilt = 0;
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      for (const s of bezelStickers) {
+        if (!s.ready || s.failed) continue;
+        const aspect = s.img.naturalHeight / Math.max(s.img.naturalWidth, 1);
+        let cx, cy, wPx, rot;
+        if (s.x != null) {
+          wPx = (s.width ?? 0.08) * w;
+          cx = s.x * w;
+          cy = s.y * h;
+          rot = s.rotate ?? 0;
+        } else {
+          wPx = s.width != null ? s.width * w : autoH / Math.max(aspect, 1e-3);
+          rot = s.rotate ?? BEZEL_STICKER_TILT[tilt % BEZEL_STICKER_TILT.length];
+          tilt += 1;
+          if (cursor + wPx > w - margin) break;
+          cx = cursor + wPx * 0.5;
+          cy = band * 0.5;
+          cursor += wPx + gap;
+        }
+        if (wPx < 1) continue;
+        const tex = bezelStickerTexture(s);
+        if (!tex) continue;
+        const rad = (rot * Math.PI) / 180;
+        const rc = Math.cos(rad);
+        const rs = Math.sin(rad);
+        const hx = wPx * 0.5;
+        const hy = wPx * aspect * 0.5;
+        // The pass's viewport is the rotated, shadow-padded quad's
+        // bounding box, like the desktop's padded instance quad.
+        const ex = Math.abs((hx + shadow * 2) * rc) + Math.abs((hy + shadow * 2) * rs);
+        const ey = Math.abs((hx + shadow * 2) * rs) + Math.abs((hy + shadow * 2) * rc);
+        const vx = Math.round(cx - ex);
+        const vy = Math.round(cy - ey);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        draw(monitorGl.sticker, vx, vy, Math.ceil(ex * 2), Math.ceil(ey * 2), (p) => {
+          gl.uniform4f(p.u.u_geo, cx - vx, cy - vy, hx, hy);
+          gl.uniform4f(p.u.u_rot, rc, rs, s.opacity, shadow);
+        });
+      }
+      gl.disable(gl.BLEND);
+      // Leave the picture texture bound, as every other path here does.
+      gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
+    }
   } else if (crtOn) {
     draw(monitorGl.crt, 0, 0, w, h, crtUniforms);
   } else {
     draw(monitorGl.plain, 0, 0, w, h);
   }
+}
+
+// --- bezel stickers (#bezel-stickers page hook) ---------------------------
+// Community logos as die-cut stickers on the drawn monitor front, the
+// desktop's `[display] bezel_stickers` for the page: a shell-provided
+// <script type="application/json" id="bezel-stickers"> holds an array of
+// {image, x, y, width, rotate, opacity} entries -- the same keys as the
+// desktop folder's stickers.toml (docs/guide/browser.md), with `image` a
+// URL resolved against the page. Entries with x/y (fractions of the
+// canvas) are placed there; the rest line up along the cabinet's top band
+// with a slight alternating tilt, exactly as the desktop lays a bare
+// folder out. Drawn only while a bezel mode is up, and never in
+// screenshots, which capture the presentation buffer. This supersedes the
+// CSS overlay hack early Retro32 pages carried: these decals live on the
+// canvas, so they track the plastic in fullscreen too.
+const BEZEL_STICKER_TILT = [-3.0, 2.2, -1.6, 2.8];
+const bezelStickers = (() => {
+  const tag = document.getElementById('bezel-stickers');
+  if (!tag || !monitorGl) return [];
+  let list;
+  try {
+    list = JSON.parse(tag.textContent);
+  } catch (e) {
+    console.error('bezel-stickers: bad JSON:', e);
+    return [];
+  }
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const raw of list.slice(0, 16)) {
+    if (!raw || typeof raw.image !== 'string') continue;
+    if ((raw.x == null) !== (raw.y == null)) {
+      console.error(`bezel-stickers: ${raw.image}: x and y place a sticker together`);
+      continue;
+    }
+    const img = new Image();
+    // Lets a CORS-enabled host serve the images without tainting the GL
+    // upload; same-origin images are unaffected.
+    img.crossOrigin = 'anonymous';
+    const entry = {
+      img,
+      ready: false,
+      failed: false,
+      tex: null,
+      gen: 0,
+      x: raw.x,
+      y: raw.y,
+      width: raw.width,
+      rotate: raw.rotate,
+      opacity: Math.min(Math.max(raw.opacity ?? 1, 0), 1),
+    };
+    img.onload = () => {
+      entry.ready = true;
+      // The picture did not change, so redraw the held texture; with no
+      // machine the sticker lands on the powered-off monitor.
+      if (emu && running) presentFrame(true);
+      else if (!emu) presentMonitorOff();
+    };
+    img.onerror = () => {
+      entry.failed = true;
+      console.error(`bezel-stickers: ${raw.image} failed to load`);
+    };
+    img.src = raw.image;
+    out.push(entry);
+  }
+  return out;
+})();
+
+// A sticker's GL texture on the current context, uploaded on first use
+// and again after a context restore (initMonitorGl's build() bumps the
+// renderer generation, orphaning uploads the lost context took with it).
+function bezelStickerTexture(entry) {
+  const gl = monitorGl.gl;
+  if (entry.tex && entry.gen === monitorGl.gen) return entry.tex;
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  try {
+    // sRGB like the picture texture, so the shader tones linear light.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, gl.RGBA, gl.UNSIGNED_BYTE, entry.img);
+  } catch (e) {
+    // A tainted image (cross-origin without CORS) cannot reach WebGL.
+    entry.failed = true;
+    console.error('bezel-stickers:', e);
+    return null;
+  }
+  entry.tex = tex;
+  entry.gen = monitorGl.gen;
+  return tex;
 }
 
 // The monitor select, the display-settings pattern: hostable by the page
