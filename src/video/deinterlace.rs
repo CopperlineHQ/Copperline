@@ -544,8 +544,16 @@ impl Deinterlacer {
         debug_assert!(field.len() >= rows * width);
         let doubled = lace || double_rows;
         let full_rows = if doubled { rows * 2 } else { rows };
-        debug_assert!(source_x + destination_width as i32 <= width as i32);
-        debug_assert!(source_y + source_rows as i32 <= full_rows as i32 + 2 * V_CENTRE_SLACK);
+        // A centred window may overhang the captured raster on any side by
+        // at most the knob's travel; the overhang is filled black below.
+        debug_assert!(
+            source_x >= -H_CENTRE_SLACK
+                && source_x + (destination_width as i32) <= width as i32 + H_CENTRE_SLACK
+        );
+        debug_assert!(
+            source_y >= -V_CENTRE_SLACK
+                && source_y + (source_rows as i32) <= full_rows as i32 + V_CENTRE_SLACK
+        );
 
         let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
         if direct {
@@ -609,9 +617,12 @@ impl Deinterlacer {
     }
 }
 
-/// Woven rows the region window may extend past either end of the field: a
-/// V-centred aperture slides at most the knob's range off the captured
-/// raster (`config::TV_V_CENTRE_RANGE` scan lines, two woven rows each).
+/// How far the region window may overhang the captured raster on each
+/// side: a centred aperture slides at most the knob's travel off it.
+/// Horizontally that is `config::TV_H_CENTRE_RANGE` lo-res pixels (two
+/// framebuffer pixels each); vertically `config::TV_V_CENTRE_RANGE` scan
+/// lines (two woven rows each).
+const H_CENTRE_SLACK: i32 = 2 * crate::config::TV_H_CENTRE_RANGE;
 const V_CENTRE_SLACK: i32 = 2 * crate::config::TV_V_CENTRE_RANGE;
 
 /// Channel-wise average of two packed RGBA pixels.
@@ -766,6 +777,33 @@ mod tests {
         assert!(row[..3].iter().all(|&px| px == black));
         let woven = crate::screenshot::scaled_source_row(0, source_rows, destination_rows) + 18;
         assert_eq!(row[3], field[(woven / 2) * FB_WIDTH]);
+
+        // Window overhanging the right edge (a left-nudged picture; the
+        // captured aperture already ends exactly at the framebuffer edge,
+        // so even one pixel of left nudge lands here): the last columns
+        // are black, the column before them is the field's edge column.
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        direct.present_field_region_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            (FB_WIDTH - destination_width + 2) as i32,
+            18,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+        let row = &destination[..destination_width];
+        assert!(row[destination_width - 2..].iter().all(|&px| px == black));
+        let woven = crate::screenshot::scaled_source_row(0, source_rows, destination_rows) + 18;
+        assert_eq!(
+            row[destination_width - 3],
+            field[(woven / 2) * FB_WIDTH + FB_WIDTH - 1]
+        );
 
         // Window sliding past the bottom: rows mapped past the field are
         // whole black rows.
