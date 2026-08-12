@@ -26,6 +26,8 @@
 # Standalone HostSocket plugin build output (the committed artifact is
 # assets/hostsocket/hostsocket_plugin.wasm).
 /crates/hostsocket-plugin/target
+# Standalone bezel preview harness build output (tools/bezel-preview).
+/tools/bezel-preview/target
 # CD images (cue/bin) are local assets, never committed.
 *.[Cc][Uu][Ee]
 *.[Bb][Ii][Nn]

@@ -59,12 +59,12 @@ fn source(style: BezelStyle) -> &'static str {
 /// These three place the opening. `shaders/bezel_1084.wgsl` reads them
 /// back to place everything else on the front, along with the two below,
 /// so the two sources must agree; a test pins them together.
-const FRAME_WEIGHT: f32 = 0.62;
-const FRAME_TOP: f32 = 0.1905 * FRAME_WEIGHT;
+const FRAME_WEIGHT: f32 = 0.86;
+const FRAME_TOP: f32 = 0.1600 * FRAME_WEIGHT;
 /// Below the glass, down to the seam the chin panel starts at.
-const FRAME_WELL_BOTTOM: f32 = 0.1293 * FRAME_WEIGHT;
+const FRAME_WELL_BOTTOM: f32 = 0.1170 * FRAME_WEIGHT;
 /// The chin panel: model badge, logotype, power lamp.
-const FRAME_CHIN: f32 = 0.1497 * FRAME_WEIGHT;
+const FRAME_CHIN: f32 = 0.1356 * FRAME_WEIGHT;
 /// The design's side margin, and the cabinet band above the moulding.
 /// Only the shader draws with these: the cabinet fills the viewport, which
 /// leaves more room beside the tube than the design asks for, so the side
@@ -73,9 +73,9 @@ const FRAME_CHIN: f32 = 0.1497 * FRAME_WEIGHT;
 /// They are here to be pinned to the shader's copies, and to let a test
 /// place what the shader does put there.
 #[cfg(test)]
-const FRAME_SIDE: f32 = 0.2313 * FRAME_WEIGHT;
+const FRAME_SIDE: f32 = 0.1780 * FRAME_WEIGHT;
 #[cfg(test)]
-const FRAME_BAND: f32 = 0.064 * FRAME_WEIGHT;
+const FRAME_BAND: f32 = 0.0700 * FRAME_WEIGHT;
 
 /// Size of the uniform block, in bytes. The shared bind group layout pins
 /// its `min_binding_size` to the CRT block's 64 bytes, so this block must
@@ -765,6 +765,59 @@ mod tests {
         px[(y * dim + x) as usize]
     }
 
+    /// One of `bezel_1084.wgsl`'s colour constants, as the sRGB triple it
+    /// will land on in the render target. The shader states them in linear
+    /// light because the target is `Rgba8UnormSrgb`, so the encode here is
+    /// the one the hardware does on the way out.
+    ///
+    /// Reading the shader rather than restating its values is the point:
+    /// a test that carries its own idea of what colour the plastic is
+    /// silently becomes a test of last year's design.
+    fn shader_colour(name: &str) -> [u8; 3] {
+        let key = format!("const {name}: vec3<f32> = vec3<f32>(");
+        let at = M1084_WGSL
+            .find(&key)
+            .unwrap_or_else(|| panic!("bezel_1084.wgsl: no {name}"));
+        let rest = &M1084_WGSL[at + key.len()..];
+        let end = rest.find(')').expect("terminated constant");
+        let mut out = [0u8; 3];
+        let mut seen = 0;
+        for (i, t) in rest[..end].split(',').enumerate() {
+            let v: f32 = t.trim().parse().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let s = if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            out[i] = (s * 255.0).round().clamp(0.0, 255.0) as u8;
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "{name}: expected three channels");
+        out
+    }
+
+    /// Assert a rendered pixel is one of the shader's declared colours,
+    /// within the tolerance the plastic grain and antialiasing need.
+    fn is_colour(got: [u8; 4], name: &str, tol: u8, what: &str) {
+        let want = shader_colour(name);
+        let ok = (0..3).all(|c| got[c].abs_diff(want[c]) <= tol);
+        assert!(ok, "{what}: got {got:?}, {name} is {want:?} (±{tol})");
+    }
+
+    /// Assert a rendered pixel is a shaded facet of one of the shader's
+    /// plastics: the same tint, at some tone between deep shadow and the
+    /// full front light. `tone()`'s range is deliberately shallow, so what
+    /// identifies a surface is its tint and not its value.
+    fn is_shaded(got: [u8; 4], name: &str, what: &str) {
+        let want = shader_colour(name);
+        let lit = f32::from(got[1]) / f32::from(want[1].max(1));
+        let tinted = (0..3).all(|c| (f32::from(got[c]) - f32::from(want[c]) * lit).abs() <= 8.0);
+        assert!(
+            (0.3..=1.4).contains(&lit) && tinted,
+            "{what}: got {got:?}, not a shaded {name} ({want:?})"
+        );
+    }
+
     /// The cabinet rect and the chin seam for a viewport. The cabinet is
     /// the viewport; only the seam is derived from the opening, exactly as
     /// `shaders/bezel_1084.wgsl` derives it.
@@ -838,48 +891,87 @@ mod tests {
             );
         }
 
-        // The front is two-tone: a pale cool cabinet with a distinctly
-        // darker moulding clipped into it. Sample the middle of each run
-        // to the left of the tube.
+        // The front is two-tone: the outer frame's pale plastic with the
+        // inner bezel's much darker moulding set into it. Sample the
+        // middle of each run to the left of the tube, and hold each to the
+        // colour the shader declares for it rather than to a hue this test
+        // remembers.
         let (cx, _, _, _, chin_top) = cabinet_of(dim, rows);
         let mid_y = (oy + oh * 0.5) as u32;
         let cabinet = at(&px, dim, (cx + 3.0) as u32, mid_y);
         let moulding = at(&px, dim, ((cx + ox) * 0.5) as u32, mid_y);
-        assert!(
-            cabinet[2] > cabinet[0] + 4,
-            "cabinet is not the cool grey it should be: {cabinet:?}"
-        );
-        assert!(
-            (120..=245).contains(&cabinet[0]),
-            "cabinet brightness out of range: {cabinet:?}"
-        );
+        is_colour(cabinet, "CASE", 6, "the outer frame");
+        is_colour(moulding, "MOULDING", 6, "the inner bezel");
         assert!(
             cabinet[1] > moulding[1] + 20,
             "moulding ({moulding:?}) is not darker than the cabinet ({cabinet:?})"
         );
 
-        // Outside the cabinet is the letterbox black it is centred in.
+        // The cabinet fills the viewport: no letterbox and no bars at the
+        // sides, so the middle of all four edges is its plastic and the
+        // front reaches the window it stands in.
+        for (x, y) in [
+            (0, rows / 2),
+            (dim - 1, rows / 2),
+            (dim / 2, 0),
+            (dim / 2, rows - 1),
+        ] {
+            is_shaded(
+                at(&px, dim, x, y),
+                "CASE",
+                &format!("the edge at ({x}, {y})"),
+            );
+        }
+
+        // Its four corners are the one place it does not: they take the
+        // smallest of radii, so the extreme pixel falls outside the
+        // outline and shows the black behind it. The arc is small -- a
+        // pixel in from it along both edges is already plastic.
+        let arc = (shader_constant(M1084_WGSL, "R_PLASTIC", "bezel_1084.wgsl") * oh).ceil() as u32;
         for (x, y) in [(0, 0), (dim - 1, 0), (0, rows - 1), (dim - 1, rows - 1)] {
             let p = at(&px, dim, x, y);
             assert!(
                 p[0] < 16 && p[1] < 16 && p[2] < 16,
-                "outside the cabinet at ({x}, {y}) is not dark: {p:?}"
+                "the cabinet's corner at ({x}, {y}) is not cut: {p:?}"
+            );
+            let inx = if x == 0 { arc } else { dim - 1 - arc };
+            let iny = if y == 0 { arc } else { rows - 1 - arc };
+            is_shaded(
+                at(&px, dim, inx, iny),
+                "CASE",
+                &format!("just inside the corner at ({x}, {y})"),
             );
         }
 
-        // The power lamp glows red, in the narrow panel the tube's own
-        // right edge closes: the shader puts that panel's outer joint on
-        // `ox + ow` and the lamp halfway across it.
-        let (_, _, case_w, _, _) = cabinet_of(dim, rows);
-        let led_x = (ox + ow - 0.033 * case_w) as i32;
-        let led_y = (chin_top + 0.24 * (rows as f32 - chin_top)) as i32;
-        let found = (-3..=3).any(|dy| {
-            (-3..=3).any(|dx| {
-                let p = at(&px, dim, (led_x + dx) as u32, (led_y + dy) as u32);
-                p[0] > p[1].saturating_add(60) && p[0] > p[2].saturating_add(60)
-            })
-        });
-        assert!(found, "no red power lamp near ({led_x}, {led_y})");
+        // The power lamp glows red, near the top of the button at the
+        // chin's right. That button hangs off the line where the inner
+        // bezel begins to fall away to the tube -- not off the moulding's
+        // outer edge -- so find the lamp and hold it to that line, which
+        // is what the whole right of the front is laid out from.
+        let span_x = shader_constant(M1084_WGSL, "CHAMFER_SPAN_X", "bezel_1084.wgsl");
+        let recess_x = ox + ow + span_x * (ox - FRAME_BAND * oh).max(1.0);
+        let mut lamp: Option<(u32, u32, u32)> = None;
+        for y in (chin_top as u32)..rows {
+            for x in 0..dim {
+                let p = at(&px, dim, x, y);
+                if p[0] > p[1].saturating_add(60) && p[0] > p[2].saturating_add(60) {
+                    lamp = Some(match lamp {
+                        None => (x, x, y),
+                        Some((x0, x1, y0)) => (x0.min(x), x1.max(x), y0.min(y)),
+                    });
+                }
+            }
+        }
+        let (lx0, lx1, ly0) = lamp.expect("no red power lamp anywhere on the chin");
+        assert!(
+            (lx1 as f32) < recess_x && (lx0 as f32) > recess_x - 0.09 * dim as f32,
+            "the lamp ({lx0}..{lx1}) is not in the button that meets the recess line \
+             at {recess_x:.1}"
+        );
+        assert!(
+            (ly0 as f32) < chin_top + 0.3 * (rows as f32 - chin_top),
+            "the lamp sits too low on the button: row {ly0} of the chin below {chin_top:.1}"
+        );
     }
 
     #[test]
@@ -974,12 +1066,16 @@ mod tests {
             "no scanline structure inside the opening (min {min}, max {max})"
         );
 
-        // The frame survives the preset pass untouched.
+        // The frame survives the preset pass untouched: the inner bezel's
+        // flat face beside the tube is still its own plastic, not the
+        // preset's picture and not its off-face black.
         let (cx, _, _, _, _) = cabinet_of(dim, rows);
         let band = at(&px, dim, ((cx + ox) * 0.5) as u32, (oy + oh * 0.5) as u32);
-        assert!(
-            band[1] > 60 && band[1] > band[0] + 2 && band[1] > band[2] + 2,
-            "left moulding lost its plastic after the preset pass: {band:?}"
+        is_colour(
+            band,
+            "MOULDING",
+            6,
+            "the left moulding after the preset pass",
         );
 
         // The frame is drawn on top of the preset: at the opening's
@@ -988,10 +1084,7 @@ mod tests {
         // the preset's off-face black. This is the layering the
         // frame-only pass exists for: the moulding overlaps the tube.
         let corner = at(&px, dim, ox as u32, oy as u32);
-        assert!(
-            corner[1] > 60 && corner[1] > corner[0] + 2 && corner[1] > corner[2] + 2,
-            "opening corner shows the preset instead of the frame: {corner:?}"
-        );
+        is_shaded(corner, "MOULDING", "the opening's corner");
     }
 
     /// The antialiased join at the opening edge in the frame-only pass

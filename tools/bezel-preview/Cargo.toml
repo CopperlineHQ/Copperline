@@ -1,0 +1,18 @@
+[package]
+name = "bezel-preview"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately outside the Copperline workspace and depending on nothing
+# from it. The point is that editing a .wgsl rebuilds NOTHING: this binary
+# reads the shader off disk at run time, so an iteration is a file save and
+# a one-second run, where the real build embeds the same file with
+# include_str! and would relink the whole emulator.
+[dependencies]
+wgpu = "29.0.4"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.17"
+
+[workspace]
