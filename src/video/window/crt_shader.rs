@@ -87,6 +87,17 @@ impl CrtUniforms {
 /// corners. A test pins this to the shader's own constant.
 pub(super) const FACE_CORNER_RADIUS: f32 = 0.0826;
 
+/// How hard a preset bows its picture, 0 for the ones that draw it flat.
+/// Only the full CRT preset shapes a face at all; the others leave the
+/// picture square, so nothing of it is lost to a corner. The overlays read
+/// this to keep clear of the face they get.
+pub(super) fn face_curvature(kind: ShaderKind) -> f32 {
+    match kind {
+        ShaderKind::Crt => 0.30,
+        ShaderKind::Scanlines | ShaderKind::Mask | ShaderKind::None | ShaderKind::Custom => 0.0,
+    }
+}
+
 /// Preset pipeline slots, in the order [`CrtShader::presets`] holds them.
 const PRESET_SCANLINES: usize = 0;
 const PRESET_MASK: usize = 1;
@@ -572,7 +583,7 @@ pub(super) fn uniforms_for(
         // curvature reproduces the screen-edge arcs of the 1084's tube
         // datasheet (Philips M34EAQ10X) under crt.wgsl's aspect-weighted
         // warp; the derivation is with the warp function.
-        ShaderKind::Crt => (1.0, 0.30, 0.15),
+        ShaderKind::Crt => (1.0, face_curvature(kind), 0.15),
         // A user shader gets the frame geometry and the two knobs it can
         // sensibly honour; the preset look table means nothing to it.
         ShaderKind::None | ShaderKind::Custom => (0.0, 0.0, 0.0),

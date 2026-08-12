@@ -7848,7 +7848,7 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let probe_y = margin + 2;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, false);
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, 0);
     // The backing box reaches the top-right margin corner...
     assert_ne!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
     // ...and the top-left of the display is untouched.
@@ -7857,13 +7857,30 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     // With the record badge up the block starts below it, leaving the
     // badge's corner rows alone.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, true);
+    super::draw_perf_overlay(&mut frame, &lines, scale, true, 0);
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
 
     // Nothing to draw is a no-op, not a stray empty box.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &[], scale, false);
+    super::draw_perf_overlay(&mut frame, &[], scale, false, 0);
     assert!(frame.iter().all(|&b| b == 0));
+
+    // A monitor front and a bowed preset round that corner away, so the
+    // block drops clear of it and the rows it used to occupy are empty.
+    let inset = super::bezel::corner_inset(
+        crate::config::BezelStyle::Model1084,
+        super::crt_shader::face_curvature(crate::config::ShaderKind::Crt),
+        1.0,
+        scale,
+    );
+    assert!(
+        inset > margin,
+        "the inset must clear the probe to be tested"
+    );
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, inset);
+    assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
+    assert_ne!(pixel(&frame, probe_x, probe_y + inset, scale), [0, 0, 0, 0]);
 }
 
 #[test]

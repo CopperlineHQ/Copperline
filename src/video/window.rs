@@ -3786,11 +3786,31 @@ impl ApplicationHandler for App {
                         // the badge never appears in the recorded file.
                         draw_record_badge(frame, r.texture_scale);
                     }
+                    // The picture loses its corners to a front's aperture
+                    // and to a preset's bowed face; both overlays live in
+                    // one, so both come in far enough to clear whichever
+                    // is drawn (nil when the picture is a plain rectangle).
+                    let corner = bezel::corner_inset(
+                        self.bezel,
+                        if crt_active {
+                            crt_shader::face_curvature(self.crt_shader_kind)
+                        } else {
+                            0.0
+                        },
+                        self.shader_strength,
+                        r.texture_scale,
+                    );
                     if self.perf_overlay {
-                        draw_perf_overlay(frame, &self.perf.lines, r.texture_scale, recording);
+                        draw_perf_overlay(
+                            frame,
+                            &self.perf.lines,
+                            r.texture_scale,
+                            recording,
+                            corner,
+                        );
                     }
                     if let Some((text, warning)) = &osd {
-                        draw_osd(frame, text, *warning, r.texture_scale);
+                        draw_osd(frame, text, *warning, r.texture_scale, corner);
                     }
                     ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
                     // The drag hint sits on top of everything: the drop will

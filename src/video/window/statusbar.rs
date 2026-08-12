@@ -1822,6 +1822,7 @@ pub(super) fn draw_perf_overlay(
     lines: &[String],
     texture_scale: usize,
     below_record_badge: bool,
+    corner_inset: usize,
 ) {
     let s = texture_scale;
     let px = crate::video::menu_scale().factor() * s;
@@ -1842,11 +1843,14 @@ pub(super) fn draw_perf_overlay(
     let box_h = lines.len() * text_h + lines.len().saturating_sub(1) * line_gap + 2 * pad;
     let box_x = (FB_WIDTH * s).saturating_sub(margin + box_w);
     let record_badge_h = font::text_height(2 * s) + 2 * (4 * s);
-    let box_y = if below_record_badge {
-        margin + record_badge_h + 4 * s
-    } else {
-        margin
-    };
+    // Dropped clear of the top-right corner a monitor front cuts away,
+    // for the same reason the OSD is lifted out of the bottom-left one.
+    let box_y = corner_inset
+        + if below_record_badge {
+            margin + record_badge_h + 4 * s
+        } else {
+            margin
+        };
 
     fill_rect_blend(
         frame,
@@ -1871,7 +1875,19 @@ pub(super) fn draw_perf_overlay(
     }
 }
 
-pub(super) fn draw_osd(frame: &mut [u8], text: &str, warning: bool, texture_scale: usize) {
+/// `corner_inset` is how far a drawn monitor front cuts into the picture's
+/// corners (0 with no front). The message sits in the bottom-left one, so
+/// it is lifted clear of that cut rather than moved in from the left: the
+/// arc bites hardest at the corner itself and not at all up the middle of
+/// the edge, so rising out of it is enough and keeps the message where it
+/// has always been read from.
+pub(super) fn draw_osd(
+    frame: &mut [u8],
+    text: &str,
+    warning: bool,
+    texture_scale: usize,
+    corner_inset: usize,
+) {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels
     let pad = 4 * s;
@@ -1886,7 +1902,7 @@ pub(super) fn draw_osd(frame: &mut [u8], text: &str, warning: bool, texture_scal
     let box_w = (text_w + 2 * pad).min(fw.saturating_sub(2 * margin));
     let box_h = text_h + 2 * pad;
     let box_x = margin;
-    let box_y = display_h.saturating_sub(margin + box_h);
+    let box_y = display_h.saturating_sub(margin + box_h + corner_inset);
 
     fill_rect_blend(
         frame,
