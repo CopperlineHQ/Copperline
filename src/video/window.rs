@@ -1080,6 +1080,12 @@ pub struct App {
     /// Presentation-level overscan handling ([display] overscan): Tv masks
     /// the deep-overscan margins with black like a CRT bezel.
     overscan: Overscan,
+    /// Where the TV presentation centres the picture on the glass
+    /// ([display] tv_h_centre / tv_v_centre, Video Settings), a monitor's
+    /// H-CENTER/V-CENTER controls. Followed by captures, like `overscan`;
+    /// the menu steps change the live value without affecting the
+    /// configured start-up one.
+    tv_centre: crate::config::TvCentre,
     /// Window shader pass in effect ([display] shader). Presentation only:
     /// screenshots, frame dumps and recordings never go through it.
     crt_shader_kind: crate::config::ShaderKind,
@@ -1686,6 +1692,7 @@ impl App {
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
         overscan: Overscan,
+        tv_centre: crate::config::TvCentre,
         deinterlace: bool,
         phosphor: f32,
         shader: crate::config::ShaderMode,
@@ -1871,6 +1878,7 @@ impl App {
             disk_playlist_index: [0; 4],
             hcenter: hcenter_enabled(),
             overscan,
+            tv_centre,
             crt_shader_kind: shader.kind(),
             custom_shader_path: match &shader {
                 crate::config::ShaderMode::Custom(path) => Some(path.clone()),
@@ -3748,6 +3756,7 @@ impl ApplicationHandler for App {
                             frame,
                             r.texture_scale,
                             self.overscan,
+                            self.tv_centre,
                             // The TV aperture is a chipset crop rect. An RTG
                             // frame fills the buffer on its own terms, so
                             // applying it here would show a sub-rect of the
@@ -5291,6 +5300,8 @@ impl App {
             ],
             pixel_aspect: crate::video::pixel_aspect(),
             scaling: crate::video::display_scaling(),
+            tv_centre: self.tv_centre,
+            tv_centre_applies: self.overscan == Overscan::Tv,
             shader: self.crt_shader_kind,
             custom_shader_available: self.custom_shader_path.is_some(),
             tint: self.tint,
@@ -5436,6 +5447,13 @@ impl App {
 
             A::SetPixelAspect(aspect) => self.apply_pixel_aspect(aspect),
             A::SetDisplayScaling(scaling) => self.apply_display_scaling(scaling),
+            A::StepTvCentre(dh, dv) => self.step_tv_centre(dh, dv),
+            A::ResetTvCentre => {
+                self.tv_centre = crate::config::TvCentre::default();
+                self.show_osd("Centring: centred");
+                self.main_presentation_dirty = true;
+                self.request_redraw();
+            }
             A::SetShader(kind) => {
                 use crate::config::ShaderKind;
                 // A user shader is re-read from disk each time it is chosen,
@@ -8991,6 +9009,7 @@ impl App {
         });
         self.disk_playlist_index = [0; 4];
         self.overscan = crate::config::resolve_overscan(cfg.overscan);
+        self.tv_centre = cfg.tv_centre;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         self.apply_display_scaling(cfg.scaling);
         // Apply the configured start-up window state; the runtime toggles
@@ -12046,6 +12065,21 @@ impl App {
         self.request_redraw();
     }
 
+    /// Nudge the TV-presentation centring (Video Settings -> Screen
+    /// Centring), the front-panel H-CENTER/V-CENTER knobs of a real
+    /// monitor. A live presentation change like the bezel toggle: captures
+    /// follow it, the configured start-up value is untouched.
+    fn step_tv_centre(&mut self, dh: i32, dv: i32) {
+        use crate::config::{TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE};
+        let centre = &mut self.tv_centre;
+        centre.h = (centre.h + dh).clamp(-TV_H_CENTRE_RANGE, TV_H_CENTRE_RANGE);
+        centre.v = (centre.v + dv).clamp(-TV_V_CENTRE_RANGE, TV_V_CENTRE_RANGE);
+        let centre = *centre;
+        self.show_osd(format!("Centring: H {:+}, V {:+}", centre.h, centre.v));
+        self.main_presentation_dirty = true;
+        self.request_redraw();
+    }
+
     /// Show or hide the status bar. An untouched window resizes to gain or lose
     /// the bar's strip; a window the user has manually resized keeps its size
     /// (and fullscreen keeps its size too), with the display reflowing to fit --
@@ -12272,6 +12306,7 @@ impl App {
                 src_rows,
                 self.present_width,
                 self.overscan,
+                self.tv_centre,
                 self.present_tv_aperture_rows,
             )
         };
@@ -12360,6 +12395,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
+            self.tv_centre,
             self.present_tv_aperture_rows,
         );
         match result {

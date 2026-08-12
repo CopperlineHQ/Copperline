@@ -301,6 +301,20 @@ belongs to the Amiga.
   underneath. The start-up mode is
   `[display] scaling`, which also notes which pixel-aspect pairing is
   fully pixel-exact (see [Configuration](configuration.md)).
+- **Screen Centring**: nudge where the TV picture sits on the glass, the
+  H-CENTER/V-CENTER controls a real monitor carried on its front.
+  **Picture Left/Right** step one lo-res pixel (up to 16 each way),
+  **Picture Up/Down** one scan line (up to 8), **Reset** recentres; the
+  category row shows the current nudge. Stepping right brings the
+  captured left overscan into view -- artwork that leans off the default
+  view, like the CD32 boot logo's leading serif -- while glass nudged
+  past the captured raster shows black, as past the raster's edge on a
+  real tube. A TV-aperture control, so it is greyed under
+  `overscan = "full"`, which already shows everything. Unlike the shader
+  and tint it is picture geometry, not a window effect: screenshots and
+  frame dumps follow it. Session-only; the start-up values are
+  `[display] tv_h_centre` / `tv_v_centre`
+  (see [Configuration](configuration.md)).
 - **CRT Shader**: the GPU tube-emulation pass over the picture --
   **Disabled**, **Scanlines** (the line structure of a 15 kHz set), **Mask**
   (an RGB phosphor shadow mask), **CRT (1084)** (both, plus a bowed tube face

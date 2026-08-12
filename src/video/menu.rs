@@ -17,7 +17,7 @@ use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
 use crate::config::{
     AudioFilterMode, BezelStyle, DisplayScaling, MenuScale, PixelAspect, ShaderKind, Tint,
-    WarpSpeed,
+    TvCentre, WarpSpeed, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
 };
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
@@ -46,6 +46,10 @@ pub enum MenuAction {
     SetTint(Tint),
     SetMenuScale(MenuScale),
     SetBezel(BezelStyle),
+    /// Nudge the TV-presentation centring one lo-res pixel/scan line:
+    /// `(dh, dv)`, a monitor's H-CENTER/V-CENTER knobs.
+    StepTvCentre(i32, i32),
+    ResetTvCentre,
     ToggleFullscreen,
     ToggleStatusBar,
     TogglePerfOverlay,
@@ -413,6 +417,11 @@ pub struct MenuState<'a> {
     pub port_devices: [PortDevice; 2],
     pub pixel_aspect: PixelAspect,
     pub scaling: DisplayScaling,
+    /// Where the TV presentation centres the picture, and whether the
+    /// control applies (it is a TV-aperture nudge, so full overscan has
+    /// nothing for it to move).
+    pub tv_centre: TvCentre,
+    pub tv_centre_applies: bool,
     pub shader: ShaderKind,
     /// Whether a custom shader file is configured. Without one the Custom
     /// row is shown but cannot be chosen.
@@ -472,6 +481,16 @@ fn gain_label(db: f32) -> String {
         "0 dB".to_string()
     } else {
         format!("{db:+.0} dB")
+    }
+}
+
+/// The centring as its category row shows it: quiet while the picture sits
+/// where the aperture puts it, the two figures once it has been nudged.
+fn tv_centre_label(centre: TvCentre) -> String {
+    if centre == TvCentre::default() {
+        "Centred".to_string()
+    } else {
+        format!("H {:+} V {:+}", centre.h, centre.v)
     }
 }
 
@@ -589,6 +608,22 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         .map(|b| MenuRow::choice(b.menu_label(), MenuAction::SetBezel(*b), s.bezel == *b))
         .collect();
 
+    // The centring steps, like the sampler gain's, are nudged rather than
+    // picked: the rows leave the menu up, and each stops at its end of the
+    // knob's travel.
+    let centring = vec![
+        MenuRow::action("Picture Left", MenuAction::StepTvCentre(-1, 0))
+            .available(s.tv_centre.h > -TV_H_CENTRE_RANGE),
+        MenuRow::action("Picture Right", MenuAction::StepTvCentre(1, 0))
+            .available(s.tv_centre.h < TV_H_CENTRE_RANGE),
+        MenuRow::action("Picture Up", MenuAction::StepTvCentre(0, -1))
+            .available(s.tv_centre.v > -TV_V_CENTRE_RANGE),
+        MenuRow::action("Picture Down", MenuAction::StepTvCentre(0, 1))
+            .available(s.tv_centre.v < TV_V_CENTRE_RANGE),
+        MenuRow::action("Reset", MenuAction::ResetTvCentre)
+            .available(s.tv_centre != TvCentre::default()),
+    ];
+
     let sizes = MenuScale::MENU_ORDER
         .iter()
         .map(|m| MenuRow::choice(m.label(), MenuAction::SetMenuScale(*m), s.menu_scale == *m))
@@ -598,6 +633,11 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspects),
         MenuRow::submenu("Scaling", scalings),
+        // A TV-aperture control: greyed under full overscan, which
+        // presents the whole raster and leaves the knob nothing to move.
+        MenuRow::submenu("Screen Centring", centring)
+            .with_value(tv_centre_label(s.tv_centre))
+            .available(s.tv_centre_applies),
         MenuRow::submenu("CRT Shader", shaders),
         MenuRow::submenu("Screen Tint", tints),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
@@ -1030,6 +1070,8 @@ mod tests {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
+            tv_centre: TvCentre::default(),
+            tv_centre_applies: true,
             shader: ShaderKind::None,
             custom_shader_available: false,
             tint: Tint::None,
@@ -1347,5 +1389,64 @@ mod tests {
         assert!(find(save, "Save State...").expect("save").closes_menu());
         let quick = find(save, "Quick Save").expect("quick save");
         assert!(!quick.children().expect("slots")[0].closes_menu());
+    }
+
+    /// The centring steps behave like the monitor knobs they model: they
+    /// leave the menu up for the next nudge, each stops at its end of the
+    /// travel, and the category row wears the current nudge. Under full
+    /// overscan -- the whole raster already presented -- the category is
+    /// greyed.
+    #[test]
+    fn screen_centring_steps_stop_at_the_knobs_travel() {
+        let none: [String; 0] = [];
+        let slots = empty_slots();
+        let video_children = |rows: &[MenuRow]| -> Vec<MenuRow> {
+            find(rows, "Video Settings")
+                .expect("video")
+                .children()
+                .expect("children")
+                .to_vec()
+        };
+
+        let mut st = state(&none, &none, &none, &none, &slots);
+        st.tv_centre = TvCentre {
+            h: TV_H_CENTRE_RANGE,
+            v: 0,
+        };
+        let rows = build(&st);
+        let video = video_children(&rows);
+        let centring = find(&video, "Screen Centring").expect("centring");
+        assert!(centring.enabled);
+        assert_eq!(centring.value.as_deref(), Some("H +16 V +0"));
+        let steps = centring.children().expect("steps");
+        for row in steps {
+            assert!(!row.closes_menu(), "picking {} closed the menu", row.label);
+        }
+        assert!(
+            !find(steps, "Picture Right").expect("right").enabled,
+            "the knob stepped past its travel"
+        );
+        assert!(find(steps, "Picture Left").expect("left").enabled);
+        assert!(find(steps, "Reset").expect("reset").enabled);
+
+        // Centred, the category is quiet and Reset has nothing to do.
+        let st = state(&none, &none, &none, &none, &slots);
+        let rows = build(&st);
+        let video = video_children(&rows);
+        let centring = find(&video, "Screen Centring").expect("centring");
+        assert_eq!(centring.value.as_deref(), Some("Centred"));
+        assert!(
+            !find(centring.children().expect("steps"), "Reset")
+                .expect("reset")
+                .enabled
+        );
+
+        // Full overscan presents the whole raster: nothing for the knob to
+        // move, so the category is greyed.
+        let mut st = state(&none, &none, &none, &none, &slots);
+        st.tv_centre_applies = false;
+        let rows = build(&st);
+        let video = video_children(&rows);
+        assert!(!find(&video, "Screen Centring").expect("centring").enabled);
     }
 }
