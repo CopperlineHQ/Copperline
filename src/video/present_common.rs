@@ -11,7 +11,7 @@
 
 use super::{bitplane, deinterlace::OUT_HEIGHT, FrameGeometry, FB_HEIGHT, FB_PIXELS, FB_WIDTH};
 use crate::bus::RenderRegisterSnapshot;
-use crate::config::Overscan;
+use crate::config::{Overscan, TvCentre};
 use crate::screenshot;
 
 pub const fn rgba(r: u32, g: u32, b: u32) -> u32 {
@@ -144,6 +144,13 @@ const _: () = {
     assert!(TV_PRESENT_SOURCE_Y + TV_NTSC_PRESENT_HEIGHT <= TUBE_NTSC_PRESENT_HEIGHT);
 };
 
+/// The framebuffer offsets a [`TvCentre`] setting moves the TV aperture's
+/// source window by: the picture moves right/down, so the window moves
+/// left/up. `.0` in framebuffer pixels, `.1` in woven rows.
+pub const fn tv_centre_source_offset(centre: TvCentre) -> (i32, i32) {
+    (-2 * centre.h, -2 * centre.v)
+}
+
 /// One glass pixel of the 4:3 TV presentation: the captured aperture's
 /// `TV_CAPTURED_WIDTH` real columns fill the `FB_WIDTH`-wide glass through
 /// a fractional resample (`blend_rgba`, the programmable-scan idiom), the
@@ -151,12 +158,21 @@ const _: () = {
 /// real captured pixels -- nothing is padded black -- and the standard
 /// window stays exactly centred because the captured margins are symmetric
 /// by construction. 8.8 fixed point, sampling between texel centres.
+///
+/// `source_x_offset` slides the sampled window across the framebuffer (the
+/// H-centre control, via [`tv_centre_source_offset`]); glass pushed past
+/// the captured raster is unscanned and comes back black.
 #[inline]
-pub fn tv_glass_sample(row: &[u32], out_x: usize) -> u32 {
+pub fn tv_glass_sample(row: &[u32], out_x: usize, source_x_offset: i32) -> u32 {
     debug_assert!(row.len() >= FB_WIDTH);
-    let s = (TV_CAPTURED_SOURCE_X as i64) * 256
+    let s = (TV_CAPTURED_SOURCE_X as i64 + source_x_offset as i64) * 256
         + ((2 * out_x as i64 + 1) * (TV_CAPTURED_WIDTH as i64) * 256) / (2 * FB_WIDTH as i64)
         - 128;
+    // Half a texel of slack on each side: the default aperture's own edge
+    // samples land there and clamp, exactly as before the offset existed.
+    if !(-128..=(FB_WIDTH as i64 - 1) * 256 + 128).contains(&s) {
+        return rgba(0, 0, 0);
+    }
     let s = s.clamp(0, (FB_WIDTH as i64 - 1) * 256);
     let i = (s >> 8) as usize;
     let frac = (s & 255) as u32;
@@ -513,8 +529,8 @@ mod tests {
         row[TV_CAPTURED_SOURCE_X] = first;
         row[FB_WIDTH - 1] = last;
 
-        let g0 = tv_glass_sample(&row, 0);
-        let g_last = tv_glass_sample(&row, FB_WIDTH - 1);
+        let g0 = tv_glass_sample(&row, 0, 0);
+        let g_last = tv_glass_sample(&row, FB_WIDTH - 1, 0);
         // The first glass pixel blends the first captured column with its
         // left neighbour; the marker must dominate or match.
         assert_ne!(g0, 0xFF7F_7F7F, "left aperture edge missing from glass");
@@ -525,7 +541,31 @@ mod tests {
         let centre_src = TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH / 2;
         centre_row[centre_src - 1] = 0xFFFF_FFFF;
         centre_row[centre_src] = 0xFFFF_FFFF;
-        assert_eq!(tv_glass_sample(&centre_row, FB_WIDTH / 2), 0xFFFF_FFFF);
+        assert_eq!(tv_glass_sample(&centre_row, FB_WIDTH / 2, 0), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn tv_glass_centre_offset_slides_the_window_and_blacks_unscanned_glass() {
+        // A right-nudged picture (negative source offset) pulls captured
+        // columns left of the default aperture onto the glass. Marker on a
+        // neighbouring pair, since a glass pixel blends adjacent texels.
+        let mut row = vec![0xFF10_1010u32; FB_WIDTH];
+        let marker = 0xFF20_4060;
+        row[TV_CAPTURED_SOURCE_X - 13] = marker;
+        row[TV_CAPTURED_SOURCE_X - 12] = marker;
+        let (x_off, _) = tv_centre_source_offset(TvCentre { h: 6, v: 0 });
+        assert_eq!(x_off, -12);
+        assert_eq!(tv_glass_sample(&row, 0, x_off), marker);
+
+        // A left-nudged picture slides the window past the framebuffer's
+        // right edge: that glass is unscanned and comes back black, never
+        // the edge column repeated (the Gen-X drag-line lesson).
+        let (x_off, _) = tv_centre_source_offset(TvCentre { h: -6, v: 0 });
+        assert_eq!(
+            tv_glass_sample(&row, FB_WIDTH - 1, x_off),
+            rgba(0, 0, 0),
+            "off-capture glass must be black"
+        );
     }
 
     /// A standard full-width display (stock Kickstart screen).

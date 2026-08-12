@@ -441,7 +441,17 @@ video = "PAL"
 
 
 # Presentation options. overscan: "tv" (default; mask deep horizontal
-# overscan like a CRT bezel) or "full". pixel_aspect: "tv" (default; the
+# overscan like a CRT bezel) or "full".
+# tv_h_centre / tv_v_centre: centre the TV picture on the glass, like a
+# monitor's front-panel H-CENTER/V-CENTER controls. tv_h_centre in lo-res
+# pixels (-16..16, positive right), tv_v_centre in scan lines (-8..8,
+# positive down); default 0 keeps the standard window centred. Nudging
+# right brings the captured left overscan into view (artwork that leans
+# off the default view, like the CD32 boot logo's leading serif); glass
+# nudged past the captured raster shows black. TV mode only (full
+# overscan already shows everything); captures follow the knobs, and
+# Video Settings > Screen Centring steps them live.
+# pixel_aspect: "tv" (default; the
 # non-square pixel aspect of a 4:3 CRT) or "square" (one host row per
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
 # pixel-exact comparison against square-pixel emulators). scaling: how that
@@ -487,6 +497,8 @@ video = "PAL"
 # also --menu-scale, and Video Settings > Menu Size changes it live.
 # [display]
 # overscan = "tv"
+# tv_h_centre = 0
+# tv_v_centre = 0
 # pixel_aspect = "tv"
 # scaling = "smooth"
 # deinterlace = true

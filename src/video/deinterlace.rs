@@ -482,6 +482,10 @@ impl Deinterlacer {
     /// intermediate weave and the subsequent aperture copy. Interlaced or
     /// phosphor-dependent frames retain [`Self::push_field`] and crop its
     /// history-dependent result, so their pixels are unchanged.
+    ///
+    /// `source_x`/`source_y` are signed: an H/V-centred aperture can slide
+    /// partly off the captured raster, and the glass it exposes there is
+    /// unscanned and fills black.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn present_field_region_into(
@@ -492,8 +496,8 @@ impl Deinterlacer {
         lace: bool,
         long_field: bool,
         double_rows: bool,
-        source_x: usize,
-        source_y: usize,
+        source_x: i32,
+        source_y: i32,
         source_rows: usize,
         destination_width: usize,
         destination_rows: usize,
@@ -528,8 +532,8 @@ impl Deinterlacer {
         lace: bool,
         long_field: bool,
         double_rows: bool,
-        source_x: usize,
-        source_y: usize,
+        source_x: i32,
+        source_y: i32,
         source_rows: usize,
         destination_width: usize,
         destination_rows: usize,
@@ -540,8 +544,16 @@ impl Deinterlacer {
         debug_assert!(field.len() >= rows * width);
         let doubled = lace || double_rows;
         let full_rows = if doubled { rows * 2 } else { rows };
-        debug_assert!(source_x + destination_width <= width);
-        debug_assert!(source_y + source_rows <= full_rows);
+        // A centred window may overhang the captured raster on any side by
+        // at most the knob's travel; the overhang is filled black below.
+        debug_assert!(
+            source_x >= -H_CENTRE_SLACK
+                && source_x + (destination_width as i32) <= width as i32 + H_CENTRE_SLACK
+        );
+        debug_assert!(
+            source_y >= -V_CENTRE_SLACK
+                && source_y + (source_rows as i32) <= full_rows as i32 + V_CENTRE_SLACK
+        );
 
         let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
         if direct {
@@ -558,27 +570,60 @@ impl Deinterlacer {
             self.present_with_phosphor_elapsed(elapsed_fields.max(1) - 1);
         }
 
+        // One destination row: source columns [source_x, source_x +
+        // destination_width) of `row`, black where the window has slid off
+        // the captured raster.
+        let copy_row = |dst: &mut [u32], row: &[u32]| {
+            let left_pad = (-source_x).clamp(0, destination_width as i32) as usize;
+            let copied =
+                (width as i32 - source_x).clamp(0, (destination_width - left_pad) as i32) as usize;
+            dst[..left_pad].fill(0xFF00_0000);
+            dst[left_pad + copied..].fill(0xFF00_0000);
+            if copied > 0 {
+                let src_x = source_x.max(0) as usize;
+                dst[left_pad..left_pad + copied].copy_from_slice(&row[src_x..src_x + copied]);
+            }
+        };
         destination.resize(destination_width * destination_rows, 0);
         if direct {
             for (y, dst) in destination.chunks_exact_mut(destination_width).enumerate() {
                 let woven_y = source_y
-                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
-                let source_row = if doubled { woven_y / 2 } else { woven_y };
-                let offset = source_row * width + source_x;
-                dst.copy_from_slice(&field[offset..offset + destination_width]);
+                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows) as i32;
+                if !(0..full_rows as i32).contains(&woven_y) {
+                    dst.fill(0xFF00_0000);
+                    continue;
+                }
+                let source_row = if doubled {
+                    woven_y as usize / 2
+                } else {
+                    woven_y as usize
+                };
+                copy_row(dst, &field[source_row * width..(source_row + 1) * width]);
             }
         } else {
             let source = self.output();
             for (y, dst) in destination.chunks_exact_mut(destination_width).enumerate() {
                 let source_row = source_y
-                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows);
-                let offset = source_row * width + source_x;
-                dst.copy_from_slice(&source[offset..offset + destination_width]);
+                    + crate::screenshot::scaled_source_row(y, source_rows, destination_rows) as i32;
+                if !(0..full_rows as i32).contains(&source_row) {
+                    dst.fill(0xFF00_0000);
+                    continue;
+                }
+                let source_row = source_row as usize;
+                copy_row(dst, &source[source_row * width..(source_row + 1) * width]);
             }
         }
         (destination_rows, destination_width)
     }
 }
+
+/// How far the region window may overhang the captured raster on each
+/// side: a centred aperture slides at most the knob's travel off it.
+/// Horizontally that is `config::TV_H_CENTRE_RANGE` lo-res pixels (two
+/// framebuffer pixels each); vertically `config::TV_V_CENTRE_RANGE` scan
+/// lines (two woven rows each).
+const H_CENTRE_SLACK: i32 = 2 * crate::config::TV_H_CENTRE_RANGE;
+const V_CENTRE_SLACK: i32 = 2 * crate::config::TV_V_CENTRE_RANGE;
 
 /// Channel-wise average of two packed RGBA pixels.
 fn avg_rgba(a: u32, b: u32) -> u32 {
@@ -688,8 +733,8 @@ mod tests {
             false,
             true,
             true,
-            source_x,
-            source_y,
+            source_x as i32,
+            source_y as i32,
             source_rows,
             destination_width,
             destination_rows,
@@ -698,6 +743,87 @@ mod tests {
 
         assert_eq!(dims, (destination_rows, destination_width));
         assert_eq!(destination, expected);
+    }
+
+    /// An H/V-centred aperture that slides past the captured raster gets
+    /// black for the unscanned glass, never edge-repeated pixels.
+    #[test]
+    fn region_window_off_the_capture_fills_black() {
+        let field: Vec<u32> = (0..FB_PIXELS).map(|idx| 0xFF00_0000 | idx as u32).collect();
+        let black = 0xFF00_0000u32;
+        let source_rows = 431;
+        let destination_width = 127;
+        let destination_rows = 263;
+
+        // Window sliding off the left edge: the first columns are black,
+        // the copied span starts at the field's own column 0.
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        let mut destination = Vec::new();
+        direct.present_field_region_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            -3,
+            18,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+        let row = &destination[..destination_width];
+        assert!(row[..3].iter().all(|&px| px == black));
+        let woven = crate::screenshot::scaled_source_row(0, source_rows, destination_rows) + 18;
+        assert_eq!(row[3], field[(woven / 2) * FB_WIDTH]);
+
+        // Window overhanging the right edge (a left-nudged picture; the
+        // captured aperture already ends exactly at the framebuffer edge,
+        // so even one pixel of left nudge lands here): the last columns
+        // are black, the column before them is the field's edge column.
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        direct.present_field_region_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            (FB_WIDTH - destination_width + 2) as i32,
+            18,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+        let row = &destination[..destination_width];
+        assert!(row[destination_width - 2..].iter().all(|&px| px == black));
+        let woven = crate::screenshot::scaled_source_row(0, source_rows, destination_rows) + 18;
+        assert_eq!(
+            row[destination_width - 3],
+            field[(woven / 2) * FB_WIDTH + FB_WIDTH - 1]
+        );
+
+        // Window sliding past the bottom: rows mapped past the field are
+        // whole black rows.
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        direct.present_field_region_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            19,
+            (2 * FB_HEIGHT - source_rows + 4) as i32,
+            source_rows,
+            destination_width,
+            destination_rows,
+            &mut destination,
+        );
+        let last = &destination[(destination_rows - 1) * destination_width..];
+        assert!(last.iter().all(|&px| px == black));
     }
 
     #[test]
@@ -733,8 +859,8 @@ mod tests {
             true,
             false,
             true,
-            source_x,
-            source_y,
+            source_x as i32,
+            source_y as i32,
             source_rows,
             destination_width,
             destination_rows,

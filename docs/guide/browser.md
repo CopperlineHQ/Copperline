@@ -605,6 +605,13 @@ around the picture, which widens the standard-scan crop from the TV
 aperture to the tube aperture (the whole rendered field, the desktop's
 tube view); full overscan and programmable scans are unaffected, and the
 last completed frame is re-presented like `set_overscan`.
+`set_tv_centre(h, v)` centres the TV picture on the glass, the desktop's
+`[display] tv_h_centre` / `tv_v_centre` knobs (a monitor's front-panel
+H-CENTER/V-CENTER controls): `h` in lo-res pixels (-16..16, positive
+right), `v` in scan lines (-8..8, positive down), clamped to those
+ranges. Glass the nudge exposes past the captured raster shows black; a
+TV-aperture control, so full overscan ignores it. The last completed
+frame is re-presented like `set_overscan`.
 Front-panel status getters mirror the desktop status bar's LED block and
 are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
 booleans, `caps_lock_led()` returns the keyboard MCU's own Caps Lock lamp

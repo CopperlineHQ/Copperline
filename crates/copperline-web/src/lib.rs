@@ -20,6 +20,7 @@ use copperline::bus::PortDevice;
 use copperline::chipset::agnus::VideoStandard;
 use copperline::config::{
     machine_profile_defaults, parse_machine_model, parse_video_standard, Config, Overscan,
+    TvCentre, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
 };
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
@@ -247,6 +248,10 @@ pub struct WebEmu {
     /// tube aperture (the desktop's tube view). See
     /// [`Self::set_monitor_bezel`].
     monitor_bezel: bool,
+    /// Where the TV presentation centres the picture on the glass, the
+    /// desktop's `[display] tv_h_centre` / `tv_v_centre` knobs. See
+    /// [`Self::set_tv_centre`].
+    tv_centre: TvCentre,
     /// Aperture/recentring decisions latched across border-only frames,
     /// as on the desktop: the blank frames a screen change emits keep the
     /// previous presentation geometry instead of snapping to the full
@@ -325,6 +330,7 @@ impl WebEmu {
             serial,
             overscan: Overscan::Tv,
             monitor_bezel: false,
+            tv_centre: TvCentre::default(),
             presentation_latch: present_common::PresentationLatch::default(),
             repeated_frame_detector: bitplane::RepeatedFrameDetector::default(),
             last_run_core_ms: 0.0,
@@ -577,6 +583,8 @@ impl WebEmu {
                     present_common::TV_GLASS_PRESENT_ROWS,
                 )
             };
+            let (source_x_offset, source_y_offset) =
+                present_common::tv_centre_source_offset(self.tv_centre);
             (self.present_rows, self.present_width) =
                 self.deinterlacer.present_field_region_into_elapsed(
                     &self.fb,
@@ -585,8 +593,8 @@ impl WebEmu {
                     lace,
                     base.long_field,
                     double_rows,
-                    present_common::TV_CAPTURED_SOURCE_X,
-                    source_y,
+                    present_common::TV_CAPTURED_SOURCE_X as i32 + source_x_offset,
+                    source_y as i32 + source_y_offset,
                     source_rows,
                     present_common::TV_CAPTURED_WIDTH,
                     destination_rows,
@@ -1044,6 +1052,33 @@ impl WebEmu {
         // the frame's content has not changed, but its presentation has,
         // so the repaint below must run the pipeline, not match.
         self.presentation_latch.reset();
+        self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+        self.render_completed_frame();
+    }
+
+    /// Centre the TV presentation on the glass, the desktop's `[display]
+    /// tv_h_centre` / `tv_v_centre` knobs (a monitor's H-CENTER/V-CENTER
+    /// controls). `h` is in lo-res pixels, positive moving the picture
+    /// right; `v` in scan lines, positive moving it down; both clamp to
+    /// the knobs' travel. Glass the nudged aperture exposes past the
+    /// captured raster shows black. A TV-aperture nudge, so it moves
+    /// nothing under full overscan. The last completed frame is
+    /// re-presented under the new centring, like `set_overscan`, so a
+    /// paused page repaints without stepping the machine.
+    pub fn set_tv_centre(&mut self, h: i32, v: i32) {
+        let centre = TvCentre {
+            h: h.clamp(-TV_H_CENTRE_RANGE, TV_H_CENTRE_RANGE),
+            v: v.clamp(-TV_V_CENTRE_RANGE, TV_V_CENTRE_RANGE),
+        };
+        if centre == self.tv_centre {
+            return;
+        }
+        self.tv_centre = centre;
+        // The frame's content has not changed, but its presentation has,
+        // so the repaint below must run the pipeline, not match the reuse
+        // detector. The latch keeps its decisions: the nudge translates
+        // the same aperture, it is not a new geometry judgement.
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();

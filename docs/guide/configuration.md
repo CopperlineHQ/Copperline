@@ -517,6 +517,8 @@ recorded in [](../internals/chipset)).
 ```toml
 [display]
 overscan = "tv"       # "tv" (default) or "full"
+tv_h_centre = 0       # TV picture centring in lo-res pixels, -16..16 (+ = right)
+tv_v_centre = 0       # TV picture centring in scan lines, -8..8 (+ = down)
 pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
 scaling = "smooth"    # "smooth" (default, aspect fit) or "integer" (whole multiples)
 deinterlace = true    # motion-adaptive interlace weaving (default true)
@@ -546,6 +548,21 @@ holds steady across the blank frames a screen change produces: a frame
 showing only border colour keeps the previous frame's aperture and
 centring instead of snapping to the full framebuffer, so the picture does
 not jump sideways at Kickstart screen changes.
+
+`tv_h_centre` / `tv_v_centre` nudge where the TV presentation centres the
+picture on the glass -- the H-CENTER/V-CENTER controls a real monitor
+carried on its front. `tv_h_centre` is in lo-res pixels, positive moving
+the picture right; `tv_v_centre` in scan lines, positive moving it down.
+The default aperture centres the standard window, which leaves most of
+the captured left overscan off-glass; software that leans its artwork
+into that overscan (the CD32 boot logo's leading "A" serif, for example)
+comes fully into view a few pixels of `tv_h_centre` later, exactly as it
+did on a set whose picture sat a little right of centre. Glass the nudge
+exposes beyond the captured raster is unscanned and shows black. The
+knobs move the TV aperture, so `overscan = "full"` ignores them; captures
+(screenshots, frame dumps) follow them like the live window. The menu's
+*Screen Centring* rows (under Video Settings) step the same knobs live
+without touching the config.
 
 `pixel_aspect` selects how emulated scanlines map to host rows. The default
 `"tv"` presents the field with the non-square pixel aspect of a 4:3 CRT:

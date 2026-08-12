@@ -19,17 +19,17 @@ use super::{
     repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
     shot_button_rect, should_render_emulated_frame, standard_window_top_row,
     status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row, tv_source_h_bounds,
-    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
-    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
-    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
-    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
-    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
-    VOLUME_GLYPH_X,
+    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row,
+    tv_centre_source_offset, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
+    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
+    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
+    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
+    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
+    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
+    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
+    TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X,
+    TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT,
+    TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -2730,6 +2730,7 @@ fn tv_window_copy_fills_the_glass_from_the_captured_aperture() {
         TV_PAL_PRESENT_HEIGHT,
         crate::video::PRESENT_HEIGHT_TV,
         TV_PRESENT_SOURCE_Y,
+        (0, 0),
     );
 
     // On the 4:3 glass the aperture fills the full texture width: the
@@ -2788,6 +2789,7 @@ fn tv_window_copy_black_pads_never_replicate_edge_columns() {
             TV_PAL_PRESENT_HEIGHT,
             rows,
             TV_PRESENT_SOURCE_Y,
+            (0, 0),
         );
 
         // The square canvas centres the aperture rows between vertical
@@ -2823,6 +2825,106 @@ fn tv_window_copy_black_pads_never_replicate_edge_columns() {
 }
 
 #[test]
+fn tv_window_copy_centring_slides_the_crop_and_blacks_unscanned_glass() {
+    use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+    let scale = 1;
+    let black = rgba(0, 0, 0).to_le_bytes();
+
+    // H-centring on the square canvas. A right-nudged picture (source
+    // window moved left) shows the column left of the default aperture
+    // and drops the framebuffer's edge columns off the window's right
+    // end; a left-nudged picture slides the window past the framebuffer,
+    // where the glass is unscanned -- black, never the edge column
+    // repeated.
+    let mut src = vec![0u32; OUT_PIXELS];
+    let row_y = TV_PRESENT_SOURCE_Y;
+    let revealed = 0x99AA_BBCCu32;
+    let fb_edge = 0xDDEE_FF00u32;
+    src[row_y * FB_WIDTH + TV_CAPTURED_SOURCE_X - 2] = revealed;
+    src[row_y * FB_WIDTH + FB_WIDTH - 1] = fb_edge;
+    let rows = crate::video::PRESENT_HEIGHT_SQUARE;
+    let mut frame = vec![0u8; texture_width(scale) * rows * scale * 4];
+    copy_tv_aperture_to_window(
+        &src,
+        OUT_HEIGHT,
+        &mut frame,
+        scale,
+        TV_PAL_PRESENT_HEIGHT,
+        rows,
+        TV_PRESENT_SOURCE_Y,
+        tv_centre_source_offset(crate::config::TvCentre { h: 1, v: 0 }),
+    );
+    let y = (rows - TV_PAL_PRESENT_HEIGHT) / 2 * scale;
+    assert_eq!(
+        pixel(&frame, TV_LIVE_PAD_X, y, scale),
+        revealed.to_le_bytes(),
+        "right nudge should reveal the column left of the aperture"
+    );
+
+    let mut frame = vec![0u8; texture_width(scale) * rows * scale * 4];
+    copy_tv_aperture_to_window(
+        &src,
+        OUT_HEIGHT,
+        &mut frame,
+        scale,
+        TV_PAL_PRESENT_HEIGHT,
+        rows,
+        TV_PRESENT_SOURCE_Y,
+        tv_centre_source_offset(crate::config::TvCentre { h: -1, v: 0 }),
+    );
+    // Window columns now sample fb 50..718: the framebuffer's edge lands
+    // two columns before the window's end, and the two columns past it
+    // are unscanned glass.
+    let window_end = TV_LIVE_PAD_X + TV_CAPTURED_WIDTH;
+    assert_eq!(
+        pixel(&frame, window_end - 3, y, scale),
+        fb_edge.to_le_bytes(),
+        "the framebuffer edge column should follow the nudge"
+    );
+    for x in window_end - 2..window_end {
+        assert_eq!(
+            pixel(&frame, x, y, scale),
+            black,
+            "glass past the framebuffer edge must be black at {x}"
+        );
+    }
+
+    // V-centring: a picture nudged up (source window moved down) pulls
+    // the bottom captured rows onto the glass and leaves the rows past
+    // the capture black.
+    let mut src = vec![0u32; OUT_PIXELS];
+    let bottom = rgba(30, 30, 200);
+    src[(OUT_HEIGHT - 1) * FB_WIDTH..].fill(bottom);
+    let present_rows = crate::video::PRESENT_HEIGHT_TV;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    copy_tv_aperture_to_window(
+        &src,
+        OUT_HEIGHT,
+        &mut frame,
+        scale,
+        TV_PAL_PRESENT_HEIGHT,
+        present_rows,
+        TV_PRESENT_SOURCE_Y,
+        tv_centre_source_offset(crate::config::TvCentre { h: 0, v: -8 }),
+    );
+    // The default aperture ends at woven row 558; nudged 16 rows down it
+    // spans 34..574, so the field's last row (569) is on the glass and
+    // the four rows past the capture are black. Find the last woven
+    // row's colour and check nothing but black follows it.
+    let last_content = (0..present_rows)
+        .rev()
+        .find(|&out_y| pixel(&frame, FB_WIDTH / 2, out_y, scale) == bottom.to_le_bytes())
+        .expect("the field's last row should reach the glass on an up-nudge");
+    for out_y in last_content + 1..present_rows {
+        assert_eq!(
+            pixel(&frame, FB_WIDTH / 2, out_y, scale),
+            black,
+            "glass past the captured field must be black at row {out_y}"
+        );
+    }
+}
+
+#[test]
 fn tv_window_copy_preserves_true_overscan_fetches() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
     let scale = 1;
@@ -2841,6 +2943,7 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
         &mut frame,
         scale,
         Overscan::Tv,
+        crate::config::TvCentre::default(),
         None,
         false,
     );
@@ -2872,6 +2975,7 @@ fn tube_window_copy_shows_the_whole_field_when_a_bezel_is_drawn() {
         &mut tube,
         scale,
         Overscan::Tv,
+        crate::config::TvCentre::default(),
         Some(TV_PAL_PRESENT_HEIGHT),
         true,
     );
@@ -2889,6 +2993,7 @@ fn tube_window_copy_shows_the_whole_field_when_a_bezel_is_drawn() {
         &mut tv,
         scale,
         Overscan::Tv,
+        crate::config::TvCentre::default(),
         Some(TV_PAL_PRESENT_HEIGHT),
         false,
     );
@@ -2924,6 +3029,7 @@ fn tube_window_copy_stops_at_the_rendered_ntsc_field() {
         &mut tube,
         scale,
         Overscan::Tv,
+        crate::config::TvCentre::default(),
         Some(TV_NTSC_PRESENT_HEIGHT),
         true,
     );
@@ -3472,6 +3578,7 @@ fn test_app_with_audio_cpu_and_program(
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
         crate::config::Overscan::Full,
+        crate::config::TvCentre::default(),
         true,
         0.0,
         crate::config::ShaderMode::None,

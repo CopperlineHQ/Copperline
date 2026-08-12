@@ -12140,6 +12140,8 @@ mod tests {
             ],
             pixel_aspect: PixelAspect::Tv,
             scaling: crate::config::DisplayScaling::Smooth,
+            tv_centre: crate::config::TvCentre::default(),
+            tv_centre_applies: true,
             shader: crate::config::ShaderKind::None,
             custom_shader_available: false,
             tint: crate::config::Tint::None,

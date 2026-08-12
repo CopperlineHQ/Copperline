@@ -7,7 +7,7 @@
 //! parent's private items.
 
 use super::*;
-use crate::config::Tint;
+use crate::config::{Tint, TvCentre};
 
 // The pure post-render helpers live in `video/present_common.rs` so headless
 // consumers can present frames without the winit frontend; re-exported here so
@@ -739,6 +739,7 @@ pub(super) fn copy_window_present_frame(
     frame: &mut [u8],
     texture_scale: usize,
     overscan: Overscan,
+    tv_centre: TvCentre,
     tv_aperture_rows: Option<usize>,
     tube_glass: bool,
 ) {
@@ -761,6 +762,7 @@ pub(super) fn copy_window_present_frame(
                 aperture_rows,
                 present_height(),
                 source_y,
+                tv_centre_source_offset(tv_centre),
             )
         }
         _ => copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale),
@@ -783,7 +785,11 @@ pub(super) fn copy_window_present_frame(
 ///
 /// `source_y` is the woven row the crop starts at: `TV_PRESENT_SOURCE_Y`
 /// for the TV aperture, 0 for the tube aperture (whose row count spans
-/// the whole rendered field).
+/// the whole rendered field). `source_offset` slides the whole crop
+/// window across the capture (the H/V-centre controls,
+/// `tv_centre_source_offset`); glass pushed past the captured raster is
+/// unscanned and stays black.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn copy_tv_aperture_to_window(
     src_fb: &[u32],
     src_rows: usize,
@@ -792,8 +798,10 @@ pub(super) fn copy_tv_aperture_to_window(
     aperture_rows: usize,
     present_rows: usize,
     source_y: usize,
+    source_offset: (i32, i32),
 ) {
     debug_assert!(src_fb.len() >= src_rows * FB_WIDTH);
+    let (source_x_offset, source_y_offset) = source_offset;
     let dst_stride = texture_width(texture_scale) * 4;
     let out_rows = present_rows * texture_scale;
     debug_assert!(frame.len() >= dst_stride * out_rows);
@@ -803,24 +811,32 @@ pub(super) fn copy_tv_aperture_to_window(
     let pixel_at = |row: &[u32], out_x: usize| -> u32 {
         if square {
             if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH).contains(&out_x) {
-                row[TV_CAPTURED_SOURCE_X + (out_x - TV_LIVE_PAD_X)]
+                let src_x =
+                    TV_CAPTURED_SOURCE_X as i32 + source_x_offset + (out_x - TV_LIVE_PAD_X) as i32;
+                if (0..FB_WIDTH as i32).contains(&src_x) {
+                    row[src_x as usize]
+                } else {
+                    black_px
+                }
             } else {
                 black_px
             }
         } else {
-            tv_glass_sample(row, out_x)
+            tv_glass_sample(row, out_x, source_x_offset)
         }
     };
     for y in 0..out_rows {
-        let Some(crop_y) = tv_aperture_source_row(y, present_rows, texture_scale, aperture_rows)
-        else {
+        let src_y = tv_aperture_source_row(y, present_rows, texture_scale, aperture_rows)
+            .map(|crop_y| (source_y + crop_y).min(src_rows - 1) as i32 + source_y_offset)
+            .filter(|src_y| (0..src_rows as i32).contains(src_y));
+        let Some(src_y) = src_y else {
             let dst = &mut frame[y * dst_stride..(y + 1) * dst_stride];
             for px in dst.chunks_exact_mut(4) {
                 px.copy_from_slice(&black);
             }
             continue;
         };
-        let src_y = (source_y + crop_y).min(src_rows - 1);
+        let src_y = src_y as usize;
         let row = &src_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
         let dst_off = y * dst_stride;
         match texture_scale {
@@ -1190,6 +1206,7 @@ pub(super) fn save_present_frame(
     src_rows: usize,
     src_width: usize,
     overscan: Overscan,
+    tv_centre: TvCentre,
     tv_aperture_rows: Option<usize>,
 ) -> anyhow::Result<()> {
     if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
@@ -1207,16 +1224,27 @@ pub(super) fn save_present_frame(
             // saved picture keeps one shape: the captured aperture's
             // columns resample onto the glass width, exactly like the
             // live window (`tv_glass_sample`), and a 60 Hz crop's rows
-            // scale onto the 50 Hz aperture's native row count.
+            // scale onto the 50 Hz aperture's native row count. The
+            // H/V-centre nudge follows the knob into captures too; glass
+            // it exposes past the captured raster saves black, exactly
+            // as the window shows it.
+            let (source_x_offset, source_y_offset) = tv_centre_source_offset(tv_centre);
+            let black = rgba(0, 0, 0);
             let mut glass = vec![0u32; FB_WIDTH * TV_GLASS_PRESENT_ROWS];
             for out_y in 0..TV_GLASS_PRESENT_ROWS {
                 let crop_y =
                     screenshot::scaled_source_row(out_y, aperture_rows, TV_GLASS_PRESENT_ROWS);
-                let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows.saturating_sub(1));
-                let row = &present_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
+                let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows.saturating_sub(1)) as i32
+                    + source_y_offset;
                 let dst = &mut glass[out_y * FB_WIDTH..(out_y + 1) * FB_WIDTH];
+                if !(0..src_rows as i32).contains(&src_y) {
+                    dst.fill(black);
+                    continue;
+                }
+                let src_y = src_y as usize;
+                let row = &present_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
                 for (out_x, px) in dst.iter_mut().enumerate() {
-                    *px = tv_glass_sample(row, out_x);
+                    *px = tv_glass_sample(row, out_x, source_x_offset);
                 }
             }
             return screenshot::save(path, &glass, FB_WIDTH as u32, TV_GLASS_PRESENT_ROWS as u32);

@@ -244,6 +244,10 @@ pub struct Config {
     /// screenshots (the emulated framebuffer always carries the full
     /// overscan field). See [`Overscan`].
     pub overscan: Overscan,
+    /// Where the TV-overscan presentation centres the picture on the
+    /// glass, like a monitor's H-CENTER/V-CENTER controls. See
+    /// [`TvCentre`].
+    pub tv_centre: TvCentre,
     /// Presentation pixel aspect: how emulated scanlines map to host
     /// rows in the window and in screenshots. See [`PixelAspect`].
     pub pixel_aspect: PixelAspect,
@@ -346,6 +350,31 @@ pub enum Overscan {
     #[default]
     Tv,
 }
+
+/// TV-presentation centring (`[display] tv_h_centre` / `tv_v_centre`),
+/// the H-CENTER/V-CENTER controls a monitor carries on its front: nudge
+/// where the TV aperture sits on the raster. `h` is in lo-res pixels,
+/// positive moving the picture right (revealing the left overscan, where
+/// the capture holds more raster than the default aperture shows); `v` is
+/// in scan lines, positive moving the picture down. Glass the nudged
+/// aperture exposes beyond the captured raster is unscanned and shows
+/// black, as past the raster's edge on a real tube. Applies to the TV
+/// overscan presentation only -- window and captures alike -- since the
+/// full-overscan view already presents everything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TvCentre {
+    /// Lo-res pixels, positive right, `-TV_H_CENTRE_RANGE..=TV_H_CENTRE_RANGE`.
+    pub h: i32,
+    /// Scan lines, positive down, `-TV_V_CENTRE_RANGE..=TV_V_CENTRE_RANGE`.
+    pub v: i32,
+}
+
+/// Centring ranges: at +16 the aperture's left edge reaches (nearly) the
+/// TV bezel mask, the most overscan the TV presentation models a tube
+/// showing; the vertical range likewise spans the captured overscan rows.
+/// A knob past these would only pull more unscanned black onto the glass.
+pub const TV_H_CENTRE_RANGE: i32 = 16;
+pub const TV_V_CENTRE_RANGE: i32 = 8;
 
 /// How emulated scanlines map to host rows in the window and in
 /// screenshots. The `COPPERLINE_PIXEL_ASPECT` env var (tv/square)
@@ -2102,6 +2131,7 @@ impl Default for Config {
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
             overscan: Overscan::Tv,
+            tv_centre: TvCentre::default(),
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
             deinterlace: true,
@@ -2812,6 +2842,14 @@ pub(crate) struct RawDisplay {
     /// "tv" (default, mask deep overscan like a CRT bezel) or "full".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) overscan: Option<String>,
+    /// Horizontal centring of the TV presentation in lo-res pixels,
+    /// positive right (default 0): a monitor's H-CENTER control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tv_h_centre: Option<i32>,
+    /// Vertical centring of the TV presentation in scan lines, positive
+    /// down (default 0): a monitor's V-CENTER control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tv_v_centre: Option<i32>,
     /// "tv" (default, 4:3 CRT pixel aspect) or "square" (1:1 host
     /// pixels; a lo-res display is an exact 2x2 of its bitmap).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3931,6 +3969,30 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.overscan,
             Some(s) => parse_overscan(s)?,
         };
+        let mut tv_centre_axis = |key: &str, raw: Option<i32>, range: i32, default: i32| match raw {
+            None => default,
+            Some(v) if (-range..=range).contains(&v) => v,
+            Some(v) => {
+                errors.push(anyhow!(
+                    "[display] {key} must be between -{range} and {range}, got {v}"
+                ));
+                default
+            }
+        };
+        let tv_centre = TvCentre {
+            h: tv_centre_axis(
+                "tv_h_centre",
+                raw.display.tv_h_centre,
+                TV_H_CENTRE_RANGE,
+                defaults.tv_centre.h,
+            ),
+            v: tv_centre_axis(
+                "tv_v_centre",
+                raw.display.tv_v_centre,
+                TV_V_CENTRE_RANGE,
+                defaults.tv_centre.v,
+            ),
+        };
         let pixel_aspect = match raw.display.pixel_aspect.as_deref() {
             None => defaults.pixel_aspect,
             Some(s) => parse_pixel_aspect(s)?,
@@ -4563,6 +4625,7 @@ impl TryFrom<RawConfig> for Config {
             floppy_connected,
             floppy_playlists,
             overscan,
+            tv_centre,
             pixel_aspect,
             scaling,
             deinterlace,
@@ -6976,6 +7039,24 @@ mod tests {
         assert_eq!(cfg.phosphor, 0.4);
         assert!(parse_config("[display]\nphosphor = 1.5").is_err());
         assert!(parse_config("[display]\nphosphor = -0.1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn display_tv_centre_parses_and_rejects_out_of_range() -> Result<()> {
+        assert_eq!(parse_config("")?.tv_centre, TvCentre::default());
+        let cfg = parse_config(
+            r#"
+            [display]
+            tv_h_centre = 6
+            tv_v_centre = -3
+            "#,
+        )?;
+        assert_eq!(cfg.tv_centre, TvCentre { h: 6, v: -3 });
+        assert!(parse_config("[display]\ntv_h_centre = 17").is_err());
+        assert!(parse_config("[display]\ntv_h_centre = -17").is_err());
+        assert!(parse_config("[display]\ntv_v_centre = 9").is_err());
+        assert!(parse_config("[display]\ntv_v_centre = -9").is_err());
         Ok(())
     }
 
