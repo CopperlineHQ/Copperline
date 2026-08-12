@@ -341,9 +341,11 @@ pub(super) struct Instance {
 /// `(vw, vh)` is the bezel viewport in physical pixels and `band_bottom`
 /// the top of the picture opening within it, which bounds the cabinet's
 /// top band. Explicit placements are fraction-of-front; auto slots line
-/// up along the top band in order, tilted by the [`AUTO_TILT`] cycle,
-/// and any that would run past the band's end are left off rather than
-/// drawn over the corner. Pure arithmetic, unit testable on its own.
+/// up along the top band in order, tilted by the [`AUTO_TILT`] cycle.
+/// An auto slot that would run past the band's end is left off rather
+/// than drawn over the corner -- only that one: a narrower slot after it
+/// may still fit, and explicit placements never depend on the row. Pure
+/// arithmetic, unit testable on its own.
 pub(super) fn instances(sheet: &StickerSheet, vw: f32, vh: f32, band_bottom: f32) -> Vec<Instance> {
     let mut out = Vec::new();
     let band = band_bottom.max(0.0);
@@ -367,7 +369,7 @@ pub(super) fn instances(sheet: &StickerSheet, vw: f32, vh: f32, band_bottom: f32
                 let rotate = e.rotate.unwrap_or(AUTO_TILT[tilt % AUTO_TILT.len()]);
                 tilt += 1;
                 if cursor + w_px > vw - margin {
-                    break;
+                    continue;
                 }
                 let centre = [cursor + w_px * 0.5, band * 0.5];
                 cursor += w_px + gap;
@@ -894,6 +896,41 @@ image = "logo.png"
         for pair in placed.windows(2) {
             assert!(pair[0].rot[1].signum() != pair[1].rot[1].signum());
         }
+    }
+
+    #[test]
+    fn a_full_row_drops_only_the_slots_that_do_not_fit() {
+        let (vw, vh, band) = (1400.0, 1050.0, 106.0);
+        let mut sheet = auto_sheet(12, 100, 50);
+        // After the wide slots fill the row: an explicit placement, and a
+        // much narrower auto slot.
+        sheet.entries[10].at = Some([0.5, 0.9]);
+        sheet.entries[10].width_frac = Some(0.1);
+        sheet.entries[11].w = 10;
+        sheet.entries[11].h = 50;
+        let placed = instances(&sheet, vw, vh, band);
+        // The row filled before the wide slots ran out...
+        let on_row = |i: &&Instance| i.centre[1] == band * 0.5;
+        assert!(
+            placed
+                .iter()
+                .filter(on_row)
+                .filter(|i| i.half[0] > 30.0)
+                .count()
+                < 10
+        );
+        // ...but the explicit placement never used the row...
+        assert!(
+            placed.iter().any(|i| i.centre == [0.5 * vw, 0.9 * vh]),
+            "explicit placement dropped with the full row"
+        );
+        // ...and the narrow slot after the oversize ones still fits.
+        assert!(
+            placed
+                .iter()
+                .any(|i| i.half[0] < 30.0 && i.centre[1] == band * 0.5),
+            "a narrow auto slot was dropped with the full row"
+        );
     }
 
     #[test]

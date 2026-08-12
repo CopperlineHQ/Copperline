@@ -5951,7 +5951,9 @@ function monitorDraw(width, rows, crtLines) {
           wPx = s.width != null ? s.width * w : autoH / Math.max(aspect, 1e-3);
           rot = s.rotate ?? BEZEL_STICKER_TILT[tilt % BEZEL_STICKER_TILT.length];
           tilt += 1;
-          if (cursor + wPx > w - margin) break;
+          // Only this slot is dropped when the row is full: a narrower one
+          // after it may still fit, and placed entries never use the row.
+          if (cursor + wPx > w - margin) continue;
           cx = cursor + wPx * 0.5;
           cy = band * 0.5;
           cursor += wPx + gap;

@@ -12084,11 +12084,6 @@ impl App {
         self.tint_lut = tint_lut(tint);
     }
 
-    /// Compile the configured user shader against the live device. The full
-    /// message goes to the log; the returned one-line summary is for the
-    /// caller to fold into whatever overlay it is already showing. A failure
-    /// leaves no pipeline, so the caller falls back to no shader rather than
-    /// to a stale one.
     /// Load the configured sticker folder into the decal pass, or clear it
     /// when none is configured. The full message goes to the log; the
     /// returned one-line summary is for the caller's overlay, exactly as
@@ -12118,6 +12113,11 @@ impl App {
         }
     }
 
+    /// Compile the configured user shader against the live device. The full
+    /// message goes to the log; the returned one-line summary is for the
+    /// caller to fold into whatever overlay it is already showing. A failure
+    /// leaves no pipeline, so the caller falls back to no shader rather than
+    /// to a stale one.
     fn reload_custom_shader(&mut self) -> Result<(), String> {
         let fail = |msg: String| {
             error!("[display] shader: {msg}");
