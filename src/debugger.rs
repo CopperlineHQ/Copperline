@@ -1166,7 +1166,9 @@ impl Debugger {
 
     pub fn is_breakpoint(&self, pc: u32) -> bool {
         let pc = pc & self.addr_mask;
-        self.breakpoints.iter().any(|&bp| (bp & self.addr_mask) == pc)
+        self.breakpoints
+            .iter()
+            .any(|&bp| (bp & self.addr_mask) == pc)
             || self.alert_break.map(|a| a & self.addr_mask) == Some(pc)
     }
 
@@ -1786,6 +1788,8 @@ mod tests {
             copper_dumped: false,
             ram_dump: None,
             ram_dumped: false,
+            listcheck: Vec::new(),
+            listcheck_reported: false,
         };
         assert!(dbg.is_breakpoint(0xFFC0_33C2));
         assert!(dbg.is_breakpoint(0x00C0_33C2));
@@ -1816,6 +1820,8 @@ mod tests {
             copper_dumped: false,
             ram_dump: None,
             ram_dumped: false,
+            listcheck: Vec::new(),
+            listcheck_reported: false,
         };
         assert!(dbg.is_breakpoint(0x4000_1000));
         assert!(!dbg.is_breakpoint(0x0000_1000));
