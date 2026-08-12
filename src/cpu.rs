@@ -6870,10 +6870,12 @@ mod tests {
 
     #[test]
     fn fpu_disabled_machine_still_traps_f_line() -> Result<()> {
+        // Without an FPU fitted the same instruction takes the Line-F
+        // exception, which is how boot code detects the FPU's absence.
         let mut bus = test_bus_with_pc(0x0000_0100);
-        write_program(&mut bus, 0x0000_0100, &[0xF200, 0x5C00]);
-        write_chip_long(&mut bus, 0x2C, 0x0000_0200);
-        write_program(&mut bus, 0x0000_0200, &[0x4E71]);
+        write_program(&mut bus, 0x0000_0100, &[0xF200, 0x5C00]); // FMOVECR #0,FP0
+        write_chip_long(&mut bus, 0x2C, 0x0000_0200); // Line-F vector
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]); // handler NOP
         let mut machine = M68kMachine::new(bus, CpuModel::M68020, false)?;
         machine.step_slice(1)?;
         assert_eq!(machine.pc(), 0x0000_0200);
