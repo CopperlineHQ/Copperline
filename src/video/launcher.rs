@@ -1953,6 +1953,11 @@ pub struct MachineSetup {
     shader_strength: f32,
     /// Which monitor front frames the picture, if any ([display] bezel).
     bezel: BezelStyle,
+    /// Folder of PNG stickers drawn onto the bezel ([display]
+    /// bezel_stickers). No launcher row edits it -- like the custom
+    /// shader, there is no file browser -- but it is carried so a
+    /// configured folder survives the launcher's config round-trip.
+    bezel_stickers: Option<PathBuf>,
     /// Performance overlay in the top-right ([display] perf_overlay).
     perf_overlay: bool,
     /// The MT-32's two ROM images, whether its front panel starts up, and
@@ -2165,6 +2170,7 @@ impl MachineSetup {
             },
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
+            bezel_stickers: cfg.bezel_stickers.clone(),
             perf_overlay: cfg.perf_overlay,
             mt32_control_rom: cfg.serial.mt32_control_rom.clone(),
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
@@ -2572,6 +2578,9 @@ impl MachineSetup {
         if self.bezel != base.bezel {
             raw.display.bezel = Some(crate::config::RawBezel::Named(self.bezel.label().into()));
         }
+        if self.bezel_stickers != base.bezel_stickers {
+            raw.display.bezel_stickers = self.bezel_stickers.as_deref().map(path_string);
+        }
         if self.perf_overlay != base.perf_overlay {
             raw.display.perf_overlay = Some(self.perf_overlay);
         }
@@ -2855,6 +2864,8 @@ impl MachineSetup {
         self.shader = base.shader.clone();
         self.shader_strength = base.shader_strength;
         self.bezel = base.bezel;
+        // The sticker folder survives like the shader path above: it names
+        // a folder of the user's, not anything of the profile's.
         self.perf_overlay = base.perf_overlay;
         self.tint = base.tint;
         self.menu_scale = base.menu_scale;
@@ -9628,6 +9639,32 @@ mod tests {
         }
         // A full turn of the cycle comes back to where it started.
         assert_eq!(s.bezel, BezelStyle::None);
+    }
+
+    #[test]
+    fn the_sticker_folder_survives_a_launcher_round_trip() {
+        let mut raw = RawConfig::default();
+        raw.display.bezel_stickers = Some("/data/amiga/stickers".into());
+        let s = MachineSetup::from_raw(&raw).expect("valid raw");
+        // No launcher row edits the folder, so a straight round-trip must
+        // carry it: a machine saved or started from the launcher keeps its
+        // stickers.
+        assert_eq!(
+            s.to_raw().display.bezel_stickers.as_deref(),
+            Some("/data/amiga/stickers")
+        );
+        assert_eq!(
+            s.build_config()
+                .expect("valid config")
+                .bezel_stickers
+                .as_deref(),
+            Some(Path::new("/data/amiga/stickers"))
+        );
+        // Unset stays unwritten.
+        assert_eq!(
+            MachineSetup::default().to_raw().display.bezel_stickers,
+            None
+        );
     }
 
     #[test]

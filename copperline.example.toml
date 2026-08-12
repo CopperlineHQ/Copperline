@@ -481,6 +481,12 @@ video = "PAL"
 # Copperline drew first). Cmd/Alt+M turns the chosen one off and back on.
 # Composes with any shader setting, and like it is a window-display effect
 # only: captures never include the frame.
+# bezel_stickers: folder of PNG stickers drawn onto the bezel, the way
+# owners dress a real monitor (unset by default: none). Every *.png in
+# the folder becomes a die-cut decal; without further instruction they
+# line up along the cabinet's top band, and an optional stickers.toml in
+# the folder places each one (see the configuration guide). Drawn only
+# while a bezel is; captures never include them.
 # perf_overlay: show the performance overlay at start (default false; also
 # --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
 # factor, per-frame emulation cost, host utilisation, audio health, and
@@ -506,6 +512,7 @@ video = "PAL"
 # shader = "none"
 # shader_strength = 1.0
 # bezel = "off"
+# bezel_stickers = "/data/amiga/stickers"
 # perf_overlay = false
 # tint = "none"
 # menu_scale = "1x"

@@ -730,6 +730,45 @@ never include it, and it is skipped while a menu or overlay panel is open
 and for RTG scanout frames. Unlike the shader it does stay on for
 programmable multisync scans -- a frame has no line structure to get wrong.
 
+`bezel_stickers` names a folder of PNG images to draw onto the bezel as
+die-cut stickers, the way owners dress a real monitor with community and
+maker logos. Unset (the default) draws none. Every `*.png` in the folder
+becomes one decal (up to 16, alpha respected, large sources scaled down),
+laid along the cabinet's top band in file-name order with a slight
+alternating tilt; each picks up a soft drop shadow and the plastic's
+lighting so it reads as stuck on rather than pasted over. The folder is
+re-read when a machine starts, so editing it and restarting (or switching
+machine in the launcher) picks up changes; a folder that fails to load
+reports on the on-screen display and falls back to bare plastic.
+
+An optional `stickers.toml` in the folder chooses and places the images
+instead, one `[[sticker]]` table per decal, drawn in written order:
+
+```toml
+[[sticker]]
+image = "retro32.png"   # file name in the folder
+x = 0.32                # sticker centre, fraction of the front's width
+y = 0.935               # and of its height (down from the top)
+width = 0.11            # width as a fraction of the front's width
+rotate = -2.5           # degrees clockwise
+opacity = 1.0
+
+[[sticker]]
+image = "badge.png"     # no x/y: an auto slot on the top band
+```
+
+`x` and `y` come as a pair; a table without them takes the next automatic
+top-band slot (where `width` and `rotate` still override that slot's own).
+Height always follows the image's aspect. The same keys, as JSON, drive
+the web player's `#bezel-stickers` page hook
+([the browser chapter](browser.md)), so one sheet lays out identically in
+the app and on a hosting page.
+
+Stickers ride the bezel: they draw only while a front does, follow it
+through Cmd+M / Alt+M, and are presentation only -- captures never include
+them. `COPPERLINE_BEZEL_STICKERS` (a folder path, or empty for none)
+overrides the config for a single run.
+
 `perf_overlay` (default `false`) shows the performance overlay at start: a
 live readout of emulated fps, speed factor, per-frame emulation cost, host
 utilisation, audio health, and pacer slips in the top-right corner of the

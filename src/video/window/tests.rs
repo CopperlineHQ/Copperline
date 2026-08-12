@@ -3584,6 +3584,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::ShaderMode::None,
         1.0,
         crate::config::BezelStyle::None,
+        None,
         false,
         crate::config::Tint::None,
         false,

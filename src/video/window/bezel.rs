@@ -1566,6 +1566,126 @@ mod tests {
         }
     }
 
+    /// The sticker pass draws over the finished front and only there:
+    /// the decal prints where its manifest places it, and every probe
+    /// away from it -- the picture, the case corner, the far chin -- is
+    /// byte-identical to the same render without the pass.
+    #[test]
+    fn sticker_decals_print_on_the_chin_and_touch_nothing_else() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (device, queue) = (gpu.device(), gpu.queue());
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &|_, _| {
+            [GREY, GREY, GREY, 255]
+        });
+        let style = BezelStyle::Model1084;
+        let (plain, dim, rows) = render_bezel(device, queue, &src, style, None, 0.0);
+
+        // A folder with one solid red die-cut sticker, placed on the chin
+        // left of the logotype.
+        let dir =
+            std::env::temp_dir().join(format!("copperline-decal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        {
+            let file = std::fs::File::create(dir.join("red.png")).expect("create png");
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 16, 8);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("png header");
+            let px: Vec<u8> = std::iter::repeat_n([255, 0, 0, 255], 16 * 8)
+                .flatten()
+                .collect();
+            writer.write_image_data(&px).expect("png data");
+        }
+        std::fs::write(
+            dir.join("stickers.toml"),
+            "[[sticker]]\nimage = \"red.png\"\nx = 0.30\ny = 0.93\nwidth = 0.12\n",
+        )
+        .expect("manifest");
+        let sheet = super::super::stickers::load_sheet(&dir).expect("load sheet");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Render exactly as render_bezel does, with the decal pass after
+        // the bezel's, as the window composes them.
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bezel_sticker_test_target"),
+            size: wgpu::Extent3d {
+                width: dim,
+                height: dim,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let (crt_uniforms, viewport) = crt_shader::uniforms_for(
+            ShaderKind::None,
+            0.0,
+            (0, 0, dim, dim),
+            DISPLAY_ROWS as usize,
+            TEX as usize,
+            (TEX, TEX),
+            DISPLAY_ROWS as f32,
+        );
+        let opening = opening_rect(style, viewport);
+        let mut shader = BezelShader::new(device, FORMAT);
+        shader.render(
+            device,
+            queue,
+            &src,
+            &mut encoder,
+            &view,
+            viewport,
+            style,
+            uniforms_from(&crt_uniforms, viewport, opening, false),
+        );
+        let mut decals = super::super::stickers::StickerPass::new(device, FORMAT);
+        decals.set_sheet(Some(sheet));
+        decals.render(device, queue, &mut encoder, &view, viewport, opening);
+        let px = read_back(device, queue, encoder, &target, (dim, dim));
+
+        // The decal prints where it was placed.
+        let probe = at(
+            &px,
+            dim,
+            (0.30 * dim as f32) as u32,
+            (0.93 * rows as f32) as u32,
+        );
+        assert!(
+            probe[0] > 150 && probe[1] < 80 && probe[2] < 80,
+            "no red decal at its placement, got {probe:?}"
+        );
+        // And it was a change: the plain front's chin is not red there.
+        let before = at(
+            &plain,
+            dim,
+            (0.30 * dim as f32) as u32,
+            (0.93 * rows as f32) as u32,
+        );
+        assert_ne!(probe, before, "the decal pass drew nothing");
+        // Everything away from the decal is untouched, byte for byte:
+        // the picture's centre, the case corner band, and the chin's
+        // far side by the power lamp.
+        for (x, y) in [
+            (dim / 2, rows / 2),
+            (dim / 2, 4),
+            ((0.85 * dim as f32) as u32, (0.93 * rows as f32) as u32),
+        ] {
+            assert_eq!(
+                at(&px, dim, x, y),
+                at(&plain, dim, x, y),
+                "({x}, {y}) changed without a decal on it"
+            );
+        }
+    }
+
     /// Not a check: renders the bezel (optionally with the CRT preset the
     /// window would pair it with) over a source image and writes a PNG for
     /// eyeballing look changes. Runs only when
@@ -1576,7 +1696,9 @@ mod tests {
     /// preset pass; COPPERLINE_BEZEL_PREVIEW_BARE instead renders the
     /// preset alone over the full frame, no bezel, for eyeballing the
     /// preset's own face geometry. COPPERLINE_BEZEL_PREVIEW_STYLE names
-    /// the front to draw, defaulting to 1084.
+    /// the front to draw, defaulting to 1084, and
+    /// COPPERLINE_BEZEL_PREVIEW_STICKERS names a sticker folder to lay
+    /// over it, the [display] bezel_stickers pass.
     #[test]
     #[ignore = "preview dump; set COPPERLINE_BEZEL_PREVIEW_OUT"]
     fn dump_bezel_preview_png() {
@@ -1701,6 +1823,13 @@ mod tests {
                 style,
                 uniforms_from(&crt_uniforms, viewport, opening, with_crt),
             );
+            if let Ok(dir) = std::env::var("COPPERLINE_BEZEL_PREVIEW_STICKERS") {
+                let sheet = super::super::stickers::load_sheet(std::path::Path::new(&dir))
+                    .expect("sticker folder loads");
+                let mut decals = super::super::stickers::StickerPass::new(device, FORMAT);
+                decals.set_sheet(Some(sheet));
+                decals.render(device, queue, &mut encoder, &view, viewport, opening);
+            }
         }
         let px = read_back(device, queue, encoder, &target, (w, h));
         let file = std::fs::File::create(&out).expect("create preview");
