@@ -30,6 +30,16 @@ own Kickstart ROM and disk/hard-disk images, and launch with:
 
 Run "copperline.exe --help" for the full command-line surface.
 
+Portable data
+-------------
+By default, quick-save slots and host preferences are kept under
+%APPDATA%\copperline so they survive replacing or moving this folder. To keep
+them inside this folder instead, create an empty file named portable.txt next
+to copperline.exe and restart Copperline. Quick-save slots will then be in the
+states subfolder; controller mappings, WHDLoad data and other host preferences
+will also stay here. Delete portable.txt to return to %APPDATA%; existing files
+are not moved automatically.
+
 Bridged Ethernet
 ----------------
 User-mode NAT works with no additional software. Direct bridged Ethernet

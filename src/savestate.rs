@@ -200,14 +200,15 @@ pub(crate) fn slot_path_in(dir: &Path, slot: usize) -> Option<std::path::PathBuf
 }
 
 /// File backing quick-save slot `slot` (1-based, `1..=SLOT_COUNT`). `None`
-/// when the host offers no per-user directory to keep them in.
+/// when the host offers no directory to keep them in.
 ///
-/// Slots live in the per-user state directory rather than beside a config
-/// file or in the working directory: they are a host convenience, they must
-/// be reachable however the emulator was launched, and a bare relative path
-/// would scatter them across whatever directory happened to be current. A
-/// state carries its own [`MachineDescriptor`], so loading a slot saved from
-/// a different machine is caught and reported rather than silently wrong.
+/// Slots normally live in the per-user state directory rather than beside a
+/// config file or in the working directory: they are a host convenience, they
+/// must be reachable however the emulator was launched, and a bare relative
+/// path would scatter them across whatever directory happened to be current.
+/// Portable mode deliberately roots them beside the executable instead. A
+/// state carries its own [`MachineDescriptor`], so loading a slot saved from a
+/// different machine is caught and reported rather than silently wrong.
 pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
     crate::paths::state_slot_dir().and_then(|dir| slot_path_in(&dir, slot))
 }

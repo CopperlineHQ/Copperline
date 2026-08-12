@@ -320,9 +320,10 @@ See `docs/README.md` for conventions and PDF output.
 Copperline is distributed from source. On macOS this repository doubles as a
 Homebrew tap (`Formula/`); on Linux it builds as a Flatpak for Flathub
 (`packaging/flatpak/`) and as a portable AppImage (`packaging/appimage/`). It
-is not on crates.io: `Cargo.toml` sets `publish = false` because Copperline is
-distributed as an application rather than a library. Release steps for every
-channel are in
+also supports a `portable.txt` marker beside the executable to keep save-state
+slots and host preferences within the application folder. It is not on
+crates.io: `Cargo.toml` sets `publish = false` because Copperline is distributed
+as an application rather than a library. Release steps for every channel are in
 [`RELEASE.md`](RELEASE.md).
 
 ## What gets emulated
