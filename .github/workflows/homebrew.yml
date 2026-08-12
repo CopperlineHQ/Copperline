@@ -3,7 +3,8 @@ name: Homebrew formula
 # The repository doubles as its own Homebrew tap (Formula/copperline.rb).
 # Its url/sha256 are hand-edited at each release (see RELEASE.md), which is
 # the error-prone step this workflow guards: a stale checksum, an
-# unreachable tarball, or deprecated formula syntax all fail the audit.
+# unreachable tarball, deprecated formula syntax, or a mismatch between the
+# formula's install steps and the tagged source archive all fail this job.
 # Scoped to formula changes so it does not run on unrelated commits.
 on:
   push:
@@ -36,3 +37,10 @@ jobs:
         run: |
           brew tap copperlinehq/copperline "$GITHUB_WORKSPACE"
           brew audit --strict --online copperlinehq/copperline/copperline
+      - name: Install from source
+        # Audit validates metadata but does not execute `def install`. Build
+        # the stable release tarball so every path copied by the formula is
+        # checked against the archive users actually receive.
+        run: brew install --build-from-source copperlinehq/copperline/copperline
+      - name: Test installed formula
+        run: brew test copperlinehq/copperline/copperline
