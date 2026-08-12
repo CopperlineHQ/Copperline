@@ -337,7 +337,7 @@ the CPU has an instruction behind an access, so `pc` cannot be combined
 with a DMA `class` -- that pair describes something that cannot happen
 and is `-32602` rather than a watch that never fires.
 Conditions are
-`{lhs, op, rhs}` with operands `"d0"`-`"a7"`, `"pc"`, `"sr"`, a number,
+`{lhs, op, rhs}` with operands `"d0"`-`"a7"`, `"sp"`, `"fp"`, `"pc"`, `"sr"`, a number,
 or `{"mem": addr}`, and ops `eq|ne|lt|gt|le|ge|and`. A session's own
 breakpoints are removed when it disconnects; GUI-set points are left
 alone.

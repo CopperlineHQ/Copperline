@@ -705,7 +705,7 @@ pub fn disassemble_copper(ir1: u16, ir2: u16) -> String {
 /// ($FFFF,$FFFE). Returns `(address, text)` per instruction.
 pub fn dump_copper_list(read: impl Fn(u32) -> u16, start: u32, max: usize) -> Vec<(u32, String)> {
     let mut out = Vec::new();
-    let mut addr = start;
+    let mut addr = start & !1;
     for _ in 0..max {
         let ir1 = read(addr);
         let ir2 = read(addr.wrapping_add(2));

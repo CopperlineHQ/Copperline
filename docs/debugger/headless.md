@@ -19,7 +19,7 @@ COPPERLINE_DBG_SHOT=/tmp/hit \
   --screenshot-after 30 /tmp/out.png
 ```
 
-All addresses are hexadecimal, with or without a `0x` prefix. Like every
+All addresses are hexadecimal, with or without a `0x` or `$` prefix. Like every
 `COPPERLINE_*` knob, the variables are snapshotted once at startup and
 cannot change at runtime (see [](../internals/architecture)).
 

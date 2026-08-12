@@ -415,12 +415,8 @@ impl Session {
         let Some((addr_s, len_s)) = payload.split_once(',') else {
             return Ok("E01".to_string());
         };
-        let addr = parse_hex_u32(addr_s)?;
+        let addr = parse_hex_u32(addr_s)? & self.emu.machine.ui_addr_mask();
         let len = parse_hex_usize(len_s)?;
-        // `len` is a hex value the peer controls directly (independent of
-        // the packet's own byte length), so a tiny packet like "m0,ffffffff"
-        // could otherwise demand a multi-GB allocation. No real GDB request
-        // needs more than a small fraction of the address space at once.
         if len > Self::MAX_PACKET_PAYLOAD_BYTES {
             return Ok("E01".to_string());
         }
@@ -434,7 +430,7 @@ impl Session {
         let Some((addr_s, len_s)) = range.split_once(',') else {
             return Ok("E01".to_string());
         };
-        let addr = parse_hex_u32(addr_s)?;
+        let addr = parse_hex_u32(addr_s)? & self.emu.machine.ui_addr_mask();
         let len = parse_hex_usize(len_s)?;
         let data = hex_decode(data_s)?;
         if data.len() != len {
@@ -467,6 +463,7 @@ impl Session {
 
     fn add_watchpoint(&mut self, packet: &str) -> Result<String> {
         let (addr, len) = parse_z_packet(packet)?;
+        let addr = addr & self.emu.machine.ui_addr_mask();
         let len = len.max(1);
         let last = self.emu.machine.debug_read_memory(addr, len);
         if let Some(existing) = self
@@ -483,6 +480,7 @@ impl Session {
 
     fn remove_watchpoint(&mut self, packet: &str) -> Result<String> {
         let (addr, len) = parse_z_packet(packet)?;
+        let addr = addr & self.emu.machine.ui_addr_mask();
         self.watchpoints
             .retain(|watch| watch.addr != addr || watch.len != len.max(1));
         Ok("OK".to_string())

@@ -395,7 +395,7 @@ impl M68kMachine {
             dbg_crash_ring: std::collections::VecDeque::with_capacity(65),
             dbg_crash_on: crate::envcfg::flag("COPPERLINE_DIAG_CRASH"),
             dbg_crash_dumped: false,
-            dbg: crate::debugger::Debugger::from_env(),
+            dbg: crate::debugger::Debugger::from_env(address_mask_for_model(cpu_model)),
             ui_breaks: crate::debugger::InteractiveBreaks::new(address_mask_for_model(cpu_model)),
             ui_stop: None,
             ui_last_this_task: None,
@@ -686,7 +686,11 @@ impl M68kMachine {
             .map(|d| {
                 d.watches
                     .iter()
-                    .flat_map(|w| (0..w.len.div_ceil(2)).map(move |k| w.addr + k * 2))
+                    .flat_map(|w| {
+                        let base = w.addr & !1;
+                        let count = ((w.addr & 1) + w.len).div_ceil(2);
+                        (0..count).map(move |k| base + k * 2)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -6866,15 +6870,25 @@ mod tests {
 
     #[test]
     fn fpu_disabled_machine_still_traps_f_line() -> Result<()> {
-        // Without an FPU fitted the same instruction takes the Line-F
-        // exception, which is how boot code detects the FPU's absence.
         let mut bus = test_bus_with_pc(0x0000_0100);
-        write_program(&mut bus, 0x0000_0100, &[0xF200, 0x5C00]); // FMOVECR #0,FP0
-        write_chip_long(&mut bus, 0x2C, 0x0000_0200); // Line-F vector
-        write_program(&mut bus, 0x0000_0200, &[0x4E71]); // handler NOP
+        write_program(&mut bus, 0x0000_0100, &[0xF200, 0x5C00]);
+        write_chip_long(&mut bus, 0x2C, 0x0000_0200);
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]);
         let mut machine = M68kMachine::new(bus, CpuModel::M68020, false)?;
         machine.step_slice(1)?;
         assert_eq!(machine.pc(), 0x0000_0200);
         Ok(())
+    }
+
+    #[test]
+    fn watch_words_odd_start_even_length() {
+        let watch = crate::debugger::Watch {
+            addr: 0x1001,
+            len: 2,
+        };
+        let base = watch.addr & !1;
+        let count = ((watch.addr & 1) + watch.len).div_ceil(2);
+        let words: Vec<u32> = (0..count).map(|k| base + k * 2).collect();
+        assert_eq!(words, vec![0x1000, 0x1002]);
     }
 }
