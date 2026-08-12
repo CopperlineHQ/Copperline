@@ -417,6 +417,10 @@ impl Session {
         };
         let addr = parse_hex_u32(addr_s)? & self.emu.machine.ui_addr_mask();
         let len = parse_hex_usize(len_s)?;
+        // `len` is a hex value the peer controls directly (independent of
+        // the packet's own byte length), so a tiny packet like "m0,ffffffff"
+        // could otherwise demand a multi-GB allocation. No real GDB request
+        // needs more than a small fraction of the address space at once.
         if len > Self::MAX_PACKET_PAYLOAD_BYTES {
             return Ok("E01".to_string());
         }
