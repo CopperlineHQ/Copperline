@@ -1956,6 +1956,7 @@ const CONTRIBUTORS: &[&str] = &[
     "Simon Dick",
     "Nicolas Ramz",
     "Ben Letchford",
+    "Volker Schwaberow",
 ];
 const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
 

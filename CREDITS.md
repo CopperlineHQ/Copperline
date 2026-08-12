@@ -13,6 +13,7 @@ Code contributions from (the full list is on
 - Simon Dick
 - Nicolas Ramz
 - Ben Letchford
+- Volker Schwaberow
 
 ## Patreon sponsors
 
