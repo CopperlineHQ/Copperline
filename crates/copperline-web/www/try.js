@@ -4746,10 +4746,10 @@ const MONITOR_OPENING_TOP_SHARE = 0.42;
 // below the glass and the chin panel leave of the canvas height, and its
 // width follows at the canvas aspect - both axes come out scaled by the
 // same fraction, and the cabinet's side pillars take the rest.
-const MONITOR_1084_WEIGHT = 0.62;
-const MONITOR_1084_TOP = 0.1905 * MONITOR_1084_WEIGHT;
-const MONITOR_1084_WELL_BOTTOM = 0.1293 * MONITOR_1084_WEIGHT;
-const MONITOR_1084_CHIN = 0.1497 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_WEIGHT = 0.86;
+const MONITOR_1084_TOP = 0.16 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_WELL_BOTTOM = 0.117 * MONITOR_1084_WEIGHT;
+const MONITOR_1084_CHIN = 0.1356 * MONITOR_1084_WEIGHT;
 const MONITOR_1084_OPENING_SCALE =
   1 / (1 + MONITOR_1084_TOP + MONITOR_1084_WELL_BOTTOM + MONITOR_1084_CHIN);
 // The CRT preset's look parameters, the desktop's uniforms_for table for
@@ -5085,41 +5085,74 @@ void main() {
 }
 `;
 
-  // The 1084 bezel, ported from shaders/bezel_1084.wgsl: the two-tone
-  // cabinet of the monitor the Amiga shipped with - a pale case with a
-  // darker moulding clipped into it, dropping to the tube in a chamfer,
-  // and below it the chin panel with the model badge, the logotype and
-  // the power lamp. Same two modes via u_params.x as the Classic frame.
-  // The page runs the preset at full strength, so the WGSL's strength
-  // fades (params.w) are dropped as the CRT port drops them; u_params.z
-  // is the radius the preset clips its face to, which the aperture opens
-  // to. See the WGSL source for the derivations; comments here mark
-  // web-port differences only.
+  // The 1084 bezel, ported from shaders/bezel_1084.wgsl: the front of the
+  // monitor the Amiga shipped with, drawn from photographs of a real
+  // cabinet. Read from the outside in it is four things - a thin outer
+  // frame of warm greige plastic, deeper across the top than down the
+  // sides; a groove all round it, cut in section (a wall off each moulding
+  // and a floor between them); the inner bezel, a separate and much darker
+  // moulding, flat until it funnels back to the glass down four mitred
+  // planes; and the chin, standing forward of the front behind a shadowed
+  // turn, carrying the model badge, the maker's name and the power button.
+  // Same two modes via u_params.x as the Classic frame; u_params.z is the
+  // radius the preset clips its face to (pre-faded by its strength, which
+  // rides in u_params.w and fades the bow here, as on the desktop). See
+  // the WGSL source for the derivations; comments here mark web-port
+  // differences only.
   const FS_BEZEL_1084 = `#version 300 es
 ${FS_COMMON}
 uniform vec4 u_opening; // picture opening in viewport UV: xy origin, zw size
-uniform vec4 u_params;  // x: 1 = frame-only, y: face curvature, z: face radius
+uniform vec4 u_params;  // x: 1 = frame-only, y: face curvature, z: face radius, w: strength
 
-const float FRAME_WEIGHT = 0.62;
-const float FRAME_TOP = 0.1905 * FRAME_WEIGHT;
-const float FRAME_WELL_BOTTOM = 0.1293 * FRAME_WEIGHT;
-const float FRAME_CHIN = 0.1497 * FRAME_WEIGHT;
-const float FRAME_SIDE = 0.2313 * FRAME_WEIGHT;
-const float FRAME_BAND = 0.064 * FRAME_WEIGHT;
+// The frame's proportions, in units of the opening's height, scaled by
+// FRAME_WEIGHT: the real cabinet's ratios, measured off a straight-on
+// photograph. The vertical three place the opening (monitorDraw does that
+// off the MONITOR_1084_* copies of them); they are stated here anyway,
+// like the WGSL states them, so the whole set lives in one place.
+const float FRAME_WEIGHT = 0.86;
+const float FRAME_TOP = 0.1600 * FRAME_WEIGHT;
+const float FRAME_WELL_BOTTOM = 0.1170 * FRAME_WEIGHT;
+const float FRAME_CHIN = 0.1356 * FRAME_WEIGHT;
+const float FRAME_SIDE = 0.1780 * FRAME_WEIGHT;
+// The outer frame's width and the groove between it and the inner bezel;
+// FRAME_BAND is the two together. Two of each: the cabinet carries a
+// deeper band across the top than down the sides.
+const float FRAME_BAND = 0.0700 * FRAME_WEIGHT;
+const float FRAME_BAND_TOP = 0.0840 * FRAME_WEIGHT;
+const float FRAME_OUTER = 0.0500 * FRAME_WEIGHT;
 
-const float APERTURE_RADIUS = 0.068;
-const float R_PLASTIC = 0.036;
-const float CHAMFER_SPAN = 0.72;
-const float CHAMFER_SLOPE = 0.80;
+// The recess aperture's corners, as a fraction of the opening half-width.
+const float APERTURE_RADIUS = 0.090;
+// The groove's cut sides: how much of its width each takes, and how far
+// each leans off the front.
+const float GROOVE_WALL = 0.30;
+const float GROOVE_SLOPE = 1.36;
+// The cabinet's corner arcs and the inner bezel's, in opening heights.
+const float R_PLASTIC = 0.018;
+const float R_REVEAL = 0.0;
 
-const vec3 CASE = vec3(0.5150, 0.5459, 0.5842);
-const vec3 MOULDING = vec3(0.2581, 0.2789, 0.2622);
-const vec3 INK = vec3(0.0, 0.0331, 0.3516);
-const vec3 BADGE_INK = vec3(0.1946, 0.2874, 0.5029);
-const vec3 LAMP = vec3(0.72, 0.035, 0.014);
+// Colours, in linear light, sRGB originals in the comments. Only CASE and
+// MOULDING are sampled off the cabinet; everything else on the front is
+// one of those two under a different light.
+const vec3 CASE = vec3(0.4287, 0.4397, 0.4233); // #afb1ae
+const vec3 CHIN_LIP = vec3(0.4287, 0.4397, 0.4233);
+const vec3 MOULDING = vec3(0.1529, 0.1413, 0.1119); // #6d695e
+const vec3 SINK = MOULDING * 0.72;
+const vec3 INK = vec3(0.0040, 0.0194, 0.0931); // #0d2656
+const vec3 BADGE_INK = vec3(0.0356, 0.0561, 0.1329); // #354366
+const vec3 LEGEND = vec3(0.0030, 0.0030, 0.0030); // #0a0a0a
+const vec3 LAMP = vec3(0.6445, 0.0012, 0.0252); // #d2042c
 const vec3 LAMP_WELL = vec3(0.014, 0.012, 0.012);
-const vec3 LEGEND = vec3(0.10, 0.10, 0.095);
+const vec3 GAP_FLOOR = vec3(0.0410, 0.0400, 0.0360);
+const vec3 GROOVE_FLOOR = vec3(0.0300, 0.0292, 0.0263);
+const vec3 GROOVE_CUT = vec3(0.1080, 0.1035, 0.0930);
 const vec3 LIGHT = vec3(-0.1, -0.5, 0.86);
+
+// How much of the room between the inner bezel's edge and the tube the
+// recess wall takes, per axis, and how far the wall leans off the front.
+const float CHAMFER_SPAN = 0.47;
+const float CHAMFER_SPAN_X = 0.52;
+const float CHAMFER_SLOPE = 1.16;
 
 float rounded_rect(vec2 p, vec2 half_size, float r) {
   vec2 q = abs(p) - half_size + vec2(r);
@@ -5138,64 +5171,33 @@ float grain(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453) - 0.5;
 }
 
+// How far the recess wall reaches beside and above the tube, in physical
+// pixels, from the room the cabinet leaves between the inner bezel's edge
+// and the glass. The vertical takes the smaller of the runs above and
+// below the tube, measured to lines the moulding does not actually reach
+// - deliberate, see the WGSL for why that comes out more proportional.
+vec2 recess_walls(vec2 o_org, vec2 o_size, float inset, float chin_top) {
+  float room_x = max(o_org.x - inset, 1.0);
+  float room_top = max(o_org.y - inset, 1.0);
+  float room_bottom = max(chin_top - (o_org.y + o_size.y), 1.0);
+  float room_y = min(room_top, room_bottom);
+  return vec2(CHAMFER_SPAN_X * room_x, CHAMFER_SPAN * room_y);
+}
+
+// A surface's tone relative to a flat front face, which comes out 1.0.
 float tone(vec3 n) {
   vec3 l = normalize(LIGHT);
-  return 0.42 + 0.58 * clamp(dot(n, l), 0.0, 1.0) / l.z;
+  return 0.52 + 0.48 * clamp(dot(n, l), 0.0, 1.0) / l.z;
 }
 
 vec3 chamfer_normal(vec2 outward, float slope) {
   return vec3(-outward * sin(slope), cos(slope));
 }
 
-const float LOGO_CAP = 0.27;
-const float LOGO_DROP = 0.56;
-
-const float MARK_SQUASH = 0.84;
-const float MARK_REACH = 1.28;
-const float MARK_MOUTH = 0.44;
-const float MARK_BAR = 0.28;
-const float MARK_SIDE = 0.46;
-
-vec2 mark_field(vec2 d, float r) {
-  float w = r * 0.50;
-  vec2 dd = vec2(d.x / MARK_SQUASH, d.y);
-  float rad = max(length(dd), 1e-4);
-  float wl = w * (1.24 - MARK_SIDE + MARK_SIDE * abs(dd.x / rad));
-  float ring = abs(rad - r) - wl * 0.5;
-  if (dd.x > 0.0 && abs(d.y) < r * MARK_MOUTH) ring = 1.0e6;
-  float bar = rounded_rect(d, vec2(r * MARK_REACH, w * MARK_BAR), w * 0.10);
-  float sd = min(ring, bar);
-  return vec2(1.0 - smoothstep(-0.5, 0.6, sd),
-              clamp(d.y / (2.0 * r) + 0.5, 0.0, 1.0));
-}
-
-float spark(vec2 q, float s, float reach) {
-  float core = pow(1.0 - clamp(length(q) / s, 0.0, 1.0), 2.2);
-  float across = pow(1.0 - clamp(abs(q.x) / (s * reach), 0.0, 1.0), 2.0)
-    * pow(1.0 - clamp(abs(q.y) / (s * 0.30), 0.0, 1.0), 1.4);
-  float down = pow(1.0 - clamp(abs(q.y) / (s * reach * 0.62), 0.0, 1.0), 2.0)
-    * pow(1.0 - clamp(abs(q.x) / (s * 0.26), 0.0, 1.0), 1.4);
-  return clamp(core + 0.85 * across + 0.85 * down, 0.0, 1.0);
-}
-
-float mark_sparks(vec2 d, float r) {
-  float a = spark(d + vec2(r * MARK_REACH, 0.0), r * 0.34, 3.2);
-  float b = spark(d - vec2(r * MARK_REACH, 0.0), r * 0.34, 3.2);
-  float c = 0.58 * spark(d + vec2(r * 0.34, 0.0), r * 0.22, 1.5);
-  return max(max(a, b), c);
-}
-
-const vec3 SPARK_LIGHT = vec3(1.0, 0.8388, 0.7011);
-
-vec3 copper(float t) {
-  vec3 top = vec3(0.3250, 0.0865, 0.0273);
-  vec3 sheen = vec3(0.6105, 0.2346, 0.1022);
-  vec3 mid = vec3(0.2519, 0.0578, 0.0168);
-  vec3 lo = vec3(0.0759, 0.0168, 0.0048);
-  if (t < 0.40) return mix(top, sheen, 1.0 - smoothstep(0.24, 0.40, t));
-  if (t < 0.60) return mix(sheen, mid, smoothstep(0.40, 0.60, t));
-  return mix(mid, lo, smoothstep(0.60, 1.0, t));
-}
+// The maker's name, in cap heights of the chin's own height, and where
+// its middle sits down the panel.
+const float LOGO_CAP = 0.30;
+const float LOGO_DROP = 0.64;
 
 const int MARK_COLS = 67;
 const int MARK_ROWS = 11;
@@ -5305,86 +5307,146 @@ bool on_text(vec2 q, int cols, int rows) {
     && all(lessThan(q, vec2(float(cols), float(rows)) + 1.0));
 }
 
-vec3 chin(vec2 px, vec2 case_org, vec2 case_size, vec2 moulding_org,
-          vec2 opening, float top, vec3 base) {
-  float h = case_org.y + case_size.y - top;
-  vec3 col = base * 1.02;
+// The standby mark: a broken ring with a bar dropped through the gap, as
+// the moulded front prints it. r in physical pixels.
+float standby(vec2 q, float r) {
+  float w = max(r * 0.34, 1.1);
+  float ring = abs(length(q) - r) - w * 0.5;
+  if (q.y < -r * 0.30 && abs(q.x) < r * 0.55) ring = 1.0e6;
+  float bar = rounded_rect(q + vec2(0.0, r * 0.45), vec2(w * 0.5, r * 0.75), w * 0.25);
+  float sd = min(ring, bar);
+  return 1.0 - smoothstep(-0.5, 0.6, sd);
+}
 
-  float below = px.y - top;
-  col *= mix(0.46, 1.0, smoothstep(0.0, 0.085 * h, below));
-  col *= 1.0 + 0.07 * (1.0 - smoothstep(0.10 * h, 0.26 * h, below));
+// The chin's panel seams, in physical pixels across the front: the flap's
+// left edge, the joint where the flap meets the power button (named twice
+// because it is two edges meeting), and the button's right edge.
+vec4 chin_seams(float cw, float recess) {
+  float joint = recess - 0.0735 * cw;
+  return vec4(0.335 * cw, joint, joint, recess);
+}
 
-  float power_right = opening.x + opening.y;
-  float power_left = power_right - 0.066 * case_size.x;
-  float joints[3] = float[3](case_org.x + 0.340 * case_size.x, power_left, power_right);
-  for (int i = 0; i < 3; i++) {
-    col *= mix(0.66, 1.0, smoothstep(0.0, 1.5, abs(px.x - joints[i]) - 0.5));
+// How wide those seams are cut, for a chin of height ch.
+float chin_seam_width(float ch) {
+  return clamp(0.030 * ch, 1.4, 4.0);
+}
+
+// How far a seam leans across the chin's turn, as a fraction of the
+// turn's height, and which way each seam of chin_seams leans on the way
+// up (the sign) and by how much of the lean (the magnitude).
+const float LEDGE_SEAM_LEAN = 0.55;
+const vec4 LEDGE_SEAM_LEAN_DIR = vec4(1.3, -1.0, -1.0, -1.0);
+
+// The whole chin: everything below the recess. p is the fragment in
+// physical pixels from the cabinet's top-left, org/size the chin band's
+// rectangle in the same space, unit the opening height.
+vec3 chin(vec2 p, vec2 org, vec2 size, float unit, float inset, float recess, vec3 base) {
+  vec3 colour = base;
+  vec2 q = p - org;
+  float ch = size.y;
+  float cw = size.x;
+  float aa = 1.0;
+
+  // The rolled top edge: a bright lip where the band's top face catches
+  // the room, then the seam's shadow under the recess above it.
+  float lip_h = clamp(0.055 * ch, 1.0, 4.0);
+  if (q.y < lip_h) {
+    colour = mix(CHIN_LIP * 1.06, colour, smoothstep(0.15 * lip_h, 1.0 * lip_h, q.y));
   }
 
-  float mid = top + h * 0.50;
+  // The seams. The power button's right edge sits on the line where the
+  // inner bezel begins to fall away to the tube, not on the moulding's
+  // outer edge.
+  float btn_w = 0.0735 * cw;
+  float btn_r = recess;
+  float btn_c = btn_r - btn_w * 0.5;
+  float btn_hw = btn_w * 0.5;
+  float seam_w = chin_seam_width(ch);
+  vec4 sv = chin_seams(cw, recess);
+  float seams[4] = float[4](sv.x, sv.y, sv.z, sv.w);
+  for (int i = 0; i < 4; i++) {
+    float groove = 1.0 - smoothstep(0.2 * seam_w, 1.0 * seam_w, abs(q.x - seams[i]));
+    colour = mix(colour, GAP_FLOOR, groove * 0.80);
+  }
 
-  float bs = h * 0.38 / MODEL_CAP;
-  float bcap = 0.5 * MODEL_CAP * bs;
-  float ink_w = (MODEL_INK.y - MODEL_INK.x) * bs;
-  vec2 bhalf = vec2(ink_w * 0.5 + bcap * 1.56, bcap * 1.20);
-  vec2 bc = vec2(moulding_org.x + bhalf.x, mid);
-  vec2 borg = vec2(bc.x - ink_w * 0.5 - MODEL_INK.x * bs, mid - bcap);
-  float db = rounded_rect(px - bc, bhalf, bs * 0.8);
-  col *= mix(0.78, 1.0, smoothstep(0.0, 1.4, abs(db) - 0.6));
-  if (db < 0.0) col *= 0.99;
-  if (2.0 * bcap >= 7.0) {
-    vec2 q = (px - borg) / bs;
-    if (on_text(q, MODEL_COLS, MODEL_ROWS)) {
-      col = mix(col, BADGE_INK, model_sample(q));
+  // The model badge: a shallow square-cornered recess let into the panel
+  // on the left, hard against the outer frame's inner edge, with the
+  // model number in striped digits.
+  float badge_l = FRAME_OUTER * unit;
+  float badge_w = 0.108 * cw;
+  vec2 badge_c = vec2(badge_l + badge_w * 0.5, 0.625 * ch);
+  vec2 badge_half = vec2(badge_w * 0.5, 0.250 * ch);
+  float d_badge = rounded_rect(q - badge_c, badge_half, 0.0);
+  if (d_badge < 2.0 * aa) {
+    // The floor a touch darker than the panel, its wall shaded along the
+    // top and left and lit along the bottom and right.
+    colour = mix(colour, colour * 0.94, 1.0 - smoothstep(-1.5 * aa, 0.5 * aa, d_badge));
+    float wall = 1.0 - smoothstep(0.35 * aa, 2.2 * aa, abs(d_badge));
+    float top_left = step(q.y, badge_c.y) * 0.6 + step(q.x, badge_c.x) * 0.4;
+    colour = mix(colour, colour * mix(1.14, 0.68, clamp(top_left, 0.0, 1.0)), wall * 0.9);
+
+    // The digits, striped: ink rows alternating with the plate.
+    float bcap = 1.18 * badge_half.y;
+    float bcell = bcap / MODEL_CAP;
+    vec2 bsize = vec2(float(MODEL_COLS), float(MODEL_ROWS)) * bcell;
+    float ink_w = (MODEL_INK.y - MODEL_INK.x) * bcell;
+    vec2 borg = badge_c - vec2(ink_w * 0.5 + MODEL_INK.x * bcell, bsize.y * 0.5);
+    vec2 bg = (q - borg) / bcell;
+    if (on_text(bg, MODEL_COLS, MODEL_ROWS)) {
+      float stripe = 1.0;
+      if (bcell > 1.6) {
+        stripe = 0.62 + 0.38 * sin((bg.y + 0.25) * 6.28318);
+      }
+      float cov = model_sample(bg) * clamp(stripe * 1.5, 0.0, 1.0);
+      colour = mix(colour, BADGE_INK, cov);
     }
   }
 
-  float logo_mid = top + h * LOGO_DROP;
-  float ls = h * LOGO_CAP / MARK_CAP;
-  float lw = float(MARK_COLS) * ls;
-  float mr = h * LOGO_CAP * 0.62;
-  float mark_w = 2.0 * MARK_REACH * mr;
-  float gap = mr * 0.42;
-  float gx = case_org.x + case_size.x * 0.47 - (mark_w + gap + lw) * 0.5;
-  if (ls >= 0.6) {
-    vec2 d = px - vec2(gx + mark_w * 0.5, logo_mid);
-    vec2 m = mark_field(d, mr);
-    if (m.x > 0.0) col = mix(col, copper(m.y), m.x);
-    float glint = mark_sparks(d, mr);
-    if (glint > 0.0) col = mix(col, SPARK_LIGHT, 0.92 * glint);
-    vec2 lorg = vec2(gx + mark_w + gap, logo_mid - 0.5 * MARK_CAP * ls);
-    vec2 q = (px - lorg) / ls;
-    if (on_text(q, MARK_COLS, MARK_ROWS)) {
-      col = mix(col, INK, 0.95 * mark_sample(q));
-    }
+  // The maker's name alone, with no device beside it, so it centres on
+  // the cabinet's own middle rather than on the segment it sits in.
+  float cap = LOGO_CAP * ch;
+  float cell = cap / MARK_CAP;
+  vec2 text_px = vec2(float(MARK_COLS), float(MARK_ROWS)) * cell;
+  vec2 org_px = vec2(cw * 0.5 - text_px.x * 0.5, LOGO_DROP * ch - text_px.y * 0.5);
+  vec2 g = (q - org_px) / cell;
+  if (on_text(g, MARK_COLS, MARK_ROWS)) {
+    colour = mix(colour, INK, mark_sample(g));
   }
 
-  float pcx = (power_left + power_right) * 0.5;
-  vec2 lamp_c = vec2(pcx, top + h * 0.24);
-  float lamp_h = max(h * 0.085, 1.0);
-  float win = rounded_rect(px - lamp_c, vec2(lamp_h * 2.1, lamp_h), lamp_h * 0.4);
-  col = mix(col, LAMP_WELL, 1.0 - smoothstep(-0.7, 0.7, win));
-  float led = rounded_rect(px - lamp_c, vec2(lamp_h * 1.5, lamp_h * 0.5), lamp_h * 0.25);
-  col = mix(col, LAMP, 1.0 - smoothstep(-0.5, 0.8, led));
-
-  float ps = h * 0.145 / CAPTION_CAP;
-  if (ps >= 0.42) {
-    float weight = 0.7 * mix(0.55, 1.0, smoothstep(0.42, 0.95, ps));
-    vec2 corg = vec2(pcx - float(CAPTION_COLS) * ps * 0.5, top + h * 0.46);
-    vec2 q = (px - corg) / ps;
-    if (on_text(q, CAPTION_COLS, CAPTION_ROWS)) {
-      col = mix(col, LEGEND, weight * caption_sample(q));
-    }
+  // The power button: its own square piece, the lamp's dark window at
+  // the top, the caption under it, the standby mark under that.
+  vec2 bq = vec2(q.x - btn_c, q.y);
+  if (abs(bq.x) < btn_hw) {
+    float bev = 1.0 - smoothstep(0.10 * ch, 0.22 * ch, q.y);
+    colour = mix(colour, colour * 1.10, bev * 0.6);
   }
+  // The lamp, sized off its foot rather than its middle: the lamp's
+  // bottom edge is the fixed thing on the button.
+  vec2 lamp_half = vec2(0.30 * btn_hw, 0.092 * ch);
+  vec2 lamp_c = vec2(0.0, 0.258 * ch - lamp_half.y);
+  float d_well = rounded_rect(bq - lamp_c, lamp_half, 0.03 * ch);
+  if (d_well < 0.0) {
+    colour = LAMP_WELL;
+    float d_lamp = rounded_rect(bq - lamp_c, lamp_half - vec2(1.5, 1.5), 0.02 * ch);
+    float lit = 1.0 - smoothstep(-2.0, 0.0, d_lamp);
+    colour = mix(colour, LAMP, lit);
+    // A soft top catchlight on the lamp's plastic.
+    float glint = 1.0 - smoothstep(0.0, lamp_half.y, bq.y - (lamp_c.y - lamp_half.y * 0.4));
+    colour = mix(colour, colour + vec3(0.25, 0.10, 0.08), lit * glint * 0.5);
+  }
+  // The caption, centred under the lamp, and the standby mark under it.
+  float ccap = 0.145 * ch;
+  float ccell = ccap / CAPTION_CAP;
+  vec2 ctext = vec2(float(CAPTION_COLS), float(CAPTION_ROWS)) * ccell;
+  vec2 corg = vec2(-ctext.x * 0.5, 0.575 * ch - ctext.y * 0.5);
+  vec2 cg = (bq - corg) / ccell;
+  if (on_text(cg, CAPTION_COLS, CAPTION_ROWS)) {
+    colour = mix(colour, LEGEND, caption_sample(cg));
+  }
+  float sb = standby(bq - vec2(0.0, 0.833 * ch), 0.080 * ch);
+  colour = mix(colour, LEGEND, sb);
 
-  float sr = max(h * 0.13, 1.4);
-  vec2 d = px - vec2(pcx, top + h * 0.76);
-  float ring = abs(length(d) - sr) - sr * 0.15;
-  float bar = rounded_rect(d + vec2(0.0, sr * 0.34),
-                           vec2(sr * 0.14, sr * 0.60), sr * 0.13);
-  float standby = min(ring, bar);
-  if (d.y < 0.0 && abs(d.x) < sr * 0.40) standby = bar;
-  return mix(col, LEGEND, 0.8 * (1.0 - smoothstep(-0.4, 0.7, standby)));
+  return colour;
 }
 
 void main() {
@@ -5394,21 +5456,25 @@ void main() {
   vec2 o_org = u_opening.xy * vp;
   vec2 o_size = u_opening.zw * vp;
   vec2 o_half = max(o_size * 0.5, vec2(1.0));
-  vec2 centre = o_org + o_half;
-  vec2 p = px - centre;
+  vec2 p = px - (o_org + o_half);
   float unit = o_size.y;
 
-  vec2 case_org = vec2(0.0);
+  vec2 case_org = vec2(0.0, 0.0);
   vec2 case_size = vp;
   float chin_top = vp.y - FRAME_CHIN * unit;
 
+  // The glass contour: the CRT pass's warp maps the opening onto the
+  // source frame, so with the preset's curvature in u_params.y this
+  // distance coincides with the preset's face boundary exactly, and at
+  // zero curvature it reduces to a plain rounded opening. Faded by
+  // mixing coordinates, exactly as the CRT pass fades its own warp.
   float k = u_params.y;
   float fa = o_half.y / max(o_half.x, 1.0);
   vec2 cn = p / o_half;
   float q = k * 0.25;
   float r2 = cn.x * cn.x + cn.y * cn.y * fa * fa;
   vec2 m = vec2(1.0 + q, 1.0 + q * fa * fa);
-  vec2 wc = cn * (1.0 + q * r2) / m;
+  vec2 wc = mix(cn, cn * (1.0 + q * r2) / m, u_params.w);
   vec2 fh = vec2(1.0, fa);
   vec2 gp = wc * fh;
   float r_aperture = max(APERTURE_RADIUS, u_params.z);
@@ -5416,57 +5482,146 @@ void main() {
   vec2 n_glass = rounded_rect_grad(gp, fh, r_aperture);
   float aa = max(fwidth(d_glass), 1e-4);
 
+  // Frame-only pass: a CRT preset has already painted the opening
+  // interior; leave every interior fragment to it and repaint just the
+  // frame on top of its square viewport.
   if (u_params.x > 0.5 && d_glass < 0.0) discard;
 
+  // The outer frame: one thin band of light plastic running the whole
+  // way round the front, deeper across the top than down the sides. It
+  // is the outermost surface: everything else is set into it.
   vec2 c_half = case_size * 0.5;
   vec2 cp = px - (case_org + c_half);
   float r_plastic = R_PLASTIC * unit;
   float d_case = rounded_rect(cp, c_half, r_plastic);
-  float aa_case = max(fwidth(d_case), 1e-4);
 
-  float m_side = (FRAME_SIDE - FRAME_BAND) * unit;
-  vec2 m_org = vec2(o_org.x - m_side, FRAME_BAND * unit);
-  vec2 m_half = vec2(o_size.x * 0.5 + m_side, (chin_top - m_org.y) * 0.5);
-  vec2 mp = px - (m_org + m_half);
-  float d_moulding = rounded_rect(mp, m_half, r_plastic);
+  vec3 colour = CASE * (1.0 + 0.025 * grain(px));
+  colour = mix(colour, colour * 0.66, 1.0 - smoothstep(0.5, 2.5, -d_case));
 
-  float up = clamp((px.y - case_org.y) / max(case_size.y, 1.0), 0.0, 1.0);
-  float g = 1.0 + 0.018 * grain(floor(px));
-  vec3 case_plastic = CASE * mix(1.06, 0.94, pow(up, 0.75)) * g;
-  vec3 moulding_plastic = MOULDING * mix(1.03, 0.96, up) * g;
+  // The inner bezel: a separate, much darker moulding carrying the
+  // tube, set into the outer frame with a uniform groove all round it;
+  // its corners are square. Below the tube it stops clear of the chin's
+  // ledge, less the groove, so the groove closes round the bottom.
+  float inset = FRAME_BAND * unit;
+  float inset_top = FRAME_BAND_TOP * unit;
+  float gap_w = (FRAME_BAND - FRAME_OUTER) * unit;
+  float ledge_h = 0.10 * FRAME_CHIN * unit + 2.0;
+  vec2 inner_lo = vec2(inset, inset_top);
+  vec2 inner_hi = vec2(vp.x - inset, chin_top - ledge_h - gap_w);
+  vec2 inner_c = (inner_lo + inner_hi) * 0.5;
+  vec2 inner_h = (inner_hi - inner_lo) * 0.5;
+  float d_inner = rounded_rect(px - inner_c, inner_h, R_REVEAL * unit);
 
-  vec2 pic_uv = clamp((v_uv - u_opening.xy) / max(u_opening.zw, vec2(1e-4)),
-                      0.0, 1.0);
-  vec3 picture = sample_display(pic_uv);
+  // The gap: a channel cut clean between the two mouldings - the cut
+  // side of each moulding's edge and the floor between them, stepped in
+  // a pixel at each break. Depth is measured per run off the larger
+  // axis offset, not off a distance field, so every contour stays
+  // square and the change-over sits on the diagonal, where the two runs
+  // mitre; which side catches the light is decided by the facing alone.
+  vec2 q_gap = abs(px - inner_c) - inner_h;
+  float d_box = max(q_gap.x, q_gap.y);
+  float in_gap = smoothstep(-aa, aa, d_box) * (1.0 - smoothstep(gap_w - aa, gap_w + aa, d_box));
+  vec2 n_gap = q_gap.x > q_gap.y
+    ? vec2(sign(px.x - inner_c.x + 1e-6), 0.0)
+    : vec2(0.0, sign(px.y - inner_c.y + 1e-6));
+  float groove_w = max(GROOVE_WALL * gap_w, 1.0);
+  float wall_in = 1.0 - smoothstep(groove_w - aa, groove_w + aa, d_box);
+  float wall_out = smoothstep(gap_w - groove_w - aa, gap_w - groove_w + aa, d_box);
+  vec3 groove = GROOVE_FLOOR * (1.0 + 0.02 * grain(px));
+  groove = mix(groove, GROOVE_CUT * tone(chamfer_normal(-n_gap, GROOVE_SLOPE)), wall_in);
+  groove = mix(groove, GROOVE_CUT * tone(chamfer_normal(n_gap, GROOVE_SLOPE)), wall_out);
+  colour = mix(colour, groove, in_gap);
 
-  vec3 frame;
-  if (px.y >= chin_top) {
-    frame = chin(px, case_org, case_size, m_org,
-                 vec2(o_org.x, o_size.x), chin_top, case_plastic);
-  } else if (d_moulding >= 0.0) {
-    frame = case_plastic * mix(0.50, 1.0, smoothstep(0.0, 1.8, d_moulding - 0.6));
-    frame *= 1.0 + 0.06 * (1.0 - smoothstep(1.8, 4.0, d_moulding));
-  } else {
-    float span = max(d_glass - d_moulding, 1e-3);
-    float t = clamp(d_glass / span, 0.0, 1.0);
-    float roll = smoothstep(CHAMFER_SPAN - 0.04, CHAMFER_SPAN + 0.04, t);
-    vec3 n = normalize(mix(chamfer_normal(n_glass, CHAMFER_SLOPE),
-                           vec3(0.0, 0.0, 1.0), roll));
-    float occ = mix(0.82, 1.0, smoothstep(0.0, CHAMFER_SPAN, t));
-    frame = moulding_plastic * tone(n) * occ;
-    frame *= mix(0.68, 1.0, smoothstep(0.0, 0.026 * unit, -d_moulding));
-    frame *= mix(0.62, 1.0, smoothstep(0.0, 0.008 * unit, d_glass));
+  if (d_inner < 0.0) {
+    // The face: flat plastic, one tone across its whole width. The tube
+    // is sunk into it: the mouth is square cornered like the moulding it
+    // is cut into, the floor is the tube (round cornered, bowed under a
+    // preset), and the wall between them carries the corner from one to
+    // the other down four flat runs, mitred at the corners.
+    vec3 well = MOULDING * (1.0 + 0.03 * grain(px));
+    vec2 mouth_half = o_half + recess_walls(o_org, o_size, inset, chin_top);
+    float d_mouth = rounded_rect(p, mouth_half, 0.0);
+    vec2 n_mouth = rounded_rect_grad(p, mouth_half, 0.0);
+
+    float span = max((-d_mouth) + d_glass, 1e-3);
+    float drop = clamp((-d_mouth) / span, 0.0, 1.0);
+    float in_mouth = 1.0 - smoothstep(-aa, aa, d_mouth);
+    vec2 rel = p / max(mouth_half, vec2(1.0));
+    vec2 n_run = abs(rel.x) > abs(rel.y)
+      ? vec2(sign(rel.x + 1e-6), 0.0)
+      : vec2(0.0, sign(rel.y + 1e-6));
+    // Only the last of the drop turns to meet the tube, so the glass
+    // seats without the mitre being rounded off.
+    vec2 n_wall = normalize(mix(n_run, n_glass, smoothstep(0.80, 1.0, drop)) + vec2(1e-6));
+    vec3 n = chamfer_normal(n_wall, CHAMFER_SLOPE);
+    // One flat tone for the whole run, set only by which way that run
+    // faces: no ramp down the wall, which would read as a curve.
+    vec3 facet = SINK * tone(n);
+    well = mix(well, facet, in_mouth);
+    colour = mix(colour, well, smoothstep(-1.0 * aa, 1.0 * aa, -d_inner));
+    // A hard line where the flat face breaks to the wall, banded on the
+    // distance's modulus, and a hairline in the angle where the wall
+    // meets the glass, so the tube reads as seated.
+    float lip = 1.0 - smoothstep(0.0, 1.6 * aa, abs(d_mouth));
+    float facing = clamp(-n_mouth.y, 0.0, 1.0);
+    colour = mix(colour, MOULDING * mix(1.06, 1.24, facing), lip * 0.95);
+    float foot = (1.0 - smoothstep(0.0, aa, d_glass)) * step(0.0, d_glass);
+    colour = mix(colour, SINK * 0.62, foot * 0.8);
   }
 
-  vec2 n_case = rounded_rect_grad(cp, c_half, r_plastic);
-  frame *= 1.0 - 0.34 * smoothstep(-0.012 * unit, 0.0, d_case);
-  frame *= 1.0 + 0.42 * max(-n_case.y, 0.0)
-    * smoothstep(-0.018 * unit, -0.004 * unit, d_case);
+  // Where the inner bezel's face ends and its wall begins, on the right:
+  // the chin lines its furniture up with this, offset by the lean of the
+  // seam that meets the groove there.
+  float mouth_right = o_org.x + o_size.x
+    + recess_walls(o_org, o_size, inset, chin_top).x;
+  float seam_lean = LEDGE_SEAM_LEAN * ledge_h;
+  float chin_recess = mouth_right - seam_lean * LEDGE_SEAM_LEAN_DIR.w;
 
+  // The chin stands proud of the front behind a ledge of about
+  // forty-five degrees turning down and away from the room. The seams
+  // are gaps between separate mouldings, so they carry on up the turn,
+  // leaning back with the receding surface.
+  if (px.y > chin_top - ledge_h && px.y <= chin_top) {
+    vec3 n = chamfer_normal(vec2(0.0, -1.0), 0.78);
+    vec3 turn = CASE * tone(n) * (1.0 + 0.025 * grain(px));
+    colour = mix(colour, turn, smoothstep(0.0, aa, px.y - (chin_top - ledge_h)));
+    vec4 sv = chin_seams(vp.x, chin_recess);
+    float seams[4] = float[4](sv.x, sv.y, sv.z, sv.w);
+    float dir[4] = float[4](LEDGE_SEAM_LEAN_DIR.x, LEDGE_SEAM_LEAN_DIR.y,
+                            LEDGE_SEAM_LEAN_DIR.z, LEDGE_SEAM_LEAN_DIR.w);
+    float seam_w = chin_seam_width(vp.y - chin_top);
+    float up = clamp((chin_top - px.y) / max(ledge_h, 1.0), 0.0, 1.0);
+    float lean = seam_lean * up;
+    for (int i = 0; i < 4; i++) {
+      float d = abs(px.x - (seams[i] + lean * dir[i]));
+      colour = mix(colour, GAP_FLOOR, (1.0 - smoothstep(0.2 * seam_w, 1.0 * seam_w, d)) * 0.80);
+    }
+  }
+  if (px.y > chin_top && d_case < 0.0) {
+    colour = chin(
+      px - vec2(0.0, chin_top),
+      vec2(0.0, 0.0),
+      vec2(vp.x, vp.y - chin_top),
+      unit,
+      inset,
+      chin_recess,
+      CASE * (1.0 + 0.025 * grain(px)));
+  }
+
+  // The picture: full mode paints the opening interior itself;
+  // frame-only has already discarded it. Black under the glass edge, so
+  // the aperture's corners read as the tube's own.
+  vec2 display_uv = (v_uv - u_opening.xy) / max(u_opening.zw, vec2(1e-4));
+  vec3 picture = sample_display(display_uv);
   vec3 inner = u_params.x > 0.5 ? vec3(0.0) : picture;
-  vec3 col = mix(inner, frame, clamp(d_glass / aa + 0.5, 0.0, 1.0));
-  col = mix(col, vec3(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
-  fragColor = vec4(srgb_encode(col), 1.0);
+  vec3 lit = d_glass < 0.0 ? inner : colour;
+  vec3 joined = mix(colour, lit, smoothstep(0.5 * aa, 1.5 * aa, -d_glass + aa));
+
+  // The cabinet's own outline: it fills the viewport but for the four
+  // corners, where the moulding is drawn off the tool with the smallest
+  // of radii; outside it is the black the front stands against.
+  float outside = smoothstep(-aa, aa, d_case);
+  fragColor = vec4(srgb_encode(mix(joined, vec3(0.0), outside)), 1.0);
 }
 `;
 
@@ -5702,12 +5857,16 @@ function monitorDraw(width, rows, crtLines) {
     const bezelProg = bezelStyle === '1084' ? monitorGl.bezel1084 : monitorGl.bezelClassic;
     draw(bezelProg, 0, 0, w, h, (p) => {
       gl.uniform4f(p.u.u_opening, ox / w, oy / h, ow / w, oh / h);
+      // The desktop's uniforms_from: frame-only, the preset's curvature
+      // raw, the radius it clips its face to pre-faded by its strength,
+      // and the strength itself, which the 1084 front fades the bow by.
+      // The page runs the preset at full strength or not at all.
       gl.uniform4f(
         p.u.u_params,
         crtOn ? 1.0 : 0.0,
         crtOn ? MONITOR_CRT_CURVATURE : 0.0,
         crtOn ? MONITOR_CRT_FACE_RADIUS : 0.0,
-        0,
+        crtOn ? 1.0 : 0.0,
       );
     });
   } else if (crtOn) {
