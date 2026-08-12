@@ -49,6 +49,103 @@ fn source(style: BezelStyle) -> &'static str {
     }
 }
 
+/// Each style's `APERTURE_RADIUS`, restated for the overlays. A test pins
+/// these to the shaders' own, the way the frame proportions are pinned.
+const APERTURE_RADIUS_1084: f32 = 0.090;
+const APERTURE_RADIUS_CLASSIC: f32 = 0.0826;
+
+/// The smallest inset, in texture pixels, that puts an overlay's corner
+/// inside the picture the presentation actually draws.
+///
+/// The picture is not the rectangle it is placed in. A drawn front rounds
+/// its aperture, and a preset that bows its face rounds and pulls it in
+/// further -- at the very edge a bowed face exists only at mid-height, so
+/// the corners are where the least of it is. An overlay parked at its
+/// usual margin lands in what has been taken away and is clipped.
+///
+/// Both effects are known here in closed form: the same warp both shaders
+/// apply, against the same rounded rect. Rather than allow for them with a
+/// factor picked to look right, walk the corner outward until it is inside
+/// the face, using that geometry. It costs a few dozen floats once a frame
+/// and cannot drift from the shaders when a constant moves.
+///
+/// `curvature` and `strength` are the active preset's, 0 for one that
+/// draws the picture flat, and the result is 0 when nothing shapes the
+/// picture at all.
+///
+/// The figure is an inset on **both** axes: an overlay takes it in from
+/// the side it sits against as well as down or up from its own edge, and
+/// the corner it clears is the diagonal one. Applying it to a single axis
+/// does not clear anything -- the walk below would have to be redone for
+/// that path.
+pub(super) fn corner_inset(
+    style: BezelStyle,
+    curvature: f32,
+    strength: f32,
+    texture_scale: usize,
+) -> usize {
+    let aperture = match style {
+        BezelStyle::None => 0.0,
+        BezelStyle::Model1084 => APERTURE_RADIUS_1084,
+        BezelStyle::Classic => APERTURE_RADIUS_CLASSIC,
+    };
+    let strength = strength.clamp(0.0, 1.0);
+    let bows = curvature > 0.0 && strength > 0.0;
+    // A preset clips its face to its own radius, so that is the corner
+    // when it is the wider -- or the only corner, with no front drawn.
+    // `crt.wgsl` fades that radius linearly, so take it faded, exactly as
+    // `uniforms_from` hands it to the bezel.
+    let r = if bows {
+        aperture.max(crt_shader::FACE_CORNER_RADIUS * strength)
+    } else {
+        aperture
+    };
+    if r <= 0.0 {
+        return 0;
+    }
+
+    let w = (crate::video::FB_WIDTH * texture_scale) as f32;
+    let h = (crate::video::present_height() * texture_scale) as f32;
+    if w < 2.0 || h < 2.0 {
+        return 0;
+    }
+    // The picture keeps its aspect in the rect it is drawn into, so the
+    // face's height in half-widths is the canvas's.
+    let fa = h / w;
+    // The curvature goes in raw and the fade is the coordinate mix below,
+    // which is how both shaders do it: warping by a faded curvature is a
+    // different curve, not a weaker one, so fading it here as well would
+    // model a flatter face than is drawn and under-inset the overlays at
+    // every strength between 0 and 1.
+    let q = curvature * 0.25;
+
+    // Is a corner `d` texture pixels in from the bottom-left of the
+    // picture inside the face? Mirrors the warp and the aperture test both
+    // shaders run, in the normalised space they run them in.
+    let inside = |d: f32| {
+        let cn = (2.0 * d / w - 1.0, 1.0 - 2.0 * d / h);
+        let r2 = cn.0 * cn.0 + cn.1 * cn.1 * fa * fa;
+        let bulge = 1.0 + q * r2;
+        let warped = (cn.0 * bulge / (1.0 + q), cn.1 * bulge / (1.0 + q * fa * fa));
+        // mix(cn, warped, strength), then into the face's own units.
+        let wc = (
+            cn.0 + (warped.0 - cn.0) * strength,
+            (cn.1 + (warped.1 - cn.1) * strength) * fa,
+        );
+        // rounded_rect(wc, (1, fa), r) < 0, i.e. on the glass.
+        let qx = wc.0.abs() - 1.0 + r;
+        let qy = wc.1.abs() - fa + r;
+        (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r < 0.0
+    };
+
+    // The overlays sit at this margin; anything less is already clear.
+    let margin = 8.0 * texture_scale as f32;
+    let limit = (h / 3.0) as usize;
+    (0..=limit)
+        .find(|&d| inside(margin + d as f32))
+        .unwrap_or(limit)
+}
+
 /// The cabinet's proportions, in units of the picture opening's height:
 /// the moulding is that thick around the tube, measured off a straight-on
 /// photograph of a real 1084. [`FRAME_WEIGHT`] scales all of them
@@ -59,12 +156,12 @@ fn source(style: BezelStyle) -> &'static str {
 /// These three place the opening. `shaders/bezel_1084.wgsl` reads them
 /// back to place everything else on the front, along with the two below,
 /// so the two sources must agree; a test pins them together.
-const FRAME_WEIGHT: f32 = 0.62;
-const FRAME_TOP: f32 = 0.1905 * FRAME_WEIGHT;
+const FRAME_WEIGHT: f32 = 0.86;
+const FRAME_TOP: f32 = 0.1600 * FRAME_WEIGHT;
 /// Below the glass, down to the seam the chin panel starts at.
-const FRAME_WELL_BOTTOM: f32 = 0.1293 * FRAME_WEIGHT;
+const FRAME_WELL_BOTTOM: f32 = 0.1170 * FRAME_WEIGHT;
 /// The chin panel: model badge, logotype, power lamp.
-const FRAME_CHIN: f32 = 0.1497 * FRAME_WEIGHT;
+const FRAME_CHIN: f32 = 0.1356 * FRAME_WEIGHT;
 /// The design's side margin, and the cabinet band above the moulding.
 /// Only the shader draws with these: the cabinet fills the viewport, which
 /// leaves more room beside the tube than the design asks for, so the side
@@ -73,9 +170,9 @@ const FRAME_CHIN: f32 = 0.1497 * FRAME_WEIGHT;
 /// They are here to be pinned to the shader's copies, and to let a test
 /// place what the shader does put there.
 #[cfg(test)]
-const FRAME_SIDE: f32 = 0.2313 * FRAME_WEIGHT;
+const FRAME_SIDE: f32 = 0.1780 * FRAME_WEIGHT;
 #[cfg(test)]
-const FRAME_BAND: f32 = 0.064 * FRAME_WEIGHT;
+const FRAME_BAND: f32 = 0.0700 * FRAME_WEIGHT;
 
 /// Size of the uniform block, in bytes. The shared bind group layout pins
 /// its `min_binding_size` to the CRT block's 64 bytes, so this block must
@@ -765,6 +862,67 @@ mod tests {
         px[(y * dim + x) as usize]
     }
 
+    /// One of `bezel_1084.wgsl`'s colour constants, as the sRGB triple it
+    /// will land on in the render target. The shader states them in linear
+    /// light because the target is `Rgba8UnormSrgb`, so the encode here is
+    /// the one the hardware does on the way out.
+    ///
+    /// Reading the shader rather than restating its values is the point:
+    /// a test that carries its own idea of what colour the plastic is
+    /// silently becomes a test of last year's design.
+    fn shader_colour(name: &str) -> [u8; 3] {
+        let key = format!("const {name}: vec3<f32> = vec3<f32>(");
+        let at = M1084_WGSL
+            .find(&key)
+            .unwrap_or_else(|| panic!("bezel_1084.wgsl: no {name}"));
+        let rest = &M1084_WGSL[at + key.len()..];
+        let end = rest.find(')').expect("terminated constant");
+        let mut out = [0u8; 3];
+        let mut seen = 0;
+        for (i, t) in rest[..end].split(',').enumerate() {
+            let v: f32 = t.trim().parse().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let s = if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            out[i] = (s * 255.0).round().clamp(0.0, 255.0) as u8;
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "{name}: expected three channels");
+        out
+    }
+
+    /// Assert a rendered pixel is one of the shader's declared colours,
+    /// within the tolerance the plastic grain and antialiasing need.
+    fn is_colour(got: [u8; 4], name: &str, tol: u8, what: &str) {
+        let want = shader_colour(name);
+        let ok = (0..3).all(|c| got[c].abs_diff(want[c]) <= tol);
+        assert!(ok, "{what}: got {got:?}, {name} is {want:?} (±{tol})");
+    }
+
+    /// Whether a rendered pixel is a shaded facet of one of the shader's
+    /// plastics: the same tint, at some tone between deep shadow and the
+    /// full front light. `tone()`'s range is deliberately shallow, so what
+    /// identifies a surface is its tint and not its value -- which also
+    /// makes this the way to tell plastic from a picture a preset has
+    /// dimmed and tinted out of all recognition.
+    fn looks_shaded(got: [u8; 4], name: &str) -> bool {
+        let want = shader_colour(name);
+        let lit = f32::from(got[1]) / f32::from(want[1].max(1));
+        let tinted = (0..3).all(|c| (f32::from(got[c]) - f32::from(want[c]) * lit).abs() <= 8.0);
+        (0.3..=1.4).contains(&lit) && tinted
+    }
+
+    /// The same, as an assertion.
+    fn is_shaded(got: [u8; 4], name: &str, what: &str) {
+        assert!(
+            looks_shaded(got, name),
+            "{what}: got {got:?}, not a shaded {name} ({:?})",
+            shader_colour(name)
+        );
+    }
+
     /// The cabinet rect and the chin seam for a viewport. The cabinet is
     /// the viewport; only the seam is derived from the opening, exactly as
     /// `shaders/bezel_1084.wgsl` derives it.
@@ -838,48 +996,87 @@ mod tests {
             );
         }
 
-        // The front is two-tone: a pale cool cabinet with a distinctly
-        // darker moulding clipped into it. Sample the middle of each run
-        // to the left of the tube.
+        // The front is two-tone: the outer frame's pale plastic with the
+        // inner bezel's much darker moulding set into it. Sample the
+        // middle of each run to the left of the tube, and hold each to the
+        // colour the shader declares for it rather than to a hue this test
+        // remembers.
         let (cx, _, _, _, chin_top) = cabinet_of(dim, rows);
         let mid_y = (oy + oh * 0.5) as u32;
         let cabinet = at(&px, dim, (cx + 3.0) as u32, mid_y);
         let moulding = at(&px, dim, ((cx + ox) * 0.5) as u32, mid_y);
-        assert!(
-            cabinet[2] > cabinet[0] + 4,
-            "cabinet is not the cool grey it should be: {cabinet:?}"
-        );
-        assert!(
-            (120..=245).contains(&cabinet[0]),
-            "cabinet brightness out of range: {cabinet:?}"
-        );
+        is_colour(cabinet, "CASE", 6, "the outer frame");
+        is_colour(moulding, "MOULDING", 6, "the inner bezel");
         assert!(
             cabinet[1] > moulding[1] + 20,
             "moulding ({moulding:?}) is not darker than the cabinet ({cabinet:?})"
         );
 
-        // Outside the cabinet is the letterbox black it is centred in.
+        // The cabinet fills the viewport: no letterbox and no bars at the
+        // sides, so the middle of all four edges is its plastic and the
+        // front reaches the window it stands in.
+        for (x, y) in [
+            (0, rows / 2),
+            (dim - 1, rows / 2),
+            (dim / 2, 0),
+            (dim / 2, rows - 1),
+        ] {
+            is_shaded(
+                at(&px, dim, x, y),
+                "CASE",
+                &format!("the edge at ({x}, {y})"),
+            );
+        }
+
+        // Its four corners are the one place it does not: they take the
+        // smallest of radii, so the extreme pixel falls outside the
+        // outline and shows the black behind it. The arc is small -- a
+        // pixel in from it along both edges is already plastic.
+        let arc = (shader_constant(M1084_WGSL, "R_PLASTIC", "bezel_1084.wgsl") * oh).ceil() as u32;
         for (x, y) in [(0, 0), (dim - 1, 0), (0, rows - 1), (dim - 1, rows - 1)] {
             let p = at(&px, dim, x, y);
             assert!(
                 p[0] < 16 && p[1] < 16 && p[2] < 16,
-                "outside the cabinet at ({x}, {y}) is not dark: {p:?}"
+                "the cabinet's corner at ({x}, {y}) is not cut: {p:?}"
+            );
+            let inx = if x == 0 { arc } else { dim - 1 - arc };
+            let iny = if y == 0 { arc } else { rows - 1 - arc };
+            is_shaded(
+                at(&px, dim, inx, iny),
+                "CASE",
+                &format!("just inside the corner at ({x}, {y})"),
             );
         }
 
-        // The power lamp glows red, in the narrow panel the tube's own
-        // right edge closes: the shader puts that panel's outer joint on
-        // `ox + ow` and the lamp halfway across it.
-        let (_, _, case_w, _, _) = cabinet_of(dim, rows);
-        let led_x = (ox + ow - 0.033 * case_w) as i32;
-        let led_y = (chin_top + 0.24 * (rows as f32 - chin_top)) as i32;
-        let found = (-3..=3).any(|dy| {
-            (-3..=3).any(|dx| {
-                let p = at(&px, dim, (led_x + dx) as u32, (led_y + dy) as u32);
-                p[0] > p[1].saturating_add(60) && p[0] > p[2].saturating_add(60)
-            })
-        });
-        assert!(found, "no red power lamp near ({led_x}, {led_y})");
+        // The power lamp glows red, near the top of the button at the
+        // chin's right. That button hangs off the line where the inner
+        // bezel begins to fall away to the tube -- not off the moulding's
+        // outer edge -- so find the lamp and hold it to that line, which
+        // is what the whole right of the front is laid out from.
+        let span_x = shader_constant(M1084_WGSL, "CHAMFER_SPAN_X", "bezel_1084.wgsl");
+        let recess_x = ox + ow + span_x * (ox - FRAME_BAND * oh).max(1.0);
+        let mut lamp: Option<(u32, u32, u32)> = None;
+        for y in (chin_top as u32)..rows {
+            for x in 0..dim {
+                let p = at(&px, dim, x, y);
+                if p[0] > p[1].saturating_add(60) && p[0] > p[2].saturating_add(60) {
+                    lamp = Some(match lamp {
+                        None => (x, x, y),
+                        Some((x0, x1, y0)) => (x0.min(x), x1.max(x), y0.min(y)),
+                    });
+                }
+            }
+        }
+        let (lx0, lx1, ly0) = lamp.expect("no red power lamp anywhere on the chin");
+        assert!(
+            (lx1 as f32) < recess_x && (lx0 as f32) > recess_x - 0.09 * dim as f32,
+            "the lamp ({lx0}..{lx1}) is not in the button that meets the recess line \
+             at {recess_x:.1}"
+        );
+        assert!(
+            (ly0 as f32) < chin_top + 0.3 * (rows as f32 - chin_top),
+            "the lamp sits too low on the button: row {ly0} of the chin below {chin_top:.1}"
+        );
     }
 
     #[test]
@@ -974,12 +1171,16 @@ mod tests {
             "no scanline structure inside the opening (min {min}, max {max})"
         );
 
-        // The frame survives the preset pass untouched.
+        // The frame survives the preset pass untouched: the inner bezel's
+        // flat face beside the tube is still its own plastic, not the
+        // preset's picture and not its off-face black.
         let (cx, _, _, _, _) = cabinet_of(dim, rows);
         let band = at(&px, dim, ((cx + ox) * 0.5) as u32, (oy + oh * 0.5) as u32);
-        assert!(
-            band[1] > 60 && band[1] > band[0] + 2 && band[1] > band[2] + 2,
-            "left moulding lost its plastic after the preset pass: {band:?}"
+        is_colour(
+            band,
+            "MOULDING",
+            6,
+            "the left moulding after the preset pass",
         );
 
         // The frame is drawn on top of the preset: at the opening's
@@ -988,10 +1189,7 @@ mod tests {
         // the preset's off-face black. This is the layering the
         // frame-only pass exists for: the moulding overlaps the tube.
         let corner = at(&px, dim, ox as u32, oy as u32);
-        assert!(
-            corner[1] > 60 && corner[1] > corner[0] + 2 && corner[1] > corner[2] + 2,
-            "opening corner shows the preset instead of the frame: {corner:?}"
-        );
+        is_shaded(corner, "MOULDING", "the opening's corner");
     }
 
     /// The antialiased join at the opening edge in the frame-only pass
@@ -1246,6 +1444,125 @@ mod tests {
                 (ours - theirs).abs() < 1e-6,
                 "{name}: bezel.rs has {ours}, bezel_1084.wgsl has {theirs}"
             );
+        }
+    }
+
+    /// Both fronts' aperture radii are restated outside the test module,
+    /// so the overlays can be kept out of the corners they cut without
+    /// parsing WGSL every frame. Hold the copies to the originals.
+    #[test]
+    fn the_aperture_radii_match_the_shaders() {
+        for (style, ours) in [
+            (BezelStyle::Model1084, APERTURE_RADIUS_1084),
+            (BezelStyle::Classic, APERTURE_RADIUS_CLASSIC),
+        ] {
+            let theirs = shader_constant(source(style), "APERTURE_RADIUS", style.label());
+            assert!(
+                (ours - theirs).abs() < 1e-6,
+                "{}: bezel.rs has {ours}, its shader has {theirs}",
+                style.label()
+            );
+        }
+    }
+
+    /// A plain rectangle of a picture keeps its corners, so nothing moves;
+    /// anything that shapes it takes some, and the overlay clears what it
+    /// takes.
+    #[test]
+    fn the_corner_inset_answers_to_what_shapes_the_picture() {
+        use crate::config::ShaderKind;
+        let flat = crt_shader::face_curvature(ShaderKind::Scanlines);
+        let bow = crt_shader::face_curvature(ShaderKind::Crt);
+        assert_eq!(flat, 0.0, "only the full preset shapes a face");
+        assert!(bow > 0.0);
+
+        // Nothing shaping the picture: the overlays stay where they are.
+        assert_eq!(corner_inset(BezelStyle::None, 0.0, 1.0, 1), 0);
+        assert_eq!(corner_inset(BezelStyle::None, flat, 1.0, 1), 0);
+        assert_eq!(
+            corner_inset(BezelStyle::None, bow, 0.0, 1),
+            0,
+            "a preset at nil strength draws a flat picture"
+        );
+
+        for scale in [1, 2] {
+            let front = corner_inset(BezelStyle::Model1084, 0.0, 1.0, scale);
+            let both = corner_inset(BezelStyle::Model1084, bow, 1.0, scale);
+            let preset = corner_inset(BezelStyle::None, bow, 1.0, scale);
+            for (what, got) in [("front", front), ("front and bow", both), ("bow", preset)] {
+                assert!(got > 0, "{what} at {scale}x takes nothing off the corner");
+                assert!(
+                    got < crate::video::present_height() * scale / 3,
+                    "{what} at {scale}x pushes the overlay {got} into the picture"
+                );
+            }
+            // The bow is the dominant term by a long way; a front alone
+            // only rounds the corner off.
+            assert!(
+                both > front * 3,
+                "the bow should cost far more: {front} vs {both}"
+            );
+            assert!(
+                preset > 0 && preset <= both,
+                "a front widens the aperture, never narrows it"
+            );
+        }
+        // The picture scales with the texture, so the inset tracks it.
+        let one = corner_inset(BezelStyle::Model1084, bow, 1.0, 1);
+        let two = corner_inset(BezelStyle::Model1084, bow, 1.0, 2);
+        let ratio = two as f32 / one as f32;
+        assert!(
+            (1.8..=2.2).contains(&ratio),
+            "inset should track the texture: {one} at 1x, {two} at 2x"
+        );
+    }
+
+    /// The figure is only worth anything if the overlay lands on the
+    /// picture. Render the front over a known source and check the corner
+    /// the overlays are placed at: outside the inset it is plastic, inside
+    /// it is picture. This is the check the arithmetic exists to pass, and
+    /// it holds the solver to the shader rather than to itself.
+    #[test]
+    fn an_overlay_at_the_corner_inset_lands_on_the_picture() {
+        use crate::config::ShaderKind;
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (device, queue) = (gpu.device(), gpu.queue());
+        let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let bow = crt_shader::face_curvature(ShaderKind::Crt);
+
+        for (label, preset, curvature) in [
+            ("no preset", None, 0.0),
+            ("the CRT preset", Some(ShaderKind::Crt), bow),
+        ] {
+            let (px, dim, rows) =
+                render_bezel(device, queue, &src, BezelStyle::Model1084, preset, 1.0);
+            let (ox, oy, ow, oh) =
+                opening_rect(BezelStyle::Model1084, (0.0, 0.0, dim as f32, rows as f32));
+            let margin = 8.0;
+            let inset = corner_inset(BezelStyle::Model1084, curvature, 1.0, 1) as f32;
+            // Both are stated in texture pixels; what carries across to
+            // the render is the fraction of the picture they sit at.
+            let fx = |t: f32| ox + t / crate::video::FB_WIDTH as f32 * ow;
+            let fy = |t: f32| oy + oh - t / crate::video::present_height() as f32 * oh;
+            // Not "is it the source grey": a preset dims the picture and
+            // tints it into the mask's stripes, so the grey is long gone
+            // by the corner. What the picture is not, at any strength, is
+            // the moulding -- so the plastic's own tint is the test.
+            let is_picture =
+                |x: f32, y: f32| !looks_shaded(at(&px, dim, x as u32, y as u32), "MOULDING");
+            assert!(
+                is_picture(fx(margin + inset), fy(margin + inset)),
+                "{label}: the overlay's corner at +{inset} is still off the picture"
+            );
+            if inset > 1.0 {
+                assert!(
+                    !is_picture(fx(margin), fy(margin)),
+                    "{label}: nothing was taken off the corner, so the inset is waste"
+                );
+            }
         }
     }
 

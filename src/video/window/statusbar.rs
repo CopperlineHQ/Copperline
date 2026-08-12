@@ -1745,7 +1745,9 @@ pub(super) fn edge(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
 /// Persistent "(*) REC" badge in the display's top-right corner while a
 /// video recording runs. Like the OSD it is drawn into the presentation
 /// texture after the frame is captured, so it is never recorded.
-pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize) {
+/// `corner_inset` is the same figure the other two overlays take: the
+/// badge shares the performance readout's corner and loses it the same way.
+pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize, corner_inset: usize) {
     let s = texture_scale;
     let px = 2 * s;
     let pad = 4 * s;
@@ -1758,8 +1760,8 @@ pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize) {
     let text_h = font::text_height(px);
     let box_w = dot_d + gap + text_w + 2 * pad;
     let box_h = text_h + 2 * pad;
-    let box_x = (FB_WIDTH * s).saturating_sub(margin + box_w);
-    let box_y = margin;
+    let box_x = (FB_WIDTH * s).saturating_sub(margin + corner_inset + box_w);
+    let box_y = margin + corner_inset;
 
     fill_rect_blend(
         frame,
@@ -1822,6 +1824,7 @@ pub(super) fn draw_perf_overlay(
     lines: &[String],
     texture_scale: usize,
     below_record_badge: bool,
+    corner_inset: usize,
 ) {
     let s = texture_scale;
     let px = crate::video::menu_scale().factor() * s;
@@ -1840,13 +1843,16 @@ pub(super) fn draw_perf_overlay(
     }
     let box_w = text_w + 2 * pad;
     let box_h = lines.len() * text_h + lines.len().saturating_sub(1) * line_gap + 2 * pad;
-    let box_x = (FB_WIDTH * s).saturating_sub(margin + box_w);
+    // Away from the top-right corner on both axes, for the same reason and
+    // by the same figure as the OSD leaves the bottom-left one.
+    let box_x = (FB_WIDTH * s).saturating_sub(margin + corner_inset + box_w);
     let record_badge_h = font::text_height(2 * s) + 2 * (4 * s);
-    let box_y = if below_record_badge {
-        margin + record_badge_h + 4 * s
-    } else {
-        margin
-    };
+    let box_y = corner_inset
+        + if below_record_badge {
+            margin + record_badge_h + 4 * s
+        } else {
+            margin
+        };
 
     fill_rect_blend(
         frame,
@@ -1871,7 +1877,20 @@ pub(super) fn draw_perf_overlay(
     }
 }
 
-pub(super) fn draw_osd(frame: &mut [u8], text: &str, warning: bool, texture_scale: usize) {
+/// `corner_inset` is how far a drawn monitor front and a bowed preset cut
+/// into the picture's corners (0 when neither is drawn). The message sits
+/// in the bottom-left one and comes away from it diagonally -- in from the
+/// left and up from the bottom by the same amount -- because that is the
+/// direction the corner is missing in, and it is the placement the figure
+/// was solved for. Moving on one axis alone would need a different figure
+/// and a much longer run.
+pub(super) fn draw_osd(
+    frame: &mut [u8],
+    text: &str,
+    warning: bool,
+    texture_scale: usize,
+    corner_inset: usize,
+) {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels
     let pad = 4 * s;
@@ -1881,12 +1900,14 @@ pub(super) fn draw_osd(frame: &mut [u8], text: &str, warning: bool, texture_scal
     // over the picture, not over the instrument under it.
     let display_h = present_height() * s;
 
-    let text_w = font::text_width(text, px).min(fw.saturating_sub(2 * (margin + pad)));
+    let text_w =
+        font::text_width(text, px).min(fw.saturating_sub(2 * margin + corner_inset + 2 * pad));
     let text_h = font::text_height(px);
-    let box_w = (text_w + 2 * pad).min(fw.saturating_sub(2 * margin));
     let box_h = text_h + 2 * pad;
-    let box_x = margin;
-    let box_y = display_h.saturating_sub(margin + box_h);
+    let box_x = margin + corner_inset;
+    // What is left of the width once the box has come in off the corner.
+    let box_w = (text_w + 2 * pad).min(fw.saturating_sub(box_x + margin));
+    let box_y = display_h.saturating_sub(margin + box_h + corner_inset);
 
     fill_rect_blend(
         frame,
