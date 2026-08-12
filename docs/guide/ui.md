@@ -791,12 +791,12 @@ reachable however Copperline was launched:
 | Windows | `%APPDATA%\copperline\states\` |
 
 For a self-contained installation, create an empty file named `portable.txt`
-beside the Copperline executable and restart Copperline. The executable's
-folder then becomes the host-data directory, so quick-save slots live in its
-`states/` subdirectory. Gamepad calibration, keyboard mappings, the default
-WHDLoad library and other per-user host data are stored in that folder too.
-Delete `portable.txt` to return to the platform location above; Copperline
-does not move existing files in either direction.
+beside the Copperline executable (or beside the downloaded `.AppImage`) and
+restart Copperline. That folder then becomes the host-data directory, so
+quick-save slots live in its `states/` subdirectory. Gamepad calibration,
+keyboard mappings, the default WHDLoad library and other per-user host data are
+stored in that folder too. Delete `portable.txt` to return to the platform
+location above; Copperline does not move existing files in either direction.
 
 Because they are per user and not per machine, a slot may hold a state from
 a different Amiga than the one running. That is safe: as above, the state

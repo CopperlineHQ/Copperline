@@ -2,7 +2,8 @@
 
 //! Host-data locations, following the platform's config-directory conventions
 //! without pulling in a dependency. An empty `portable.txt` beside the
-//! executable opts into keeping the same data beside the executable instead.
+//! executable (or downloaded AppImage) opts into keeping the same data there
+//! instead.
 //!
 //! These are *host preferences and per-user data* -- gamepad calibration,
 //! keyboard mappings, save-state slots -- not machine configuration. Anything
@@ -23,18 +24,33 @@ use std::path::PathBuf;
 /// switch, so portable archives need no machine-specific configuration.
 pub const PORTABLE_MARKER: &str = "portable.txt";
 
-/// Return the directory containing `executable` when it carries the portable
-/// marker. Split out so the filesystem contract can be tested without trying
-/// to change the process executable.
-fn portable_config_dir(executable: &std::path::Path) -> Option<PathBuf> {
-    let dir = executable.parent()?;
+/// Return the directory containing `program` when it carries the portable
+/// marker.
+fn marked_program_dir(program: &std::path::Path) -> Option<PathBuf> {
+    let dir = program.parent()?;
     dir.join(PORTABLE_MARKER)
         .is_file()
         .then(|| dir.to_path_buf())
 }
 
+/// Resolve portable mode from the program path the user launched. An AppImage
+/// executes its embedded binary from a temporary read-only mount, but the
+/// runtime exposes the downloaded image as `APPIMAGE`; that original path must
+/// win so a marker can sit beside the image and the chosen directory is
+/// writable. Split out so this ordering can be tested without changing the
+/// process environment or executable.
+fn portable_config_dir(
+    appimage: Option<&std::path::Path>,
+    executable: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    appimage
+        .into_iter()
+        .chain(executable)
+        .find_map(marked_program_dir)
+}
+
 /// Copperline's host-data directory. An empty `portable.txt` beside the
-/// executable selects that directory; otherwise this is
+/// executable or downloaded AppImage selects that directory; otherwise this is
 /// `$XDG_CONFIG_HOME/copperline`, `%APPDATA%\copperline`, or
 /// `$HOME/.config/copperline`, whichever the host offers first.
 ///
@@ -45,10 +61,13 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 fn discover_config_dir() -> Option<PathBuf> {
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(dir) = portable_config_dir(&executable) {
-            return Some(dir);
-        }
+    #[cfg(target_os = "linux")]
+    let appimage = crate::envcfg::var_os("APPIMAGE").map(PathBuf::from);
+    #[cfg(not(target_os = "linux"))]
+    let appimage: Option<PathBuf> = None;
+    let executable = std::env::current_exe().ok();
+    if let Some(dir) = portable_config_dir(appimage.as_deref(), executable.as_deref()) {
+        return Some(dir);
     }
     for var in ["XDG_CONFIG_HOME", "APPDATA"] {
         if let Some(dir) = crate::envcfg::var_os(var) {
@@ -166,12 +185,32 @@ mod tests {
         let root = ScratchDir::new("portable-marker");
         let executable = root.0.join("copperline.exe");
 
-        assert_eq!(portable_config_dir(&executable), None);
+        assert_eq!(portable_config_dir(None, Some(&executable)), None);
         std::fs::write(root.0.join(PORTABLE_MARKER), []).unwrap();
-        assert_eq!(portable_config_dir(&executable), Some(root.0.clone()));
         assert_eq!(
-            portable_config_dir(&executable).map(|dir| dir.join("states")),
+            portable_config_dir(None, Some(&executable)),
+            Some(root.0.clone())
+        );
+        assert_eq!(
+            portable_config_dir(None, Some(&executable)).map(|dir| dir.join("states")),
             Some(root.0.join("states"))
+        );
+    }
+
+    #[test]
+    fn appimage_marker_selects_the_download_location_before_the_mounted_binary() {
+        let root = ScratchDir::new("appimage-marker");
+        let download = root.0.join("download");
+        let mount = root.0.join("mount/usr/bin");
+        std::fs::create_dir_all(&download).unwrap();
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::write(download.join(PORTABLE_MARKER), []).unwrap();
+
+        let appimage = download.join("Copperline.AppImage");
+        let executable = mount.join("copperline");
+        assert_eq!(
+            portable_config_dir(Some(&appimage), Some(&executable)),
+            Some(download)
         );
     }
 
