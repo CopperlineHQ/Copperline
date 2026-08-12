@@ -274,7 +274,12 @@ hi-res `$81`/`$3C` picture starts its 640 fetched pixels one lo-res pixel
 inside the window (matching vAmiga), with no wider leading border. Wide-FMODE DMA fetches start from the revision-masked
 DDFSTRT comparator value and complete whole units, but the displayed shifter
 origin is still quantized by the FMODE fetch gulp; the renderer keeps those
-two effects separate. Denise's output line starts at the horizontal blanking
+two effects separate. That absolute gulp grid remains linear below the
+standard fetch slots rather than clamping at the `$18` hard start. In lo-res
+BPL64, DDFSTRT `$18` / DDFSTOP `$B8` therefore puts the whole first 64-pixel
+gulp left of a standard `$81` DIW and fills the window with the remaining five
+gulps; `ddfprobe-agaorigin` pins the hidden first gulp and the flush right edge
+against an equivalent FS-UAE A1200 capture. Denise's output line starts at the horizontal blanking
 start counter; COLORxx writes before that counter are the wrapped tail of
 the previous output row, while the palette value they load is still the
 base colour for the following row. These anchors were calibrated against

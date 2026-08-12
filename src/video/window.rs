@@ -6311,6 +6311,14 @@ impl App {
                     }
                 }
             }
+            UiControl::LauncherRamPatternEdit => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    if state.editing().is_none() {
+                        state.begin_edit_ram_pattern();
+                    }
+                }
+            }
             UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
             #[cfg(feature = "game-library")]
             UiControl::LauncherWhdloadDownload(field) => self.whdload_download(field),

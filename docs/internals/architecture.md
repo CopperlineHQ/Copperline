@@ -133,6 +133,10 @@ The flow of a frame:
    form once per slice. Arming a debugger, trace, watchpoint, waveform PC
    trigger or diagnostic recorder selects the former; normal and browser
    runs therefore do not retest every inactive hook after every instruction.
+   An instruction-granular control stop retains the unfinished budget and its
+   `STOP` fast-forward state in `Emulator`; resume completes that same quantum
+   before starting another, so a host-side observation cannot move an
+   emulated interrupt race by repartitioning the execution loop.
 2. Advancing the clock for a CPU access also advances everything else:
    Agnus beam counters, Copper fetches, blitter slots, Paula audio and disk
    DMA, CIA timers. The chip bus is arbitrated per colour clock, so a CPU

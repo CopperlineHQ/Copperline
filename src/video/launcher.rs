@@ -30,6 +30,7 @@ use crate::config::{
     RawFloppyDrive, RawHostDisk, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode,
     Tint, WarpSpeed, BOOT_PRI_NEVER,
 };
+use crate::memory::{RamInit, DEFAULT_RAM_PATTERN, DEFAULT_RANDOM_RAM_SEED};
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -453,6 +454,8 @@ pub enum LauncherField {
     ChipRam,
     FastRam,
     SlowRam,
+    RamInit,
+    RamPattern,
     MbRam,
     AccelRam,
     Z3Ram,
@@ -826,7 +829,9 @@ const CPU_ROWS: [Row; 6] = [
     row(F::Dcache, "Data cache", Toggle),
     row(F::Jit, "JIT accelerator", Toggle),
 ];
-const MEMORY_ROWS: [Row; 6] = [
+const MEMORY_ROWS: [Row; 8] = [
+    row(F::RamInit, "Power-on fill", Cycle),
+    row(F::RamPattern, "Fill pattern", RowKind::Text),
     row(F::ChipRam, "Chip RAM", Cycle),
     row(F::FastRam, "Fast RAM", Cycle),
     row(F::SlowRam, "Slow RAM", Cycle),
@@ -1731,6 +1736,12 @@ pub struct MachineSetup {
     chip_ram: usize,
     fast_ram: usize,
     slow_ram: usize,
+    /// Diagnostic cold-start policy selected by the Memory page.
+    ram_init: RamInit,
+    /// Values remembered while another fill mode is selected, so cycling away
+    /// from a loaded/custom mode and back does not silently replace its value.
+    ram_pattern: u16,
+    ram_random_seed: u64,
     mb_ram: usize,
     accel_ram: usize,
     z3_ram: usize,
@@ -2016,6 +2027,15 @@ impl MachineSetup {
             chip_ram: cfg.chip_ram_bytes,
             fast_ram: cfg.fast_ram_bytes,
             slow_ram: cfg.slow_ram_bytes,
+            ram_init: cfg.ram_init,
+            ram_pattern: match cfg.ram_init {
+                RamInit::Pattern { word } => word,
+                _ => DEFAULT_RAM_PATTERN,
+            },
+            ram_random_seed: match cfg.ram_init {
+                RamInit::Random { seed } => seed,
+                _ => DEFAULT_RANDOM_RAM_SEED,
+            },
             mb_ram: cfg.mb_ram_bytes,
             accel_ram: cfg.accel_ram_bytes,
             z3_ram: cfg.z3_ram_bytes,
@@ -2363,6 +2383,9 @@ impl MachineSetup {
         }
         if self.slow_ram != base.slow_ram_bytes {
             raw.memory.slow = Some(format_size(self.slow_ram));
+        }
+        if self.ram_init != base.ram_init {
+            raw.memory.init = Some(self.ram_init.config_value());
         }
         if self.mb_ram != base.mb_ram_bytes {
             raw.memory.motherboard = Some(format_size(self.mb_ram));
@@ -2963,6 +2986,10 @@ impl MachineSetup {
                 !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010),
                 "needs 68020+",
             ),
+            F::RamPattern => reason(
+                matches!(self.ram_init, RamInit::Pattern { .. }),
+                "select Fixed fill",
+            ),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
@@ -3341,6 +3368,12 @@ impl MachineSetup {
             F::ChipRam => size_label(self.chip_ram),
             F::FastRam => size_label(self.fast_ram),
             F::SlowRam => size_label(self.slow_ram),
+            F::RamInit => match self.ram_init {
+                RamInit::Zero => "Zero".to_string(),
+                RamInit::Pattern { .. } => "Fixed".to_string(),
+                RamInit::Random { .. } => "Random".to_string(),
+            },
+            F::RamPattern => format!("0x{:04X}", self.ram_pattern),
             F::MbRam => size_label(self.mb_ram),
             F::AccelRam => size_label(self.accel_ram),
             F::Z3Ram => size_label(self.z3_ram),
@@ -3596,6 +3629,14 @@ impl MachineSetup {
         }
     }
 
+    /// Change the fixed power-on word and make it the active policy. The text
+    /// box only applies in Fixed mode, but setting both here keeps this method
+    /// correct if another frontend reuses it directly.
+    pub fn set_ram_pattern(&mut self, word: u16) {
+        self.ram_pattern = word;
+        self.ram_init = RamInit::Pattern { word };
+    }
+
     fn path_label(&self, field: LauncherField, empty: &str) -> String {
         match self.path(field) {
             Some(p) => p
@@ -3689,6 +3730,19 @@ impl MachineSetup {
             F::ChipRam => self.chip_ram = cycle_slice(&CHIP_PRESETS, self.chip_ram, forward),
             F::FastRam => self.fast_ram = cycle_nearest(&FAST_PRESETS, self.fast_ram, forward),
             F::SlowRam => self.slow_ram = cycle_nearest(&SLOW_PRESETS, self.slow_ram, forward),
+            F::RamInit => {
+                self.ram_init = match (self.ram_init, forward) {
+                    (RamInit::Zero, true) | (RamInit::Pattern { .. }, false) => RamInit::Random {
+                        seed: self.ram_random_seed,
+                    },
+                    (RamInit::Random { .. }, true) | (RamInit::Zero, false) => RamInit::Pattern {
+                        word: self.ram_pattern,
+                    },
+                    (RamInit::Pattern { .. }, true) | (RamInit::Random { .. }, false) => {
+                        RamInit::Zero
+                    }
+                };
+            }
             F::MbRam => {
                 // Only the A4000's Ramsey-07 extends past its four banks
                 // into the $04000000-$06FFFFFF expansion space.
@@ -4980,6 +5034,8 @@ pub enum EditTarget {
     NewImageText(LauncherField),
     /// A `host:port` typed into the Serial section's Connect or Listen box.
     SerialAddr(LauncherField),
+    /// The fixed 16-bit RAM power-on word on the Memory page.
+    RamPattern,
 }
 
 /// Where typing goes in a text field, as a character index into it.
@@ -6455,7 +6511,7 @@ impl LauncherState {
         matches!(
             self.editing,
             Some(EditTarget::NewImageText(f) | EditTarget::SerialAddr(f)) if f == field
-        )
+        ) || field == F::RamPattern && self.editing == Some(EditTarget::RamPattern)
     }
 
     /// The filesystem a Create Image row is about: the floppy page's or the
@@ -6773,6 +6829,18 @@ impl LauncherState {
         self.status = None;
     }
 
+    /// Focus the fixed RAM word, using the canonical hexadecimal spelling the
+    /// configuration writer will emit.
+    pub fn begin_edit_ram_pattern(&mut self) {
+        if !self.setup.applies(F::RamPattern) {
+            return;
+        }
+        self.edit_buffer = self.setup.value_label(F::RamPattern);
+        self.editing = Some(EditTarget::RamPattern);
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
+        self.status = None;
+    }
+
     pub fn new(setup: MachineSetup) -> Self {
         let mut setup = setup;
         // Read the host devices as the screen opens so the pickers show what is
@@ -6933,6 +7001,15 @@ impl LauncherState {
             if !c.is_ascii_graphic() || self.edit_buffer.chars().count() >= SERIAL_ADDR_MAX {
                 return;
             }
+        }
+        // A fixed fill is a 16-bit word. The parser accepts decimal too, so
+        // admit decimal digits and the hexadecimal prefix/digits while keeping
+        // the buffer no wider than `0xFFFF`.
+        if target == EditTarget::RamPattern
+            && (self.edit_buffer.chars().count() >= 6
+                || !(c.is_ascii_hexdigit() || matches!(c, 'x' | 'X')))
+        {
+            return;
         }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
@@ -7109,6 +7186,18 @@ impl LauncherState {
                 self.edit_buffer.clear();
                 return;
             }
+            EditTarget::RamPattern => {
+                match crate::config::parse_ram_pattern(&self.edit_buffer) {
+                    Ok(word) => self.setup.set_ram_pattern(word),
+                    Err(err) => {
+                        self.status = Some(StatusMessage::err(err.to_string()));
+                        return;
+                    }
+                }
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
             EditTarget::BoardOption { .. } => {}
         }
         self.editing = None;
@@ -7121,7 +7210,8 @@ impl LauncherState {
             // These commit above and return, so nothing is left to do here.
             EditTarget::DriveBootpri(_)
             | EditTarget::NewImageText(_)
-            | EditTarget::SerialAddr(_) => {}
+            | EditTarget::SerialAddr(_)
+            | EditTarget::RamPattern => {}
         }
     }
 
@@ -7690,6 +7780,72 @@ fn pacing_name(pacing: PacingBudget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ram_initialisation_controls_cycle_and_round_trip() {
+        let raw: RawConfig = toml::from_str("[memory]\ninit = \"random:0xBEEF\"\n").unwrap();
+        let mut setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(setup.value_label(F::RamInit), "Random");
+        assert_eq!(
+            setup.to_raw().memory.init.as_deref(),
+            Some("random:0x000000000000BEEF")
+        );
+
+        setup.cycle(F::RamInit, true);
+        assert_eq!(setup.value_label(F::RamInit), "Fixed");
+        assert_eq!(setup.value_label(F::RamPattern), "0x5555");
+        assert!(setup.applies(F::RamPattern));
+        setup.set_ram_pattern(0xDEAD);
+        assert_eq!(
+            setup.to_raw().memory.init.as_deref(),
+            Some("pattern:0xDEAD")
+        );
+
+        setup.cycle(F::RamInit, true);
+        assert_eq!(setup.value_label(F::RamInit), "Zero");
+        assert!(!setup.applies(F::RamPattern));
+        setup.cycle(F::RamInit, false);
+        assert_eq!(setup.value_label(F::RamPattern), "0xDEAD");
+
+        setup.cycle(F::RamInit, false);
+        assert_eq!(setup.value_label(F::RamInit), "Random");
+        assert_eq!(
+            setup.to_raw().memory.init.as_deref(),
+            Some("random:0x000000000000BEEF")
+        );
+    }
+
+    #[test]
+    fn fixed_ram_pattern_text_box_validates_and_commits() {
+        let mut setup = MachineSetup::default();
+        setup.cycle(F::RamInit, false); // Zero -> Fixed
+        let mut state = LauncherState::new(setup);
+        state.begin_edit_ram_pattern();
+        assert_eq!(state.editing(), Some(EditTarget::RamPattern));
+        assert_eq!(state.edit_buffer(), "0x5555");
+
+        state.edit_buffer.clear();
+        for c in "0x1234".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert_eq!(state.setup.value_label(F::RamPattern), "0x1234");
+        assert_eq!(
+            state.setup.to_raw().memory.init.as_deref(),
+            Some("pattern:0x1234")
+        );
+
+        state.begin_edit_ram_pattern();
+        state.edit_buffer = "0x10000".to_string();
+        state.edit_caret = Caret::end_of(&state.edit_buffer);
+        state.edit_commit();
+        assert_eq!(state.editing(), Some(EditTarget::RamPattern));
+        assert!(state
+            .status
+            .as_ref()
+            .is_some_and(|s| s.kind == StatusKind::Error));
+        assert_eq!(state.setup.value_label(F::RamPattern), "0x1234");
+    }
 
     /// The page greys what an interface does not honour, exactly as the
     /// library's own driver table reports it: the launcher carries no driver

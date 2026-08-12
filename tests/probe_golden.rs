@@ -386,6 +386,11 @@ probe_tests! {
     // class, issue #371), and an on-grid start folds from the pipeline
     // alone; FS-UAE-verified band by band.
     golden_ddfprobe_agafold2 => probe_aga("ddfprobe-agafold2", "ddfprobe-agafold2.bin", 16.0);
+    // Wide-FMODE's absolute gulp grid remains linear below the standard
+    // fetch slots: lo-res BPL64 $18/$B8 hides its whole first 64-px gulp
+    // left of a standard DIW and presents the remaining 320 px edge to edge;
+    // FS-UAE-verified on the equivalent live display constellation.
+    golden_ddfprobe_agaorigin => probe_aga("ddfprobe-agaorigin", "ddfprobe-agaorigin.bin", 16.0);
     // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
     // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);
