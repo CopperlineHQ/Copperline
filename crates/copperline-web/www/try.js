@@ -1671,10 +1671,30 @@ function updatePadStatus(releasedPort1) {
 // default still has to be suppressed on every repeat or holding a cursor
 // key scrolls the page. Track which codes the first keydown consumed.
 const consumedKeys = new Set();
+// Codes whose keydown the page itself spent (Esc releasing the mouse):
+// the guest never saw the down, so the keyup must not reach it either.
+const pageSpentKeys = new Set();
 window.addEventListener('keydown', (e) => {
   if (!emu || !running) return;
   if (e.repeat) {
     if (consumedKeys.has(e.code)) e.preventDefault();
+    return;
+  }
+  // A fresh keydown supersedes any page-spent claim on the code: if this
+  // press reaches the guest, its release must too.
+  pageSpentKeys.delete(e.code);
+  // Esc with the mouse captured releases it and goes no further. In the
+  // page the browser enforces that gesture itself (this branch never
+  // sees the key); in fullscreen, keyboard lock hands Escape to the page
+  // instead (see the fullscreen section), so the branch recreates it -
+  // one meaning for Esc everywhere, and releasing the mouse no longer
+  // costs the session its fullscreen. The guest only sees Esc while the
+  // pointer is free.
+  if (e.code === 'Escape' && document.pointerLockElement) {
+    document.exitPointerLock?.();
+    pageSpentKeys.add(e.code);
+    consumedKeys.add(e.code);
+    e.preventDefault();
     return;
   }
   if (joystickKey(e.code, true) || emu.key_event(e.code, true)) {
@@ -1688,7 +1708,14 @@ window.addEventListener('keyup', (e) => {
   // Delete before the running check: a hold that spans an emulator stop
   // or a focus loss must not leave a stale entry behind.
   const consumed = consumedKeys.delete(e.code);
+  const pageSpent = pageSpentKeys.delete(e.code);
   if (!emu || !running) return;
+  // The page spent the down, so the guest never saw it; forwarding the
+  // up would land an unmatched release code.
+  if (pageSpent) {
+    e.preventDefault();
+    return;
+  }
   if (joystickKey(e.code, false) || emu.key_event(e.code, false) || consumed) {
     e.preventDefault();
   }
@@ -1697,7 +1724,9 @@ window.addEventListener('keyup', (e) => {
 // --- mouse ---------------------------------------------------------------
 // Unlocked: the cursor drives the Amiga pointer through position deltas
 // (Workbench-friendly). Click to pointer-lock for relative motion (games);
-// Esc releases the lock, as the browser enforces.
+// Esc releases the lock - enforced by the browser in the page, recreated
+// by the keydown handler in fullscreen, where keyboard lock delivers
+// Escape to the page instead (see the fullscreen section).
 
 let lastPos = null;
 // Emulator pixels per CSS pixel, one scale per axis. The picture fills the
@@ -2201,13 +2230,33 @@ $('fullscreen').addEventListener('click', () => {
   }
 });
 
+// Esc is spoken for twice over by browser defaults - it exits fullscreen
+// and it releases pointer lock - and the guest wants it as the Amiga Esc
+// key besides. Fullscreen is where they collide: Esc pressed to put the
+// mouse away also throws the session out of fullscreen. Where the
+// Keyboard Lock API exists (Chromium), lock Escape while really
+// fullscreen: a single press then arrives as an ordinary keydown -
+// releasing the mouse when it is captured (the keydown handler), typing
+// into the guest when it is free - and the browser moves leaving
+// fullscreen to press-and-hold Esc, announcing that itself on entry,
+// alongside the Exit button. Browsers without the API keep the old
+// defaults, and the CSS fallback needs none of this - no browser
+// default is in play there, so Esc already reaches the guest.
+function syncEscapeLock() {
+  const kb = navigator.keyboard;
+  if (!kb?.lock) return;
+  if (document.fullscreenElement !== null) kb.lock(['Escape']).catch(() => {});
+  else kb.unlock();
+}
+
 // Real fullscreen carries the same canvas letterbox as the CSS fallback,
-// applied on the state change so it also covers Esc and any other
+// applied on the state change so it also covers hold-Esc and any other
 // browser-initiated exit. Leaving fullscreen re-syncs the windowed shell
 // chrome (the monitor path's border hiding); entering it is a no-op
 // there, since fullscreen owns the shell's styles.
 document.addEventListener('fullscreenchange', () => {
   setStyles(canvas, CSS_FS_CANVAS, document.fullscreenElement !== null);
+  syncEscapeLock();
   updateFsUi();
   syncShellChrome();
 });
