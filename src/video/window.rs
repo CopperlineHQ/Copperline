@@ -3793,15 +3793,11 @@ impl ApplicationHandler for App {
                     if !super::status_bar_hidden() {
                         draw_status_bar(frame, &view, r.texture_scale);
                     }
-                    if recording {
-                        // Painted into the presentation texture only, so
-                        // the badge never appears in the recorded file.
-                        draw_record_badge(frame, r.texture_scale);
-                    }
                     // The picture loses its corners to a front's aperture
-                    // and to a preset's bowed face; both overlays live in
-                    // one, so both come in far enough to clear whichever
-                    // is drawn (nil when the picture is a plain rectangle).
+                    // and to a preset's bowed face; all three overlays live
+                    // in one, so all three come in far enough to clear
+                    // whichever is drawn (nil when the picture is a plain
+                    // rectangle). Worked out before any of them is drawn.
                     let corner = bezel::corner_inset(
                         self.bezel,
                         if crt_active {
@@ -3812,6 +3808,11 @@ impl ApplicationHandler for App {
                         self.shader_strength,
                         r.texture_scale,
                     );
+                    if recording {
+                        // Painted into the presentation texture only, so
+                        // the badge never appears in the recorded file.
+                        draw_record_badge(frame, r.texture_scale, corner);
+                    }
                     if self.perf_overlay {
                         draw_perf_overlay(
                             frame,

@@ -7866,7 +7866,10 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     assert!(frame.iter().all(|&b| b == 0));
 
     // A monitor front and a bowed preset round that corner away, so the
-    // block drops clear of it and the rows it used to occupy are empty.
+    // block leaves it on both axes and the corner it used to occupy is
+    // empty. Where it lands is pinned by
+    // `the_overlays_leave_the_corner_on_both_axes`; this only asks that it
+    // moved at all, and that the old corner was vacated.
     let inset = super::bezel::corner_inset(
         crate::config::BezelStyle::Model1084,
         super::crt_shader::face_curvature(crate::config::ShaderKind::Crt),
@@ -7880,7 +7883,82 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     super::draw_perf_overlay(&mut frame, &lines, scale, false, inset);
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
-    assert_ne!(pixel(&frame, probe_x, probe_y + inset, scale), [0, 0, 0, 0]);
+    assert_ne!(
+        pixel(&frame, probe_x - inset, probe_y + inset, scale),
+        [0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn the_overlays_leave_the_corner_on_both_axes() {
+    // `corner_inset` solves for a corner that moves diagonally: it walks
+    // the probe in from the side and up from the bottom together. An
+    // overlay that spent the figure on one axis only would come to rest
+    // exactly where the solver said it must not, and the figure would read
+    // as correct the whole time. So pin the placement, not the number.
+    let scale = 1;
+    let inset = super::bezel::corner_inset(
+        crate::config::BezelStyle::Model1084,
+        super::crt_shader::face_curvature(crate::config::ShaderKind::Crt),
+        1.0,
+        scale,
+    );
+    assert!(
+        inset > 0,
+        "nothing to test if the picture keeps its corners"
+    );
+    let margin = 8 * scale;
+    let fw = crate::video::FB_WIDTH * scale;
+    let display_h = crate::video::present_height() * scale;
+
+    // The drawn extent of whatever was painted into `frame`.
+    let bounds = |frame: &[u8]| {
+        let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for y in 0..texture_height(scale) {
+            for x in 0..texture_width(scale) {
+                if pixel(frame, x, y, scale) != [0, 0, 0, 0] {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x0, x1, y0, y1)
+    };
+
+    // The message is in the bottom-left corner: in from the left and up
+    // from the foot of the picture, by the inset on each.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_osd(&mut frame, "corner", false, scale, inset);
+    let (x0, _, _, y1) = bounds(&frame);
+    assert_eq!(x0, margin + inset, "the OSD did not come in from the left");
+    assert_eq!(
+        y1,
+        display_h - margin - inset - 1,
+        "the OSD did not rise off the foot"
+    );
+
+    // The badge and the readout share the top-right one.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_record_badge(&mut frame, scale, inset);
+    let (_, x1, y0, _) = bounds(&frame);
+    assert_eq!(
+        x1,
+        fw - margin - inset - 1,
+        "the record badge did not come in from the right"
+    );
+    assert_eq!(y0, margin + inset, "the record badge did not drop");
+
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_perf_overlay(&mut frame, &["50.0 fps".to_string()], scale, false, inset);
+    let (_, x1, y0, _) = bounds(&frame);
+    assert_eq!(
+        x1,
+        fw - margin - inset - 1,
+        "the performance readout did not come in from the right"
+    );
+    assert_eq!(y0, margin + inset, "the performance readout did not drop");
 }
 
 #[test]

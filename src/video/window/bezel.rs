@@ -72,6 +72,12 @@ const APERTURE_RADIUS_CLASSIC: f32 = 0.0826;
 /// `curvature` and `strength` are the active preset's, 0 for one that
 /// draws the picture flat, and the result is 0 when nothing shapes the
 /// picture at all.
+///
+/// The figure is an inset on **both** axes: an overlay takes it in from
+/// the side it sits against as well as down or up from its own edge, and
+/// the corner it clears is the diagonal one. Applying it to a single axis
+/// does not clear anything -- the walk below would have to be redone for
+/// that path.
 pub(super) fn corner_inset(
     style: BezelStyle,
     curvature: f32,
@@ -84,11 +90,13 @@ pub(super) fn corner_inset(
         BezelStyle::Classic => APERTURE_RADIUS_CLASSIC,
     };
     let strength = strength.clamp(0.0, 1.0);
-    let k = curvature * strength;
+    let bows = curvature > 0.0 && strength > 0.0;
     // A preset clips its face to its own radius, so that is the corner
     // when it is the wider -- or the only corner, with no front drawn.
-    let r = if k > 0.0 {
-        aperture.max(crt_shader::FACE_CORNER_RADIUS)
+    // `crt.wgsl` fades that radius linearly, so take it faded, exactly as
+    // `uniforms_from` hands it to the bezel.
+    let r = if bows {
+        aperture.max(crt_shader::FACE_CORNER_RADIUS * strength)
     } else {
         aperture
     };
@@ -104,7 +112,12 @@ pub(super) fn corner_inset(
     // The picture keeps its aspect in the rect it is drawn into, so the
     // face's height in half-widths is the canvas's.
     let fa = h / w;
-    let q = k * 0.25;
+    // The curvature goes in raw and the fade is the coordinate mix below,
+    // which is how both shaders do it: warping by a faded curvature is a
+    // different curve, not a weaker one, so fading it here as well would
+    // model a flatter face than is drawn and under-inset the overlays at
+    // every strength between 0 and 1.
+    let q = curvature * 0.25;
 
     // Is a corner `d` texture pixels in from the bottom-left of the
     // picture inside the face? Mirrors the warp and the aperture test both

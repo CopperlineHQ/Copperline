@@ -63,6 +63,17 @@ fn parse_args() -> Args {
             }
             "--style" => {
                 let name = it.next().expect("--style NAME");
+                // Only the 1084's opening is known here. Every other front
+                // places its own a different way -- Classic off two
+                // constants that live in bezel.rs, not in its shader -- and
+                // guessing would put the picture somewhere the emulator
+                // never would, which is worse than not drawing it.
+                assert!(
+                    name == "1084",
+                    "--style knows only 1084: this harness derives the opening from the \
+                     1084's frame constants, and no other front states its own in its \
+                     shader. Use --shader FILE to render another source at that opening."
+                );
                 a.shader = root.join(format!("src/video/window/shaders/bezel_{name}.wgsl"));
             }
             "--shader" => a.shader = PathBuf::from(it.next().expect("--shader FILE")),
@@ -165,10 +176,18 @@ async fn run(args: Args, shader_src: String) {
     // The source texture stands in for the `pixels` backing buffer: the
     // display region on top, a status-bar strip below that must never be
     // sampled -- if any magenta appears in the PNG, the sampling is wrong.
-    let (sw, sh) = (args.width, args.height);
-    let display_rows = sh;
+    // The strip has to be real for that to prove anything, and deep enough
+    // that a half-texel slip on the boundary lands in it.
+    const STATUS_ROWS: u32 = 16;
+    let sw = args.width;
+    let display_rows = args.height;
+    let sh = display_rows + STATUS_ROWS;
     let mut src = test_pattern(sw, display_rows);
-    src.extend(std::iter::repeat([255u8, 0, 255, 255]).take(0).flatten());
+    src.extend(
+        std::iter::repeat([255u8, 0, 255, 255])
+            .take((sw * STATUS_ROWS) as usize)
+            .flatten(),
+    );
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("src"),
