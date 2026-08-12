@@ -141,7 +141,9 @@ Controls:
 
 - **Mouse**: with the pointer unlocked, the cursor drives the Amiga pointer
   through position deltas (Workbench-friendly); clicking the canvas
-  requests pointer lock for relative motion (games), and Esc releases it.
+  requests pointer lock for relative motion (games), and Esc releases it --
+  also in fullscreen, which releasing the mouse no longer abandons (see
+  the fullscreen section below).
 - **Keyboard**: physical keys map to Amiga raw keycodes with the same table
   as the desktop frontend. The mapping is positional, and the browser does
   not report the host's layout, so the one Amiga key it cannot reach is
@@ -235,6 +237,15 @@ device keyboard is measured from how much of the viewport it covers, which
 is what a browser offers instead of leaving room. On iPhones, where Safari has no element
 fullscreen, the button pins the shell over the page instead -- Safari's
 chrome stays, the page furniture goes, and the same letterbox applies.
+
+Esc carries two browser defaults -- leaving fullscreen and releasing the
+captured mouse -- and the guest wants it as the Amiga Esc key besides. In
+browsers with the Keyboard Lock API (Chromium), the page locks Escape
+while fullscreen, so a press releases the captured mouse without ending
+fullscreen, or types Esc into the guest when the pointer is free; leaving
+fullscreen moves to press-and-hold Esc (the browser announces this on
+entry) or the Exit button. Browsers without the API keep the default,
+where a single Esc leaves fullscreen.
 
 Once a machine boots, a status strip appears below the screen with the
 same front-panel readouts as the desktop [status bar](ui.md): the PWR and
