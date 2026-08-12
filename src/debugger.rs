@@ -981,6 +981,7 @@ pub struct CopperDumpReq {
 }
 
 pub struct Debugger {
+    pub addr_mask: u32,
     pub breakpoints: Vec<u32>,
     pub watches: Vec<Watch>,
     /// `(addr, words)` regions hexdumped (as 16-bit words) on each hit.
@@ -1023,7 +1024,7 @@ pub struct Debugger {
 impl Debugger {
     /// Build a debugger from the `COPPERLINE_DBG_*` environment, or `None` when no
     /// breakpoint, watchpoint, or trace is configured.
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(addr_mask: u32) -> Option<Self> {
         let breakpoints = parse_addr_list("COPPERLINE_DBG_BREAK");
         let watches = parse_watch_list("COPPERLINE_DBG_WATCH");
         let trace_full = crate::envcfg::flag("COPPERLINE_DBG_TRACE_FULL");
@@ -1049,6 +1050,7 @@ impl Debugger {
             .map(|w| (w.addr, w.len))
             .collect();
         let dbg = Self {
+            addr_mask,
             breakpoints,
             watches,
             dumps,
@@ -1096,9 +1098,9 @@ impl Debugger {
     }
 
     pub fn is_breakpoint(&self, pc: u32) -> bool {
-        let pc = pc & UI_ADDR_MASK;
-        self.breakpoints.iter().any(|&bp| (bp & UI_ADDR_MASK) == pc)
-            || self.alert_break.map(|a| a & UI_ADDR_MASK) == Some(pc)
+        let pc = pc & self.addr_mask;
+        self.breakpoints.iter().any(|&bp| (bp & self.addr_mask) == pc)
+            || self.alert_break.map(|a| a & self.addr_mask) == Some(pc)
     }
 
     pub fn catches_vector(&self, vector: u16) -> bool {
@@ -1625,6 +1627,7 @@ mod tests {
     #[test]
     fn headless_is_breakpoint_masks_addresses() {
         let dbg = Debugger {
+            addr_mask: UI_ADDR_MASK,
             breakpoints: vec![0x00C0_33C2],
             watches: Vec::new(),
             dumps: Vec::new(),
@@ -1649,5 +1652,35 @@ mod tests {
         };
         assert!(dbg.is_breakpoint(0xFFC0_33C2));
         assert!(dbg.is_breakpoint(0x00C0_33C2));
+    }
+
+    #[test]
+    fn headless_full_mask_keeps_z3_breakpoints_distinct() {
+        let dbg = Debugger {
+            addr_mask: 0xFFFF_FFFF,
+            breakpoints: vec![0x4000_1000],
+            watches: Vec::new(),
+            dumps: Vec::new(),
+            trace: false,
+            trace_full: false,
+            trace_lo: 0,
+            trace_hi: u32::MAX,
+            catches: Vec::new(),
+            catch_alert: false,
+            alert_break: None,
+            after_secs: 0.0,
+            until_secs: f64::INFINITY,
+            max_hits: 200,
+            hits: 0,
+            shot_prefix: None,
+            shot_seq: 0,
+            trace_lines: 0,
+            copper_dump: None,
+            copper_dumped: false,
+            ram_dump: None,
+            ram_dumped: false,
+        };
+        assert!(dbg.is_breakpoint(0x4000_1000));
+        assert!(!dbg.is_breakpoint(0x0000_1000));
     }
 }
