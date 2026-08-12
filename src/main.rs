@@ -157,7 +157,7 @@ pub struct CliArgs {
     pub list_sampler_inputs: bool,
     /// Command-line machine overrides (`--model`, `--chipset`, `--cpu`,
     /// `--fpu`/`--no-fpu`, `--cpu-clock`, `--chip`, `--fast`, `--slow`,
-    /// `--floppy-drives`).
+    /// `--ram-init`, `--floppy-drives`).
     /// Applied on top of the config file (or the built-in defaults) before
     /// validation.
     pub overrides: ConfigOverrides,
@@ -534,6 +534,11 @@ where
                     args.next()
                         .ok_or_else(|| anyhow!("--slow requires a size (e.g. 0, 512K)"))?,
                 );
+            }
+            "--ram-init" => {
+                overrides.ram_init = Some(args.next().ok_or_else(|| {
+                    anyhow!("--ram-init requires zero, random[:SEED], pattern:WORD, or 0xWORD")
+                })?);
             }
             "--motherboard" => {
                 overrides.motherboard =
@@ -1234,6 +1239,8 @@ fn print_help() {
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
+         --ram-init MODE                cold-start RAM contents: zero (default), random[:SEED],\n  \
+         \x20                            pattern:WORD, or 0xWORD (uninitialised-read testing)\n  \
          --motherboard SIZE             Ramsey motherboard fast RAM (A3000/A4000), e.g. 0, 4M,\n  \
          \x20                            16M; the A4000 extends to 64M\n  \
          --accelerator SIZE             CPU-slot accelerator fast RAM at $08000000 (32-bit\n  \
@@ -3207,6 +3214,8 @@ mod tests {
             "8M",
             "--slow",
             "512K",
+            "--ram-init",
+            "pattern:0x5555",
             "--floppy-drives",
             "3",
             "--chipset",
@@ -3221,6 +3230,7 @@ mod tests {
         assert_eq!(args.overrides.chip.as_deref(), Some("2M"));
         assert_eq!(args.overrides.fast.as_deref(), Some("8M"));
         assert_eq!(args.overrides.slow.as_deref(), Some("512K"));
+        assert_eq!(args.overrides.ram_init.as_deref(), Some("pattern:0x5555"));
         assert_eq!(args.overrides.floppy_drives, Some(3));
         assert_eq!(args.overrides.chipset.as_deref(), Some("AGA"));
         Ok(())

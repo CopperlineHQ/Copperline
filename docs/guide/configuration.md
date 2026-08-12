@@ -44,6 +44,7 @@ range checks as the equivalent TOML fields:
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
+| `--ram-init MODE` | `[memory] init` | `zero` (default), `random[:SEED]`, `pattern:WORD`, or `0xWORD` |
 | `--motherboard SIZE` | `[memory] motherboard` | Ramsey RAM (A3000/A4000): `0`, `1M`..`4M`, `8M`, `12M`, `16M`; A4000 up to `64M` |
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
@@ -301,7 +302,8 @@ carried no information.)
 
 - `power_on = false` starts the machine powered off showing a test screen
   until you click the status-bar power button -- useful for arming video
-  capture first. The power button cold-boots (clears RAM).
+  capture first. The power button cold-boots (reinitialising RAM according to
+  `[memory] init`).
 - `pacing_budget` selects how real-time pacing budgets CPU work per frame:
   `"cycles"` (default) charges each instruction its actual 68000 cycle cost
   plus chip-bus waits, matching real hardware speed; `"instructions"` uses a
@@ -426,6 +428,7 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 chip = "512K"        # OCS max 512K; ECS/AGA max 2M
 fast = "0"           # Zorro II fast RAM at $200000: 64K..8M board sizes
 slow = "512K"        # A500 trapdoor RAM at $C00000: 0 or up to 512K
+init = "zero"         # or "random[:SEED]" / "pattern:0x5555" for read testing
 motherboard = "0"    # Ramsey motherboard RAM (A3000/A4000): up to 16M (A4000: 64M)
 accelerator = "0"    # CPU-slot RAM at $08000000 (32-bit CPUs): up to 128M
 z3   = "0"           # Zorro III RAM (needs a 32-bit CPU): 64K..1G, power of two
@@ -433,6 +436,26 @@ z3   = "0"           # Zorro III RAM (needs a 32-bit CPU): 64K..1G, power of two
 
 Sizes accept `K`/`KB`/`M`/`MB` (and `G`/`GB` for Zorro III) suffixes or
 plain byte counts, and must be multiples of 4 KiB.
+
+`init` controls cold power-on contents for writable system RAM. The default,
+`"zero"`, preserves Copperline's normal compatibility behaviour. `"random"`
+fills chip, slow, motherboard, accelerator, A1000 WCS, and RAM-backed Zorro
+boards with deterministic pseudo-random bytes, which helps expose guest code
+that reads memory before initialising it. The fixed default seed is identical
+across hosts and repeated cold resets; `"random:SEED"` selects another decimal
+or `0x` hexadecimal 64-bit seed for test matrices. `"pattern:WORD"` instead
+repeats one decimal or `0x` hexadecimal 16-bit word in big-endian Amiga byte
+order; for convenience a bare value such as `"0x5555"` means the same thing as
+`"pattern:0x5555"`. The Machine Configuration screen exposes these as
+**Power-on fill** and **Fill pattern** on its Memory page. Warm keyboard resets
+still preserve RAM, and save-state restores reproduce the saved bytes exactly.
+
+For a one-off developer run:
+
+```sh
+./target/release/copperline --ram-init random --config game.toml --noaudio \
+  --screenshot-after 20 /tmp/game-random-ram.png
+```
 
 - **Chip RAM** is range-checked against the chipset: 512K on OCS, 2M on
   ECS/AGA (also bounded by the selected Agnus revision's address reach).

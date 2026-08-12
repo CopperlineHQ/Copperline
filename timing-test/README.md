@@ -414,7 +414,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 26 takes ~20 s on an
+parallel on the available cores (the full suite of 28 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
@@ -447,6 +447,12 @@ tap range instead of wrapping, so the SANITY Roots II AGA
 swirl/kaleidoscope taps render linearly -- the issue #371 regression
 class -- while an on-grid start folds from the pipeline alone;
 FS-UAE-verified band by band),
+`ddfprobe-agaorigin` (the AGA wide-FMODE absolute origin below the standard
+fetch slots: lo-res BPL64 DDFSTRT `$18` / DDFSTOP `$B8` hides the complete
+first 64-pixel gulp left of the standard DIW, leaving the other five gulps to
+fill its 320-pixel width exactly; its checkerboard seam and right-edge marker
+make either a hard-start clamp or the wrong six-gulp word count visible;
+FS-UAE-verified on the equivalent live display constellation),
 `dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible

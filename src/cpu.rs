@@ -591,8 +591,9 @@ impl M68kMachine {
     /// COPPERLINE_DBG_*: per-instruction debugger work done before the CPU steps.
     /// Handles instruction tracing and PC breakpoints, and (when watchpoints
     /// are configured) returns a snapshot of the watched memory words so the
-    /// post-step pass can detect writes. Returns `None` when inactive or when
-    /// there is nothing to compare afterwards.
+    /// post-step pass can detect writes. Returns `Some(empty)` when an Exec-list
+    /// check still needs the post-step pass, and `None` when no post-step work
+    /// is active.
     fn debug_before_step(&mut self) -> Option<Vec<(u32, u16)>> {
         let secs = self.bus.bus.emulated_seconds();
         if !self.dbg.as_ref().is_some_and(|d| d.enabled_at(secs)) {
@@ -692,7 +693,11 @@ impl M68kMachine {
                     .collect()
             })
             .unwrap_or_default();
-        if watch_words.is_empty() {
+        let listcheck_pending = self
+            .dbg
+            .as_ref()
+            .is_some_and(|d| !d.listcheck.is_empty() && !d.listcheck_reported);
+        if watch_words.is_empty() && !listcheck_pending {
             return None;
         }
         Some(
@@ -1248,6 +1253,43 @@ impl M68kMachine {
                     &format!("WATCH {addr:#010X} {old:04X}->{new:04X} by pc={writer:#010X}"),
                     secs,
                 );
+            }
+        }
+        self.debug_check_exec_lists(secs);
+    }
+
+    /// COPPERLINE_DBG_LISTCHECK: after each instruction in the window, walk
+    /// the configured exec List headers and report the first instruction
+    /// after which a node is linked twice (within one list or across the
+    /// listed lists) or a chain no longer terminates.
+    fn debug_check_exec_lists(&mut self, secs: f64) {
+        const NODE_LIMIT: usize = 4096;
+        let headers: Vec<u32> = match self.dbg.as_ref() {
+            Some(d) if !d.listcheck.is_empty() && !d.listcheck_reported => d.listcheck.clone(),
+            _ => return,
+        };
+        let violation = crate::debugger::find_exec_list_violation(&headers, NODE_LIMIT, |addr| {
+            (u32::from(self.bus.bus.peek_word_any(addr)) << 16)
+                | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
+        });
+        if let Some(violation) = violation {
+            let text = match violation {
+                crate::debugger::ExecListViolation::Duplicate {
+                    node,
+                    first_head,
+                    second_head,
+                } => format!(
+                    "LISTCHECK node {node:#010X} linked twice (lists {first_head:#010X} and {second_head:#010X}) by pc={:#010X}",
+                    self.cpu.ppc
+                ),
+                crate::debugger::ExecListViolation::Unterminated { head, limit } => format!(
+                    "LISTCHECK list {head:#010X} unterminated (>{limit} nodes) by pc={:#010X}",
+                    self.cpu.ppc
+                ),
+            };
+            self.debug_report(&text, secs);
+            if let Some(d) = self.dbg.as_mut() {
+                d.listcheck_reported = true;
             }
         }
     }

@@ -6,6 +6,7 @@
 use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
+use crate::memory::{RamInit, DEFAULT_RANDOM_RAM_SEED};
 use crate::zorro::{zorro_ii_size_code, zorro_iii_size_bits, BoardSpec, ZorroChain, ZorroVersion};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,11 @@ pub struct Config {
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
     pub slow_ram_bytes: usize,
+    /// Cold power-on contents for writable system RAM (`[memory] init`). Zero
+    /// is the compatibility default; a fixed word or deterministic random
+    /// data is an opt-in guest-development aid for exposing uninitialised
+    /// reads.
+    pub ram_init: RamInit,
     /// Ramsey-controlled motherboard fast RAM (`[memory] motherboard`):
     /// 32-bit local RAM ending at $08000000 and growing downward, sized by
     /// Kickstart's own probe rather than autoconfig. Needs a Ramsey
@@ -2044,6 +2050,7 @@ impl Default for Config {
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
             slow_ram_bytes: A500_TRAPDOOR_RAM_BYTES,
+            ram_init: RamInit::Zero,
             mb_ram_bytes: 0,
             accel_ram_bytes: 0,
             z3_ram_bytes: 0,
@@ -2252,6 +2259,8 @@ pub struct ConfigOverrides {
     pub chip: Option<String>,
     pub fast: Option<String>,
     pub slow: Option<String>,
+    /// RAM power-on policy (`--ram-init`). Same syntax as `[memory] init`.
+    pub ram_init: Option<String>,
     /// Ramsey motherboard fast RAM size (`--motherboard`). Same parser as
     /// `[memory] motherboard`.
     pub motherboard: Option<String>,
@@ -2390,6 +2399,7 @@ impl ConfigOverrides {
             && self.chip.is_none()
             && self.fast.is_none()
             && self.slow.is_none()
+            && self.ram_init.is_none()
             && self.motherboard.is_none()
             && self.accelerator.is_none()
             && self.floppy_drives.is_none()
@@ -2463,6 +2473,9 @@ impl ConfigOverrides {
         }
         if let Some(slow) = &self.slow {
             raw.memory.slow = Some(slow.clone());
+        }
+        if let Some(init) = &self.ram_init {
+            raw.memory.init = Some(init.clone());
         }
         if let Some(motherboard) = &self.motherboard {
             raw.memory.motherboard = Some(motherboard.clone());
@@ -3396,6 +3409,11 @@ pub(crate) struct RawMemory {
     pub(crate) fast: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) slow: Option<String>,
+    /// Cold-power-on RAM contents: "zero" (default), "random" (the fixed
+    /// reproducible seed), "random:SEED", or a fixed 16-bit
+    /// "pattern:WORD" / bare "0xWORD".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) init: Option<String>,
     /// Ramsey-controlled motherboard fast RAM size (e.g. "16M"); needs a
     /// Ramsey (A3000/A4000 profiles) and a 32-bit CPU. Sizes beyond 16M
     /// (up to 64M) fill the motherboard RAM expansion space and need the
@@ -3783,6 +3801,10 @@ impl TryFrom<RawConfig> for Config {
         let slow_ram_bytes = match raw.memory.slow.as_deref() {
             None => defaults.slow_ram_bytes,
             Some(s) => parse_size(s, "slow RAM")?,
+        };
+        let ram_init = match raw.memory.init.as_deref() {
+            None => defaults.ram_init,
+            Some(s) => parse_ram_init(s)?,
         };
         let mb_ram_bytes = match raw.memory.motherboard.as_deref() {
             None => defaults.mb_ram_bytes,
@@ -4459,6 +4481,7 @@ impl TryFrom<RawConfig> for Config {
             chip_ram_bytes,
             fast_ram_bytes,
             slow_ram_bytes,
+            ram_init,
             mb_ram_bytes,
             accel_ram_bytes,
             z3_ram_bytes,
@@ -5112,6 +5135,67 @@ pub(crate) fn format_size(bytes: usize) -> String {
     } else {
         bytes.to_string()
     }
+}
+
+/// Parse the diagnostic RAM power-on policy shared by `[memory] init` and
+/// `--ram-init`. A named default seed keeps the convenient `random` spelling
+/// reproducible, while a fixed pattern accepts either the explicit
+/// `pattern:WORD` spelling or a bare hexadecimal word such as `0x5555`.
+fn parse_ram_init(s: &str) -> Result<RamInit> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("zero") {
+        return Ok(RamInit::Zero);
+    }
+    if s.eq_ignore_ascii_case("random") {
+        return Ok(RamInit::Random {
+            seed: DEFAULT_RANDOM_RAM_SEED,
+        });
+    }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        return Ok(RamInit::Pattern {
+            word: parse_ram_pattern(s).with_context(|| format!("[memory] init {s:?}"))?,
+        });
+    }
+    let Some((mode, value)) = s.split_once(':') else {
+        bail!(
+            "unknown [memory] init {s:?}: expected zero, random, random:SEED, pattern:WORD, or 0xWORD"
+        );
+    };
+    if mode.trim().eq_ignore_ascii_case("pattern") {
+        return Ok(RamInit::Pattern {
+            word: parse_ram_pattern(value).with_context(|| format!("[memory] init {s:?}"))?,
+        });
+    }
+    if !mode.trim().eq_ignore_ascii_case("random") {
+        bail!(
+            "unknown [memory] init {s:?}: expected zero, random, random:SEED, pattern:WORD, or 0xWORD"
+        );
+    }
+    let seed = value.trim().replace('_', "");
+    let parsed = if let Some(hex) = seed.strip_prefix("0x").or_else(|| seed.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        seed.parse::<u64>()
+    }
+    .with_context(|| {
+        format!("[memory] init {s:?}: seed must be a decimal or 0x hexadecimal 64-bit integer")
+    })?;
+    Ok(RamInit::Random { seed: parsed })
+}
+
+/// Parse the launcher's fixed 16-bit word. Decimal and `0x` hexadecimal
+/// spellings match the seed parser; underscores are accepted for readability.
+pub(crate) fn parse_ram_pattern(s: &str) -> Result<u16> {
+    let value = s.trim().replace('_', "");
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u16::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u16>()
+    };
+    parsed.with_context(|| "pattern must be a decimal or 0x hexadecimal 16-bit word")
 }
 
 /// Parse a human size like "512K", "1M", "2 MiB" or a raw byte count.
@@ -6298,6 +6382,56 @@ mod tests {
     }
 
     #[test]
+    fn ram_init_parses_zero_random_fixed_patterns_and_explicit_seeds() -> Result<()> {
+        assert_eq!(parse_config("")?.ram_init, RamInit::Zero);
+        assert_eq!(
+            parse_config("[memory]\ninit = \"random\"\n")?.ram_init,
+            RamInit::Random {
+                seed: DEFAULT_RANDOM_RAM_SEED,
+            }
+        );
+        assert_eq!(
+            parse_config("[memory]\ninit = \"random:0x12_34_AB_CD\"\n")?.ram_init,
+            RamInit::Random { seed: 0x1234_ABCD }
+        );
+        assert_eq!(
+            parse_config("[memory]\ninit = \"random:12345\"\n")?.ram_init,
+            RamInit::Random { seed: 12345 }
+        );
+        assert_eq!(
+            parse_config("[memory]\ninit = \"pattern:0x5555\"\n")?.ram_init,
+            RamInit::Pattern { word: 0x5555 }
+        );
+        assert_eq!(
+            parse_config("[memory]\ninit = \"0xDEAD\"\n")?.ram_init,
+            RamInit::Pattern { word: 0xDEAD }
+        );
+        assert_eq!(
+            load_overrides(&ConfigOverrides {
+                ram_init: Some("pattern:0xBEEF".to_string()),
+                ..ConfigOverrides::default()
+            })?
+            .ram_init,
+            RamInit::Pattern { word: 0xBEEF }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ram_init_rejects_unknown_modes_and_bad_seeds() {
+        for value in [
+            "garbage",
+            "random:nope",
+            "random:",
+            "pattern:nope",
+            "pattern:0x10000",
+        ] {
+            let err = parse_config(&format!("[memory]\ninit = {value:?}\n")).unwrap_err();
+            assert!(err.to_string().contains("[memory] init"), "{err:#}");
+        }
+    }
+
+    #[test]
     fn filesys_volume_name_is_validated() {
         use crate::filesys::MountSpec;
         let with_volume = |volume: &str| Config {
@@ -6353,6 +6487,7 @@ mod tests {
                 chip: Some("2M".to_string()),
                 fast: Some("8M".to_string()),
                 slow: None,
+                init: Some("random:0x1234".to_string()),
                 motherboard: None,
                 accelerator: None,
                 z3: None,

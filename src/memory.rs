@@ -59,6 +59,73 @@ pub const WCS_SIZE: usize = 256 * 1024;
 pub const A1000_BOOT_ROM_SIZE: usize = 64 * 1024;
 pub use crate::zorro::{AUTOCONFIG_BASE, AUTOCONFIG_SIZE};
 
+/// Default seed for the opt-in deterministic pseudo-random RAM power-on
+/// pattern. Keeping the seed fixed makes a failing headless run exactly
+/// reproducible; developers can select another seed in the config or CLI to
+/// exercise the same program against a different set of stale-looking bytes.
+pub const DEFAULT_RANDOM_RAM_SEED: u64 = 0x434F_5050_4552_4C49;
+/// Initial value offered by the launcher's fixed-pattern RAM fill control.
+pub const DEFAULT_RAM_PATTERN: u16 = 0x5555;
+
+/// How writable system memory is initialised at a cold power-on.
+///
+/// Zero remains the compatibility default. `Pattern` repeats one big-endian
+/// 16-bit word, while `Random` is a development aid for finding guest code
+/// that reads allocations or statics before initialising them. Random data is
+/// deliberately deterministic rather than host entropy, so the same seed is
+/// byte-identical on every host and run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RamInit {
+    #[default]
+    Zero,
+    Pattern {
+        word: u16,
+    },
+    Random {
+        seed: u64,
+    },
+}
+
+impl RamInit {
+    /// Config/CLI spelling for this policy.
+    pub fn config_value(self) -> String {
+        match self {
+            Self::Zero => "zero".to_string(),
+            Self::Pattern { word } => format!("pattern:0x{word:04X}"),
+            Self::Random {
+                seed: DEFAULT_RANDOM_RAM_SEED,
+            } => "random".to_string(),
+            Self::Random { seed } => format!("random:0x{seed:016X}"),
+        }
+    }
+
+    /// Fill one independently-seeded RAM bank. SplitMix64 is small, stable,
+    /// and fully specified by integer operations; it is not cryptographic and
+    /// does not need to be for an uninitialised-read detector.
+    pub(crate) fn fill(self, bytes: &mut [u8], stream: u64) {
+        match self {
+            Self::Zero => bytes.fill(0),
+            Self::Pattern { word } => {
+                let pattern = word.to_be_bytes();
+                for (offset, byte) in bytes.iter_mut().enumerate() {
+                    *byte = pattern[offset & 1];
+                }
+            }
+            Self::Random { seed } => {
+                let mut state = seed ^ stream.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+                for chunk in bytes.chunks_mut(8) {
+                    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut word = state;
+                    word = (word ^ (word >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    word = (word ^ (word >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    word ^= word >> 31;
+                    chunk.copy_from_slice(&word.to_be_bytes()[..chunk.len()]);
+                }
+            }
+        }
+    }
+}
+
 /// Restore big-endian byte order in a byte-swapped ROM image.
 ///
 /// Every bootable Amiga ROM -- Kickstart parts of both sizes, the CDTV/CD32
@@ -303,22 +370,32 @@ impl Memory {
         self.extended_rom_base = 0;
     }
 
-    /// Return memory to its cold power-on state: clear all RAM and restore
-    /// the boot-time ROM overlay and Zorro autoconfig state. Unlike a
-    /// warm (keyboard) reset, this does not preserve RAM contents, so the
-    /// machine boots as if power had been cycled.
+    /// Return memory to its default cold power-on state: zero all RAM and
+    /// restore the boot-time ROM overlay and Zorro autoconfig state. Tests and
+    /// fixtures use this directly; the live Bus calls
+    /// [`Memory::power_on_reset_with`] with its configured policy.
     pub fn power_on_reset(&mut self) {
-        self.chip_ram.fill(0);
-        self.slow_ram.fill(0);
-        self.mb_ram.fill(0);
-        self.accel_ram.fill(0);
+        self.power_on_reset_with(RamInit::Zero);
+    }
+
+    /// Return memory to its configured cold power-on state. Random fills give
+    /// each bank a separate stream, so fitting or resizing fast RAM does not
+    /// change the bytes generated for chip RAM. Warm resets never call this
+    /// and continue to preserve every RAM bank.
+    pub(crate) fn power_on_reset_with(&mut self, init: RamInit) {
+        let mb_ram_base = self.mb_ram_base();
+        init.fill(&mut self.chip_ram, CHIP_RAM_BASE);
+        init.fill(&mut self.slow_ram, SLOW_RAM_BASE);
+        init.fill(&mut self.mb_ram, mb_ram_base);
+        init.fill(&mut self.accel_ram, ACCEL_RAM_BASE);
         // Cold boot loses the WCS contents and returns the latch to boot mode
         // (WCS writable), so the A1000 reloads Kickstart from disk. A warm
         // (keyboard) reset preserves the WCS, as the real machine does.
-        self.wcs.fill(0);
+        init.fill(&mut self.wcs, WCS_BASE);
         self.wcs_write_protected = false;
         self.overlay = true;
-        self.zorro.power_on_reset();
+        self.zorro
+            .power_on_reset_with(|idx, ram| init.fill(ram, 0x5A00_0000_0000_0000 | idx as u64));
     }
 }
 
@@ -431,6 +508,81 @@ mod tests {
         assert_eq!(&mem.rom[0..4], &0x0000_4000u32.to_be_bytes()); // initial SP
         assert_eq!(&mem.rom[4..8], &0x00F8_0010u32.to_be_bytes()); // initial PC
         assert_eq!(&mem.rom[0x10..0x12], &0x60FEu16.to_be_bytes()); // bra.s self
+    }
+
+    #[test]
+    fn random_ram_initialisation_is_repeatable_and_seeded() {
+        let mut first = [0u8; 37];
+        let mut repeated = [0u8; 37];
+        let mut other_seed = [0u8; 37];
+        let init = RamInit::Random {
+            seed: DEFAULT_RANDOM_RAM_SEED,
+        };
+        init.fill(&mut first, CHIP_RAM_BASE);
+        init.fill(&mut repeated, CHIP_RAM_BASE);
+        RamInit::Random {
+            seed: DEFAULT_RANDOM_RAM_SEED + 1,
+        }
+        .fill(&mut other_seed, CHIP_RAM_BASE);
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, [0; 37]);
+        assert_ne!(first, other_seed);
+    }
+
+    #[test]
+    fn fixed_ram_initialisation_repeats_a_big_endian_word() {
+        let mut bytes = [0u8; 7];
+        RamInit::Pattern { word: 0xDEAD }.fill(&mut bytes, CHIP_RAM_BASE);
+        assert_eq!(bytes, [0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE]);
+        assert_eq!(
+            RamInit::Pattern { word: 0x5555 }.config_value(),
+            "pattern:0x5555"
+        );
+    }
+
+    #[test]
+    fn random_ram_banks_use_independent_streams() {
+        let init = RamInit::Random {
+            seed: DEFAULT_RANDOM_RAM_SEED,
+        };
+        let mut chip = [0u8; 32];
+        let mut slow = [0u8; 32];
+        init.fill(&mut chip, CHIP_RAM_BASE);
+        init.fill(&mut slow, SLOW_RAM_BASE);
+        assert_ne!(chip, slow);
+    }
+
+    #[test]
+    fn random_cold_start_covers_every_system_ram_bank_and_repeats() {
+        let mut zorro = ZorroChain::default();
+        zorro
+            .add_board(crate::zorro::BoardSpec::fast_ram(64 * 1024))
+            .unwrap();
+        let mut mem = Memory::placeholder(64, 32, zorro);
+        mem.fit_mb_ram(64);
+        mem.fit_accel_ram(64);
+        mem.wcs = vec![0; 64];
+        let init = RamInit::Random { seed: 0x1234 };
+
+        mem.power_on_reset_with(init);
+        assert_ne!(mem.chip_ram, vec![0; mem.chip_ram.len()]);
+        assert_ne!(mem.slow_ram, vec![0; mem.slow_ram.len()]);
+        assert_ne!(mem.mb_ram, vec![0; mem.mb_ram.len()]);
+        assert_ne!(mem.accel_ram, vec![0; mem.accel_ram.len()]);
+        assert_ne!(mem.wcs, vec![0; mem.wcs.len()]);
+        assert_ne!(
+            mem.zorro.board_ram(0),
+            vec![0; mem.zorro.board_ram(0).len()]
+        );
+
+        let first_chip = mem.chip_ram.clone();
+        let first_zorro = mem.zorro.board_ram(0).to_vec();
+        mem.chip_ram.fill(0xFF);
+        mem.zorro.board_ram_mut(0).fill(0xFF);
+        mem.power_on_reset_with(init);
+        assert_eq!(mem.chip_ram, first_chip);
+        assert_eq!(mem.zorro.board_ram(0), first_zorro);
     }
 
     #[test]

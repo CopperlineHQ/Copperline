@@ -1423,6 +1423,30 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
         pinball_with_standard_ddf.fetch_start_native_x(false, 2)
     );
 
+    // The absolute gulp grid stays linear below the standard slots: a lores
+    // FMODE=3 scroller (8-plane interleaved 384-px buffer, 48-byte rows) with
+    // DDFSTRT $19 (masked $18, gulp slot 0) and DDFSTOP $B8 fetches six
+    // 64-px gulps and hides the whole first gulp -- its scroll-seam wrap
+    // columns -- left of the standard window: buffer pixel 64 is the
+    // window's first visible pixel and the remaining 320 fill the window
+    // flush to both edges (real-AGA and FS-UAE verified). Clamping the wide
+    // placement grid to the DDF hard start $18 pushed the picture 48 px
+    // right: the seam showed as a junk column at the window's left edge and
+    // the rightmost 48 px of content were cropped.
+    let seam_scroller = RenderState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x0211,
+        fmode: 0x0003,
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        ddfstrt: 0x0019,
+        ddfstop: 0x00B8,
+        ..blank_state()
+    };
+    assert_eq!(seam_scroller.words_per_row(false, 320), 24);
+    assert_eq!(seam_scroller.native_x_offset(false, 2), 64);
+    assert_eq!(seam_scroller.fetch_start_native_x(false, 2), 0);
+
     let diagrom_hires = RenderState {
         bplcon0: 0x8000,
         diwstrt: 0x2C81,

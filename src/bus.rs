@@ -24,7 +24,7 @@ use crate::chipset::paula::{
 };
 use crate::floppy::FloppyController;
 use crate::gayle::Gayle;
-use crate::memory::Memory;
+use crate::memory::{Memory, RamInit};
 use crate::rtc::{Rtc, RtcChip};
 use crate::timebase::{Duration, Instant};
 use crate::video::{beam::BeamEventIndex, FrameGeometry, FB_HEIGHT, FB_WIDTH, MAX_VISIBLE_LINES};
@@ -697,6 +697,10 @@ fn empty_sprite_display_enable_x_by_y() -> [Option<usize>; MAX_VISIBLE_LINES] {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
     pub mem: Memory,
+    /// Cold-power-on RAM policy. This is machine state rather than a host-side
+    /// presentation preference: a save-state restored and then power-cycled
+    /// must use the same deterministic pattern as the machine that saved it.
+    ram_init: RamInit,
     pub cia_a: Cia,
     pub cia_b: Cia,
     pub paula: Paula,
@@ -2548,6 +2552,7 @@ impl Bus {
 
         let mut bus = Self {
             mem,
+            ram_init: RamInit::Zero,
             cia_a: Cia::new(Which::A),
             cia_b: Cia::new(Which::B),
             paula,
@@ -3862,13 +3867,20 @@ impl Bus {
         self.floppy.write_prb(0xFF);
     }
 
-    /// Full cold boot. Clears RAM to its power-on (zeroed) state and then
-    /// runs the same chip/CIA reset as a keyboard reset. Unlike
-    /// Ctrl-Amiga-Amiga, RAM is not preserved, so the machine comes up as
-    /// if it had been power-cycled. Clear RAM first so the keyboard-reset
-    /// path snapshots the zeroed chip RAM for the renderer.
+    /// Select the RAM pattern used by subsequent cold power-on resets. Initial
+    /// machine construction fills Memory before building the Bus so the
+    /// renderer's first chip-RAM snapshot already sees the selected pattern.
+    pub fn set_ram_init(&mut self, init: RamInit) {
+        self.ram_init = init;
+    }
+
+    /// Full cold boot. Reinitialises RAM according to the configured policy
+    /// and then runs the same chip/CIA reset as a keyboard reset. Unlike
+    /// Ctrl-Amiga-Amiga, RAM is not preserved, so the machine comes up as if
+    /// it had been power-cycled. Fill RAM first so the keyboard-reset path
+    /// snapshots the new chip RAM for the renderer.
     pub fn power_on_reset(&mut self) {
-        self.mem.power_on_reset();
+        self.mem.power_on_reset_with(self.ram_init);
         self.reset_for_keyboard_reset();
     }
 

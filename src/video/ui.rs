@@ -767,6 +767,8 @@ pub enum UiControl {
     LauncherNewImageEdit(LauncherField),
     /// A serial TCP address box on the I/O Ports tab (Connect or Listen).
     LauncherSerialAddrEdit(LauncherField),
+    /// The fixed RAM power-on word on the Memory tab.
+    LauncherRamPatternEdit,
     /// The Create button on a Create Image page.
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.
@@ -5753,7 +5755,9 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
                         // word, and a serial address on the machine.
-                        return Some(if LauncherState::is_serial_addr(r.field) {
+                        return Some(if r.field == LauncherField::RamPattern {
+                            UiControl::LauncherRamPatternEdit
+                        } else if LauncherState::is_serial_addr(r.field) {
                             UiControl::LauncherSerialAddrEdit(r.field)
                         } else {
                             UiControl::LauncherNewImageEdit(r.field)
@@ -7213,9 +7217,11 @@ fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> Gre
     }
     match r.field {
         F::MouseSensitivity | F::MouseCapture | F::ShaderStrength => GreyedAs::DimmedReason,
-        F::FloppySpeed | F::AudioChannelMode | F::AudioFilter | F::AudioStereoSeparation => {
-            GreyedAs::DimmedValue
-        }
+        F::RamPattern
+        | F::FloppySpeed
+        | F::AudioChannelMode
+        | F::AudioFilter
+        | F::AudioStereoSeparation => GreyedAs::DimmedValue,
         // Drive select is shaped by the interface, so it only shows a
         // selection while there is one to shape it: an attached DrawBridge
         // has no drive-select line, but with no interface at all there is
@@ -10253,6 +10259,39 @@ mod tests {
             Some(UiControl::LauncherSerialAddrEdit(
                 LauncherField::SerialConnect
             ))
+        );
+    }
+
+    #[test]
+    fn fixed_ram_pattern_box_hit_tests_to_its_own_edit() {
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::Memory;
+        state.setup.cycle(LauncherField::RamInit, false); // Zero -> Fixed
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        let Some(Panel::Launcher(state)) = ui.panel.as_ref() else {
+            unreachable!()
+        };
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let index = launcher::rows(
+            state.tab,
+            state.setup.parallel_device(),
+            state.setup.serial_mode(),
+            state.setup.midi_out_is_mt32(),
+        )
+        .iter()
+        .filter(|r| !state.setup.row_hidden(r.field))
+        .position(|r| r.field == LauncherField::RamPattern)
+        .expect("no fixed RAM pattern row on Memory page");
+        let row_y = launcher_row_y(rect, index);
+        let box_rect = launcher_text_rect(rect, row_y, LauncherField::RamPattern);
+        assert_eq!(
+            ui.control_at((box_rect.x as i32 + 4, box_rect.y as i32 + 4)),
+            Some(UiControl::LauncherRamPatternEdit)
         );
     }
 
