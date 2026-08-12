@@ -426,6 +426,18 @@ fn logical_size_is_canvas(logical_w: f64, logical_h: f64, canvas_height: usize) 
 
 const CANVAS_SNAP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// What a canvas change still owes the window, when it could not be paid
+/// at the time: fullscreen was holding the window and nothing could be
+/// resized.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CanvasFollow {
+    /// The window was the canvas's own size: put it back on the new one.
+    Snap,
+    /// The window is the user's: move its height by what the canvas moved,
+    /// in logical pixels, and leave the width they chose alone.
+    Nudge(i32),
+}
+
 /// Whether a resize still belongs to the presentation canvas. The first
 /// event after an asynchronous `request_inner_size` is the platform's answer
 /// even when a window-manager limit clamps it far away from the requested
@@ -992,7 +1004,7 @@ pub struct App {
     snap_request_deadline: Option<Instant>,
     /// A canvas change that could not size the window because it was
     /// fullscreen, waiting for the window to come back.
-    snap_when_windowed: bool,
+    pending_canvas_follow: Option<CanvasFollow>,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
@@ -1838,7 +1850,7 @@ impl App {
             main_window_focused: false,
             window_manually_sized: false,
             snap_request_deadline: None,
-            snap_when_windowed: false,
+            pending_canvas_follow: None,
             cursor_pos: None,
             last_display_cursor_pos: None,
             last_cursor_phys: None,
@@ -5703,11 +5715,13 @@ impl App {
             return;
         }
         // Decide before the flag flips whether the window still matches the
-        // canvas, so a manual resize survives.
+        // canvas, so a manual resize survives, and note the height it is
+        // being measured against.
         let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         crate::video::set_mt32_panel_shown(shown);
         if self.resync_canvas_height() {
-            self.follow_canvas_change(was_canvas_sized);
+            self.follow_canvas_change(was_canvas_sized, canvas_before);
         } else {
             crate::video::set_mt32_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -5729,11 +5743,13 @@ impl App {
             self.release_keyboard_panel_holds();
         }
         // Decide before the flag flips whether the window still matches the
-        // canvas, so a manual resize survives.
+        // canvas, so a manual resize survives, and note the height it is
+        // being measured against.
         let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         crate::video::set_keyboard_panel_shown(shown);
         if self.resync_canvas_height() {
-            self.follow_canvas_change(was_canvas_sized);
+            self.follow_canvas_change(was_canvas_sized, canvas_before);
         } else {
             crate::video::set_keyboard_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -11796,19 +11812,67 @@ impl App {
     /// Follow a canvas-height change with the window, or arrange to when
     /// fullscreen gives the window back.
     ///
-    /// `was_canvas_sized` is the verdict taken before the change, so a
-    /// window the user has resized keeps its size. Fullscreen is the other
-    /// way a window is not the canvas's to size, and there the snap cannot
-    /// happen now: the request resizes nothing, and on the way out the
-    /// window returns at the *old* canvas's size, which would then be read
-    /// as a drag and strand it letterboxed for the rest of the run. So it
-    /// is remembered and taken when the window is the canvas's again.
-    fn follow_canvas_change(&mut self, was_canvas_sized: bool) {
+    /// `was_canvas_sized` is the verdict taken before the change and
+    /// `canvas_before` the canvas height it was taken at. Three cases:
+    ///
+    /// - The window was the canvas's: put it on the new canvas size.
+    /// - Fullscreen is holding it: nothing can be resized now, and on the
+    ///   way out the window returns at the size the *old* canvas gave it.
+    ///   Remember what is owed and take it when the window comes back.
+    /// - The window is the user's own size: their size is not ours to
+    ///   take, but the strip the canvas just gained or lost is theirs to
+    ///   gain or lose with it. Move the height by exactly that and leave
+    ///   the width alone. Doing nothing here -- as this used to -- leaves
+    ///   the canvas a different shape inside an unchanged window, and the
+    ///   picture letterboxes on whichever axis has come up short.
+    fn follow_canvas_change(&mut self, was_canvas_sized: bool, canvas_before: usize) {
         if was_canvas_sized {
             self.snap_window_to_canvas();
-        } else if !self.window_manually_sized {
-            // Not the user's, so only fullscreen can be holding it.
-            self.snap_when_windowed = true;
+            return;
+        }
+        let delta = window_present_height() as i32 - canvas_before as i32;
+        let fullscreen = self
+            .render
+            .as_ref()
+            .is_some_and(|r| r.window.fullscreen().is_some());
+        if fullscreen {
+            // A second change while still fullscreen adds to the first.
+            self.pending_canvas_follow = Some(if self.window_manually_sized {
+                let owed = match self.pending_canvas_follow {
+                    Some(CanvasFollow::Nudge(d)) => d,
+                    _ => 0,
+                };
+                CanvasFollow::Nudge(owed + delta)
+            } else {
+                CanvasFollow::Snap
+            });
+            return;
+        }
+        self.nudge_window_height(delta);
+    }
+
+    /// Move the main window's height by `delta` logical pixels, keeping the
+    /// width. Unlike a snap this leaves the window the user's -- it is
+    /// still their size, less or plus the strip the canvas changed by -- so
+    /// the resize it provokes is classified as any other.
+    fn nudge_window_height(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
+            return;
+        };
+        if window.fullscreen().is_some() {
+            return;
+        }
+        let scale = window.scale_factor();
+        let size = window.inner_size();
+        let logical_w = f64::from(size.width) / scale;
+        let logical_h = f64::from(size.height) / scale;
+        let want = (logical_h + f64::from(delta)).max(1.0);
+        if let Some(applied) = window.request_inner_size(LogicalSize::new(logical_w, want)) {
+            // Applied client-side, with no Resized event to follow.
+            self.apply_surface_size(applied);
         }
     }
 
@@ -11834,10 +11898,13 @@ impl App {
             return;
         }
         // The window is back from fullscreen with a canvas change owing:
-        // this size is the old canvas's, not a drag. Take the snap instead
-        // of classifying it, or the stale size is what gets remembered.
-        if std::mem::take(&mut self.snap_when_windowed) {
-            self.snap_window_to_canvas();
+        // this size is the old canvas's, not a drag. Settle up instead of
+        // classifying it, or the stale size is what gets remembered.
+        if let Some(follow) = self.pending_canvas_follow.take() {
+            match follow {
+                CanvasFollow::Snap => self.snap_window_to_canvas(),
+                CanvasFollow::Nudge(delta) => self.nudge_window_height(delta),
+            }
             return;
         }
         let logical_w = f64::from(size.width) / scale;
@@ -11997,8 +12064,10 @@ impl App {
             return;
         }
         // Decide before the change (it feeds window_present_height) whether the
-        // window is still canvas-sized, so a manual resize survives.
+        // window is still canvas-sized, so a manual resize survives, and
+        // note the height that verdict is measured against.
         let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         super::set_pixel_aspect(aspect);
         if let Some(r) = self.render.as_mut() {
             // The canvas height changes with the aspect, so re-plan: the
@@ -12029,7 +12098,7 @@ impl App {
                 self.apply_tool_surface_size(kind, applied);
             }
         }
-        self.follow_canvas_change(was_canvas_sized);
+        self.follow_canvas_change(was_canvas_sized, canvas_before);
         self.request_redraw();
     }
 
@@ -12075,6 +12144,7 @@ impl App {
         // Decide before the flag flips (it feeds window_present_height) whether
         // the window is still canvas-sized, so a manual resize survives.
         let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         let hidden = !super::status_bar_hidden();
         super::set_status_bar_hidden(hidden);
         if let Some(r) = self.render.as_mut() {
@@ -12112,9 +12182,9 @@ impl App {
                 tool.window.request_redraw();
             }
         }
-        // Only snap an unresized window to the new canvas size; a resized window
-        // keeps its dimensions and the display reflows into it.
-        self.follow_canvas_change(was_canvas_sized);
+        // An unresized window goes on the new canvas size; a resized one
+        // keeps the width the user chose and moves by the bar's height.
+        self.follow_canvas_change(was_canvas_sized, canvas_before);
         self.request_redraw();
         if hidden {
             self.show_osd(format!(
