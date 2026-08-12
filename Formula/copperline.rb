@@ -58,10 +58,14 @@ class Copperline < Formula
 
     # WHDLoad support archives: <prefix>/share/copperline/whdboot, where
     # whdload::find_whdboot_assets looks, with the provenance README beside
-    # them.
-    (pkgshare/"whdboot").install "assets/whdboot/README.md"
-    resource("whdload").stage { (pkgshare/"whdboot").install "WHDLoad_usr.lha" }
-    resource("skick").stage { (pkgshare/"whdboot").install "skick346.lha" }
+    # them. The stable formula can briefly point at a release made before a
+    # newly added optional payload, while HEAD already contains it. Use the
+    # source-tree marker so both revisions remain installable.
+    if (buildpath/"assets/whdboot/README.md").exist?
+      (pkgshare/"whdboot").install "assets/whdboot/README.md"
+      resource("whdload").stage { (pkgshare/"whdboot").install "WHDLoad_usr.lha" }
+      resource("skick").stage { (pkgshare/"whdboot").install "skick346.lha" }
+    end
   end
 
   test do
