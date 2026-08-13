@@ -5771,31 +5771,41 @@ fn launcher_action_label(control: UiControl) -> &'static str {
     }
 }
 
-/// The Save menu's items, in the order they are stacked above the button
-/// that opens it. Nearest the button first, so the pointer reaches the
-/// commonest of the three without crossing the other two -- and the one
-/// that deletes something ends up furthest away.
+/// The Save menu's items, left to right from the button that opens them.
+/// Nearest first, so the pointer reaches the commonest of the three
+/// without crossing the other two -- and the one that deletes something
+/// ends up furthest away, next to Defaults.
 const SAVE_MENU: [UiControl; 3] = [
     UiControl::LauncherSaveAs,
     UiControl::LauncherSaveDefault,
     UiControl::LauncherResetDefault,
 ];
 
-/// Where each Save-menu item is drawn: stacked upward from the Save button,
-/// wide enough for the longest label rather than the button's own width.
+/// Where each Save-menu item is drawn: in a row to the right of the Save
+/// button, along the action bar it belongs to.
+///
+/// Each is sized to its own label rather than to a shared width. There are
+/// 336 pixels between Save... and Defaults, and three buttons wide enough
+/// for "Reset default" do not fit in them -- a uniform row is 12 pixels
+/// too long. Sized individually the three come to 324 with their gaps,
+/// which leaves the last of them clear of Defaults by 8. The test below
+/// holds that, because a label growing by two characters is what would
+/// quietly push the row into the button beside it.
 fn launcher_save_menu_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let save = launcher_action_rects(rect)[1].1;
-    let w = LAUNCH_ACTION_W + 34;
+    // Six pixels of clearance either side of the text, which is what a
+    // label of exactly this many characters needs to survive the
+    // truncation `draw_text_button` applies.
+    let width = |control| launcher_action_label(control).chars().count() * font::GLYPH_W + 12;
+    let mut x = save.x + save.w + 4;
     std::array::from_fn(|i| {
         let item = Rect {
-            // Beside the button rather than over it: the first item lands
-            // level with Save..., so the menu opens out of it instead of
-            // covering the row it came from.
-            x: save.x + save.w + 4,
-            y: save.y - i * (LAUNCH_ACTION_H + 4),
-            w,
+            x,
+            y: save.y,
+            w: width(SAVE_MENU[i]),
             h: LAUNCH_ACTION_H,
         };
+        x = item.x + item.w + 4;
         (SAVE_MENU[i], item)
     })
 }
@@ -12656,6 +12666,47 @@ mod tests {
             // The base swaps them.
             assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
             assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
+        }
+
+        // The Save menu is a row along the action bar, and there is only
+        // just room for it: three buttons at a shared width do not fit
+        // between Save... and Defaults at all. Nothing about that is
+        // obvious from reading the code, so it is held here -- a label
+        // gaining two characters would otherwise push the last button
+        // silently under the one beside it.
+        {
+            let panel = Panel::Launcher(Box::new(LauncherState::new(
+                launcher::MachineSetup::default(),
+            )));
+            let rect = panel_rect(&panel);
+            let [load, save, defaults, run] = launcher_action_rects(rect);
+            let items = launcher_save_menu_rects(rect);
+            assert!(
+                items[0].1.x >= save.1.x + save.1.w,
+                "the menu should start clear of the button that opens it"
+            );
+            for (a, b) in items.iter().zip(items.iter().skip(1)) {
+                assert!(a.1.x + a.1.w <= b.1.x, "menu items overlap each other");
+                assert_eq!(a.1.y, b.1.y, "the menu should be one row");
+            }
+            let last = items[2].1;
+            assert!(
+                last.x + last.w <= defaults.1.x,
+                "the menu runs into Defaults: {} past {}",
+                last.x + last.w,
+                defaults.1.x
+            );
+            // Every label readable rather than truncated by the button it
+            // is drawn in, which is the reason the widths differ at all.
+            for (control, item) in items {
+                let fits = item.w.saturating_sub(8) / font::GLYPH_W;
+                let label = launcher_action_label(control);
+                assert!(
+                    label.chars().count() <= fits,
+                    "{label:?} does not fit its button"
+                );
+            }
+            let _ = (load, run);
         }
 
         // The confirm over Reset default answers every click on the panel:
