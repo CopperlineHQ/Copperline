@@ -1121,16 +1121,19 @@ const EMULATION_ROWS: [Row; 5] = [
 const PATHS_ROWS: [Row; 12] = [
     row(F::PathsBase, "Base folder", PathRow),
     section_header("Custom directories:"),
-    row(F::PathsStates, "Save states", PathRow),
-    row(F::PathsScreenshots, "Screenshots", PathRow),
-    row(F::PathsRecordings, "Recordings", PathRow),
-    row(F::PathsNvram, "NVRAM", PathRow),
-    row(F::PathsTraces, "Traces", PathRow),
-    row(F::PathsConfigs, "Configurations", PathRow),
-    row(F::PathsRoms, "ROMs", PathRow),
-    row(F::PathsFloppies, "Floppies", PathRow),
-    row(F::PathsHarddrives, "Hard drives", PathRow),
-    row(F::PathsCds, "CD images", PathRow),
+    // Indented under the heading, the same as the sections on the I/O
+    // Ports and MT-32 pages: the base above it is not one of these, and
+    // the indent is what says so.
+    row(F::PathsStates, "  Save states", PathRow),
+    row(F::PathsScreenshots, "  Screenshots", PathRow),
+    row(F::PathsRecordings, "  Recordings", PathRow),
+    row(F::PathsNvram, "  NVRAM", PathRow),
+    row(F::PathsTraces, "  Traces", PathRow),
+    row(F::PathsConfigs, "  Configurations", PathRow),
+    row(F::PathsRoms, "  ROMs", PathRow),
+    row(F::PathsFloppies, "  Floppies", PathRow),
+    row(F::PathsHarddrives, "  Hard drives", PathRow),
+    row(F::PathsCds, "  CD images", PathRow),
 ];
 
 /// The floppy page. Every option the format carries is on it; nothing on

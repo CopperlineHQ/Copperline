@@ -5788,11 +5788,11 @@ fn launcher_save_menu_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let w = LAUNCH_ACTION_W + 34;
     std::array::from_fn(|i| {
         let item = Rect {
-            // From the middle of the button that opened it, so the stack
-            // reads as hanging off that button rather than as a column
-            // that happens to sit above it.
-            x: save.x + save.w / 2,
-            y: save.y - (i + 1) * (LAUNCH_ACTION_H + 4),
+            // Beside the button rather than over it: the first item lands
+            // level with Save..., so the menu opens out of it instead of
+            // covering the row it came from.
+            x: save.x + save.w + 4,
+            y: save.y - i * (LAUNCH_ACTION_H + 4),
             w,
             h: LAUNCH_ACTION_H,
         };
@@ -8067,12 +8067,18 @@ fn draw_launcher_row(
                 Some(full) => clip_path_keep_name(&full, avail),
                 None => truncate_to_width(&setup.value_label(r.field), avail),
             };
-            let value_color = if launcher_path_inherits(setup, r.field) {
-                PANEL_TEXT_DIM
+            // An inheriting row centres its `(default)`, which reads as a
+            // column of its own rather than as eleven short strings
+            // pretending to be paths. A row with a real path keeps the
+            // left edge every other path on the page is read from.
+            let inherits = launcher_path_inherits(setup, r.field);
+            let (value_color, text_x) = if inherits {
+                let text_w = text.chars().count() * font::GLYPH_W;
+                (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
             } else {
-                PANEL_TEXT
+                (PANEL_TEXT, value_x)
             };
-            draw_panel_text(frame, value_x, browse.y + 6, &text, value_color, 1, scale);
+            draw_panel_text(frame, text_x, browse.y + 6, &text, value_color, 1, scale);
             let (has_browse, has_clear) = launcher_path_buttons(setup, r.field);
             if has_browse {
                 draw_text_button(
