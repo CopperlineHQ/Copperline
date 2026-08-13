@@ -31,8 +31,10 @@
 //! as a resident module and finds channel 0's drive. RIDE and AT-Bus 2008
 //! have one channel: task file at `0x1000`, control block at `0x2000` (so
 //! `+0x2C00` is the alternate-status register the driver's channel-autodetect
-//! polls against `+0x1E00`); both have also booted successfully against real
-//! release ROMs.
+//! polls against `+0x1E00`); both have also booted successfully to a real
+//! Workbench against real release ROMs (see
+//! `LIDE-ATBUS2008-BOOT-INVESTIGATION.md` in the repo root for the
+//! AT-Bus 2008 control-block/ROM-lane collision this once masked).
 //!
 //! A channel with *no* drives attached at all (as opposed to one drive
 //! present and the other slot empty) must float every register, not only
@@ -449,7 +451,9 @@ impl IdeZorro {
             return (hi << 16) | lo;
         }
         let value = if let Some((ch, is_ctrl)) = self.register_block(off) {
-            if self.ide_enabled {
+            if self.personality.rom_lane_odd() && off & 1 == 1 && self.rom_visible(off) {
+                self.read_rom(off, size)
+            } else if self.ide_enabled {
                 self.read_register_block(ch, is_ctrl, off, size)
             } else if self.rom_visible(off) {
                 self.read_rom(off, size)
@@ -778,6 +782,16 @@ mod tests {
                                                                    // ROM on the odd lane; even lane in ROM-only space floats.
         assert_eq!(board.read(0x8000, 1) as u8, 0xFF);
         assert_eq!(board.read(0x8001, 1) as u8, flash[0x4000]);
+        // The odd ROM lane is also live where it overlaps the channel 0
+        // control block (0x2000..0x3000) -- this is exactly where the boot
+        // ROM's chainloader fetches its relocatable driver payload
+        // (DRIVEROFFSET + the odd-board adjustment lands at 0x2001). Before
+        // this was fixed, `read()` matched the control block first and
+        // never consulted ROM on this lane, so the chainloader read back
+        // floated 0xFF instead of the driver's hunk header and silently
+        // failed to load lide.device.
+        assert_eq!(board.read(0x2000, 1) as u8, 0xFF); // even lane: register
+        assert_eq!(board.read(0x2001, 1) as u8, flash[0x1000]); // odd lane: ROM
     }
 
     #[test]
