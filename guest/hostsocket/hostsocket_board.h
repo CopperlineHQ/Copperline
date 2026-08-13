@@ -259,7 +259,16 @@
 //
 // SocketBaseTagList (SET and GET(REF) for SBTC_ERRNOLONGPTR,
 // SBTC_HERRNOLONGPTR, SBTC_SIGEVENTMASK, SBTC_BREAKMASK, and
-// SBTC_DTABLESIZE -- see crates/hostsocket-plugin/src/lib.rs's do_socketbasetaglist):
+// SBTC_DTABLESIZE; GET(REF)-only for the capability-detection tags
+// SBTC_HAVE_DNS_API/SBTC_HAVE_LOCAL_DATABASE_API/
+// SBTC_HAVE_ADDRESS_CONVERSION_API/SBTC_HAVE_GETHOSTADDR_R_API, always
+// answering TRUE (this project implements all four families) -- real
+// callers (curl's own amigaos.c among them) check these before ever
+// calling getaddrinfo()/the *ent iterators/inet_aton and friends/
+// gethostbyname_r, so leaving them unanswered would make those LVOs
+// unreachable to compliant software regardless of how real the
+// implementation behind them is -- see
+// crates/hostsocket-plugin/src/lib.rs's do_socketbasetaglist):
 //
 //   CALL_SOCKETBASETAGLIST arg1=tags (Amiga ptr to a TagItem array: 8
 //                           bytes/entry, BE ti_Tag then BE ti_Data,

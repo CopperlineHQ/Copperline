@@ -614,10 +614,14 @@ _func_table:
 
 	| -- AmiTCP 4.0 tail: -306 through -696 (ObtainServerSocket) --------
 	| See this table's own header comment above for which of these are
-	| real and which stay _hs_stub, and why. -306..-360 and -426 are
-	| reserved gaps in the real bsdsocket_lib.fd itself (no LVO name
-	| assigned there at all), filled with _hs_stub purely to keep this
-	| vector array contiguous.
+	| real and which stay _hs_stub, and why. -306..-360 are reserved
+	| gaps in the real bsdsocket_lib.fd itself (no LVO name assigned
+	| there at all), filled with _hs_stub purely to keep this vector
+	| array contiguous. -426 is different: it's ChangeRouteTagList, a
+	| real, named, `==private` LVO the .sfd's own comment says is "still
+	| unimplemented" upstream too -- _hs_stub is still the right body,
+	| but it's not a gap in this project's own coverage the way the
+	| -306..-360 run is.
 	.short	_hs_stub           - _func_table	| -306 (reserved)
 	.short	_hs_stub           - _func_table	| -312 (reserved)
 	.short	_hs_stub           - _func_table	| -318 (reserved)
@@ -638,13 +642,13 @@ _func_table:
 	.short	_hs_stub           - _func_table	| -408 bpf_data_waiting
 	.short	_hs_stub           - _func_table	| -414 AddRouteTagList
 	.short	_hs_stub           - _func_table	| -420 DeleteRouteTagList
-	.short	_hs_stub           - _func_table	| -426 (reserved)
+	.short	_hs_stub           - _func_table	| -426 ChangeRouteTagList (private, unimplemented upstream too)
 	.short	_hs_stub           - _func_table	| -432 FreeRouteInfo
-	.short	_hs_stub           - _func_table	| -438 GetRouteInfo
+	.short	_hs_stub_null      - _func_table	| -438 GetRouteInfo
 	.short	_hs_stub           - _func_table	| -444 AddInterfaceTagList
 	.short	_hs_stub           - _func_table	| -450 ConfigureInterfaceTagList
 	.short	_hs_stub           - _func_table	| -456 ReleaseInterfaceList
-	.short	_hs_stub           - _func_table	| -462 ObtainInterfaceList
+	.short	_hs_stub_null      - _func_table	| -462 ObtainInterfaceList
 	.short	_hs_stub           - _func_table	| -468 QueryInterfaceTagList
 	.short	_hs_stub           - _func_table	| -474 CreateAddrAllocMessageA
 	.short	_hs_stub           - _func_table	| -480 DeleteAddrAllocMessage
@@ -656,7 +660,7 @@ _func_table:
 	.short	_hs_stub           - _func_table	| -516 AddDomainNameServer
 	.short	_hs_stub           - _func_table	| -522 RemoveDomainNameServer
 	.short	_hs_stub           - _func_table	| -528 ReleaseDomainNameServerList
-	.short	_hs_stub           - _func_table	| -534 ObtainDomainNameServerList
+	.short	_hs_stub_null      - _func_table	| -534 ObtainDomainNameServerList
 	.short	_hs_setnetent      - _func_table	| -540 setnetent
 	.short	_hs_endnetent      - _func_table	| -546 endnetent
 	.short	_hs_getnetent      - _func_table	| -552 getnetent
@@ -671,29 +675,29 @@ _func_table:
 	.short	_hs_inet_pton      - _func_table	| -606 inet_pton
 	.short	_hs_in_localaddr   - _func_table	| -612 In_LocalAddr
 	.short	_hs_in_canforward  - _func_table	| -618 In_CanForward
-	.short	_hs_stub           - _func_table	| -624 mbuf_copym
+	.short	_hs_stub_null      - _func_table	| -624 mbuf_copym
 	.short	_hs_stub           - _func_table	| -630 mbuf_copyback
 	.short	_hs_stub           - _func_table	| -636 mbuf_copydata
-	.short	_hs_stub           - _func_table	| -642 mbuf_free
+	.short	_hs_stub_null      - _func_table	| -642 mbuf_free
 	.short	_hs_stub           - _func_table	| -648 mbuf_freem
-	.short	_hs_stub           - _func_table	| -654 mbuf_get
-	.short	_hs_stub           - _func_table	| -660 mbuf_gethdr
-	.short	_hs_stub           - _func_table	| -666 mbuf_prepend
+	.short	_hs_stub_null      - _func_table	| -654 mbuf_get
+	.short	_hs_stub_null      - _func_table	| -660 mbuf_gethdr
+	.short	_hs_stub_null      - _func_table	| -666 mbuf_prepend
 	.short	_hs_stub           - _func_table	| -672 mbuf_cat
 	.short	_hs_stub           - _func_table	| -678 mbuf_adj
-	.short	_hs_stub           - _func_table	| -684 mbuf_pullup
-	.short	_hs_stub           - _func_table	| -690 ProcessIsServer
+	.short	_hs_stub_null      - _func_table	| -684 mbuf_pullup
+	.short	_hs_stub_null      - _func_table	| -690 ProcessIsServer
 	.short	_hs_stub           - _func_table	| -696 ObtainServerSocket
 
 	| -- Real table continuation past this project's own original,
 	| too-early -696 stopping point, through to the real end at -858 --
 	| see this table's own header comment above for the .sfd source and
 	| why each of these is real or _hs_stub.
-	.short	_hs_stub           - _func_table	| -702 GetDefaultDomainName
+	.short	_hs_stub_null      - _func_table	| -702 GetDefaultDomainName
 	.short	_hs_stub           - _func_table	| -708 SetDefaultDomainName
-	.short	_hs_stub           - _func_table	| -714 ObtainRoadshowData
+	.short	_hs_stub_null      - _func_table	| -714 ObtainRoadshowData
 	.short	_hs_stub           - _func_table	| -720 ReleaseRoadshowData
-	.short	_hs_stub           - _func_table	| -726 ChangeRoadshowData
+	.short	_hs_stub_null      - _func_table	| -726 ChangeRoadshowData
 	.short	_hs_stub           - _func_table	| -732 RemoveInterface
 	.short	_hs_gethostbyname_r - _func_table	| -738 gethostbyname_r
 	.short	_hs_gethostbyaddr_r - _func_table	| -744 gethostbyaddr_r
@@ -1693,6 +1697,22 @@ _hs_gethostbyaddr_r:
 	| correct BSD "error" convention for these.
 _hs_stub:
 	moveq	#-1,d0
+	rts
+
+	| _hs_stub's own counterpart for LVOs whose real return type is a
+	| pointer or BOOL, not a plain LONG error code -- GetRouteInfo,
+	| ObtainInterfaceList, ObtainDomainNameServerList, the mbuf_*
+	| functions returning struct mbuf*, ProcessIsServer,
+	| GetDefaultDomainName, and ObtainRoadshowData/ChangeRoadshowData
+	| (see the jump table below for exactly which). -1 there would read
+	| back as a non-null 0xFFFFFFFF pointer (or BOOL TRUE) instead of
+	| NULL/FALSE, and a caller trusting that "success" value could go on
+	| to dereference memory nothing ever populated -- found in review,
+	| not by a failing test (bsdsocktest doesn't reach any of these).
+	| 0 is both NULL and BOOL FALSE, so one shared body covers both
+	| return-type families.
+_hs_stub_null:
+	moveq	#0,d0
 	rts
 
 	| -- Interrupt server (Phase 2) ----------------------------------
