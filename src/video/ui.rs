@@ -491,9 +491,20 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         matches!(panel, Panel::Launcher(state) if state.login.is_some() || state.meta.is_some());
     #[cfg(not(feature = "game-library"))]
     let modal = false;
-    // The Save menu answers before anything under it, including the close
-    // gadget: while it is up it is the only thing being asked.
+    // The confirm, then the Save menu: each answers before anything under
+    // it, including the close gadget, because while one is up it is the
+    // only thing being asked.
     if let Panel::Launcher(state) = panel {
+        if state.confirm_reset {
+            let (yes, _) = launcher_confirm_button_rects(rect);
+            if yes.contains(pos) {
+                return Some(UiControl::LauncherConfirmReset);
+            }
+            // Anywhere else, the dialog's own frame included, is the
+            // answer that changes nothing. A question about deleting
+            // something should not be answerable by a stray click.
+            return Some(UiControl::LauncherCancelReset);
+        }
         if state.save_menu {
             return launcher_save_menu_hit(rect, pos).or(Some(UiControl::LauncherSave));
         }
@@ -913,6 +924,10 @@ pub enum UiControl {
     /// Save menu: delete the saved default, so Copperline starts from
     /// factory settings again.
     LauncherResetDefault,
+    /// The "are you sure" over Reset default: go ahead.
+    LauncherConfirmReset,
+    /// The "are you sure" over Reset default: leave it alone.
+    LauncherCancelReset,
     /// Configuration screen: reset to the selected profile's defaults.
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
@@ -5490,8 +5505,12 @@ fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -
 /// Whether a row is a Paths row that has not been given a directory of its
 /// own. Its label and value are dimmed to say so: the row is showing
 /// Copperline's answer rather than the person's.
+///
+/// Not the base. It names a real directory either way, it is the one row
+/// on the page that always says something, and dimming the only line that
+/// tells you where everything is would be the wrong thing to play down.
 fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
-    field.is_paths_field() && !setup.paths_is_set(field)
+    field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }
 
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
@@ -5645,6 +5664,100 @@ fn launcher_zorro_add_rect(rect: Rect) -> Rect {
     launcher_nav_button_rect(rect, 0)
 }
 
+/// The "are you sure" over Reset default, centred on the panel.
+fn launcher_confirm_rect(rect: Rect) -> Rect {
+    // Sized by its title bar -- the name plus its close gadget -- and its
+    // two buttons, both of which want more room than the one line inside
+    // it does.
+    let (w, h) = (268, TITLE_H + 62);
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// Its two buttons, as (yes, cancel). Cancel is the rightmost, where a
+/// dialog's least destructive answer usually sits.
+fn launcher_confirm_button_rects(rect: Rect) -> (Rect, Rect) {
+    let dialog = launcher_confirm_rect(rect);
+    let (w, h) = (66, 20);
+    let y = dialog.y + dialog.h - h - 12;
+    (
+        Rect {
+            x: dialog.x + dialog.w - 2 * w - 20,
+            y,
+            w,
+            h,
+        },
+        Rect {
+            x: dialog.x + dialog.w - w - 12,
+            y,
+            w,
+            h,
+        },
+    )
+}
+
+fn draw_launcher_confirm(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    if !state.confirm_reset {
+        return;
+    }
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = launcher_confirm_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    draw_title_bar(
+        frame,
+        dialog,
+        "Reset default",
+        hover == Some(UiControl::LauncherCancelReset),
+        scale,
+    );
+    // The title bar has already said which default, and the buttons say
+    // what the answers are. Anything more here is a paragraph nobody
+    // reads standing between somebody and a decision they have made.
+    draw_panel_text(
+        frame,
+        dialog.x + 12,
+        dialog.y + TITLE_H + 10,
+        "Are you sure?",
+        PANEL_TEXT,
+        1,
+        scale,
+    );
+    let (yes, cancel) = launcher_confirm_button_rects(rect);
+    draw_text_button(
+        frame,
+        yes,
+        "Yes",
+        true,
+        hover == Some(UiControl::LauncherConfirmReset),
+        scale,
+    );
+    draw_text_button(
+        frame,
+        cancel,
+        "Cancel",
+        true,
+        hover == Some(UiControl::LauncherCancelReset),
+        scale,
+    );
+}
+
 fn launcher_action_label(control: UiControl) -> &'static str {
     match control {
         UiControl::LauncherLoad => "Load...",
@@ -5675,7 +5788,10 @@ fn launcher_save_menu_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let w = LAUNCH_ACTION_W + 34;
     std::array::from_fn(|i| {
         let item = Rect {
-            x: save.x,
+            // From the middle of the button that opened it, so the stack
+            // reads as hanging off that button rather than as a column
+            // that happens to sit above it.
+            x: save.x + save.w / 2,
             y: save.y - (i + 1) * (LAUNCH_ACTION_H + 4),
             w,
             h: LAUNCH_ACTION_H,
@@ -8658,6 +8774,10 @@ fn draw_launcher(
         );
     }
     if state.save_menu {
+        // Dimmed rather than merely covered, the same as a dialog: while
+        // the menu is up it is the only thing being answered, and the page
+        // behind it should look like it is waiting.
+        fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
         for (control, item) in launcher_save_menu_rects(rect) {
             // No backing fill: the button face is opaque across the whole
             // rect, and a second fill here would have to scale the rect
@@ -8673,6 +8793,7 @@ fn draw_launcher(
             );
         }
     }
+    draw_launcher_confirm(frame, rect, state, hover, scale);
     // Over everything, because it is the only thing being answered while
     // it is up.
     #[cfg(feature = "game-library")]
@@ -12475,6 +12596,18 @@ mod tests {
             };
             draw(&mut frame, big, &ui, None, None);
             save_at(&frame, "launcher-save-menu", bw, bh);
+
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.confirm_reset = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-confirm-reset");
         }
 
         // A Paths row must offer exactly the buttons it draws. A Reset
@@ -12517,6 +12650,30 @@ mod tests {
             // The base swaps them.
             assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
             assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
+        }
+
+        // The confirm over Reset default answers every click on the panel:
+        // Yes only on its own button, and anything else -- Run included --
+        // cancels. A question about deleting something must not be
+        // answerable by a click that missed.
+        {
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.confirm_reset = true;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let centre = |r: Rect| ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+            let (yes, cancel) = launcher_confirm_button_rects(rect);
+            assert_eq!(
+                panel_control_at(&panel, centre(yes)),
+                Some(UiControl::LauncherConfirmReset)
+            );
+            for elsewhere in [cancel, launcher_action_rects(rect)[3].1, rect] {
+                assert_eq!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherCancelReset),
+                    "a click off Yes should cancel"
+                );
+            }
         }
 
         // The Save menu: every item reachable, nothing under it reachable

@@ -6831,6 +6831,8 @@ impl App {
             UiControl::LauncherSaveAs => self.launcher_save(),
             UiControl::LauncherSaveDefault => self.launcher_save_default(),
             UiControl::LauncherResetDefault => self.launcher_reset_default(),
+            UiControl::LauncherConfirmReset => self.launcher_reset_default_confirmed(),
+            UiControl::LauncherCancelReset => self.launcher_close_confirm(),
             UiControl::LauncherRun => self.launcher_run(),
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)
@@ -8983,14 +8985,37 @@ impl App {
         }
     }
 
+    /// Ask before deleting the saved default.
+    ///
+    /// Only when there is one. With no default saved there is nothing to be
+    /// sure about, and a dialog that asks anyway is a dialog that teaches
+    /// people to dismiss dialogs without reading them.
+    fn launcher_reset_default(&mut self) {
+        self.launcher_close_save_menu();
+        let saved = crate::paths::default_config_file().is_some_and(|path| path.is_file());
+        if !saved {
+            self.set_launcher_status(StatusMessage::ok("No default saved"));
+            return;
+        }
+        if let Some(state) = self.launcher_state_mut() {
+            state.confirm_reset = true;
+        }
+    }
+
+    fn launcher_close_confirm(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            state.confirm_reset = false;
+        }
+    }
+
     /// Delete the saved default, so Copperline starts from factory settings
     /// again.
     ///
     /// Nothing else goes with it. What it removes is one file that was
     /// written by one button press, and everything the emulator has
     /// produced -- states, screenshots, NVRAM -- is untouched.
-    fn launcher_reset_default(&mut self) {
-        self.launcher_close_save_menu();
+    fn launcher_reset_default_confirmed(&mut self) {
+        self.launcher_close_confirm();
         let Some(path) = crate::paths::default_config_file() else {
             return;
         };

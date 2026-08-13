@@ -1120,7 +1120,7 @@ const EMULATION_ROWS: [Row; 5] = [
 /// the machine, so none of it round-trips through [`RawConfig`].
 const PATHS_ROWS: [Row; 12] = [
     row(F::PathsBase, "Base folder", PathRow),
-    section_header("Copperline writes:"),
+    section_header("Custom directories:"),
     row(F::PathsStates, "Save states", PathRow),
     row(F::PathsScreenshots, "Screenshots", PathRow),
     row(F::PathsRecordings, "Recordings", PathRow),
@@ -5866,6 +5866,11 @@ pub struct LauncherState {
     /// is three buttons over the action bar, and every click either picks
     /// one or puts it away.
     pub save_menu: bool,
+    /// Whether the "are you sure" over Reset default is up. Only ever set
+    /// when there is a default to delete -- with none saved there is
+    /// nothing to be sure about, and a dialog asking anyway is a dialog
+    /// that teaches people to dismiss dialogs.
+    pub confirm_reset: bool,
     /// What the Create Image pages will make. Not machine configuration, so
     /// it sits beside the setup rather than inside it.
     pub workshop: ImageWorkshop,
@@ -7111,6 +7116,7 @@ impl LauncherState {
         setup.adopt_whdload_defaults();
         let mut state = Self {
             save_menu: false,
+            confirm_reset: false,
             #[cfg(feature = "game-library")]
             library: LibraryPage::default(),
             #[cfg(feature = "game-library")]
