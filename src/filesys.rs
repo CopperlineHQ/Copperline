@@ -288,15 +288,6 @@ impl LruPathCache {
             Self::touch_dir_order(&mut self.dir_order, dir);
             return Some(res);
         }
-        if dir.join(comp).exists() {
-            let res = Some(std::sync::Arc::new(comp.into()));
-            dir_cache.exact.insert(comp.to_string(), res.clone());
-            with_ascii_lower(comp, |lower| {
-                dir_cache.folded.insert(lower.to_string(), res.clone());
-            });
-            Self::touch_dir_order(&mut self.dir_order, dir);
-            return Some(res);
-        }
         let res = with_ascii_lower(comp, |lower| dir_cache.folded.get(lower).cloned())?;
         Self::touch_dir_order(&mut self.dir_order, dir);
         Some(res)
@@ -324,9 +315,15 @@ impl LruPathCache {
         }
         if let Some(dir_cache) = self.dirs.get_mut(dir) {
             dir_cache.exact.insert(comp.to_string(), arc_res.clone());
-            with_ascii_lower(comp, |lower| {
-                dir_cache.folded.insert(lower.to_string(), arc_res);
-            });
+            if let Some(ref res) = arc_res {
+                let res_str = res.to_string_lossy();
+                dir_cache.exact.insert(res_str.to_string(), arc_res.clone());
+                if comp != res_str.as_ref() {
+                    with_ascii_lower(comp, |lower| {
+                        dir_cache.folded.insert(lower.to_string(), arc_res.clone());
+                    });
+                }
+            }
         }
     }
 
@@ -3585,6 +3582,16 @@ mod tests {
         std::fs::write(root.join("data.bin"), b"lower").unwrap();
         std::fs::write(root.join("DATA.BIN"), b"upper").unwrap();
 
+        // On case-insensitive host filesystems (e.g. Windows/macOS), the second write
+        // overwrites the first, so two files with case-differing names cannot exist in the same directory.
+        let entries_count = std::fs::read_dir(&root)
+            .map(|rd| rd.flatten().count())
+            .unwrap_or(0);
+        if entries_count < 2 {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
         let unit = FilesysUnit::new(
             0,
             MountSpec {
@@ -3606,6 +3613,43 @@ mod tests {
         let rec_upper2 = unit.resolve(0, b"DATA.BIN").unwrap();
         assert_eq!(rec_upper2.rel, Path::new("DATA.BIN"));
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_lru_path_cache_eviction_limit() {
+        let root = std::env::temp_dir().join(format!("clfs-lru-evict-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        for i in 0..=MAX_CACHED_DIRS {
+            let dir = root.join(format!("dir_{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("file.txt"), b"x").unwrap();
+        }
+
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+
+        for i in 0..=MAX_CACHED_DIRS {
+            let path_bytes = format!("DIR_{i}/FILE.TXT");
+            let rec = unit.resolve(0, path_bytes.as_bytes()).unwrap();
+            assert_eq!(rec.rel, Path::new(&format!("dir_{i}")).join("file.txt"));
+        }
+
+        let cache = unit.path_cache.borrow();
+        assert!(cache.dirs.len() <= MAX_CACHED_DIRS);
+        assert!(cache.dir_order.len() <= MAX_CACHED_DIRS);
+
+        drop(cache);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
