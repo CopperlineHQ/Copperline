@@ -491,6 +491,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         matches!(panel, Panel::Launcher(state) if state.login.is_some() || state.meta.is_some());
     #[cfg(not(feature = "game-library"))]
     let modal = false;
+    // The Save menu answers before anything under it, including the close
+    // gadget: while it is up it is the only thing being asked.
+    if let Panel::Launcher(state) = panel {
+        if state.save_menu {
+            return launcher_save_menu_hit(rect, pos).or(Some(UiControl::LauncherSave));
+        }
+    }
     if !modal && close_button_rect(rect).contains(pos) {
         return Some(UiControl::PanelClose);
     }
@@ -897,8 +904,15 @@ pub enum UiControl {
     },
     /// Configuration screen: load a .toml configuration.
     LauncherLoad,
-    /// Configuration screen: save the configuration to a .toml file.
+    /// Configuration screen: open the Save menu.
     LauncherSave,
+    /// Save menu: save the configuration to a .toml file of its own.
+    LauncherSaveAs,
+    /// Save menu: save it as the configuration Copperline starts with.
+    LauncherSaveDefault,
+    /// Save menu: delete the saved default, so Copperline starts from
+    /// factory settings again.
+    LauncherResetDefault,
     /// Configuration screen: reset to the selected profile's defaults.
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
@@ -5607,8 +5621,37 @@ fn launcher_action_label(control: UiControl) -> &'static str {
         UiControl::LauncherSave => "Save...",
         UiControl::LauncherDefaults => "Defaults",
         UiControl::LauncherRun => "Run",
+        UiControl::LauncherSaveAs => "Save as...",
+        UiControl::LauncherSaveDefault => "Save default",
+        UiControl::LauncherResetDefault => "Reset default",
         _ => "",
     }
+}
+
+/// The Save menu's items, in the order they are stacked above the button
+/// that opens it. Nearest the button first, so the pointer reaches the
+/// commonest of the three without crossing the other two -- and the one
+/// that deletes something ends up furthest away.
+const SAVE_MENU: [UiControl; 3] = [
+    UiControl::LauncherSaveAs,
+    UiControl::LauncherSaveDefault,
+    UiControl::LauncherResetDefault,
+];
+
+/// Where each Save-menu item is drawn: stacked upward from the Save button,
+/// wide enough for the longest label rather than the button's own width.
+fn launcher_save_menu_rects(rect: Rect) -> [(UiControl, Rect); 3] {
+    let save = launcher_action_rects(rect)[1].1;
+    let w = LAUNCH_ACTION_W + 34;
+    std::array::from_fn(|i| {
+        let item = Rect {
+            x: save.x,
+            y: save.y - (i + 1) * (LAUNCH_ACTION_H + 4),
+            w,
+            h: LAUNCH_ACTION_H,
+        };
+        (SAVE_MENU[i], item)
+    })
 }
 
 /// Hit-test the configuration panel. Returns the control under `pos`, or `None`
@@ -6119,6 +6162,15 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     }
     None
+}
+
+/// Hit-test the Save menu, which is over everything while it is up. A click
+/// anywhere else closes it without doing anything, which is what a menu is
+/// expected to do and keeps it from being a mode you can get stuck in.
+fn launcher_save_menu_hit(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
+    launcher_save_menu_rects(rect)
+        .into_iter()
+        .find_map(|(control, item)| item.contains(pos).then_some(control))
 }
 
 /// The Host Disk page: what the host has, and which of it to attach.
@@ -7860,16 +7912,13 @@ fn draw_launcher_row(
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
             let avail = browse.x.saturating_sub(value_x + 8);
-            // The printer output shows its full path (clipped to keep the file
-            // name if long, so the row never overflows), "(none)" until one is
-            // chosen; other path rows show the image file name.
-            let text = if r.field == LauncherField::ParallelOutput {
-                match setup.path(r.field) {
-                    Some(p) => clip_path_keep_name(&p.to_string_lossy(), avail),
-                    None => "(none)".to_string(),
-                }
-            } else {
-                truncate_to_width(&setup.value_label(r.field), avail)
+            // The printer output and the Paths rows show a whole path
+            // (clipped from the front if long, so the row never overflows
+            // and the end -- which is the part that identifies it -- stays);
+            // other path rows show the image file name.
+            let text = match setup.full_path_label(r.field) {
+                Some(full) => clip_path_keep_name(&full, avail),
+                None => truncate_to_width(&setup.value_label(r.field), avail),
             };
             draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
             draw_text_button(
@@ -8554,9 +8603,25 @@ fn draw_launcher(
             button_rect,
             launcher_action_label(control),
             true,
-            hover == Some(control),
+            hover == Some(control) || (control == UiControl::LauncherSave && state.save_menu),
             scale,
         );
+    }
+    if state.save_menu {
+        for (control, item) in launcher_save_menu_rects(rect) {
+            // No backing fill: the button face is opaque across the whole
+            // rect, and a second fill here would have to scale the rect
+            // itself, which is `draw_text_button`'s job and not this
+            // loop's.
+            draw_text_button(
+                frame,
+                item,
+                launcher_action_label(control),
+                true,
+                hover == Some(control),
+                scale,
+            );
+        }
     }
     // Over everything, because it is the only thing being answered while
     // it is up.
@@ -10897,7 +10962,7 @@ mod tests {
 
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        let save = |frame: &[u8], name: &str| {
+        let save_at = |frame: &[u8], name: &str, w: usize, h: usize| {
             if !crate::envcfg::flag("COPPERLINE_UI_PREVIEW") {
                 return;
             }
@@ -10910,6 +10975,9 @@ mod tests {
             writer.write_image_data(frame).unwrap();
             eprintln!("saved {path}");
         };
+        // Almost every preview is drawn at the base scale into the same
+        // frame size, so most callers need say nothing about it.
+        let save = |frame: &[u8], name: &str| save_at(frame, name, w, h);
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
             let probe = ((rect.y + 10) * w + rect.x + 4) * 4;
@@ -12301,6 +12369,76 @@ mod tests {
                     launcher_control_at(rect, state, centre),
                     Some(control),
                     "a mounted disk must not block {control:?}"
+                );
+            }
+        }
+
+        // A preview of the Paths page and of the Save menu, for eyes.
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::AvPaths;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-paths");
+
+            // Drawn at a scale of more than one, which is where anything
+            // handing an unscaled rect to a scaled draw shows up: at scale
+            // one the two are the same and the mistake is invisible.
+            let big = 2;
+            let (bw, bh) = (texture_width(big), texture_height(big));
+            let mut frame = vec![0u8; bw * bh * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.save_menu = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, big, &ui, None, None);
+            save_at(&frame, "launcher-save-menu", bw, bh);
+        }
+
+        // The Save menu: every item reachable, nothing under it reachable
+        // while it is up, and a click anywhere else putting it away rather
+        // than doing something.
+        {
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.save_menu = true;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let centre = |r: Rect| ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+            for (control, item) in launcher_save_menu_rects(rect) {
+                assert_eq!(
+                    panel_control_at(&panel, centre(item)),
+                    Some(control),
+                    "{control:?} is not reachable from the Save menu"
+                );
+            }
+            // Run sits under the open menu and must not answer: a click
+            // meant for a menu item that lands slightly off should close the
+            // menu, never start a machine.
+            let run = launcher_action_rects(rect)[3].1;
+            assert_eq!(
+                panel_control_at(&panel, centre(run)),
+                Some(UiControl::LauncherSave),
+                "a click off the menu should only put it away"
+            );
+            // And with the menu down, its items are not there to be hit.
+            let mut closed = LauncherState::new(launcher::MachineSetup::default());
+            closed.save_menu = false;
+            let closed = Panel::Launcher(Box::new(closed));
+            for (control, item) in launcher_save_menu_rects(rect) {
+                assert_ne!(
+                    panel_control_at(&closed, centre(item)),
+                    Some(control),
+                    "{control:?} answers with the menu closed"
                 );
             }
         }
