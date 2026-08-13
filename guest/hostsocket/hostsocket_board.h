@@ -394,6 +394,130 @@
 //                       struct in_addr) arg2=type (AF_INET; anything else
 //                       is rejected) arg3=bufaddr (LIB_NETENTBUF)
 //                       -> REG_RESULT = 0 or -1, same as CALL_GETNETBYNAME
+//
+// AmiTCP 4.0 tail additions: the real bsdsocket_lib.fd LVO order continues
+// well past GetSocketEvents (LVO -300, Phase 4's own ceiling) -- see
+// entry.s's jump-table comment for the full accounting of everything
+// between there and the real table's own end (-858, per the authoritative
+// bsdsocket_lib.sfd v1.12 -- ObtainServerSocket at -696 was this project's
+// own first, too-early stopping point, not the real end), most of which
+// stays _hs_stub because it has no equivalent in this project's model (raw
+// packet capture, host routing tables, live interface reconfiguration,
+// direct BSD mbuf-chain manipulation, Roadshow's own global-data-access
+// functions). These are the ones that do fit -- inet_aton/inet_ntop/
+// inet_pton round out the existing Inet_*/inet_* family, In_LocalAddr/
+// In_CanForward are small local predicates, and the three *ent iterator
+// triples walk the same static SERVICES/PROTOCOLS/NETWORKS tables
+// getservbyname and friends already use (see crates/hostsocket-plugin/
+// src/lib.rs's do_inet_aton and neighbors):
+//
+//   CALL_INET_ATON     arg1=cp (Amiga ptr to a NUL-terminated dotted-quad
+//                       string) arg2=out (Amiga ptr to a struct in_addr,
+//                       written on success only)
+//                       -> REG_RESULT = 1 (parsed, *out written) or 0
+//                          (unparsable, *out untouched) -- the inverse of
+//                          CALL_INET_ADDR's -1-on-failure convention,
+//                          matching real inet_aton()'s int/bool return
+//
+//   CALL_INET_NTOP     arg1=af (AF_INET; anything else fails) arg2=src
+//                       (Amiga ptr to 4 raw address bytes) arg3=dst (Amiga
+//                       ptr to the caller's own buffer) arg4=size (its
+//                       length)
+//                       -> REG_RESULT = dst (the formatted "a.b.c.d\0"
+//                          string written there) on success, or 0 (NULL)
+//                          if size is too small or af isn't AF_INET
+//
+//   CALL_INET_PTON     arg1=af (AF_INET; anything else fails) arg2=src
+//                       (Amiga ptr to a NUL-terminated dotted-quad string)
+//                       arg3=dst (Amiga ptr to a struct in_addr, written on
+//                       success only)
+//                       -> REG_RESULT = 1 (parsed, *dst written), 0
+//                          (unparsable), or -1 (af not AF_INET)
+//
+//   CALL_IN_LOCALADDR  arg1=addr (in_addr_t, network byte order)
+//                       -> REG_RESULT = 1 if addr falls inside one of this
+//                          interface's own configured subnets (including
+//                          127.0.0.0/8), 0 otherwise
+//
+//   CALL_IN_CANFORWARD arg1=addr (in_addr_t, network byte order)
+//                       -> REG_RESULT = 1 if addr is a plausible unicast
+//                          address eligible for forwarding (not class D/E,
+//                          not net 0 or 127), 0 otherwise
+//
+//   CALL_SETSERVENT/CALL_SETPROTOENT/CALL_SETNETENT arg1=stay_open
+//                       (accepted, not distinguished -- see
+//                       do_setservent's own comment)
+//                       -> REG_RESULT = 0 always; rewinds this task's own
+//                          cursor into SERVICES/PROTOCOLS/NETWORKS to the
+//                          start
+//
+//   CALL_ENDSERVENT/CALL_ENDPROTOENT/CALL_ENDNETENT (no args)
+//                       -> REG_RESULT = 0 always; same rewind as the
+//                          matching CALL_SET*ENT above
+//
+//   CALL_GETSERVENT arg1=bufaddr (LIB_SERVENTBUF)
+//   CALL_GETPROTOENT arg1=bufaddr (LIB_PROTOENTBUF)
+//   CALL_GETNETENT arg1=bufaddr (LIB_NETENTBUF)
+//                       -> REG_RESULT = 0 (writes the table entry at this
+//                          task's current cursor into bufaddr and advances
+//                          it), or -1 once the cursor runs past the end of
+//                          the table (real *ent() NULL-on-exhaustion,
+//                          same 0/-1-then-bufaddr convention as
+//                          CALL_GETSERVBYNAME and the rest of this family)
+//
+// Roadshow's own resolver-family extension (RFC 3493 getaddrinfo/
+// getnameinfo, plus BSD-style reentrant gethostbyname_r/gethostbyaddr_r),
+// past the AmiTCP-4.0-compatible tail above -- see
+// crates/hostsocket-plugin/src/lib.rs's do_getaddrinfo and neighbors for
+// the deliberate simplifications versus the full RFC 3493 contract.
+// freeaddrinfo() needs no CALL_* at all: it's a guest-side no-op (see
+// entry.s's own comment on why there is nothing to free here).
+//
+//   CALL_GAI_STRERROR  arg1=errnum (an EAI_* code, netdb.h) arg2=bufaddr
+//                       (the guest's own LIB_GAIBUF scratch area)
+//                       -> REG_RESULT = 0 always (writes a NUL-terminated
+//                          message string to bufaddr; an unrecognized code
+//                          still gets a real "Unknown error." string)
+//
+//   CALL_GETADDRINFO   arg1=hostname (Amiga ptr to a NUL-terminated string,
+//                       or 0) arg2=servname (ditto, or 0) arg3=hints (Amiga
+//                       ptr to a struct addrinfo used only for its
+//                       ai_flags/ai_family/ai_socktype/ai_protocol fields,
+//                       or 0) arg4=res (Amiga ptr to a struct addrinfo*,
+//                       written on a definite return only) arg5=bufaddr
+//                       (the guest's own LIB_ADDRINFOBUF scratch area)
+//                       -> REG_RESULT = 0 (success; *res = bufaddr) or a
+//                          negative EAI_* code (*res = 0), or RES_PENDING
+//                          if `hostname` needs a real DNS round trip (same
+//                          blocking shape as CALL_GETHOSTBYNAME)
+//
+//   CALL_GETNAMEINFO   arg1=sa (Amiga ptr to a sockaddr_in) arg2=salen
+//                       arg3=host (Amiga ptr to the caller's own buffer, or
+//                       0) arg4=hostlen arg5=serv (ditto, or 0) arg6=servlen
+//                       arg7=flags (NI_* bits, netdb.h)
+//                       -> REG_RESULT = 0 (host/serv written, truncated to
+//                          fit) or a negative EAI_* code -- never
+//                          RES_PENDING, see do_getnameinfo's own comment
+//                          for why `host` is always numeric here
+//
+//   CALL_GETHOSTBYNAME_R arg1=name arg2=hp (Amiga ptr to the caller's own
+//                       struct hostent shell) arg3=buf (Amiga ptr to the
+//                       caller's own storage for the variable-length parts)
+//                       arg4=buflen arg5=he (Amiga ptr to a LONG, written
+//                       with an h_errno-style code on failure, 0 on
+//                       success)
+//                       -> REG_RESULT = 0 (hp filled in, trampoline
+//                          returns hp) or -1 (NULL; ERANGE in *he if buf
+//                          was too small), or RES_PENDING (same DNS shape
+//                          as CALL_GETHOSTBYNAME)
+//
+//   CALL_GETHOSTBYADDR_R arg1=addr arg2=len arg3=type arg4=hp arg5=buf
+//                       arg6=buflen arg7=he
+//                       -> REG_RESULT = 0, -1, or RES_PENDING, same
+//                          conventions as CALL_GETHOSTBYNAME_R but for a
+//                          reverse (PTR) lookup -- shares the same single
+//                          in-flight-PTR-query engine CALL_GETHOSTBYADDR
+//                          uses (see PtrQuery::dest's own comment)
 #define CALL_SOCKET        0
 #define CALL_CONNECT       1
 #define CALL_SEND          2
@@ -439,6 +563,25 @@
 #define CALL_GETPROTOBYNUMBER 42
 #define CALL_GETNETBYNAME 43
 #define CALL_GETNETBYADDR 44
+#define CALL_INET_ATON 45
+#define CALL_INET_NTOP 46
+#define CALL_INET_PTON 47
+#define CALL_IN_LOCALADDR 48
+#define CALL_IN_CANFORWARD 49
+#define CALL_SETSERVENT 50
+#define CALL_ENDSERVENT 51
+#define CALL_GETSERVENT 52
+#define CALL_SETPROTOENT 53
+#define CALL_ENDPROTOENT 54
+#define CALL_GETPROTOENT 55
+#define CALL_SETNETENT 56
+#define CALL_ENDNETENT 57
+#define CALL_GETNETENT 58
+#define CALL_GAI_STRERROR 59
+#define CALL_GETADDRINFO 60
+#define CALL_GETNAMEINFO 61
+#define CALL_GETHOSTBYNAME_R 62
+#define CALL_GETHOSTBYADDR_R 63
 
 // REG_RESULT sentinel: the call hasn't completed yet (smoltcp needs more
 // tick()s -- e.g. the TCP handshake hasn't finished, or no data is buffered
