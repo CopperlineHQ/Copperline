@@ -81,6 +81,7 @@ pub mod mt32;
 pub mod net;
 pub mod package;
 pub mod parallel;
+pub mod pathconf;
 pub mod paths;
 pub mod picasso2;
 pub mod pointer;
