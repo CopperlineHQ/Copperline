@@ -492,9 +492,15 @@ In-tree functional boards implement the `ZorroDevice` trait
 
 1. Implement `ZorroDevice` for the board (register `read`/`write`, `tick`,
    `int2_line`/`int6_line`, `reset`); DMA goes through the `DeviceHost` passed
-   to each call. Add a `BoardDevice` variant wrapping it (`src/zorro_device.rs`).
+   to each call. Add a `BoardDevice` variant wrapping it (`src/zorro_device.rs`)
+   -- **append it at the end of the enum**: bincode encodes variants by
+   index, so inserting one anywhere else renumbers every saved state. Extend
+   all of `BoardDevice`'s forwarding `match` arms (`read`, `write`,
+   `peek_word`, `tick`, `int2_line`, `int6_line`, `is_idle`,
+   `next_event_cck`, `take_activity`, `reset`, `kind`) for the new variant.
 2. Provide a `BoardSpec` constructor with `backing: BoardBacking::Device(slot)`,
-   mirroring the existing ones:
+   mirroring the existing ones -- note the full field set (a stale example
+   here previously omitted three of them):
 
    ```rust
    pub fn fast_ram(size_bytes: usize) -> Self {
@@ -507,15 +513,21 @@ In-tree functional boards implement the `ZorroDevice` trait
            size_bytes,
            backing: BoardBacking::Ram,
            memlist: true,
+           memory_space: true,
+           chained: false,
+           window: 0,
            diag_vec: None,
        }
    }
    ```
 
-3. Instantiate the device in `build_machine` (`src/main.rs`): assign it a
-   slot, add its `BoardSpec` to the chain, and push the `BoardDevice` onto
-   `Bus::devices` (the A2091 block is the template). Bump
-   `savestate::STATE_VERSION` if the serialized layout changes.
+3. Instantiate the device in `build_machine` (`src/emulator.rs`, *not*
+   `src/main.rs`): assign it a slot, add its `BoardSpec` to the chain, and
+   push the `BoardDevice` onto `Bus::devices` (the A2091 block, and the
+   lide-compatible IDE board's block right after it, are worked templates).
+   Bump `savestate::STATE_VERSION` (with a comment explaining why) whenever
+   the serialized layout changes -- adding a `BoardDevice` variant always
+   counts, since the enum itself is part of every save state.
 4. Add unit tests next to the existing ones in `src/zorro.rs`, which cover
    ROM nibble encoding, Zorro II/III base assignment, chain advance,
    shut-up, and power-on reset -- they are the best worked examples of the

@@ -2386,6 +2386,58 @@ pub fn build_machine(
         };
         devices.push(device);
     }
+    // A lide.device-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
+    // or AT-Bus 2008. Hard disks only; the boot ROM is always user-supplied
+    // (never bundled), and its absence is a legal hardware-only mode.
+    if cfg.lide.enabled() {
+        let slot = devices.len();
+        let has_rom = cfg.lide.rom.is_some();
+        let mut flash = Vec::new();
+        if let Some(rom_path) = &cfg.lide.rom {
+            // Same --load-state placeholder handling as the A4091: the flash
+            // is serialized into save states, so a ROM that is temporarily
+            // unavailable while resuming is fine -- the state replaces it.
+            if rom_optional && !rom_path.is_file() {
+                info!(
+                    "--load-state: lide ROM {} is unavailable; building with \
+                     a placeholder the save state will replace",
+                    rom_path.display()
+                );
+            } else {
+                flash = crate::ide_zorro::IdeZorro::load_rom(rom_path)?;
+                if let Some(bank2_path) = &cfg.lide.rom_bank2 {
+                    flash.extend(crate::ide_zorro::IdeZorro::load_rom(bank2_path)?);
+                }
+            }
+        }
+        let mut board = crate::ide_zorro::IdeZorro::new(cfg.lide.board, flash)?;
+        let channels = cfg.lide.board.channels();
+        for (idx, drive) in cfg.lide.drives.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            let (ch, unit) = (idx / 2, idx % 2);
+            if ch >= channels {
+                continue; // config validation already rejects this; defensive only
+            }
+            let disk = crate::ata::IdeDrive::open(
+                &drive.path,
+                unit,
+                drive.volume_name.as_deref(),
+                drive.boot_pri,
+            )?;
+            board.attach_drive(ch, unit, disk);
+        }
+        zorro.add_board(crate::zorro::BoardSpec::lide(cfg.lide.board, slot, has_rom))?;
+        info!(
+            "lide: {} controller on the Zorro chain (slot {slot}){}",
+            cfg.lide.board.name(),
+            cfg.lide
+                .rom
+                .as_ref()
+                .map(|p| format!(", ROM {}", p.display()))
+                .unwrap_or_default()
+        );
+        devices.push(crate::zorro_device::BoardDevice::IdeZorro(board));
+    }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
     #[cfg(feature = "wasm-boards")]

@@ -177,7 +177,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  51: Bus gained the cold-power-on RAM initialisation policy, so a state
 //      restored and later power-cycled repeats its zero or seeded pseudo-random
 //      pattern.
-pub const STATE_VERSION: u32 = 51;
+//  52: BoardDevice gained the IdeZorro variant (the lide.device-compatible
+//      Zorro II IDE board, `[lide]`), appended at the end of the enum.
+pub const STATE_VERSION: u32 = 52;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

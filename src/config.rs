@@ -202,6 +202,10 @@ pub struct Config {
     /// drive images on SCSI IDs 0-6. The Zorro boards autoconfig on the chain
     /// and carry their own boot ROM and scsi.device; the A3000's does not.
     pub scsi: ScsiConfig,
+    /// `lide.device`-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
+    /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Hard
+    /// disks only; the boot ROM is always user-supplied.
+    pub lide: LideConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
@@ -1068,6 +1072,33 @@ impl ScsiConfig {
     /// which validation gives the bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
+    }
+}
+
+/// `[lide]`: a built-in Zorro II IDE board compatible with LIV2's
+/// `lide.device`. Hard disks only (no ATAPI); the boot ROM is always
+/// user-supplied (never bundled).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LideConfig {
+    /// Which of the three AutoConfig identities the board presents. Only
+    /// meaningful when `enabled()`.
+    pub board: crate::ide_zorro::LidePersonality,
+    /// Boot ROM image (32768 bytes). Absent = hardware-only mode: no
+    /// DiagArea, no autoboot; drives still work under a disk-loaded
+    /// `lide.device`.
+    pub rom: Option<PathBuf>,
+    /// Optional second flash bank (e.g. a CD filesystem image). Requires
+    /// `rom`; not valid on the AT-Bus 2008 personality.
+    pub rom_bank2: Option<PathBuf>,
+    /// Drive images, in (channel, master/slave) order: 0-1 are channel 0's,
+    /// 2-3 are channel 1's (RIPPLE only).
+    pub drives: [Option<DriveImage>; 4],
+}
+
+impl LideConfig {
+    /// Whether a `[lide]` section asked for a board at all.
+    pub fn enabled(&self) -> bool {
+        self.rom.is_some() || self.drives.iter().any(Option::is_some)
     }
 }
 
@@ -2128,6 +2159,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
+            lide: LideConfig::default(),
             a2065_net: None,
             hostsocket_net: None,
             hostsocket_transport: None,
@@ -2767,6 +2799,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) scsi: RawScsi,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) lide: RawLide,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
@@ -3285,6 +3319,30 @@ pub(crate) struct RawScsi {
     pub(crate) unit5: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unit6: Option<RawDrive>,
+}
+
+/// `[lide]` `lide.device`-compatible Zorro II IDE board.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLide {
+    /// Board personality: "ripple" (default once the section is present),
+    /// "ride", or "atbus2008".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) board: Option<String>,
+    /// Boot ROM image (a `lide.rom`/`lide-atbus.rom` release download, 32768
+    /// bytes). Absent means hardware-only mode: no autoboot, drives still
+    /// work under a disk-loaded `lide.device`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom: Option<String>,
+    /// Optional second flash bank (e.g. `cdfs.rom`), also 32768 bytes.
+    /// Requires `rom`; not valid on the AT-Bus 2008 personality, which has
+    /// no banking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom_bank2: Option<String>,
+    /// Drive images, in (channel, master/slave) order: index 0-1 are
+    /// channel 0's master/slave, index 2-3 are channel 1's (RIPPLE only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) drives: Vec<RawDrive>,
 }
 
 /// `[a2065]` Ethernet board. Fitting the board enables host networking, which
@@ -4249,6 +4307,67 @@ impl TryFrom<RawConfig> for Config {
             errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
         }
 
+        let lide_board = match raw.lide.board.as_deref() {
+            None => crate::ide_zorro::LidePersonality::Ripple,
+            Some(raw_board) => match raw_board.trim().to_ascii_lowercase().as_str() {
+                "ripple" => crate::ide_zorro::LidePersonality::Ripple,
+                "ride" => crate::ide_zorro::LidePersonality::Ride,
+                "atbus2008" | "at-bus2008" | "atbus" => {
+                    crate::ide_zorro::LidePersonality::AtBus2008
+                }
+                _ => {
+                    errors.push(anyhow!(
+                        "[lide] board = {raw_board:?} is not known \
+                         (expected \"ripple\", \"ride\", or \"atbus2008\")"
+                    ));
+                    crate::ide_zorro::LidePersonality::Ripple
+                }
+            },
+        };
+        let mut lide_drives: [Option<DriveImage>; 4] = Default::default();
+        for (slot, raw_drive) in raw.lide.drives.iter().enumerate().take(4) {
+            lide_drives[slot] = Some(drive_image(raw_drive.clone())?);
+        }
+        let lide = LideConfig {
+            board: lide_board,
+            rom: raw.lide.rom.as_ref().map(PathBuf::from),
+            rom_bank2: raw.lide.rom_bank2.as_ref().map(PathBuf::from),
+            drives: lide_drives,
+        };
+        if lide.enabled() {
+            // The IDE interface speaks plain ATA, not ATAPI.
+            for drive in lide.drives.iter().flatten() {
+                if is_cd_image_path(&drive.path) {
+                    errors.push(anyhow!(
+                        "[lide] {}: CD images are not supported; the lide-compatible IDE \
+                         board has no ATAPI support in this build",
+                        drive.path.display()
+                    ));
+                }
+            }
+            let max_drives = lide_board.max_drives();
+            if raw.lide.drives.len() > max_drives {
+                errors.push(anyhow!(
+                    "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
+                    raw.lide.drives.len(),
+                    lide_board.name()
+                ));
+            }
+            if lide.rom_bank2.is_some() && lide.rom.is_none() {
+                errors.push(anyhow!(
+                    "[lide] rom_bank2 needs rom (the primary bank image)"
+                ));
+            }
+            if lide.rom_bank2.is_some()
+                && lide_board == crate::ide_zorro::LidePersonality::AtBus2008
+            {
+                errors.push(anyhow!(
+                    "[lide] rom_bank2 does not apply to board = \"atbus2008\": that board has \
+                     no flash banking"
+                ));
+            }
+        }
+
         let a2065_net = match (&raw.a2065.net, &raw.a2065.interface) {
             (None, None) => None,
             (None, Some(_)) => {
@@ -4632,6 +4751,7 @@ impl TryFrom<RawConfig> for Config {
             audio,
             ide,
             scsi,
+            lide,
             a2065_net,
             hostsocket_net,
             hostsocket_transport,
@@ -8256,6 +8376,92 @@ mod tests {
             "#,
         )?;
         assert!(cfg.scsi.enabled());
+        Ok(())
+    }
+
+    #[test]
+    fn lide_section_parses_board_rom_and_drives() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom = "lide.rom"
+            drives = ["dh0.hdf", "dh1.hdf"]
+            "#,
+        )?;
+        assert!(cfg.lide.enabled());
+        assert_eq!(cfg.lide.board, crate::ide_zorro::LidePersonality::Ripple);
+        assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new("lide.rom")));
+        assert_eq!(
+            cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("dh0.hdf"))
+        );
+        assert_eq!(
+            cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("dh1.hdf"))
+        );
+        assert!(cfg.lide.drives[2].is_none());
+
+        // Hardware-only mode (no rom) is legal: no ROM, no autoboot, but the
+        // section still "enabled" via drives alone.
+        let cfg = parse_config(
+            r#"
+            [lide]
+            board = "ride"
+            drives = ["dh0.hdf"]
+            "#,
+        )?;
+        assert!(cfg.lide.enabled());
+        assert!(cfg.lide.rom.is_none());
+
+        // CD images are rejected: no ATAPI in this build.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom = "lide.rom"
+            drives = ["game.cue"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ATAPI"), "{err:#}");
+
+        // RIDE only has one channel (two drives); a third entry overflows it.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "ride"
+            rom = "lide.rom"
+            drives = ["dh0.hdf", "dh1.hdf", "dh2.hdf"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("drive(s)"), "{err:#}");
+
+        // rom_bank2 needs rom.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom_bank2 = "cdfs.rom"
+            drives = ["dh0.hdf"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rom_bank2 needs rom"), "{err:#}");
+
+        // rom_bank2 does not apply to AT-Bus 2008.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "atbus2008"
+            rom = "lide-atbus.rom"
+            rom_bank2 = "cdfs.rom"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no flash banking"), "{err:#}");
+
         Ok(())
     }
 

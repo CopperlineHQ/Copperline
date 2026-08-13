@@ -313,6 +313,40 @@ impl BoardSpec {
         }
     }
 
+    /// A `lide.device`-compatible Zorro II IDE board (`[lide]`):
+    /// RIPPLE (LIV2, manufacturer 0x144A / product 7, 128K, two channels),
+    /// RIDE (LIV2, manufacturer 0x144A / product 9, 128K, one channel), or
+    /// AT-Bus 2008 (manufacturer 0x082C / product 6, 64K, one channel,
+    /// odd-lane ROM). `diag_vec` is only set when a boot ROM is configured
+    /// (hardware-only mode never autoboots). `slot` is the index of the
+    /// matching [`crate::ide_zorro::IdeZorro`] device in `Bus::devices`.
+    pub fn lide(
+        personality: crate::ide_zorro::LidePersonality,
+        slot: usize,
+        has_rom: bool,
+    ) -> Self {
+        use crate::ide_zorro::LidePersonality;
+        let (name, manufacturer, product, serial, size_bytes, diag_vec) = match personality {
+            LidePersonality::Ripple => ("lide RIPPLE IDE", 0x144A, 7, 0, 0x2_0000, 0x0008),
+            LidePersonality::Ride => ("lide RIDE IDE", 0x144A, 9, 1, 0x2_0000, 0x0008),
+            LidePersonality::AtBus2008 => ("lide AT-Bus 2008 IDE", 0x082C, 6, 0, 0x1_0000, 0x0001),
+        };
+        Self {
+            name: name.into(),
+            version: ZorroVersion::II,
+            manufacturer,
+            product,
+            serial,
+            size_bytes,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: has_rom.then_some(diag_vec),
+        }
+    }
+
     /// The Z3660 accelerator's FPGA RTG core: one 128 MB Zorro III window
     /// (manufacturer 0x144B, product 1) holding the register file, the P96
     /// VRAM, and the GFXData mailbox; no autoboot ROM (the Z3660.card
@@ -1645,6 +1679,58 @@ mod tests {
         assert_eq!(chain.config_logical_byte(0, 9), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 6), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 7), Some(0x10));
+    }
+
+    #[test]
+    fn lide_identities_match_each_personality() {
+        use crate::ide_zorro::LidePersonality;
+
+        let ripple = BoardSpec::lide(LidePersonality::Ripple, 0, true);
+        assert_eq!(ripple.manufacturer, 0x144A);
+        assert_eq!(ripple.product, 7);
+        assert_eq!(ripple.serial, 0);
+        assert_eq!(ripple.size_bytes, 0x2_0000);
+        assert_eq!(ripple.diag_vec, Some(0x0008));
+
+        let ride = BoardSpec::lide(LidePersonality::Ride, 0, true);
+        assert_eq!(ride.manufacturer, 0x144A);
+        assert_eq!(ride.product, 9);
+        assert_eq!(ride.serial, 1);
+        assert_eq!(ride.size_bytes, 0x2_0000);
+        assert_eq!(ride.diag_vec, Some(0x0008));
+
+        let atbus = BoardSpec::lide(LidePersonality::AtBus2008, 0, true);
+        assert_eq!(atbus.manufacturer, 0x082C);
+        assert_eq!(atbus.product, 6);
+        assert_eq!(atbus.size_bytes, 0x1_0000);
+        assert_eq!(atbus.diag_vec, Some(0x0001));
+
+        // Hardware-only mode (no ROM configured): no DiagArea, no autoboot.
+        let no_rom = BoardSpec::lide(LidePersonality::Ripple, 0, false);
+        assert_eq!(no_rom.diag_vec, None);
+    }
+
+    #[test]
+    fn lide_ripple_autoconfig_rom_is_nibble_encoded() {
+        use crate::ide_zorro::LidePersonality;
+
+        let chain = chain_with(vec![BoardSpec::lide(LidePersonality::Ripple, 0, true)]);
+        // er_Type = Zorro II | DIAGVALID | 128K size code (2): 0xC0|0x10|0x02 = 0xD2.
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE, 1), 0xD0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 2, 1), 0x20);
+        // er_Product 7, inverted: 0xF8.
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 4, 1), 0xF0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 6, 1), 0x80);
+        // er_Manufacturer 0x144A, inverted: 0xEB 0xB5.
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x10, 1), 0xE0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x12, 1), 0xB0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x14, 1), 0xB0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x16, 1), 0x50);
+        // er_InitDiagVec 0x0008, inverted: FF F7.
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x28, 1), 0xF0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2A, 1), 0xF0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2C, 1), 0xF0);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2E, 1), 0x70);
     }
 
     #[test]

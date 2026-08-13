@@ -308,6 +308,18 @@ impl AtaBus {
         self.drives[slot.min(1)] = Some(drive);
     }
 
+    /// Whether either drive slot is populated. A front-end whose cable
+    /// connector is entirely unpopulated (as opposed to one drive present
+    /// and the other slot empty) can use this to float every task-file
+    /// register, not just status: [`Self::read_reg`] only special-cases
+    /// status/alt-status for "no drive selected", so an unattached second
+    /// physical channel needs this check to avoid presenting registers like
+    /// device/head as a hard zero, which some drivers' probes read as "a
+    /// device answered" rather than "floating bus".
+    pub fn any_drive_attached(&self) -> bool {
+        self.drives.iter().any(Option::is_some)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
         out.extend(
