@@ -97,6 +97,8 @@ impl VideoRecorder {
     /// RGBA stream. The header's timing fields are placeholders until
     /// [`finish`](Self::finish) patches them.
     pub fn create(path: &Path, width: usize, height: usize) -> Result<Self> {
+        crate::paths::ensure_parent(path)
+            .with_context(|| format!("creating the directory for {}", path.display()))?;
         let file =
             File::create(path).with_context(|| format!("creating recording {}", path.display()))?;
         let mut out = BufWriter::new(file);

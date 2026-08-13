@@ -183,7 +183,7 @@ pub fn library_root() -> PathBuf {
 
 /// Directory holding the numbered save-state slots.
 pub fn state_slot_dir() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join("states"))
+    config_dir().map(|dir| dirs().states_dir(&dir))
 }
 
 // --- what a run produces ------------------------------------------------
@@ -208,6 +208,29 @@ pub fn state_slot_dir() -> Option<PathBuf> {
 // recognises, so unifying it is a change in its own right and not one to
 // smuggle in here.
 
+/// The configured directories, read once. `paths.toml` says where each of
+/// these goes; absent or empty, it says nothing and the defaults stand.
+fn dirs() -> &'static crate::pathconf::Paths {
+    static DIRS: std::sync::OnceLock<crate::pathconf::Paths> = std::sync::OnceLock::new();
+    DIRS.get_or_init(crate::pathconf::Paths::load)
+}
+
+/// A named file under one of the configured directories.
+///
+/// A host with no per-user directory at all keeps the bare name, which is
+/// the working directory -- the same "degrade to not persisted" the rest of
+/// this module promises, rather than an error at the point somebody presses
+/// the screenshot key.
+fn output(
+    pick: impl Fn(&crate::pathconf::Paths, &std::path::Path) -> PathBuf,
+    name: String,
+) -> PathBuf {
+    match config_dir() {
+        Some(host) => pick(dirs(), &host).join(name),
+        None => PathBuf::from(name),
+    }
+}
+
 /// Seconds since the epoch, for the diagnostic captures.
 fn epoch_stamp() -> u64 {
     std::time::SystemTime::now()
@@ -218,61 +241,98 @@ fn epoch_stamp() -> u64 {
 
 /// Default name for a screenshot taken without one being given.
 pub fn screenshot_file() -> PathBuf {
-    PathBuf::from(format!(
-        "copperline-screenshot-{}.png",
-        crate::timestamp::compact_now()
-    ))
+    output(
+        |p, h| p.screenshots_dir(h),
+        format!(
+            "copperline-screenshot-{}.png",
+            crate::timestamp::compact_now()
+        ),
+    )
 }
 
 /// Default name for a video recording.
 pub fn recording_file() -> PathBuf {
-    PathBuf::from(format!(
-        "copperline-video-{}.avi",
-        crate::timestamp::compact_now()
-    ))
+    output(
+        |p, h| p.recordings_dir(h),
+        format!("copperline-video-{}.avi", crate::timestamp::compact_now()),
+    )
 }
 
 /// Default name for a recorded input script.
 pub fn input_recording_file() -> PathBuf {
-    PathBuf::from(format!(
-        "copperline-input-{}.clscript",
-        crate::timestamp::compact_now()
-    ))
+    output(
+        |p, h| p.recordings_dir(h),
+        format!(
+            "copperline-input-{}.clscript",
+            crate::timestamp::compact_now()
+        ),
+    )
 }
 
 /// Default name for a save state written outside the numbered slots.
 pub fn state_file() -> PathBuf {
-    PathBuf::from(format!(
-        "copperline-state-{}.clstate",
-        crate::timestamp::compact_now()
-    ))
+    output(
+        |p, h| p.states_dir(h),
+        format!(
+            "copperline-state-{}.clstate",
+            crate::timestamp::compact_now()
+        ),
+    )
 }
 
 /// Default name for a waveform capture. Reached from `--waveform` without a
 /// path and from `waveform.start` without one; a capture can run to half a
 /// gigabyte, which is its own argument against the working directory.
 pub fn waveform_file() -> PathBuf {
-    PathBuf::from(format!("copperline-wave-{}.vcd", epoch_stamp()))
+    output(
+        |p, h| p.traces_dir(h),
+        format!("copperline-wave-{}.vcd", epoch_stamp()),
+    )
 }
 
 /// Default name for an instruction trace. The debugger console and the
 /// control protocol both start traces, and each had its own copy of this;
 /// they now cannot drift.
 pub fn trace_file() -> PathBuf {
-    PathBuf::from(format!("copperline-trace-{}.txt", epoch_stamp()))
+    output(
+        |p, h| p.traces_dir(h),
+        format!("copperline-trace-{}.txt", epoch_stamp()),
+    )
+}
+
+/// A battery-backed RAM, under the configured directory -- unless one is
+/// already sitting where Copperline used to put it.
+///
+/// These held their bare names, so they landed in whatever directory the
+/// process happened to start in. Moving where Copperline *looks* is not the
+/// same as moving the file: the CD32's is a memory card holding real game
+/// saves, and a player whose progress silently reverted to blank would have
+/// no way of knowing it was still on disk a directory away. So an existing
+/// file keeps being used where it is, and only a machine that never had one
+/// gets the new place. Nothing is moved behind anyone's back.
+fn battery_ram(name: &str) -> PathBuf {
+    let legacy = PathBuf::from(name);
+    if legacy.is_file() {
+        log::info!(
+            "using the existing {name} in the working directory; new machines keep theirs under the host data directory"
+        );
+        return legacy;
+    }
+    match config_dir() {
+        Some(host) => dirs().nvram_dir(&host).join(name),
+        None => legacy,
+    }
 }
 
 /// The RP5C01's battery-backed RAM, when `[machine] battmem` does not say
 /// otherwise. Fitted to A3000/A4000-class machines.
 pub fn battery_ram_file() -> PathBuf {
-    PathBuf::from("battmem.nvram")
+    battery_ram("battmem.nvram")
 }
 
-/// The CD32's Akiko NVRAM, when nothing else says otherwise. This one holds
-/// real game saves, so wherever it ends up, an existing file has to keep
-/// being found.
+/// The CD32's Akiko NVRAM, when nothing else says otherwise.
 pub fn akiko_nvram_file() -> PathBuf {
-    PathBuf::from("cd32-nvram.bin")
+    battery_ram("cd32-nvram.bin")
 }
 
 /// Create a path's parent directory so a write to it can succeed.
@@ -340,15 +400,49 @@ mod tests {
         epoch(&waveform_file(), "copperline-wave-", ".vcd");
         epoch(&trace_file(), "copperline-trace-", ".txt");
 
-        // The two battery RAMs are fixed names, not stamped.
-        assert_eq!(battery_ram_file().to_str(), Some("battmem.nvram"));
-        assert_eq!(akiko_nvram_file().to_str(), Some("cd32-nvram.bin"));
+        // The two battery RAMs are fixed names, not stamped. Where they
+        // sit is `nvram_dir`'s business and is covered separately; what
+        // matters here is that the names themselves never changed.
+        assert_eq!(
+            battery_ram_file().file_name().and_then(|n| n.to_str()),
+            Some("battmem.nvram")
+        );
+        assert_eq!(
+            akiko_nvram_file().file_name().and_then(|n| n.to_str()),
+            Some("cd32-nvram.bin")
+        );
     }
 
     /// The launcher is handed a root and spells the library paths from it;
     /// the no-argument helpers spell them from the config directory. Those
     /// were two independent descriptions of the same tree, agreeing only by
     /// coincidence, so hold them to each other.
+    /// A battery RAM sitting where Copperline used to put it keeps being
+    /// used from there. The CD32's is a memory card holding real game
+    /// saves; looking somewhere new would present a player with a blank
+    /// card and no hint that their progress was still on disk.
+    #[test]
+    fn an_existing_battery_ram_is_not_abandoned() {
+        let scratch = ScratchDir::new("battery");
+        let here = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&scratch.0).unwrap();
+
+        // Nothing there: the new place, under the host data directory.
+        let fresh = akiko_nvram_file();
+        assert!(
+            fresh.parent().is_some_and(|p| p.ends_with("nvram")) || config_dir().is_none(),
+            "a machine with no card should get the nvram directory: {fresh:?}"
+        );
+
+        // One there: that one, wherever it is.
+        std::fs::write("cd32-nvram.bin", []).unwrap();
+        assert_eq!(akiko_nvram_file(), PathBuf::from("cd32-nvram.bin"));
+        std::fs::write("battmem.nvram", []).unwrap();
+        assert_eq!(battery_ram_file(), PathBuf::from("battmem.nvram"));
+
+        std::env::set_current_dir(here).unwrap();
+    }
+
     #[test]
     fn the_library_layout_is_one_description() {
         let root = std::path::Path::new("/tmp/copperline-root");

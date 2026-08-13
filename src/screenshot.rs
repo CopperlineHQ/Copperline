@@ -26,6 +26,8 @@ pub fn save(path: &Path, fb: &[u32], width: u32, height: u32) -> Result<()> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
+    crate::paths::ensure_parent(path)
+        .with_context(|| format!("creating the directory for {}", path.display()))?;
     let file =
         std::fs::File::create(path).with_context(|| format!("opening {}", path.display()))?;
     let writer = std::io::BufWriter::new(file);

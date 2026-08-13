@@ -6386,9 +6386,14 @@ mod tests {
         // The big boxes get the default backing file with their Ricoh part.
         for profile in ["A3000", "A4000"] {
             let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+            // The file's name, not its directory: where it sits is
+            // `paths`' business and moves with the host-data directory.
             assert_eq!(
-                cfg.battmem_path.as_deref(),
-                Some(std::path::Path::new("battmem.nvram")),
+                cfg.battmem_path
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str()),
+                Some("battmem.nvram"),
                 "{profile}"
             );
         }

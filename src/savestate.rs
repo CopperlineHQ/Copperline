@@ -218,6 +218,8 @@ pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
 /// (the shape of the machine that produced it). Call only between emulated
 /// frames.
 pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) -> Result<()> {
+    crate::paths::ensure_parent(path)
+        .with_context(|| format!("creating the directory for {}", path.display()))?;
     let file =
         File::create(path).with_context(|| format!("creating save state {}", path.display()))?;
     save_to_writer(machine, descriptor, BufWriter::new(file))

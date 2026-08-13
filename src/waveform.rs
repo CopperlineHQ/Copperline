@@ -597,6 +597,7 @@ impl WaveCapture {
     /// Create the output file and write the declaration section. The
     /// capture starts in the Armed state.
     pub fn create(opts: WaveOptions) -> io::Result<Self> {
+        crate::paths::ensure_parent(&opts.path)?;
         let file = std::fs::File::create(&opts.path)?;
         let mut writer = VcdWriter::new(io::BufWriter::new(file));
         writer.header(&[format!(
@@ -960,7 +961,14 @@ mod tests {
             }
         );
         assert_eq!(opts.duration, WaveDuration::Cck(500));
-        assert!(opts.path.to_string_lossy().starts_with("copperline-wave-"));
+        assert!(
+            opts.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("copperline-wave-")),
+            "{:?}",
+            opts.path
+        );
         // Defaults with no arguments at all.
         let opts = parse_wave_args([]).unwrap();
         assert_eq!(opts.trigger, Trigger::Now);
