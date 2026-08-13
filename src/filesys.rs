@@ -2355,14 +2355,18 @@ fn match_component_uncached(dir: &Path, comp: &str) -> Option<std::ffi::OsString
     if comp == "." || comp == ".." {
         return None;
     }
-    if dir.join(comp).exists() {
-        return Some(comp.into());
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut case_insensitive_match = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == comp {
+            return Some(name);
+        }
+        if case_insensitive_match.is_none() && name.to_string_lossy().eq_ignore_ascii_case(comp) {
+            case_insensitive_match = Some(name);
+        }
     }
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.file_name())
-        .find(|n| n.to_string_lossy().eq_ignore_ascii_case(comp))
+    case_insensitive_match
 }
 
 /// Total and available bytes of the host filesystem containing `path`.
