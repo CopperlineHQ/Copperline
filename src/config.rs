@@ -275,6 +275,11 @@ pub struct Config {
     /// (`[display] bezel`). The `Cmd+M` / `Alt+M` toggle turns it off and
     /// back on live without affecting this start-up value.
     pub bezel: BezelStyle,
+    /// Where this machine's output goes and where its file dialogs open
+    /// (`[paths]`). Empty until somebody moves something; put in force by
+    /// [`crate::paths::adopt`], which drops whatever this host cannot
+    /// reach so a configuration written elsewhere still starts.
+    pub paths: crate::pathconf::Paths,
     /// Folder of PNG stickers drawn onto the monitor bezel
     /// (`[display] bezel_stickers`). Each PNG in the folder becomes a
     /// decal on the drawn front; an optional `stickers.toml` in the folder
@@ -2158,6 +2163,7 @@ impl Default for Config {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
+            paths: crate::pathconf::Paths::default(),
         }
     }
 }
@@ -2793,6 +2799,13 @@ pub struct RawConfig {
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
+    /// `[paths]`: where this machine's output goes and where its file
+    /// dialogs open. Absent until somebody moves something, and every
+    /// entry within it optional, so a configuration that never mentions
+    /// directories behaves exactly as one written before the section
+    /// existed.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) paths: crate::pathconf::Paths,
 }
 
 impl RawConfig {
@@ -4662,6 +4675,7 @@ impl TryFrom<RawConfig> for Config {
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
+            paths: raw.paths,
         })
     }
 }

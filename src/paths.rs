@@ -183,7 +183,7 @@ pub fn library_root() -> PathBuf {
 
 /// Directory holding the numbered save-state slots.
 pub fn state_slot_dir() -> Option<PathBuf> {
-    config_dir().map(|dir| dirs().states_dir(&dir))
+    config_dir().map(|dir| configured().states_dir(&dir))
 }
 
 // --- what a run produces ------------------------------------------------
@@ -208,11 +208,51 @@ pub fn state_slot_dir() -> Option<PathBuf> {
 // recognises, so unifying it is a change in its own right and not one to
 // smuggle in here.
 
-/// The configured directories, read once. `paths.toml` says where each of
-/// these goes; absent or empty, it says nothing and the defaults stand.
-fn dirs() -> &'static crate::pathconf::Paths {
-    static DIRS: std::sync::OnceLock<crate::pathconf::Paths> = std::sync::OnceLock::new();
-    DIRS.get_or_init(crate::pathconf::Paths::load)
+/// The directories in force. A configuration's `[paths]` says where each of
+/// these goes; no section, or an empty one, says nothing and the defaults
+/// stand -- which is the state Copperline runs in until a configuration is
+/// loaded, and the one it stays in for anybody who never moves anything.
+///
+/// Settable rather than read once: the launcher can change these mid-session
+/// and a screenshot taken afterwards must land where the person just said it
+/// should, not where the configuration said at startup.
+fn store() -> &'static std::sync::RwLock<Option<std::sync::Arc<crate::pathconf::Paths>>> {
+    static DIRS: std::sync::RwLock<Option<std::sync::Arc<crate::pathconf::Paths>>> =
+        std::sync::RwLock::new(None);
+    &DIRS
+}
+
+/// The directories in force now.
+pub fn configured() -> std::sync::Arc<crate::pathconf::Paths> {
+    // A poisoned lock still holds a perfectly good `Paths`: the panic that
+    // poisoned it was somebody else's, and refusing to say where screenshots
+    // go because of it would help nobody.
+    let read = store().read().unwrap_or_else(|e| e.into_inner());
+    if let Some(dirs) = read.clone() {
+        return dirs;
+    }
+    drop(read);
+    let mut write = store().write().unwrap_or_else(|e| e.into_inner());
+    write.get_or_insert_with(Default::default).clone()
+}
+
+/// Put a configuration's `[paths]` in force, dropping whatever it names that
+/// this machine cannot reach.
+///
+/// Called once the configuration is settled, and again whenever the launcher
+/// changes it. The reachability check happens here rather than at the point
+/// of use so it happens once and where it can be waited on, not in the
+/// middle of taking a screenshot.
+pub fn adopt(dirs: crate::pathconf::Paths) {
+    let checked = match config_dir() {
+        Some(host) => dirs.reachable(&host),
+        // Nowhere to resolve against, so nothing to check: without a
+        // host-data directory the defaults are bare names in the working
+        // directory and `[paths]` has nothing to hang off.
+        None => dirs,
+    };
+    let mut write = store().write().unwrap_or_else(|e| e.into_inner());
+    *write = Some(std::sync::Arc::new(checked));
 }
 
 /// A named file under one of the configured directories.
@@ -226,7 +266,7 @@ fn output(
     name: String,
 ) -> PathBuf {
     match config_dir() {
-        Some(host) => pick(dirs(), &host).join(name),
+        Some(host) => pick(&configured(), &host).join(name),
         None => PathBuf::from(name),
     }
 }
@@ -319,7 +359,7 @@ fn battery_ram(name: &str) -> PathBuf {
         return legacy;
     }
     match config_dir() {
-        Some(host) => dirs().nvram_dir(&host).join(name),
+        Some(host) => configured().nvram_dir(&host).join(name),
         None => legacy,
     }
 }
@@ -348,7 +388,7 @@ pub fn akiko_nvram_file() -> PathBuf {
 fn media_dir(
     pick: impl Fn(&crate::pathconf::Paths, &std::path::Path) -> PathBuf,
 ) -> Option<PathBuf> {
-    let dir = pick(dirs(), &config_dir()?);
+    let dir = pick(&configured(), &config_dir()?);
     dir.is_dir().then_some(dir)
 }
 
@@ -376,6 +416,25 @@ pub fn harddrives_dir() -> Option<PathBuf> {
 pub fn cds_dir() -> Option<PathBuf> {
     media_dir(|p, h| p.cds_dir(h))
 }
+
+/// Where the launcher saves machine configurations.
+pub fn configs_dir() -> Option<PathBuf> {
+    config_dir().map(|host| configured().configs_dir(&host))
+}
+
+/// The configuration Copperline starts with when nothing on the command
+/// line says otherwise.
+///
+/// Exists only once somebody has pressed Save default, which is what makes
+/// "back to factory settings" a matter of deleting one file: with no
+/// default saved there is nothing to override, so most installations never
+/// have one and `--factory` never has anything to do.
+pub fn default_config_file() -> Option<PathBuf> {
+    configs_dir().map(|dir| dir.join(DEFAULT_CONFIG))
+}
+
+/// The saved default's filename.
+pub const DEFAULT_CONFIG: &str = "default.toml";
 
 /// Create a path's parent directory so a write to it can succeed.
 pub fn ensure_parent(path: &std::path::Path) -> std::io::Result<()> {
@@ -453,6 +512,34 @@ mod tests {
             akiko_nvram_file().file_name().and_then(|n| n.to_str()),
             Some("cd32-nvram.bin")
         );
+    }
+
+    /// The link the rest of the suite does not reach: a configuration's
+    /// `[paths]`, once adopted, is what a run actually writes against.
+    /// Everything in between is covered -- the section parses, the entries
+    /// resolve, the names keep their shape -- and none of it would notice
+    /// if [`output`] stopped consulting the adopted set at all.
+    ///
+    /// The only test that writes the process-wide store. It is safe beside
+    /// the others because they look at file *names*, which this does not
+    /// touch, and it puts the defaults back when it is done.
+    #[test]
+    fn what_a_run_writes_follows_the_adopted_section() {
+        let Some(host) = config_dir() else {
+            // No per-user directory on this host, so every default is a
+            // bare name and there is nothing for a section to move.
+            return;
+        };
+        adopt(crate::pathconf::Paths {
+            screenshots: Some(PathBuf::from("elsewhere")),
+            ..Default::default()
+        });
+        let moved = screenshot_file();
+        adopt(crate::pathconf::Paths::default());
+        let back = screenshot_file();
+
+        assert_eq!(moved.parent(), Some(host.join("elsewhere").as_path()));
+        assert_eq!(back.parent(), Some(host.join("screenshots").as_path()));
     }
 
     /// The launcher is handed a root and spells the library paths from it;

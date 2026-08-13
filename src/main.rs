@@ -161,6 +161,10 @@ pub struct CliArgs {
     /// Applied on top of the config file (or the built-in defaults) before
     /// validation.
     pub overrides: ConfigOverrides,
+    /// `--factory`: start from Copperline's own defaults, ignoring a
+    /// configuration saved with Save default. An explicit `--config` still
+    /// wins -- this says "not the saved default", not "no configuration".
+    pub factory: bool,
 }
 
 use copperline::video::window::{JoyButtonKind, MouseButtonKind};
@@ -341,6 +345,7 @@ where
     let mut wave_signals: Option<copperline::waveform::SignalSet> = None;
     let mut disk_insert_after: Vec<CliDiskInsert> = Vec::new();
     let mut cd_insert_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut factory = false;
     let mut audio_live = true;
     let mut explicit_audio_live = false;
     let mut explicit_noaudio = false;
@@ -1016,6 +1021,7 @@ where
                 audio_live = true;
                 explicit_audio_live = true;
             }
+            "--factory" => factory = true,
             "--noaudio" | "--no-audio" => {
                 audio_live = false;
                 explicit_noaudio = true;
@@ -1178,6 +1184,7 @@ where
         net_helper_action,
         list_sampler_inputs,
         overrides,
+        factory,
     })
 }
 
@@ -1225,7 +1232,10 @@ fn print_help() {
          Usage: copperline [--config FILE] [--screenshot-after SECS PATH] [ROM]\n\
          \n\
          Options:\n  \
-         -c, --config FILE              load configuration from FILE (default: ./copperline.toml)\n  \
+         -c, --config FILE              load configuration from FILE (default: ./copperline.toml,\n  \
+         \x20                            then the configuration saved with Save default)\n  \
+         --factory                      ignore the saved default and start from Copperline's own\n  \
+         \x20                            settings\n  \
          --whdload GAME                 boot a WHDLoad game package: an .lha archive or a\n  \
          \x20                            directory holding a .slave (see docs/guide/whdload.md)\n  \
          --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
@@ -1992,7 +2002,7 @@ fn main() -> Result<()> {
     if cli.list_sampler_inputs {
         return print_sampler_input_devices();
     }
-    let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides)?;
+    let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());
     }
@@ -2374,6 +2384,12 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
 /// interactive launch with nothing specified (no config file, ROM, overrides,
 /// scripted input, headless capture, or save-state load), and with live audio
 /// (the launcher's Run path uses the live audio sink).
+///
+/// `--factory` is deliberately not in the list. It is the flag for somebody
+/// whose saved default is not what they want any more, and sending them
+/// straight into a machine rather than into the launcher would be the
+/// opposite of helpful. A saved default does not suppress the launcher
+/// either -- it says what the launcher opens showing, not what to run.
 fn launcher_requested(cli: &CliArgs) -> bool {
     cli.config_path.is_none()
         && cli.rom_path.is_none()
@@ -2506,21 +2522,39 @@ fn read_profile_audio_word(chip_ram: &[u8], address: u32) -> u16 {
 fn load_config(
     explicit: Option<&Path>,
     overrides: &ConfigOverrides,
+    factory: bool,
 ) -> Result<(Config, config::RawConfig)> {
     // Resolve which file (if any) backs the config: the explicit --config
-    // path, then ./copperline.toml if present, otherwise the built-in
-    // defaults. CLI overrides layer on top of whichever it is.
-    let default = Path::new("copperline.toml");
+    // path, then ./copperline.toml if present, then the configuration saved
+    // with Save default, otherwise the built-in defaults. CLI overrides
+    // layer on top of whichever it is.
+    let cwd = Path::new("copperline.toml");
+    // Only if it was actually saved: most installations have no default, so
+    // this is normally one `stat` that finds nothing.
+    let saved = (!factory)
+        .then(copperline::paths::default_config_file)
+        .flatten()
+        .filter(|path| path.is_file());
     let path = if explicit.is_some() {
         explicit
-    } else if default.exists() {
-        info!("loading config from {}", default.display());
-        Some(default)
+    } else if cwd.exists() {
+        info!("loading config from {}", cwd.display());
+        Some(cwd)
+    } else if let Some(saved) = saved.as_deref() {
+        info!(
+            "loading the saved default configuration {}",
+            saved.display()
+        );
+        Some(saved)
     } else {
         None
     };
     let raw = Config::load_raw(path, overrides)?;
     let cfg = Config::try_from(raw.clone())?;
+    // Put `[paths]` in force before anything asks where it should write.
+    // Whatever this host cannot reach is dropped here and inherits instead,
+    // so a config that names somebody else's memory stick still starts.
+    copperline::paths::adopt(cfg.paths.clone());
     Ok((cfg, raw))
 }
 

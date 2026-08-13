@@ -2,35 +2,43 @@
 
 //! Where Copperline puts what it produces, and where its file dialogs start.
 //!
-//! A host preference, kept in `paths.toml` beside `keymap.toml` and
-//! `gamepads.toml` rather than in a machine TOML. Which chipset a machine
-//! has is a property of that machine and travels with its config; which
-//! folder *this* person keeps screenshots in is not, and a machine config
-//! carrying it would stop being something you can hand to someone else.
+//! The `[paths]` section of a configuration, and no file of its own: one
+//! TOML says what the machine is and where its output goes, which is one
+//! thing to keep, copy or hand over rather than two that have to be kept
+//! in step.
 //!
-//! Every entry is optional and every unset entry inherits, so the file is
-//! only ever as long as the person writing it wants it to be. An empty
-//! `paths.toml`, or none at all, behaves exactly as Copperline does today.
+//! Every entry is optional and every unset entry inherits, so the section
+//! only exists at all once somebody moves something. No `[paths]`, or an
+//! empty one, behaves exactly as Copperline does with no configuration.
 //!
 //! Relative entries are taken from [`base`](Paths::base), which is itself
 //! taken from the host-data directory when it is relative or unset. That is
 //! what makes the whole tree move together: a portable install sets nothing
 //! and everything follows the marker, because nothing ever said where it
 //! was in absolute terms.
+//!
+//! A configuration written on one machine will happily name directories the
+//! next one has never heard of, so [`Paths::reachable`] drops the entries
+//! whose directories are not there and lets them inherit. It is bounded in
+//! time as well as in work: a directory on a network share that has gone
+//! away does not fail, it *hangs*, and Copperline starting is not something
+//! to make conditional on a file server answering.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-/// The file's name in the host-data directory.
-pub const FILE: &str = "paths.toml";
+/// How long the whole reachability check may take before Copperline stops
+/// waiting and inherits the rest. Long enough that a busy disk still
+/// answers, short enough that a stale mount is a pause and not a hang.
+const PROBE_BUDGET: Duration = Duration::from_millis(1500);
 
 /// Directories Copperline writes into, and the directories its file
 /// dialogs open at. Serialised with `skip_serializing_if` throughout so a
-/// saved file records only what was actually set -- an inherited entry is
-/// absent rather than written out with its computed value, which would
-/// freeze today's default into a file that then stops following it.
+/// saved configuration records only what was actually set -- an inherited
+/// entry is absent rather than written out with its computed value, which
+/// would freeze today's default into a file that then stops following it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Paths {
@@ -85,6 +93,76 @@ pub struct Paths {
     pub cds: Option<PathBuf>,
 }
 
+/// Whether a directory is one Copperline can use: it is there, or it is one
+/// Copperline would make for itself inside `root`.
+///
+/// The second half is what makes a fresh installation work. `screenshots =
+/// "shots"` names a directory that will not exist until the first screenshot
+/// is taken, and it must not inherit in the meantime -- but the same
+/// generosity extended to *any* missing directory would be worse than
+/// useless: `/Volumes/STICK/Copperline` with the stick unplugged has a
+/// perfectly good parent, and treating it as creatable would quietly build
+/// a shadow copy of somebody's library on the internal disk. So a missing
+/// directory counts only inside the root everything else already hangs off,
+/// which a removed volume is not.
+///
+/// Two `stat`s at most, and nothing is created here. Whether the eventual
+/// write succeeds is the write's business to report; this only answers
+/// whether the place named still exists on this machine.
+fn is_reachable(dir: &Path, root: &Path) -> bool {
+    dir.is_dir()
+        || dir
+            .parent()
+            .is_some_and(|parent| parent.starts_with(root) && parent.is_dir())
+}
+
+/// Check each directory, giving up at `deadline`.
+///
+/// The checking runs on a thread of its own because it cannot be
+/// interrupted: a `stat` into a network mount whose server has gone away
+/// blocks in the kernel until it decides to time out, which on a default
+/// NFS mount is minutes. Verdicts come back one at a time as they are
+/// reached, so a hang costs only the entries behind it -- everything
+/// already answered still counts. Anything unanswered when the deadline
+/// passes is reported unreachable, and the thread is abandoned: it holds no
+/// lock, touches nothing shared, and ends when the kernel lets it.
+fn probe_within(dirs: &[PathBuf], root: &Path, deadline: Instant) -> Vec<bool> {
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned: Vec<PathBuf> = dirs.to_vec();
+    let root = root.to_path_buf();
+    std::thread::Builder::new()
+        .name("paths-probe".to_string())
+        .spawn(move || {
+            for dir in owned {
+                // A closed channel means the deadline passed and nobody is
+                // listening any more; there is nothing left to do.
+                if tx.send(is_reachable(&dir, &root)).is_err() {
+                    return;
+                }
+            }
+        })
+        // A host that cannot spawn a thread has bigger problems than where
+        // its screenshots go; inherit everything and carry on.
+        .map_or_else(
+            |_| vec![false; dirs.len()],
+            |_| {
+                let mut verdicts = Vec::with_capacity(dirs.len());
+                while verdicts.len() < dirs.len() {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    match rx.recv_timeout(left) {
+                        Ok(verdict) => verdicts.push(verdict),
+                        Err(_) => break,
+                    }
+                }
+                verdicts.resize(dirs.len(), false);
+                verdicts
+            },
+        )
+}
+
 /// The name each entry carries when unset. Stated once so the defaults, the
 /// resolver and anything that lists them cannot disagree.
 mod default_name {
@@ -102,36 +180,102 @@ mod default_name {
 }
 
 impl Paths {
-    /// Read `paths.toml`, or the defaults when there is none.
-    ///
-    /// A malformed file is reported and then ignored. It names only where
-    /// things go, so falling back to the defaults leaves a working
-    /// emulator; refusing to start over it would be a poor trade, and the
-    /// message says which file to look at.
-    pub fn load() -> Self {
-        let Some(path) = crate::paths::config_file(FILE) else {
-            return Self::default();
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
-        };
-        match toml::from_str(&text) {
-            Ok(paths) => paths,
-            Err(err) => {
-                log::warn!("{}: {err}; using the default directories", path.display());
-                Self::default()
-            }
-        }
+    /// Whether anything at all was set. Nothing set is the overwhelmingly
+    /// common case and costs nothing to answer, which is what keeps the
+    /// reachability check off the startup path for almost everybody.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
     }
 
-    /// Write the entries that were set.
-    pub fn save(&self) -> Result<()> {
-        let path = crate::paths::config_file(FILE)
-            .ok_or_else(|| anyhow!("no host-data directory for {FILE}"))?;
-        crate::paths::ensure_parent(&path)?;
-        std::fs::write(&path, toml::to_string_pretty(self)?)?;
-        log::info!("saved directories to {}", path.display());
-        Ok(())
+    /// Every entry but the base, destructured rather than listed so a field
+    /// added later cannot quietly escape the check below.
+    fn entries(&mut self) -> [&mut Option<PathBuf>; 11] {
+        let Paths {
+            base: _,
+            states,
+            screenshots,
+            recordings,
+            nvram,
+            traces,
+            configs,
+            roms,
+            mt32_roms,
+            floppies,
+            harddrives,
+            cds,
+        } = self;
+        [
+            states,
+            screenshots,
+            recordings,
+            nvram,
+            traces,
+            configs,
+            roms,
+            mt32_roms,
+            floppies,
+            harddrives,
+            cds,
+        ]
+    }
+
+    /// Drop the entries whose directories are not there, so what is left
+    /// inherits.
+    ///
+    /// A configuration is a portable thing: it gets copied between machines,
+    /// checked in, and handed to other people, and the memory stick one of
+    /// them named is not going to be plugged into the next one. Rather than
+    /// fail, or write somewhere surprising, an entry Copperline cannot reach
+    /// stops applying and that directory goes back to its default.
+    ///
+    /// "There" means the directory itself, or the directory it would be
+    /// created inside: Copperline makes its own output directories on first
+    /// write, so naming one that does not exist yet is normal and only its
+    /// parent has to be real.
+    ///
+    /// Bounded in time. `stat` on a network share whose server has gone away
+    /// blocks in the kernel and cannot be cancelled, so the probing happens
+    /// on a thread of its own and this waits [`PROBE_BUDGET`] for it.
+    /// Whatever has not answered by then is treated as unreachable and
+    /// inherits -- the wrong-but-working answer, arrived at promptly, rather
+    /// than the right one at the cost of a startup that never finishes. The
+    /// thread is left to end in its own time; it holds nothing.
+    pub fn reachable(mut self, host_data: &Path) -> Self {
+        if self.is_empty() {
+            return self;
+        }
+        let deadline = Instant::now() + PROBE_BUDGET;
+        // The base goes first and on its own. Everything relative hangs off
+        // it, so an unreachable base is not one bad entry but a wrong answer
+        // for all of them; dropping it first means the rest are then
+        // measured where they are actually about to be written.
+        if let Some(base) = self.base.clone() {
+            let dir = host_data.join(base);
+            if !probe_within(std::slice::from_ref(&dir), host_data, deadline)[0] {
+                log::warn!("{}: base folder unreachable", dir.display());
+                self.base = None;
+            }
+        }
+        let base = self.base_dir(host_data);
+        let mut entries = self.entries();
+        let resolved: Vec<PathBuf> = entries
+            .iter()
+            .map(|entry| match entry.as_deref() {
+                Some(dir) => base.join(dir),
+                // Unset entries are probed too rather than skipped, so the
+                // verdicts line up with the entries by position and no
+                // index arithmetic stands between the two.
+                None => base.clone(),
+            })
+            .collect();
+        let verdicts = probe_within(&resolved, &base, deadline);
+        for ((entry, dir), reachable) in entries.iter_mut().zip(resolved).zip(verdicts) {
+            if entry.is_some() && !reachable {
+                log::warn!("{}: unreachable, using the default instead", dir.display());
+                **entry = None;
+            }
+        }
+        self
     }
 
     /// The directory everything else is taken from: `base` when it is
@@ -327,5 +471,67 @@ mod tests {
     #[test]
     fn an_empty_file_is_the_defaults() {
         assert_eq!(toml::from_str::<Paths>("").unwrap(), Paths::default());
+        assert!(Paths::default().is_empty());
+    }
+
+    /// The point of the whole check: a configuration written on a machine
+    /// with a memory stick plugged in still starts on one without it, with
+    /// the entries that *are* there left alone.
+    #[test]
+    fn an_entry_that_is_not_there_inherits_and_the_rest_do_not() {
+        let root = std::env::temp_dir();
+        let paths = Paths {
+            // A volume that is not mounted: the case the whole check is for.
+            screenshots: Some(PathBuf::from("/no-such-volume-9f3a/shots")),
+            // A directory that does not exist yet, inside Copperline's own
+            // root: normal on a fresh installation, because it is made on
+            // the first write.
+            states: Some(PathBuf::from("not-yet-created")),
+            // One that is simply there.
+            recordings: Some(root.clone()),
+            ..Default::default()
+        }
+        .reachable(&root);
+        assert_eq!(paths.screenshots, None, "a missing volume should inherit");
+        assert!(paths.states.is_some(), "a creatable directory should stand");
+        assert!(paths.recordings.is_some(), "an existing one should stand");
+    }
+
+    /// An unreachable base takes only itself out: the rest fall back to the
+    /// host directory rather than being condemned along with it.
+    #[test]
+    fn an_unreachable_base_leaves_the_entries_under_the_default_root() {
+        let paths = Paths {
+            base: Some(PathBuf::from("/no-such-volume-4c1d/Copperline")),
+            screenshots: Some(std::env::temp_dir()),
+            ..Default::default()
+        }
+        .reachable(&host());
+        assert_eq!(paths.base, None);
+        assert!(paths.screenshots.is_some());
+    }
+
+    /// Nothing set means nothing to check, so the common case never touches
+    /// the disk at all.
+    #[test]
+    fn nothing_set_is_not_probed() {
+        assert_eq!(Paths::default().reachable(&host()), Paths::default());
+    }
+
+    /// A probe that never answers costs the budget and no more, and the
+    /// entries behind it inherit rather than the whole thing failing.
+    #[test]
+    fn the_check_gives_up_rather_than_waiting() {
+        let started = Instant::now();
+        let verdicts = probe_within(
+            &[PathBuf::from("/"), PathBuf::from("/")],
+            Path::new("/"),
+            started - Duration::from_secs(1),
+        );
+        assert_eq!(verdicts.len(), 2, "one verdict per directory, always");
+        assert!(
+            started.elapsed() < PROBE_BUDGET,
+            "a passed deadline should not be waited out"
+        );
     }
 }
