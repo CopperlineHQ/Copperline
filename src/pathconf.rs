@@ -80,6 +80,11 @@ pub struct Paths {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roms: Option<PathBuf>,
     /// MT-32 control and PCM ROMs, under the ROMs directory by default.
+    /// The one entry with no row on the Paths page: they are ROMs, they
+    /// follow the ROMs directory, and a second ROM row for the handful of
+    /// people who keep them apart is a poor trade against a shorter page.
+    /// Still read and still written back, so a configuration that sets it
+    /// keeps it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mt32_roms: Option<PathBuf>,
     /// Floppy images.

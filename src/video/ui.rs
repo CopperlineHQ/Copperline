@@ -5464,6 +5464,36 @@ fn launcher_bridge_configure_rect(rect: Rect, row_y: usize) -> Rect {
 
 /// (Browse, Clear) buttons for a path row, just after the fixed-width value
 /// column ([`LAUNCH_PATH_VALUE_W`]) rather than out at the panel's right edge.
+/// Which of a path row's two buttons are there, as (browse, reset).
+///
+/// Every path row outside the Paths page has both, always. On the Paths
+/// page a row that is inheriting has nothing to reset, so it offers only
+/// Browse -- and the base swaps the two rather than showing both, because
+/// it is the root the others hang off and moving it is a different act
+/// from picking a folder for one of them.
+///
+/// One function, so what is drawn and what can be clicked cannot disagree:
+/// a Reset that is not there must not still answer, and a Browse that is
+/// not there must not still open a dialog.
+fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -> (bool, bool) {
+    if !field.is_paths_field() {
+        return (true, true);
+    }
+    let set = setup.paths_is_set(field);
+    if field == LauncherField::PathsBase {
+        (!set, set)
+    } else {
+        (true, set)
+    }
+}
+
+/// Whether a row is a Paths row that has not been given a directory of its
+/// own. Its label and value are dimmed to say so: the row is showing
+/// Copperline's answer rather than the person's.
+fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
+    field.is_paths_field() && !setup.paths_is_set(field)
+}
+
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
     let y = row_y + 2;
     let browse = Rect {
@@ -5944,10 +5974,11 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 }
                 RowKind::Path => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
-                    if browse.contains(pos) {
+                    let (has_browse, has_clear) = launcher_path_buttons(&state.setup, r.field);
+                    if has_browse && browse.contains(pos) {
                         return Some(UiControl::LauncherBrowse(r.field));
                     }
-                    if clear.contains(pos) {
+                    if has_clear && clear.contains(pos) {
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
@@ -7369,7 +7400,7 @@ fn draw_launcher_row(
     } else {
         setup.disabled_reason(r.field)
     };
-    let label_color = if reason.is_none() {
+    let label_color = if reason.is_none() && !launcher_path_inherits(setup, r.field) {
         PANEL_TEXT
     } else {
         PANEL_TEXT_DIM
@@ -7920,23 +7951,42 @@ fn draw_launcher_row(
                 Some(full) => clip_path_keep_name(&full, avail),
                 None => truncate_to_width(&setup.value_label(r.field), avail),
             };
-            draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
-            draw_text_button(
-                frame,
-                browse,
-                "Browse",
-                true,
-                hover == Some(UiControl::LauncherBrowse(r.field)),
-                scale,
-            );
-            draw_text_button(
-                frame,
-                clear,
-                "Clear",
-                true,
-                hover == Some(UiControl::LauncherClear(r.field)),
-                scale,
-            );
+            let value_color = if launcher_path_inherits(setup, r.field) {
+                PANEL_TEXT_DIM
+            } else {
+                PANEL_TEXT
+            };
+            draw_panel_text(frame, value_x, browse.y + 6, &text, value_color, 1, scale);
+            let (has_browse, has_clear) = launcher_path_buttons(setup, r.field);
+            if has_browse {
+                draw_text_button(
+                    frame,
+                    browse,
+                    "Browse",
+                    true,
+                    hover == Some(UiControl::LauncherBrowse(r.field)),
+                    scale,
+                );
+            }
+            if has_clear {
+                // "Reset" on the Paths page, because that is what it does
+                // there: the row goes back to inheriting rather than being
+                // emptied. Everywhere else the button really does clear a
+                // path, and says so.
+                let label = if r.field.is_paths_field() {
+                    "Reset"
+                } else {
+                    "Clear"
+                };
+                draw_text_button(
+                    frame,
+                    clear,
+                    label,
+                    true,
+                    hover == Some(UiControl::LauncherClear(r.field)),
+                    scale,
+                );
+            }
         }
         #[cfg(feature = "game-library")]
         RowKind::Account => {
@@ -12387,6 +12437,28 @@ mod tests {
             draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-paths");
 
+            // And with two rows given directories of their own, which is
+            // the only state in which a Reset button exists.
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::AvPaths;
+            state.setup.set_path(
+                LauncherField::PathsBase,
+                std::path::PathBuf::from("/Volumes/AMIGA"),
+            );
+            state.setup.set_path(
+                LauncherField::PathsScreenshots,
+                std::path::PathBuf::from("/Users/someone/Pictures/Amiga screenshots"),
+            );
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-paths-set");
+
             // Drawn at a scale of more than one, which is where anything
             // handing an unscaled rect to a scaled draw shows up: at scale
             // one the two are the same and the mistake is invisible.
@@ -12403,6 +12475,48 @@ mod tests {
             };
             draw(&mut frame, big, &ui, None, None);
             save_at(&frame, "launcher-save-menu", bw, bh);
+        }
+
+        // A Paths row must offer exactly the buttons it draws. A Reset
+        // that is not there but still answers would put a row back to
+        // inheriting on a click meant for nothing at all, and on the base
+        // -- where Browse and Reset swap places rather than sitting side
+        // by side -- the two would land on each other's rectangles.
+        {
+            let probe = |set: bool, field: LauncherField| {
+                let mut setup = launcher::MachineSetup::default();
+                if set {
+                    setup.set_path(field, std::path::PathBuf::from("/probe/dir"));
+                }
+                let mut state = LauncherState::new(setup);
+                state.tab = LauncherTab::AvPaths;
+                let panel = Panel::Launcher(Box::new(state));
+                let rect = panel_rect(&panel);
+                let row = launcher::rows(
+                    LauncherTab::AvPaths,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                )
+                .iter()
+                .position(|r| r.field == field)
+                .expect("the field has a row");
+                let row_y = launcher_row_y(rect, row) + launcher_nav_block_h(LauncherTab::AvPaths);
+                let (browse, reset) = launcher_path_rects(rect, row_y);
+                let at = |r: Rect| {
+                    panel_control_at(&panel, ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32))
+                };
+                (
+                    at(browse) == Some(UiControl::LauncherBrowse(field)),
+                    at(reset) == Some(UiControl::LauncherClear(field)),
+                )
+            };
+            // An ordinary row: Browse always, Reset only once it was set.
+            assert_eq!(probe(false, LauncherField::PathsScreenshots), (true, false));
+            assert_eq!(probe(true, LauncherField::PathsScreenshots), (true, true));
+            // The base swaps them.
+            assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
+            assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
         }
 
         // The Save menu: every item reachable, nothing under it reachable

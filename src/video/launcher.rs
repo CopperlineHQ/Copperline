@@ -429,7 +429,6 @@ pub enum LauncherField {
     PathsTraces,
     PathsConfigs,
     PathsRoms,
-    PathsMt32Roms,
     PathsFloppies,
     PathsHarddrives,
     PathsCds,
@@ -791,7 +790,6 @@ impl LauncherField {
                 | LauncherField::PathsTraces
                 | LauncherField::PathsConfigs
                 | LauncherField::PathsRoms
-                | LauncherField::PathsMt32Roms
                 | LauncherField::PathsFloppies
                 | LauncherField::PathsHarddrives
                 | LauncherField::PathsCds
@@ -1120,18 +1118,16 @@ const EMULATION_ROWS: [Row; 5] = [
 /// The Paths page. Every row is optional: cleared, it inherits, and the
 /// value shown is the directory that would be used. Nothing here describes
 /// the machine, so none of it round-trips through [`RawConfig`].
-const PATHS_ROWS: [Row; 14] = [
+const PATHS_ROWS: [Row; 12] = [
     row(F::PathsBase, "Base folder", PathRow),
     section_header("Copperline writes:"),
     row(F::PathsStates, "Save states", PathRow),
     row(F::PathsScreenshots, "Screenshots", PathRow),
     row(F::PathsRecordings, "Recordings", PathRow),
-    row(F::PathsNvram, "Battery RAM", PathRow),
+    row(F::PathsNvram, "NVRAM", PathRow),
     row(F::PathsTraces, "Traces", PathRow),
     row(F::PathsConfigs, "Configurations", PathRow),
-    section_header("Dialogs open at:"),
     row(F::PathsRoms, "ROMs", PathRow),
-    row(F::PathsMt32Roms, "MT-32 ROMs", PathRow),
     row(F::PathsFloppies, "Floppies", PathRow),
     row(F::PathsHarddrives, "Hard drives", PathRow),
     row(F::PathsCds, "CD images", PathRow),
@@ -3337,7 +3333,6 @@ impl MachineSetup {
             F::PathsTraces => &mut p.traces,
             F::PathsConfigs => &mut p.configs,
             F::PathsRoms => &mut p.roms,
-            F::PathsMt32Roms => &mut p.mt32_roms,
             F::PathsFloppies => &mut p.floppies,
             F::PathsHarddrives => &mut p.harddrives,
             F::PathsCds => &mut p.cds,
@@ -3359,7 +3354,6 @@ impl MachineSetup {
             F::PathsTraces => &p.traces,
             F::PathsConfigs => &p.configs,
             F::PathsRoms => &p.roms,
-            F::PathsMt32Roms => &p.mt32_roms,
             F::PathsFloppies => &p.floppies,
             F::PathsHarddrives => &p.harddrives,
             F::PathsCds => &p.cds,
@@ -3383,7 +3377,6 @@ impl MachineSetup {
             F::PathsTraces => p.traces_dir(&host),
             F::PathsConfigs => p.configs_dir(&host),
             F::PathsRoms => p.roms_dir(&host),
-            F::PathsMt32Roms => p.mt32_roms_dir(&host),
             F::PathsFloppies => p.floppies_dir(&host),
             F::PathsHarddrives => p.harddrives_dir(&host),
             F::PathsCds => p.cds_dir(&host),
@@ -3409,19 +3402,24 @@ impl MachineSetup {
         if !field.is_paths_field() {
             return None;
         }
-        let Some(resolved) = self.paths_resolved(field) else {
+        // An inheriting row says so and stops there. Where a default goes
+        // is Copperline's business until somebody makes it theirs, and a
+        // page of eleven paths nobody chose is a page nobody reads.
+        //
+        // The base is the exception: it is the root the rest of them hang
+        // off, so it names its directory whether or not it was set. With
+        // it inheriting too, the page would say where nothing goes.
+        if !self.paths_is_set(field) && field != F::PathsBase {
+            return Some("(default)".to_string());
+        }
+        let resolved = self
+            .paths_resolved(field)
+            .or_else(|| self.path(field).map(Path::to_path_buf));
+        Some(match resolved {
+            Some(dir) => dir.display().to_string(),
             // No host directory at all, so nothing is resolvable and the
             // defaults land beside wherever Copperline was started.
-            return Some("(default)".to_string());
-        };
-        let label = resolved.display().to_string();
-        // The marker goes on the end because the column clips from the
-        // front to keep the tail: a leading one would be the first thing
-        // lost on a long path.
-        Some(if self.paths_is_set(field) {
-            label
-        } else {
-            format!("{label} (default)")
+            None => "(default)".to_string(),
         })
     }
 
@@ -8982,7 +8980,7 @@ mod tests {
             .map(|row| row.field)
             .filter(|field| field.is_paths_field())
             .collect();
-        assert_eq!(fields.len(), 12, "every entry should have had a row");
+        assert_eq!(fields.len(), 11, "every entry should have had a row");
         for (i, &field) in fields.iter().enumerate() {
             assert!(
                 !setup.paths_is_set(field),
