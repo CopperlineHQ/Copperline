@@ -22,7 +22,8 @@
 //! from a pool inside the board window, so the host never has to call
 //! AllocMem in the guest.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use m68k::AddressBus;
@@ -245,6 +246,99 @@ impl LockPool {
     }
 }
 
+const MAX_CACHED_DIRS: usize = 256;
+
+fn with_ascii_lower<R>(s: &str, f: impl FnOnce(&str) -> R) -> R {
+    if s.bytes().all(|b| !b.is_ascii_uppercase()) {
+        f(s)
+    } else {
+        let mut buf = [0u8; 128];
+        if let Some(slice) = buf.get_mut(..s.len()) {
+            slice.copy_from_slice(s.as_bytes());
+            slice.make_ascii_lowercase();
+            if let Ok(lower_str) = std::str::from_utf8(slice) {
+                return f(lower_str);
+            }
+        }
+        f(&s.to_ascii_lowercase())
+    }
+}
+
+#[derive(Default)]
+struct DirCache {
+    exact: HashMap<String, Option<std::sync::Arc<std::ffi::OsString>>>,
+    folded: HashMap<String, Option<std::sync::Arc<std::ffi::OsString>>>,
+}
+
+#[derive(Default)]
+struct LruPathCache {
+    dirs: HashMap<PathBuf, DirCache>,
+    dir_order: VecDeque<PathBuf>,
+}
+
+impl LruPathCache {
+    fn get(
+        &mut self,
+        dir: &Path,
+        comp: &str,
+    ) -> Option<Option<std::sync::Arc<std::ffi::OsString>>> {
+        let dir_cache = self.dirs.get_mut(dir)?;
+        if let Some(res) = dir_cache.exact.get(comp) {
+            let res = res.clone();
+            Self::touch_dir_order(&mut self.dir_order, dir);
+            return Some(res);
+        }
+        if dir.join(comp).exists() {
+            let res = Some(std::sync::Arc::new(comp.into()));
+            dir_cache.exact.insert(comp.to_string(), res.clone());
+            with_ascii_lower(comp, |lower| {
+                dir_cache.folded.insert(lower.to_string(), res.clone());
+            });
+            Self::touch_dir_order(&mut self.dir_order, dir);
+            return Some(res);
+        }
+        let res = with_ascii_lower(comp, |lower| dir_cache.folded.get(lower).cloned())?;
+        Self::touch_dir_order(&mut self.dir_order, dir);
+        Some(res)
+    }
+
+    fn touch_dir_order(dir_order: &mut VecDeque<PathBuf>, dir: &Path) {
+        if dir_order.back().map(|b| b.as_path()) != Some(dir) {
+            if let Some(pos) = dir_order.iter().position(|d| d == dir) {
+                let d = dir_order.remove(pos).unwrap();
+                dir_order.push_back(d);
+            }
+        }
+    }
+
+    fn insert(&mut self, dir: &Path, comp: &str, result: Option<std::ffi::OsString>) {
+        let arc_res = result.map(std::sync::Arc::new);
+        if !self.dirs.contains_key(dir) {
+            if self.dir_order.len() >= MAX_CACHED_DIRS {
+                if let Some(oldest) = self.dir_order.pop_front() {
+                    self.dirs.remove(&oldest);
+                }
+            }
+            self.dir_order.push_back(dir.to_path_buf());
+            self.dirs.insert(dir.to_path_buf(), DirCache::default());
+        }
+        if let Some(dir_cache) = self.dirs.get_mut(dir) {
+            dir_cache.exact.insert(comp.to_string(), arc_res.clone());
+            with_ascii_lower(comp, |lower| {
+                dir_cache.folded.insert(lower.to_string(), arc_res);
+            });
+        }
+    }
+
+    fn invalidate_dir(&mut self, dir: &Path) {
+        if self.dirs.remove(dir).is_some() {
+            if let Some(pos) = self.dir_order.iter().position(|d| d == dir) {
+                self.dir_order.remove(pos);
+            }
+        }
+    }
+}
+
 /// Per-mount state: the immutable [`MountSpec`] from config plus everything the
 /// handler learns or hands out at run time, including this unit's slice of the
 /// board-window lock pool. `FilesysBoard` owns one per unit, indexed by unit
@@ -293,6 +387,8 @@ struct FilesysUnit {
     next_exall_id: u32,
     /// This unit's fixed slice of the board-window FileLock pool.
     pool: LockPool,
+    #[serde(skip)]
+    path_cache: RefCell<LruPathCache>,
 }
 
 impl FilesysUnit {
@@ -310,7 +406,25 @@ impl FilesysUnit {
             exalls: HashMap::new(),
             next_exall_id: 0,
             pool: LockPool::new(pool_base, pool_end),
+            path_cache: RefCell::new(LruPathCache::default()),
         }
+    }
+
+    fn match_component(&self, dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
+        if comp == "." || comp == ".." {
+            return None;
+        }
+        let mut cache = self.path_cache.borrow_mut();
+        if let Some(cached) = cache.get(dir, comp) {
+            return cached.map(|arc| (*arc).clone());
+        }
+        let res = match_component_uncached(dir, comp);
+        cache.insert(dir, comp, res.clone());
+        res
+    }
+
+    fn invalidate_dir(&self, dir: &Path) {
+        self.path_cache.borrow_mut().invalidate_dir(dir);
     }
 }
 
@@ -507,7 +621,7 @@ impl FilesysUnit {
             // mount that way is a feature (same trust model as the UAE family).
             // The escapes we do block ("..", separators) are the ones a guest
             // program could construct on its own.
-            match match_component(&dir, &comp) {
+            match self.match_component(&dir, &comp) {
                 Some(existing) => rel.push(existing),
                 // The leaf may legitimately not exist yet, but a name the host
                 // would read as a path (or as "here"/"up") never becomes one.
@@ -1247,6 +1361,9 @@ impl FilesysUnit {
                         let key = self.next_file_key;
                         self.files.insert(key, (f, rec));
                         bus.write_long(fh + FILEHANDLE_ARG1, key);
+                        if let Some(parent) = path.parent() {
+                            self.invalidate_dir(parent);
+                        }
                         (DOSTRUE, 0)
                     }
                     Err(e) => (DOSFALSE, host_error(&e)),
@@ -1336,6 +1453,9 @@ impl FilesysUnit {
                 if let Err(e) = std::fs::create_dir(&path) {
                     return (DOSFALSE, host_error(&e));
                 }
+                if let Some(parent) = path.parent() {
+                    self.invalidate_dir(parent);
+                }
                 match self.alloc_lock(bus, board_base, ACCESS_READ, rec) {
                     Some(addr) => (addr >> 2, 0),
                     None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
@@ -1376,6 +1496,9 @@ impl FilesysUnit {
                         // The attribute sidecar belongs to the file, not to the
                         // guest: it goes with it.
                         let _ = std::fs::remove_file(uaem_path(&path));
+                        if let Some(parent) = path.parent() {
+                            self.invalidate_dir(parent);
+                        }
                         (DOSTRUE, 0)
                     }
                     Err(e) => (DOSFALSE, host_error(&e)),
@@ -1409,6 +1532,12 @@ impl FilesysUnit {
                         let (from_uaem, to_uaem) = (uaem_path(&from_path), uaem_path(&to_path));
                         if from_uaem.exists() {
                             let _ = std::fs::rename(&from_uaem, &to_uaem);
+                        }
+                        if let Some(parent) = from_path.parent() {
+                            self.invalidate_dir(parent);
+                        }
+                        if let Some(parent) = to_path.parent() {
+                            self.invalidate_dir(parent);
                         }
                         (DOSTRUE, 0)
                     }
@@ -2220,7 +2349,7 @@ fn is_creatable_name(comp: &str) -> bool {
         && !comp.to_ascii_lowercase().ends_with(".uaem")
 }
 
-fn match_component(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
+fn match_component_uncached(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
     // "." and ".." are not directory shortcuts in AmigaDOS ("/" is the
     // parent), but the host would honor them and ".." escapes the mount.
     if comp == "." || comp == ".." {
@@ -3408,5 +3537,132 @@ mod tests {
         let dir = std::env::temp_dir();
         let (total, avail) = host_fs_usage(&dir).expect("host fs usage");
         assert!(total > 0 && avail <= total);
+    }
+
+    #[test]
+    fn test_lru_path_cache() {
+        let root = std::env::temp_dir().join(format!("clfs-lru-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("SubDir")).unwrap();
+        std::fs::write(root.join("SubDir/File.txt"), b"test").unwrap();
+
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+
+        let rec1 = unit.resolve(0, b"SUBDIR/file.TXT").unwrap();
+        assert_eq!(rec1.rel, Path::new("SubDir").join("File.txt"));
+
+        let rec2 = unit.resolve(0, b"subdir/FILE.txt").unwrap();
+        assert_eq!(rec2.rel, Path::new("SubDir").join("File.txt"));
+
+        unit.invalidate_dir(&root);
+        let rec3 = unit.resolve(0, b"SubDir/File.txt").unwrap();
+        assert_eq!(rec3.rel, Path::new("SubDir").join("File.txt"));
+
+        unit.invalidate_dir(&root.join("SubDir"));
+        let rec4 = unit.resolve(0, b"SubDir/File.txt").unwrap();
+        assert_eq!(rec4.rel, Path::new("SubDir").join("File.txt"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_lru_path_cache_case_sensitive_exact_collision() {
+        let root = std::env::temp_dir().join(format!("clfs-lru-case-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("data.bin"), b"lower").unwrap();
+        std::fs::write(root.join("DATA.BIN"), b"upper").unwrap();
+
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+
+        let rec_upper = unit.resolve(0, b"DATA.BIN").unwrap();
+        assert_eq!(rec_upper.rel, Path::new("DATA.BIN"));
+
+        let rec_lower = unit.resolve(0, b"data.bin").unwrap();
+        assert_eq!(rec_lower.rel, Path::new("data.bin"));
+
+        let rec_upper2 = unit.resolve(0, b"DATA.BIN").unwrap();
+        assert_eq!(rec_upper2.rel, Path::new("DATA.BIN"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_lru_path_cache_performance() {
+        let root = std::env::temp_dir().join(format!("clfs-bench-{}", std::process::id()));
+        let dir = root.join("WHDLoad/Games/Turrican2");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..100 {
+            std::fs::write(dir.join(format!("data_file_{i}.dat")), b"data").unwrap();
+        }
+
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "DH0".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+
+        let iterations = 2000;
+        let paths = [
+            b"WHDLOAD/GAMES/TURRICAN2/DATA_FILE_5.DAT".as_slice(),
+            b"whdload/games/turrican2/data_file_42.dat".as_slice(),
+            b"WhdLoad/Games/Turrican2/Data_File_99.Dat".as_slice(),
+        ];
+
+        let start_cold = std::time::Instant::now();
+        for _ in 0..iterations {
+            unit.invalidate_dir(&root);
+            for p in &paths {
+                let _ = unit.resolve(0, p);
+            }
+        }
+        let cold_duration = start_cold.elapsed();
+
+        for p in &paths {
+            let _ = unit.resolve(0, p);
+        }
+
+        let start_hot = std::time::Instant::now();
+        for _ in 0..iterations {
+            for p in &paths {
+                let _ = unit.resolve(0, p);
+            }
+        }
+        let hot_duration = start_hot.elapsed();
+
+        println!(
+            "VFS Benchmark ({} lookups):\n  Uncached (Disk Scans): {:?}\n  Cached (LRU Hit):     {:?}\n  Speedup Factor:        {:.2}x",
+            iterations * paths.len(),
+            cold_duration,
+            hot_duration,
+            cold_duration.as_secs_f64() / hot_duration.as_secs_f64().max(1e-9)
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
