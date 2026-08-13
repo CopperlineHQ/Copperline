@@ -254,16 +254,6 @@ dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests and
 `LIDE-ATBUS2008-BOOT-INVESTIGATION.md` in the repo root for the full
 trace).
 
-On a 68000, real-Kickstart hard-disk boot through `[lide]` currently
-depends on a fix not yet released in the `m68k` crate Copperline uses for
-its CPU core: 68000 `MOVEM.L` memory-to-register issues its one discarded
-extra read at the wrong address, and `lide.device`'s sector-transfer
-`movem.l` sweep depends on the real placement to avoid corrupting the ATA
-data port's FIFO. Until that lands (upstream PR
-[benletchford/m68k-rs#126](https://github.com/benletchford/m68k-rs/pull/126)),
-68020+ configurations are unaffected but 68000 configurations will see the
-same "insert disk" symptom on real hard-disk boots.
-
 ## Host filesystem service (`filesys.rs`)
 
 `[[filesys]]` mounts export host directories as live AmigaDOS volumes
