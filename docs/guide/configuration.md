@@ -1515,6 +1515,14 @@ optionally supplies a second flash bank (e.g. `cdfs.rom`, LIV2's CD
 filesystem, from the same releases page); it requires `rom` and does not
 apply to `"atbus2008"`, which has no ROM banking.
 
+Real-Kickstart hard-disk boot through `[lide]` on a **68000** CPU model
+currently depends on a fix not yet released in the `m68k` crate Copperline
+uses for its CPU core (upstream PR
+[benletchford/m68k-rs#126](https://github.com/benletchford/m68k-rs/pull/126)):
+until it lands, `lide.device`'s sector transfer corrupts every sector read
+on a 68000, and the machine never gets past the "insert disk" screen.
+`--cpu 68020` or higher is unaffected.
+
 ## `[[host_disk]]` -- a real disk of the host's
 
 Give the machine a real disk of this computer's instead of an image -- a card

@@ -236,8 +236,33 @@ absent from the `BoardSpec`, but drives still answer once a disk-loaded
 driver finds them.
 
 All three personalities have booted a real `lide.rom`/`lide-atbus.rom`
-release end-to-end under AROS: AutoConfig, the DiagArea, and
-`lide.device` loading as a resident module and finding an attached drive.
+release end-to-end to a real Workbench (Kickstart 1.3 and 3.1, `--cpu
+68020`): AutoConfig, the DiagArea, `lide.device` loading as a resident
+module, finding an attached drive, and mounting a boot node from a real
+RDB image.
+
+AT-Bus 2008's ROM and register blocks share address space by byte lane
+(ROM odd, registers even, per above), including inside the control block
+at `$2000`: the board's read dispatch used to match the control block
+first regardless of lane, so odd-lane reads there -- exactly where the
+boot ROM's chainloader fetches its relocatable driver payload -- floated
+as an unpopulated register instead of reaching ROM. `lide.device` never
+loaded and the machine never got past the "insert disk" screen; RIPPLE and
+RIDE were unaffected, since their ROM sits on the even lane, clear of any
+register. Fixed by checking the ROM lane ahead of the register-block
+dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests and
+`LIDE-ATBUS2008-BOOT-INVESTIGATION.md` in the repo root for the full
+trace).
+
+On a 68000, real-Kickstart hard-disk boot through `[lide]` currently
+depends on a fix not yet released in the `m68k` crate Copperline uses for
+its CPU core: 68000 `MOVEM.L` memory-to-register issues its one discarded
+extra read at the wrong address, and `lide.device`'s sector-transfer
+`movem.l` sweep depends on the real placement to avoid corrupting the ATA
+data port's FIFO. Until that lands (upstream PR
+[benletchford/m68k-rs#126](https://github.com/benletchford/m68k-rs/pull/126)),
+68020+ configurations are unaffected but 68000 configurations will see the
+same "insert disk" symptom on real hard-disk boots.
 
 ## Host filesystem service (`filesys.rs`)
 
