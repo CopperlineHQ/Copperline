@@ -2,7 +2,7 @@
 name = "copperline"
 version = "0.15.0"
 edition = "2021"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "GPL-3.0-or-later"
 description = "A cycle-driven Amiga emulator written in Rust"
 readme = "README.md"
@@ -112,7 +112,7 @@ ctl-bin = ["dep:serde_json"]
 fluxbridge = ["dep:fluxbridge"]
 
 [dependencies]
-m68k = { version = "0.7.1", features = ["serde"] }
+m68k = { version = "0.10", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 pixels = { version = "0.17", optional = true }
@@ -131,14 +131,19 @@ serde_json = { version = "1", optional = true }
 # away into nothing at all.
 zeroize = { version = "1", optional = true }
 serde-big-array = "0.5"
+# Save-state and snapshot serialization (src/savestate.rs and friends).
+# Held on the 1.x serde API on purpose: bincode 2+/3 replaces the API and
+# defaults to a different wire format, so moving would invalidate every
+# existing .clstate for no functional gain. Migrate only as part of a
+# planned savestate::STATE_VERSION bump.
 bincode = "1"
-toml = "0.8"
-png = "0.17"
+toml = "0.9"
+png = "0.18"
 flate2 = "1"
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.18", optional = true }
 # Kept unconditional (not `frontend`-gated) because the Windows MIDI backend
 # (src/midi/winmm.rs) also uses it; it is pure Rust and wasm-safe.
-ringbuf = "0.4"
+ringbuf = "0.5"
 hound = "3.5"
 rfd = { version = "0.17.2", optional = true }
 gilrs = { version = "0.11", optional = true }
@@ -159,12 +164,12 @@ wasmtime = { version = "=36.0.13", default-features = false, features = ["cranel
 # wasm-plugin capability (src/wasmboard.rs): the host-socket backend for the
 # bundled HostSocket board (`[hostsocket] net = "host"`). Pure Rust wrapper
 # over the platform socket API, no C library linked.
-socket2 = { version = "0.5", optional = true }
+socket2 = { version = "0.6", optional = true }
 # Userspace TCP/IP stack for the NAT backend (src/net/nat/): terminates the
 # guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
 # sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets
 # only (DHCP/DNS/UDP/ICMP are handled at frame level with the wire parsers).
-smoltcp = { version = "0.12", default-features = false, features = [
+smoltcp = { version = "0.13", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",
@@ -187,7 +192,7 @@ fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "mai
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
-delharc = "0.7.0"
+delharc = "0.8"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
@@ -227,7 +232,7 @@ pcap = { version = "2.4", optional = true }
 # Npcap is deliberately not linked at build time: the bridge backend loads it
 # from a trusted system directory only when selected, so NAT-only installs do
 # not acquire a runtime DLL dependency.
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 # HostSocket's direct host-socket backend uses WSAPoll for real listener and
 # connect/read/write readiness. This is the Windows counterpart of poll(2);
 # in particular it can report a queued connection on a listening socket,

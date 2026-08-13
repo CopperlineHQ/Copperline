@@ -435,10 +435,10 @@ pub fn is_png(bytes: &[u8]) -> bool {
 /// every other byte were a pixel, which is a picture of noise rather than
 /// a picture. What arrives here is then one of four shapes, all 8-bit.
 fn decode(png: &[u8]) -> Option<Image> {
-    let mut decoder = png::Decoder::new(png);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width as usize, info.height as usize);
     // The buffer belongs to the frame that was read, which may be smaller

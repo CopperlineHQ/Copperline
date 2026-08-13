@@ -11,8 +11,8 @@ publish = false
 # include_str! and would relink the whole emulator.
 [dependencies]
 wgpu = "29.0.4"
-pollster = "0.4"
+pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
-png = "0.17"
+png = "0.18"
 
 [workspace]

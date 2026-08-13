@@ -110,7 +110,7 @@ pub fn list_input_devices() -> Vec<String> {
     cpal::default_host()
         .input_devices()
         .map(|devs| {
-            devs.filter_map(|d| d.name().ok())
+            devs.filter_map(|d| crate::audio::device_name(&d))
                 .filter(|name| !crate::audio::is_alsa_plugin_variant(name))
                 .collect()
         })
@@ -126,7 +126,7 @@ pub fn list_input_devices() -> Vec<String> {
 pub fn picker_input_devices() -> Vec<String> {
     let default_name = cpal::default_host()
         .default_input_device()
-        .and_then(|d| d.name().ok());
+        .and_then(|d| crate::audio::device_name(&d));
     list_input_devices()
         .into_iter()
         .filter(|name| !crate::audio::is_redundant_default(name, default_name.as_deref()))
@@ -158,7 +158,7 @@ fn select_input_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::De
         let needle = name.to_lowercase();
         let matched = host.input_devices().ok().and_then(|mut devs| {
             devs.find(|d| {
-                d.name()
+                crate::audio::device_name(d)
                     .map(|n| n.to_lowercase().contains(&needle))
                     .unwrap_or(false)
             })
@@ -222,7 +222,7 @@ impl CpalSampler {
             .map_err(|e| anyhow!("query default input config: {e}"))?;
         let sample_format = supported.sample_format();
         let channels = supported.channels() as usize;
-        let capture_rate = supported.sample_rate().0 as f64;
+        let capture_rate = supported.sample_rate() as f64;
         let config: cpal::StreamConfig = supported.into();
 
         // ~2 s ring at the capture rate; we trim backlog on read to stay live.
@@ -267,7 +267,7 @@ impl CpalSampler {
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     for frame in data.chunks(channels) {
                         let l = frame.first().copied().unwrap_or(0.0);
@@ -279,7 +279,7 @@ impl CpalSampler {
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     for frame in data.chunks(channels) {
                         let l = frame.first().copied().unwrap_or(0) as f32 / 32768.0;
@@ -295,7 +295,7 @@ impl CpalSampler {
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
                     for frame in data.chunks(channels) {
                         let l =
@@ -318,7 +318,7 @@ impl CpalSampler {
             .play()
             .map_err(|e| anyhow!("input stream play: {e}"))?;
 
-        let device_label = device.name().unwrap_or_else(|_| "<unknown>".into());
+        let device_label = crate::audio::device_name(&device).unwrap_or_else(|| "<unknown>".into());
         log::info!(
             "sampler: parallel-port sampler ready, device={device_label:?}, \
              capture_rate={capture_rate}, format={sample_format:?}"

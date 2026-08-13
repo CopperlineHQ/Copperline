@@ -966,7 +966,7 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                     (SOL_SOCKET, SO_KEEPALIVE) => socket.set_keepalive(value != 0),
                     (SOL_SOCKET, SO_RCVBUF) => socket.set_recv_buffer_size(value.max(0) as usize),
                     (SOL_SOCKET, SO_SNDBUF) => socket.set_send_buffer_size(value.max(0) as usize),
-                    (IPPROTO_TCP, TCP_NODELAY) => socket.set_nodelay(value != 0),
+                    (IPPROTO_TCP, TCP_NODELAY) => socket.set_tcp_nodelay(value != 0),
                     _ => return Ok(-EINVAL),
                 };
                 match result {
@@ -1013,7 +1013,7 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                         Ok(v) => v as i32,
                         Err(e) => return Ok(-translate_errno(&e)),
                     },
-                    (IPPROTO_TCP, TCP_NODELAY) => match socket.nodelay() {
+                    (IPPROTO_TCP, TCP_NODELAY) => match socket.tcp_nodelay() {
                         Ok(v) => v as i32,
                         Err(e) => return Ok(-translate_errno(&e)),
                     },

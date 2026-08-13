@@ -26,9 +26,12 @@ struct FrameDumpReport {
 
 impl Image {
     fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let decoder = png::Decoder::new(File::open(path)?);
+        let decoder = png::Decoder::new(std::io::BufReader::new(File::open(path)?));
         let mut reader = decoder.read_info()?;
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let size = reader
+            .output_buffer_size()
+            .ok_or("PNG dimensions overflow")?;
+        let mut buf = vec![0; size];
         let info = reader.next_frame(&mut buf)?;
         assert_eq!(info.color_type, png::ColorType::Rgba);
         assert_eq!(info.bit_depth, png::BitDepth::Eight);
