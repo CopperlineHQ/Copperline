@@ -103,6 +103,13 @@
 |   LIB_HOSTENTBUF, sized to match crates/hostsocket-plugin/src/lib.rs's
 |   SERVENT_BUF_LEN/PROTOENT_BUF_LEN/NETENT_BUF_LEN exactly (kept in sync
 |   by hand, like every other offset the guest ROM and plugin share).
+| LIB_GAIBUF: a 64-byte scratch buffer for gai_strerror()'s returned
+|   message string -- same "no caller-supplied buffer" reasoning as
+|   LIB_INETBUF, generously sized for the longest real message (see
+|   crates/hostsocket-plugin/src/lib.rs's do_gai_strerror).
+| LIB_ADDRINFOBUF: a scratch buffer for getaddrinfo()'s returned addrinfo
+|   chain -- same reasoning again, sized to match crates/hostsocket-plugin/
+|   src/lib.rs's ADDRINFO_BUF_LEN exactly.
 #define LIB_BOARDBASE 34
 #define LIB_ARGBLK    38
 #define LIB_INTERRUPT 70 /* LIB_ARGBLK + 8*4 */
@@ -113,7 +120,9 @@
 #define LIB_SERVENTBUF 244 /* LIB_HERRNO_SLOT + 4 */
 #define LIB_PROTOENTBUF 304 /* LIB_SERVENTBUF + 60 */
 #define LIB_NETENTBUF 336 /* LIB_PROTOENTBUF + 32 */
-#define LIB_DATASIZE  372 /* sizeof(struct Library) [34] + BOARDBASE [4] + ARGBLK [32] + Interrupt [22] + InetBuf [20] + HostEntBuf [124] + ErrnoSlot [4] + HerrnoSlot [4] + ServEntBuf [60] + ProtoEntBuf [32] + NetEntBuf [36] */
+#define LIB_GAIBUF 372 /* LIB_NETENTBUF + 36 */
+#define LIB_ADDRINFOBUF 436 /* LIB_GAIBUF + 64 */
+#define LIB_DATASIZE  692 /* sizeof(struct Library) [34] + BOARDBASE [4] + ARGBLK [32] + Interrupt [22] + InetBuf [20] + HostEntBuf [124] + ErrnoSlot [4] + HerrnoSlot [4] + ServEntBuf [60] + ProtoEntBuf [32] + NetEntBuf [36] + GaiBuf [64] + AddrInfoBuf [256] */
 
 #define LN_TYPE  8
 #define LN_NAME  10
@@ -418,16 +427,94 @@ _int_name:
 	| followed by the real bsdsocket_lib.fd order starting at socket()
 	| (LVO -30) through getprotobynumber (-252, the last name/number
 	| database lookup -- see below), then on through GetSocketEvents
-	| (-300, Phase 4's ceiling -- see PROPOSAL.md's Phase 4 scope
-	| decisions); the vector array must be contiguous, so every LVO in
-	| that range needs an entry even where the real function stays
-	| unimplemented (`_hs_stub`, a real-but-"not implemented" LVO rather
-	| than a jump off the end of this table into unrelated ROM bytes --
-	| MakeLibrary's jump table has no bounds checking of its own). Only
-	| SetSocketSignals and vsyslog are still on `_hs_stub` today (-1, the
-	| correct BSD "error" convention for their plain-LONG return type) --
-	| every other LVO in the table gets a real body, listed below by
-	| group.
+	| (-300, Phase 4's own ceiling), and now on again through the real
+	| table's actual end at -858 -- confirmed against the authoritative
+	| bsdsocket_lib.sfd v1.12 (Olaf Barthel, Roadshow's own author; see
+	| nyteshade/nea-quickjs's bundled NDK3.2R4 SANA+RoadshowTCP-IP SDK on
+	| GitHub for a copy), not just amitools' bundled bsdsocket_lib.fd --
+	| that file matches this .sfd exactly through ObtainServerSocket
+	| (-696) but simply doesn't go any further, which is what let
+	| ObtainServerSocket become this table's own first, too-early stopping
+	| point (a real caller reaching for anything past it, e.g. Roadshow's
+	| own getaddrinfo(), would have jumped off the end exactly like the
+	| original Inet_Aton gap this whole table extension started from).
+	| The vector array must be contiguous, so every LVO in that range
+	| needs an entry even where the real function stays unimplemented
+	| (`_hs_stub`, a real-but-"not implemented" LVO rather than a jump off
+	| the end of this table into unrelated ROM bytes -- MakeLibrary's
+	| jump table has no bounds checking of its own); this also covers a
+	| handful of LVO numbers the real .sfd itself leaves unnamed via
+	| `==reserve N` (gaps at -306..-360, -750..-756, and -828..-858) or
+	| marks `==private` while still admitting outright non-implementation
+	| (ChangeRouteTagList at -426: "This is still unimplemented..." in the
+	| .sfd's own comment, i.e. `_hs_stub` here matches upstream Roadshow's
+	| own behavior, not a gap in this project's coverage) -- reserved slots
+	| are for future expansion in every real stack too, evidently, so
+	| `_hs_stub` is the correct match for both cases.
+	|
+	| Past -300 (the "AmiTCP 4.0 tail", added once real Inet_Aton use was
+	| found jumping off the end of a table that stopped at -300 --
+	| bsdsocket.library itself already claims version 4 in this file's
+	| own `_lib_idstring`, so leaving its own version's LVOs
+	| unaddressable was the actual bug, not Inet_Aton going unimplemented
+	| by choice) most of the tail stays `_hs_stub`: bpf_* (-366..-408,
+	| raw packet capture off a host NIC -- nothing in this project's
+	| smoltcp-backed virtual interface to capture), the routing/
+	| interface-config/net-monitor/DNS-server-list functions
+	| (-414..-534, real routing-table and live interface reconfiguration
+	| -- this project has exactly one fixed virtual interface, nothing to
+	| route between or reconfigure), mbuf_* (-624..-684, hands the guest
+	| direct pointers into BSD kernel mbuf chains -- there is no mbuf
+	| concept anywhere in this project's RPC-trampoline design, host or
+	| guest side, to back that with), ProcessIsServer/ObtainServerSocket
+	| (-690/-696, tied to AmiTCP's classic inetd-style server-socket model
+	| this project doesn't have), GetDefaultDomainName/SetDefaultDomainName
+	| (-702/-708) and RemoveInterface (-732, the counterpart to
+	| AddInterfaceTagList -- unimplemented for the same "one fixed virtual
+	| interface" reason as the routing functions above), Roadshow's own
+	| global-data-access functions ObtainRoadshowData/ReleaseRoadshowData/
+	| ChangeRoadshowData (-714/-720/-726, an internal handle onto
+	| Roadshow's own private linked lists this project has no equivalent
+	| of), and the whole `==private` "subject to change" IP-filter group
+	| ipf_open..ipf_set_interrupt_mask (-762..-798, not part of the public
+	| API real software links against at all). SetSocketSignals and
+	| vsyslog (-132/-258, from the original -30..-300 range) round out the
+	| `_hs_stub` holdouts from Phase 4 itself.
+	|
+	| The rest of the tail does get a real body, same reasoning as the
+	| name/number database lookups below -- general Amiga software calls
+	| these, not just bsdsocktest: inet_aton/inet_ntop/inet_pton (-594,
+	| -600, -606) round out the existing Inet_*/inet_* family with the
+	| same strict-dotted-quad parser inet_addr/inet_network already share
+	| (see crates/hostsocket-plugin/src/lib.rs's do_inet_aton and
+	| neighbors); In_LocalAddr/In_CanForward (-612/-618) are small local
+	| predicates against this interface's own configured subnet and the
+	| standard 4.3BSD in_canforward() algorithm; and
+	| setnetent/endnetent/getnetent (-540/-546/-552),
+	| setprotoent/endprotoent/getprotoent (-558/-564/-570), and
+	| setservent/endservent/getservent (-576/-582/-588) -- that order
+	| (net, then proto, then serv) is bsdsocket_lib.fd's own layout, not
+	| alphabetical or this file's choice -- all walk the very same static
+	| SERVICES/PROTOCOLS/NETWORKS tables getservbyname and friends
+	| already use, via a per-task cursor (do_setservent and friends).
+	|
+	| Roadshow's own resolver-family extension, added on top of Roadshow's
+	| own AmiTCP-4.0-compatible base (Roadshow 1.12, 2016): gethostbyname_r/
+	| gethostbyaddr_r (-738/-744) are BSD-style reentrant siblings of
+	| gethostbyname/gethostbyaddr, delivering into the caller's own buffer
+	| instead of this library's shared LIB_HOSTENTBUF; freeaddrinfo/
+	| getaddrinfo/gai_strerror/getnameinfo (-804/-810/-816/-822, in the
+	| `==public` block right after the private IP-filter group) are the
+	| RFC 3493 protocol-independent name/address translation functions.
+	| freeaddrinfo() alone needs no CALL_* or RPC round trip at all: real
+	| Roadshow's own documentation (bsdsocket.doc.txt's getaddrinfo NOTES)
+	| says getaddrinfo() shares its per-SocketBase name-resolution state
+	| with gethostbyname()/gethostbyaddr() rather than allocating fresh
+	| memory per call, so there is nothing dynamically allocated to free in
+	| the first place -- this project's own do_getaddrinfo follows the same
+	| shape (a fixed LIB_ADDRINFOBUF scratch area, like every other
+	| library-owned buffer here), so _hs_freeaddrinfo below is a pure
+	| no-op, not a stub standing in for missing functionality.
 	|
 	| gethostbyaddr (reverse/PTR DNS): smoltcp 0.13's wire::dns::Type has
 	| no Ptr variant, and its dns::Socket API can't return a domain-name
@@ -524,6 +611,115 @@ _func_table:
 	.short	_hs_gethostid      - _func_table	| -288 gethostid
 	.short	_hs_socketbasetaglist - _func_table	| -294 SocketBaseTagList
 	.short	_hs_getsocketevents - _func_table	| -300 GetSocketEvents
+
+	| -- AmiTCP 4.0 tail: -306 through -696 (ObtainServerSocket) --------
+	| See this table's own header comment above for which of these are
+	| real and which stay _hs_stub, and why. -306..-360 are reserved
+	| gaps in the real bsdsocket_lib.fd itself (no LVO name assigned
+	| there at all), filled with _hs_stub purely to keep this vector
+	| array contiguous. -426 is different: it's ChangeRouteTagList, a
+	| real, named, `==private` LVO the .sfd's own comment says is "still
+	| unimplemented" upstream too -- _hs_stub is still the right body,
+	| but it's not a gap in this project's own coverage the way the
+	| -306..-360 run is.
+	.short	_hs_stub           - _func_table	| -306 (reserved)
+	.short	_hs_stub           - _func_table	| -312 (reserved)
+	.short	_hs_stub           - _func_table	| -318 (reserved)
+	.short	_hs_stub           - _func_table	| -324 (reserved)
+	.short	_hs_stub           - _func_table	| -330 (reserved)
+	.short	_hs_stub           - _func_table	| -336 (reserved)
+	.short	_hs_stub           - _func_table	| -342 (reserved)
+	.short	_hs_stub           - _func_table	| -348 (reserved)
+	.short	_hs_stub           - _func_table	| -354 (reserved)
+	.short	_hs_stub           - _func_table	| -360 (reserved)
+	.short	_hs_stub           - _func_table	| -366 bpf_open
+	.short	_hs_stub           - _func_table	| -372 bpf_close
+	.short	_hs_stub           - _func_table	| -378 bpf_read
+	.short	_hs_stub           - _func_table	| -384 bpf_write
+	.short	_hs_stub           - _func_table	| -390 bpf_set_notify_mask
+	.short	_hs_stub           - _func_table	| -396 bpf_set_interrupt_mask
+	.short	_hs_stub           - _func_table	| -402 bpf_ioctl
+	.short	_hs_stub           - _func_table	| -408 bpf_data_waiting
+	.short	_hs_stub           - _func_table	| -414 AddRouteTagList
+	.short	_hs_stub           - _func_table	| -420 DeleteRouteTagList
+	.short	_hs_stub           - _func_table	| -426 ChangeRouteTagList (private, unimplemented upstream too)
+	.short	_hs_stub           - _func_table	| -432 FreeRouteInfo
+	.short	_hs_stub_null      - _func_table	| -438 GetRouteInfo
+	.short	_hs_stub           - _func_table	| -444 AddInterfaceTagList
+	.short	_hs_stub           - _func_table	| -450 ConfigureInterfaceTagList
+	.short	_hs_stub           - _func_table	| -456 ReleaseInterfaceList
+	.short	_hs_stub_null      - _func_table	| -462 ObtainInterfaceList
+	.short	_hs_stub           - _func_table	| -468 QueryInterfaceTagList
+	.short	_hs_stub           - _func_table	| -474 CreateAddrAllocMessageA
+	.short	_hs_stub           - _func_table	| -480 DeleteAddrAllocMessage
+	.short	_hs_stub           - _func_table	| -486 BeginInterfaceConfig
+	.short	_hs_stub           - _func_table	| -492 AbortInterfaceConfig
+	.short	_hs_stub           - _func_table	| -498 AddNetMonitorHookTagList
+	.short	_hs_stub           - _func_table	| -504 RemoveNetMonitorHook
+	.short	_hs_stub           - _func_table	| -510 GetNetworkStatistics
+	.short	_hs_stub           - _func_table	| -516 AddDomainNameServer
+	.short	_hs_stub           - _func_table	| -522 RemoveDomainNameServer
+	.short	_hs_stub           - _func_table	| -528 ReleaseDomainNameServerList
+	.short	_hs_stub_null      - _func_table	| -534 ObtainDomainNameServerList
+	.short	_hs_setnetent      - _func_table	| -540 setnetent
+	.short	_hs_endnetent      - _func_table	| -546 endnetent
+	.short	_hs_getnetent      - _func_table	| -552 getnetent
+	.short	_hs_setprotoent    - _func_table	| -558 setprotoent
+	.short	_hs_endprotoent    - _func_table	| -564 endprotoent
+	.short	_hs_getprotoent    - _func_table	| -570 getprotoent
+	.short	_hs_setservent     - _func_table	| -576 setservent
+	.short	_hs_endservent     - _func_table	| -582 endservent
+	.short	_hs_getservent     - _func_table	| -588 getservent
+	.short	_hs_inet_aton      - _func_table	| -594 inet_aton
+	.short	_hs_inet_ntop      - _func_table	| -600 inet_ntop
+	.short	_hs_inet_pton      - _func_table	| -606 inet_pton
+	.short	_hs_in_localaddr   - _func_table	| -612 In_LocalAddr
+	.short	_hs_in_canforward  - _func_table	| -618 In_CanForward
+	.short	_hs_stub_null      - _func_table	| -624 mbuf_copym
+	.short	_hs_stub           - _func_table	| -630 mbuf_copyback
+	.short	_hs_stub           - _func_table	| -636 mbuf_copydata
+	.short	_hs_stub_null      - _func_table	| -642 mbuf_free
+	.short	_hs_stub           - _func_table	| -648 mbuf_freem
+	.short	_hs_stub_null      - _func_table	| -654 mbuf_get
+	.short	_hs_stub_null      - _func_table	| -660 mbuf_gethdr
+	.short	_hs_stub_null      - _func_table	| -666 mbuf_prepend
+	.short	_hs_stub           - _func_table	| -672 mbuf_cat
+	.short	_hs_stub           - _func_table	| -678 mbuf_adj
+	.short	_hs_stub_null      - _func_table	| -684 mbuf_pullup
+	.short	_hs_stub_null      - _func_table	| -690 ProcessIsServer
+	.short	_hs_stub           - _func_table	| -696 ObtainServerSocket
+
+	| -- Real table continuation past this project's own original,
+	| too-early -696 stopping point, through to the real end at -858 --
+	| see this table's own header comment above for the .sfd source and
+	| why each of these is real or _hs_stub.
+	.short	_hs_stub_null      - _func_table	| -702 GetDefaultDomainName
+	.short	_hs_stub           - _func_table	| -708 SetDefaultDomainName
+	.short	_hs_stub_null      - _func_table	| -714 ObtainRoadshowData
+	.short	_hs_stub           - _func_table	| -720 ReleaseRoadshowData
+	.short	_hs_stub_null      - _func_table	| -726 ChangeRoadshowData
+	.short	_hs_stub           - _func_table	| -732 RemoveInterface
+	.short	_hs_gethostbyname_r - _func_table	| -738 gethostbyname_r
+	.short	_hs_gethostbyaddr_r - _func_table	| -744 gethostbyaddr_r
+	.short	_hs_stub           - _func_table	| -750 (reserved)
+	.short	_hs_stub           - _func_table	| -756 (reserved)
+	.short	_hs_stub           - _func_table	| -762 ipf_open (private)
+	.short	_hs_stub           - _func_table	| -768 ipf_close (private)
+	.short	_hs_stub           - _func_table	| -774 ipf_ioctl (private)
+	.short	_hs_stub           - _func_table	| -780 ipf_log_read (private)
+	.short	_hs_stub           - _func_table	| -786 ipf_log_data_waiting (private)
+	.short	_hs_stub           - _func_table	| -792 ipf_set_notify_mask (private)
+	.short	_hs_stub           - _func_table	| -798 ipf_set_interrupt_mask (private)
+	.short	_hs_freeaddrinfo   - _func_table	| -804 freeaddrinfo
+	.short	_hs_getaddrinfo    - _func_table	| -810 getaddrinfo
+	.short	_hs_gai_strerror   - _func_table	| -816 gai_strerror
+	.short	_hs_getnameinfo    - _func_table	| -822 getnameinfo
+	.short	_hs_stub           - _func_table	| -828 (reserved)
+	.short	_hs_stub           - _func_table	| -834 (reserved)
+	.short	_hs_stub           - _func_table	| -840 (reserved)
+	.short	_hs_stub           - _func_table	| -846 (reserved)
+	.short	_hs_stub           - _func_table	| -852 (reserved)
+	.short	_hs_stub           - _func_table	| -858 (reserved)
 	.short	-1
 
 	| Standard library entry points. No per-open state and no real
@@ -1251,11 +1447,272 @@ _hs_getnetbyaddr:
 1:	moveq	#0,d0
 	rts
 
+	| -- AmiTCP 4.0 tail (see this file's own jump-table header comment
+	| for the full accounting of what's real vs _hs_stub past -300) -----
+_hs_inet_aton:
+	| in: a0=cp (NUL-terminated dotted-quad string) a1=addr (out: struct
+	| in_addr*, written only if the parse succeeds)
+	move.l	a0,LIB_ARGBLK+4(a6)
+	move.l	a1,LIB_ARGBLK+8(a6)
+	bsr	_stage_task
+	moveq	#CALL_INET_ATON,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_inet_ntop:
+	| in: d0=af a0=src (ptr to 4 raw address bytes) a1=dst (caller's own
+	| buffer) d1=size (its length)
+	move.l	d0,LIB_ARGBLK+4(a6)
+	move.l	a0,LIB_ARGBLK+8(a6)
+	move.l	a1,LIB_ARGBLK+12(a6)
+	move.l	d1,LIB_ARGBLK+16(a6)
+	bsr	_stage_task
+	moveq	#CALL_INET_NTOP,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_inet_pton:
+	| in: d0=af a0=src (NUL-terminated dotted-quad string) a1=dst (out:
+	| struct in_addr*, written only if the parse succeeds)
+	move.l	d0,LIB_ARGBLK+4(a6)
+	move.l	a0,LIB_ARGBLK+8(a6)
+	move.l	a1,LIB_ARGBLK+12(a6)
+	bsr	_stage_task
+	moveq	#CALL_INET_PTON,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_in_localaddr:
+	| in: d0=addr (in_addr_t, network byte order)
+	move.l	d0,LIB_ARGBLK+4(a6)
+	bsr	_stage_task
+	moveq	#CALL_IN_LOCALADDR,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_in_canforward:
+	| in: d0=addr (in_addr_t, network byte order)
+	move.l	d0,LIB_ARGBLK+4(a6)
+	bsr	_stage_task
+	moveq	#CALL_IN_CANFORWARD,d0
+	bsr	_ring_doorbell
+	rts
+
+	| setnetent/endnetent/getnetent, setprotoent/endprotoent/getprotoent,
+	| setservent/endservent/getservent: same static-table cursor shape
+	| three times over (see crates/hostsocket-plugin/src/lib.rs's
+	| do_setservent and neighbors). `stay_open` (the real setX() LVOs'
+	| own d0 argument) is accepted by real callers but never staged here
+	| at all -- the plugin doesn't distinguish it, so there is nothing
+	| for the host side to receive.
+_hs_setnetent:
+	bsr	_stage_task
+	moveq	#CALL_SETNETENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_endnetent:
+	bsr	_stage_task
+	moveq	#CALL_ENDNETENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_getnetent:
+	| Returns a pointer to LIB_NETENTBUF on success, NULL once the
+	| per-task cursor runs past the end of NETWORKS.
+	lea	LIB_NETENTBUF(a6),a0
+	move.l	a0,LIB_ARGBLK+4(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETNETENT,d0
+	bsr	_ring_doorbell
+	tst.l	d0
+	bne.s	1f
+	lea	LIB_NETENTBUF(a6),a0
+	move.l	a0,d0
+	rts
+1:	moveq	#0,d0
+	rts
+
+_hs_setprotoent:
+	bsr	_stage_task
+	moveq	#CALL_SETPROTOENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_endprotoent:
+	bsr	_stage_task
+	moveq	#CALL_ENDPROTOENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_getprotoent:
+	| Returns a pointer to LIB_PROTOENTBUF on success, NULL once the
+	| per-task cursor runs past the end of PROTOCOLS.
+	lea	LIB_PROTOENTBUF(a6),a0
+	move.l	a0,LIB_ARGBLK+4(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETPROTOENT,d0
+	bsr	_ring_doorbell
+	tst.l	d0
+	bne.s	1f
+	lea	LIB_PROTOENTBUF(a6),a0
+	move.l	a0,d0
+	rts
+1:	moveq	#0,d0
+	rts
+
+_hs_setservent:
+	bsr	_stage_task
+	moveq	#CALL_SETSERVENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_endservent:
+	bsr	_stage_task
+	moveq	#CALL_ENDSERVENT,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_getservent:
+	| Returns a pointer to LIB_SERVENTBUF on success, NULL once the
+	| per-task cursor runs past the end of SERVICES.
+	lea	LIB_SERVENTBUF(a6),a0
+	move.l	a0,LIB_ARGBLK+4(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETSERVENT,d0
+	bsr	_ring_doorbell
+	tst.l	d0
+	bne.s	1f
+	lea	LIB_SERVENTBUF(a6),a0
+	move.l	a0,d0
+	rts
+1:	moveq	#0,d0
+	rts
+
+	| -- Roadshow's own resolver-family extension (see this file's own
+	| jump-table header comment) -------------------------------------
+_hs_freeaddrinfo:
+	| in: a0=ai (ignored). No RPC round trip at all: this project's own
+	| getaddrinfo() has nothing dynamically allocated to free (see this
+	| file's own jump-table header comment for why) -- a real no-op, not
+	| a stub standing in for missing functionality.
+	rts
+
+_hs_getaddrinfo:
+	| in: a0=hostname a1=servname a2=hints a3=res. Plain LONG status
+	| passthrough, no NULL-vs-pointer substitution needed here (unlike
+	| Inet_NtoA/gethostbyname's own buffer tricks): do_getaddrinfo already
+	| writes the result pointer through `res` itself and returns the
+	| EAI_*-or-zero status directly in d0. _ring_doorbell_blocking, not
+	| the plain doorbell: `hostname` can need a real DNS round trip, same
+	| blocking shape as _hs_gethostbyname.
+	move.l	a0,LIB_ARGBLK+4(a6)
+	move.l	a1,LIB_ARGBLK+8(a6)
+	move.l	a2,LIB_ARGBLK+12(a6)
+	move.l	a3,LIB_ARGBLK+16(a6)
+	lea	LIB_ADDRINFOBUF(a6),a0
+	move.l	a0,LIB_ARGBLK+20(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETADDRINFO,d0
+	bsr	_ring_doorbell_blocking
+	rts
+
+_hs_gai_strerror:
+	| in: a0=errnum. Same LIB_INETBUF-style "library-owned scratch
+	| buffer, trampoline already knows the address" shape Inet_NtoA uses.
+	move.l	a0,LIB_ARGBLK+4(a6)
+	lea	LIB_GAIBUF(a6),a0
+	move.l	a0,LIB_ARGBLK+8(a6)
+	bsr	_stage_task
+	moveq	#CALL_GAI_STRERROR,d0
+	bsr	_ring_doorbell
+	lea	LIB_GAIBUF(a6),a0	| recomputed after the doorbell call, same
+					| reasoning as every other library-owned-
+					| buffer trampoline here
+	move.l	a0,d0
+	rts
+
+_hs_getnameinfo:
+	| in: a0=sa d0=salen a1=host d1=hostlen a2=serv d2=servlen d3=flags.
+	| Plain LONG status passthrough -- host/serv are the caller's own
+	| buffers, nothing here for the trampoline to substitute. Plain
+	| _ring_doorbell: never blocks (see do_getnameinfo's own comment for
+	| why `host` never triggers a real DNS round trip).
+	move.l	a0,LIB_ARGBLK+4(a6)
+	move.l	d0,LIB_ARGBLK+8(a6)
+	move.l	a1,LIB_ARGBLK+12(a6)
+	move.l	d1,LIB_ARGBLK+16(a6)
+	move.l	a2,LIB_ARGBLK+20(a6)
+	move.l	d2,LIB_ARGBLK+24(a6)
+	move.l	d3,LIB_ARGBLK+28(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETNAMEINFO,d0
+	bsr	_ring_doorbell
+	rts
+
+_hs_gethostbyname_r:
+	| in: a0=name a1=hp a2=buf d0=buflen a3=he. Unlike gethostbyname's own
+	| LIB_HOSTENTBUF, `hp` is the *caller's* buffer -- the trampoline
+	| re-reads its own staged arg1 (LIB_ARGBLK+8) to recover it after the
+	| doorbell call rather than holding a1 across it (a0/a1 are
+	| _ring_doorbell's own scratch, same reasoning as every buffer-
+	| returning trampoline here).
+	move.l	a0,LIB_ARGBLK+4(a6)
+	move.l	a1,LIB_ARGBLK+8(a6)
+	move.l	a2,LIB_ARGBLK+12(a6)
+	move.l	d0,LIB_ARGBLK+16(a6)
+	move.l	a3,LIB_ARGBLK+20(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETHOSTBYNAME_R,d0
+	bsr	_ring_doorbell_blocking
+	tst.l	d0
+	bne.s	1f
+	move.l	LIB_ARGBLK+8(a6),d0	| success -- return hp
+	rts
+1:	moveq	#0,d0
+	rts
+
+_hs_gethostbyaddr_r:
+	| in: a0=addr d0=len d1=type a1=hp a2=buf d2=buflen a3=he. Same
+	| caller-owned-`hp` reasoning as _hs_gethostbyname_r just above.
+	move.l	a0,LIB_ARGBLK+4(a6)
+	move.l	d0,LIB_ARGBLK+8(a6)
+	move.l	d1,LIB_ARGBLK+12(a6)
+	move.l	a1,LIB_ARGBLK+16(a6)
+	move.l	a2,LIB_ARGBLK+20(a6)
+	move.l	d2,LIB_ARGBLK+24(a6)
+	move.l	a3,LIB_ARGBLK+28(a6)
+	bsr	_stage_task
+	moveq	#CALL_GETHOSTBYADDR_R,d0
+	bsr	_ring_doorbell_blocking
+	tst.l	d0
+	bne.s	1f
+	move.l	LIB_ARGBLK+16(a6),d0	| success -- return hp
+	rts
+1:	moveq	#0,d0
+	rts
+
 	| Shared body for every still-unimplemented LVO that returns a plain
 	| LONG (SetSocketSignals, vsyslog): no RPC round trip, just -1, the
 	| correct BSD "error" convention for these.
 _hs_stub:
 	moveq	#-1,d0
+	rts
+
+	| _hs_stub's own counterpart for LVOs whose real return type is a
+	| pointer or BOOL, not a plain LONG error code -- GetRouteInfo,
+	| ObtainInterfaceList, ObtainDomainNameServerList, the mbuf_*
+	| functions returning struct mbuf*, ProcessIsServer,
+	| GetDefaultDomainName, and ObtainRoadshowData/ChangeRoadshowData
+	| (see the jump table below for exactly which). -1 there would read
+	| back as a non-null 0xFFFFFFFF pointer (or BOOL TRUE) instead of
+	| NULL/FALSE, and a caller trusting that "success" value could go on
+	| to dereference memory nothing ever populated -- found in review,
+	| not by a failing test (bsdsocktest doesn't reach any of these).
+	| 0 is both NULL and BOOL FALSE, so one shared body covers both
+	| return-type families.
+_hs_stub_null:
+	moveq	#0,d0
 	rts
 
 	| -- Interrupt server (Phase 2) ----------------------------------

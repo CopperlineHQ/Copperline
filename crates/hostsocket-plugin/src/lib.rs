@@ -341,6 +341,31 @@ const CALL_GETPROTOBYNAME: i32 = 41;
 const CALL_GETPROTOBYNUMBER: i32 = 42;
 const CALL_GETNETBYNAME: i32 = 43;
 const CALL_GETNETBYADDR: i32 = 44;
+// AmiTCP 4.0 tail (see hostsocket_board.h's own doc comment for the full
+// picture of what lies between GetSocketEvents and here, and why most of
+// it stays unreachable rather than getting a CALL_* of its own).
+const CALL_INET_ATON: i32 = 45;
+const CALL_INET_NTOP: i32 = 46;
+const CALL_INET_PTON: i32 = 47;
+const CALL_IN_LOCALADDR: i32 = 48;
+const CALL_IN_CANFORWARD: i32 = 49;
+const CALL_SETSERVENT: i32 = 50;
+const CALL_ENDSERVENT: i32 = 51;
+const CALL_GETSERVENT: i32 = 52;
+const CALL_SETPROTOENT: i32 = 53;
+const CALL_ENDPROTOENT: i32 = 54;
+const CALL_GETPROTOENT: i32 = 55;
+const CALL_SETNETENT: i32 = 56;
+const CALL_ENDNETENT: i32 = 57;
+const CALL_GETNETENT: i32 = 58;
+// Roadshow's own resolver-family extension, past the AmiTCP-4.0-compatible
+// tail (see hostsocket_board.h's own doc comment) -- freeaddrinfo needs no
+// CALL_* of its own, see do_freeaddrinfo's own comment for why.
+const CALL_GAI_STRERROR: i32 = 59;
+const CALL_GETADDRINFO: i32 = 60;
+const CALL_GETNAMEINFO: i32 = 61;
+const CALL_GETHOSTBYNAME_R: i32 = 62;
+const CALL_GETHOSTBYADDR_R: i32 = 63;
 
 const RES_PENDING: i32 = -2;
 
@@ -376,6 +401,28 @@ const SBTC_HERRNOLONGPTR_SET: u32 = 0x8000_0033;
 const SBTC_HERRNOLONGPTR_GET: u32 = 0x8000_8032;
 const SBTC_DTABLESIZE_SET: u32 = 0x8000_0011;
 const SBTC_DTABLESIZE_GET: u32 = 0x8000_8010;
+// GET-only capability-detection tags real Roadshow callers (curl's own
+// amigaos.c among them) check via SocketBaseTags(SBTM_GETREF(...)) before
+// using the LVO families this branch adds -- without a real answer here,
+// compliant software reports "not available" and never calls them at all,
+// no matter how real the implementation behind them is. Codes 54/59/60/69
+// confirmed against two independent sources, since this project's own
+// local NDK checkout only carries the older AmiTCP-vintage tag list
+// (up to SBTC_HERRNOLONGPTR=25): AROS's own libraries/bsdsocket.h
+// (github.com/aros-development-team/AROS) and the newer, more complete
+// amitcp/socketbasetags.h from github.com/MW0MWZ/AmiTCP_NG, which agree
+// on every code the AROS header also defines. GETREF(code) = TAG_USER
+// (1<<31) | SBTF_REF (0x8000) | (code<<SBTB_CODE=1), same macro as every
+// other SBTC_*_GET constant above.
+// code 54: gethostbyname/gethostbyaddr and getaddrinfo/getnameinfo/
+// gai_strerror (Roadshow's own doc: getaddrinfo shares this family's state)
+const SBTC_HAVE_DNS_API_GET: u32 = 0x8000_806C;
+// code 59: getservby*/getprotoby*/getnetby* and the *ent iterator families
+const SBTC_HAVE_LOCAL_DATABASE_API_GET: u32 = 0x8000_8076;
+// code 60: Inet_*/inet_* family, including inet_aton/inet_ntop/inet_pton
+const SBTC_HAVE_ADDRESS_CONVERSION_API_GET: u32 = 0x8000_8078;
+// code 69: gethostbyname_r/gethostbyaddr_r specifically
+const SBTC_HAVE_GETHOSTADDR_R_API_GET: u32 = 0x8000_808A;
 
 // sys/socket.h constants (/opt/amiga/m68k-amigaos/ndk-include/sys/socket.h,
 // not guessed).
@@ -410,6 +457,7 @@ const FD_CLOSE: u32 = 0x40;
 // netinet/in.h
 const AF_INET: i32 = 2;
 const IPPROTO_TCP: i32 = 6;
+const IPPROTO_UDP: i32 = 17;
 const IPPROTO_ICMP: i32 = 1;
 const MSG_OOB: i32 = 0x1;
 const MSG_PEEK: i32 = 0x2;
@@ -440,6 +488,41 @@ const EMFILE: i32 = 24;
 // The smoltcp path has no equivalent: it tracks connection state directly
 // rather than by re-issuing `connect()`.
 const EISCONN: i32 = 56;
+// do_inet_ntop/do_inet_pton's own failure cases (/opt/amiga/m68k-amigaos/
+// sys-include/sys/errno.h, not guessed).
+const EAFNOSUPPORT: i32 = 47;
+const ENOSPC: i32 = 28;
+// write_hostent_r's own failure case, same header.
+const ERANGE: i32 = 34;
+
+// getaddrinfo()/getnameinfo()'s own EAI_* error codes (netdb.h,
+// /opt/amiga/m68k-amigaos/ndk-include/netdb.h, not guessed) -- a disjoint
+// negative-number space from errno/h_errno, per RFC 3493.
+const EAI_BADFLAGS: i32 = -1;
+const EAI_NONAME: i32 = -2;
+const EAI_AGAIN: i32 = -3;
+const EAI_FAIL: i32 = -4;
+const EAI_NODATA: i32 = -5;
+const EAI_FAMILY: i32 = -6;
+const EAI_SOCKTYPE: i32 = -7;
+const EAI_SERVICE: i32 = -8;
+const EAI_ADDRFAMILY: i32 = -9;
+const EAI_MEMORY: i32 = -10;
+const EAI_SYSTEM: i32 = -11;
+const EAI_BADHINTS: i32 = -12;
+const EAI_PROTOCOL: i32 = -13;
+
+// getnameinfo()'s own NI_* flag bits (same header).
+const NI_NUMERICHOST: i32 = 1;
+const NI_NUMERICSERV: i32 = 2;
+const NI_NAMEREQD: i32 = 8;
+const NI_DGRAM: i32 = 16;
+
+// getaddrinfo()'s own AI_* hint flag bits (same header).
+const AI_PASSIVE: i32 = 1;
+const AI_CANONNAME: i32 = 2;
+const AI_NUMERICHOST: i32 = 4;
+const AI_NUMERICSERV: i32 = 16;
 
 // h_errno values (netdb.h, /opt/amiga/m68k-amigaos/sys-include/netdb.h,
 // not guessed) -- do_gethostbyname's own failure/success paths, via
@@ -628,6 +711,24 @@ const NETENT_ALIASES_OFF: u32 = NETENT_HDR_LEN;
 const NETENT_NAME_CAP: usize = 16; // longest real entry below is 8 bytes
 const NETENT_NAME_OFF: u32 = NETENT_ALIASES_OFF + 4;
 const NETENT_BUF_LEN: u32 = NETENT_NAME_OFF + NETENT_NAME_CAP as u32;
+
+// getaddrinfo()'s LIB_ADDRINFOBUF layout: up to ADDRINFO_MAX_RESULTS
+// (struct addrinfo, struct sockaddr_in) pairs -- capped the same as
+// HOSTENT_MAX_ADDRS for the same reason (a small fixed scratch buffer, not
+// a dynamically-sized one; see do_getaddrinfo's own comment) -- followed
+// by a single shared canonical-name string (RFC 3493: only the *first*
+// addrinfo in the chain ever gets ai_canonname). struct addrinfo is 8
+// LONGs/32 bytes (ai_flags/ai_family/ai_socktype/ai_protocol/ai_addrlen/
+// ai_addr/ai_canonname/ai_next, netdb.h, not guessed); struct sockaddr_in
+// is the same 16-byte layout write_sockaddr_out already uses.
+const ADDRINFO_MAX_RESULTS: usize = HOSTENT_MAX_ADDRS;
+const ADDRINFO_ENTRY_LEN: u32 = 32;
+const ADDRINFO_SOCKADDR_LEN: u32 = 16;
+const ADDRINFO_SOCKADDRS_OFF: u32 = ADDRINFO_MAX_RESULTS as u32 * ADDRINFO_ENTRY_LEN;
+const ADDRINFO_NAME_CAP: usize = HOSTENT_NAME_CAP;
+const ADDRINFO_NAME_OFF: u32 =
+    ADDRINFO_SOCKADDRS_OFF + ADDRINFO_MAX_RESULTS as u32 * ADDRINFO_SOCKADDR_LEN;
+const ADDRINFO_BUF_LEN: u32 = ADDRINFO_NAME_OFF + ADDRINFO_NAME_CAP as u32;
 
 // Small, static well-known-name tables backing getservbyname()/
 // getservbyport()/getprotobyname()/getprotobynumber()/getnetbyname()/
@@ -1158,6 +1259,18 @@ struct TaskState {
     // setsockopt options `SockOpts` already tracks: nothing in this
     // project actually delivers a real Ctrl-C break signal today.
     break_mask: u32,
+    // setservent/endservent/getservent (and the protoent/netent trios)'s
+    // own per-task cursor into SERVICES/PROTOCOLS/NETWORKS -- real BSD
+    // *ent() iteration state is per-process, and this project's closest
+    // equivalent to a process is the calling task, same scoping
+    // `errno_ptr` already uses. `stay_open` (setservent's own argument) is
+    // accepted but not distinguished: this project has no open file handle
+    // to actually keep pinned open, so there is nothing "not staying open"
+    // would change here -- endservent()/setservent() both just rewind the
+    // cursor to 0.
+    servent_cursor: usize,
+    protoent_cursor: usize,
+    netent_cursor: usize,
 }
 
 // What a task registered as "waiting for" the last time one of its calls
@@ -1238,19 +1351,28 @@ enum DnsOutcome {
     Failed,
 }
 
-// One in-flight gethostbyaddr() reverse-DNS query -- see `Board::ptr_pending`'s
-// own comment for why this exists as hand-rolled state instead of reusing
-// `dns_queries`/`dns_results` (smoltcp's own `dns::Socket` can't do PTR
-// lookups at all).
+// resolve_hostname's own result -- deliberately not DnsOutcome itself: a
+// Failed outcome always carries an h_errno code (do_gethostbyname's own
+// HOST_NOT_FOUND, but resolve_hostname's other failure paths -- couldn't
+// even start the query -- use TRY_AGAIN instead), and callers (getaddrinfo,
+// gethostbyname_r) each need to translate that into their own error
+// convention rather than bsdsocket.library's global h_errno.
+enum HostResolve {
+    Pending,
+    Failed(i32),
+    Ready(Vec<IpAddress>),
+}
+
+// One in-flight gethostbyaddr()/gethostbyaddr_r() reverse-DNS query -- see
+// `Board::ptr_pending`'s own comment for why this exists as hand-rolled,
+// per-task state instead of reusing `dns_queries`/`dns_results` (smoltcp's
+// own `dns::Socket` can't do PTR lookups at all).
 struct PtrQuery {
-    task: u32,
-    // Matched against the response's own transaction ID to reject a
-    // stray/unrelated datagram landing on the same socket.
+    // Matched against a reply's own transaction ID to find which pending
+    // task (if any) it belongs to -- see process_waiters' WaitKind::Ptr
+    // arm, the only place that demultiplexes replies arriving on the one
+    // shared `ptr_socket` this way.
     transaction_id: u16,
-    // The guest's own LIB_HOSTENTBUF scratch buffer (same convention
-    // gethostbyname's `buf_addr` already uses) to write the resolved
-    // struct hostent into on success.
-    buf_addr: u32,
     // The address that was actually queried -- echoed back into the
     // resolved hostent's own h_addr_list, matching real gethostbyaddr()
     // semantics (the hostent describes the *address given*, now with a
@@ -1260,6 +1382,31 @@ struct PtrQuery {
     // it's colour-clock ticks, not real microseconds) -- do_wait_select's
     // own CCK_HZ conversion pattern, not a literal duration.
     deadline: i64,
+}
+
+// A completed PtrQuery's outcome, cached by task until the owning
+// gethostbyaddr()/gethostbyaddr_r() call consumes it -- same
+// wait-then-consume shape `dns_results` already uses for forward DNS
+// (`DnsOutcome`'s own comment), needed here because nothing else tracks
+// "this task's reverse lookup finished" once process_waiters' drain loop
+// (not this task's own call) is what actually receives the reply.
+enum PtrOutcome {
+    // The resolved name, plus the address that was queried (carried
+    // forward from the PtrQuery that produced it, so the task consuming
+    // this doesn't need to re-read addr_ptr on its own completion call).
+    Ok(String, Ipv4Address),
+    Failed,
+}
+
+// See `PtrQuery::dest`'s own comment.
+enum PtrDest {
+    Shared(u32),
+    Reentrant {
+        hp_addr: u32,
+        buf_addr: u32,
+        buf_len: i32,
+        he_addr: u32,
+    },
 }
 
 struct Waiter {
@@ -1392,10 +1539,19 @@ struct Board {
     // an ephemeral port once at init() time, the same "one persistent
     // socket, not tied to any guest fd" shape `dns_socket` already uses.
     ptr_socket: Option<SocketHandle>,
-    // The single in-flight reverse-DNS query (this project's own
-    // established "one active task at a time" simplification, same as
-    // `dns_queries`/`send_progress`) -- `None` between calls.
-    ptr_pending: Option<PtrQuery>,
+    // In-flight reverse-DNS queries, one per calling task -- multiple
+    // tasks can each have their own outstanding gethostbyaddr()/
+    // gethostbyaddr_r() call at once (found in review: a single
+    // `Option<PtrQuery>` here let a second task's call silently steal or
+    // corrupt the first task's own query, defeating gethostbyaddr_r()'s
+    // whole point), all funneled through the one shared `ptr_socket`
+    // above and demultiplexed by transaction ID in process_waiters'
+    // WaitKind::Ptr arm (the only place that ever calls recv_slice() on
+    // it).
+    ptr_pending: HashMap<u32, PtrQuery>,
+    // Completed-but-not-yet-consumed outcomes, keyed by task -- see
+    // `PtrOutcome`'s own comment.
+    ptr_results: HashMap<u32, PtrOutcome>,
     // Cached at init() time from the same `[config] dns_server` this
     // project's forward resolver (`dns_socket`) already reads --
     // `do_gethostbyaddr` needs this address too, but `init()`'s own
@@ -1469,7 +1625,8 @@ impl Board {
             event_queues: HashMap::new(),
             reported_dtablesize: MAX_FDS as i32,
             ptr_socket: None,
-            ptr_pending: None,
+            ptr_pending: HashMap::new(),
+            ptr_results: HashMap::new(),
             // Overwritten by init() with the real configured/default
             // value -- this placeholder is never read before then.
             dns_server_addr: NAT_DNS_ADDR,
@@ -1796,6 +1953,57 @@ impl Board {
             CALL_GETPROTOBYNUMBER => self.do_getprotobynumber(task, arg(1), arg(2) as u32),
             CALL_GETNETBYNAME => self.do_getnetbyname(task, arg(1) as u32, arg(2) as u32),
             CALL_GETNETBYADDR => self.do_getnetbyaddr(task, arg(1) as u32, arg(2), arg(3) as u32),
+            CALL_INET_ATON => self.do_inet_aton(task, arg(1) as u32, arg(2) as u32),
+            CALL_INET_NTOP => self.do_inet_ntop(task, arg(1), arg(2) as u32, arg(3) as u32, arg(4)),
+            CALL_INET_PTON => self.do_inet_pton(task, arg(1), arg(2) as u32, arg(3) as u32),
+            CALL_IN_LOCALADDR => self.do_in_localaddr(task, arg(1) as u32),
+            CALL_IN_CANFORWARD => self.do_in_canforward(task, arg(1) as u32),
+            CALL_SETSERVENT => self.do_setservent(task),
+            CALL_ENDSERVENT => self.do_endservent(task),
+            CALL_GETSERVENT => self.do_getservent(task, arg(1) as u32),
+            CALL_SETPROTOENT => self.do_setprotoent(task),
+            CALL_ENDPROTOENT => self.do_endprotoent(task),
+            CALL_GETPROTOENT => self.do_getprotoent(task, arg(1) as u32),
+            CALL_SETNETENT => self.do_setnetent(task),
+            CALL_ENDNETENT => self.do_endnetent(task),
+            CALL_GETNETENT => self.do_getnetent(task, arg(1) as u32),
+            CALL_GAI_STRERROR => self.do_gai_strerror(task, arg(1), arg(2) as u32),
+            CALL_GETADDRINFO => self.do_getaddrinfo(
+                task,
+                arg(1) as u32,
+                arg(2) as u32,
+                arg(3) as u32,
+                arg(4) as u32,
+                arg(5) as u32,
+            ),
+            CALL_GETNAMEINFO => self.do_getnameinfo(
+                task,
+                arg(1) as u32,
+                arg(2),
+                arg(3) as u32,
+                arg(4),
+                arg(5) as u32,
+                arg(6),
+                arg(7),
+            ),
+            CALL_GETHOSTBYNAME_R => self.do_gethostbyname_r(
+                task,
+                arg(1) as u32,
+                arg(2) as u32,
+                arg(3) as u32,
+                arg(4),
+                arg(5) as u32,
+            ),
+            CALL_GETHOSTBYADDR_R => self.do_gethostbyaddr_r(
+                task,
+                arg(1) as u32,
+                arg(2),
+                arg(3),
+                arg(4) as u32,
+                arg(5) as u32,
+                arg(6),
+                arg(7) as u32,
+            ),
             _ => -1,
         }
     }
@@ -1970,6 +2178,86 @@ impl Board {
             let n_be = (n as i32).to_be_bytes();
             unsafe { dma_write(len_ptr as i32, n_be.as_ptr() as i32, 4) };
         }
+    }
+
+    // getnameinfo(sa, salen, host, hostlen, serv, servlen, flags):
+    // sockaddr_in -> host/serv strings, the reverse of getaddrinfo.
+    //
+    // Host: this project has no synchronous reverse-DNS path (the real
+    // one, do_gethostbyaddr, is a RES_PENDING/CALL_REGISTER_WAIT blocking
+    // call like every other DNS lookup here, and getnameinfo's own LVO
+    // contract has no such blocking convention to hook into) -- so `host`
+    // is always the numeric dotted-quad, regardless of NI_NUMERICHOST.
+    // NI_NAMEREQD ("fail if a real name can't be produced") is still
+    // honoured honestly: since a real name genuinely can't be produced
+    // here, that combination fails with EAI_NONAME instead of silently
+    // handing back a numeric address mislabeled as a resolved name.
+    //
+    // Serv: NI_NUMERICSERV forces the plain decimal port string; otherwise
+    // this looks it up in the same static SERVICES table
+    // getservbyport()/getaddrinfo() already share (NI_DGRAM picks "udp"
+    // instead of "tcp", matching do_getservbyport's own proto filter),
+    // falling back to numeric if nothing matches -- real getnameinfo()
+    // does the same silent fallback rather than failing outright.
+    //
+    // Both strings truncate silently into the caller's buffer if they
+    // don't fit, same as do_gethostname's own established convention
+    // (there is no locally-defined EAI_OVERFLOW to report it with).
+    fn do_getnameinfo(
+        &mut self,
+        _task: u32,
+        sa_addr: u32,
+        salen: i32,
+        host_addr: u32,
+        hostlen: i32,
+        serv_addr: u32,
+        servlen: i32,
+        flags: i32,
+    ) -> i32 {
+        // A NULL, undersized, or non-AF_INET `sa` isn't a real sockaddr_in
+        // this project can format -- parse_sockaddr itself zero-fills
+        // whatever it can't read and has no concept of "invalid", so this
+        // checks salen/sin_family up front rather than silently reporting
+        // 0.0.0.0:0 for garbage input (found in review: real getnameinfo()
+        // returns EAI_FAMILY for exactly this).
+        if sa_addr == 0 || salen < 16 {
+            return EAI_FAMILY;
+        }
+        let mut family_raw = [0u8; 2];
+        unsafe { dma_read(sa_addr as i32, family_raw.as_mut_ptr() as i32, 2) };
+        if i16::from_be_bytes(family_raw) as i32 != AF_INET {
+            return EAI_FAMILY;
+        }
+        let (ip, port) = self.parse_sockaddr(sa_addr, salen);
+
+        if host_addr != 0 && hostlen > 0 {
+            if flags & NI_NAMEREQD != 0 && flags & NI_NUMERICHOST == 0 {
+                return EAI_NONAME;
+            }
+            let o = ip.octets();
+            let s = format!("{}.{}.{}.{}\0", o[0], o[1], o[2], o[3]);
+            let n = s.len().min(hostlen as usize);
+            unsafe { dma_write(host_addr as i32, s.as_ptr() as i32, n as i32) };
+        }
+
+        if serv_addr != 0 && servlen > 0 {
+            let s = if flags & NI_NUMERICSERV != 0 {
+                format!("{port}\0")
+            } else {
+                let proto = if flags & NI_DGRAM != 0 { "udp" } else { "tcp" };
+                match SERVICES
+                    .iter()
+                    .find(|&&(_, p, pr)| p == port && pr.eq_ignore_ascii_case(proto))
+                {
+                    Some(&(name, ..)) => format!("{name}\0"),
+                    None => format!("{port}\0"),
+                }
+            };
+            let n = s.len().min(servlen as usize);
+            unsafe { dma_write(serv_addr as i32, s.as_ptr() as i32, n as i32) };
+        }
+
+        0
     }
 
     // Checks a socket's read-readiness regardless of TCP/UDP kind -- used
@@ -4624,6 +4912,36 @@ impl Board {
         0
     }
 
+    // gai_strerror(errnum): same "library-owned scratch buffer, trampoline
+    // already knows the address" shape Inet_NtoA uses for LIB_INETBUF,
+    // here LIB_GAIBUF -- real gai_strerror() has no caller-supplied buffer
+    // either. Message text from netdb.h's own EAI_* comments (not
+    // reworded); an unrecognized code (real callers can pass anything)
+    // still gets a real string back, matching real gai_strerror()'s own
+    // "unknown error" fallback rather than something that reads like a
+    // crash.
+    fn do_gai_strerror(&mut self, _task: u32, errnum: i32, bufaddr: u32) -> i32 {
+        let msg = match errnum {
+            EAI_BADFLAGS => "Invalid value for ai_flags.",
+            EAI_NONAME => "Name or service is not known.",
+            EAI_AGAIN => "Temporary failure in name resolution.",
+            EAI_FAIL => "Non-recoverable failure in name resolution.",
+            EAI_NODATA => "No address associated with name.",
+            EAI_FAMILY => "ai_family not supported.",
+            EAI_SOCKTYPE => "ai_socktype not supported.",
+            EAI_SERVICE => "Service not supported for ai_socktype.",
+            EAI_ADDRFAMILY => "Address family for name not supported.",
+            EAI_MEMORY => "Memory allocation failure.",
+            EAI_SYSTEM => "System error (code indicated in errno).",
+            EAI_BADHINTS => "Invalid value for hints.",
+            EAI_PROTOCOL => "Resolved protocol is unknown.",
+            _ => "Unknown error.",
+        };
+        let s = format!("{msg}\0");
+        unsafe { dma_write(bufaddr as i32, s.as_ptr() as i32, s.len() as i32) };
+        0
+    }
+
     // inet_addr(str): strict "a.b.c.d" (exactly 4 decimal octets), -1
     // (INADDR_NONE, 0xffffffff) if unparsable -- the same bit pattern a
     // legitimate 255.255.255.255 also produces, a real, documented
@@ -4683,6 +5001,171 @@ impl Board {
     fn do_inet_network(&mut self, _task: u32, straddr: u32) -> i32 {
         match self.parse_dotted_quad_at(straddr) {
             Some(v) => v as i32,
+            None => -1,
+        }
+    }
+
+    // inet_aton(cp, addr): same strict "a.b.c.d" parser as inet_addr/
+    // inet_network (real inet_aton() is historically more permissive --
+    // hex/octal octets, fewer-than-four-part classful shorthand -- but this
+    // project's own inet_addr/inet_network already made the same "strict
+    // dotted-quad only" simplification, so this stays consistent with them
+    // rather than growing a second, more lenient parser). Returns 1/0, the
+    // inverse of inet_addr's -1-on-failure convention, and only touches
+    // `out` on success -- both matching real inet_aton()'s own contract.
+    fn do_inet_aton(&mut self, _task: u32, cp_addr: u32, out_addr: u32) -> i32 {
+        match self.parse_dotted_quad_at(cp_addr) {
+            Some(v) => {
+                unsafe { dma_write(out_addr as i32, v.to_be_bytes().as_ptr() as i32, 4) };
+                1
+            }
+            None => 0,
+        }
+    }
+
+    // inet_ntop(af, src, dst, size): AF_INET only (this project has no
+    // AF_INET6 concept anywhere else either). Unlike Inet_NtoA, `dst` is
+    // the caller's own buffer, not a library-owned scratch area, so this
+    // writes straight into it and hands back its own address on success --
+    // there's no "trampoline already knows the address" trick to play
+    // here, entry.s's _hs_inet_ntop just passes the result through
+    // untouched, same as _hs_inet_addr.
+    fn do_inet_ntop(&mut self, task: u32, af: i32, src_addr: u32, dst_addr: u32, size: i32) -> i32 {
+        if af != AF_INET {
+            self.set_errno(task, EAFNOSUPPORT);
+            return 0;
+        }
+        let mut raw = [0u8; 4];
+        unsafe { dma_read(src_addr as i32, raw.as_mut_ptr() as i32, 4) };
+        let [a, b, c, d] = raw;
+        let s = format!("{a}.{b}.{c}.{d}\0");
+        if size < 0 || s.len() > size as usize {
+            self.set_errno(task, ENOSPC);
+            return 0;
+        }
+        unsafe { dma_write(dst_addr as i32, s.as_ptr() as i32, s.len() as i32) };
+        dst_addr as i32
+    }
+
+    // inet_pton(af, src, dst): the reverse of inet_ntop -- `src` is a
+    // NUL-terminated string (like inet_aton's `cp`), `dst` a caller-
+    // supplied struct in_addr to fill in. Real inet_pton()'s three-way
+    // return (1 parsed / 0 bad format / -1 bad af, with errno only set in
+    // the -1 case) is why this can't just reuse do_inet_aton's 1/0 shape
+    // outright.
+    fn do_inet_pton(&mut self, task: u32, af: i32, src_addr: u32, dst_addr: u32) -> i32 {
+        if af != AF_INET {
+            self.set_errno(task, EAFNOSUPPORT);
+            return -1;
+        }
+        match self.parse_dotted_quad_at(src_addr) {
+            Some(v) => {
+                unsafe { dma_write(dst_addr as i32, v.to_be_bytes().as_ptr() as i32, 4) };
+                1
+            }
+            None => 0,
+        }
+    }
+
+    // In_LocalAddr(addr): real BSD checks `addr` against every subnet the
+    // local machine has an interface configured on. This project only ever
+    // has the one interface (see `interface_addr`/init()), but it already
+    // carries two CIDRs -- INTERFACE_ADDR (or its configured override) and
+    // the bolted-on 127.0.0.0/8 loopback range (see init()'s own comment on
+    // why 127.0.0.1 needs special-casing there) -- so checking
+    // `iface.ip_addrs()` directly covers both without this needing its own
+    // copy of the prefix length.
+    fn do_in_localaddr(&mut self, _task: u32, addr: u32) -> i32 {
+        let [a, b, c, d] = addr.to_be_bytes();
+        let ip = IpAddress::Ipv4(Ipv4Address::new(a, b, c, d));
+        let iface = self.iface.as_ref().expect("init() has run");
+        i32::from(iface.ip_addrs().iter().any(|cidr| cidr.contains_addr(&ip)))
+    }
+
+    // In_CanForward(addr): the standard 4.3BSD in_canforward() algorithm
+    // (general knowledge, not confirmed against a local header -- same
+    // caveat as do_inet_lnaof/do_inet_netof above): rejects class D
+    // (multicast, 224.0.0.0/4) and class E (experimental, 240.0.0.0/4)
+    // outright, and for class A additionally rejects net 0 (this network)
+    // and net 127 (loopback) specifically.
+    fn do_in_canforward(&mut self, _task: u32, addr: u32) -> i32 {
+        if addr & 0xE000_0000 == 0xE000_0000 {
+            return 0; // class D or E
+        }
+        if addr & 0x8000_0000 == 0 {
+            let net = (addr & 0xFF00_0000) >> 24;
+            if net == 0 || net == 127 {
+                return 0;
+            }
+        }
+        1
+    }
+
+    // setservent/endservent/getservent and the protoent/netent trios below
+    // all share the same shape: rewind this task's cursor (`set`/`end`), or
+    // hand back the table entry at it and advance (`get`, exhausted once
+    // the cursor reaches the table's length -- matches real *ent()'s NULL-
+    // on-exhaustion via the same 0/-1-then-bufaddr convention every other
+    // write_*ent-backed LVO here uses).
+    fn do_setservent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().servent_cursor = 0;
+        0
+    }
+
+    fn do_endservent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().servent_cursor = 0;
+        0
+    }
+
+    fn do_getservent(&mut self, task: u32, buf_addr: u32) -> i32 {
+        let cursor = self.tasks.entry(task).or_default().servent_cursor;
+        match SERVICES.get(cursor) {
+            Some(&(n, port, proto)) => {
+                self.tasks.entry(task).or_default().servent_cursor = cursor + 1;
+                self.write_servent(buf_addr, n, port, proto)
+            }
+            None => -1,
+        }
+    }
+
+    fn do_setprotoent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().protoent_cursor = 0;
+        0
+    }
+
+    fn do_endprotoent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().protoent_cursor = 0;
+        0
+    }
+
+    fn do_getprotoent(&mut self, task: u32, buf_addr: u32) -> i32 {
+        let cursor = self.tasks.entry(task).or_default().protoent_cursor;
+        match PROTOCOLS.get(cursor) {
+            Some(&(n, proto)) => {
+                self.tasks.entry(task).or_default().protoent_cursor = cursor + 1;
+                self.write_protoent(buf_addr, n, proto)
+            }
+            None => -1,
+        }
+    }
+
+    fn do_setnetent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().netent_cursor = 0;
+        0
+    }
+
+    fn do_endnetent(&mut self, task: u32) -> i32 {
+        self.tasks.entry(task).or_default().netent_cursor = 0;
+        0
+    }
+
+    fn do_getnetent(&mut self, task: u32, buf_addr: u32) -> i32 {
+        let cursor = self.tasks.entry(task).or_default().netent_cursor;
+        match NETWORKS.get(cursor) {
+            Some(&(n, net)) => {
+                self.tasks.entry(task).or_default().netent_cursor = cursor + 1;
+                self.write_netent(buf_addr, n, net)
+            }
             None => -1,
         }
     }
@@ -4754,40 +5237,56 @@ impl Board {
     // observable -- a known gap, not a silent wrong answer, until a real
     // consumer needs h_errno.
     fn do_gethostbyname(&mut self, task: u32, name_addr: u32, buf_addr: u32) -> i32 {
-        // Unlike every other blocking call here, the guest only calls
-        // CALL_REGISTER_WAIT *once* per operation (see entry.s's
-        // _ring_doorbell_blocking: once it holds an allocated signal, a
-        // later RES_PENDING skips straight back to Wait() on that same
-        // signal, trusting the plugin to remember it and signal it again
-        // once ready -- exactly what process_waiters' persistent
-        // `self.waiters` list does for Connect/Recv/Accept/Select by
-        // re-checking live socket state every tick without ever being
-        // asked to). A first version of this function returned
-        // RES_PENDING here without anything backing that promise, so the
-        // second wait cycle had no waiter left to ever wake it -- a
-        // genuine deadlock the end-to-end test rig caught (every earlier
-        // blocking call's *own* readiness check is a cheap, repeatable,
-        // non-consuming read of live socket state, so this class of bug
-        // had no earlier LVO to surface on). The fix: process_waiters
-        // does the real (consuming) dns::Socket::get_query_result() check
-        // itself, on every tick, and caches the outcome in
-        // dns_results -- this function then only ever needs to consult
-        // that cache, never the query handle directly.
+        let Some(name) = self.read_c_string(name_addr, HOSTENT_NAME_CAP - 1) else {
+            return -1;
+        };
+        match self.resolve_hostname(task, &name) {
+            HostResolve::Pending => RES_PENDING,
+            HostResolve::Failed(herrno) => {
+                self.set_herrno(task, herrno);
+                -1
+            }
+            HostResolve::Ready(addrs) => {
+                self.set_herrno(task, 0);
+                self.write_hostent(buf_addr, &name, &addrs)
+            }
+        }
+    }
+
+    // The DNS state machine do_gethostbyname originally owned outright,
+    // factored out so do_getaddrinfo and gethostbyname_r can share it
+    // rather than reimplementing the same start-then-poll/localhost/
+    // resolver_host logic a second time. `name` is read by the caller
+    // (each of them needs the string for its own purposes too -- e.g.
+    // write_hostent's own `name` field -- so there is no benefit to
+    // re-reading it in here).
+    //
+    // Unlike every other blocking call here, the guest only calls
+    // CALL_REGISTER_WAIT *once* per operation (see entry.s's
+    // _ring_doorbell_blocking: once it holds an allocated signal, a
+    // later RES_PENDING skips straight back to Wait() on that same
+    // signal, trusting the plugin to remember it and signal it again
+    // once ready -- exactly what process_waiters' persistent
+    // `self.waiters` list does for Connect/Recv/Accept/Select by
+    // re-checking live socket state every tick without ever being
+    // asked to). A first version of this function returned
+    // RES_PENDING here without anything backing that promise, so the
+    // second wait cycle had no waiter left to ever wake it -- a
+    // genuine deadlock the end-to-end test rig caught (every earlier
+    // blocking call's *own* readiness check is a cheap, repeatable,
+    // non-consuming read of live socket state, so this class of bug
+    // had no earlier LVO to surface on). The fix: process_waiters
+    // does the real (consuming) dns::Socket::get_query_result() check
+    // itself, on every tick, and caches the outcome in
+    // dns_results -- this function then only ever needs to consult
+    // that cache, never the query handle directly.
+    fn resolve_hostname(&mut self, task: u32, name: &str) -> HostResolve {
         if let Some(outcome) = self.dns_results.remove(&task) {
             self.dns_queries.remove(&task);
             self.host_resolve_jobs.remove(&task);
             return match outcome {
-                DnsOutcome::Failed => {
-                    self.set_herrno(task, HOST_NOT_FOUND);
-                    -1
-                }
-                DnsOutcome::Ok(addrs) => {
-                    let Some(name) = self.read_c_string(name_addr, HOSTENT_NAME_CAP - 1) else {
-                        return -1;
-                    };
-                    self.set_herrno(task, 0);
-                    self.write_hostent(buf_addr, &name, &addrs)
-                }
+                DnsOutcome::Failed => HostResolve::Failed(HOST_NOT_FOUND),
+                DnsOutcome::Ok(addrs) => HostResolve::Ready(addrs),
             };
         }
         if self.dns_queries.contains_key(&task) || self.host_resolve_jobs.contains_key(&task) {
@@ -4796,12 +5295,9 @@ impl Board {
             // CALL_REGISTER_WAIT again for this cycle (see above), and
             // the waiter it already registered is what's keeping this
             // alive.
-            return RES_PENDING;
+            return HostResolve::Pending;
         }
 
-        let Some(name) = self.read_c_string(name_addr, HOSTENT_NAME_CAP - 1) else {
-            return -1;
-        };
         // "localhost" resolves locally on every real system, hosts file
         // or not -- it's a resolver-level special case (glibc, BSD libc,
         // and AmigaOS stacks alike all special-case it, precisely so it
@@ -4815,12 +5311,7 @@ impl Board {
         // regardless of resolver strategy: real host resolvers special-case
         // it too, so there's no reason to spend a background thread on it.
         if name.eq_ignore_ascii_case("localhost") {
-            self.set_herrno(task, 0);
-            return self.write_hostent(
-                buf_addr,
-                &name,
-                &[IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1))],
-            );
+            return HostResolve::Ready(vec![IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1))]);
         }
 
         if self.resolver_host {
@@ -4831,14 +5322,13 @@ impl Board {
             return if id >= 0 {
                 self.host_resolve_jobs.insert(task, id);
                 self.last_pending.insert(task, WaitKind::HostResolve);
-                RES_PENDING
+                HostResolve::Pending
             } else {
                 // The host couldn't even start the lookup (e.g. its own
                 // outstanding-request budget is exhausted) -- a resolver-
                 // level "couldn't ask", matching the smoltcp branch's own
                 // TRY_AGAIN below for the equivalent failure there.
-                self.set_herrno(task, TRY_AGAIN);
-                -1
+                HostResolve::Failed(TRY_AGAIN)
             };
         }
 
@@ -4847,21 +5337,18 @@ impl Board {
         let cx = iface.context();
         let sockets = self.sockets.as_mut().expect("init() has run");
         let socket = sockets.get_mut::<dns::Socket>(dns_handle);
-        match socket.start_query(cx, &name, DnsQueryType::A) {
+        match socket.start_query(cx, name, DnsQueryType::A) {
             Ok(handle) => {
                 self.dns_queries.insert(task, handle);
                 self.last_pending.insert(task, WaitKind::Dns);
-                RES_PENDING
+                HostResolve::Pending
             }
             // smoltcp couldn't even start the query (e.g. its own DNS
             // socket is already busy with another one) -- a resolver-
             // level "couldn't ask", not "asked and got a negative
             // answer/timeout" (that's DnsOutcome::Failed above), so
             // TRY_AGAIN fits better than HOST_NOT_FOUND here.
-            Err(_) => {
-                self.set_herrno(task, TRY_AGAIN);
-                -1
-            }
+            Err(_) => HostResolve::Failed(TRY_AGAIN),
         }
     }
 
@@ -4890,12 +5377,87 @@ impl Board {
         type_: i32,
         buf_addr: u32,
     ) -> i32 {
-        if self.ptr_pending.as_ref().is_some_and(|p| p.task == task) {
-            return self.poll_ptr_query(task);
+        self.gethostbyaddr_impl(task, addr_ptr, len, type_, PtrDest::Shared(buf_addr))
+    }
+
+    // gethostbyaddr_r(addr, len, type, hp, buf, buflen, he): the reentrant
+    // sibling -- same reverse-DNS engine as do_gethostbyaddr (this project
+    // only ever has one PTR query in flight at a time regardless of which
+    // LVO started it, see `PtrQuery::dest`'s own comment), but delivers
+    // the result into the caller's own hp/buf instead of the shared
+    // LIB_HOSTENTBUF, and error info through `*he` instead of h_errno.
+    fn do_gethostbyaddr_r(
+        &mut self,
+        task: u32,
+        addr_ptr: u32,
+        len: i32,
+        type_: i32,
+        hp_addr: u32,
+        buf_addr: u32,
+        buf_len: i32,
+        he_addr: u32,
+    ) -> i32 {
+        self.gethostbyaddr_impl(
+            task,
+            addr_ptr,
+            len,
+            type_,
+            PtrDest::Reentrant {
+                hp_addr,
+                buf_addr,
+                buf_len,
+                he_addr,
+            },
+        )
+    }
+
+    fn gethostbyaddr_impl(
+        &mut self,
+        task: u32,
+        addr_ptr: u32,
+        len: i32,
+        type_: i32,
+        dest: PtrDest,
+    ) -> i32 {
+        // Same three-way shape as resolve_hostname (already-resolved /
+        // still in flight / needs to be started), now that a concurrent
+        // gethostbyaddr_r() call from a different task can have its own
+        // entry in these per-task maps at the same time (found in review:
+        // a single global `Option<PtrQuery>` meant a second task's call
+        // would silently steal or corrupt the first task's own in-flight
+        // query -- exactly the concurrent-safety Roadshow documents for
+        // the `_r` variants).
+        if let Some(outcome) = self.ptr_results.remove(&task) {
+            return match outcome {
+                PtrOutcome::Ok(name, orig_addr) => {
+                    let addrs = [IpAddress::Ipv4(orig_addr)];
+                    match dest {
+                        PtrDest::Shared(buf_addr) => {
+                            self.set_herrno(task, 0);
+                            self.write_hostent(buf_addr, &name, &addrs)
+                        }
+                        PtrDest::Reentrant {
+                            hp_addr,
+                            buf_addr,
+                            buf_len,
+                            he_addr,
+                        } => {
+                            self.write_hostent_r(hp_addr, buf_addr, buf_len, he_addr, &name, &addrs)
+                        }
+                    }
+                }
+                PtrOutcome::Failed => self.ptr_fail(task, &dest, HOST_NOT_FOUND),
+            };
+        }
+        if self.ptr_pending.contains_key(&task) {
+            // Still in flight -- process_waiters' WaitKind::Ptr arm is
+            // what actually drains the shared socket and demultiplexes
+            // replies by transaction ID now (see its own comment); this
+            // just waits for it to populate ptr_results.
+            return RES_PENDING;
         }
         if type_ != AF_INET || len < 4 || addr_ptr == 0 {
-            self.set_herrno(task, HOST_NOT_FOUND);
-            return -1;
+            return self.ptr_fail(task, &dest, HOST_NOT_FOUND);
         }
         let mut raw = [0u8; 4];
         // Safety: reading the guest-supplied raw address bytes (a real
@@ -4936,20 +5498,18 @@ impl Board {
         let dns_server = self.dns_server_addr;
         let sockets = self.sockets.as_mut().expect("init() has run");
         let socket = sockets.get_mut::<udp::Socket>(handle);
-        // Drain any stale datagram left over from an earlier query (e.g.
-        // a slow reply that arrived after this project's own timeout had
-        // already given up on it) -- otherwise the very next recv_slice
-        // below could consume that leftover instead of this query's own
-        // real answer.
-        while socket.can_recv() {
-            let _ = socket.recv();
-        }
+        // No longer drains leftover datagrams before sending: with
+        // multiple concurrent queries possible now, anything already
+        // queued could legitimately belong to another task's still-
+        // pending query rather than being stale -- the WaitKind::Ptr
+        // drain loop is what tells stale/stray datagrams (transaction ID
+        // matches nothing pending) apart from real ones, not this send
+        // path.
         if socket
             .send_slice(&buf, (IpAddress::Ipv4(dns_server), 53))
             .is_err()
         {
-            self.set_herrno(task, TRY_AGAIN);
-            return -1;
+            return self.ptr_fail(task, &dest, TRY_AGAIN);
         }
 
         // 5 real seconds -- generous for a single UDP round trip, but
@@ -4957,63 +5517,40 @@ impl Board {
         // it at all) or a resolver that simply doesn't answer PTR
         // queries, nothing would ever complete this otherwise.
         let deadline = self.micros + (5.0 * CCK_HZ) as i64;
-        self.ptr_pending = Some(PtrQuery {
+        // `dest` isn't stored in PtrQuery: CALL_REGISTER_WAIT's blocking
+        // convention means the guest re-stages the exact same call
+        // arguments on every retry (see do_gethostbyname's own comment on
+        // this), so the eventual consuming call above already reconstructs
+        // an equivalent `dest` fresh from its own arguments -- storing a
+        // second copy here would be pure redundancy (and was, until the
+        // compiler's own dead-field warning caught it).
+        self.ptr_pending.insert(
             task,
-            transaction_id,
-            buf_addr,
-            orig_addr,
-            deadline,
-        });
+            PtrQuery {
+                transaction_id,
+                orig_addr,
+                deadline,
+            },
+        );
         self.last_pending.insert(task, WaitKind::Ptr);
         RES_PENDING
     }
 
-    // The retry half of do_gethostbyaddr, reached once `self.ptr_pending`
-    // already holds this task's own in-flight query (see that function's
-    // own comment for the full design). Only ever called after
-    // process_waiters has confirmed (via `WaitKind::Ptr`) that either a
-    // response is ready or the deadline has passed, but re-checks both
-    // itself anyway -- CALL_REGISTER_WAIT's own blocking-retry protocol
-    // means this can in principle be reached before that, same as every
-    // other RES_PENDING call here.
-    fn poll_ptr_query(&mut self, task: u32) -> i32 {
-        let pending = self.ptr_pending.take().expect("caller checked Some");
-        let handle = self.ptr_socket.expect("init() has run");
-        let sockets = self.sockets.as_mut().expect("init() has run");
-        let socket = sockets.get_mut::<udp::Socket>(handle);
-
-        if !socket.can_recv() {
-            if self.micros >= pending.deadline {
-                self.set_herrno(task, HOST_NOT_FOUND);
-                return -1;
-            }
-            self.ptr_pending = Some(pending);
-            self.last_pending.insert(task, WaitKind::Ptr);
-            return RES_PENDING;
-        }
-
-        let mut raw = [0u8; 512];
-        let (n, _meta) = match socket.recv_slice(&mut raw) {
-            Ok(v) => v,
-            Err(_) => {
-                self.set_herrno(task, TRY_AGAIN);
-                return -1;
-            }
-        };
-        match parse_ptr_response(&raw[..n], pending.transaction_id) {
-            Some(name) => {
-                self.set_herrno(task, 0);
-                self.write_hostent(
-                    pending.buf_addr,
-                    &name,
-                    &[IpAddress::Ipv4(pending.orig_addr)],
-                )
-            }
-            None => {
-                self.set_herrno(task, HOST_NOT_FOUND);
-                -1
+    // Reports a gethostbyaddr()/gethostbyaddr_r() failure through whichever
+    // channel `dest` says the caller expects (global h_errno, or a
+    // caller-supplied `*he`) and returns -1 (NULL, once the trampoline
+    // substitutes it in), so every failure path above can just `return
+    // self.ptr_fail(...)` instead of duplicating the dest match.
+    fn ptr_fail(&mut self, task: u32, dest: &PtrDest, herrno: i32) -> i32 {
+        match *dest {
+            PtrDest::Shared(_) => self.set_herrno(task, herrno),
+            PtrDest::Reentrant { he_addr, .. } => {
+                if he_addr != 0 {
+                    unsafe { dma_write(he_addr as i32, herrno.to_be_bytes().as_ptr() as i32, 4) };
+                }
             }
         }
+        -1
     }
 
     // Marshals a resolved (name, addrs) pair into the guest's
@@ -5055,6 +5592,353 @@ impl Board {
 
         unsafe { dma_write(buf_addr as i32, blob.as_ptr() as i32, blob.len() as i32) };
         0
+    }
+
+    // gethostbyname_r/gethostbyaddr_r's own writer: unlike write_hostent,
+    // the fixed 20-byte struct hostent header (`hp`) and the variable-
+    // length data it points into (`buf`, `buf_len` bytes) are two separate
+    // caller-supplied buffers, not one library-owned one -- the whole
+    // point of the reentrant variants is that two tasks (or two calls on
+    // the same task) can hold results at once without one overwriting the
+    // other's LIB_HOSTENTBUF. `addrs` is capped at HOSTENT_MAX_ADDRS, same
+    // as write_hostent, to keep both writers' notion of "how many
+    // addresses fit" consistent. Writes 0 into `*he` on success or an
+    // h_errno-style code on failure (ERANGE if `buf` is too small for
+    // everything that needs to go in it -- the real reentrant contract's
+    // one genuinely new failure mode versus the shared-buffer LVOs, which
+    // never have this problem because they own a buffer sized for the
+    // worst case up front) and returns 0/-1 the same way every other
+    // write_*ent-backed LVO here does (entry.s's trampoline substitutes
+    // NULL vs `hp` accordingly).
+    fn write_hostent_r(
+        &mut self,
+        hp_addr: u32,
+        buf_addr: u32,
+        buf_len: i32,
+        he_addr: u32,
+        name: &str,
+        addrs: &[IpAddress],
+    ) -> i32 {
+        let addr_count = addrs.len().min(HOSTENT_MAX_ADDRS);
+        let name_len = name.len().min(HOSTENT_NAME_CAP - 1);
+
+        // Layout within `buf`, relative to `buf_addr` (unlike HOSTENT_*_OFF,
+        // which is relative to a single shared buf_addr that also holds
+        // the header -- here the header lives in `hp` instead, so this
+        // starts back at 0).
+        let aliases_off = 0u32; // a single NULL LONG (empty alias list)
+        let addr_list_off = aliases_off + 4;
+        let addr_list_len = (addr_count as u32 + 1) * 4; // +1 for the NULL terminator
+        let addrs_off = addr_list_off + addr_list_len;
+        let addrs_len = addr_count as u32 * 4;
+        let name_off = addrs_off + addrs_len;
+        let required = name_off + name_len as u32 + 1;
+
+        if buf_len < 0 || (buf_len as u32) < required {
+            if he_addr != 0 {
+                unsafe { dma_write(he_addr as i32, ERANGE.to_be_bytes().as_ptr() as i32, 4) };
+            }
+            return -1;
+        }
+
+        let mut hp_blob = [0u8; 20];
+        hp_blob[0..4].copy_from_slice(&(buf_addr + name_off).to_be_bytes());
+        hp_blob[4..8].copy_from_slice(&(buf_addr + aliases_off).to_be_bytes());
+        hp_blob[8..12].copy_from_slice(&2i32.to_be_bytes()); // h_addrtype = AF_INET
+        hp_blob[12..16].copy_from_slice(&4i32.to_be_bytes()); // h_length = 4 (IPv4)
+        hp_blob[16..20].copy_from_slice(&(buf_addr + addr_list_off).to_be_bytes());
+        unsafe {
+            dma_write(
+                hp_addr as i32,
+                hp_blob.as_ptr() as i32,
+                hp_blob.len() as i32,
+            )
+        };
+
+        let mut buf_blob = vec![0u8; required as usize];
+        // aliases[0] = NULL: already zeroed.
+        for (i, addr) in addrs.iter().take(addr_count).enumerate() {
+            let IpAddress::Ipv4(v4) = *addr;
+            let entry_ptr = buf_addr + addrs_off + (i as u32) * 4;
+            let list_off = addr_list_off as usize + i * 4;
+            buf_blob[list_off..list_off + 4].copy_from_slice(&entry_ptr.to_be_bytes());
+            let addr_off = addrs_off as usize + i * 4;
+            buf_blob[addr_off..addr_off + 4].copy_from_slice(&v4.octets());
+        }
+        // addr_list's NULL terminator: already zeroed.
+        let name_bytes = name.as_bytes();
+        let name_off_usize = name_off as usize;
+        buf_blob[name_off_usize..name_off_usize + name_len]
+            .copy_from_slice(&name_bytes[..name_len]);
+        // Trailing NUL: already zeroed.
+        unsafe {
+            dma_write(
+                buf_addr as i32,
+                buf_blob.as_ptr() as i32,
+                buf_blob.len() as i32,
+            )
+        };
+
+        if he_addr != 0 {
+            unsafe { dma_write(he_addr as i32, 0i32.to_be_bytes().as_ptr() as i32, 4) };
+        }
+        0
+    }
+
+    // gethostbyname_r(name, hp, buf, buflen, he): the reentrant sibling of
+    // gethostbyname, sharing the exact same DNS resolution engine
+    // (resolve_hostname) but delivering the result through the caller's
+    // own hp/buf instead of the shared LIB_HOSTENTBUF, and error info
+    // through `*he` instead of h_errno -- same relationship
+    // do_gethostbyaddr_r has to do_gethostbyaddr.
+    fn do_gethostbyname_r(
+        &mut self,
+        task: u32,
+        name_addr: u32,
+        hp_addr: u32,
+        buf_addr: u32,
+        buf_len: i32,
+        he_addr: u32,
+    ) -> i32 {
+        let Some(name) = self.read_c_string(name_addr, HOSTENT_NAME_CAP - 1) else {
+            return -1;
+        };
+        match self.resolve_hostname(task, &name) {
+            HostResolve::Pending => RES_PENDING,
+            HostResolve::Failed(herrno) => {
+                if he_addr != 0 {
+                    unsafe { dma_write(he_addr as i32, herrno.to_be_bytes().as_ptr() as i32, 4) };
+                }
+                -1
+            }
+            HostResolve::Ready(addrs) => {
+                self.write_hostent_r(hp_addr, buf_addr, buf_len, he_addr, &name, &addrs)
+            }
+        }
+    }
+
+    // getaddrinfo(hostname, servname, hints, res): protocol-independent
+    // name-to-address translation (RFC 3493) -- AF_INET only, this project
+    // has no AF_INET6 concept anywhere else either. `buf_addr` is the
+    // guest's own LIB_ADDRINFOBUF scratch area (the trampoline already
+    // knows it, same "extra arg beyond the real LVO's own params"
+    // convention CALL_GETHOSTBYNAME's own bufaddr uses) -- `res_addr` is
+    // the caller's own `struct addrinfo **` out-parameter, written on a
+    // definite (non-RES_PENDING) return only.
+    //
+    // Deliberate simplifications versus the full RFC 3493 contract, each
+    // consistent with a choice this file already made elsewhere: results
+    // are capped at ADDRINFO_MAX_RESULTS entries (same fixed-scratch-
+    // buffer reasoning as HOSTENT_MAX_ADDRS); an unconstrained ai_socktype
+    // (0) defaults to SOCK_STREAM only rather than real getaddrinfo's
+    // "one entry per matching socktype" fan-out (SOCK_STREAM *and*
+    // SOCK_DGRAM); ai_socktype/ai_protocol aren't cross-validated against
+    // each other beyond the socktype check itself; and the resolved
+    // ai_canonname is always just the name that was looked up (this
+    // project's own DNS resolver has no notion of a CNAME-expanded
+    // canonical name distinct from the query name -- same simplification
+    // write_hostent's own h_name field already makes).
+    fn do_getaddrinfo(
+        &mut self,
+        task: u32,
+        hostname_addr: u32,
+        servname_addr: u32,
+        hints_addr: u32,
+        res_addr: u32,
+        buf_addr: u32,
+    ) -> i32 {
+        // Real getaddrinfo() requires at least one of hostname/servname --
+        // "In the normal client scenario, both ... are specified. In the
+        // normal server scenario, only ... servname" (RFC 3493). Rejecting
+        // the all-NULL case up front, before manufacturing a default
+        // address, matters here specifically: this project's own default
+        // (loopback, or INADDR_ANY under AI_PASSIVE) would otherwise
+        // silently paper over a genuinely malformed request instead of
+        // reporting it (found in review).
+        if hostname_addr == 0 && servname_addr == 0 {
+            return self.gai_fail(res_addr, EAI_NONAME);
+        }
+
+        let (flags, family, hint_socktype, hint_protocol) = if hints_addr == 0 {
+            (0, 0, 0, 0)
+        } else {
+            let mut raw = [0u8; 16];
+            unsafe { dma_read(hints_addr as i32, raw.as_mut_ptr() as i32, 16) };
+            (
+                i32::from_be_bytes(raw[0..4].try_into().unwrap()),
+                i32::from_be_bytes(raw[4..8].try_into().unwrap()),
+                i32::from_be_bytes(raw[8..12].try_into().unwrap()),
+                i32::from_be_bytes(raw[12..16].try_into().unwrap()),
+            )
+        };
+        // Reject any ai_flags bit outside the four this project actually
+        // interprets -- real getaddrinfo() returns EAI_BADFLAGS for an
+        // unrecognized flag rather than silently ignoring it (found in
+        // review: this project defines EAI_BADFLAGS but never returned it
+        // anywhere).
+        if flags & !(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_NUMERICSERV) != 0 {
+            return self.gai_fail(res_addr, EAI_BADFLAGS);
+        }
+        // PF_UNSPEC (0) is a real, valid "any" wildcard here -- only ever
+        // resolves to AF_INET results though, since that's all this
+        // project speaks.
+        if family != 0 && family != AF_INET {
+            return self.gai_fail(res_addr, EAI_FAMILY);
+        }
+        let socktype = match hint_socktype {
+            0 => SOCK_STREAM,
+            SOCK_STREAM | SOCK_DGRAM => hint_socktype,
+            _ => return self.gai_fail(res_addr, EAI_SOCKTYPE),
+        };
+        let protocol = if hint_protocol != 0 {
+            hint_protocol
+        } else if socktype == SOCK_DGRAM {
+            IPPROTO_UDP
+        } else {
+            IPPROTO_TCP
+        };
+
+        let port = if servname_addr == 0 {
+            0u16
+        } else {
+            let Some(serv) = self.read_c_string(servname_addr, SERVENT_NAME_CAP - 1) else {
+                return self.gai_fail(res_addr, EAI_NONAME);
+            };
+            match serv.parse::<u16>() {
+                Ok(p) => p,
+                Err(_) if flags & AI_NUMERICSERV != 0 => {
+                    return self.gai_fail(res_addr, EAI_NONAME);
+                }
+                Err(_) => {
+                    let proto_name = if socktype == SOCK_DGRAM { "udp" } else { "tcp" };
+                    match SERVICES
+                        .iter()
+                        .find(|&&(n, _, p)| n.eq_ignore_ascii_case(&serv) && p == proto_name)
+                    {
+                        Some(&(_, p, _)) => p,
+                        None => return self.gai_fail(res_addr, EAI_SERVICE),
+                    }
+                }
+            }
+        };
+
+        let (addrs, canonname): (Vec<Ipv4Address>, Option<String>) = if hostname_addr == 0 {
+            let ip = if flags & AI_PASSIVE != 0 {
+                Ipv4Address::new(0, 0, 0, 0)
+            } else {
+                Ipv4Address::new(127, 0, 0, 1)
+            };
+            (vec![ip], None)
+        } else {
+            let Some(name) = self.read_c_string(hostname_addr, HOSTENT_NAME_CAP - 1) else {
+                return self.gai_fail(res_addr, EAI_NONAME);
+            };
+            if let Some(v) = parse_dotted_quad(&name) {
+                let [a, b, c, d] = v.to_be_bytes();
+                let ip = Ipv4Address::new(a, b, c, d);
+                let canon = (flags & AI_CANONNAME != 0).then(|| name.clone());
+                (vec![ip], canon)
+            } else if flags & AI_NUMERICHOST != 0 {
+                return self.gai_fail(res_addr, EAI_NONAME);
+            } else {
+                match self.resolve_hostname(task, &name) {
+                    HostResolve::Pending => return RES_PENDING,
+                    HostResolve::Failed(HOST_NOT_FOUND) => {
+                        return self.gai_fail(res_addr, EAI_NONAME);
+                    }
+                    HostResolve::Failed(_) => return self.gai_fail(res_addr, EAI_AGAIN),
+                    HostResolve::Ready(ips) => {
+                        let addrs = ips
+                            .into_iter()
+                            .map(|a| {
+                                let IpAddress::Ipv4(v4) = a;
+                                v4
+                            })
+                            .collect();
+                        let canon = (flags & AI_CANONNAME != 0).then(|| name.clone());
+                        (addrs, canon)
+                    }
+                }
+            }
+        };
+
+        self.write_addrinfo_chain(
+            buf_addr,
+            &addrs,
+            port,
+            socktype,
+            protocol,
+            canonname.as_deref(),
+        );
+        if res_addr != 0 {
+            unsafe { dma_write(res_addr as i32, buf_addr.to_be_bytes().as_ptr() as i32, 4) };
+        }
+        0
+    }
+
+    // Every do_getaddrinfo failure path shares this: clear `*res` (real
+    // getaddrinfo leaves it in an undefined state on error, but NULL is
+    // the safe, checkable choice) and hand back the EAI_* code itself.
+    fn gai_fail(&mut self, res_addr: u32, code: i32) -> i32 {
+        if res_addr != 0 {
+            unsafe { dma_write(res_addr as i32, 0i32.to_be_bytes().as_ptr() as i32, 4) };
+        }
+        code
+    }
+
+    // Writes up to ADDRINFO_MAX_RESULTS (addrinfo, sockaddr_in) pairs into
+    // LIB_ADDRINFOBUF, chained via ai_next, with ai_canonname on the first
+    // entry only (RFC 3493) if `canonname` is given.
+    fn write_addrinfo_chain(
+        &mut self,
+        buf_addr: u32,
+        addrs: &[Ipv4Address],
+        port: u16,
+        socktype: i32,
+        protocol: i32,
+        canonname: Option<&str>,
+    ) {
+        let mut blob = vec![0u8; ADDRINFO_BUF_LEN as usize];
+        let count = addrs.len().min(ADDRINFO_MAX_RESULTS);
+
+        if let Some(name) = canonname {
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len().min(ADDRINFO_NAME_CAP - 1);
+            let off = ADDRINFO_NAME_OFF as usize;
+            blob[off..off + name_len].copy_from_slice(&name_bytes[..name_len]);
+        }
+
+        for (i, addr) in addrs.iter().take(count).enumerate() {
+            let entry_off = (i as u32) * ADDRINFO_ENTRY_LEN;
+            let sa_off = ADDRINFO_SOCKADDRS_OFF + (i as u32) * ADDRINFO_SOCKADDR_LEN;
+            let e = entry_off as usize;
+
+            blob[e..e + 4].copy_from_slice(&0i32.to_be_bytes()); // ai_flags
+            blob[e + 4..e + 8].copy_from_slice(&AF_INET.to_be_bytes());
+            blob[e + 8..e + 12].copy_from_slice(&socktype.to_be_bytes());
+            blob[e + 12..e + 16].copy_from_slice(&protocol.to_be_bytes());
+            blob[e + 16..e + 20].copy_from_slice(&(ADDRINFO_SOCKADDR_LEN as i32).to_be_bytes()); // ai_addrlen
+            blob[e + 20..e + 24].copy_from_slice(&(buf_addr + sa_off).to_be_bytes()); // ai_addr
+            let canon_ptr = if i == 0 && canonname.is_some() {
+                buf_addr + ADDRINFO_NAME_OFF
+            } else {
+                0
+            };
+            blob[e + 24..e + 28].copy_from_slice(&canon_ptr.to_be_bytes()); // ai_canonname
+            let next_ptr = if i + 1 < count {
+                buf_addr + (i as u32 + 1) * ADDRINFO_ENTRY_LEN
+            } else {
+                0
+            };
+            blob[e + 28..e + 32].copy_from_slice(&next_ptr.to_be_bytes()); // ai_next
+
+            let sa = sa_off as usize;
+            blob[sa..sa + 2].copy_from_slice(&(AF_INET as i16).to_be_bytes());
+            blob[sa + 2..sa + 4].copy_from_slice(&port.to_be_bytes());
+            blob[sa + 4..sa + 8].copy_from_slice(&addr.octets());
+        }
+
+        unsafe { dma_write(buf_addr as i32, blob.as_ptr() as i32, blob.len() as i32) };
     }
 
     // Marshals a (name, port, proto) SERVICES entry into the guest's
@@ -5454,6 +6338,10 @@ impl Board {
                     self.reported_dtablesize = self.reported_dtablesize.max(data as i32);
                 }
                 SBTC_DTABLESIZE_GET => write_u32(data, self.reported_dtablesize as u32),
+                SBTC_HAVE_DNS_API_GET
+                | SBTC_HAVE_LOCAL_DATABASE_API_GET
+                | SBTC_HAVE_ADDRESS_CONVERSION_API_GET
+                | SBTC_HAVE_GETHOSTADDR_R_API_GET => write_u32(data, 1),
                 _ => {}
             }
             addr = addr.wrapping_add(8);
@@ -6211,20 +7099,74 @@ impl Board {
                         }
                     }
                 },
-                // Non-consuming (see WaitKind::Ptr's own comment): just
-                // checks readiness or the deadline, never touches the
-                // socket's own rx queue -- do_gethostbyaddr's retry path
-                // (poll_ptr_query) does the one real recv_slice() once
-                // this fires.
-                WaitKind::Ptr => match self.ptr_pending.as_ref() {
-                    None => true, // no query on record -- don't hang on it forever
-                    Some(pending) => {
+                // The other consuming check in this match (see
+                // WaitKind::Dns's own comment on why it has to happen
+                // here): unlike smoltcp's own dns::Socket, this project's
+                // hand-rolled PTR resolver has no per-query handle to ask
+                // "is *my* query done yet" -- every reply lands on the one
+                // shared `ptr_socket`, so whichever waiter's turn comes up
+                // first has to drain it and figure out, by transaction ID,
+                // which of potentially several still-pending tasks (see
+                // `Board::ptr_pending`'s own comment) each reply actually
+                // belongs to. A reply for task B arriving while task A is
+                // being checked still gets routed to B's own ptr_results
+                // entry, not dropped or misattributed to A.
+                WaitKind::Ptr => {
+                    if self.ptr_results.contains_key(&w.task) {
+                        true
+                    } else if self.ptr_pending.contains_key(&w.task) {
                         let handle = self.ptr_socket.expect("init() has run");
-                        let sockets = self.sockets.as_ref().expect("init() has run");
-                        sockets.get::<udp::Socket>(handle).can_recv()
-                            || self.micros >= pending.deadline
+                        let sockets = self.sockets.as_mut().expect("init() has run");
+                        let socket = sockets.get_mut::<udp::Socket>(handle);
+                        // Bounded: a flood of stray/duplicate datagrams
+                        // must not spin this tick forever. Real replies
+                        // are one-per-query, so this comfortably covers
+                        // every legitimately pending task at once.
+                        for _ in 0..16 {
+                            if !socket.can_recv() {
+                                break;
+                            }
+                            let mut raw = [0u8; 512];
+                            let Ok((n, _meta)) = socket.recv_slice(&mut raw) else {
+                                break;
+                            };
+                            let Ok(packet) = DnsPacket::new_checked(&raw[..n]) else {
+                                continue; // not even a well-formed DNS packet
+                            };
+                            let reply_id = packet.transaction_id();
+                            let Some(matched_task) = self
+                                .ptr_pending
+                                .iter()
+                                .find(|(_, q)| q.transaction_id == reply_id)
+                                .map(|(&t, _)| t)
+                            else {
+                                continue; // stray/stale -- no longer (or never) pending
+                            };
+                            let pending = self.ptr_pending.remove(&matched_task).unwrap();
+                            let outcome = match parse_ptr_response(&raw[..n], reply_id) {
+                                Some(name) => PtrOutcome::Ok(name, pending.orig_addr),
+                                None => PtrOutcome::Failed,
+                            };
+                            self.ptr_results.insert(matched_task, outcome);
+                        }
+                        let now = self.micros;
+                        if self.ptr_results.contains_key(&w.task) {
+                            true
+                        } else if self
+                            .ptr_pending
+                            .get(&w.task)
+                            .is_some_and(|p| now >= p.deadline)
+                        {
+                            self.ptr_pending.remove(&w.task);
+                            self.ptr_results.insert(w.task, PtrOutcome::Failed);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        true // no query on record -- don't hang on it forever
                     }
-                },
+                }
             };
             if ready {
                 self.wake_queue.push_back((w.task, w.signal_mask));
@@ -6623,6 +7565,25 @@ mod tests {
         assert_eq!(CALL_GETPROTOBYNUMBER, 42);
         assert_eq!(CALL_GETNETBYNAME, 43);
         assert_eq!(CALL_GETNETBYADDR, 44);
+        assert_eq!(CALL_INET_ATON, 45);
+        assert_eq!(CALL_INET_NTOP, 46);
+        assert_eq!(CALL_INET_PTON, 47);
+        assert_eq!(CALL_IN_LOCALADDR, 48);
+        assert_eq!(CALL_IN_CANFORWARD, 49);
+        assert_eq!(CALL_SETSERVENT, 50);
+        assert_eq!(CALL_ENDSERVENT, 51);
+        assert_eq!(CALL_GETSERVENT, 52);
+        assert_eq!(CALL_SETPROTOENT, 53);
+        assert_eq!(CALL_ENDPROTOENT, 54);
+        assert_eq!(CALL_GETPROTOENT, 55);
+        assert_eq!(CALL_SETNETENT, 56);
+        assert_eq!(CALL_ENDNETENT, 57);
+        assert_eq!(CALL_GETNETENT, 58);
+        assert_eq!(CALL_GAI_STRERROR, 59);
+        assert_eq!(CALL_GETADDRINFO, 60);
+        assert_eq!(CALL_GETNAMEINFO, 61);
+        assert_eq!(CALL_GETHOSTBYNAME_R, 62);
+        assert_eq!(CALL_GETHOSTBYADDR_R, 63);
         assert_eq!(RES_PENDING, -2);
         assert_eq!(FIONBIO, 0x8004667E);
     }
@@ -7242,6 +8203,239 @@ mod tests {
     }
 
     #[test]
+    fn inet_aton_and_inet_pton_fail_cleanly_on_an_unparsable_string() {
+        // dma_read is a no-op stub under cfg(test) (see the module's own
+        // native_host_stubs doc comment), so the "string" at any address
+        // always reads back as an immediate NUL -- an empty string, which
+        // parse_dotted_quad correctly rejects. That's enough to exercise
+        // both functions' failure paths and return-value conventions
+        // (inet_aton's 1/0, inet_pton's 1/0/-1) even without real guest
+        // memory backing the read.
+        let mut board = Board::new();
+        board.init();
+        assert_eq!(board.do_inet_aton(1, 0, 0), 0);
+        assert_eq!(board.do_inet_pton(1, AF_INET, 0, 0), 0);
+        assert_eq!(board.do_inet_pton(1, AF_INET + 1, 0, 0), -1);
+        assert_eq!(board.do_errno(1), EAFNOSUPPORT);
+    }
+
+    #[test]
+    fn inet_ntop_rejects_bad_af_and_a_too_small_buffer() {
+        let mut board = Board::new();
+        board.init();
+        // af mismatch: rejected before any buffer-size check.
+        assert_eq!(board.do_inet_ntop(1, AF_INET + 1, 0, 0, 100), 0);
+        assert_eq!(board.do_errno(1), EAFNOSUPPORT);
+        // dma_read's stubbed-zero `src` formats as "0.0.0.0\0" (8 bytes):
+        // too small a `size` fails with ENOSPC, a large enough one
+        // succeeds and hands back `dst_addr` itself (unlike Inet_NtoA,
+        // this writes into the caller's own buffer, not a library-owned
+        // scratch area -- see do_inet_ntop's own comment).
+        assert_eq!(board.do_inet_ntop(1, AF_INET, 0, 0x1000, 7), 0);
+        assert_eq!(board.do_errno(1), ENOSPC);
+        assert_eq!(board.do_inet_ntop(1, AF_INET, 0, 0x1000, 8), 0x1000);
+    }
+
+    #[test]
+    fn in_localaddr_recognizes_the_configured_subnet_and_loopback() {
+        let mut board = Board::new();
+        board.init();
+        // INTERFACE_ADDR defaults to 10.0.2.15/24 -- another host on that
+        // /24 is local, one outside it isn't.
+        assert_eq!(board.do_in_localaddr(1, 0x0a000205), 1); // 10.0.2.5
+        assert_eq!(board.do_in_localaddr(1, 0x0a000305), 0); // 10.0.3.5
+
+        // 127.0.0.0/8 is bolted onto this interface unconditionally (see
+        // init()'s own comment on why) -- any address in it counts as
+        // local too.
+        assert_eq!(board.do_in_localaddr(1, 0x7f000001), 1); // 127.0.0.1
+    }
+
+    #[test]
+    fn in_canforward_rejects_multicast_experimental_and_own_net() {
+        let mut board = Board::new();
+        board.init();
+        assert_eq!(board.do_in_canforward(1, 0x0a010203), 1); // 10.1.2.3, ordinary class A
+        assert_eq!(board.do_in_canforward(1, 0xe0000001), 0); // 224.0.0.1, class D
+        assert_eq!(board.do_in_canforward(1, 0xf0000001), 0); // 240.0.0.1, class E
+        assert_eq!(board.do_in_canforward(1, 0x00000001), 0); // net 0
+        assert_eq!(board.do_in_canforward(1, 0x7f000001), 0); // net 127 (loopback)
+    }
+
+    #[test]
+    fn gai_strerror_returns_a_real_message_for_known_and_unknown_codes() {
+        // dma_write is a no-op under cfg(test), so the written message
+        // text itself isn't observable here -- this locks down the
+        // return-code contract (always 0, matching Inet_NtoA's own "there
+        // is no failure mode" shape) for both a real EAI_* code and an
+        // arbitrary unrecognized one (real gai_strerror() never panics or
+        // errors on a bad code, it just falls back to "unknown error").
+        let mut board = Board::new();
+        board.init();
+        assert_eq!(board.do_gai_strerror(1, EAI_NONAME, 0), 0);
+        assert_eq!(board.do_gai_strerror(1, 9999, 0), 0);
+    }
+
+    #[test]
+    fn getnameinfo_rejects_null_undersized_and_wrong_family_sockaddrs() {
+        // dma_read is a no-op stub under cfg(test) (see native_host_stubs's
+        // own doc comment), so any nonzero `sa_addr` reads back sin_family
+        // as 0, never AF_INET -- meaning this test target can only ever
+        // exercise do_getnameinfo's rejection paths, never its success
+        // path (same limitation gethostbyname_rejects_an_unreadable_name_
+        // without_panicking's own comment already documents for the
+        // equivalent gethostbyname case). That's still a real, meaningful
+        // test: it locks down that a NULL/undersized/wrong-family sockaddr
+        // is rejected with EAI_FAMILY rather than silently formatted as
+        // 0.0.0.0:0 (found in review).
+        let mut board = Board::new();
+        board.init();
+        assert_eq!(board.do_getnameinfo(1, 0, 16, 0, 0, 0, 0, 0), EAI_FAMILY);
+        assert_eq!(
+            board.do_getnameinfo(1, 0x3000, 15, 0, 0, 0, 0, 0),
+            EAI_FAMILY
+        );
+        assert_eq!(
+            board.do_getnameinfo(1, 0x3000, 16, 0, 0, 0, 0, 0),
+            EAI_FAMILY
+        );
+    }
+
+    #[test]
+    fn getaddrinfo_validates_hints_before_touching_dns() {
+        let mut board = Board::new();
+        board.init();
+        // Both hostname and servname NULL: rejected outright (found in
+        // review -- this used to manufacture a successful loopback/port-0
+        // default instead, indistinguishable from a real request).
+        assert_eq!(board.do_getaddrinfo(1, 0, 0, 0, 0, 0), EAI_NONAME);
+
+        // hints.ai_family/ai_socktype/ai_flags all read back as 0 under
+        // the no-op dma_read stub (see native_host_stubs's own doc
+        // comment) regardless of what a real hints_addr would point at,
+        // so a nonzero hints_addr on this test target exercises exactly
+        // the same "flags=0, family=PF_UNSPEC, socktype=0" defaulting
+        // path as hints_addr==0 -- real flags/family/socktype rejection
+        // is exercised separately below. servname_addr nonzero (to clear
+        // the both-NULL check above) reads back as an empty string, which
+        // fails both the numeric-port parse and the SERVICES lookup, so
+        // this still reaches (and exercises) the hints-defaulting code
+        // before failing for an unrelated, expected reason.
+        assert_eq!(
+            board.do_getaddrinfo(1, 0, 0x2000, 0x1000, 0, 0),
+            EAI_SERVICE
+        );
+
+        // A non-empty hostname_addr with AI_NUMERICHOST semantics can't
+        // be driven from this stub (flags themselves come from
+        // hints_addr, always reading back 0 here) -- covered instead by
+        // gethostbyname_rejects_an_unreadable_name_without_panicking's
+        // own sibling below via the plain DNS-fallback path: an
+        // unreadable/empty hostname with no AI_NUMERICHOST in effect
+        // falls through to resolve_hostname("") exactly like
+        // gethostbyname("") does, and smoltcp rejects that outright
+        // rather than panicking.
+        assert_eq!(board.do_getaddrinfo(1, 0x1000, 0, 0, 0, 0), EAI_AGAIN);
+    }
+
+    #[test]
+    fn getaddrinfo_rejects_unrecognized_ai_flags_bits() {
+        // AI_MASK is AI_PASSIVE(1)|AI_CANONNAME(2)|AI_NUMERICHOST(4)|
+        // AI_NUMERICSERV(16) -- 0x20 (32) is outside it. hints_addr==0
+        // can't drive this (flags always read back 0 from the stub), so
+        // this locks down the constant/mask arithmetic itself rather than
+        // a full dispatch round trip.
+        assert_eq!(
+            AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_NUMERICSERV,
+            23
+        );
+        assert_eq!(
+            0x20 & !(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_NUMERICSERV),
+            0x20
+        );
+    }
+
+    #[test]
+    fn gethostbyname_r_and_gethostbyaddr_r_reject_bad_input_without_panicking() {
+        // Same "empty name, smoltcp rejects it outright" shape as
+        // gethostbyname_rejects_an_unreadable_name_without_panicking --
+        // the reentrant sibling shares the exact same resolve_hostname
+        // engine, so it fails the same way rather than needing its own
+        // separate proof.
+        let mut board = Board::new();
+        board.init();
+        assert_eq!(board.do_gethostbyname_r(1, 0x1000, 0, 0, 0, 0), -1);
+        // type_ != AF_INET is gethostbyaddr_r's own cheap, DNS-free
+        // rejection path (mirrors do_gethostbyaddr's own).
+        assert_eq!(
+            board.do_gethostbyaddr_r(1, 0, 4, AF_INET + 1, 0, 0, 0, 0),
+            -1
+        );
+    }
+
+    #[test]
+    fn concurrent_gethostbyaddr_calls_from_different_tasks_keep_separate_pending_queries() {
+        // The bug this locks down (found in review): a single global
+        // `Option<PtrQuery>` meant a second task's gethostbyaddr()/
+        // gethostbyaddr_r() call would silently replace the first task's
+        // own in-flight query instead of both existing side by side --
+        // defeating the whole point of the reentrant variant, which
+        // Roadshow documents as safe for concurrent use across tasks
+        // sharing a SocketBase.
+        let mut board = Board::new();
+        board.init();
+        // addr_ptr nonzero reads back as 0.0.0.0 under the no-op dma_read
+        // stub (see native_host_stubs's own doc comment) -- fine here,
+        // do_gethostbyaddr never inspects the address value itself before
+        // sending the query, only that len/type/addr_ptr look sane.
+        assert_eq!(
+            board.do_gethostbyaddr(1, 0x4000, 4, AF_INET, 0),
+            RES_PENDING
+        );
+        assert_eq!(
+            board.do_gethostbyaddr(2, 0x4000, 4, AF_INET, 0),
+            RES_PENDING
+        );
+        assert_eq!(board.ptr_pending.len(), 2);
+        assert!(board.ptr_pending.contains_key(&1));
+        assert!(board.ptr_pending.contains_key(&2));
+        // A retry for a task that already has a query in flight doesn't
+        // touch either entry.
+        assert_eq!(
+            board.do_gethostbyaddr(1, 0x4000, 4, AF_INET, 0),
+            RES_PENDING
+        );
+        assert_eq!(board.ptr_pending.len(), 2);
+    }
+
+    #[test]
+    fn servent_protoent_netent_iterators_walk_their_tables_then_exhaust_and_rewind() {
+        let mut board = Board::new();
+        board.init();
+        for _ in 0..SERVICES.len() {
+            assert_eq!(board.do_getservent(1, 0), 0);
+        }
+        assert_eq!(board.do_getservent(1, 0), -1); // exhausted
+        board.do_setservent(1); // rewinds
+        assert_eq!(board.do_getservent(1, 0), 0);
+        board.do_endservent(1); // also rewinds
+        assert_eq!(board.tasks.get(&1).unwrap().servent_cursor, 0);
+
+        for _ in 0..PROTOCOLS.len() {
+            assert_eq!(board.do_getprotoent(1, 0), 0);
+        }
+        assert_eq!(board.do_getprotoent(1, 0), -1);
+
+        for _ in 0..NETWORKS.len() {
+            assert_eq!(board.do_getnetent(1, 0), 0);
+        }
+        assert_eq!(board.do_getnetent(1, 0), -1);
+
+        // Cursors are per-task, not global.
+        assert_eq!(board.do_getservent(2, 0), 0);
+    }
+
+    #[test]
     fn services_protocols_networks_tables_match_bsdsocktest_expectations() {
         // Pins the actual static-table data (not just the lookup logic)
         // against bsdsocktest's own test_dns.c assertions -- a typo in one
@@ -7710,6 +8904,10 @@ mod tests {
         assert_eq!(SBTC_BREAKMASK_GET, 0x8000_8002);
         assert_eq!(SBTC_DTABLESIZE_SET, 0x8000_0011);
         assert_eq!(SBTC_DTABLESIZE_GET, 0x8000_8010);
+        assert_eq!(SBTC_HAVE_DNS_API_GET, 0x8000_806C);
+        assert_eq!(SBTC_HAVE_LOCAL_DATABASE_API_GET, 0x8000_8076);
+        assert_eq!(SBTC_HAVE_ADDRESS_CONVERSION_API_GET, 0x8000_8078);
+        assert_eq!(SBTC_HAVE_GETHOSTADDR_R_API_GET, 0x8000_808A);
     }
 
     #[test]

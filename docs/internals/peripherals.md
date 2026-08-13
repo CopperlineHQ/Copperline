@@ -314,6 +314,21 @@ reimplemented -- so it works out of the box under `net = "bridge"` with no
 `dns_server` hand-configured to match the LAN. `[hostsocket] resolver =
 "dns"` opts back into the board speaking DNS itself over that same `net`
 traffic, to target a specific server instead of the host's own resolver.
+The library's own LVO table covers the real bsdsocket_lib.sfd order from
+`socket()` all the way to the table's real end at LVO -858 (confirmed
+against Olaf Barthel's own authoritative `.sfd`, not just the -30..-300
+range Phase 4 originally shipped, and not just the AmiTCP-4.0-compatible
+subset through `ObtainServerSocket` at -696) -- `inet_aton`/`inet_ntop`/
+`inet_pton`, `In_LocalAddr`/`In_CanForward`, the `setservent`/`setprotoent`/
+`setnetent` iterator families, and Roadshow's own resolver-family extension
+(`getaddrinfo`/`getnameinfo`/`gai_strerror`/`freeaddrinfo`, plus the
+reentrant `gethostbyname_r`/`gethostbyaddr_r`) all get real bodies too,
+while the LVOs with no equivalent in this project's model (raw packet
+capture, host routing tables, live interface reconfiguration, direct BSD
+mbuf-chain manipulation, Roadshow's own internal global-data-access
+functions) stay `_hs_stub` rather than jumping off the end of the table
+(see `guest/hostsocket/entry.s`'s own jump-table comment for the full
+accounting).
 
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 
