@@ -130,9 +130,11 @@ fn whdload_boots_the_test_slave_from_an_lha_package() {
 
     // The slave writes COLOR00 = $0B4 with all DMA off, so the whole frame
     // is that colour ($0B4 expands to 00/BB/44).
-    let decoder = png::Decoder::new(std::fs::File::open(&shot).expect("screenshot written"));
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&shot).expect("screenshot written"),
+    ));
     let mut reader = decoder.read_info().unwrap();
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![0; reader.output_buffer_size().expect("png dimensions")];
     let info = reader.next_frame(&mut buf).unwrap();
     let rgba = &buf[..info.buffer_size()];
     let total = (info.width * info.height) as usize;

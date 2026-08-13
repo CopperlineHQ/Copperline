@@ -1718,9 +1718,11 @@ mod tests {
         let bare = std::env::var("COPPERLINE_BEZEL_PREVIEW_BARE").is_ok();
         let (src, w, h) = match std::env::var("COPPERLINE_BEZEL_PREVIEW_SRC") {
             Ok(path) => {
-                let decoder = png::Decoder::new(std::fs::File::open(&path).expect("open src"));
+                let decoder = png::Decoder::new(std::io::BufReader::new(
+                    std::fs::File::open(&path).expect("open src"),
+                ));
                 let mut reader = decoder.read_info().expect("png info");
-                let mut buf = vec![0; reader.output_buffer_size()];
+                let mut buf = vec![0; reader.output_buffer_size().expect("png dimensions")];
                 let info = reader.next_frame(&mut buf).expect("png frame");
                 let (w, h) = (info.width, info.height);
                 let rgba: Vec<[u8; 4]> = match info.color_type {

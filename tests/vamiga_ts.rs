@@ -479,7 +479,7 @@ fn vamiga_retroshell_script(
 }
 
 fn assert_png_dimensions(path: &Path, expected_width: u32, expected_height: u32) -> TestResult {
-    let decoder = png::Decoder::new(File::open(path)?);
+    let decoder = png::Decoder::new(std::io::BufReader::new(File::open(path)?));
     let reader = decoder.read_info()?;
     let info = reader.info();
     assert_eq!(

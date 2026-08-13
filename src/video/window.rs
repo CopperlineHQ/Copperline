@@ -4483,7 +4483,10 @@ fn copperline_window_icon() -> Option<Icon> {
 fn decode_embedded_png(bytes: &[u8]) -> Result<EmbeddedRgbaImage> {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info()?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| anyhow!("PNG dimensions overflow"))?;
+    let mut buf = vec![0; size];
     let info = reader.next_frame(&mut buf)?;
     let width = info.width as usize;
     let height = info.height as usize;

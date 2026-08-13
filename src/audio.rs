@@ -346,11 +346,17 @@ pub fn list_output_devices() -> Vec<String> {
     cpal::default_host()
         .output_devices()
         .map(|devs| {
-            devs.filter_map(|d| d.name().ok())
+            devs.filter_map(|d| device_name(&d))
                 .filter(|name| !is_alsa_plugin_variant(name))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The device's human-readable name, if the host can describe it.
+#[cfg(feature = "frontend")]
+pub(crate) fn device_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
 }
 
 /// Whether `name` is redundant with the GUI picker's own "Default" entry: it is
@@ -371,7 +377,7 @@ pub(crate) fn is_redundant_default(name: &str, default_name: Option<&str>) -> bo
 #[cfg(feature = "frontend")]
 pub fn picker_output_devices() -> Vec<String> {
     let host = cpal::default_host();
-    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let default_name = host.default_output_device().and_then(|d| device_name(&d));
     list_output_devices()
         .into_iter()
         .filter(|name| !is_redundant_default(name, default_name.as_deref()))
@@ -388,7 +394,7 @@ fn select_output_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::D
         let needle = name.to_lowercase();
         let matched = host.output_devices().ok().and_then(|mut devs| {
             devs.find(|d| {
-                d.name()
+                device_name(d)
                     .map(|n| n.to_lowercase().contains(&needle))
                     .unwrap_or(false)
             })
@@ -421,7 +427,7 @@ impl CpalSink {
         // callback performs a small linear resample so live output
         // doesn't slowly drain or grow when the device is e.g. 48 kHz.
         let channels = supported.channels().max(2);
-        let output_sample_rate = supported.sample_rate().0;
+        let output_sample_rate = supported.sample_rate();
         let config = cpal::StreamConfig {
             channels,
             sample_rate: supported.sample_rate(),
@@ -464,7 +470,7 @@ impl CpalSink {
 
         let stream = device
             .build_output_stream(
-                &config,
+                config,
                 move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                     // Runs on the cpal-owned audio thread. Latched internally,
                     // so only the first callback does the scheduling syscall.
@@ -525,8 +531,13 @@ impl CpalSink {
                     log::warn!("cpal stream error: {err}");
                     // A vanished device (unplugged, or the default switched away)
                     // cannot recover on its own; flag it so the host reopens on
-                    // the current default output.
-                    if matches!(err, cpal::StreamError::DeviceNotAvailable) {
+                    // the current default output. StreamInvalidated is cpal's
+                    // "must be rebuilt" signal; DeviceChanged means the stream
+                    // was rerouted and keeps running, so it stays out.
+                    if matches!(
+                        err.kind(),
+                        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated
+                    ) {
                         device_lost_for_cb.store(true, Ordering::Relaxed);
                     }
                 },
@@ -537,7 +548,7 @@ impl CpalSink {
 
         log::info!(
             "audio: cpal sink ready, device={:?}, channels={}, output_rate={}, mix_rate={}",
-            device.name().unwrap_or_else(|_| "<unknown>".into()),
+            device_name(&device).unwrap_or_else(|| "<unknown>".into()),
             channels,
             output_sample_rate,
             MIX_SAMPLE_RATE

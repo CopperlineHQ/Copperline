@@ -240,7 +240,10 @@ fn decode_png(path: &Path) -> Result<Rgba, String> {
     let mut reader = decoder
         .read_info()
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("{}: image dimensions overflow", path.display()))?;
+    let mut buf = vec![0; size];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| format!("{}: {e}", path.display()))?;
