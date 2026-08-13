@@ -335,6 +335,48 @@ pub fn akiko_nvram_file() -> PathBuf {
     battery_ram("cd32-nvram.bin")
 }
 
+// --- where a dialog opens ------------------------------------------------
+//
+// Not Copperline's to write, and not created: these only say where a file
+// dialog starts when the field it was opened from is empty. A field with a
+// value opens beside that value, which beats any fixed answer.
+//
+// Each returns `None` when the directory does not exist, so a dialog is
+// never pointed at somewhere that isn't there. Make the folder and it gets
+// used; don't, and nothing changes. That is the whole of the opt-in.
+
+fn media_dir(
+    pick: impl Fn(&crate::pathconf::Paths, &std::path::Path) -> PathBuf,
+) -> Option<PathBuf> {
+    let dir = pick(dirs(), &config_dir()?);
+    dir.is_dir().then_some(dir)
+}
+
+/// Kickstart and extended ROM images.
+pub fn roms_dir() -> Option<PathBuf> {
+    media_dir(|p, h| p.roms_dir(h))
+}
+
+/// MT-32 control and PCM ROMs.
+pub fn mt32_roms_dir() -> Option<PathBuf> {
+    media_dir(|p, h| p.mt32_roms_dir(h))
+}
+
+/// Floppy images.
+pub fn floppies_dir() -> Option<PathBuf> {
+    media_dir(|p, h| p.floppies_dir(h))
+}
+
+/// Hard-disk images and host-filesystem folders.
+pub fn harddrives_dir() -> Option<PathBuf> {
+    media_dir(|p, h| p.harddrives_dir(h))
+}
+
+/// CD images.
+pub fn cds_dir() -> Option<PathBuf> {
+    media_dir(|p, h| p.cds_dir(h))
+}
+
 /// Create a path's parent directory so a write to it can succeed.
 pub fn ensure_parent(path: &std::path::Path) -> std::io::Result<()> {
     match path.parent() {
@@ -421,6 +463,30 @@ mod tests {
     /// used from there. The CD32's is a memory card holding real game
     /// saves; looking somewhere new would present a player with a blank
     /// card and no hint that their progress was still on disk.
+    /// The dialog directories answer only for a folder that exists. Make
+    /// one and it gets used; leave it and nothing changes -- which is what
+    /// lets these be offered without Copperline creating a handful of empty
+    /// folders nobody asked for.
+    #[test]
+    fn a_dialog_directory_answers_only_when_it_is_there() {
+        let scratch = ScratchDir::new("media");
+        let cfg = crate::pathconf::Paths {
+            base: Some(scratch.0.clone()),
+            ..Default::default()
+        };
+        let host = scratch.0.as_path();
+
+        let roms = cfg.roms_dir(host);
+        assert!(!roms.is_dir(), "nothing made yet");
+        assert_eq!(roms.is_dir().then(|| roms.clone()), None);
+
+        std::fs::create_dir_all(&roms).unwrap();
+        assert_eq!(roms.is_dir().then(|| roms.clone()), Some(roms.clone()));
+
+        // The MT-32 pair sit under the ROMs folder rather than beside it.
+        assert_eq!(cfg.mt32_roms_dir(host), roms.join("mt32"));
+    }
+
     #[test]
     fn an_existing_battery_ram_is_not_abandoned() {
         let scratch = ScratchDir::new("battery");

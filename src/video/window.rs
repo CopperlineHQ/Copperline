@@ -8001,10 +8001,16 @@ impl App {
             self.launcher_browse_save(field, "printer.txt");
             return;
         }
+        // Beside whatever the field already holds; failing that, the
+        // directory kept for that kind of media. A field with a value is
+        // the better answer of the two -- somebody editing df1 after df0
+        // wants the folder df0 came from, not a fixed one -- so the
+        // configured directory is only ever the fallback.
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| Self::media_start_dir(field));
         self.suspend_live_audio_for_host_io();
         let mut dialog = rfd::FileDialog::new().set_title("Select file");
         dialog = match field {
@@ -8072,12 +8078,49 @@ impl App {
         self.finish_host_io_pause();
     }
 
+    /// The directory a dialog opens at when its field is empty, by what the
+    /// field holds. The same grouping the filters use just below, so a field
+    /// cannot be offered ROM filters and opened in the floppy folder.
+    ///
+    /// `None` throughout when the directory has not been made -- `paths` only
+    /// answers for one that exists -- which is what keeps this opt-in.
+    fn media_start_dir(field: LauncherField) -> Option<std::path::PathBuf> {
+        match field {
+            LauncherField::Mt32ControlRom | LauncherField::Mt32PcmRom => {
+                crate::paths::mt32_roms_dir().or_else(crate::paths::roms_dir)
+            }
+            LauncherField::Rom
+            | LauncherField::ExtendedRom
+            | LauncherField::ScsiRom
+            | LauncherField::ScsiRomOdd => crate::paths::roms_dir(),
+            LauncherField::Df0Image
+            | LauncherField::Df1Image
+            | LauncherField::Df2Image
+            | LauncherField::Df3Image => crate::paths::floppies_dir(),
+            LauncherField::CdImage => crate::paths::cds_dir(),
+            // A SCSI unit takes either, and the hard-disk folder is the more
+            // likely of the two; a CD there is the exception.
+            LauncherField::ScsiUnit0
+            | LauncherField::ScsiUnit1
+            | LauncherField::ScsiUnit2
+            | LauncherField::ScsiUnit3
+            | LauncherField::ScsiUnit4
+            | LauncherField::ScsiUnit5
+            | LauncherField::ScsiUnit6 => crate::paths::harddrives_dir(),
+            // The WHDLoad game folder and the NVRAM image have homes of their
+            // own that the launcher already knows; nothing to add here.
+            LauncherField::WhdloadGame | LauncherField::Cd32Nvram => None,
+            _ => crate::paths::harddrives_dir(),
+        }
+    }
+
     /// Folder picker for a Host FS mount's directory field.
     fn launcher_browse_folder(&mut self, field: LauncherField) {
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
-            .map(|p| p.to_path_buf());
+            .map(|p| p.to_path_buf())
+            .or_else(crate::paths::harddrives_dir);
         self.suspend_live_audio_for_host_io();
         let mut dialog = rfd::FileDialog::new().set_title("Select host directory");
         if let Some(dir) = start_dir {
