@@ -63,8 +63,7 @@ const HEADER_LEN: usize = 324;
 
 /// Pick a default filename for an interactive recording.
 pub fn auto_filename() -> PathBuf {
-    let ts = crate::timestamp::compact_now();
-    PathBuf::from(format!("copperline-video-{ts}.avi"))
+    crate::paths::recording_file()
 }
 
 struct IndexEntry {

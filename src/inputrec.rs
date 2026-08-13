@@ -102,8 +102,7 @@ fn pot_positions(p: &ControllerPort) -> Option<(u8, u8)> {
 /// Default recording file name, timestamped like the screenshot/recorder
 /// names.
 pub fn auto_filename() -> PathBuf {
-    let ts = crate::timestamp::compact_now();
-    PathBuf::from(format!("copperline-input-{ts}.clscript"))
+    crate::paths::input_recording_file()
 }
 
 pub struct InputRecorder {

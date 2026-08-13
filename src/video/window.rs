@@ -6330,7 +6330,7 @@ impl App {
                     // is, and the database may have been synced meanwhile.
                     #[cfg(feature = "game-library")]
                     if tab == crate::video::launcher::LauncherTab::WhdloadLibrary {
-                        let at = crate::paths::config_dir().unwrap_or_default();
+                        let at = crate::paths::library_root();
                         state.library.games = crate::gamelib::Library::default();
                         state.refresh_library(&at);
                     }
@@ -6433,7 +6433,7 @@ impl App {
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavourite(drawn) => {
-                let config = crate::paths::config_dir().unwrap_or_default();
+                let config = crate::paths::library_root();
                 if let Some(state) = self.launcher_state_mut() {
                     let at = state.library.scroll + drawn;
                     state.toggle_library_favourite(at);
@@ -6451,7 +6451,7 @@ impl App {
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouriteRemove(drawn) => {
-                let config = crate::paths::config_dir().unwrap_or_default();
+                let config = crate::paths::library_root();
                 if let Some(state) = self.launcher_state_mut() {
                     let at = state.library.favourite_scroll + drawn;
                     state.remove_favourite(at);
@@ -8261,7 +8261,7 @@ impl App {
         else {
             return;
         };
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state_mut() else {
             return;
         };
@@ -8308,7 +8308,7 @@ impl App {
     /// Commit the editor and write the store.
     #[cfg(feature = "game-library")]
     fn meta_save(&mut self) {
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         if let Some(state) = self.launcher_state_mut() {
             state.commit_meta_editor();
             state.save_library_database(&config);
@@ -8408,7 +8408,7 @@ impl App {
     /// the last scan resolved, and asks the service nothing.
     #[cfg(feature = "game-library")]
     fn library_refresh(&mut self) {
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state_mut() else {
             return;
         };
@@ -8430,7 +8430,7 @@ impl App {
         if self.library_scan.is_some() {
             return;
         }
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state() else {
             return;
         };
@@ -8534,7 +8534,7 @@ impl App {
         if said.is_empty() {
             return;
         }
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let mut status = None;
         for progress in said {
             let text = progress.message();

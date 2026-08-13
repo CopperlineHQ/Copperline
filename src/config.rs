@@ -4528,7 +4528,7 @@ impl TryFrom<RawConfig> for Config {
                  rtc_chip = \"RP5C01\" or drop battmem"
             ),
             Some(path) => Some(PathBuf::from(path)),
-            None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
+            None => rp5c01_fitted.then(crate::paths::battery_ram_file),
         };
 
         // A SCSI unit exists when something answers on it: a Zorro board
@@ -4613,7 +4613,7 @@ impl TryFrom<RawConfig> for Config {
                 .cd
                 .nvram
                 .map(PathBuf::from)
-                .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
+                .or_else(|| defaults.akiko.then(crate::paths::akiko_nvram_file)),
             rtc_present,
             rtc_chip,
             rtc_seed_unix,

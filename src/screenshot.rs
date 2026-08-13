@@ -217,8 +217,7 @@ pub fn stretch_rows_x_window(fb: &mut [u32], width: usize, rows: usize, src_x0: 
 
 /// Pick a default filename for an interactive screenshot grab.
 pub fn auto_filename() -> PathBuf {
-    let ts = crate::timestamp::compact_now();
-    PathBuf::from(format!("copperline-screenshot-{ts}.png"))
+    crate::paths::screenshot_file()
 }
 
 #[cfg(test)]

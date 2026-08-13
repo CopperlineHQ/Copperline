@@ -5950,12 +5950,12 @@ impl LoginDialog {
 #[cfg(feature = "game-library")]
 const USER_MAX: usize = 64;
 
-/// The support directory under a given configuration directory. The same
-/// place [`crate::paths::whdload_support_dir`] names, spelled from a root
-/// the caller chose so a test can point somewhere else.
+/// The support directory under a given configuration directory, from
+/// `paths` so this and the no-argument helpers cannot describe different
+/// trees. Kept as a name here because the call sites read better for it.
 #[cfg(feature = "game-library")]
 fn whdload_support_under(config_dir: &std::path::Path) -> PathBuf {
-    config_dir.join("whdload").join("support")
+    crate::paths::whdload_support_in(config_dir)
 }
 
 #[cfg(feature = "game-library")]

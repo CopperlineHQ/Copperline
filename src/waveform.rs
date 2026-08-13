@@ -295,13 +295,10 @@ where
     Ok(opts)
 }
 
-/// Timestamped default output path in the working directory.
+/// Timestamped default output path. Named by `paths`, with every other
+/// default a run produces.
 pub fn default_wave_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    PathBuf::from(format!("copperline-wave-{stamp}.vcd"))
+    crate::paths::waveform_file()
 }
 
 /// Snapshot of a capture's state for the console/debugger UI.

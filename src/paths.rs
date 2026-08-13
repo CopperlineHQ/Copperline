@@ -95,7 +95,7 @@ pub fn whdload_dir() -> Option<PathBuf> {
 
 /// Where the support archives are looked for and downloaded to.
 pub fn whdload_support_dir() -> Option<PathBuf> {
-    whdload_dir().map(|dir| dir.join("support"))
+    config_dir().map(|dir| whdload_support_in(&dir))
 }
 
 /// Where games are unpacked and their saves kept, when `[whdload] library`
@@ -132,22 +132,147 @@ fn holds_unpacked_games(dir: &std::path::Path) -> bool {
         .any(|entry| entry.path().join(".source").is_file())
 }
 
+// The same layout, spelled from a root the caller chose. The launcher is
+// handed a root rather than asking for one, so a test can point it
+// somewhere harmless -- and it had grown its own copy of these joins,
+// which meant the tree Copperline writes and the tree `paths` described
+// were two independent claims that happened to agree.
+
+/// The support directory under a given root.
+pub fn whdload_support_in(root: &std::path::Path) -> PathBuf {
+    root.join("whdload").join("support")
+}
+
+/// The scanned library under a given root.
+pub fn whdload_library_db_in(root: &std::path::Path) -> PathBuf {
+    whdload_support_in(root).join("launcher.db")
+}
+
+/// A scan's downloads under a given root.
+pub fn whdload_library_cache_in(root: &std::path::Path) -> PathBuf {
+    whdload_support_in(root).join("cache")
+}
+
 /// The scanned library, when `[whdload] library_db` does not say otherwise.
 /// Beside the support archives, which is the other thing under `whdload/`
 /// that Copperline rather than the guest put there.
 pub fn whdload_library_db() -> Option<PathBuf> {
-    whdload_support_dir().map(|dir| dir.join("launcher.db"))
+    config_dir().map(|dir| whdload_library_db_in(&dir))
 }
 
 /// What a scan downloaded, when `[whdload] library_cache` does not say
 /// otherwise. Safe to delete: it is rebuilt by the next scan.
 pub fn whdload_library_cache() -> Option<PathBuf> {
-    whdload_support_dir().map(|dir| dir.join("cache"))
+    config_dir().map(|dir| whdload_library_cache_in(&dir))
+}
+
+/// The root the launcher takes its library paths from.
+///
+/// A host with no per-user directory at all -- no `HOME`, no `XDG_CONFIG_HOME`,
+/// no `APPDATA`, which is a bare service account or some CI runners -- has
+/// nowhere to put these, and every call site reached for
+/// `config_dir().unwrap_or_default()`. That yields an *empty* path, so the
+/// library quietly becomes `whdload/support/launcher.db` relative to
+/// wherever the process was started. Named here rather than repeated at
+/// eight call sites, with the behaviour unchanged: it is a poor answer, but
+/// changing it is a decision about where data lives and not about who owns
+/// the path.
+pub fn library_root() -> PathBuf {
+    config_dir().unwrap_or_default()
 }
 
 /// Directory holding the numbered save-state slots.
 pub fn state_slot_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("states"))
+}
+
+// --- what a run produces ------------------------------------------------
+//
+// Screenshots, recordings, save states, traces, waveform captures and the
+// battery-backed RAMs. Each of these had its name and its location written
+// out at the point it was used -- in nine places, two of them identical --
+// so a file's home depended on which code path produced it and no one
+// place knew the whole set.
+//
+// They are gathered here unchanged: every function below still resolves to
+// exactly where its caller put things before, which for most of them is
+// the process's working directory. That is not where they belong, but
+// moving them and re-homing them at once would make a regression in the
+// routing indistinguishable from an argument about the destination. With
+// one owner, the move is an edit to these bodies.
+
+// Two stamp formats are in use and both are kept. What a person opens --
+// screenshots, recordings, states -- is named with a readable local
+// datetime; the diagnostic captures are named with Unix seconds. Nobody
+// chose that split, but a filename is what a script greps and a person
+// recognises, so unifying it is a change in its own right and not one to
+// smuggle in here.
+
+/// Seconds since the epoch, for the diagnostic captures.
+fn epoch_stamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Default name for a screenshot taken without one being given.
+pub fn screenshot_file() -> PathBuf {
+    PathBuf::from(format!(
+        "copperline-screenshot-{}.png",
+        crate::timestamp::compact_now()
+    ))
+}
+
+/// Default name for a video recording.
+pub fn recording_file() -> PathBuf {
+    PathBuf::from(format!(
+        "copperline-video-{}.avi",
+        crate::timestamp::compact_now()
+    ))
+}
+
+/// Default name for a recorded input script.
+pub fn input_recording_file() -> PathBuf {
+    PathBuf::from(format!(
+        "copperline-input-{}.clscript",
+        crate::timestamp::compact_now()
+    ))
+}
+
+/// Default name for a save state written outside the numbered slots.
+pub fn state_file() -> PathBuf {
+    PathBuf::from(format!(
+        "copperline-state-{}.clstate",
+        crate::timestamp::compact_now()
+    ))
+}
+
+/// Default name for a waveform capture. Reached from `--waveform` without a
+/// path and from `waveform.start` without one; a capture can run to half a
+/// gigabyte, which is its own argument against the working directory.
+pub fn waveform_file() -> PathBuf {
+    PathBuf::from(format!("copperline-wave-{}.vcd", epoch_stamp()))
+}
+
+/// Default name for an instruction trace. The debugger console and the
+/// control protocol both start traces, and each had its own copy of this;
+/// they now cannot drift.
+pub fn trace_file() -> PathBuf {
+    PathBuf::from(format!("copperline-trace-{}.txt", epoch_stamp()))
+}
+
+/// The RP5C01's battery-backed RAM, when `[machine] battmem` does not say
+/// otherwise. Fitted to A3000/A4000-class machines.
+pub fn battery_ram_file() -> PathBuf {
+    PathBuf::from("battmem.nvram")
+}
+
+/// The CD32's Akiko NVRAM, when nothing else says otherwise. This one holds
+/// real game saves, so wherever it ends up, an existing file has to keep
+/// being found.
+pub fn akiko_nvram_file() -> PathBuf {
+    PathBuf::from("cd32-nvram.bin")
 }
 
 /// Create a path's parent directory so a write to it can succeed.
@@ -177,6 +302,77 @@ mod tests {
     impl Drop for ScratchDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The names a run produces, and which stamp each carries. Gathering
+    /// these into one place is only safe if none of them changed on the way
+    /// -- a filename is what a person recognises and a script greps -- and
+    /// the two stamp formats are easy to swap by accident, because nothing
+    /// but the call site said which was which.
+    #[test]
+    fn the_output_names_keep_their_shape_and_their_stamp() {
+        let readable = |p: &std::path::Path, prefix: &str, ext: &str| {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.starts_with(prefix), "{name} does not start {prefix}");
+            assert!(name.ends_with(ext), "{name} does not end {ext}");
+            let stamp = &name[prefix.len()..name.len() - ext.len()];
+            // yyyymmddHHMMSS: a local datetime a person can read.
+            assert_eq!(stamp.len(), 14, "{name}: not a compact datetime");
+            assert!(stamp.chars().all(|c| c.is_ascii_digit()), "{name}");
+            assert!(stamp.starts_with("20"), "{name}: not a year");
+        };
+        readable(&screenshot_file(), "copperline-screenshot-", ".png");
+        readable(&recording_file(), "copperline-video-", ".avi");
+        readable(&input_recording_file(), "copperline-input-", ".clscript");
+        readable(&state_file(), "copperline-state-", ".clstate");
+
+        let epoch = |p: &std::path::Path, prefix: &str, ext: &str| {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.starts_with(prefix), "{name} does not start {prefix}");
+            assert!(name.ends_with(ext), "{name} does not end {ext}");
+            let stamp = &name[prefix.len()..name.len() - ext.len()];
+            let secs: u64 = stamp.parse().unwrap_or_else(|_| panic!("{name}"));
+            // Unix seconds, not a datetime: far past any 14-digit value.
+            assert!(secs > 1_600_000_000, "{name}: not unix seconds");
+            assert!(secs < 4_000_000_000, "{name}: not unix seconds");
+        };
+        epoch(&waveform_file(), "copperline-wave-", ".vcd");
+        epoch(&trace_file(), "copperline-trace-", ".txt");
+
+        // The two battery RAMs are fixed names, not stamped.
+        assert_eq!(battery_ram_file().to_str(), Some("battmem.nvram"));
+        assert_eq!(akiko_nvram_file().to_str(), Some("cd32-nvram.bin"));
+    }
+
+    /// The launcher is handed a root and spells the library paths from it;
+    /// the no-argument helpers spell them from the config directory. Those
+    /// were two independent descriptions of the same tree, agreeing only by
+    /// coincidence, so hold them to each other.
+    #[test]
+    fn the_library_layout_is_one_description() {
+        let root = std::path::Path::new("/tmp/copperline-root");
+        assert_eq!(
+            whdload_library_db_in(root),
+            whdload_support_in(root).join("launcher.db")
+        );
+        assert_eq!(
+            whdload_library_cache_in(root),
+            whdload_support_in(root).join("cache")
+        );
+        assert_eq!(
+            whdload_support_in(root),
+            root.join("whdload").join("support")
+        );
+        // And the no-argument forms are the same layout under the config
+        // directory, whatever that turns out to be on this host.
+        if let Some(dir) = config_dir() {
+            assert_eq!(whdload_support_dir(), Some(whdload_support_in(&dir)));
+            assert_eq!(whdload_library_db(), Some(whdload_library_db_in(&dir)));
+            assert_eq!(
+                whdload_library_cache(),
+                Some(whdload_library_cache_in(&dir))
+            );
         }
     }
 

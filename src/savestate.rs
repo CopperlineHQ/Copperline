@@ -183,8 +183,7 @@ pub const STATE_VERSION: u32 = 52;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
-    let ts = crate::timestamp::compact_now();
-    std::path::PathBuf::from(format!("copperline-state-{ts}.clstate"))
+    crate::paths::state_file()
 }
 
 /// Number of numbered quick-save slots. Ten, so they map onto the host
