@@ -136,6 +136,39 @@ manifest capabilities; importing one that was not granted fails to load):
 | `resolve_start` | `(name_ptr i32, name_len i32) -> i32` | `resolve`: start a host-OS-resolver lookup, returns a request id or -1 |
 | `resolve_poll` | `(id i32, out_ptr i32) -> i32` | `resolve`: poll it -- -2 pending, -1 failed, or 0 with the address at `out_ptr` |
 
+DMA transfers (`dma_read`/`dma_write`) are transactional and permitted only
+during active host transactions (`read`, `write`, `tick`). Calling DMA
+functions during module initialization (`init`) traps immediately and causes
+plugin instantiation to fail. Calling DMA functions during passive interrupt
+queries (`int2`, `int6`) traps immediately and transitions the board into the
+faulted offline state. Within an active host callback, `dma_write` buffers
+transfers into a host-side journal (bounded to 4,096 transfers and 16 MiB
+cumulative size per callback to prevent host resource exhaustion); pending
+writes are committed to Amiga memory only upon successful return. If the plugin
+traps (e.g. out of fuel, panic, or unhandled exception), uncommitted writes are
+rolled back, leaving Amiga memory untouched. `dma_read` provides read-your-writes
+coherency by overlaying pending uncommitted writes, including across 32-bit
+address wrap boundaries (`0xFFFF_FFFF` -> `0x0000_0000`).
+
+### Fault isolation and lifecycle
+
+When a plugin traps during runtime execution (`read`, `write`, `tick`, `int2`,
+or `int6` -- e.g. from fuel exhaustion, unreachable code, out-of-bounds access,
+or calling DMA outside active transactions):
+- The board immediately enters a **faulted offline state**.
+- Open host resources are cleaned up: sockets are closed, uncommitted DMA
+  journals are discarded, and background resolve receiver handles are dropped
+  (in-flight OS resolver threads terminate on their own and their responses are
+  discarded).
+- Subsequent host callbacks bypass the WASM module entirely:
+  - Register reads return Open Bus (`0xFFFF_FFFF`).
+  - Register writes and clock ticks are ignored (no-ops).
+  - Interrupt lines (`int2`, `int6`) remain unasserted (low / `0`).
+- The faulted state is preserved across save-state snapshots and restores.
+- The board remains offline until a bus reset (`reset()`), including a warm
+  keyboard reset, which re-instantiates a clean module instance with reset
+  linear memory.
+
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
 the bus applies the interrupt-delivery pipeline automatically -- the
