@@ -9,7 +9,7 @@ use super::*;
 
 impl Bus {
     pub(super) fn read_custom_word(&mut self, off: u16) -> u16 {
-        match off & 0xFFE {
+        let value = match off & 0xFFE {
             0x002 => {
                 // DMACONR. Bit 14 = BBUSY (blitter busy), bit 13 = BZERO
                 // (last blit's D was all zero). BBUSY is the early-dropping
@@ -96,20 +96,32 @@ impl Bus {
             // HHPOSR (ECS Agnus): UHRES dual-mode H counter readback. The
             // counter is not emulated, so this reads the HHPOSW latch.
             0x1DA if self.agnus.revision().is_ecs() => self.agnus.hhpos(),
-            0x07C => self.denise_revision.id().unwrap_or(0xFFFF),
+            0x07C => match self.denise_revision.id() {
+                Some(id) => id,
+                // Undriven on OCS: return early so the workaround constant
+                // never contaminates the bus residue below.
+                None => return 0xFFFF,
+            },
             _ => {
                 // Write-only and unmapped custom offsets drive nothing, so
                 // the read samples the residue of the last real chip-bus
                 // transfer (`data_bus`, the same floating-bus model unmapped
-                // address space uses). Software that reads a write-only
-                // register back and ORs the result into a fresh write picks
-                // up garbage bits here exactly as on real hardware (e.g. a
-                // floating BPLCON3 LOCT bit misrouting AGA palette writes).
-                // The debugger still inspects the internal latches through
-                // `custom_reg_latch`.
-                self.data_bus
+                // address space uses) and leaves it unchanged. Software that
+                // reads a write-only register back and ORs the result into a
+                // fresh write picks up garbage bits here exactly as on real
+                // hardware (e.g. a floating BPLCON3 LOCT bit misrouting AGA
+                // palette writes). The debugger still inspects the internal
+                // latches through `custom_reg_latch`.
+                return self.data_bus;
             }
-        }
+        };
+        // A driven word cycle recharges the chip data bus, so a following
+        // undriven cycle floats to this word even inside the same CPU
+        // transfer: MOVE.L $DFF01E,Dn reads INTREQR and then the write-only
+        // $020, and the second word must sample the first, not the residue
+        // from before the transfer.
+        self.data_bus = value;
+        value
     }
 
     pub(super) fn pot_pins(&self) -> PotPins {

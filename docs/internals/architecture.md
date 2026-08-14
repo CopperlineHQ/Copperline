@@ -228,7 +228,10 @@ own values -- e.g. the A2091 board's unpopulated XT-interface bytes read
 Write-only and unmapped custom-register offsets float the same way: the
 chips decode the address but drive no data, so `move.w $DFF106,d0` returns
 the bus residue rather than the register's internal latch (which the
-debugger still inspects separately). Reading a write-only register back
+debugger still inspects separately). Each driven word cycle recharges the
+bus, so a longword read pairing a readable register with a write-only one
+floats the second word to the first -- `move.l $DFF01E,d0` reads INTREQR
+in both halves. Reading a write-only register back
 and OR-ing the result into a fresh write therefore picks up garbage bits
 exactly as on real hardware -- a floating BPLCON3 LOCT bit, for example,
 misroutes AGA palette writes into the low nibbles and darkens the whole

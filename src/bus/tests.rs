@@ -1058,6 +1058,22 @@ fn write_only_custom_register_reads_float_to_the_chip_data_bus() {
 }
 
 #[test]
+fn a_driven_word_cycle_recharges_the_bus_for_a_following_undriven_cycle() {
+    // MOVE.L $DFF01E,Dn pairs a driven word with an undriven one: the
+    // INTREQR cycle drives the chip data bus, so the following read of the
+    // write-only DSKPTH ($020) floats to INTREQR's value, not to the
+    // residue from before the transfer.
+    let mut bus = empty_bus();
+    bus.paula.write_intreq(0x8000 | INT_AUD0);
+    bus.data_bus = 0x5A5A;
+
+    let intreqr = INT_AUD0 as u64;
+    assert_eq!(bus.custom_read(0x01E, 4), (intreqr << 16) | intreqr);
+    // The driven cycle's word stays on the bus for later undriven reads.
+    assert_eq!(bus.custom_read(0x106, 2), intreqr);
+}
+
+#[test]
 fn dmacon_masks_stored_bits_and_dmaconr_derives_status() {
     let mut bus = empty_bus();
 
