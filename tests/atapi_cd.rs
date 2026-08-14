@@ -65,16 +65,6 @@ fn toml_path(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
-/// LIV2's `cdfs.rom` is a bare flash-bank dump; a full release image is
-/// exactly 32768 bytes (`[lide] rom_bank2`'s required size), but some local
-/// dumps are stripped short. Pad a working copy rather than require a
-/// specific dump layout.
-fn padded_rom_bank(src: &Path, dest: &Path) -> std::io::Result<()> {
-    let mut data = std::fs::read(src)?;
-    data.resize(32768, 0xFF);
-    std::fs::write(dest, data)
-}
-
 /// Build a minimal ISO9660 image with one file, `PROBE.TXT`, using whatever
 /// ISO-authoring tool is on the host. Returns `None` (the caller skips) if
 /// none is available -- this is a test-tooling gap, not a missing asset,
@@ -198,10 +188,9 @@ fn atapi_cd_answers_a_real_lide_device_driver_probe() -> Result<(), Box<dyn std:
         eprintln!("skipping ATAPI regression; no ISO-authoring tool (hdiutil/genisoimage/mkisofs) on this host");
         return Ok(());
     };
-    let cdfs_bank = temp.join("cdfs_bank2.rom");
-    padded_rom_bank(&cdfs_src, &cdfs_bank)?;
-
-    let (log, _png, boot_temp) = boot_lide_atapi("probe", &lide_rom, &cdfs_bank, &hdf, &iso)?;
+    // load_rom pads a short dump out to a full bank itself, so cdfs_src can
+    // be handed to [lide] rom_bank2 as-is.
+    let (log, _png, boot_temp) = boot_lide_atapi("probe", &lide_rom, &cdfs_src, &hdf, &iso)?;
 
     // The real driver's probe: IDENTIFY DEVICE (0xEC) against the ATAPI
     // slot must abort (drv=1 is the CD-ROM slave here) so the driver falls

@@ -241,17 +241,27 @@ impl IdeZorro {
 
     /// Load one 32K ROM bank image (`lide.rom`, `lide-atbus.rom`, or a
     /// second-bank image like `cdfs.rom`) from disk.
+    ///
+    /// A real EEPROM/flash chip is a fixed 32K regardless of how much of it
+    /// the mask actually uses; unprogrammed cells read as `0xFF`. Distributed
+    /// dumps (`cdfs.rom` in particular) commonly stop at the last meaningful
+    /// byte rather than including that trailing fill, so a short file is
+    /// padded out to the full bank size the same way -- not rejected. A file
+    /// *larger* than one bank is still an error: that is unambiguously the
+    /// wrong image (e.g. a two-bank release picked for a `rom_bank2` field
+    /// that only takes one).
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
-        let rom =
+        let mut rom =
             std::fs::read(path).with_context(|| format!("reading lide ROM {}", path.display()))?;
-        if rom.len() != ROM_BANK_SIZE {
+        if rom.len() > ROM_BANK_SIZE {
             bail!(
-                "lide ROM {} is {} bytes; expected exactly 32768 (a lide.rom/lide-atbus.rom \
+                "lide ROM {} is {} bytes; expected at most 32768 (a lide.rom/lide-atbus.rom \
                  release image, one bank at a time)",
                 path.display(),
                 rom.len()
             );
         }
+        rom.resize(ROM_BANK_SIZE, 0xFF);
         Ok(rom)
     }
 
@@ -851,6 +861,39 @@ mod tests {
         assert_eq!(crate::zorro_device::ZorroDevice::peek_word(&board, 0), None);
         assert_eq!(board.read(0x1E00, 1) as u8, 0xFF); // live register, empty cable
         assert!(board.ide_enabled); // hardware-only: nothing to latch
+    }
+
+    /// A short dump (a real `cdfs.rom` release commonly stops at the last
+    /// meaningful byte rather than including the EEPROM's trailing
+    /// unprogrammed fill) is padded out to a full bank, not rejected -- only
+    /// a file bigger than one bank is unambiguously the wrong image.
+    #[test]
+    fn load_rom_pads_a_short_dump_and_rejects_an_oversized_one() {
+        let short_path = std::env::temp_dir().join(format!(
+            "copperline-lide-test-short-rom-{}-{}.rom",
+            std::process::id(),
+            rand_suffix()
+        ));
+        std::fs::write(&short_path, vec![0x42u8; ROM_BANK_SIZE - 956]).unwrap();
+        let rom = IdeZorro::load_rom(&short_path).expect("a short dump is padded, not rejected");
+        assert_eq!(rom.len(), ROM_BANK_SIZE);
+        assert_eq!(rom[0], 0x42);
+        assert_eq!(
+            rom[ROM_BANK_SIZE - 956],
+            0xFF,
+            "padded with unprogrammed fill"
+        );
+        assert_eq!(rom[ROM_BANK_SIZE - 1], 0xFF);
+        let _ = std::fs::remove_file(&short_path);
+
+        let long_path = std::env::temp_dir().join(format!(
+            "copperline-lide-test-long-rom-{}-{}.rom",
+            std::process::id(),
+            rand_suffix()
+        ));
+        std::fs::write(&long_path, vec![0u8; ROM_BANK_SIZE + 1]).unwrap();
+        assert!(IdeZorro::load_rom(&long_path).is_err());
+        let _ = std::fs::remove_file(&long_path);
     }
 
     #[test]
