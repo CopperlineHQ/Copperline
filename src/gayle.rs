@@ -292,7 +292,10 @@ mod tests {
     fn gayle_with_drive(sectors: u64) -> (Gayle, PathBuf) {
         let path = temp_image(sectors);
         let mut gayle = Gayle::new(0xD0);
-        gayle.attach_drive(0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        gayle.attach_drive(
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         (gayle, path)
     }
 
@@ -341,7 +344,8 @@ mod tests {
         data[SECTOR_SIZE] = 0xA5; // marker in partition sector 1
         std::fs::write(&path, &data).unwrap();
 
-        let mut drive = IdeDrive::open(&path, 0, None, 0).unwrap();
+        let mut drive =
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         // One synthesized RDB cylinder plus the partition cylinder.
         assert_eq!(drive.disk.total_sectors(), 2 * u64::from(CYL_SECTORS));
 
@@ -397,7 +401,8 @@ mod tests {
         let mut data = std::fs::read(&path).unwrap();
         data[..4].copy_from_slice(b"RDSK");
         std::fs::write(&path, &data).unwrap();
-        let mut drive = IdeDrive::open(&path, 0, None, 0).unwrap();
+        let mut drive =
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         assert_eq!(drive.disk.total_sectors(), u64::from(CYL_SECTORS));
         let mut sector = [0u8; SECTOR_SIZE];
         drive.disk.read_sector(0, &mut sector).unwrap();
@@ -412,7 +417,7 @@ mod tests {
         let mut data = std::fs::read(&path).unwrap();
         data[..4].copy_from_slice(b"DOS\x00");
         std::fs::write(&path, &data).unwrap();
-        let err = match IdeDrive::open(&path, 0, None, 0) {
+        let err = match IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS) {
             Ok(_) => panic!("expected open to fail"),
             Err(e) => e.to_string(),
         };

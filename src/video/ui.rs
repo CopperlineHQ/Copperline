@@ -790,6 +790,8 @@ pub enum UiControl {
     LauncherClear(LauncherField),
     /// Configuration screen: focus a drive's volume-name field for text entry.
     LauncherDriveNameEdit(LauncherField),
+    /// Configuration screen: flip a directory-mount drive between FFS and OFS.
+    LauncherDriveFilesystemToggle(LauncherField),
     /// A free-text box on a Create Image page (a volume or device name).
     LauncherNewImageEdit(LauncherField),
     /// A serial TCP address box on the I/O Ports tab (Connect or Listen).
@@ -4331,6 +4333,8 @@ const LAUNCH_CLEAR_W: usize = 54;
 const LAUNCH_PATH_VALUE_W: usize = 216;
 /// Width of the editable volume-name box on a drive row.
 const LAUNCH_NAME_W: usize = 96;
+/// Width of the FFS/OFS toggle button on a drive row (just "FFS"/"OFS").
+const LAUNCH_FS_W: usize = 40;
 /// Width of the serial TCP address box. Far wider than a volume name's,
 /// because a host name and a port together are a long string and the port
 /// is at the far end of it -- the part a reader most needs to see.
@@ -5578,12 +5582,37 @@ fn row_archive(field: LauncherField) -> Option<crate::gamelib::support::Archive>
 
 /// The editable volume-name box on a drive row: it sits just left of the
 /// Browse button, with the path text filling the space before it.
+/// Whether a drive row's FFS/OFS toggle applies: only a directory mount on
+/// one of the disk-backed drive fields (IDE/SCSI/lide) has a filesystem
+/// choice to make -- an HDF/gzip image already carries its own, and a
+/// `Filesys*Dir` row is a live HOSTFS mount, not a disk snapshot, so it has
+/// no filesystem to choose either. `drive_is_directory` restricts to
+/// exactly that field set on its own (returning `false` for anything else,
+/// same as `drive_filesystem`'s fallback) and reads a cached flag rather
+/// than statting the path here on every frame the row is drawn.
+fn launcher_drive_fs_applies(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
+    setup.drive_is_directory(field)
+}
+
 fn launcher_drive_name_rect(rect: Rect, row_y: usize) -> Rect {
     let (browse, _clear) = launcher_path_rects(rect, row_y);
     Rect {
         x: browse.x.saturating_sub(6 + LAUNCH_NAME_W),
         y: browse.y,
         w: LAUNCH_NAME_W,
+        h: LAUNCH_CONTROL_H,
+    }
+}
+
+/// The FFS/OFS toggle button on a drive row: just left of the volume-name
+/// box, shown under the same condition as `launcher_drive_fs_applies`
+/// above (a directory mount on a disk-backed drive field).
+fn launcher_drive_fs_rect(rect: Rect, row_y: usize) -> Rect {
+    let name_box = launcher_drive_name_rect(rect, row_y);
+    Rect {
+        x: name_box.x.saturating_sub(6 + LAUNCH_FS_W),
+        y: name_box.y,
+        w: LAUNCH_FS_W,
         h: LAUNCH_CONTROL_H,
     }
 }
@@ -6306,6 +6335,14 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         && launcher_drive_name_rect(rect, row_y).contains(pos)
                     {
                         return Some(UiControl::LauncherDriveNameEdit(r.field));
+                    }
+                    // The filesystem toggle only matters for a directory
+                    // mount: an HDF/gzip image already carries its own
+                    // filesystem inside it.
+                    if launcher_drive_fs_applies(&state.setup, r.field)
+                        && launcher_drive_fs_rect(rect, row_y).contains(pos)
+                    {
+                        return Some(UiControl::LauncherDriveFilesystemToggle(r.field));
                     }
                 }
             }
@@ -8304,8 +8341,16 @@ fn draw_launcher_row(
             // until then the row reads like a plain path row and the path text
             // fills the full width.
             let has_image = setup.path(r.field).is_some() && setup.drive_name_applies(r.field);
+            let has_fs_toggle = launcher_drive_fs_applies(setup, r.field);
             let name_box = launcher_drive_name_rect(rect, row_y);
-            let text_right = if has_image { name_box.x } else { browse.x };
+            let fs_box = launcher_drive_fs_rect(rect, row_y);
+            let text_right = if has_fs_toggle {
+                fs_box.x
+            } else if has_image {
+                name_box.x
+            } else {
+                browse.x
+            };
             let avail = text_right.saturating_sub(value_x + 8);
             // Host FS mounts and the WHDLoad paths show the whole host path
             // (clipped to keep the final name, with a leading "..." when
@@ -8355,6 +8400,21 @@ fn draw_launcher_row(
                         scale,
                     );
                 }
+            }
+            if has_fs_toggle {
+                let label = if setup.drive_filesystem(r.field).ffs {
+                    "FFS"
+                } else {
+                    "OFS"
+                };
+                draw_text_button(
+                    frame,
+                    fs_box,
+                    label,
+                    true,
+                    hover == Some(UiControl::LauncherDriveFilesystemToggle(r.field)),
+                    scale,
+                );
             }
             draw_text_button(
                 frame,

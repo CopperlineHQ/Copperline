@@ -182,15 +182,24 @@ impl ScsiDisk {
     /// Open a SCSI unit. `unit` is the SCSI ID, which picks the DHn device
     /// name a synthesized RDB advertises (so a bare hardfile on unit 0
     /// boots as DH0 exactly as it would on the IDE bus). `volume_name`
-    /// labels a directory mounted as an in-memory FFS volume; `boot_pri` is
-    /// the synthesized partition's `de_BootPri`.
+    /// labels a directory mounted as an in-memory volume; `filesystem`
+    /// picks FFS or OFS for that volume (directory mounts only). `boot_pri`
+    /// is the synthesized partition's `de_BootPri`.
     pub fn open(
         path: &Path,
         unit: usize,
         volume_name: Option<&str>,
         boot_pri: i8,
+        filesystem: crate::diskimage::FileSystem,
     ) -> anyhow::Result<Self> {
-        let disk = HardDriveImage::open(path, &format!("DH{unit}"), "scsi", volume_name, boot_pri)?;
+        let disk = HardDriveImage::open(
+            path,
+            &format!("DH{unit}"),
+            "scsi",
+            volume_name,
+            boot_pri,
+            filesystem,
+        )?;
         Ok(Self {
             disk,
             sense: [0u8; SENSE_LEN],
@@ -1471,7 +1480,10 @@ mod tests {
     fn chip_with_disk(sectors: u64) -> (Wd33c93, PathBuf) {
         let path = temp_image(sectors);
         let mut wd = Wd33c93::new();
-        wd.attach_target(0, ScsiDisk::open(&path, 0, None, 0).unwrap());
+        wd.attach_target(
+            0,
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         (wd, path)
     }
 
@@ -1665,7 +1677,8 @@ mod tests {
         // so `execute()` can be handed a truncated `cdb` slice. It must
         // reject that as a malformed CDB rather than indexing past the end.
         let path = temp_image(64);
-        let mut disk = ScsiDisk::open(&path, 0, None, 0).unwrap();
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
 
         // Empty CDB.
         let (exec, status) = disk.execute(&[], 0);
@@ -1689,7 +1702,8 @@ mod tests {
     #[test]
     fn complete_out_rejects_short_cdb_instead_of_panicking() {
         let path = temp_image(64);
-        let mut disk = ScsiDisk::open(&path, 0, None, 0).unwrap();
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         assert_eq!(disk.complete_out(&[], &[0u8; SECTOR_SIZE]), GOOD);
         assert_eq!(disk.complete_out(&[0x2A, 0, 0], &[0u8; SECTOR_SIZE]), GOOD);
         std::fs::remove_file(&path).ok();

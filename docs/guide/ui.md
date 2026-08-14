@@ -587,7 +587,10 @@ The layout is:
   image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
-  raw HDF).
+  raw HDF). Once that image is a host **directory** specifically, an **FFS/OFS**
+  button appears just left of the volume-name box: click it to flip the
+  in-memory volume's filesystem (FFS by default; OFS is the one every
+  Kickstart from 1.2 onward can read with no guest-side setup).
   A setting that does not apply to the chosen machine is greyed and
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
   and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for

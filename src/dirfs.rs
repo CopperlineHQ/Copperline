@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Build a bare FFS partition image (a "partition hardfile") from a host
+//! Build a bare partition image (a "partition hardfile") from a host
 //! directory tree, so a directory can be mounted as a Gayle IDE hard disk
 //! with no preparation. The image is built once at startup and lives in
-//! memory: the guest sees an ordinary FFS volume and may write to it, but
-//! nothing is synced back to the host directory.
+//! memory: the guest sees an ordinary AmigaDOS volume and may write to it,
+//! but nothing is synced back to the host directory.
 //!
-//! The on-disk layout is plain AmigaDOS FFS (dostype DOS\x01, 512-byte
-//! blocks, 16x32 cylinder geometry to match the RDB the IDE layer
-//! synthesizes around bare partition images): boot block, root block in the
-//! middle of the partition, bitmap blocks after the root, directory header
-//! blocks with hashed name chains, and file header / extension blocks whose
-//! data pointers reference raw 512-byte data blocks.
+//! The on-disk layout is plain AmigaDOS FFS or OFS (dostype DOS\x01 or
+//! DOS\x00, caller's choice; see [`build_image`]), 512-byte blocks, 16x32
+//! cylinder geometry to match the RDB the IDE layer synthesizes around bare
+//! partition images: boot block, root block in the middle of the partition,
+//! bitmap blocks after the root, directory header blocks with hashed name
+//! chains, and file header / extension blocks whose data pointers reference
+//! either raw 512-byte FFS data blocks or 24-byte-header OFS data blocks
+//! (488 payload bytes apiece, chained through their own `next_data`
+//! pointers). OFS exists alongside FFS because Kickstart 1.3's ROM has no
+//! FFS handler built in -- OFS is the only filesystem a 1.3 guest can read
+//! from a directory mount with no guest-side setup.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -34,6 +39,7 @@ const BMEXT_PAGES: usize = BSIZE / 4 - 1;
 
 const T_HEADER: u32 = 2;
 const T_LIST: u32 = 16;
+const T_DATA: u32 = 8;
 const ST_ROOT: u32 = 1;
 const ST_USERDIR: u32 = 2;
 const ST_FILE: u32 = 0xFFFF_FFFD; // -3
@@ -44,9 +50,35 @@ const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
 /// Refuse to build images larger than this; the whole image lives in RAM.
 const MAX_IMAGE_BYTES: u64 = 2 << 30;
 
-pub fn build_ffs_image(dir: &Path, volume_name: &str) -> anyhow::Result<Vec<u8>> {
+/// Data payload bytes per content block: FFS data blocks carry no header
+/// (the full 512 bytes are payload); OFS data blocks reserve the first 24
+/// bytes for type/header_key/seq_num/data_size/next_data/checksum.
+fn data_payload_bytes(filesystem: crate::diskimage::FileSystem) -> u64 {
+    if filesystem.ffs {
+        BSIZE as u64
+    } else {
+        (BSIZE - 24) as u64
+    }
+}
+
+pub fn build_image(
+    dir: &Path,
+    volume_name: &str,
+    filesystem: crate::diskimage::FileSystem,
+) -> anyhow::Result<Vec<u8>> {
+    // Only `ffs`/plain-vs-not matters here: Kickstart 1.3 (the reason OFS
+    // exists as an option at all) has no intl/dircache/longname support
+    // either, so callers are only ever expected to pass FileSystem::OFS or
+    // FileSystem::FFS.
+    debug_assert!(
+        filesystem.variant == crate::diskimage::Variant::Plain,
+        "dirfs only builds plain OFS/FFS volumes"
+    );
     let entries = scan_tree(dir)?;
-    let content_blocks: u64 = 3 + entries.iter().map(EntryPlan::blocks_needed).sum::<u64>();
+    let content_blocks: u64 = 3 + entries
+        .iter()
+        .map(|e| e.blocks_needed(filesystem))
+        .sum::<u64>();
 
     // Fixed-point size estimate: bitmap blocks depend on the total size.
     let slack = (content_blocks / 20).max(64);
@@ -69,7 +101,7 @@ pub fn build_ffs_image(dir: &Path, volume_name: &str) -> anyhow::Result<Vec<u8>>
         );
     }
 
-    let mut b = Builder::new(total as usize, volume_name);
+    let mut b = Builder::new(total as usize, volume_name, filesystem);
     b.write_tree(dir, &entries, b.root_key)?;
     Ok(b.finish())
 }
@@ -85,15 +117,15 @@ struct EntryPlan {
 }
 
 impl EntryPlan {
-    fn blocks_needed(&self) -> u64 {
+    fn blocks_needed(&self, filesystem: crate::diskimage::FileSystem) -> u64 {
         if self.is_dir {
             1 + self
                 .children
                 .iter()
-                .map(EntryPlan::blocks_needed)
+                .map(|c| c.blocks_needed(filesystem))
                 .sum::<u64>()
         } else {
-            let data = self.size.div_ceil(BSIZE as u64);
+            let data = self.size.div_ceil(data_payload_bytes(filesystem));
             let headers = 1 + data.saturating_sub(HT_SIZE as u64).div_ceil(HT_SIZE as u64);
             data + headers
         }
@@ -216,12 +248,19 @@ struct Builder {
     bitmap_keys: Vec<u32>,
     bmext_keys: Vec<u32>,
     /// Header blocks whose checksum (at offset 20) is computed at finish,
-    /// after all hash-chain inserts have settled.
+    /// after all hash-chain inserts have settled. OFS data blocks are pushed
+    /// here too: they carry a checksum at the same offset, computed the
+    /// same way.
     meta_blocks: Vec<u32>,
+    filesystem: crate::diskimage::FileSystem,
 }
 
 impl Builder {
-    fn new(total_blocks: usize, volume_name: &str) -> Self {
+    fn new(
+        total_blocks: usize,
+        volume_name: &str,
+        filesystem: crate::diskimage::FileSystem,
+    ) -> Self {
         let mut b = Builder {
             image: vec![0u8; total_blocks * BSIZE],
             total_blocks,
@@ -231,10 +270,11 @@ impl Builder {
             bitmap_keys: Vec::new(),
             bmext_keys: Vec::new(),
             meta_blocks: Vec::new(),
+            filesystem,
         };
         // Boot block: dostype only, no boot code (hard-disk partitions boot
         // through the RDB, not boot-block code).
-        b.image[..4].copy_from_slice(b"DOS\x01");
+        b.image[..4].copy_from_slice(&filesystem.dos_type().to_be_bytes());
         b.used[0] = true;
         b.used[1] = true;
         let root = b.root_key as usize;
@@ -378,8 +418,9 @@ impl Builder {
         Ok(())
     }
 
-    /// Write a file header (plus extension blocks as needed) and its raw FFS
-    /// data blocks; returns the header key.
+    /// Write a file header (plus extension blocks as needed) and its data
+    /// blocks (raw FFS or header-carrying OFS, per `self.filesystem`);
+    /// returns the header key.
     fn write_file(
         &mut self,
         host_path: &Path,
@@ -401,7 +442,13 @@ impl Builder {
         let mut chunk_block = header;
         let mut in_block = 0usize;
         let mut first_data = 0u32;
-        for chunk in data.chunks(BSIZE) {
+        // OFS-only bookkeeping: the previous data block's key (to backfill
+        // its next_data pointer once the current one's key is known) and a
+        // running 1-based sequence number.
+        let mut prev_data: Option<u32> = None;
+        let mut seq_num = 0u32;
+        let payload = data_payload_bytes(self.filesystem) as usize;
+        for chunk in data.chunks(payload) {
             if in_block == HT_SIZE {
                 // Current header/extension is full: chain a T_LIST block.
                 let ext = self.alloc()?;
@@ -415,8 +462,24 @@ impl Builder {
                 in_block = 0;
             }
             let block = self.alloc()?;
-            let base = block as usize * BSIZE;
-            self.image[base..base + chunk.len()].copy_from_slice(chunk);
+            if self.filesystem.ffs {
+                let base = block as usize * BSIZE;
+                self.image[base..base + chunk.len()].copy_from_slice(chunk);
+            } else {
+                seq_num += 1;
+                self.put32(block, 0, T_DATA);
+                self.put32(block, 4, header); // header_key: the file's header, never an extension
+                self.put32(block, 8, seq_num);
+                self.put32(block, 12, chunk.len() as u32); // data_size
+                self.put32(block, 16, 0); // next_data, backfilled below once known
+                self.meta_blocks.push(block); // checksum at offset 20, deferred to finish()
+                let base = block as usize * BSIZE + 24;
+                self.image[base..base + chunk.len()].copy_from_slice(chunk);
+                if let Some(prev) = prev_data {
+                    self.put32(prev, 16, block);
+                }
+                prev_data = Some(block);
+            }
             if first_data == 0 {
                 first_data = block;
             }
@@ -501,12 +564,27 @@ fn bitmap_overhead(total: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Minimal FFS reader used to verify built images.
+    /// Minimal FFS/OFS reader used to verify built images.
     struct Reader<'a> {
         image: &'a [u8],
+        filesystem: crate::diskimage::FileSystem,
     }
 
     impl<'a> Reader<'a> {
+        fn ffs(image: &'a [u8]) -> Self {
+            Reader {
+                image,
+                filesystem: crate::diskimage::FileSystem::FFS,
+            }
+        }
+
+        fn ofs(image: &'a [u8]) -> Self {
+            Reader {
+                image,
+                filesystem: crate::diskimage::FileSystem::OFS,
+            }
+        }
+
         fn get32(&self, block: u32, offset: usize) -> u32 {
             let base = block as usize * BSIZE + offset;
             u32::from_be_bytes(self.image[base..base + 4].try_into().unwrap())
@@ -549,7 +627,14 @@ mod tests {
             None
         }
 
-        /// Read a whole file back through header/extension data pointers.
+        /// Read a whole file back through header/extension data pointers. For
+        /// OFS, each data pointer names a block with its own 24-byte header
+        /// (data_size may be short only on the very last block); the
+        /// `next_data` chain is not consulted here since the header's/
+        /// extension's own pointer table already lists every data block in
+        /// order -- `next_data` exists for OFS readers that don't have that
+        /// table (e.g. real AmigaDOS repairing a damaged header), and is
+        /// checked separately in ofs-specific tests below.
         fn read_file(&self, header: u32) -> Vec<u8> {
             let size = self.get32(header, BSIZE - 188) as usize;
             let mut out = Vec::with_capacity(size);
@@ -558,9 +643,15 @@ mod tests {
                 let count = self.get32(block, 8) as usize;
                 for i in 0..count {
                     let data = self.get32(block, 24 + (HT_SIZE - 1 - i) * 4);
-                    let base = data as usize * BSIZE;
-                    let take = (size - out.len()).min(BSIZE);
-                    out.extend_from_slice(&self.image[base..base + take]);
+                    if self.filesystem.ffs {
+                        let base = data as usize * BSIZE;
+                        let take = (size - out.len()).min(BSIZE);
+                        out.extend_from_slice(&self.image[base..base + take]);
+                    } else {
+                        let data_size = self.get32(data, 12) as usize;
+                        let base = data as usize * BSIZE + 24;
+                        out.extend_from_slice(&self.image[base..base + data_size]);
+                    }
                 }
                 block = self.get32(block, BSIZE - 8);
                 if block == 0 {
@@ -592,11 +683,11 @@ mod tests {
     #[test]
     fn builds_a_valid_ffs_volume_from_a_directory() {
         let dir = temp_tree();
-        let image = build_ffs_image(&dir, "TestVol").unwrap();
+        let image = build_image(&dir, "TestVol", crate::diskimage::FileSystem::FFS).unwrap();
         assert_eq!(image.len() % (CYL_BLOCKS * BSIZE), 0);
         assert_eq!(&image[..4], b"DOS\x01");
 
-        let r = Reader { image: &image };
+        let r = Reader::ffs(&image);
         let root = r.root_key();
         assert!(r.checksum_ok(root, 20), "root checksum");
         assert_eq!(r.get32(root, 0), T_HEADER);
@@ -636,6 +727,122 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn builds_a_valid_ofs_volume_from_a_directory() {
+        let dir = temp_tree();
+        let image = build_image(&dir, "TestVol", crate::diskimage::FileSystem::OFS).unwrap();
+        assert_eq!(image.len() % (CYL_BLOCKS * BSIZE), 0);
+        assert_eq!(&image[..4], b"DOS\x00");
+
+        let r = Reader::ofs(&image);
+        let root = r.root_key();
+        assert!(r.checksum_ok(root, 20), "root checksum");
+        assert_eq!(r.name_of(root), b"TestVol");
+
+        // Single small file: one OFS data block whose header fields are
+        // right, and whose next_data is 0 (end of chain).
+        let readme = r.lookup(root, b"ReadMe.txt").expect("ReadMe.txt");
+        assert!(r.checksum_ok(readme, 20));
+        let data_ptr = r.get32(readme, 24 + (HT_SIZE - 1) * 4);
+        assert_ne!(data_ptr, 0, "ReadMe.txt has a data block");
+        assert_eq!(r.get32(data_ptr, 0), T_DATA);
+        assert_eq!(
+            r.get32(data_ptr, 4),
+            readme,
+            "header_key points at the file header"
+        );
+        assert_eq!(r.get32(data_ptr, 8), 1, "seq_num");
+        assert_eq!(
+            r.get32(data_ptr, 12),
+            b"hello amiga\n".len() as u32,
+            "data_size"
+        );
+        assert_eq!(r.get32(data_ptr, 16), 0, "single block: next_data is 0");
+        assert!(r.checksum_ok(data_ptr, 20), "data block checksum");
+        assert_eq!(r.read_file(readme), b"hello amiga\n");
+
+        // A file spanning multiple, non-block-aligned data blocks: exercise
+        // data_size truncation on the last block and the next_data chain.
+        let sub = r.lookup(root, b"Sub").expect("Sub");
+        let data = r.lookup(sub, b"data.bin").expect("data.bin");
+        assert_ne!(
+            r.get32(data, BSIZE - 8),
+            0,
+            "has extension block (>72 OFS data blocks)"
+        );
+        assert_eq!(r.read_file(data), vec![0xA7u8; 100_000]);
+        // Walk the next_data chain directly (rather than through the header's
+        // pointer table) to prove it is intact end to end, including across
+        // the T_LIST extension boundary.
+        let mut block = r.get32(data, 24 + (HT_SIZE - 1) * 4);
+        let mut seen = 0u32;
+        let mut total = 0usize;
+        loop {
+            seen += 1;
+            assert_eq!(
+                r.get32(block, 8),
+                seen,
+                "seq_num increments across extensions"
+            );
+            assert_eq!(
+                r.get32(block, 4),
+                data,
+                "header_key stays the original file header"
+            );
+            total += r.get32(block, 12) as usize;
+            let next = r.get32(block, 16);
+            if next == 0 {
+                break;
+            }
+            block = next;
+        }
+        assert_eq!(total, 100_000);
+        assert!(seen > HT_SIZE as u32, "the file needed a T_LIST extension");
+
+        let empty_dir = r.lookup(sub, b"Deeper").expect("Deeper");
+        let empty = r.lookup(empty_dir, b"empty").expect("empty");
+        assert_eq!(r.get32(empty, 8), 0, "no data blocks");
+        assert!(r.read_file(empty).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ofs_data_block_content_round_trips_on_a_non_aligned_boundary() {
+        // 488*2 + 137 bytes: two full OFS data blocks plus a short last one,
+        // chosen to catch a data_size truncation bug on the final block.
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-dirfs-ofs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let content: Vec<u8> = (0..(488 * 2 + 137)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("odd.bin"), &content).unwrap();
+
+        let image = build_image(&dir, "TestVol", crate::diskimage::FileSystem::OFS).unwrap();
+        let r = Reader::ofs(&image);
+        let root = r.root_key();
+        let file = r.lookup(root, b"odd.bin").expect("odd.bin");
+        assert_eq!(r.read_file(file), content);
+
+        // The last data block's data_size is the short remainder, not 488.
+        let mut block = r.get32(file, 24 + (HT_SIZE - 1) * 4);
+        loop {
+            let next = r.get32(block, 16);
+            if next == 0 {
+                assert_eq!(r.get32(block, 12), 137, "last block keeps its short length");
+                break;
+            }
+            block = next;
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Utility for cross-checking against external FFS tools (e.g.
     /// amitools' xdftool): builds an image from COPPERLINE_DIRFS_SRC and
     /// writes it to COPPERLINE_DIRFS_OUT.
@@ -654,7 +861,12 @@ mod tests {
             eprintln!("skipping: set COPPERLINE_DIRFS_SRC and COPPERLINE_DIRFS_OUT to run it");
             return;
         };
-        let image = build_ffs_image(Path::new(&src), "DirVolume").unwrap();
+        let image = build_image(
+            Path::new(&src),
+            "DirVolume",
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         std::fs::write(&out, image).unwrap();
         eprintln!("wrote {out}");
     }
@@ -662,8 +874,8 @@ mod tests {
     #[test]
     fn bitmap_marks_metadata_used_and_tail_free() {
         let dir = temp_tree();
-        let image = build_ffs_image(&dir, "TestVol").unwrap();
-        let r = Reader { image: &image };
+        let image = build_image(&dir, "TestVol", crate::diskimage::FileSystem::FFS).unwrap();
+        let r = Reader::ffs(&image);
         let root = r.root_key();
         let bm0 = r.get32(root, BSIZE - 196);
         let bit = |block: u32| -> bool {

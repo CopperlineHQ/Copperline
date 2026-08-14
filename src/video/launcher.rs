@@ -1932,10 +1932,23 @@ pub struct MachineSetup {
     // store one or the other, so a save of a disabled drive still writes -128).
     ide_master: Option<PathBuf>,
     ide_master_name: Option<String>,
+    /// The filesystem an in-memory directory-mount volume is built with
+    /// (meaningless, and never emitted, unless the path is a directory);
+    /// paralleling `*_name` above.
+    ide_master_fs: crate::diskimage::FileSystem,
+    /// Whether `ide_master`'s path is a host directory, sampled whenever
+    /// the path is set or loaded rather than on every frame the row is
+    /// drawn: `Path::is_dir()` is a host filesystem call that can stall on
+    /// a slow or disconnected mount, and the FFS/OFS toggle's visibility
+    /// (`launcher_drive_fs_applies`, `ui.rs`) needs it every frame that row
+    /// is on screen.
+    ide_master_is_dir: bool,
     ide_master_bootpri: Option<i8>,
     ide_master_boot_off: bool,
     ide_slave: Option<PathBuf>,
     ide_slave_name: Option<String>,
+    ide_slave_fs: crate::diskimage::FileSystem,
+    ide_slave_is_dir: bool,
     ide_slave_bootpri: Option<i8>,
     ide_slave_boot_off: bool,
     /// Which SCSI host adapter is fitted, or `None` for no board. Shares the
@@ -1945,6 +1958,9 @@ pub struct MachineSetup {
     scsi_rom_odd: Option<PathBuf>,
     scsi_units: [Option<PathBuf>; 7],
     scsi_unit_names: [Option<String>; 7],
+    scsi_unit_fs: [crate::diskimage::FileSystem; 7],
+    /// Paralleling `ide_master_is_dir`, per unit.
+    scsi_unit_is_dir: [bool; 7],
     scsi_unit_bootpri: [Option<i8>; 7],
     scsi_unit_boot_off: [bool; 7],
     /// Which lide personality is fitted, or `None` for no board. Unlike
@@ -1961,6 +1977,9 @@ pub struct MachineSetup {
     /// after it, keeping this array always representable as a config.
     lide_drives: [Option<PathBuf>; 4],
     lide_drive_names: [Option<String>; 4],
+    lide_drive_fs: [crate::diskimage::FileSystem; 4],
+    /// Paralleling `ide_master_is_dir`, per drive.
+    lide_drive_is_dir: [bool; 4],
     lide_drive_bootpri: [Option<i8>; 4],
     lide_drive_boot_off: [bool; 4],
     // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
@@ -2212,10 +2231,24 @@ impl MachineSetup {
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
+            ide_master_fs: cfg
+                .ide
+                .master
+                .as_ref()
+                .map(|d| d.filesystem)
+                .unwrap_or(crate::diskimage::FileSystem::FFS),
+            ide_master_is_dir: cfg.ide.master.as_ref().is_some_and(|d| d.path.is_dir()),
             ide_master_bootpri: boot_priority_of(raw.ide.master.as_ref().and_then(|d| d.bootpri)),
             ide_master_boot_off: boot_is_off(raw.ide.master.as_ref().and_then(|d| d.bootpri)),
             ide_slave: cfg.ide.slave.as_ref().map(|d| d.path.clone()),
             ide_slave_name: cfg.ide.slave.as_ref().and_then(|d| d.volume_name.clone()),
+            ide_slave_fs: cfg
+                .ide
+                .slave
+                .as_ref()
+                .map(|d| d.filesystem)
+                .unwrap_or(crate::diskimage::FileSystem::FFS),
+            ide_slave_is_dir: cfg.ide.slave.as_ref().is_some_and(|d| d.path.is_dir()),
             ide_slave_bootpri: boot_priority_of(raw.ide.slave.as_ref().and_then(|d| d.bootpri)),
             ide_slave_boot_off: boot_is_off(raw.ide.slave.as_ref().and_then(|d| d.bootpri)),
             scsi_controller: cfg.scsi.enabled().then_some(cfg.scsi.controller),
@@ -2226,6 +2259,15 @@ impl MachineSetup {
                 cfg.scsi.units[i]
                     .as_ref()
                     .and_then(|d| d.volume_name.clone())
+            }),
+            scsi_unit_fs: std::array::from_fn(|i| {
+                cfg.scsi.units[i]
+                    .as_ref()
+                    .map(|d| d.filesystem)
+                    .unwrap_or(crate::diskimage::FileSystem::FFS)
+            }),
+            scsi_unit_is_dir: std::array::from_fn(|i| {
+                cfg.scsi.units[i].as_ref().is_some_and(|d| d.path.is_dir())
             }),
             scsi_unit_bootpri: std::array::from_fn(|i| {
                 boot_priority_of(raw_scsi_unit(&raw.scsi, i).and_then(|d| d.bootpri))
@@ -2243,6 +2285,15 @@ impl MachineSetup {
                 cfg.lide.drives[i]
                     .as_ref()
                     .and_then(|d| d.volume_name.clone())
+            }),
+            lide_drive_fs: std::array::from_fn(|i| {
+                cfg.lide.drives[i]
+                    .as_ref()
+                    .map(|d| d.filesystem)
+                    .unwrap_or(crate::diskimage::FileSystem::FFS)
+            }),
+            lide_drive_is_dir: std::array::from_fn(|i| {
+                cfg.lide.drives[i].as_ref().is_some_and(|d| d.path.is_dir())
             }),
             lide_drive_bootpri: std::array::from_fn(|i| {
                 boot_priority_of(raw.lide.drives.get(i).and_then(|d| d.bootpri))
@@ -2595,11 +2646,13 @@ impl MachineSetup {
             self.ide_master.as_deref(),
             self.ide_master_name.as_deref(),
             self.effective_bootpri(F::IdeMasterBoot),
+            self.ide_master_fs,
         );
         raw.ide.slave = drive_raw(
             self.ide_slave.as_deref(),
             self.ide_slave_name.as_deref(),
             self.effective_bootpri(F::IdeSlaveBoot),
+            self.ide_slave_fs,
         );
         // Only emit `[scsi]` when a controller is fitted, so an unset board
         // leaves the section absent rather than writing dangling ROM/units.
@@ -2629,36 +2682,43 @@ impl MachineSetup {
                 self.scsi_units[0].as_deref(),
                 self.scsi_unit_names[0].as_deref(),
                 self.effective_bootpri(F::ScsiUnit0Boot),
+                self.scsi_unit_fs[0],
             );
             raw.scsi.unit1 = drive_raw(
                 self.scsi_units[1].as_deref(),
                 self.scsi_unit_names[1].as_deref(),
                 self.effective_bootpri(F::ScsiUnit1Boot),
+                self.scsi_unit_fs[1],
             );
             raw.scsi.unit2 = drive_raw(
                 self.scsi_units[2].as_deref(),
                 self.scsi_unit_names[2].as_deref(),
                 self.effective_bootpri(F::ScsiUnit2Boot),
+                self.scsi_unit_fs[2],
             );
             raw.scsi.unit3 = drive_raw(
                 self.scsi_units[3].as_deref(),
                 self.scsi_unit_names[3].as_deref(),
                 self.effective_bootpri(F::ScsiUnit3Boot),
+                self.scsi_unit_fs[3],
             );
             raw.scsi.unit4 = drive_raw(
                 self.scsi_units[4].as_deref(),
                 self.scsi_unit_names[4].as_deref(),
                 self.effective_bootpri(F::ScsiUnit4Boot),
+                self.scsi_unit_fs[4],
             );
             raw.scsi.unit5 = drive_raw(
                 self.scsi_units[5].as_deref(),
                 self.scsi_unit_names[5].as_deref(),
                 self.effective_bootpri(F::ScsiUnit5Boot),
+                self.scsi_unit_fs[5],
             );
             raw.scsi.unit6 = drive_raw(
                 self.scsi_units[6].as_deref(),
                 self.scsi_unit_names[6].as_deref(),
                 self.effective_bootpri(F::ScsiUnit6Boot),
+                self.scsi_unit_fs[6],
             );
         }
         // Only emit `[lide]` when a board is fitted, matching `[scsi]` above.
@@ -2686,6 +2746,7 @@ impl MachineSetup {
                         self.lide_drives[i].as_deref(),
                         self.lide_drive_names[i].as_deref(),
                         self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
+                        self.lide_drive_fs[i],
                     )
                 })
                 .collect();
@@ -3659,6 +3720,111 @@ impl MachineSetup {
         name.as_deref()
     }
 
+    /// The in-memory volume's filesystem for a directory-mount drive field
+    /// (FFS by default). Meaningless -- but still tracked, so a toggle made
+    /// before Browse is not lost -- for a field whose path is not currently
+    /// a directory; `to_raw` only emits it once the path actually is one.
+    pub fn drive_filesystem(&self, field: LauncherField) -> crate::diskimage::FileSystem {
+        match field {
+            F::IdeMaster => self.ide_master_fs,
+            F::IdeSlave => self.ide_slave_fs,
+            F::ScsiUnit0 => self.scsi_unit_fs[0],
+            F::ScsiUnit1 => self.scsi_unit_fs[1],
+            F::ScsiUnit2 => self.scsi_unit_fs[2],
+            F::ScsiUnit3 => self.scsi_unit_fs[3],
+            F::ScsiUnit4 => self.scsi_unit_fs[4],
+            F::ScsiUnit5 => self.scsi_unit_fs[5],
+            F::ScsiUnit6 => self.scsi_unit_fs[6],
+            F::LideDrive0 => self.lide_drive_fs[0],
+            F::LideDrive1 => self.lide_drive_fs[1],
+            F::LideDrive2 => self.lide_drive_fs[2],
+            F::LideDrive3 => self.lide_drive_fs[3],
+            _ => crate::diskimage::FileSystem::FFS,
+        }
+    }
+
+    /// Whether a disk-backed drive field's current path is a host directory
+    /// (as opposed to an image file) -- sampled when the path was last set
+    /// or loaded, not by statting it here: see `ide_master_is_dir`'s doc
+    /// comment. `false` for any field that is not one of the drive fields
+    /// this applies to, matching `drive_filesystem`'s fallback above.
+    pub fn drive_is_directory(&self, field: LauncherField) -> bool {
+        match field {
+            F::IdeMaster => self.ide_master_is_dir,
+            F::IdeSlave => self.ide_slave_is_dir,
+            F::ScsiUnit0 => self.scsi_unit_is_dir[0],
+            F::ScsiUnit1 => self.scsi_unit_is_dir[1],
+            F::ScsiUnit2 => self.scsi_unit_is_dir[2],
+            F::ScsiUnit3 => self.scsi_unit_is_dir[3],
+            F::ScsiUnit4 => self.scsi_unit_is_dir[4],
+            F::ScsiUnit5 => self.scsi_unit_is_dir[5],
+            F::ScsiUnit6 => self.scsi_unit_is_dir[6],
+            F::LideDrive0 => self.lide_drive_is_dir[0],
+            F::LideDrive1 => self.lide_drive_is_dir[1],
+            F::LideDrive2 => self.lide_drive_is_dir[2],
+            F::LideDrive3 => self.lide_drive_is_dir[3],
+            _ => false,
+        }
+    }
+
+    /// Refresh a drive field's cached directory flag from its current path
+    /// (the one host-filesystem stat the field's `_is_dir` companion is
+    /// allowed: on the path actually changing, not on every draw). A no-op
+    /// for a field this doesn't apply to.
+    fn refresh_drive_is_dir(&mut self, field: LauncherField) {
+        let is_dir = self.path(field).is_some_and(|p| p.is_dir());
+        let slot = match field {
+            F::IdeMaster => &mut self.ide_master_is_dir,
+            F::IdeSlave => &mut self.ide_slave_is_dir,
+            F::ScsiUnit0 => &mut self.scsi_unit_is_dir[0],
+            F::ScsiUnit1 => &mut self.scsi_unit_is_dir[1],
+            F::ScsiUnit2 => &mut self.scsi_unit_is_dir[2],
+            F::ScsiUnit3 => &mut self.scsi_unit_is_dir[3],
+            F::ScsiUnit4 => &mut self.scsi_unit_is_dir[4],
+            F::ScsiUnit5 => &mut self.scsi_unit_is_dir[5],
+            F::ScsiUnit6 => &mut self.scsi_unit_is_dir[6],
+            F::LideDrive0 => &mut self.lide_drive_is_dir[0],
+            F::LideDrive1 => &mut self.lide_drive_is_dir[1],
+            F::LideDrive2 => &mut self.lide_drive_is_dir[2],
+            F::LideDrive3 => &mut self.lide_drive_is_dir[3],
+            _ => return,
+        };
+        *slot = is_dir;
+    }
+
+    /// Set a drive field's directory-mount filesystem.
+    pub fn set_drive_filesystem(&mut self, field: LauncherField, fs: crate::diskimage::FileSystem) {
+        let slot = match field {
+            F::IdeMaster => &mut self.ide_master_fs,
+            F::IdeSlave => &mut self.ide_slave_fs,
+            F::ScsiUnit0 => &mut self.scsi_unit_fs[0],
+            F::ScsiUnit1 => &mut self.scsi_unit_fs[1],
+            F::ScsiUnit2 => &mut self.scsi_unit_fs[2],
+            F::ScsiUnit3 => &mut self.scsi_unit_fs[3],
+            F::ScsiUnit4 => &mut self.scsi_unit_fs[4],
+            F::ScsiUnit5 => &mut self.scsi_unit_fs[5],
+            F::ScsiUnit6 => &mut self.scsi_unit_fs[6],
+            F::LideDrive0 => &mut self.lide_drive_fs[0],
+            F::LideDrive1 => &mut self.lide_drive_fs[1],
+            F::LideDrive2 => &mut self.lide_drive_fs[2],
+            F::LideDrive3 => &mut self.lide_drive_fs[3],
+            _ => return,
+        };
+        *slot = fs;
+    }
+
+    /// Flip a drive field's directory-mount filesystem between FFS and OFS
+    /// -- the Storage tab's filesystem button is a two-way toggle, not a
+    /// stepper, so it needs no forward/backward direction.
+    pub fn cycle_drive_filesystem(&mut self, field: LauncherField) {
+        let next = if self.drive_filesystem(field).ffs {
+            crate::diskimage::FileSystem::OFS
+        } else {
+            crate::diskimage::FileSystem::FFS
+        };
+        self.set_drive_filesystem(field, next);
+    }
+
     /// Set (or, with a blank string, clear) a drive field's volume-name
     /// override. A name without a configured image is meaningless, so it is
     /// dropped when the field has no path.
@@ -4570,6 +4736,7 @@ impl MachineSetup {
                 }
             }
         }
+        self.refresh_drive_is_dir(field);
         if seed_cascade {
             if let Some(boot) = drive_boot_field(field) {
                 if self.drive_bootpri(boot).is_none() && !self.drive_boot_off(boot) {
@@ -4640,11 +4807,13 @@ impl MachineSetup {
                 }
             }
         }
-        // A drive's volume name and boot priority are meaningless once its
-        // image is gone.
+        // A drive's volume name, filesystem, and boot priority are
+        // meaningless once its image is gone.
         if Self::is_drive_field(field) {
             self.set_drive_name(field, String::new());
+            self.set_drive_filesystem(field, crate::diskimage::FileSystem::FFS);
             self.clear_drive_bootpri(field);
+            self.refresh_drive_is_dir(field);
         }
         // `[lide] drives` is a positional list in the config file -- a hole
         // cannot be represented -- so clearing a slot also clears every slot
@@ -7835,7 +8004,12 @@ fn path_string(path: &Path) -> String {
 /// Build a `[ide]`/`[scsi]` drive entry from an editable path + optional
 /// volume-name override. A blank name emits the bare path string so saved
 /// configs stay minimal.
-fn drive_raw(path: Option<&Path>, name: Option<&str>, bootpri: Option<i8>) -> Option<RawDrive> {
+fn drive_raw(
+    path: Option<&Path>,
+    name: Option<&str>,
+    bootpri: Option<i8>,
+    filesystem: crate::diskimage::FileSystem,
+) -> Option<RawDrive> {
     path.map(|p| RawDrive {
         path: path_string(p),
         name: name
@@ -7843,6 +8017,10 @@ fn drive_raw(path: Option<&Path>, name: Option<&str>, bootpri: Option<i8>) -> Op
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         bootpri,
+        // OFS is only meaningful (and only valid, config-side) on a
+        // directory mount; FFS is the default, so it too stays unwritten,
+        // keeping a saved config minimal exactly like `name` above.
+        filesystem: (p.is_dir() && !filesystem.ffs).then(|| "ofs".to_string()),
     })
 }
 
@@ -11734,6 +11912,47 @@ mod tests {
         assert_eq!(s.disabled_reason(F::IdeSlaveBoot), None);
     }
 
+    /// The FFS/OFS toggle applies only to a directory mount on a
+    /// disk-backed drive field (IDE/SCSI/lide), never to a `Filesys*Dir`
+    /// row -- a live HOSTFS mount is a directory too, but has no filesystem
+    /// of its own to choose. `drive_is_directory` is also the cached flag
+    /// `launcher_drive_fs_applies` (`ui.rs`) reads instead of statting the
+    /// path on every frame; this exercises both that it is scoped correctly
+    /// and that it tracks the real path shape as it changes.
+    #[test]
+    fn drive_filesystem_toggle_applies_only_to_disk_backed_fields_and_tracks_path_shape() {
+        use LauncherField as F;
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-launcher-isdir-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut s = MachineSetup::default();
+        // A live HOSTFS mount points at a real directory too, but the
+        // toggle must never claim to apply there.
+        s.set_path(F::Filesys0Dir, dir.clone());
+        assert!(!s.drive_is_directory(F::Filesys0Dir));
+
+        // A disk-backed field pointed at that same directory: applies.
+        s.set_path(F::IdeMaster, dir.clone());
+        assert!(s.drive_is_directory(F::IdeMaster));
+
+        // Repointed at an ordinary file: does not apply.
+        let file = dir.join("plain.hdf");
+        std::fs::write(&file, b"").unwrap();
+        s.set_path(F::IdeMaster, file);
+        assert!(!s.drive_is_directory(F::IdeMaster));
+
+        // Clearing drops the flag along with the path.
+        s.set_path(F::IdeMaster, dir.clone());
+        assert!(s.drive_is_directory(F::IdeMaster));
+        s.clear_path(F::IdeMaster);
+        assert!(!s.drive_is_directory(F::IdeMaster));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn lide_clearing_a_drive_cascades_to_later_slots() {
         use LauncherField as F;
@@ -12663,6 +12882,82 @@ mod tests {
         assert_eq!(s.drive_name(LauncherField::IdeMaster), Some("Games"));
         s.clear_path(LauncherField::IdeMaster);
         assert_eq!(s.drive_name(LauncherField::IdeMaster), None);
+    }
+
+    #[test]
+    fn drive_filesystem_round_trips_through_raw_for_a_directory_mount() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-launcher-fs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::A1200)); // Gayle, so IDE applies.
+        s.set_path(LauncherField::IdeMaster, dir.clone());
+        // FFS by default, and an FFS default is not written out at all.
+        assert_eq!(
+            s.drive_filesystem(LauncherField::IdeMaster),
+            crate::diskimage::FileSystem::FFS
+        );
+        let raw = s.to_raw();
+        assert_eq!(raw.ide.master.as_ref().unwrap().filesystem, None);
+
+        s.cycle_drive_filesystem(LauncherField::IdeMaster);
+        assert_eq!(
+            s.drive_filesystem(LauncherField::IdeMaster),
+            crate::diskimage::FileSystem::OFS
+        );
+        let raw = s.to_raw();
+        assert_eq!(
+            raw.ide.master.as_ref().unwrap().filesystem.as_deref(),
+            Some("ofs")
+        );
+
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(
+            back.drive_filesystem(LauncherField::IdeMaster),
+            crate::diskimage::FileSystem::OFS
+        );
+
+        // Toggling back to FFS and clearing the path both drop it again.
+        s.cycle_drive_filesystem(LauncherField::IdeMaster);
+        assert_eq!(
+            s.to_raw().ide.master.as_ref().unwrap().filesystem,
+            None,
+            "FFS is the default and is not written out"
+        );
+        s.cycle_drive_filesystem(LauncherField::IdeMaster);
+        s.clear_path(LauncherField::IdeMaster);
+        assert_eq!(
+            s.drive_filesystem(LauncherField::IdeMaster),
+            crate::diskimage::FileSystem::FFS,
+            "clearing the image resets the filesystem choice, like the volume name"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drive_filesystem_is_not_emitted_for_a_non_directory_path() {
+        // A raw HDF/image path already carries its own filesystem; even if
+        // the field is toggled (e.g. leftover session state from an earlier
+        // directory at the same slot), `to_raw` must never write a
+        // `filesystem` key config.rs would then reject at parse time.
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::A1200));
+        s.set_path(LauncherField::IdeMaster, PathBuf::from("/host/games.hdf"));
+        s.cycle_drive_filesystem(LauncherField::IdeMaster);
+        assert_eq!(
+            s.drive_filesystem(LauncherField::IdeMaster),
+            crate::diskimage::FileSystem::OFS
+        );
+        let raw = s.to_raw();
+        assert_eq!(raw.ide.master.as_ref().unwrap().filesystem, None);
     }
 
     #[test]

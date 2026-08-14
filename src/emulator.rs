@@ -2255,6 +2255,7 @@ fn open_scsi_target(
             unit,
             drive.volume_name.as_deref(),
             drive.boot_pri,
+            drive.filesystem,
         )?;
         info!("scsi: unit {unit} {}", drive.path.display());
         Ok(disk.into())
@@ -2268,12 +2269,13 @@ fn open_ide_target(
     unit: usize,
     volume_name: Option<&str>,
     boot_pri: i8,
+    filesystem: crate::diskimage::FileSystem,
 ) -> Result<crate::ata::AtaDevice> {
     if crate::config::is_cd_image_path(path) {
         let cd = crate::ata::AtapiDrive::open(path)?;
         Ok(cd.into())
     } else {
-        let disk = crate::ata::IdeDrive::open(path, unit, volume_name, boot_pri)?;
+        let disk = crate::ata::IdeDrive::open(path, unit, volume_name, boot_pri, filesystem)?;
         Ok(disk.into())
     }
 }
@@ -2497,6 +2499,7 @@ pub fn build_machine(
                 idx,
                 drive.volume_name.as_deref(),
                 drive.boot_pri,
+                drive.filesystem,
             )?;
             board.attach_drive(ch, unit, target);
         }
@@ -2749,14 +2752,26 @@ pub fn build_machine(
         if let Some(drive) = &cfg.ide.master {
             gayle.attach_drive(
                 0,
-                open_ide_target(&drive.path, 0, drive.volume_name.as_deref(), drive.boot_pri)?,
+                open_ide_target(
+                    &drive.path,
+                    0,
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                    drive.filesystem,
+                )?,
             );
             info!("ide: master {}", drive.path.display());
         }
         if let Some(drive) = &cfg.ide.slave {
             gayle.attach_drive(
                 1,
-                open_ide_target(&drive.path, 1, drive.volume_name.as_deref(), drive.boot_pri)?,
+                open_ide_target(
+                    &drive.path,
+                    1,
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                    drive.filesystem,
+                )?,
             );
             info!("ide: slave {}", drive.path.display());
         }
@@ -2777,6 +2792,7 @@ pub fn build_machine(
                     slot,
                     drive.volume_name.as_deref(),
                     drive.boot_pri,
+                    drive.filesystem,
                 )?,
             );
             let which = if slot == 0 { "master" } else { "slave" };

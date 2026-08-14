@@ -4,11 +4,11 @@
 //! IDE drives and the A2091 SCSI targets.
 //!
 //! A unit opens from a raw HDF image file, from a gzip-compressed one (the
-//! `.hdz` convention), or from a host directory (built into an in-memory FFS
-//! volume at open time, see `dirfs.rs`). Bare partition hardfiles (a
-//! filesystem boot block at sector 0, no RDSK) get a synthesized RDB
-//! cylinder prepended so the ROM boot driver can mount them without
-//! pre-conversion.
+//! `.hdz` convention), or from a host directory (built into an in-memory
+//! FFS or OFS volume at open time, caller's choice; see `dirfs.rs`). Bare
+//! partition hardfiles (a filesystem boot block at sector 0, no RDSK) get a
+//! synthesized RDB cylinder prepended so the ROM boot driver can mount them
+//! without pre-conversion.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -503,18 +503,21 @@ impl HardDriveImage {
     /// log messages. A synthesized RDB names itself (see
     /// [`default_rdb_identity`]); nothing a caller passes reaches it.
     /// The path may be a raw HDF image file, a gzip-compressed one (`.hdz`),
-    /// or a host directory, which is built into an in-memory FFS volume at
-    /// open time. `volume_override` names that FFS volume; when `None` the
-    /// directory name is used. It has no effect on an HDF, which carries its
-    /// own label inside the image. `boot_pri` is the `de_BootPri` written
-    /// into a synthesized RDB; it too is ignored by an image that carries its
-    /// own RDB.
+    /// or a host directory, which is built into an in-memory FFS or OFS
+    /// volume at open time (`filesystem` picks which; irrelevant to every
+    /// other path form here, since an HDF/gzip image already carries its own
+    /// filesystem inside it). `volume_override` names that volume; when
+    /// `None` the directory name is used. It has no effect on an HDF, which
+    /// carries its own label inside the image. `boot_pri` is the
+    /// `de_BootPri` written into a synthesized RDB; it too is ignored by an
+    /// image that carries its own RDB.
     pub fn open(
         path: &Path,
         device_name: &str,
         bus_name: &'static str,
         volume_override: Option<&str>,
         boot_pri: i8,
+        filesystem: crate::diskimage::FileSystem,
     ) -> anyhow::Result<Self> {
         let mut backing = if path.is_dir() {
             let volume = volume_override.map(str::to_string).unwrap_or_else(|| {
@@ -522,7 +525,7 @@ impl HardDriveImage {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });
-            let image = crate::dirfs::build_ffs_image(path, &volume)?;
+            let image = crate::dirfs::build_image(path, &volume, filesystem)?;
             log::warn!(
                 "{bus_name}: {} mounted as an in-memory volume \"{volume}\" built from the \
                  directory; guest writes to it are NOT written back to the host and are lost \
@@ -817,7 +820,15 @@ mod tests {
         bytes[tail..tail + 4].copy_from_slice(b"TAIL");
         let (first, second) = bytes.split_at(bytes.len() / 2);
         let path = temp_image("multi.hdz", &gzip_members(&[first, second]));
-        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
 
         assert_eq!(
             drive.total_sectors(),
@@ -837,7 +848,15 @@ mod tests {
     fn gzip_compressed_hardfile_serves_the_unpacked_sectors() {
         let bytes = bare_partition_bytes(2);
         let path = temp_image("packed.hdz", &gzip(&bytes));
-        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
 
         // The synthesized RDB cylinder still goes in front: the sniff runs on
         // the unpacked image, not on the gzip stream.
@@ -865,7 +884,15 @@ mod tests {
         let bytes = bare_partition_bytes(1);
         let packed = gzip(&bytes);
         let path = temp_image("readonly.hdz", &packed);
-        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
 
         // Writes land in the unpacked copy for the session...
         let written = vec![0x5A; SECTOR_SIZE];
@@ -886,7 +913,15 @@ mod tests {
         // The same bytes under the .hdf name every other emulator expects.
         let bytes = bare_partition_bytes(1);
         let path = temp_image("misnamed.hdf", &gzip(&bytes));
-        let drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         assert_eq!(
             drive.total_sectors(),
             u64::from(CYL_SECTORS) + (bytes.len() / SECTOR_SIZE) as u64
@@ -900,7 +935,15 @@ mod tests {
         let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
         bytes[..4].copy_from_slice(b"RDSK");
         let path = temp_image("rdb.hdz", &gzip(&bytes));
-        let mut drive = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
 
         assert_eq!(drive.total_sectors(), 64);
         let mut sector = vec![0u8; SECTOR_SIZE];
@@ -914,7 +957,15 @@ mod tests {
     fn gzip_compressed_hardfile_survives_a_save_state_round_trip() {
         let bytes = bare_partition_bytes(1);
         let path = temp_image("state.hdz", &gzip(&bytes));
-        let mut original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut original = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         // A session-only write has nowhere else to live, so the state has to
         // carry the unpacked image rather than reopen the .hdz.
         let written = vec![0xA5; SECTOR_SIZE];
@@ -937,7 +988,14 @@ mod tests {
         // Not a multiple of the sector size once unpacked: the size check
         // runs on the unpacked bytes, so the message names those.
         let path = temp_image("junk.hdz", &gzip(&[0u8; SECTOR_SIZE + 1]));
-        let Err(err) = HardDriveImage::open(&path, "DH0", "ide", None, 0) else {
+        let Err(err) = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        ) else {
             panic!("a gzip stream of junk is not a hardfile");
         };
         assert!(
@@ -952,7 +1010,14 @@ mod tests {
     fn truncated_gzip_hardfile_reports_the_decompression_failure() {
         let packed = gzip(&bare_partition_bytes(1));
         let path = temp_image("truncated.hdz", &packed[..packed.len() / 2]);
-        let Err(err) = HardDriveImage::open(&path, "DH0", "ide", None, 0) else {
+        let Err(err) = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        ) else {
             panic!("a truncated gzip stream cannot be unpacked");
         };
         assert!(err.to_string().contains("decompressing"), "{err}");
@@ -965,7 +1030,15 @@ mod tests {
         let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
         bytes[5 * SECTOR_SIZE..5 * SECTOR_SIZE + 4].copy_from_slice(b"MARK");
         let path = temp_image("serde.hdf", &bytes);
-        let mut original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let mut original = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
 
         let encoded = bincode::serialize(&original).unwrap();
         let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
@@ -1014,8 +1087,9 @@ mod tests {
         assert_eq!(image.total_sectors(), 1234);
     }
 
-    /// Read every sector of an image and return the FFS volume label found in
-    /// its root block (block type 2 / secondary type 1). The directory mount
+    /// Read every sector of an image and return the volume label found in
+    /// its root block (block type 2 / secondary type 1; the same for FFS
+    /// and OFS). The directory mount
     /// prepends a synthesized RDB, so the root block is not at a fixed LBA;
     /// scan for it instead.
     fn volume_label(disk: &mut HardDriveImage) -> String {
@@ -1052,7 +1126,15 @@ mod tests {
     #[test]
     fn directory_mount_uses_the_directory_name_as_the_volume_label() {
         let (parent, mount) = temp_mount_dir("Games");
-        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", None, 0).unwrap();
+        let mut disk = HardDriveImage::open(
+            &mount,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         assert_eq!(volume_label(&mut disk), "Games");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -1060,7 +1142,15 @@ mod tests {
     #[test]
     fn directory_mount_volume_override_sets_the_label() {
         let (parent, mount) = temp_mount_dir("Games");
-        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", Some("Workbench"), 0).unwrap();
+        let mut disk = HardDriveImage::open(
+            &mount,
+            "DH0",
+            "ide",
+            Some("Workbench"),
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         assert_eq!(volume_label(&mut disk), "Workbench");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -1068,7 +1158,15 @@ mod tests {
     #[test]
     fn serde_errors_when_backing_file_is_missing() {
         let path = temp_image("gone.hdf", &vec![0u8; 8 * SECTOR_SIZE]);
-        let original = HardDriveImage::open(&path, "DH0", "ide", None, 0).unwrap();
+        let original = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         let encoded = bincode::serialize(&original).unwrap();
         let _ = std::fs::remove_file(&path);
         let Err(err) = bincode::deserialize::<HardDriveImage>(&encoded) else {
@@ -1113,7 +1211,15 @@ mod tests {
     fn synthesized_partition_carries_the_configured_boot_priority() {
         let path = bare_partition_image("bootpri.hdf");
         for pri in [0i8, 6, 20, -5, 127] {
-            let mut disk = HardDriveImage::open(&path, "DH0", "ide", None, pri).unwrap();
+            let mut disk = HardDriveImage::open(
+                &path,
+                "DH0",
+                "ide",
+                None,
+                pri,
+                crate::diskimage::FileSystem::FFS,
+            )
+            .unwrap();
             let part = part_block(&mut disk);
             assert_eq!(
                 be32(&part, DE_BOOT_PRI_OFF) as i32,
@@ -1128,9 +1234,15 @@ mod tests {
     #[test]
     fn boot_pri_never_mounts_the_partition_without_making_it_bootable() {
         let path = bare_partition_image("neverboot.hdf");
-        let mut disk =
-            HardDriveImage::open(&path, "DH1", "scsi", None, crate::config::BOOT_PRI_NEVER)
-                .unwrap();
+        let mut disk = HardDriveImage::open(
+            &path,
+            "DH1",
+            "scsi",
+            None,
+            crate::config::BOOT_PRI_NEVER,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
         let part = part_block(&mut disk);
         assert_eq!(
             be32(&part, DE_BOOT_PRI_OFF) as i32,
@@ -1151,7 +1263,15 @@ mod tests {
     fn part_block_checksum_stays_valid_for_every_boot_priority() {
         let path = bare_partition_image("checksum.hdf");
         for pri in [i8::MIN, -1, 0, 1, i8::MAX] {
-            let mut disk = HardDriveImage::open(&path, "DH0", "ide", None, pri).unwrap();
+            let mut disk = HardDriveImage::open(
+                &path,
+                "DH0",
+                "ide",
+                None,
+                pri,
+                crate::diskimage::FileSystem::FFS,
+            )
+            .unwrap();
             let part = part_block(&mut disk);
             let sum = (0..64).fold(0u32, |acc, i| acc.wrapping_add(be32(&part, i * 4)));
             assert_eq!(sum, 0, "RDB checksum rule broken for bootpri {pri}");

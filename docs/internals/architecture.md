@@ -50,7 +50,7 @@ src/
   scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets
   sdmac.rs          # A3000 Super DMAC fronting the WD33C93
   harddrive.rs      # shared hard-drive image backend (IDE + SCSI)
-  dirfs.rs          # host directory -> in-memory FFS partition image
+  dirfs.rs          # host directory -> in-memory FFS/OFS partition image
   filesys.rs        # host directories mounted live as AmigaDOS volumes
   a2065.rs          # A2065 Zorro II Ethernet board (Am7990 LANCE)
   net/              # loopback, userspace NAT, and host-adapter bridge backends

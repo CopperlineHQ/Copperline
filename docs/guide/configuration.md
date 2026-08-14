@@ -1396,18 +1396,18 @@ file, and changes are lost at exit. An image that unpacks to more than
 plain hardfile and attach it instead.
 
 A path may also name a **host directory**: its tree is built into an
-in-memory FFS volume at startup (volume name = directory name, files and
+in-memory volume at startup (volume name = directory name, files and
 subdirectories included; entries whose names cannot exist on an Amiga
 volume are skipped with a warning). The guest sees an ordinary bootable
-FFS disk and may write to it, but the volume lives only in memory --
-nothing is written back to the host directory, and changes are lost at
-exit. Note that the stock A1200/A600 Kickstart `scsi.device` only probes
-the IDE master; a slave drive needs a guest OS or driver that supports
-two units (e.g. Kickstart 3.1.4).
+disk and may write to it, but the volume lives only in memory -- nothing
+is written back to the host directory, and changes are lost at exit. Note
+that the stock A1200/A600 Kickstart `scsi.device` only probes the IDE
+master; a slave drive needs a guest OS or driver that supports two units
+(e.g. Kickstart 3.1.4).
 
-To override the volume name (instead of inheriting the directory name) or
-the boot priority, give the drive as a table with `path` plus `name`
-and/or `bootpri`:
+To override the volume name (instead of inheriting the directory name),
+the boot priority, or the filesystem, give the drive as a table with
+`path` plus `name`, `bootpri`, and/or `filesystem`:
 
 ```toml
 [ide]
@@ -1416,9 +1416,26 @@ slave = { path = "wb.hdf", bootpri = 6 }
 # slave = "scratch.hdf"        # the bare-string form still works
 ```
 
-The name sets the FFS volume label of a directory mount; AmigaDOS volume
+The name sets the volume label of a directory mount; AmigaDOS volume
 names hold up to 30 characters and cannot contain `:` or `/`. It has no
 effect on a raw HDF, which carries its own label inside the image.
+
+`filesystem` (`"ffs"`, the default, or `"ofs"`) picks the filesystem a
+directory mount's in-memory volume is built with; it only applies to a
+directory (an HDF/gzip image already carries its own filesystem inside
+it, and Copperline refuses the key on one at config-parse time). FFS is
+the default because it is the more modern, more capacious choice, but
+Kickstart 1.3's ROM has no FFS handler built in -- real 1.3 hardware needs
+`L:FastFileSystem` loaded from disk, or an RDB `FileSystemHeader` chain,
+neither of which Copperline can bundle (it is Commodore-copyrighted). OFS
+(`DOS\x00`) is built into every Kickstart ROM from 1.2 onward, so a
+directory mount meant to work under 1.3 with no guest-side setup should
+set `filesystem = "ofs"`:
+
+```toml
+[ide]
+master = { path = "/host/Games", filesystem = "ofs" }
+```
 
 `bootpri` (-128..127, default 0) is the `de_BootPri` written into the
 **synthesized** RDB's partition, which is what the ROM's strap ranks boot
@@ -1495,10 +1512,11 @@ A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`
 partition, named after the SCSI ID), gzip-compressed hardfiles (`.hdz`),
-and host directories built into in-memory FFS volumes -- including the
-`{ path = "...", name = "...", bootpri = N }` table form that overrides a
-directory mount's volume name and the synthesized partition's boot
-priority. The HDD activity LED covers SCSI traffic too.
+and host directories built into in-memory FFS/OFS volumes -- including the
+`{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table
+form that overrides a directory mount's volume name, filesystem, and the
+synthesized partition's boot priority. The HDD activity LED covers SCSI
+traffic too.
 
 A `unitN` path ending in `.cue`, `.iso`, or `.chd` attaches a **SCSI
 CD-ROM drive** at that ID instead of a hard disk: a read-only removable
@@ -1551,7 +1569,8 @@ one channel, no ROM banking. None of the three wire an interrupt line --
 
 `drives` takes the same bare-path/table form as `[ide]`/`[scsi]` (RDB images,
 bare partition hardfiles, `.hdz`, host directories, and the `{ path = "...",
-name = "...", bootpri = N }` table), in (channel, master/slave) order:
+name = "...", bootpri = N, filesystem = "..." }` table), in (channel,
+master/slave) order:
 entries 0 and 1 are channel 0's master and slave, entries 2 and 3 are channel
 1's (`"ripple"` only -- `"ride"` and `"atbus2008"` have one channel).
 
@@ -1625,8 +1644,8 @@ Each `[[filesys]]` entry exports a host directory to the guest as an
 AmigaDOS volume on its own `HOSTFS<n>:` device, served live by the
 emulator: no disk image is built, and guest reads always see the current
 host contents. This differs from giving `[ide]`/`[scsi]` a directory
-path, which snapshots the tree into an in-memory FFS volume at startup.
-Up to 8 mounts.
+path, which snapshots the tree into an in-memory FFS or OFS volume at
+startup (see `filesystem` above). Up to 8 mounts.
 
 The volumes are read-write by default: the guest creates, writes, renames,
 and deletes the host's files directly, and changes land in the directory

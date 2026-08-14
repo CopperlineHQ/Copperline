@@ -1496,8 +1496,15 @@ mod tests {
 
         // The strongest check available: the emulator's own hardfile
         // support has to recognise it, since that is what will mount it.
-        let opened = crate::harddrive::HardDriveImage::open(s.path(), "DH0", "ide", None, 0)
-            .expect("our own parser opens it");
+        let opened = crate::harddrive::HardDriveImage::open(
+            s.path(),
+            "DH0",
+            "ide",
+            None,
+            0,
+            FileSystem::FFS, // not a directory mount; this image already carries its own dostype
+        )
+        .expect("our own parser opens it");
         assert!(
             opened.has_own_rdb(),
             "our parser did not find the partition table we wrote, and \
