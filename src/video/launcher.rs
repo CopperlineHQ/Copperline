@@ -3213,7 +3213,11 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => {
+            | F::ScsiUnit6Boot
+            | F::LideDrive0Boot
+            | F::LideDrive1Boot
+            | F::LideDrive2Boot
+            | F::LideDrive3Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.drive_holds(drive) {
                     None => Some("No drive"),
@@ -3761,15 +3765,21 @@ impl MachineSetup {
                     "Read-write".to_string()
                 }
             }
-            // SCSI units: flag CD images, which attach a CD-ROM drive
-            // rather than a hard disk at that ID.
+            // SCSI, IDE, and lide drive slots: flag CD images, which attach
+            // a CD-ROM drive (SCSI or ATAPI) rather than a hard disk there.
             F::ScsiUnit0
             | F::ScsiUnit1
             | F::ScsiUnit2
             | F::ScsiUnit3
             | F::ScsiUnit4
             | F::ScsiUnit5
-            | F::ScsiUnit6 => {
+            | F::ScsiUnit6
+            | F::IdeMaster
+            | F::IdeSlave
+            | F::LideDrive0
+            | F::LideDrive1
+            | F::LideDrive2
+            | F::LideDrive3 => {
                 let label = self.path_label(field, "(none)");
                 match self.path(field) {
                     Some(p) if crate::config::is_cd_image_path(p) => format!("{label} (CD-ROM)"),
@@ -11315,6 +11325,25 @@ mod tests {
         assert_eq!(back.path(F::LideDrive0), Some(Path::new("ch0-master.hdf")));
         assert_eq!(back.path(F::LideDrive1), Some(Path::new("ch0-slave.hdf")));
         assert_eq!(back.value_label(F::LideDrive0Boot), "5");
+    }
+
+    #[test]
+    fn ide_and_lide_cd_images_label_and_grey_boot_priority_like_scsi() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::IdeMaster, PathBuf::from("game.iso"));
+        s.set_path(F::LideDrive0, PathBuf::from("game.cue"));
+
+        assert_eq!(s.value_label(F::IdeMaster), "game.iso (CD-ROM)");
+        assert_eq!(s.value_label(F::LideDrive0), "game.cue (CD-ROM)");
+        assert_eq!(s.disabled_reason(F::IdeMasterBoot), Some("CD-ROM"));
+        assert_eq!(s.disabled_reason(F::LideDrive0Boot), Some("CD-ROM"));
+
+        // A hard disk at the same fields gets no such treatment.
+        s.set_path(F::IdeSlave, PathBuf::from("work.hdf"));
+        assert_eq!(s.value_label(F::IdeSlave), "work.hdf");
+        assert_eq!(s.disabled_reason(F::IdeSlaveBoot), None);
     }
 
     #[test]
