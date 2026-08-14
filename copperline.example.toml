@@ -13,6 +13,27 @@ rom = "kickstart.rom"
 # identify = false           # drop it from the Zorro chain (default: present)
 
 
+# [paths] -- where Copperline writes what it produces, and where its file
+# dialogs open when the field they were launched from is empty. Every key is
+# optional; the defaults are folders of these names under the host-data
+# directory (~/.config/copperline, %APPDATA%\copperline, or the executable's
+# folder in a portable install). Relative paths hang off `base`, absolute
+# paths are used as given. Entries naming folders this machine cannot reach
+# are ignored with a log warning and the default is used instead.
+# [paths]
+# base = "/somewhere/else"    # move the whole tree in one line
+# states = "states"           # save states, incl. the quick-save slots
+# screenshots = "screenshots"
+# recordings = "recordings"   # video captures and recorded input scripts
+# nvram = "nvram"             # battery-backed RAMs, incl. CD32 game saves
+# traces = "traces"           # debugger traces and waveform captures
+# configs = "configs"         # configurations saved from the launcher
+# roms = "roms"               # dialog folders: only used if the folder exists
+# mt32_roms = "roms/mt32"
+# floppies = "floppies"
+# harddrives = "harddrives"
+# cds = "cds"
+
 [emulation]
 
 # The CPU, chipset, CIA, audio, floppy, and chip-bus timing all advance on

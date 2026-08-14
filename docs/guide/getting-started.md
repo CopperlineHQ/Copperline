@@ -125,7 +125,9 @@ With no arguments and no `./copperline.toml` in the current directory,
 Copperline opens the **configuration screen** -- a launcher that lets you pick
 a machine, configure everything about it, load and save `.toml` configs, and
 press **Run** to boot. See [](ui#machine-configuration-screen) for a full tour.
-The screen starts from the built-in defaults: the A500 Rev 6A -- the most
+The screen starts from the configuration saved with its **Save default**
+button, if you have saved one; otherwise from the built-in defaults: the
+A500 Rev 6A -- the most
 common and most-targeted Amiga: a 68000 at ~7.09 MHz, the ECS "Fatter" 8372A
 Agnus (1 MiB chip reach plus the software PAL/NTSC switch) with the original
 OCS 8362 Denise, 512 KiB chip RAM plus 512 KiB of trapdoor slow RAM, PAL, and
@@ -135,8 +137,10 @@ that ships with it -- see [](configuration#top-level)).
 Copperline boots directly, skipping the configuration screen, whenever a
 machine is specified: a `./copperline.toml` in the current directory, an
 explicit `--config` file, a ROM or override on the command line, or any
-headless/scripted run. You can reopen the configuration screen at any time from
-the menu (see [](ui#machine-configuration-screen)).
+headless/scripted run. Those runs also start from the saved default when
+neither `--config` nor `./copperline.toml` names a machine; `--factory`
+ignores it (see [](configuration)). You can reopen the configuration screen
+at any time from the menu (see [](ui#machine-configuration-screen)).
 
 You can boot your own ROM with a positional argument, or point at a specific
 config file:
