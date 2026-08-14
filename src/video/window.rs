@@ -1716,7 +1716,7 @@ impl App {
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
         record_input: Option<PathBuf>,
-        run_warp_target: Option<String>,
+        run_warp_target: Option<crate::runprog::WarpLaunch>,
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
         overscan: Overscan,
@@ -1863,7 +1863,7 @@ impl App {
             pending_auto_disk_inserts: disk_insert_after,
             auto_cd_inserts: Vec::new(),
             pending_auto_cd_inserts: cd_insert_after,
-            warp_launch: run_warp_target.map(crate::runprog::WarpLaunch::new),
+            warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             input_recorder: record_input
                 .is_some()
@@ -9360,6 +9360,12 @@ impl App {
                 info!("warp launch: {target} loaded; real-time pacing resumes");
                 self.finish_warp_launch();
                 self.show_osd(format!("Warp launch: {target} running"));
+                true
+            }
+            crate::runprog::WarpLaunchOutcome::Finished => {
+                info!("warp launch: {target} already ran to completion; real-time pacing resumes");
+                self.finish_warp_launch();
+                self.show_osd(format!("Warp launch: {target} finished"));
                 true
             }
             crate::runprog::WarpLaunchOutcome::TimedOut => {

@@ -850,10 +850,25 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     }
 
     // The generated Startup-Sequence was staged under the redirected
-    // config home...
-    let script =
-        std::fs::read_to_string(config_home.join("copperline/run/boot/S/Startup-Sequence"))?;
+    // config home, in the per-process boot-<pid> directory...
+    let boot_dir = std::fs::read_dir(config_home.join("copperline/run"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("boot-"))
+        })
+        .expect("a staged boot-<pid> directory");
+    let script = std::fs::read_to_string(boot_dir.join("S/Startup-Sequence"))?;
     assert!(script.contains("\"RunProg:mkfile\""), "script: {script}");
+    // ...the guest echoed the completion marker after the program
+    // returned...
+    assert!(
+        boot_dir.join("done").is_file(),
+        "completion marker missing from {}",
+        boot_dir.display()
+    );
     // ...and the probe ran: it wrote FROM-GUEST next to itself.
     let written = std::fs::read(prog_dir.join("FROM-GUEST"))?;
     assert_eq!(

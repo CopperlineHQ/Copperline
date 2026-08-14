@@ -21,8 +21,10 @@ live mounts as [`[[filesys]]`](configuration.md#filesys-mounts)):
 
 - a generated boot volume `RunBoot:` (boot priority 6, beating DF0:),
   containing only an `S/Startup-Sequence` that makes the program's
-  directory current and runs the program by absolute path -- regenerated
-  on every launch;
+  directory current, runs the program by absolute path, and echoes a
+  completion marker when it returns -- regenerated on every launch, in a
+  per-process staging directory so concurrent Copperline instances never
+  disturb each other;
 - the program's parent directory as `RunProg:`, writable, mounted in
   place: the guest reads the executable the host just built, and
   anything it writes lands next to it on the host.
@@ -48,9 +50,15 @@ seconds passes in wall-clock seconds.
 
 Details worth knowing:
 
-- If the program is never loaded (a crash mid-boot, a name mismatch),
-  the warp gives up after 60 emulated seconds and drops to real time so
-  the failed boot is watchable.
+- A program that runs to completion faster than the launch gate can see
+  it scheduled still ends the warp: the Startup-Sequence writes a
+  completion marker the moment the program returns.
+- If the program is never loaded (a crash mid-boot, a misspelled
+  Startup-Sequence), the warp gives up after 60 emulated seconds and
+  drops to real time so the failed boot is watchable.
+- The program's file name must be addressable from the guest: plain
+  ASCII, without quotes, colons, or slashes. Anything else is rejected
+  at launch with a message, rather than warping to the timeout.
 - Toggling warp manually cancels the launch phase: one press means
   normal-speed, audible emulation.
 - A machine with a physical floppy drive attached (FluxBridge) refuses

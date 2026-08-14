@@ -2084,6 +2084,7 @@ fn main() -> Result<()> {
     // WHDLoad nothing else is derived -- the machine is whatever the
     // configuration and CLI flags say.
     let mut run_prog_name: Option<String> = None;
+    let mut run_warp: Option<copperline::runprog::WarpLaunch> = None;
     if let Some(program) = &cli.run {
         let prepared = copperline::runprog::prepare(program, cli.run_args.as_deref(), None)?;
         let mut derived = raw_cfg.clone();
@@ -2095,6 +2096,10 @@ fn main() -> Result<()> {
             prepared.prog_dir.display(),
             copperline::runprog::PROG_VOLUME
         );
+        run_warp = Some(copperline::runprog::WarpLaunch::new(
+            prepared.prog_name.clone(),
+            Some(prepared.boot_dir.join(copperline::runprog::DONE_MARKER)),
+        ));
         run_prog_name = Some(prepared.prog_name);
     }
     if cli.load_state.is_some() {
@@ -2268,11 +2273,7 @@ fn main() -> Result<()> {
     // The warp-launch gate belongs to interactive sessions only: a capture
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
-    let run_warp_target = if headless_capture {
-        None
-    } else {
-        run_prog_name
-    };
+    let run_warp_target = if headless_capture { None } else { run_warp };
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,

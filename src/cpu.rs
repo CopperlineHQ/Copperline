@@ -1787,15 +1787,17 @@ impl M68kMachine {
     /// Toggle the loadseg catch: stop when the guest OS loads a program
     /// (a new seglist appearing in the scheduled process; `name` limits
     /// it to that basename, case-insensitive). Returns true when now
-    /// set. Toggling resets the observer; it baselines on the running
-    /// task world at the first armed check, so programs already loaded
-    /// never fire.
+    /// set. Arming resets the observer and baselines it immediately on
+    /// the running task world, so programs already loaded never fire --
+    /// and a program loaded by the very next instruction does.
     pub fn ui_toggle_loadseg_catch(&mut self, name: Option<String>) -> bool {
         self.ui_loadseg_tracker = crate::amigaos::LibraryTracker::default();
         if self.ui_breaks.loadseg_catch.is_some() {
             self.ui_breaks.set_loadseg_catch(None);
             false
         } else {
+            let tracker = &mut self.ui_loadseg_tracker;
+            crate::amigaos::with_bus_memory(&self.bus.bus, |os| tracker.arm(os));
             self.ui_breaks
                 .set_loadseg_catch(Some(crate::debugger::LoadSegCatch { name }));
             true
@@ -1863,9 +1865,10 @@ impl M68kMachine {
         let tracker = &mut self.ui_loadseg_tracker;
         let event = crate::amigaos::with_bus_memory(&self.bus.bus, |os| {
             if !tracker.armed() {
-                // Deferred baseline: snapshot the task world at the
-                // first armed check, so programs already running when
-                // the catch was set never fire it.
+                // Defensive re-baseline for any path that reset the
+                // observer while the catch stayed set; the normal arm
+                // happens in ui_toggle_loadseg_catch, before the next
+                // instruction can install a module unobserved.
                 tracker.arm(os);
             }
             tracker.observe(os).map(|module| {
