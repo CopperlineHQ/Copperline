@@ -184,6 +184,7 @@ struct HostCtx {
 
 impl HostCtx {
     fn cleanup_resources(&mut self) {
+        self.net = None;
         self.sockets.clear();
         self.resolve_jobs.clear();
         self.clear_pending_dma();
@@ -2175,6 +2176,23 @@ mod tests {
 
         board.reset();
         assert!(!board.rt.borrow().faulted);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fault_isolation_drops_and_reset_reopens_network_backend() {
+        let path = write_wasm("network_fault_isolation", INFINITE_LOOP_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, net_manifest("network_fault_isolation")).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.tick(1, &mut host);
+        assert!(board.rt.borrow().store.data().net.is_none());
+
+        board.reset();
+        assert!(board.rt.borrow().store.data().net.is_some());
 
         let _ = std::fs::remove_file(&path);
     }
