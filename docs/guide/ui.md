@@ -577,8 +577,14 @@ The layout is:
   configuration by **Save As** or **Save default** like everything else.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
-  a file path through a native file dialog. On the *Storage* tab, once an IDE
-  or SCSI drive has an image a small editable box appears next to **Browse**:
+  a file path through a native file dialog. On the *Storage* tab (IDE master/
+  slave, a SCSI unit, or a lide drive), **Browse** lets you pick a directory as
+  well as a file -- on macOS -- since any of those slots can be a host
+  directory mounted as an in-memory FFS volume instead of a raw image; on
+  other platforms the dialog is file-only there too, matching the rest of the
+  launcher, and a directory target still has to be set some other way (e.g.
+  editing the config file directly). Once an IDE, SCSI, or lide drive has an
+  image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
   raw HDF).
