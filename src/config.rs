@@ -2818,6 +2818,13 @@ impl RawConfig {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
     }
 
+    /// The `[paths]` section, for the startup that must put it in force
+    /// before building a [`Config`] -- the conversion resolves the implicit
+    /// battery-RAM files through the paths already in force.
+    pub fn paths(&self) -> crate::pathconf::Paths {
+        self.paths.clone()
+    }
+
     /// The configured menu size, for the paths that put a window up before a
     /// whole [`Config`] has been built.
     pub fn menu_scale(&self) -> MenuScale {
@@ -6393,6 +6400,31 @@ mod tests {
 
         let err = parse_config("[machine]\nrtc_chip = \"DS1307\"\n").unwrap_err();
         assert!(err.to_string().contains("rtc_chip"), "{err:#}");
+    }
+
+    /// `Config::try_from` resolves the implicit battery-RAM files through
+    /// the paths in force, so a startup that adopted `[paths]` *after* the
+    /// conversion would site this run's NVRAM by the previous answer. The
+    /// conversion is exercised here with a section already in force, which
+    /// is the order `load_config` uses.
+    #[test]
+    fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
+        let _guard = crate::paths::adopted_store_lock();
+        crate::paths::adopt(crate::pathconf::Paths {
+            nvram: Some(PathBuf::from("elsewhere")),
+            ..Default::default()
+        });
+        let cfg = parse_config("[machine]\nprofile = \"A4000\"\n")?;
+        let battmem = cfg.battmem_path.expect("an A4000 fits an RP5C01");
+        // No host-data directory at all leaves the bare name, which is the
+        // documented degradation and has no directory to check.
+        if crate::paths::config_dir().is_some() {
+            assert!(
+                battmem.parent().is_some_and(|p| p.ends_with("elsewhere")),
+                "the section in force did not site the battery RAM: {battmem:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

@@ -616,7 +616,12 @@ impl Rp5c01Rtc {
 
     fn flush_battmem(&mut self, emulated_secs: f64) {
         if let Some(path) = &self.battmem_path {
-            if let Err(e) = std::fs::write(path, self.battmem_bytes(emulated_secs)) {
+            // The directory is Copperline's own and may not exist yet; it
+            // is made here rather than at bind time so a guest that never
+            // writes the clock RAM leaves no empty folder behind.
+            if let Err(e) = crate::paths::ensure_parent(path)
+                .and_then(|()| std::fs::write(path, self.battmem_bytes(emulated_secs)))
+            {
                 // Stay dirty so the next MODE write retries: a transient
                 // host error must not lose the battery state until the
                 // guest happens to change it again.
@@ -1237,17 +1242,21 @@ mod tests {
     /// drop the battery state on a transient host error.
     #[test]
     fn rp5c01_battmem_retries_the_flush_after_a_failed_write() {
-        let dir = battmem_file("retry-dir"); // reserved, not yet created
+        let dir = battmem_file("retry-dir");
         let path = dir.join("battmem.nvram");
+        // A directory where the file goes: the write fails, and unlike a
+        // missing parent it stays failing, since the flush makes its own
+        // directories now.
+        std::fs::create_dir_all(&path).unwrap();
         let mut rtc = seeded_rp5c01(VECTOR_UNIX);
         rtc.set_battmem_path(path.clone());
 
         rp_write(&mut rtc, 0xD, 0xA);
         rp_write(&mut rtc, 0x0, 0x5);
-        rp_write(&mut rtc, 0xD, 0x8); // flush fails: parent dir missing
-        assert!(!path.exists());
+        rp_write(&mut rtc, 0xD, 0x8); // flush fails: a directory is in the way
+        assert!(path.is_dir(), "nothing should have been written over it");
 
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::remove_dir(&path).unwrap();
         rp_write(&mut rtc, 0xD, 0x8); // still dirty: retried and lands
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes[0x20], 0x05);

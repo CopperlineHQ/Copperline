@@ -20,12 +20,6 @@ pub fn save(path: &Path, fb: &[u32], width: u32, height: u32) -> Result<()> {
             expected
         );
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-    }
     crate::paths::ensure_parent(path)
         .with_context(|| format!("creating the directory for {}", path.display()))?;
     let file =

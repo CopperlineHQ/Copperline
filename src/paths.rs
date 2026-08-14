@@ -236,15 +236,35 @@ pub fn configured() -> std::sync::Arc<crate::pathconf::Paths> {
     write.get_or_insert_with(Default::default).clone()
 }
 
-/// Serialises the tests that touch the adopted set. [`adopt`] writes one
-/// process-wide store, `cargo test` runs threads in one process, and a test
-/// that adopts and then asserts can otherwise be clobbered by another
-/// test's adopt landing between the two. Production has no such caller:
-/// adoption happens at startup and on launcher edits, both on one thread.
+/// Borrows the adopted set for a test, and puts the defaults back when it
+/// goes out of scope.
+///
+/// [`adopt`] writes one process-wide store and `cargo test` runs threads in
+/// one process, so two tests adopting at once would clobber each other --
+/// hence the lock. Restoring on drop is the other half: without it a test
+/// that adopts leaves its directories in force for every *unguarded* test
+/// that runs afterwards, which the lock alone cannot prevent. Production
+/// has no such caller; adoption happens at startup and on launcher edits,
+/// both on one thread.
 #[cfg(test)]
-pub(crate) fn adopted_store_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) struct AdoptedStore {
+    /// Held for the guard's lifetime; never read.
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for AdoptedStore {
+    fn drop(&mut self) {
+        adopt(crate::pathconf::Paths::default());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn adopted_store_lock() -> AdoptedStore {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    AdoptedStore {
+        _lock: LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+    }
 }
 
 /// Put a configuration's `[paths]` in force, dropping whatever it names that
@@ -455,8 +475,10 @@ pub const DEFAULT_CONFIG: &str = "default.toml";
 /// Create a path's parent directory so a write to it can succeed.
 pub fn ensure_parent(path: &std::path::Path) -> std::io::Result<()> {
     match path.parent() {
-        Some(parent) => std::fs::create_dir_all(parent),
-        None => Ok(()),
+        // A bare filename's parent is the empty path, which is the working
+        // directory and needs no creating.
+        Some(parent) if !parent.as_os_str().is_empty() => std::fs::create_dir_all(parent),
+        _ => Ok(()),
     }
 }
 
@@ -554,6 +576,8 @@ mod tests {
         let moved = screenshot_file();
         adopt(crate::pathconf::Paths::default());
         let back = screenshot_file();
+        // `_guard` puts the defaults back either way; the explicit adopt
+        // above is what `back` is measuring.
 
         assert_eq!(moved.parent(), Some(host.join("elsewhere").as_path()));
         assert_eq!(back.parent(), Some(host.join("screenshots").as_path()));

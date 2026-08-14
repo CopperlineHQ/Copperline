@@ -12596,7 +12596,9 @@ impl App {
                 let events = rec.events_recorded();
                 let script = rec.finish();
                 let path = crate::inputrec::auto_filename();
-                match std::fs::write(&path, script) {
+                match crate::paths::ensure_parent(&path)
+                    .and_then(|()| std::fs::write(&path, script))
+                {
                     Ok(()) => {
                         info!(
                             "input recording saved: {} ({events} events)",

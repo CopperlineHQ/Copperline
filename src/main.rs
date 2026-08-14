@@ -2550,11 +2550,13 @@ fn load_config(
         None
     };
     let raw = Config::load_raw(path, overrides)?;
+    // Before the conversion, not after: `Config::try_from` resolves the
+    // implicit battery-RAM backing files through the paths in force, so
+    // adopting afterwards would site this run's NVRAM by the previous
+    // answer. Whatever this host cannot reach is dropped here and inherits
+    // instead, so a config naming somebody else's memory stick still starts.
+    copperline::paths::adopt(raw.paths());
     let cfg = Config::try_from(raw.clone())?;
-    // Put `[paths]` in force before anything asks where it should write.
-    // Whatever this host cannot reach is dropped here and inherits instead,
-    // so a config that names somebody else's memory stick still starts.
-    copperline::paths::adopt(cfg.paths.clone());
     Ok((cfg, raw))
 }
 
@@ -3021,6 +3023,44 @@ mod tests {
     /// The flag means "this bay is a real drive", so it displaces an image the
     /// config file put there rather than colliding with it -- a bay cannot
     /// hold both, and the command line wins.
+    /// `load_config` must put `[paths]` in force *before* building the
+    /// machine: the conversion resolves the implicit battery-RAM backing
+    /// files through the paths in force, so adopting afterwards would site
+    /// this run's NVRAM by the previous answer. Adopting after the
+    /// conversion fails this.
+    ///
+    /// No lock is taken: this is the binary's own test process, and it is
+    /// the only test in it that adopts.
+    #[test]
+    fn a_configs_paths_are_in_force_before_the_machine_is_built() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-paths-order-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "[machine]\nprofile = \"A4000\"\n\n[paths]\nnvram = \"elsewhere\"\n",
+        )?;
+        let loaded = load_config(Some(&path), &ConfigOverrides::default(), true);
+        let _ = std::fs::remove_file(&path);
+        let (cfg, _) = loaded?;
+        let battmem = cfg.battmem_path.expect("an A4000 fits an RP5C01");
+        // A host with no per-user directory keeps the bare name, which is
+        // the documented degradation and has no directory to check.
+        if copperline::paths::config_dir().is_some() {
+            assert!(
+                battmem.parent().is_some_and(|p| p.ends_with("elsewhere")),
+                "the config's [paths] was adopted too late: {battmem:?}"
+            );
+        }
+        copperline::paths::adopt(Default::default());
+        Ok(())
+    }
+
     // The flags only exist in a build that can attach a physical drive.
     #[cfg(feature = "fluxbridge")]
     #[test]
