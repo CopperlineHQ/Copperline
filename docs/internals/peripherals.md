@@ -250,9 +250,7 @@ as an unpopulated register instead of reaching ROM. `lide.device` never
 loaded and the machine never got past the "insert disk" screen; RIPPLE and
 RIDE were unaffected, since their ROM sits on the even lane, clear of any
 register. Fixed by checking the ROM lane ahead of the register-block
-dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests and
-`LIDE-ATBUS2008-BOOT-INVESTIGATION.md` in the repo root for the full
-trace).
+dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests).
 
 ## Host filesystem service (`filesys.rs`)
 

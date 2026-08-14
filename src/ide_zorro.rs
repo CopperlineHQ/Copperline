@@ -32,9 +32,7 @@
 //! have one channel: task file at `0x1000`, control block at `0x2000` (so
 //! `+0x2C00` is the alternate-status register the driver's channel-autodetect
 //! polls against `+0x1E00`); both have also booted successfully to a real
-//! Workbench against real release ROMs (see
-//! `LIDE-ATBUS2008-BOOT-INVESTIGATION.md` in the repo root for the
-//! AT-Bus 2008 control-block/ROM-lane collision this once masked).
+//! Workbench against real release ROMs.
 //!
 //! A channel with *no* drives attached at all (as opposed to one drive
 //! present and the other slot empty) must float every register, not only
