@@ -5785,13 +5785,42 @@ const SAVE_ACTIONS: [UiControl; 3] = [
 const SAVE_DIALOG_BUTTON: (usize, usize) = (116, 20);
 const SAVE_DIALOG_MARGIN: usize = 12;
 const SAVE_DIALOG_GAP: usize = 6;
+/// Lines kept for the description above the buttons, what one costs, and
+/// the space between the last of them and the row.
+///
+/// Always reserved, whether or not anything is being pointed at: a dialog
+/// that changed size as the pointer crossed it would move the buttons out
+/// from under the pointer that was crossing them.
+const SAVE_DIALOG_HELP_LINES: usize = 2;
+const SAVE_DIALOG_LINE_H: usize = 12;
+const SAVE_DIALOG_HELP_GAP: usize = 16;
+
+/// What each button does, said while the pointer is on it.
+///
+/// Anything that is not one of the three gets the Save line. This is a
+/// Save dialog opened from a Save button, so with the pointer resting
+/// nowhere in particular it should say what saving means rather than go
+/// blank and leave a hole where a sentence was a moment ago.
+fn save_dialog_help(control: UiControl) -> &'static str {
+    match control {
+        UiControl::LauncherSaveDefault => {
+            "Saves the current running configuration as the default when you launch Copperline."
+        }
+        UiControl::LauncherResetDefault => "Resets the current default config to factory settings.",
+        _ => "Save the configuration to a file",
+    }
+}
 
 /// The Save dialog, centred on the panel like the confirm.
 fn launcher_save_dialog_rect(rect: Rect) -> Rect {
     let (bw, bh) = SAVE_DIALOG_BUTTON;
     let (w, h) = (
         2 * SAVE_DIALOG_MARGIN + 3 * bw + 2 * SAVE_DIALOG_GAP,
-        TITLE_H + 2 * SAVE_DIALOG_MARGIN + bh,
+        TITLE_H
+            + 2 * SAVE_DIALOG_MARGIN
+            + SAVE_DIALOG_HELP_LINES * SAVE_DIALOG_LINE_H
+            + SAVE_DIALOG_HELP_GAP
+            + bh,
     );
     Rect {
         x: rect.x + rect.w.saturating_sub(w) / 2,
@@ -5808,7 +5837,8 @@ fn launcher_save_dialog_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     std::array::from_fn(|i| {
         let item = Rect {
             x: dialog.x + SAVE_DIALOG_MARGIN + i * (w + SAVE_DIALOG_GAP),
-            y: dialog.y + TITLE_H + SAVE_DIALOG_MARGIN,
+            // Along the bottom, under the line that says what they do.
+            y: dialog.y + dialog.h - SAVE_DIALOG_MARGIN - h,
             w,
             h,
         };
@@ -5854,6 +5884,25 @@ fn draw_launcher_save_dialog(
             launcher_action_label(control),
             true,
             hover == Some(control),
+            scale,
+        );
+    }
+    // Above the row, where a dialog's own words go, and never blank: with
+    // the pointer on none of the three it says what the dialog is for.
+    let help = save_dialog_help(hover.unwrap_or(UiControl::LauncherSaveAs));
+    let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
+    for (i, line) in wrap_text(help, chars, chars)
+        .into_iter()
+        .take(SAVE_DIALOG_HELP_LINES)
+        .enumerate()
+    {
+        draw_panel_text(
+            frame,
+            dialog.x + SAVE_DIALOG_MARGIN,
+            dialog.y + TITLE_H + SAVE_DIALOG_MARGIN + i * SAVE_DIALOG_LINE_H,
+            &line,
+            PANEL_TEXT,
+            1,
             scale,
         );
     }
@@ -12641,7 +12690,15 @@ mod tests {
                 menu_nav: menu::MenuNav::default(),
                 panel: Some(Panel::Launcher(Box::new(state))),
             };
-            draw(&mut frame, big, &ui, None, None);
+            // With the pointer on the button whose description is longest,
+            // which is the one that has to fit.
+            draw(
+                &mut frame,
+                big,
+                &ui,
+                Some(UiControl::LauncherSaveDefault),
+                None,
+            );
             save_at(&frame, "launcher-save-menu", bw, bh);
 
             let mut frame = vec![0u8; w * h * 4];
@@ -12714,7 +12771,17 @@ mod tests {
                 panel_control_at(&panel, centre(yes)),
                 Some(UiControl::LauncherConfirmReset)
             );
-            for elsewhere in [cancel, launcher_action_rects(rect)[3].1, rect] {
+            // Named places again, not the panel's centre: that sits inside
+            // the dialog and would land on a button if it ever resized.
+            let dialog = launcher_confirm_rect(rect);
+            let title = Rect {
+                x: dialog.x,
+                y: dialog.y,
+                w: dialog.w,
+                h: TITLE_H,
+            };
+            let [load, _, _, run] = launcher_action_rects(rect);
+            for elsewhere in [cancel, title, load.1, run.1] {
                 assert_eq!(
                     panel_control_at(&panel, centre(elsewhere)),
                     Some(UiControl::LauncherCancelReset),
@@ -12757,21 +12824,54 @@ mod tests {
                 assert!(a.1.x + a.1.w <= b.1.x, "the buttons overlap each other");
                 assert_eq!(a.1.y, b.1.y, "the buttons should be one row");
             }
-            // The close gadget, and Run underneath it: neither does
-            // anything but put the dialog away.
+            // The close gadget, the dialog's own body below the buttons,
+            // and the bar underneath: none of them does anything but put
+            // the dialog away. Probed at named places rather than at the
+            // panel's centre, which is inside the dialog and moves onto a
+            // button the moment the dialog changes height.
             let close = Rect {
                 x: dialog.x + dialog.w - 18,
                 y: dialog.y + 4,
                 w: 12,
                 h: 12,
             };
-            for elsewhere in [close, launcher_action_rects(rect)[3].1, rect] {
+            let body = Rect {
+                x: dialog.x,
+                y: dialog.y + TITLE_H,
+                w: dialog.w,
+                h: SAVE_DIALOG_MARGIN,
+            };
+            let [load, _, _, run] = launcher_action_rects(rect);
+            for elsewhere in [close, body, load.1, run.1] {
                 assert_eq!(
                     panel_control_at(&panel, centre(elsewhere)),
                     Some(UiControl::LauncherSave),
                     "a click off the three should only put the dialog away"
                 );
             }
+            // Every description fits the two lines reserved for it. The
+            // dialog cannot grow to suit a longer one -- resizing under a
+            // pointer that is crossing the buttons would move them -- so a
+            // sentence that does not fit is silently cut off instead.
+            let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
+            for (control, _) in items {
+                let help = save_dialog_help(control);
+                assert!(!help.is_empty(), "{control:?} has nothing to say");
+                let lines = wrap_text(help, chars, chars);
+                assert!(
+                    lines.len() <= SAVE_DIALOG_HELP_LINES,
+                    "{help:?} wraps to {} lines, and there is room for {}",
+                    lines.len(),
+                    SAVE_DIALOG_HELP_LINES
+                );
+            }
+            // With the pointer on nothing, the dialog still says what it
+            // is for rather than leaving the space empty.
+            assert_eq!(
+                save_dialog_help(UiControl::LauncherSave),
+                save_dialog_help(UiControl::LauncherSaveAs)
+            );
+
             // And with it closed, its buttons are not there to be hit.
             let closed = Panel::Launcher(Box::new(LauncherState::new(
                 launcher::MachineSetup::default(),
