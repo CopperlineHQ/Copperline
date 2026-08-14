@@ -181,7 +181,13 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      fault isolation across save-state restoration.
 //  53: BoardDevice gained the IdeZorro variant (the lide.device-compatible
 //      Zorro II IDE board, `[lide]`), appended at the end of the enum.
-pub const STATE_VERSION: u32 = 53;
+//  54: AtaBus's cylinder registers became per-device-slot pairs (PR #458),
+//      reserved here so the two in-flight branches do not collide on one
+//      version number.
+//  55: BoardDevice gained the GraffityZ2 and GraffityZ3 variants (the Atéo
+//      Concepts Graffity RTG boards, `[rtg] card`), appended at the end of
+//      the enum.
+pub const STATE_VERSION: u32 = 55;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

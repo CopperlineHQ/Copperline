@@ -2630,6 +2630,36 @@ pub fn build_machine(
             },
         )));
     }
+    // Atéo Concepts Graffity [Zorro II]: the same CL-GD5428 core as Picasso
+    // II+, wired as a chained VRAM + 128K register aperture pair.
+    if cfg.rtg == crate::config::RtgCard::GraffityZ2 {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::graffity_z2_vram(
+            slot,
+            cfg.rtg_vram_bytes,
+        ))?;
+        zorro.add_board(crate::zorro::BoardSpec::graffity_z2_regs(slot))?;
+        info!(
+            "graffityz2: CL-GD5428 RTG board with {} MB VRAM on the Zorro chain (slot {slot})",
+            cfg.rtg_vram_bytes / (1024 * 1024)
+        );
+        devices.push(crate::zorro_device::BoardDevice::GraffityZ2(Box::new(
+            crate::graffity::GraffityZ2::new(cfg.rtg_vram_bytes),
+        )));
+    }
+    // Atéo Concepts Graffity [Zorro III]: one 16 MB autoconfig window over
+    // the same CL-GD5428 core.
+    if cfg.rtg == crate::config::RtgCard::GraffityZ3 {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::graffity_z3(slot))?;
+        info!(
+            "graffityz3: CL-GD5428 RTG board with {} MB VRAM on the Zorro chain (slot {slot})",
+            cfg.rtg_vram_bytes / (1024 * 1024)
+        );
+        devices.push(crate::zorro_device::BoardDevice::GraffityZ3(Box::new(
+            crate::graffity::GraffityZ3::new(cfg.rtg_vram_bytes),
+        )));
+    }
     // The A1000 has no Kickstart ROM: cfg.rom_path is its 64 KiB bootstrap
     // ROM, and a 256 KiB WCS is allocated for it to load Kickstart into from
     // the Kickstart disk in DF0.

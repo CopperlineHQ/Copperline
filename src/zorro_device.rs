@@ -382,6 +382,8 @@ pub enum BoardDevice {
     Z3660(crate::z3660::Z3660),
     Picasso2(Box<crate::picasso2::Picasso2>),
     IdeZorro(crate::ide_zorro::IdeZorro),
+    GraffityZ2(Box<crate::graffity::GraffityZ2>),
+    GraffityZ3(Box<crate::graffity::GraffityZ3>),
 }
 
 impl ZorroDevice for BoardDevice {
@@ -396,6 +398,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::Picasso2(d) => ZorroDevice::read(d.as_mut(), off, size, host),
             BoardDevice::IdeZorro(d) => ZorroDevice::read(d, off, size, host),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::read(d.as_mut(), off, size, host),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::read(d.as_mut(), off, size, host),
         }
     }
 
@@ -410,6 +414,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Picasso2(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
             BoardDevice::IdeZorro(d) => ZorroDevice::write(d, off, size, value, host),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
         }
     }
 
@@ -424,6 +430,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::Picasso2(d) => ZorroDevice::peek_word(d.as_ref(), off),
             BoardDevice::IdeZorro(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::peek_word(d.as_ref(), off),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::peek_word(d.as_ref(), off),
         }
     }
 
@@ -438,6 +446,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::Picasso2(d) => ZorroDevice::tick(d.as_mut(), cck, host),
             BoardDevice::IdeZorro(d) => ZorroDevice::tick(d, cck, host),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::tick(d.as_mut(), cck, host),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::tick(d.as_mut(), cck, host),
         }
     }
 
@@ -452,6 +462,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::int2_line(d),
             BoardDevice::Picasso2(d) => ZorroDevice::int2_line(d.as_ref()),
             BoardDevice::IdeZorro(d) => ZorroDevice::int2_line(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::int2_line(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::int2_line(d.as_ref()),
         }
     }
 
@@ -466,6 +478,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::int6_line(d),
             BoardDevice::Picasso2(d) => ZorroDevice::int6_line(d.as_ref()),
             BoardDevice::IdeZorro(d) => ZorroDevice::int6_line(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::int6_line(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::int6_line(d.as_ref()),
         }
     }
 
@@ -480,6 +494,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::is_idle(d),
             BoardDevice::Picasso2(d) => ZorroDevice::is_idle(d.as_ref()),
             BoardDevice::IdeZorro(d) => ZorroDevice::is_idle(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::is_idle(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::is_idle(d.as_ref()),
         }
     }
 
@@ -494,6 +510,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::Picasso2(d) => ZorroDevice::next_event_cck(d.as_ref()),
             BoardDevice::IdeZorro(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::next_event_cck(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::next_event_cck(d.as_ref()),
         }
     }
 
@@ -508,6 +526,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::take_activity(d),
             BoardDevice::Picasso2(d) => ZorroDevice::take_activity(d.as_mut()),
             BoardDevice::IdeZorro(d) => ZorroDevice::take_activity(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::take_activity(d.as_mut()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::take_activity(d.as_mut()),
         }
     }
 
@@ -522,6 +542,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::reset(d),
             BoardDevice::Picasso2(d) => ZorroDevice::reset(d.as_mut()),
             BoardDevice::IdeZorro(d) => ZorroDevice::reset(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::reset(d.as_mut()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::reset(d.as_mut()),
         }
     }
 
@@ -536,6 +558,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Z3660(d) => ZorroDevice::kind(d),
             BoardDevice::Picasso2(d) => ZorroDevice::kind(d.as_ref()),
             BoardDevice::IdeZorro(d) => ZorroDevice::kind(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::kind(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::kind(d.as_ref()),
         }
     }
 }

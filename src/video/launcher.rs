@@ -1372,10 +1372,12 @@ pub const MODELS: [MachineModel; 10] = [
 // --- value preset lists for the cycle/stepper controls -------------------
 
 const CHIPSETS: [Chipset; 3] = [Chipset::Ocs, Chipset::Ecs, Chipset::Aga];
-const RTG_CARDS: [RtgCard; 4] = [
+const RTG_CARDS: [RtgCard; 6] = [
     RtgCard::None,
     RtgCard::Picasso2,
     RtgCard::Picasso2Plus,
+    RtgCard::GraffityZ2,
+    RtgCard::GraffityZ3,
     RtgCard::Z3660,
 ];
 const AGNUS_CHOICES: [Option<AgnusRevision>; 5] = [
@@ -4300,14 +4302,14 @@ impl MachineSetup {
                 self.clock_mhz = self.cpu.default_clock_mhz();
                 if !cpu_is_32bit(self.cpu) {
                     // Zorro III RAM, motherboard RAM, accelerator RAM, and
-                    // the Zorro III RTG card all sit beyond a 24-bit bus;
+                    // the Zorro III RTG cards all sit beyond a 24-bit bus;
                     // dropping them (rather than just greying their rows)
-                    // keeps the emitted config launchable. Picasso II/II+ are
-                    // Zorro II cards and remain fitted.
+                    // keeps the emitted config launchable. Picasso II/II+ and
+                    // Graffity [Zorro II] remain fitted (Zorro II cards).
                     self.z3_ram = 0;
                     self.mb_ram = 0;
                     self.accel_ram = 0;
-                    if self.rtg == RtgCard::Z3660 {
+                    if matches!(self.rtg, RtgCard::Z3660 | RtgCard::GraffityZ3) {
                         self.rtg = RtgCard::None;
                     }
                 }
@@ -8407,6 +8409,8 @@ fn rtg_card_name(card: RtgCard) -> &'static str {
         RtgCard::Picasso2 => "Picasso II",
         RtgCard::Picasso2Plus => "Picasso II+",
         RtgCard::Z3660 => "Z3660",
+        RtgCard::GraffityZ2 => "Graffity [Zorro II]",
+        RtgCard::GraffityZ3 => "Graffity [Zorro III]",
     }
 }
 
@@ -8416,6 +8420,8 @@ fn rtg_card_value(card: RtgCard) -> &'static str {
         RtgCard::Picasso2 => "picasso2",
         RtgCard::Picasso2Plus => "picasso2plus",
         RtgCard::Z3660 => "z3660",
+        RtgCard::GraffityZ2 => "graffityz2",
+        RtgCard::GraffityZ3 => "graffityz3",
     }
 }
 
