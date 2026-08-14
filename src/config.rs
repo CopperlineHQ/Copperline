@@ -1076,8 +1076,8 @@ impl ScsiConfig {
 }
 
 /// `[lide]`: a built-in Zorro II IDE board compatible with LIV2's
-/// `lide.device`. Hard disks only (no ATAPI); the boot ROM is always
-/// user-supplied (never bundled).
+/// `lide.device`. Drives may be hard disks or ATAPI CD-ROMs; the boot ROM is
+/// always user-supplied (never bundled).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LideConfig {
     /// Which of the three AutoConfig identities the board presents. Only
@@ -4195,18 +4195,6 @@ impl TryFrom<RawConfig> for Config {
                  (or A1200, or A4000)"
             ));
         }
-        // The IDE interfaces speak plain ATA, not ATAPI: a CD image on the
-        // cable would be served as a garbage hard disk.
-        for drive in [&ide.master, &ide.slave].into_iter().flatten() {
-            if is_cd_image_path(&drive.path) {
-                errors.push(anyhow!(
-                    "[ide] {}: CD images attach a CD-ROM drive on the SCSI bus \
-                     ([scsi] unit0..unit6); the IDE port has no ATAPI support",
-                    drive.path.display()
-                ));
-            }
-        }
-
         let scsi_controller = match raw.scsi.controller.as_deref() {
             // A machine with a Super DMAC already has a SCSI bus, so drives go
             // on it unless the config asks for a Zorro board instead.
@@ -4335,16 +4323,6 @@ impl TryFrom<RawConfig> for Config {
             drives: lide_drives,
         };
         if lide.enabled() {
-            // The IDE interface speaks plain ATA, not ATAPI.
-            for drive in lide.drives.iter().flatten() {
-                if is_cd_image_path(&drive.path) {
-                    errors.push(anyhow!(
-                        "[lide] {}: CD images are not supported; the lide-compatible IDE \
-                         board has no ATAPI support in this build",
-                        drive.path.display()
-                    ));
-                }
-            }
             let max_drives = lide_board.max_drives();
             if raw.lide.drives.len() > max_drives {
                 errors.push(anyhow!(
@@ -8414,17 +8392,19 @@ mod tests {
         assert!(cfg.lide.enabled());
         assert!(cfg.lide.rom.is_none());
 
-        // CD images are rejected: no ATAPI in this build.
-        let err = parse_config(
+        // CD images attach as ATAPI drives, exactly as they do on [ide].
+        let cfg = parse_config(
             r#"
             [lide]
             board = "ripple"
             rom = "lide.rom"
             drives = ["game.cue"]
             "#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("ATAPI"), "{err:#}");
+        )?;
+        assert_eq!(
+            cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("game.cue"))
+        );
 
         // RIDE only has one channel (two drives); a third entry overflows it.
         let err = parse_config(
@@ -8466,10 +8446,10 @@ mod tests {
     }
 
     /// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
-    /// they attach as SCSI CD-ROM drives, and the ATA-only IDE port rejects
-    /// them.
+    /// they attach as SCSI CD-ROM drives on [scsi], and as ATAPI drives on
+    /// [ide]/[lide].
     #[test]
-    fn cd_images_fit_scsi_units_but_not_the_ide_port() -> Result<()> {
+    fn cd_images_fit_scsi_units_and_the_ide_port() -> Result<()> {
         assert!(is_cd_image_path(Path::new("games/Disc.CUE")));
         assert!(is_cd_image_path(Path::new("cd32.iso")));
         assert!(!is_cd_image_path(Path::new("workbench.hdf")));
@@ -8488,16 +8468,18 @@ mod tests {
             Some(Path::new("game.cue"))
         );
 
-        let err = parse_config(
+        let cfg = parse_config(
             r#"
             [machine]
             profile = "A1200"
             [ide]
             master = "game.iso"
             "#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("ATAPI"), "{err:#}");
+        )?;
+        assert_eq!(
+            cfg.ide.master.as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("game.iso"))
+        );
         Ok(())
     }
 

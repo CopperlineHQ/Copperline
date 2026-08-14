@@ -1394,9 +1394,12 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
-CD images (`.cue`/`.iso`/`.chd`) are rejected here: the emulated IDE port
-speaks plain ATA, not ATAPI. Attach CD-ROM drives as `[scsi]` units instead
-(see below).
+A path ending in `.cue`, `.iso`, or `.chd` attaches an **ATAPI CD-ROM
+drive** at that slot instead of a hard disk, through the PACKET (0xA0)
+command -- the same read-only SCSI-2 command engine `[scsi]` CD-ROM units
+use (see below), reached over the ATA task file instead of a WD33C93 SCSI
+bus. It mounts and swaps discs, plays CD audio, and answers `scsi.device`
+filesystems the same way a `[scsi]` CD-ROM unit does.
 
 ## `[scsi]` -- SCSI controllers
 
@@ -1486,8 +1489,8 @@ A built-in Zorro II IDE board compatible with LIV2's actively-maintained
 open-source [lide.device](https://github.com/LIV2/lide.device), giving
 autobooting IDE storage under any Kickstart including 1.3 -- unlike `[ide]`,
 which needs a Gayle or A4000 IDE port, `[lide]` works on **any machine
-model**, the same way `[scsi]`'s Zorro boards do. Hard disks only: no ATAPI,
-so CD images are rejected the same way `[ide]` rejects them.
+model**, the same way `[scsi]`'s Zorro boards do. A `.cue`/`.iso`/`.chd`
+drive entry attaches an ATAPI CD-ROM drive, exactly as it does on `[ide]`.
 
 `board` picks the AutoConfig identity: `"ripple"` (the default), LIV2's
 open-hardware Zorro II card with two ATA channels (four drives); `"ride"`,

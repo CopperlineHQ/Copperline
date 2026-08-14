@@ -236,6 +236,13 @@ impl ScsiCdRom {
         self.sense = [0u8; SENSE_LEN];
     }
 
+    /// The current sense key (fixed-format sense byte 2's low nibble),
+    /// without a REQUEST SENSE round trip -- ATAPI puts this in the error
+    /// register's top nibble immediately on CHECK CONDITION.
+    pub fn sense_key(&self) -> u8 {
+        self.sense[2] & 0x0F
+    }
+
     fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
         self.set_sense(key, asc);
         (ScsiExec::NoData, CHECK_CONDITION)

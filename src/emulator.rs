@@ -2214,6 +2214,23 @@ fn open_scsi_target(
     }
 }
 
+/// Open an `[ide]`/`[lide]` drive slot: a CD image attaches as ATAPI, exactly
+/// as `open_scsi_target` attaches one as a SCSI CD-ROM.
+fn open_ide_target(
+    path: &std::path::Path,
+    unit: usize,
+    volume_name: Option<&str>,
+    boot_pri: i8,
+) -> Result<crate::ata::AtaDevice> {
+    if crate::config::is_cd_image_path(path) {
+        let cd = crate::ata::AtapiDrive::open(path)?;
+        Ok(cd.into())
+    } else {
+        let disk = crate::ata::IdeDrive::open(path, unit, volume_name, boot_pri)?;
+        Ok(disk.into())
+    }
+}
+
 /// Open every drive the config bridges to real hardware.
 ///
 /// Failing to open one is fatal rather than a warning: a bay configured as a
@@ -2418,13 +2435,13 @@ pub fn build_machine(
             if ch >= channels {
                 continue; // config validation already rejects this; defensive only
             }
-            let disk = crate::ata::IdeDrive::open(
+            let target = open_ide_target(
                 &drive.path,
                 unit,
                 drive.volume_name.as_deref(),
                 drive.boot_pri,
             )?;
-            board.attach_drive(ch, unit, disk);
+            board.attach_drive(ch, unit, target);
         }
         zorro.add_board(crate::zorro::BoardSpec::lide(cfg.lide.board, slot, has_rom))?;
         info!(
@@ -2668,24 +2685,14 @@ pub fn build_machine(
         if let Some(drive) = &cfg.ide.master {
             gayle.attach_drive(
                 0,
-                crate::gayle::IdeDrive::open(
-                    &drive.path,
-                    0,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                )?,
+                open_ide_target(&drive.path, 0, drive.volume_name.as_deref(), drive.boot_pri)?,
             );
             info!("ide: master {}", drive.path.display());
         }
         if let Some(drive) = &cfg.ide.slave {
             gayle.attach_drive(
                 1,
-                crate::gayle::IdeDrive::open(
-                    &drive.path,
-                    1,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                )?,
+                open_ide_target(&drive.path, 1, drive.volume_name.as_deref(), drive.boot_pri)?,
             );
             info!("ide: slave {}", drive.path.display());
         }
@@ -2701,7 +2708,7 @@ pub fn build_machine(
             let Some(drive) = drive else { continue };
             ide.attach_drive(
                 slot,
-                crate::ata::IdeDrive::open(
+                open_ide_target(
                     &drive.path,
                     slot,
                     drive.volume_name.as_deref(),

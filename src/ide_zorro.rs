@@ -5,8 +5,9 @@
 //! open-hardware card, two ATA channels), **RIDE** (an expansion-port board
 //! sharing RIPPLE's ROM image and register layout, one channel), and
 //! **AT-Bus 2008** (the register model shared by that board's whole clone
-//! family, one channel). Hard disks only: no ATAPI, no host block devices.
-//! The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
+//! family, one channel). Drives may be hard disks or ATAPI CD-ROMs (a `.cue`,
+//! `.iso`, or `.chd` image on any `[lide] drives` slot); no host block
+//! devices. The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
 //! release image from <https://github.com/LIV2/lide.device>) -- nothing is
 //! bundled or distributed.
 //!
@@ -68,7 +69,7 @@
 //! None of the three boards wire ATA INTRQ anywhere -- `lide.device` is a
 //! purely polling driver. [`IdeZorro`] never asserts INT2/INT6.
 
-use crate::ata::{AtaBus, IdeDrive, IdeReg};
+use crate::ata::{AtaBus, AtaDevice, IdeReg};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
@@ -253,8 +254,19 @@ impl IdeZorro {
         Ok(rom)
     }
 
-    pub fn attach_drive(&mut self, channel: usize, slot: usize, drive: IdeDrive) {
+    pub fn attach_drive(&mut self, channel: usize, slot: usize, drive: impl Into<AtaDevice>) {
         self.ata[channel.min(1)].attach_drive(slot, drive);
+    }
+
+    /// The first ATAPI CD-ROM drive across this board's channels, if any
+    /// slot holds one; the runtime disc-swap target.
+    pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.ata.iter().find_map(AtaBus::first_atapi_ref)
+    }
+
+    /// Mutable counterpart of [`Self::first_atapi_ref`].
+    pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.ata.iter_mut().find_map(AtaBus::first_atapi_mut)
     }
 
     /// System reset: clear both ATA channels and, on boards with a latch,
@@ -558,6 +570,7 @@ impl crate::zorro_device::ZorroDevice for IdeZorro {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ata::IdeDrive;
     use crate::harddrive::SECTOR_SIZE;
     use std::path::PathBuf;
 
@@ -805,5 +818,36 @@ mod tests {
         assert!(IdeZorro::new(LidePersonality::Ripple, vec![0u8; 100]).is_err());
         // Too many banks for the personality.
         assert!(IdeZorro::new(LidePersonality::AtBus2008, fake_flash(2)).is_err());
+    }
+
+    /// A `.iso` path attaches as an ATAPI drive rather than being rejected:
+    /// IDENTIFY PACKET DEVICE (0xA1) answers, and plain IDENTIFY DEVICE
+    /// (0xEC) aborts. The full PACKET protocol is exercised in `ata.rs`.
+    #[test]
+    fn a_cd_image_path_attaches_as_atapi() {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-lide-test-cd-{}-{}.iso",
+            std::process::id(),
+            rand_suffix()
+        ));
+        std::fs::write(&path, vec![0u8; 2048]).unwrap();
+        let mut board = IdeZorro::new(LidePersonality::Ripple, Vec::new()).unwrap();
+        board.attach_drive(0, 0, crate::ata::AtapiDrive::open(&path).unwrap());
+
+        board.write(0x1000 + 6 * 0x200, 1, 0xE0); // drive/head: drive 0
+        board.write(0x1000 + 7 * 0x200, 1, 0xA1); // IDENTIFY PACKET DEVICE
+        assert_eq!(
+            board.read(0x1000 + 7 * 0x200, 1) as u8,
+            crate::ata::ST_DRDY | crate::ata::ST_DSC | crate::ata::ST_DRQ
+        );
+
+        board.write(0x1000 + 6 * 0x200, 1, 0xE0);
+        board.write(0x1000 + 7 * 0x200, 1, 0xEC); // IDENTIFY DEVICE
+        assert_eq!(
+            board.read(0x1000 + 7 * 0x200, 1) as u8,
+            crate::ata::ST_DRDY | crate::ata::ST_DSC | crate::ata::ST_ERR,
+            "IDENTIFY DEVICE must abort against an ATAPI slot"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

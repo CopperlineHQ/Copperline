@@ -349,8 +349,8 @@ slow = "512K"
 # unit0 = { path = "workbench.hdf", bootpri = 6 }   # table form, as for [ide]
 
 # A built-in Zorro II IDE board compatible with LIV2's actively-maintained
-# open-source lide.device (https://github.com/LIV2/lide.device). Hard disks
-# only (no ATAPI); drive entries take the same bare-path/table form as
+# open-source lide.device (https://github.com/LIV2/lide.device). Drive
+# entries take the same bare-path/table form as
 # [ide]/[scsi], in (channel, master/slave) order: drives[0]/[1] are channel
 # 0's master/slave, drives[2]/[3] are channel 1's (RIPPLE only -- RIDE and
 # AT-Bus 2008 have one channel, two drives).
@@ -418,6 +418,10 @@ video = "PAL"
 # bootpri = 6 boots the hard disk ahead of a floppy; -128 mounts the volume
 # without ever offering it for boot. Neither applies to an image carrying its
 # own RDB, which keeps the label and priorities recorded inside it.
+#
+# A path ending in .cue, .iso, or .chd attaches an ATAPI CD-ROM drive at
+# that slot instead of a hard disk (see [scsi], above, for the read-only
+# SCSI-2 command engine both share).
 # [ide]
 # master = "workbench.hdf"
 # slave = "data.hdf"

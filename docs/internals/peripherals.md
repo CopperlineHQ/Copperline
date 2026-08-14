@@ -70,6 +70,13 @@ WinUAE-verified model so device scans terminate correctly. PCMCIA reports
 an empty slot (the status/config registers exist so card.resource
 behaves); credit-card device emulation is a non-goal.
 
+Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.chd`
+image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
+handing 12-byte CDBs to the same bus-agnostic SCSI-2 CD-ROM command engine
+(`scsi/cd.rs`'s `ScsiCdRom`) the `[scsi]` host adapters use, so the read
+family, TOC/sub-channel queries, mode pages, and CD-DA playback all behave
+identically over ATAPI PACKET or a WD33C93 SCSI bus.
+
 ## A4000 motherboard IDE (`ide_a4000.rs`)
 
 The A4000 profile decodes the same ATA task file (`ata.rs`) at `$DD2020`
@@ -79,7 +86,8 @@ control block one A12 page up at `$DD3038`, and an interrupt status byte
 at `$DD3020` whose bit 7 is the drive's INTRQ. Unlike Gayle there is no
 interrupt-change latch: INTRQ feeds INT2 directly and the driver drops it
 by reading the status register. Drives come from the same `[ide]`
-section as Gayle machines.
+section as Gayle machines, ATAPI CD-ROMs included -- same `ata.rs` engine,
+same PACKET protocol.
 
 ## SCSI controllers (`a2091.rs`, `a4091.rs`, `sdmac.rs`, `scsi.rs`)
 
@@ -191,7 +199,8 @@ whole clone family). All three reuse the front-end-agnostic ATA core in
 `ata.rs` (the same one Gayle and the A4000 IDE port use) and the shared
 drive backend above; the new work is entirely in the board's own address
 decode, since none of the three personalities resemble Gayle's 4-byte task
-file.
+file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
+PACKET support, `.cue`/`.iso`/`.chd` CD-ROM images.
 
 **Register decode.** Each ATA channel occupies a 4K block of the board
 window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
