@@ -134,6 +134,9 @@ pub struct M68kMachine {
     /// ThisTask pointer at the last armed task-catch check, so only a
     /// reschedule (a change) can fire the catch. Debug-only state.
     ui_last_this_task: Option<u32>,
+    /// LoadSeg observer behind the armed loadseg catch. Debug-only
+    /// state, never serialized; reset whenever the catch is toggled.
+    ui_loadseg_tracker: crate::amigaos::LibraryTracker,
     /// Recent retired-instruction PCs, a debugger-only ring recorded
     /// while a debug window is open ("how did I get here").
     ui_pc_history: [u32; UI_PC_HISTORY_CAP],
@@ -399,6 +402,7 @@ impl M68kMachine {
             ui_breaks: crate::debugger::InteractiveBreaks::new(address_mask_for_model(cpu_model)),
             ui_stop: None,
             ui_last_this_task: None,
+            ui_loadseg_tracker: crate::amigaos::LibraryTracker::default(),
             ui_pc_history: [0; UI_PC_HISTORY_CAP],
             ui_pc_history_next: 0,
             ui_pc_history_len: 0,
@@ -1780,6 +1784,24 @@ impl M68kMachine {
             .set_task_catch(target.map(|t| t.to_ascii_uppercase()));
     }
 
+    /// Toggle the loadseg catch: stop when the guest OS loads a program
+    /// (a new seglist appearing in the scheduled process; `name` limits
+    /// it to that basename, case-insensitive). Returns true when now
+    /// set. Toggling resets the observer; it baselines on the running
+    /// task world at the first armed check, so programs already loaded
+    /// never fire.
+    pub fn ui_toggle_loadseg_catch(&mut self, name: Option<String>) -> bool {
+        self.ui_loadseg_tracker = crate::amigaos::LibraryTracker::default();
+        if self.ui_breaks.loadseg_catch.is_some() {
+            self.ui_breaks.set_loadseg_catch(None);
+            false
+        } else {
+            self.ui_breaks
+                .set_loadseg_catch(Some(crate::debugger::LoadSegCatch { name }));
+            true
+        }
+    }
+
     /// ExecBase->ThisTask via side-effect-free peeks, when plausible.
     fn ui_peek_this_task(&self) -> Option<u32> {
         let peek32 = |addr: u32| {
@@ -1828,6 +1850,41 @@ impl M68kMachine {
         name
     }
 
+    /// Fire the loadseg catch when the guest OS loads a matching
+    /// program. The tracker's own scheduled-task/module probe is the
+    /// cheap pre-filter -- a ThisTask-change cache would miss a
+    /// same-task cli_Module swap, which is exactly how the shell runs a
+    /// command -- so the per-instruction cost is a handful of
+    /// side-effect-free peeks, paid only while a catch is armed.
+    fn ui_check_loadseg_catch(&mut self) {
+        let Some(catch) = &self.ui_breaks.loadseg_catch else {
+            return;
+        };
+        let tracker = &mut self.ui_loadseg_tracker;
+        let event = crate::amigaos::with_bus_memory(&self.bus.bus, |os| {
+            if !tracker.armed() {
+                // Deferred baseline: snapshot the task world at the
+                // first armed check, so programs already running when
+                // the catch was set never fire it.
+                tracker.arm(os);
+            }
+            tracker.observe(os).map(|module| {
+                (
+                    module.name.clone(),
+                    module.segments.first().map_or(0, |seg| seg.start),
+                )
+            })
+        });
+        let Some((name, addr)) = event else { return };
+        let matched = catch
+            .name
+            .as_deref()
+            .is_none_or(|target| name.eq_ignore_ascii_case(target));
+        if matched {
+            self.ui_stop = Some(crate::debugger::DebugStop::LoadSeg { name, addr });
+        }
+    }
+
     /// Fire the task catch when exec reschedules to a matching task.
     fn ui_check_task_catch(&mut self) {
         if self.ui_breaks.task_catch.is_none() {
@@ -1864,6 +1921,7 @@ impl M68kMachine {
 
     pub fn ui_breaks_clear(&mut self) {
         self.ui_breaks.clear();
+        self.ui_loadseg_tracker = crate::amigaos::LibraryTracker::default();
         self.bus.bus.set_ui_reg_watches(&[]);
         self.bus.bus.set_ui_mem_watches(&[]);
         self.bus.bus.ui_clear_beam_traps();
@@ -1938,6 +1996,10 @@ impl M68kMachine {
             return;
         }
         self.ui_check_task_catch();
+        if self.ui_stop.is_some() {
+            return;
+        }
+        self.ui_check_loadseg_catch();
         if self.ui_stop.is_some() {
             return;
         }

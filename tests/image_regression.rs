@@ -807,6 +807,64 @@ fn hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host(
     result
 }
 
+/// Warp launch end to end, no local assets: `--run` stages its boot volume
+/// (Startup-Sequence only), the bundled AROS ROM boots it at priority 6,
+/// and the Startup-Sequence CDs to the program volume and runs the guest
+/// probe -- which writes FROM-GUEST next to the binary on the host. The
+/// staging is redirected via XDG_CONFIG_HOME so the invoking user's real
+/// config directory is never touched.
+#[test]
+#[ignore = "runs the emulator"]
+fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    let scratch = std::env::temp_dir().join(format!("copperline-runflag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let prog_dir = scratch.join("build");
+    let config_home = scratch.join("config");
+    std::fs::create_dir_all(&prog_dir)?;
+    std::fs::create_dir_all(&config_home)?;
+    std::fs::copy(
+        repo_root().join("guest/hostfs-test/mkfile"),
+        prog_dir.join("mkfile"),
+    )?;
+
+    let shot = screenshot_path("run-flag");
+    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
+        .env("RUST_LOG", "copperline=warn")
+        .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .arg("--noaudio")
+        .arg("--run")
+        .arg(prog_dir.join("mkfile"))
+        .arg("--screenshot-after")
+        .arg("50.0")
+        .arg(&shot)
+        .output()?;
+    if !output.status.success() {
+        panic!(
+            "copperline exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
+            output.status,
+            tail_text(&output.stdout),
+            tail_text(&output.stderr)
+        );
+    }
+
+    // The generated Startup-Sequence was staged under the redirected
+    // config home...
+    let script =
+        std::fs::read_to_string(config_home.join("copperline/run/boot/S/Startup-Sequence"))?;
+    assert!(script.contains("\"RunProg:mkfile\""), "script: {script}");
+    // ...and the probe ran: it wrote FROM-GUEST next to itself.
+    let written = std::fs::read(prog_dir.join("FROM-GUEST"))?;
+    assert_eq!(
+        written, b"hello from the guest\n",
+        "guest-written file content mismatch"
+    );
+    let _ = std::fs::remove_file(shot);
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
 /// The V34 boot path: Kickstart 1.3 starts the boot handler with its BCPL
 /// startup-packet conventions, historically the fragile leg of hostfs boot.
 #[test]

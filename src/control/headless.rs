@@ -988,6 +988,43 @@ mod tests {
         emu
     }
 
+    /// A machine whose ROM installs a seglist BPTR into a staged CLI
+    /// structure, mimicking the tail of AmigaDOS RunCommand() after
+    /// LoadSeg(); the CLI names "dh0:c/hello" and the seglist holds two
+    /// hunks at $14000/$15000. Mirrors gdbstub.rs's fixture.
+    fn loadseg_control_test_emulator() -> Emulator {
+        let mut emu = control_test_emulator();
+        let put_word = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        let put32 = |mem: &mut [u8], addr: usize, value: u32| {
+            mem[addr..addr + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        let rom = &mut emu.bus_mut().mem.rom;
+        put_word(rom, 0x10, 0x4E71); // NOP
+        put_word(rom, 0x12, 0x23FC); // MOVE.L #imm,(abs).L
+        put_word(rom, 0x14, 0x0000);
+        put_word(rom, 0x16, 0x5000); // seglist BPTR ($14000 >> 2)
+        put_word(rom, 0x18, 0x0001);
+        put_word(rom, 0x1A, 0x303C); // cli_Module at $13000 + $3C
+        put_word(rom, 0x1C, 0x60FE); // BRA.S *
+        let base = 0x0001_0000u32;
+        let chip = &mut emu.bus_mut().mem.chip_ram;
+        put32(chip, (base + 0x26) as usize, !base); // ChkBase
+        put32(chip, (base + 0x114) as usize, 0x0001_2000); // ThisTask
+        chip[0x1_2008] = 13; // ln_Type NT_PROCESS
+        put32(chip, 0x1_20AC, 0x0001_3000 >> 2); // pr_CLI
+        put32(chip, 0x1_3010, 0x0001_3800 >> 2); // cli_CommandName
+        chip[0x1_3800] = 11;
+        chip[0x1_3801..0x1_380C].copy_from_slice(b"dh0:c/hello");
+        put32(chip, 0x1_3FFC, 0x100); // hunk 1 size
+        put32(chip, 0x1_4000, 0x0001_5000 >> 2); // hunk 1 next
+        put32(chip, 0x1_4FFC, 0x40); // hunk 2 size
+        put32(chip, 0x1_5000, 0); // end of list
+        emu.machine.debug_write_memory(4, &base.to_be_bytes());
+        emu
+    }
+
     /// Run one connection against an existing machine and its
     /// machine-lifetime input state. This is the ownership hand-off the
     /// real accept loop performs after every disconnect.
@@ -1101,6 +1138,25 @@ mod tests {
             assert_eq!(stop["reason"], "breakpoint");
             assert_eq!(stop["pc"], 0xF8001A);
         });
+    }
+
+    #[test]
+    fn loadseg_catch_stops_before_the_program_runs() {
+        let (_, _, _, _) = run_machine_session(
+            loadseg_control_test_emulator(),
+            MachineInputState::default(),
+            |c| {
+                c.auth();
+                // Name filter matched case-insensitively against the CLI
+                // command basename ("dh0:c/hello" -> "hello").
+                c.result("break.add", json!({"kind": "loadseg", "name": "HELLO"}));
+                let stop = c.result("continue", json!({}));
+                assert_eq!(stop["reason"], "loadseg");
+                let detail = stop["detail"].as_str().unwrap();
+                assert!(detail.contains("hello"), "detail: {detail}");
+                assert!(detail.contains("014004"), "detail: {detail}");
+            },
+        );
     }
 
     #[test]

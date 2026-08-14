@@ -218,6 +218,18 @@ use the `monitor loadseg-break` flow with them. Programs already
 running when the list is first fetched are reported in it without a
 stop; `monitor loadseg-list` prints the same table.
 
+Launching with `--run` (the user guide's Warp launch chapter) arms the
+same stop automatically for the named program: the first `continue`
+runs until the guest loads it, prints `run target loaded: ...` with the
+first hunk's address, and stops there -- before the program's first
+instruction, with no monitor command needed. The stop is one-shot and
+scoped to that program; unrelated Startup-Sequence commands do not
+stop the session.
+
+```sh
+copperline --run build/hello --gdb :2345
+```
+
 ## Monitor Commands
 
 | Command | Effect |

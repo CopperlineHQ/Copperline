@@ -49,6 +49,9 @@ pub struct Config {
     pub listen: String,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
+    /// `--run` + `--gdb`: stop (once) the moment the guest OS loads a
+    /// program with this name, before its first instruction executes.
+    pub stop_on_load: Option<String>,
 }
 
 impl Config {
@@ -61,6 +64,7 @@ impl Config {
             reverse_interval_frames: crate::envcfg::var("COPPERLINE_DBG_RR_INTERVAL")
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .unwrap_or(crate::debugger::RR_DEFAULT_INTERVAL_FRAMES),
+            stop_on_load: None,
         }
     }
 }
@@ -100,7 +104,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
     emu.debug_ensure_time_travel_anchor()?;
 
-    serve(listener, emu)
+    serve(listener, emu, config.stop_on_load)
 }
 
 /// Accept GDB connections one at a time against the same machine. A
@@ -108,12 +112,15 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
 /// for the next client -- reattaching re-runs `qOffsets`, which is the
 /// documented way to pick up a program loaded mid-session -- while
 /// GDB's `kill` ends the server.
-fn serve(listener: TcpListener, mut emu: Emulator) -> Result<()> {
+fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().context("accepting GDB connection")?;
         log::info!("gdb: connection from {peer}");
         stream.set_nodelay(true).ok();
-        let mut session = Session::new(emu, stream);
+        // Each connection re-arms the stop-on-load target: a reconnecting
+        // client wants the same break-at-entry, and the fresh tracker
+        // absorbs an already-running program so nothing fires spuriously.
+        let mut session = Session::new(emu, stream, stop_on_load.clone());
         let end = session.run()?;
         session.clear_debug_hardware();
         emu = session.emu;
@@ -163,6 +170,9 @@ struct Session {
     lib_events_armed: bool,
     /// `monitor loadseg-break`: new LoadSegs cause a user-visible stop.
     loadseg_break: bool,
+    /// `--run` + `--gdb`: one-shot stop when a program with this name is
+    /// loaded (case-insensitive), before its first instruction.
+    run_stop: Option<String>,
     tracker: crate::amigaos::LibraryTracker,
     /// Library-list XML cached at offset 0 so multi-chunk reads are
     /// self-consistent.
@@ -170,7 +180,15 @@ struct Session {
 }
 
 impl Session {
-    fn new(emu: Emulator, stream: TcpStream) -> Self {
+    fn new(emu: Emulator, stream: TcpStream, run_stop: Option<String>) -> Self {
+        let mut tracker = crate::amigaos::LibraryTracker::default();
+        if run_stop.is_some() {
+            // Arm now so a program already running when the client attaches
+            // is absorbed rather than reported. Pre-boot this is a no-op
+            // (exec is not up yet) and arm() is idempotent, so the later
+            // qXfer arming path is unaffected.
+            crate::amigaos::with_bus_memory(emu.bus(), |os| tracker.arm(os));
+        }
         Self {
             emu,
             stream,
@@ -182,7 +200,8 @@ impl Session {
             cpu_idle: false,
             lib_events_armed: false,
             loadseg_break: false,
-            tracker: crate::amigaos::LibraryTracker::default(),
+            run_stop,
+            tracker,
             libraries_xml: String::new(),
         }
     }
@@ -558,7 +577,7 @@ impl Session {
                 return Ok(Some(StopReason::Watchpoint(watch.addr)));
             }
         }
-        if self.lib_events_armed || self.loadseg_break {
+        if self.lib_events_armed || self.loadseg_break || self.run_stop.is_some() {
             let tracker = &mut self.tracker;
             let event = crate::amigaos::with_bus_memory(self.emu.bus(), |os| {
                 tracker.observe(os).map(|module| {
@@ -567,6 +586,20 @@ impl Session {
                 })
             });
             if let Some((name, first_hunk)) = event {
+                if self
+                    .run_stop
+                    .as_deref()
+                    .is_some_and(|target| name.eq_ignore_ascii_case(target))
+                {
+                    // One-shot: the target rerunning later is ordinary
+                    // execution, not a fresh launch.
+                    self.run_stop = None;
+                    self.send_console(&format!(
+                        "run target loaded: {name} first hunk ${first_hunk:06X} \
+                         (monitor segments / add-symbol-file FILE 0x{first_hunk:X})\n"
+                    ))?;
+                    return Ok(Some(StopReason::LoadSeg));
+                }
                 if self.loadseg_break {
                     self.send_console(&format!(
                         "loadseg: {name} first hunk ${first_hunk:06X} \
@@ -574,7 +607,11 @@ impl Session {
                     ))?;
                     return Ok(Some(StopReason::LoadSeg));
                 }
-                return Ok(Some(StopReason::LibraryLoad));
+                if self.lib_events_armed {
+                    return Ok(Some(StopReason::LibraryLoad));
+                }
+                // Only the stop-on-load target is armed and this was some
+                // other program: keep running.
             }
         }
         Ok(None)
@@ -1350,11 +1387,22 @@ mod tests {
     /// The session runs on the test thread; client panics propagate
     /// through the join.
     fn run_session(emu: Emulator, client: impl FnOnce(GdbClient) + Send + 'static) {
+        run_session_with_target(emu, None, client);
+    }
+
+    /// [`run_session`] with a `--run` stop-on-load target armed.
+    fn run_session_with_target(
+        emu: Emulator,
+        stop_on_load: Option<&str>,
+        client: impl FnOnce(GdbClient) + Send + 'static,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let thread = std::thread::spawn(move || client(GdbClient::connect(addr)));
         let (stream, _) = listener.accept().unwrap();
-        Session::new(emu, stream).run().unwrap();
+        Session::new(emu, stream, stop_on_load.map(String::from))
+            .run()
+            .unwrap();
         thread.join().unwrap();
     }
 
@@ -1379,7 +1427,7 @@ mod tests {
             assert_eq!(second.request("qOffsets"), "TextSeg=14004;DataSeg=15004");
             second.send("k");
         });
-        serve(listener, emulator_with_loadseg_program()).unwrap();
+        serve(listener, emulator_with_loadseg_program(), None).unwrap();
         thread.join().unwrap();
     }
 
@@ -1481,5 +1529,46 @@ mod tests {
             assert!(console.concat().contains("hello:"), "loadseg-list output");
             assert_eq!(client.request("D"), "OK");
         });
+    }
+
+    #[test]
+    fn stop_on_load_target_stops_once_at_program_entry() {
+        run_session_with_target(
+            emulator_with_loadseg_program(),
+            Some("HELLO"), // matched case-insensitively against "hello"
+            |mut client| {
+                let (console, reply) = client.request_collect("c");
+                assert_eq!(reply, "T05thread:1;");
+                let text = console.concat();
+                assert!(text.contains("run target loaded: hello"), "console: {text}");
+                assert!(text.contains("$014004"), "console: {text}");
+                // The stop is one-shot: a later continue runs on (bounded
+                // here by a breakpoint on the program's spin loop).
+                assert_eq!(client.request("Z0,f8001c,2"), "OK");
+                let (_, reply) = client.request_collect("c");
+                assert_eq!(reply, "T05hwbreak:;thread:1;");
+                assert_eq!(client.request("D"), "OK");
+            },
+        );
+    }
+
+    #[test]
+    fn stop_on_load_ignores_other_programs() {
+        run_session_with_target(
+            emulator_with_loadseg_program(),
+            Some("otherprog"),
+            |mut client| {
+                // The "hello" load must not stop the session; bound the
+                // run with a breakpoint past the install instead.
+                assert_eq!(client.request("Z0,f8001c,2"), "OK");
+                let (console, reply) = client.request_collect("c");
+                assert_eq!(reply, "T05hwbreak:;thread:1;");
+                assert!(
+                    !console.concat().contains("run target loaded"),
+                    "unrelated load must not fire the stop-on-load target"
+                );
+                assert_eq!(client.request("D"), "OK");
+            },
+        );
     }
 }

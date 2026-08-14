@@ -1513,6 +1513,8 @@ none. Opening a real disk asks for permission the first time, and the host's
 volumes on it are unmounted while the machine has it. Attach read-only the
 first time: [](host-disks) covers the whole of it.
 
+(filesys-mounts)=
+
 ## `[[filesys]]` -- host directories as live volumes
 
 ```toml
@@ -1597,6 +1599,11 @@ header (an A1200 with 8 MiB fast RAM) unless `[machine]`, `rom`, or
 equivalent and overrides `game`. The whole story, including what the
 support archives are and how Kickstart identification works, is in
 [](whdload.md).
+
+The developer-oriented cousin is `--run PROG`: it stages the same kind
+of boot volume around an ordinary Amiga executable and warp-boots into
+it. It is CLI-only by design (no config section) and is covered in
+[](run.md).
 
 ## `[cd]` -- CDTV and CD32
 

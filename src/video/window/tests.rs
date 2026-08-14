@@ -3575,6 +3575,7 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         Vec::new(),
         None,
+        None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
         crate::config::Overscan::Full,

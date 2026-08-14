@@ -31,6 +31,7 @@ project:
         - file: guide/configuration.md
         - file: guide/ui.md
         - file: guide/whdload.md
+        - file: guide/run.md
         - file: guide/fluxbridge.md
         - file: guide/host-disks.md
         - file: guide/mt32.md
@@ -69,6 +70,7 @@ project:
         - guide/configuration.md
         - guide/ui.md
         - guide/whdload.md
+        - guide/run.md
         - guide/fluxbridge.md
         - guide/host-disks.md
         - guide/mt32.md
