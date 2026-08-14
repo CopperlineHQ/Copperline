@@ -1410,6 +1410,10 @@ pub enum HostDiskAttach {
     #[default]
     IdeMaster,
     IdeSlave,
+    /// Master on a `[lide]` Zorro II IDE board channel (0 or 1).
+    LideMaster(u8),
+    /// Slave on a `[lide]` Zorro II IDE board channel (0 or 1).
+    LideSlave(u8),
     /// A unit on whichever SCSI controller the machine has fitted.
     Scsi(u8),
 }
@@ -1423,6 +1427,8 @@ impl HostDiskAttach {
         match self {
             Self::IdeMaster => "ide-master".to_string(),
             Self::IdeSlave => "ide-slave".to_string(),
+            Self::LideMaster(ch) => format!("lide{ch}-master"),
+            Self::LideSlave(ch) => format!("lide{ch}-slave"),
             Self::Scsi(unit) => format!("scsi{unit}"),
         }
     }
@@ -1432,6 +1438,8 @@ impl HostDiskAttach {
         match self {
             Self::IdeMaster => "IDE Master".to_string(),
             Self::IdeSlave => "IDE Slave".to_string(),
+            Self::LideMaster(ch) => format!("Lide {ch} Master"),
+            Self::LideSlave(ch) => format!("Lide {ch} Slave"),
             Self::Scsi(unit) => format!("SCSI Unit {unit}"),
         }
     }
@@ -1448,6 +1456,7 @@ impl HostDiskAttach {
     pub fn requirement(self) -> &'static str {
         match self {
             Self::IdeMaster | Self::IdeSlave => "Attach to IDE requires an A600, A1200 or A4000",
+            Self::LideMaster(_) | Self::LideSlave(_) => "Attach to Lide requires a [lide] board",
             Self::Scsi(_) => "Attach to SCSI requires a SCSI controller",
         }
     }
@@ -1459,7 +1468,14 @@ impl HostDiskAttach {
 
     /// Every attachment point, in the order a picker cycles them.
     pub fn all() -> Vec<Self> {
-        let mut all = vec![Self::IdeMaster, Self::IdeSlave];
+        let mut all = vec![
+            Self::IdeMaster,
+            Self::IdeSlave,
+            Self::LideMaster(0),
+            Self::LideSlave(0),
+            Self::LideMaster(1),
+            Self::LideSlave(1),
+        ];
         all.extend((0..SCSI_UNITS).map(Self::Scsi));
         all
     }
@@ -4634,7 +4650,8 @@ impl TryFrom<RawConfig> for Config {
         // a disk is never accepted onto a bus that will not be built.
         let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
             || (defaults.sdmac && scsi.controller == ScsiController::A3000);
-        let host_disks = parse_host_disks(&raw.host_disk, &ide, &scsi, has_ide_port, has_scsi)?;
+        let host_disks =
+            parse_host_disks(&raw.host_disk, &ide, &scsi, &lide, has_ide_port, has_scsi)?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
@@ -5842,6 +5859,7 @@ fn parse_host_disks(
     raw: &[RawHostDisk],
     ide: &IdeConfig,
     scsi: &ScsiConfig,
+    lide: &LideConfig,
     has_ide_port: bool,
     has_scsi: bool,
 ) -> Result<Vec<HostDiskConfig>> {
@@ -5867,10 +5885,12 @@ fn parse_host_disks(
         // A disk attached where the machine has no port is not a disk at
         // all: nothing would ever look at it, so say so now rather than
         // opening it and leaving it unreachable.
-        let fitted = if attach.is_scsi() {
-            has_scsi
-        } else {
-            has_ide_port
+        let fitted = match attach {
+            HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave => has_ide_port,
+            HostDiskAttach::Scsi(_) => has_scsi,
+            HostDiskAttach::LideMaster(ch) | HostDiskAttach::LideSlave(ch) => {
+                lide.enabled() && usize::from(ch) < lide.board.channels()
+            }
         };
         if !fitted {
             bail!("host_disk[{index}]: {}", attach.requirement());
@@ -5908,6 +5928,8 @@ fn parse_host_disks(
                 .units
                 .get(usize::from(unit))
                 .is_some_and(Option::is_some),
+            HostDiskAttach::LideMaster(ch) => lide.drives[usize::from(ch) * 2].is_some(),
+            HostDiskAttach::LideSlave(ch) => lide.drives[usize::from(ch) * 2 + 1].is_some(),
         };
         if taken {
             bail!(
@@ -6289,7 +6311,7 @@ mod tests {
                 read_only: None,
             },
         ];
-        let error = parse_host_disks(&twice, &ide, &scsi, true, false)
+        let error = parse_host_disks(&twice, &ide, &scsi, &LideConfig::default(), true, false)
             .expect_err("the same disk on two slots is refused")
             .to_string();
         assert!(error.contains("already attached"), "{error}");
@@ -6310,9 +6332,16 @@ mod tests {
                 read_only: Some(true),
             },
         ];
-        let error = parse_host_disks(&same_identity, &ide, &scsi, true, false)
-            .expect_err("one fingerprint cannot become two guest drives")
-            .to_string();
+        let error = parse_host_disks(
+            &same_identity,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            true,
+            false,
+        )
+        .expect_err("one fingerprint cannot become two guest drives")
+        .to_string();
         assert!(error.contains("one disk cannot be two drives"), "{error}");
 
         // Two different disks on two slots is the ordinary case.
@@ -6332,13 +6361,151 @@ mod tests {
                 read_only: None,
             },
         ];
-        let parsed =
-            parse_host_disks(&separately, &ide, &scsi, true, false).expect("two disks, two slots");
+        let parsed = parse_host_disks(
+            &separately,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            true,
+            false,
+        )
+        .expect("two disks, two slots");
         assert_eq!(parsed.len(), 2);
         assert!(
             parsed.iter().all(|disk| !disk.writable),
             "an omitted physical-disk access mode is safely read-only"
         );
+    }
+
+    fn host_disk_entry(device: &str, attach: &str) -> RawHostDisk {
+        RawHostDisk {
+            device: device.to_string(),
+            fingerprint: None,
+            identity_confirmed: false,
+            attach: Some(attach.to_string()),
+            read_only: None,
+        }
+    }
+
+    /// A `[lide]` attachment point requires an actual `[lide]` board, and
+    /// then only a channel that board's personality has.
+    #[test]
+    fn lide_host_disk_attach_requires_a_fitted_channel() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+
+        // No [lide] board at all: neither channel is fitted.
+        let disks = [host_disk_entry("sdb", "lide0-master")];
+        let error = parse_host_disks(&disks, &ide, &scsi, &LideConfig::default(), true, false)
+            .expect_err("no [lide] board means no lide attachment point")
+            .to_string();
+        assert!(
+            error.contains("Attach to Lide requires a [lide] board"),
+            "{error}"
+        );
+
+        // RIDE: one channel. Channel 0 is fitted, channel 1 is not.
+        let ride = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ride,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        let ok = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &ride,
+            true,
+            false,
+        )
+        .expect("channel 0 is fitted on RIDE");
+        assert_eq!(ok.len(), 1);
+        let error = parse_host_disks(
+            &[host_disk_entry("sdb", "lide1-master")],
+            &ide,
+            &scsi,
+            &ride,
+            true,
+            false,
+        )
+        .expect_err("RIDE has only one channel")
+        .to_string();
+        assert!(
+            error.contains("Attach to Lide requires a [lide] board"),
+            "{error}"
+        );
+
+        // RIPPLE: two channels, both fitted.
+        let ripple = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        let parsed = parse_host_disks(
+            &[
+                host_disk_entry("sdb", "lide0-master"),
+                host_disk_entry("sdc", "lide1-slave"),
+            ],
+            &ide,
+            &scsi,
+            &ripple,
+            true,
+            false,
+        )
+        .expect("both channels are fitted on RIPPLE");
+        assert_eq!(parsed.len(), 2);
+    }
+
+    /// A lide slot already holding an image cannot also take a real disk --
+    /// one slot holds one drive.
+    #[test]
+    fn lide_host_disk_attach_rejects_a_slot_already_holding_an_image() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let ripple = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [
+                Some(DriveImage {
+                    path: PathBuf::from("ch0-master.hdf"),
+                    volume_name: None,
+                    boot_pri: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let error = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &ripple,
+            true,
+            false,
+        )
+        .expect_err("channel 0 master already has an image")
+        .to_string();
+        assert!(error.contains("already has an image"), "{error}");
+    }
+
+    /// Tokens for the new lide attachment points round-trip, and label
+    /// exactly as written.
+    #[test]
+    fn lide_host_disk_attach_tokens_round_trip() {
+        assert_eq!(
+            HostDiskAttach::from_token("lide1-slave"),
+            Some(HostDiskAttach::LideSlave(1))
+        );
+        assert_eq!(
+            HostDiskAttach::from_token("lide0-master"),
+            Some(HostDiskAttach::LideMaster(0))
+        );
+        assert_eq!(HostDiskAttach::LideMaster(0).label(), "Lide 0 Master");
+        assert_eq!(HostDiskAttach::LideSlave(1).label(), "Lide 1 Slave");
     }
 
     /// Where several disks went, said once. A single point reads as its own

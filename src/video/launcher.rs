@@ -4813,10 +4813,13 @@ impl MachineSetup {
 
     /// Whether the machine has the port an attachment point needs.
     fn attach_is_fitted(&self, attach: crate::config::HostDiskAttach) -> bool {
-        if attach.is_scsi() {
-            self.has_scsi_controller()
-        } else {
-            self.has_ide()
+        use crate::config::HostDiskAttach as A;
+        match attach {
+            A::IdeMaster | A::IdeSlave => self.has_ide(),
+            A::Scsi(_) => self.has_scsi_controller(),
+            A::LideMaster(ch) | A::LideSlave(ch) => self
+                .lide_board
+                .is_some_and(|b| usize::from(ch) < b.channels()),
         }
     }
 
@@ -5016,6 +5019,20 @@ impl MachineSetup {
                 self.ide_slave = None;
                 self.ide_slave_name = None;
             }
+            crate::config::HostDiskAttach::LideMaster(ch)
+            | crate::config::HostDiskAttach::LideSlave(ch) => {
+                let idx = usize::from(ch) * 2
+                    + usize::from(matches!(
+                        attach,
+                        crate::config::HostDiskAttach::LideSlave(_)
+                    ));
+                if let Some(slot) = self.lide_drives.get_mut(idx) {
+                    *slot = None;
+                }
+                if let Some(name) = self.lide_drive_names.get_mut(idx) {
+                    *name = None;
+                }
+            }
             crate::config::HostDiskAttach::Scsi(unit) => {
                 if let Some(slot) = self.scsi_units.get_mut(usize::from(unit)) {
                     *slot = None;
@@ -5106,6 +5123,10 @@ impl MachineSetup {
         match field {
             F::IdeMaster => Some(crate::config::HostDiskAttach::IdeMaster),
             F::IdeSlave => Some(crate::config::HostDiskAttach::IdeSlave),
+            F::LideDrive0 => Some(crate::config::HostDiskAttach::LideMaster(0)),
+            F::LideDrive1 => Some(crate::config::HostDiskAttach::LideSlave(0)),
+            F::LideDrive2 => Some(crate::config::HostDiskAttach::LideMaster(1)),
+            F::LideDrive3 => Some(crate::config::HostDiskAttach::LideSlave(1)),
             F::ScsiUnit0 => Some(crate::config::HostDiskAttach::Scsi(0)),
             F::ScsiUnit1 => Some(crate::config::HostDiskAttach::Scsi(1)),
             F::ScsiUnit2 => Some(crate::config::HostDiskAttach::Scsi(2)),
@@ -11366,6 +11387,48 @@ mod tests {
         assert_eq!(s.path(F::LideDrive1), None);
         assert_eq!(s.path(F::LideDrive2), None);
         assert!(s.to_raw().lide.drives.is_empty());
+    }
+
+    /// Lide host-disk attachment points are only fitted for a channel the
+    /// selected board personality actually has.
+    #[test]
+    fn lide_host_disk_attach_points_are_fitted_by_board_channel_count() {
+        use crate::config::HostDiskAttach;
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+
+        // No board at all: nothing is fitted.
+        assert!(!s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+
+        // RIDE: one channel.
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.cycle(F::LideBoard, true); // RIDE
+        assert!(s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+        assert!(!s.attach_is_fitted(HostDiskAttach::LideMaster(1)));
+
+        // RIPPLE: two channels.
+        s.cycle(F::LideBoard, true); // AT-Bus 2008
+        s.cycle(F::LideBoard, true); // None
+        s.cycle(F::LideBoard, true); // RIPPLE
+        assert!(s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+        assert!(s.attach_is_fitted(HostDiskAttach::LideSlave(1)));
+
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive0),
+            Some(HostDiskAttach::LideMaster(0))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive1),
+            Some(HostDiskAttach::LideSlave(0))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive2),
+            Some(HostDiskAttach::LideMaster(1))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive3),
+            Some(HostDiskAttach::LideSlave(1))
+        );
     }
 
     #[cfg(feature = "midi")]

@@ -66,9 +66,14 @@ Or in a configuration file:
 [[host_disk]]
 device = "sdb"                 # last name shown by --list-disks
 fingerprint = "v1-..."         # opaque identity written by the launcher
-attach = "ide-master"          # ide-master (default), ide-slave, or scsi0..scsi6
+attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
+                                # lide0-slave, lide1-master, lide1-slave, or scsi0..scsi6
 read_only = true               # the default; false explicitly allows writes
 ```
+
+`lide0-*` and `lide1-*` are the two channels of a `[lide]` Zorro II IDE board
+(RIPPLE, RIDE, or AT-Bus 2008). `lide1-*` only applies to the RIPPLE
+personality, which has two channels; RIDE and AT-Bus 2008 have only channel 0.
 
 `device` is the host's current enumeration name, exactly as `--list-disks`
 prints it: `sdb` on Linux, `disk4` on macOS, or `PhysicalDrive1` on Windows.

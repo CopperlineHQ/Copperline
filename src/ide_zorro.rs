@@ -269,6 +269,26 @@ impl IdeZorro {
         self.ata.iter_mut().find_map(AtaBus::first_atapi_mut)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
+        for bus in &self.ata {
+            bus.pending_host_disks(out);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn materialize_host_disks(&mut self) -> anyhow::Result<()> {
+        for bus in &mut self.ata {
+            bus.materialize_host_disks()?;
+        }
+        Ok(())
+    }
+
+    /// Let go of any real disk of the host's, and say how many went.
+    pub fn release_host_disks(&mut self) -> usize {
+        self.ata.iter_mut().map(AtaBus::release_host_disks).sum()
+    }
+
     /// System reset: clear both ATA channels and, on boards with a latch,
     /// re-cover the window with ROM (matching a real board's power-on state).
     pub fn reset(&mut self) {
@@ -629,6 +649,20 @@ mod tests {
         }
         assert_eq!(ctrl_index_reg(6), Some(IdeReg::AltStatusDevCtl));
         assert_eq!(ctrl_index_reg(0), None);
+    }
+
+    /// A board with only image-backed drives has no real host disk to let go
+    /// of, on any personality/channel count. Mirrors the depth of Gayle's own
+    /// host-disk wrapper coverage (none beyond this shape).
+    #[test]
+    fn release_host_disks_on_a_board_with_only_image_drives_returns_zero() {
+        let path = temp_image(64);
+        let mut board = IdeZorro::new(LidePersonality::Ripple, Vec::new()).unwrap();
+        board.attach_drive(0, 0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        assert_eq!(board.release_host_disks(), 0);
+
+        let mut empty = IdeZorro::new(LidePersonality::AtBus2008, Vec::new()).unwrap();
+        assert_eq!(empty.release_host_disks(), 0);
     }
 
     #[test]

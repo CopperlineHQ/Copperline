@@ -2111,11 +2111,13 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
 #[cfg(not(target_arch = "wasm32"))]
 fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata::IdeDrive)) {
     for disk in &cfg.host_disks {
-        // SCSI units are attached with their controller, further down.
+        // SCSI units and lide positions are attached elsewhere.
         let slot = match disk.attach {
             crate::config::HostDiskAttach::IdeMaster => 0,
             crate::config::HostDiskAttach::IdeSlave => 1,
-            crate::config::HostDiskAttach::Scsi(_) => continue,
+            crate::config::HostDiskAttach::LideMaster(_)
+            | crate::config::HostDiskAttach::LideSlave(_)
+            | crate::config::HostDiskAttach::Scsi(_) => continue,
         };
         match crate::ata::IdeDrive::open_host_disk(
             &disk.device,
@@ -2138,6 +2140,51 @@ fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata:
             }
             Err(error) => warn!(
                 "ide: {} asked for host disk {}, which is not available: {error}",
+                disk.attach.label(),
+                disk.device
+            ),
+        }
+    }
+}
+
+/// Attach every real host disk the config puts on a `[lide]` channel.
+///
+/// A configuration outlives the disk it names, so one that is not here is
+/// reported and skipped: the machine comes up with that position empty, as
+/// it would if the drive had been unplugged. Only a disk that is present is
+/// opened, so a missing one never raises the host's permission prompt.
+#[cfg(not(target_arch = "wasm32"))]
+fn attach_lide_host_disks(
+    cfg: &Config,
+    mut attach: impl FnMut(usize, usize, crate::ata::IdeDrive),
+) {
+    for disk in &cfg.host_disks {
+        let (channel, slot) = match disk.attach {
+            crate::config::HostDiskAttach::LideMaster(ch) => (usize::from(ch), 0),
+            crate::config::HostDiskAttach::LideSlave(ch) => (usize::from(ch), 1),
+            _ => continue,
+        };
+        match crate::ata::IdeDrive::open_host_disk(
+            &disk.device,
+            disk.fingerprint.as_deref(),
+            disk.identity_confirmed,
+            disk.writable,
+        ) {
+            Ok(drive) => {
+                attach(channel, slot, drive);
+                info!(
+                    "lide: {} is host disk {}{}",
+                    disk.attach.label(),
+                    disk.device,
+                    if disk.writable {
+                        " (WRITABLE)"
+                    } else {
+                        " (read-only)"
+                    }
+                );
+            }
+            Err(error) => warn!(
+                "lide: {} asked for host disk {}, which is not available: {error}",
                 disk.attach.label(),
                 disk.device
             ),
@@ -2443,6 +2490,13 @@ pub fn build_machine(
             )?;
             board.attach_drive(ch, unit, target);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        attach_lide_host_disks(cfg, |ch, unit, drive| {
+            if ch >= channels {
+                return; // config validation already rejects this; defensive only
+            }
+            board.attach_drive(ch, unit, drive);
+        });
         zorro.add_board(crate::zorro::BoardSpec::lide(cfg.lide.board, slot, has_rom))?;
         info!(
             "lide: {} controller on the Zorro chain (slot {slot}){}",

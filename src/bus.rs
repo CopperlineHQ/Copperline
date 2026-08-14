@@ -3940,6 +3940,7 @@ impl Bus {
             released += match device {
                 crate::zorro_device::BoardDevice::A2091(board) => board.release_host_disks(),
                 crate::zorro_device::BoardDevice::A4091(board) => board.release_host_disks(),
+                crate::zorro_device::BoardDevice::IdeZorro(board) => board.release_host_disks(),
                 _ => 0,
             };
         }
@@ -3960,42 +3961,80 @@ impl Bus {
     pub fn attach_host_disks(&mut self, cfg: &crate::config::Config) -> usize {
         let mut attached = 0;
         for disk in &cfg.host_disks {
-            let slot = match disk.attach {
-                crate::config::HostDiskAttach::IdeMaster => Some(0),
-                crate::config::HostDiskAttach::IdeSlave => Some(1),
-                crate::config::HostDiskAttach::Scsi(_) => None,
-            };
-            let opened = match slot {
-                Some(slot) if self.gayle.is_some() || self.ide_a4000.is_some() => {
-                    match crate::ata::IdeDrive::open_host_disk(
-                        &disk.device,
-                        disk.fingerprint.as_deref(),
-                        disk.identity_confirmed,
-                        disk.writable,
-                    ) {
-                        Ok(drive) => {
-                            if let Some(gayle) = self.gayle.as_mut() {
-                                gayle.attach_drive(slot, drive);
-                            } else if let Some(ide) = self.ide_a4000.as_mut() {
-                                ide.attach_drive(slot, drive);
+            // Ide/Lide/Scsi each open through their own driver and land on
+            // their own controller, so the dispatch is a straight match on
+            // the attachment point rather than routing everything through a
+            // shared slot number.
+            let opened = match disk.attach {
+                crate::config::HostDiskAttach::IdeMaster
+                | crate::config::HostDiskAttach::IdeSlave => {
+                    let slot = match disk.attach {
+                        crate::config::HostDiskAttach::IdeMaster => 0,
+                        _ => 1,
+                    };
+                    if self.gayle.is_none() && self.ide_a4000.is_none() {
+                        false
+                    } else {
+                        match crate::ata::IdeDrive::open_host_disk(
+                            &disk.device,
+                            disk.fingerprint.as_deref(),
+                            disk.identity_confirmed,
+                            disk.writable,
+                        ) {
+                            Ok(drive) => {
+                                if let Some(gayle) = self.gayle.as_mut() {
+                                    gayle.attach_drive(slot, drive);
+                                } else if let Some(ide) = self.ide_a4000.as_mut() {
+                                    ide.attach_drive(slot, drive);
+                                }
+                                true
                             }
-                            true
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "ide: {} asked for host disk {}, which is not available: {error}",
-                                disk.attach.label(),
-                                disk.device
-                            );
-                            false
+                            Err(error) => {
+                                log::warn!(
+                                    "ide: {} asked for host disk {}, which is not available: \
+                                     {error}",
+                                    disk.attach.label(),
+                                    disk.device
+                                );
+                                false
+                            }
                         }
                     }
                 }
-                Some(_) => false,
-                None => {
-                    let crate::config::HostDiskAttach::Scsi(unit) = disk.attach else {
-                        continue;
-                    };
+                crate::config::HostDiskAttach::LideMaster(ch)
+                | crate::config::HostDiskAttach::LideSlave(ch) => {
+                    let channel = usize::from(ch);
+                    let slot =
+                        matches!(disk.attach, crate::config::HostDiskAttach::LideSlave(_)) as usize;
+                    let board = self.devices.iter_mut().find_map(|device| match device {
+                        crate::zorro_device::BoardDevice::IdeZorro(board) => Some(board),
+                        _ => None,
+                    });
+                    match board {
+                        None => false,
+                        Some(board) => match crate::ata::IdeDrive::open_host_disk(
+                            &disk.device,
+                            disk.fingerprint.as_deref(),
+                            disk.identity_confirmed,
+                            disk.writable,
+                        ) {
+                            Ok(drive) => {
+                                board.attach_drive(channel, slot, drive);
+                                true
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "lide: {} asked for host disk {}, which is not available: \
+                                     {error}",
+                                    disk.attach.label(),
+                                    disk.device
+                                );
+                                false
+                            }
+                        },
+                    }
+                }
+                crate::config::HostDiskAttach::Scsi(unit) => {
                     let unit = usize::from(unit);
                     // Which controller is to have it, settled before the disk
                     // is opened: a drive is moved into one place, so there is
@@ -4293,6 +4332,9 @@ impl Bus {
                 crate::zorro_device::BoardDevice::A4091(board) => {
                     board.pending_host_disks(&mut pending);
                 }
+                crate::zorro_device::BoardDevice::IdeZorro(board) => {
+                    board.pending_host_disks(&mut pending);
+                }
                 _ => {}
             }
         }
@@ -4317,6 +4359,9 @@ impl Bus {
                         board.wd.materialize_host_disks()?;
                     }
                     crate::zorro_device::BoardDevice::A4091(board) => {
+                        board.materialize_host_disks()?;
+                    }
+                    crate::zorro_device::BoardDevice::IdeZorro(board) => {
                         board.materialize_host_disks()?;
                     }
                     _ => {}
