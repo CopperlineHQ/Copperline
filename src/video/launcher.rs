@@ -5865,10 +5865,10 @@ struct RomNote {
 #[derive(Debug, Clone)]
 pub struct LauncherState {
     pub setup: MachineSetup,
-    /// Whether the Save menu is showing. One flag rather than a dialog: it
-    /// is three buttons over the action bar, and every click either picks
-    /// one or puts it away.
-    pub save_menu: bool,
+    /// Whether the Save dialog is up: Save As, Set default, Reset default.
+    /// One flag, because it holds nothing -- three buttons and a close
+    /// gadget, and every click either picks one or puts it away.
+    pub save_dialog: bool,
     /// Whether the "are you sure" over Reset default is up. Only ever set
     /// when there is a default to delete -- with none saved there is
     /// nothing to be sure about, and a dialog asking anyway is a dialog
@@ -7118,7 +7118,7 @@ impl LauncherState {
         #[cfg(feature = "game-library")]
         setup.adopt_whdload_defaults();
         let mut state = Self {
-            save_menu: false,
+            save_dialog: false,
             confirm_reset: false,
             #[cfg(feature = "game-library")]
             library: LibraryPage::default(),

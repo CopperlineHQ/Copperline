@@ -505,8 +505,8 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
             // something should not be answerable by a stray click.
             return Some(UiControl::LauncherCancelReset);
         }
-        if state.save_menu {
-            return launcher_save_menu_hit(rect, pos).or(Some(UiControl::LauncherSave));
+        if state.save_dialog {
+            return launcher_save_dialog_hit(rect, pos).or(Some(UiControl::LauncherSave));
         }
     }
     if !modal && close_button_rect(rect).contains(pos) {
@@ -5764,50 +5764,99 @@ fn launcher_action_label(control: UiControl) -> &'static str {
         UiControl::LauncherSave => "Save...",
         UiControl::LauncherDefaults => "Defaults",
         UiControl::LauncherRun => "Run",
-        UiControl::LauncherSaveAs => "Save as...",
-        UiControl::LauncherSaveDefault => "Save default",
+        UiControl::LauncherSaveAs => "Save As",
+        UiControl::LauncherSaveDefault => "Set default",
         UiControl::LauncherResetDefault => "Reset default",
         _ => "",
     }
 }
 
-/// The Save menu's items, left to right from the button that opens them.
-/// Nearest first, so the pointer reaches the commonest of the three
-/// without crossing the other two -- and the one that deletes something
-/// ends up furthest away, next to Defaults.
-const SAVE_MENU: [UiControl; 3] = [
+/// What the Save dialog offers, left to right. The one that deletes
+/// something sits furthest from where the pointer comes in.
+const SAVE_ACTIONS: [UiControl; 3] = [
     UiControl::LauncherSaveAs,
     UiControl::LauncherSaveDefault,
     UiControl::LauncherResetDefault,
 ];
 
-/// Where each Save-menu item is drawn: in a row to the right of the Save
-/// button, along the action bar it belongs to.
-///
-/// Each is sized to its own label rather than to a shared width. There are
-/// 336 pixels between Save... and Defaults, and three buttons wide enough
-/// for "Reset default" do not fit in them -- a uniform row is 12 pixels
-/// too long. Sized individually the three come to 324 with their gaps,
-/// which leaves the last of them clear of Defaults by 8. The test below
-/// holds that, because a label growing by two characters is what would
-/// quietly push the row into the button beside it.
-fn launcher_save_menu_rects(rect: Rect) -> [(UiControl, Rect); 3] {
-    let save = launcher_action_rects(rect)[1].1;
-    // Six pixels of clearance either side of the text, which is what a
-    // label of exactly this many characters needs to survive the
-    // truncation `draw_text_button` applies.
-    let width = |control| launcher_action_label(control).chars().count() * font::GLYPH_W + 12;
-    let mut x = save.x + save.w + 4;
+/// One button's size, and the space around them. Every button is as wide
+/// as the longest label so the row is even, and the dialog is then sized
+/// to the row rather than the row fitted into a dialog.
+const SAVE_DIALOG_BUTTON: (usize, usize) = (116, 20);
+const SAVE_DIALOG_MARGIN: usize = 12;
+const SAVE_DIALOG_GAP: usize = 6;
+
+/// The Save dialog, centred on the panel like the confirm.
+fn launcher_save_dialog_rect(rect: Rect) -> Rect {
+    let (bw, bh) = SAVE_DIALOG_BUTTON;
+    let (w, h) = (
+        2 * SAVE_DIALOG_MARGIN + 3 * bw + 2 * SAVE_DIALOG_GAP,
+        TITLE_H + 2 * SAVE_DIALOG_MARGIN + bh,
+    );
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// The three buttons in it.
+fn launcher_save_dialog_rects(rect: Rect) -> [(UiControl, Rect); 3] {
+    let dialog = launcher_save_dialog_rect(rect);
+    let (w, h) = SAVE_DIALOG_BUTTON;
     std::array::from_fn(|i| {
         let item = Rect {
-            x,
-            y: save.y,
-            w: width(SAVE_MENU[i]),
-            h: LAUNCH_ACTION_H,
+            x: dialog.x + SAVE_DIALOG_MARGIN + i * (w + SAVE_DIALOG_GAP),
+            y: dialog.y + TITLE_H + SAVE_DIALOG_MARGIN,
+            w,
+            h,
         };
-        x = item.x + item.w + 4;
-        (SAVE_MENU[i], item)
+        (SAVE_ACTIONS[i], item)
     })
+}
+
+fn draw_launcher_save_dialog(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    if !state.save_dialog {
+        return;
+    }
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = launcher_save_dialog_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    // The close gadget in its title bar is how this is dismissed. There is
+    // no Cancel among the three because none of them answers a question --
+    // they are three things you might do, and not doing any of them is
+    // closing the window rather than choosing a fourth.
+    draw_title_bar(
+        frame,
+        dialog,
+        "Save configuration...",
+        hover == Some(UiControl::LauncherSave),
+        scale,
+    );
+    for (control, item) in launcher_save_dialog_rects(rect) {
+        draw_text_button(
+            frame,
+            item,
+            launcher_action_label(control),
+            true,
+            hover == Some(control),
+            scale,
+        );
+    }
 }
 
 /// Hit-test the configuration panel. Returns the control under `pos`, or `None`
@@ -6321,11 +6370,12 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     None
 }
 
-/// Hit-test the Save menu, which is over everything while it is up. A click
-/// anywhere else closes it without doing anything, which is what a menu is
-/// expected to do and keeps it from being a mode you can get stuck in.
-fn launcher_save_menu_hit(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
-    launcher_save_menu_rects(rect)
+/// Hit-test the Save dialog, which is over everything while it is up. A
+/// click anywhere else -- its close gadget, its own frame, the panel
+/// behind it -- puts it away without doing anything, so it can never be a
+/// mode you are stuck in.
+fn launcher_save_dialog_hit(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
+    launcher_save_dialog_rects(rect)
         .into_iter()
         .find_map(|(control, item)| item.contains(pos).then_some(control))
 }
@@ -8785,30 +8835,11 @@ fn draw_launcher(
             button_rect,
             launcher_action_label(control),
             true,
-            hover == Some(control) || (control == UiControl::LauncherSave && state.save_menu),
+            hover == Some(control),
             scale,
         );
     }
-    if state.save_menu {
-        // Dimmed rather than merely covered, the same as a dialog: while
-        // the menu is up it is the only thing being answered, and the page
-        // behind it should look like it is waiting.
-        fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
-        for (control, item) in launcher_save_menu_rects(rect) {
-            // No backing fill: the button face is opaque across the whole
-            // rect, and a second fill here would have to scale the rect
-            // itself, which is `draw_text_button`'s job and not this
-            // loop's.
-            draw_text_button(
-                frame,
-                item,
-                launcher_action_label(control),
-                true,
-                hover == Some(control),
-                scale,
-            );
-        }
-    }
+    draw_launcher_save_dialog(frame, rect, state, hover, scale);
     draw_launcher_confirm(frame, rect, state, hover, scale);
     // Over everything, because it is the only thing being answered while
     // it is up.
@@ -12603,7 +12634,7 @@ mod tests {
             let (bw, bh) = (texture_width(big), texture_height(big));
             let mut frame = vec![0u8; bw * bh * 4];
             let mut state = LauncherState::new(launcher::MachineSetup::default());
-            state.save_menu = true;
+            state.save_dialog = true;
             let ui = UiState {
                 menu_open: false,
                 menu_rows: Vec::new(),
@@ -12668,47 +12699,6 @@ mod tests {
             assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
         }
 
-        // The Save menu is a row along the action bar, and there is only
-        // just room for it: three buttons at a shared width do not fit
-        // between Save... and Defaults at all. Nothing about that is
-        // obvious from reading the code, so it is held here -- a label
-        // gaining two characters would otherwise push the last button
-        // silently under the one beside it.
-        {
-            let panel = Panel::Launcher(Box::new(LauncherState::new(
-                launcher::MachineSetup::default(),
-            )));
-            let rect = panel_rect(&panel);
-            let [load, save, defaults, run] = launcher_action_rects(rect);
-            let items = launcher_save_menu_rects(rect);
-            assert!(
-                items[0].1.x >= save.1.x + save.1.w,
-                "the menu should start clear of the button that opens it"
-            );
-            for (a, b) in items.iter().zip(items.iter().skip(1)) {
-                assert!(a.1.x + a.1.w <= b.1.x, "menu items overlap each other");
-                assert_eq!(a.1.y, b.1.y, "the menu should be one row");
-            }
-            let last = items[2].1;
-            assert!(
-                last.x + last.w <= defaults.1.x,
-                "the menu runs into Defaults: {} past {}",
-                last.x + last.w,
-                defaults.1.x
-            );
-            // Every label readable rather than truncated by the button it
-            // is drawn in, which is the reason the widths differ at all.
-            for (control, item) in items {
-                let fits = item.w.saturating_sub(8) / font::GLYPH_W;
-                let label = launcher_action_label(control);
-                assert!(
-                    label.chars().count() <= fits,
-                    "{label:?} does not fit its button"
-                );
-            }
-            let _ = (load, run);
-        }
-
         // The confirm over Reset default answers every click on the panel:
         // Yes only on its own button, and anything else -- Run included --
         // cancels. A question about deleting something must not be
@@ -12733,40 +12723,64 @@ mod tests {
             }
         }
 
-        // The Save menu: every item reachable, nothing under it reachable
-        // while it is up, and a click anywhere else putting it away rather
-        // than doing something.
+        // The Save dialog: every button reachable, nothing under it
+        // reachable while it is up, and anything that is not one of the
+        // three -- its close gadget included -- putting it away.
         {
             let mut state = LauncherState::new(launcher::MachineSetup::default());
-            state.save_menu = true;
+            state.save_dialog = true;
             let panel = Panel::Launcher(Box::new(state));
             let rect = panel_rect(&panel);
+            let dialog = launcher_save_dialog_rect(rect);
             let centre = |r: Rect| ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
-            for (control, item) in launcher_save_menu_rects(rect) {
+            let items = launcher_save_dialog_rects(rect);
+            for (control, item) in items {
                 assert_eq!(
                     panel_control_at(&panel, centre(item)),
                     Some(control),
-                    "{control:?} is not reachable from the Save menu"
+                    "{control:?} is not reachable in the Save dialog"
+                );
+                assert!(
+                    item.x >= dialog.x && item.x + item.w <= dialog.x + dialog.w,
+                    "{control:?} is outside the dialog"
+                );
+                // Readable rather than truncated by the button it sits in,
+                // which is what sizes the dialog in the first place.
+                let fits = item.w.saturating_sub(8) / font::GLYPH_W;
+                let label = launcher_action_label(control);
+                assert!(
+                    label.chars().count() <= fits,
+                    "{label:?} does not fit its button"
                 );
             }
-            // Run sits under the open menu and must not answer: a click
-            // meant for a menu item that lands slightly off should close the
-            // menu, never start a machine.
-            let run = launcher_action_rects(rect)[3].1;
-            assert_eq!(
-                panel_control_at(&panel, centre(run)),
-                Some(UiControl::LauncherSave),
-                "a click off the menu should only put it away"
-            );
-            // And with the menu down, its items are not there to be hit.
-            let mut closed = LauncherState::new(launcher::MachineSetup::default());
-            closed.save_menu = false;
-            let closed = Panel::Launcher(Box::new(closed));
-            for (control, item) in launcher_save_menu_rects(rect) {
+            for (a, b) in items.iter().zip(items.iter().skip(1)) {
+                assert!(a.1.x + a.1.w <= b.1.x, "the buttons overlap each other");
+                assert_eq!(a.1.y, b.1.y, "the buttons should be one row");
+            }
+            // The close gadget, and Run underneath it: neither does
+            // anything but put the dialog away.
+            let close = Rect {
+                x: dialog.x + dialog.w - 18,
+                y: dialog.y + 4,
+                w: 12,
+                h: 12,
+            };
+            for elsewhere in [close, launcher_action_rects(rect)[3].1, rect] {
+                assert_eq!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherSave),
+                    "a click off the three should only put the dialog away"
+                );
+            }
+            // And with it closed, its buttons are not there to be hit.
+            let closed = Panel::Launcher(Box::new(LauncherState::new(
+                launcher::MachineSetup::default(),
+            )));
+            for (control, item) in items {
                 assert_ne!(
                     panel_control_at(&closed, centre(item)),
                     Some(control),
-                    "{control:?} answers with the menu closed"
+                    "{control:?} answers with the dialog closed"
                 );
             }
         }

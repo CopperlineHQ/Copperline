@@ -6827,7 +6827,7 @@ impl App {
             UiControl::LauncherBrowse(field) => self.launcher_browse(field),
             UiControl::LauncherZorroAdd => self.launcher_add_zorro(),
             UiControl::LauncherLoad => self.launcher_load(),
-            UiControl::LauncherSave => self.launcher_toggle_save_menu(),
+            UiControl::LauncherSave => self.launcher_toggle_save_dialog(),
             UiControl::LauncherSaveAs => self.launcher_save(),
             UiControl::LauncherSaveDefault => self.launcher_save_default(),
             UiControl::LauncherResetDefault => self.launcher_reset_default(),
@@ -8950,9 +8950,9 @@ impl App {
 
     /// Open or put away the Save menu. Every other click while it is up
     /// arrives here too, which is how clicking off it closes it.
-    fn launcher_toggle_save_menu(&mut self) {
+    fn launcher_toggle_save_dialog(&mut self) {
         if let Some(state) = self.launcher_state_mut() {
-            state.save_menu = !state.save_menu;
+            state.save_dialog = !state.save_dialog;
         }
     }
 
@@ -8964,7 +8964,7 @@ impl App {
     /// previous answer to that same question rather than anything a person
     /// would have to go and recreate.
     fn launcher_save_default(&mut self) {
-        self.launcher_close_save_menu();
+        self.launcher_close_save_dialog();
         let Some(text) = self.launcher_toml_for_save() else {
             return;
         };
@@ -8991,7 +8991,7 @@ impl App {
     /// sure about, and a dialog that asks anyway is a dialog that teaches
     /// people to dismiss dialogs without reading them.
     fn launcher_reset_default(&mut self) {
-        self.launcher_close_save_menu();
+        self.launcher_close_save_dialog();
         let saved = crate::paths::default_config_file().is_some_and(|path| path.is_file());
         if !saved {
             self.set_launcher_status(StatusMessage::ok("No default saved"));
@@ -9035,9 +9035,9 @@ impl App {
         }
     }
 
-    fn launcher_close_save_menu(&mut self) {
+    fn launcher_close_save_dialog(&mut self) {
         if let Some(state) = self.launcher_state_mut() {
-            state.save_menu = false;
+            state.save_dialog = false;
         }
     }
 
@@ -9067,7 +9067,7 @@ impl App {
     }
 
     fn launcher_save(&mut self) {
-        self.launcher_close_save_menu();
+        self.launcher_close_save_dialog();
         let Some(toml) = self.launcher_toml_for_save() else {
             return;
         };
