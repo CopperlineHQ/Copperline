@@ -1,9 +1,15 @@
 # Configuration reference
 
-Copperline is configured by a TOML file: `./copperline.toml` by default, or
-any file passed with `--config`. Every field is optional; missing fields use
-the defaults documented here. `copperline.example.toml` in the repository
-root is a commented companion to this reference.
+Copperline is configured by a TOML file: the file passed with `--config`,
+else `./copperline.toml` if present, else the configuration saved with the
+configuration screen's **Save default** button (see [](ui.md)). Every field
+is optional; missing fields use the defaults documented here.
+`copperline.example.toml` in the repository root is a commented companion to
+this reference.
+
+`--factory` ignores the saved default and starts from Copperline's own
+settings; `--config` and `./copperline.toml` always win over it anyway. With
+no default saved, the flag changes nothing.
 
 The configuration is validated up front and the emulator refuses to start
 with a clear error message rather than guessing (unknown CPU or chipset
@@ -138,6 +144,48 @@ is fitted from the menu, and under each path row of the machine-configuration
 screen's ROM tab. The bundled AROS ROM reports itself as `bundled AROS`; any
 other image the table does not carry -- DiagROM, a ROM you built yourself --
 simply goes unnamed and boots as usual.
+
+## `[paths]` -- where files go
+
+```toml
+[paths]
+# base = "/somewhere/else"   # move the whole tree; the rest are under it
+# states = "states"          # save states, incl. the quick-save slots
+# screenshots = "screenshots"
+# recordings = "recordings"  # video captures and recorded input scripts
+# nvram = "nvram"            # battery-backed RAMs, incl. CD32 game saves
+# traces = "traces"          # debugger traces and waveform captures
+# configs = "configs"        # configurations saved from the launcher
+# roms = "roms"              # the rest set where an empty file dialog opens:
+# mt32_roms = "roms/mt32"    # MT-32 control and PCM ROMs
+# floppies = "floppies"
+# harddrives = "harddrives"
+# cds = "cds"
+```
+
+Where Copperline writes what it produces, and where its file dialogs open
+when the field they were launched from is empty. Every key is optional and
+an omitted key uses the default shown, so the section only needs to exist
+once something is moved. The launcher edits the same keys on its **A/V &
+Emu -> Paths** page.
+
+Each default is a folder of that name under the host-data directory --
+`~/.config/copperline` on macOS and Linux, `%APPDATA%\copperline` on
+Windows, or the executable's own folder in a [portable
+installation](ui.md#where-files-go). A relative path is taken from
+`base` (itself taken from the host-data directory when relative or unset),
+an absolute path is used as given. Output folders are created on first
+write; the dialog folders are never created, and a dialog only starts in
+one that exists.
+
+These name folders on the machine that runs the configuration, so a config
+copied to another machine may name folders that are not there. At startup
+each entry set here is checked and one that cannot be found is ignored with
+a warning in the log, falling back to its default -- the check waits no
+more than a moment, so a dead network mount delays starting rather than
+preventing it. Explicit output paths on the command line
+(`--screenshot-after`, `--save-state-after`, and so on) are used exactly as
+written and never consult this section.
 
 ## `[machine]` -- machine profiles
 
@@ -1617,8 +1665,9 @@ The disc mounts on the machine's CD controller: Akiko on CD32, the DMAC on
 CDTV. `insert_delay` inserts the disc some emulated seconds after power-on
 with the proper media-change notification; some CDTV discs only boot when
 inserted after the boot screen appears. CD32 NVRAM
-persists to `cd32-nvram.bin` next to the working directory unless
-overridden; without a path the EEPROM is session-only.
+persists to `cd32-nvram.bin` in the `[paths]` nvram folder unless
+overridden with `[cd] nvram`; a `cd32-nvram.bin` already in the working
+directory from an earlier Copperline keeps being used from there.
 
 ## `[[zorro]]` -- expansion boards
 

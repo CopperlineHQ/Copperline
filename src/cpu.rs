@@ -1607,6 +1607,7 @@ impl M68kMachine {
     /// cap-stop). Costs a disassembly and a buffered write per retired
     /// instruction while active.
     pub fn ui_trace_start(&mut self, path: std::path::PathBuf, cap: u64) -> std::io::Result<()> {
+        crate::paths::ensure_parent(&path)?;
         let file = std::fs::File::create(&path)?;
         self.ui_trace = Some(UiTrace {
             writer: std::io::BufWriter::new(file),

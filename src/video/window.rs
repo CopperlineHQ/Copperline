@@ -6330,7 +6330,7 @@ impl App {
                     // is, and the database may have been synced meanwhile.
                     #[cfg(feature = "game-library")]
                     if tab == crate::video::launcher::LauncherTab::WhdloadLibrary {
-                        let at = crate::paths::config_dir().unwrap_or_default();
+                        let at = crate::paths::library_root();
                         state.library.games = crate::gamelib::Library::default();
                         state.refresh_library(&at);
                     }
@@ -6433,7 +6433,7 @@ impl App {
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavourite(drawn) => {
-                let config = crate::paths::config_dir().unwrap_or_default();
+                let config = crate::paths::library_root();
                 if let Some(state) = self.launcher_state_mut() {
                     let at = state.library.scroll + drawn;
                     state.toggle_library_favourite(at);
@@ -6451,7 +6451,7 @@ impl App {
             }
             #[cfg(feature = "game-library")]
             UiControl::LauncherLibraryFavouriteRemove(drawn) => {
-                let config = crate::paths::config_dir().unwrap_or_default();
+                let config = crate::paths::library_root();
                 if let Some(state) = self.launcher_state_mut() {
                     let at = state.library.favourite_scroll + drawn;
                     state.remove_favourite(at);
@@ -6827,7 +6827,18 @@ impl App {
             UiControl::LauncherBrowse(field) => self.launcher_browse(field),
             UiControl::LauncherZorroAdd => self.launcher_add_zorro(),
             UiControl::LauncherLoad => self.launcher_load(),
-            UiControl::LauncherSave => self.launcher_save(),
+            UiControl::LauncherSave => self.launcher_toggle_save_dialog(),
+            UiControl::LauncherSaveAs => self.launcher_save(),
+            UiControl::LauncherSaveDefault => self.launcher_save_default(),
+            UiControl::LauncherResetDefault => self.launcher_reset_default(),
+            UiControl::LauncherConfirmReset => self.launcher_reset_default_confirmed(),
+            UiControl::LauncherCancelReset => self.launcher_close_confirm(),
+            // Whichever is up. Only one ever is: opening the confirm puts
+            // the Save dialog away rather than stacking on it.
+            UiControl::LauncherDialogClose => {
+                self.launcher_close_confirm();
+                self.launcher_close_save_dialog();
+            }
             UiControl::LauncherRun => self.launcher_run(),
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)
@@ -7991,7 +8002,7 @@ impl App {
         // Host FS mounts and the WHDLoad staging directories are a host
         // directory, not an image file, so they get a folder picker seeded
         // at the current directory itself.
-        if field.is_filesys_dir_field() || field.is_whdload_dir_field() {
+        if field.is_filesys_dir_field() || field.is_whdload_dir_field() || field.is_paths_field() {
             self.launcher_browse_folder(field);
             return;
         }
@@ -8001,10 +8012,16 @@ impl App {
             self.launcher_browse_save(field, "printer.txt");
             return;
         }
+        // Beside whatever the field already holds; failing that, the
+        // directory kept for that kind of media. A field with a value is
+        // the better answer of the two -- somebody editing df1 after df0
+        // wants the folder df0 came from, not a fixed one -- so the
+        // configured directory is only ever the fallback.
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| Self::media_start_dir(field));
         self.suspend_live_audio_for_host_io();
         let mut dialog = rfd::FileDialog::new().set_title("Select file");
         dialog = match field {
@@ -8072,12 +8089,55 @@ impl App {
         self.finish_host_io_pause();
     }
 
+    /// The directory a dialog opens at when its field is empty, by what the
+    /// field holds. The same grouping the filters use just below, so a field
+    /// cannot be offered ROM filters and opened in the floppy folder.
+    ///
+    /// `None` throughout when the directory has not been made -- `paths` only
+    /// answers for one that exists -- which is what keeps this opt-in.
+    fn media_start_dir(field: LauncherField) -> Option<std::path::PathBuf> {
+        match field {
+            LauncherField::Mt32ControlRom | LauncherField::Mt32PcmRom => {
+                crate::paths::mt32_roms_dir().or_else(crate::paths::roms_dir)
+            }
+            LauncherField::Rom
+            | LauncherField::ExtendedRom
+            | LauncherField::ScsiRom
+            | LauncherField::ScsiRomOdd => crate::paths::roms_dir(),
+            LauncherField::Df0Image
+            | LauncherField::Df1Image
+            | LauncherField::Df2Image
+            | LauncherField::Df3Image => crate::paths::floppies_dir(),
+            LauncherField::CdImage => crate::paths::cds_dir(),
+            // A SCSI unit takes either, and the hard-disk folder is the more
+            // likely of the two; a CD there is the exception.
+            LauncherField::ScsiUnit0
+            | LauncherField::ScsiUnit1
+            | LauncherField::ScsiUnit2
+            | LauncherField::ScsiUnit3
+            | LauncherField::ScsiUnit4
+            | LauncherField::ScsiUnit5
+            | LauncherField::ScsiUnit6 => crate::paths::harddrives_dir(),
+            // The WHDLoad game folder and the NVRAM image have homes of their
+            // own that the launcher already knows; nothing to add here.
+            LauncherField::WhdloadGame | LauncherField::Cd32Nvram => None,
+            _ => crate::paths::harddrives_dir(),
+        }
+    }
+
     /// Folder picker for a Host FS mount's directory field.
     fn launcher_browse_folder(&mut self, field: LauncherField) {
+        // A Paths row opens where it points now, resolved: its stored value
+        // may be relative to the base, which is not somewhere a dialog can
+        // be pointed at.
         let start_dir = self
             .launcher_state()
-            .and_then(|s| s.setup.path(field))
-            .map(|p| p.to_path_buf());
+            .and_then(|s| {
+                s.setup
+                    .paths_resolved(field)
+                    .or_else(|| s.setup.path(field).map(std::path::Path::to_path_buf))
+            })
+            .or_else(crate::paths::harddrives_dir);
         self.suspend_live_audio_for_host_io();
         let mut dialog = rfd::FileDialog::new().set_title("Select host directory");
         if let Some(dir) = start_dir {
@@ -8261,7 +8321,7 @@ impl App {
         else {
             return;
         };
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state_mut() else {
             return;
         };
@@ -8308,7 +8368,7 @@ impl App {
     /// Commit the editor and write the store.
     #[cfg(feature = "game-library")]
     fn meta_save(&mut self) {
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         if let Some(state) = self.launcher_state_mut() {
             state.commit_meta_editor();
             state.save_library_database(&config);
@@ -8408,7 +8468,7 @@ impl App {
     /// the last scan resolved, and asks the service nothing.
     #[cfg(feature = "game-library")]
     fn library_refresh(&mut self) {
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state_mut() else {
             return;
         };
@@ -8430,7 +8490,7 @@ impl App {
         if self.library_scan.is_some() {
             return;
         }
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let Some(state) = self.launcher_state() else {
             return;
         };
@@ -8534,7 +8594,7 @@ impl App {
         if said.is_empty() {
             return;
         }
-        let config = crate::paths::config_dir().unwrap_or_default();
+        let config = crate::paths::library_root();
         let mut status = None;
         for progress in said {
             let text = progress.message();
@@ -8894,35 +8954,153 @@ impl App {
         self.finish_host_io_pause();
     }
 
-    fn launcher_save(&mut self) {
-        // Capture a name/option typed but not yet committed with Enter. A
-        // value the commit refuses keeps the focus and blocks the save:
-        // writing the file anyway would silently save the previous value
-        // while the box shows the rejected one.
+    /// Open or put away the Save menu. Every other click while it is up
+    /// arrives here too, which is how clicking off it closes it.
+    fn launcher_toggle_save_dialog(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            state.save_dialog = !state.save_dialog;
+        }
+    }
+
+    /// Save the configuration as the one Copperline starts with.
+    ///
+    /// The same TOML as Save As, in a fixed place. It replaces whatever
+    /// was there without asking: pressing Save default is a statement about
+    /// what the default should be now, and the thing it overwrites is a
+    /// previous answer to that same question rather than anything a person
+    /// would have to go and recreate.
+    fn launcher_save_default(&mut self) {
+        self.launcher_close_save_dialog();
+        let Some(text) = self.launcher_toml_for_save() else {
+            return;
+        };
+        let Some(path) = crate::paths::default_config_file() else {
+            // No host-data directory at all (no HOME, XDG_CONFIG_HOME or
+            // APPDATA), so there is nowhere the next launch would look.
+            warn!("no host data directory to save a default configuration in");
+            self.set_launcher_status(StatusMessage::err(
+                "Failed to set the default config (see log)",
+            ));
+            return;
+        };
+        let written = crate::paths::ensure_parent(&path).and_then(|()| std::fs::write(&path, text));
+        match written {
+            Ok(()) => {
+                info!("saved the default configuration to {}", path.display());
+                self.set_launcher_status(StatusMessage::ok(
+                    "Saved the running config as the default",
+                ));
+            }
+            Err(e) => {
+                warn!("default save failed ({}): {e}", path.display());
+                self.set_launcher_status(StatusMessage::err(
+                    "Failed to set the default config (see log)",
+                ));
+            }
+        }
+    }
+
+    /// Ask before deleting the saved default.
+    ///
+    /// Only when there is one. With no default saved there is nothing to be
+    /// sure about, and a dialog that asks anyway is a dialog that teaches
+    /// people to dismiss dialogs without reading them.
+    fn launcher_reset_default(&mut self) {
+        self.launcher_close_save_dialog();
+        let saved = crate::paths::default_config_file().is_some_and(|path| path.is_file());
+        if !saved {
+            self.set_launcher_status(StatusMessage::ok("No default config currently set"));
+            return;
+        }
+        if let Some(state) = self.launcher_state_mut() {
+            state.confirm_reset = true;
+        }
+    }
+
+    fn launcher_close_confirm(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            state.confirm_reset = false;
+        }
+    }
+
+    /// Delete the saved default, so Copperline starts from factory settings
+    /// again.
+    ///
+    /// Nothing else goes with it. What it removes is one file that was
+    /// written by one button press, and everything the emulator has
+    /// produced -- states, screenshots, NVRAM -- is untouched.
+    fn launcher_reset_default_confirmed(&mut self) {
+        self.launcher_close_confirm();
+        let Some(path) = crate::paths::default_config_file() else {
+            return;
+        };
+        if !path.is_file() {
+            self.set_launcher_status(StatusMessage::ok("No default config currently set"));
+            return;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                info!("removed the default configuration {}", path.display());
+                self.set_launcher_status(StatusMessage::ok(
+                    "Reset the current default config to factory settings",
+                ));
+            }
+            Err(e) => {
+                warn!("default reset failed ({}): {e}", path.display());
+                self.set_launcher_status(StatusMessage::err(
+                    "Unable to reset the default config (see log)",
+                ));
+            }
+        }
+    }
+
+    fn launcher_close_save_dialog(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            state.save_dialog = false;
+        }
+    }
+
+    /// The configuration as TOML, with a value typed but not committed
+    /// folded in first. A value the commit refuses keeps the focus and
+    /// blocks the save: writing the file anyway would save the previous
+    /// value while the box still shows the rejected one.
+    fn launcher_toml_for_save(&mut self) -> Option<String> {
         if let Some(state) = self.launcher_state_mut() {
             state.edit_commit();
             if state.editing().is_some() {
                 self.request_redraw();
-                return;
+                return None;
             }
         }
-        let toml = match self.launcher_state().map(|s| s.setup.to_toml()) {
-            Some(Ok(text)) => text,
+        match self.launcher_state().map(|s| s.setup.to_toml()) {
+            Some(Ok(text)) => Some(text),
             Some(Err(e)) => {
                 self.set_launcher_status(StatusMessage::err(format!(
                     "Save failed: {}",
                     short_status_error(&e)
                 )));
-                return;
+                None
             }
-            None => return,
+            None => None,
+        }
+    }
+
+    fn launcher_save(&mut self) {
+        self.launcher_close_save_dialog();
+        let Some(toml) = self.launcher_toml_for_save() else {
+            return;
         };
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .set_title("Save configuration")
             .add_filter("Copperline config", &["toml"])
-            .set_file_name("machine.toml")
-            .save_file();
+            .set_file_name("machine.toml");
+        // Where configurations are kept, which is a better first answer than
+        // wherever the last unrelated dialog happened to end up.
+        if let Some(dir) = crate::paths::configs_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        let picked = dialog.save_file();
         if let Some(path) = picked {
             match std::fs::write(&path, toml) {
                 Ok(()) => self.set_launcher_status(StatusMessage::ok(format!(
@@ -12418,7 +12596,9 @@ impl App {
                 let events = rec.events_recorded();
                 let script = rec.finish();
                 let path = crate::inputrec::auto_filename();
-                match std::fs::write(&path, script) {
+                match crate::paths::ensure_parent(&path)
+                    .and_then(|()| std::fs::write(&path, script))
+                {
                     Ok(()) => {
                         info!(
                             "input recording saved: {} ({events} events)",

@@ -12,10 +12,10 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 |---|---|---|
 | `Cmd+Q` | `Alt+Q` | Quit |
 | `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
-| `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the working directory; the on-screen confirmation overlay is not part of the saved image) |
+| `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
-| `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the working directory) |
+| `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go)) |
 | `Cmd+Shift+L` | `Alt+Shift+L` | Load a save state from a file dialog |
 | `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
 | `Cmd+Shift+1`..`Cmd+Shift+0` | `Alt+Shift+1`..`Alt+Shift+0` | Quick-load from that slot |
@@ -557,9 +557,17 @@ The layout is:
   style,
   perf overlay, menu size, overscan, pixel aspect, scaling, deinterlace,
   screen tint, phosphor, CRT shader and shader strength),
-  and **Emulation**
-  (power-on, realtime priority, pacing, warp speed) -- opening on Audio, and
-  switched freely between the three.
+  **Emulation**
+  (power-on, realtime priority, pacing, warp speed),
+  and **Paths** -- opening on Audio, and switched freely between the four.
+  The Paths page edits the `[paths]` section of the configuration (see
+  [](configuration.md)): the base folder on top, then one row per folder.
+  A row reads `(default)` until a folder is chosen for it; **Browse** picks
+  one and a **Reset** button then appears to put the row back to inheriting.
+  The base folder always shows its full path, and swaps Browse for Reset
+  once set. Changes take effect immediately -- a screenshot taken after
+  moving the row lands where the row now says -- and are written to the
+  configuration by **Save As** or **Save default** like everything else.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
   a file path through a native file dialog. On the *Storage* tab, once an IDE
@@ -589,14 +597,21 @@ The layout is:
   keeps it, and one that just names a device with no `bootpri` stays at 0. See
   [](configuration.md) for how the priority ranks against Kickstart's DF0: boot
   node at 5.
-- **Action bar** (bottom). **Load...** and **Save...** read and write a `.toml`
-  config
-  through a file dialog (Save writes a minimal file, only the settings that
-  differ from the chosen profile's defaults, so it reads like the example
-  configs). **Defaults** resets to the selected profile. **Run** validates the
-  configuration and boots it; if anything is wrong -- an unusable RAM size, a
-  missing disk image, a ROM file that cannot be read, an option the chosen
-  machine cannot use -- the reason is
+- **Action bar** (bottom). **Load...** reads a `.toml` config through a file
+  dialog. **Save...** opens a small dialog of three buttons, each described
+  in the dialog as the pointer moves over it: **Save As** writes a `.toml`
+  through a file dialog (a minimal file, only the settings that differ from
+  the chosen profile's defaults, so it reads like the example configs);
+  **Save default** saves the running configuration as the one Copperline
+  starts with: this screen opens showing it, and a run with no `--config`
+  and no `./copperline.toml` boots it (see [](configuration.md));
+  **Reset default** deletes that saved default after
+  an "Are you sure?", returning Copperline to factory settings. The close
+  gadget, or a click anywhere else, puts the dialog away.
+  **Defaults** resets the screen to the selected profile. **Run** validates
+  the configuration and boots it; if anything is wrong -- an unusable RAM
+  size, a missing disk image, a ROM file that cannot be read, an option the
+  chosen machine cannot use -- the reason is
   shown on the status line and you stay on the screen to fix it.
 
 ```{figure} ../images/ui-preview-launcher-boot-priority.png
@@ -708,7 +723,7 @@ names` needs a filesystem no Kickstart provides.
 
 `Cmd+R` on macOS or `Alt+R` on Linux/Windows (or the menu's "Record Video")
 starts capturing the emulated display and sound to
-`copperline-video-<YYYYMMDDHHmmSS>.avi` in the working directory; pressing it again
+`copperline-video-<YYYYMMDDHHmmSS>.avi` in the [recordings folder](#where-files-go); pressing it again
 stops and finalizes the file. A red REC
 badge sits in the display's top-right corner while a recording runs --
 like the screenshot overlay, the badge, status bar, and menus are never
@@ -739,7 +754,7 @@ machine by the same path), mouse buttons and motion, joystick / CD32-pad
 controls, analogue pot positions, and floppy inserts,
 on whichever port carries each device -- each stamped
 with its emulated time. Pressing it again stops the recording and writes
-`copperline-input-<YYYYMMDDHHmmSS>.clscript` in the working directory: a plain
+`copperline-input-<YYYYMMDDHHmmSS>.clscript` in the [recordings folder](#where-files-go): a plain
 text file of scripted-input directives that
 `copperline --script FILE` replays exactly, because the core is
 deterministic and the events re-fire at the same emulated timestamps.
@@ -756,7 +771,7 @@ headless `--record-input` variant are described in
 
 `Cmd+Shift+S` on macOS or `Alt+Shift+S` on Linux/Windows (or the menu's
 "Save State") writes a snapshot of the whole emulated machine to
-`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the working directory: CPU,
+`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go): CPU,
 chip/slow/fast RAM, ROM, the full chipset and CIA state, floppy images
 (including unsaved in-memory changes), expansion boards, and CD/NVRAM
 state. `Cmd+Shift+L` / `Alt+Shift+L` (or "Load State...") restores one; the
@@ -798,26 +813,10 @@ as empty.
 A quick save overwrites its slot without asking -- that is the point of it --
 and loading a slot that has never been written reports "Slot N is empty"
 rather than failing. Slots are ordinary `.clstate` files, identical in format
-to a named save, kept per user rather than per working directory so they are
-reachable however Copperline was launched:
-
-| Host | Location |
-|---|---|
-| Linux/BSD | `$XDG_CONFIG_HOME/copperline/states/`, else `~/.config/copperline/states/` |
-| macOS | `~/.config/copperline/states/` |
-| Windows | `%APPDATA%\copperline\states\` |
-
-For a self-contained installation, create an empty file named `portable.txt`
-beside the Copperline executable (or beside the downloaded `.AppImage`) and
-restart Copperline. That folder then becomes the host-data directory, so
-quick-save slots live in its `states/` subdirectory. Gamepad calibration,
-keyboard mappings, the default WHDLoad library and other per-user host data are
-stored in that folder too. Delete `portable.txt` to return to the platform
-location above; Copperline does not move existing files in either direction.
-
-Because they are per user and not per machine, a slot may hold a state from
-a different Amiga than the one running. That is safe: as above, the state
-carries its own machine and the load reconfigures to match it and says so.
+to a named save, kept in the states folder below. And because they are per
+user and not per machine, a slot may hold a state from a different Amiga
+than the one running. That is safe: as above, the state carries its own
+machine and the load reconfigures to match it and says so.
 
 The headless flags `--save-state-after SECS PATH` and `--load-state PATH`
 script the same feature for [debugging workflows](headless.md): snapshot a
@@ -825,6 +824,42 @@ long-running program just before the scene under investigation once, then
 iterate from the state in seconds instead of re-emulating minutes. The
 file format and what exactly is (and is not) captured are specified in
 [the internals chapter](../internals/savestate.md).
+
+### Where files go
+
+Everything Copperline produces is kept per user rather than per working
+directory, so it is reachable however Copperline was launched. The host-data
+directory is:
+
+| Host | Location |
+|---|---|
+| Linux/BSD | `$XDG_CONFIG_HOME/copperline/`, else `~/.config/copperline/` |
+| macOS | `~/.config/copperline/` |
+| Windows | `%APPDATA%\copperline\` |
+
+with a folder inside it for each kind of file: `screenshots/`, `states/`
+(named saves and the quick-save slots), `recordings/` (video captures and
+recorded input scripts), `nvram/` (battery-backed clock RAM and CD32 game
+saves), `traces/` (debugger traces and waveform captures), and `configs/`
+(configurations saved from the configuration screen). Each folder is created
+on first use, and each can be moved with the `[paths]` section of the
+configuration or the configuration screen's **A/V & Emu -> Paths** page --
+see [](configuration.md). Headless flags that take an explicit path
+(`--screenshot-after` and friends) write exactly where they are told and
+ignore all of this.
+
+A `battmem.nvram` or `cd32-nvram.bin` left in the working directory by an
+earlier Copperline keeps being used from there -- they hold real game saves,
+so nothing is moved or abandoned behind your back.
+
+For a self-contained installation, create an empty file named `portable.txt`
+beside the Copperline executable (or beside the downloaded `.AppImage`) and
+restart Copperline. That folder then becomes the host-data directory, and all
+of the folders above -- plus gamepad calibration, keyboard mappings, the
+default WHDLoad library and other per-user host data -- live inside it, so
+the whole installation moves as one folder. Delete `portable.txt` to return
+to the platform location above; Copperline does not move existing files in
+either direction.
 
 ## Controller ports
 

@@ -755,13 +755,7 @@ impl App {
                     Some("START") => {
                         let path = match args.get(1) {
                             Some(path) => std::path::PathBuf::from(path),
-                            None => {
-                                let stamp = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
-                                std::path::PathBuf::from(format!("copperline-trace-{stamp}.txt"))
-                            }
+                            None => crate::paths::trace_file(),
                         };
                         match self
                             .emu

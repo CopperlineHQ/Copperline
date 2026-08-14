@@ -51,7 +51,8 @@ defaults) and click Arm.
 
 Everything is optional: the default trigger is `now`, the default duration
 one video frame, the default signal set `all`, and an omitted path becomes
-`copperline-wave-<timestamp>.vcd` in the working directory.
+`copperline-wave-<timestamp>.vcd` in the traces folder (see the guide's
+[Where files go](../guide/ui.md#where-files-go)).
 
 ## Triggers
 

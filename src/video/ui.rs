@@ -491,6 +491,33 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         matches!(panel, Panel::Launcher(state) if state.login.is_some() || state.meta.is_some());
     #[cfg(not(feature = "game-library"))]
     let modal = false;
+    // The confirm, then the Save menu: each answers before anything under
+    // it, including the close gadget, because while one is up it is the
+    // only thing being asked.
+    if let Panel::Launcher(state) = panel {
+        if state.confirm_reset {
+            let (yes, _) = launcher_confirm_button_rects(rect);
+            if yes.contains(pos) {
+                return Some(UiControl::LauncherConfirmReset);
+            }
+            if close_button_rect(launcher_confirm_rect(rect)).contains(pos) {
+                return Some(UiControl::LauncherDialogClose);
+            }
+            // Anywhere else, the dialog's own frame included, is the
+            // answer that changes nothing. A question about deleting
+            // something should not be answerable by a stray click.
+            return Some(UiControl::LauncherCancelReset);
+        }
+        if state.save_dialog {
+            if let Some(control) = launcher_save_dialog_hit(rect, pos) {
+                return Some(control);
+            }
+            if close_button_rect(launcher_save_dialog_rect(rect)).contains(pos) {
+                return Some(UiControl::LauncherDialogClose);
+            }
+            return Some(UiControl::LauncherSave);
+        }
+    }
     if !modal && close_button_rect(rect).contains(pos) {
         return Some(UiControl::PanelClose);
     }
@@ -897,8 +924,26 @@ pub enum UiControl {
     },
     /// Configuration screen: load a .toml configuration.
     LauncherLoad,
-    /// Configuration screen: save the configuration to a .toml file.
+    /// Configuration screen: open the Save menu.
     LauncherSave,
+    /// Save menu: save the configuration to a .toml file of its own.
+    LauncherSaveAs,
+    /// Save menu: save it as the configuration Copperline starts with.
+    LauncherSaveDefault,
+    /// Save menu: delete the saved default, so Copperline starts from
+    /// factory settings again.
+    LauncherResetDefault,
+    /// The "are you sure" over Reset default: go ahead.
+    LauncherConfirmReset,
+    /// The "are you sure" over Reset default: leave it alone.
+    LauncherCancelReset,
+    /// The close gadget on whichever launcher dialog is up.
+    ///
+    /// Its own control rather than sharing the one a click anywhere else
+    /// returns. Both mean "put this away", but only one of them is the
+    /// gadget, and the gadget lights up when the pointer is on it -- share
+    /// the control and it lights up for every hover in the dialog.
+    LauncherDialogClose,
     /// Configuration screen: reset to the selected profile's defaults.
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
@@ -5450,6 +5495,40 @@ fn launcher_bridge_configure_rect(rect: Rect, row_y: usize) -> Rect {
 
 /// (Browse, Clear) buttons for a path row, just after the fixed-width value
 /// column ([`LAUNCH_PATH_VALUE_W`]) rather than out at the panel's right edge.
+/// Which of a path row's two buttons are there, as (browse, reset).
+///
+/// Every path row outside the Paths page has both, always. On the Paths
+/// page a row that is inheriting has nothing to reset, so it offers only
+/// Browse -- and the base swaps the two rather than showing both, because
+/// it is the root the others hang off and moving it is a different act
+/// from picking a folder for one of them.
+///
+/// One function, so what is drawn and what can be clicked cannot disagree:
+/// a Reset that is not there must not still answer, and a Browse that is
+/// not there must not still open a dialog.
+fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -> (bool, bool) {
+    if !field.is_paths_field() {
+        return (true, true);
+    }
+    let set = setup.paths_is_set(field);
+    if field == LauncherField::PathsBase {
+        (!set, set)
+    } else {
+        (true, set)
+    }
+}
+
+/// Whether a row is a Paths row that has not been given a directory of its
+/// own. Its label and value are dimmed to say so: the row is showing
+/// Copperline's answer rather than the person's.
+///
+/// Not the base. It names a real directory either way, it is the one row
+/// on the page that always says something, and dimming the only line that
+/// tells you where everything is would be the wrong thing to play down.
+fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
+    field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
+}
+
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
     let y = row_y + 2;
     let browse = Rect {
@@ -5601,13 +5680,248 @@ fn launcher_zorro_add_rect(rect: Rect) -> Rect {
     launcher_nav_button_rect(rect, 0)
 }
 
+/// The "are you sure" over Reset default, centred on the panel.
+fn launcher_confirm_rect(rect: Rect) -> Rect {
+    // Its own width, which its title bar and two buttons decide, but the
+    // Save dialog's height exactly: they are the same window asking two
+    // things, and one being shorter than the other made them look like two
+    // unrelated boxes that happened to open in the same place.
+    let (w, h) = (268, launcher_save_dialog_rect(rect).h);
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// Its two buttons, as (yes, cancel). Cancel is the rightmost, where a
+/// dialog's least destructive answer usually sits.
+fn launcher_confirm_button_rects(rect: Rect) -> (Rect, Rect) {
+    let dialog = launcher_confirm_rect(rect);
+    let (w, h) = (66, SAVE_DIALOG_BUTTON.1);
+    let y = dialog.y + dialog.h - SAVE_DIALOG_MARGIN - h;
+    (
+        Rect {
+            x: dialog.x + dialog.w - 2 * w - 20,
+            y,
+            w,
+            h,
+        },
+        Rect {
+            x: dialog.x + dialog.w - w - 12,
+            y,
+            w,
+            h,
+        },
+    )
+}
+
+fn draw_launcher_confirm(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    if !state.confirm_reset {
+        return;
+    }
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = launcher_confirm_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    draw_title_bar(
+        frame,
+        dialog,
+        "Reset default",
+        hover == Some(UiControl::LauncherDialogClose),
+        scale,
+    );
+    // The title bar has already said which default, and the buttons say
+    // what the answers are. Anything more here is a paragraph nobody
+    // reads standing between somebody and a decision they have made.
+    draw_panel_text(
+        frame,
+        dialog.x + SAVE_DIALOG_MARGIN,
+        dialog.y + TITLE_H + SAVE_DIALOG_MARGIN,
+        "Are you sure?",
+        PANEL_TEXT,
+        1,
+        scale,
+    );
+    let (yes, cancel) = launcher_confirm_button_rects(rect);
+    draw_text_button(
+        frame,
+        yes,
+        "Yes",
+        true,
+        hover == Some(UiControl::LauncherConfirmReset),
+        scale,
+    );
+    draw_text_button(
+        frame,
+        cancel,
+        "Cancel",
+        true,
+        hover == Some(UiControl::LauncherCancelReset),
+        scale,
+    );
+}
+
 fn launcher_action_label(control: UiControl) -> &'static str {
     match control {
         UiControl::LauncherLoad => "Load...",
         UiControl::LauncherSave => "Save...",
         UiControl::LauncherDefaults => "Defaults",
         UiControl::LauncherRun => "Run",
+        UiControl::LauncherSaveAs => "Save As",
+        UiControl::LauncherSaveDefault => "Save default",
+        UiControl::LauncherResetDefault => "Reset default",
         _ => "",
+    }
+}
+
+/// What the Save dialog offers, left to right. The one that deletes
+/// something sits furthest from where the pointer comes in.
+const SAVE_ACTIONS: [UiControl; 3] = [
+    UiControl::LauncherSaveAs,
+    UiControl::LauncherSaveDefault,
+    UiControl::LauncherResetDefault,
+];
+
+/// One button's size, and the space around them. Every button is as wide
+/// as the longest label so the row is even, and the dialog is then sized
+/// to the row rather than the row fitted into a dialog.
+const SAVE_DIALOG_BUTTON: (usize, usize) = (116, 20);
+const SAVE_DIALOG_MARGIN: usize = 12;
+const SAVE_DIALOG_GAP: usize = 6;
+/// Lines kept for the description above the buttons, what one costs, and
+/// the space between the last of them and the row.
+///
+/// Always reserved, whether or not anything is being pointed at: a dialog
+/// that changed size as the pointer crossed it would move the buttons out
+/// from under the pointer that was crossing them.
+const SAVE_DIALOG_HELP_LINES: usize = 2;
+const SAVE_DIALOG_LINE_H: usize = 12;
+const SAVE_DIALOG_HELP_GAP: usize = 16;
+
+/// What each button does, said while the pointer is on it.
+///
+/// Anything that is not one of the three gets the Save line. This is a
+/// Save dialog opened from a Save button, so with the pointer resting
+/// nowhere in particular it should say what saving means rather than go
+/// blank and leave a hole where a sentence was a moment ago.
+fn save_dialog_help(control: UiControl) -> &'static str {
+    match control {
+        UiControl::LauncherSaveDefault => {
+            "Sets the running configuration as the default when you launch Copperline."
+        }
+        UiControl::LauncherResetDefault => "Resets the current default config to factory settings.",
+        _ => "Save the running configuration to a file.",
+    }
+}
+
+/// The Save dialog, centred on the panel like the confirm.
+fn launcher_save_dialog_rect(rect: Rect) -> Rect {
+    let (bw, bh) = SAVE_DIALOG_BUTTON;
+    let (w, h) = (
+        2 * SAVE_DIALOG_MARGIN + 3 * bw + 2 * SAVE_DIALOG_GAP,
+        TITLE_H
+            + 2 * SAVE_DIALOG_MARGIN
+            + SAVE_DIALOG_HELP_LINES * SAVE_DIALOG_LINE_H
+            + SAVE_DIALOG_HELP_GAP
+            + bh,
+    );
+    Rect {
+        x: rect.x + rect.w.saturating_sub(w) / 2,
+        y: rect.y + rect.h.saturating_sub(h) / 2,
+        w,
+        h,
+    }
+}
+
+/// The three buttons in it.
+fn launcher_save_dialog_rects(rect: Rect) -> [(UiControl, Rect); 3] {
+    let dialog = launcher_save_dialog_rect(rect);
+    let (w, h) = SAVE_DIALOG_BUTTON;
+    std::array::from_fn(|i| {
+        let item = Rect {
+            x: dialog.x + SAVE_DIALOG_MARGIN + i * (w + SAVE_DIALOG_GAP),
+            // Along the bottom, under the line that says what they do.
+            y: dialog.y + dialog.h - SAVE_DIALOG_MARGIN - h,
+            w,
+            h,
+        };
+        (SAVE_ACTIONS[i], item)
+    })
+}
+
+fn draw_launcher_save_dialog(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &LauncherState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    if !state.save_dialog {
+        return;
+    }
+    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    let dialog = launcher_save_dialog_rect(rect);
+    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
+    draw_rect_bevel(
+        frame,
+        scale_rect(dialog, scale),
+        BUTTON_EDGE_LIGHT,
+        BUTTON_EDGE_DARK,
+        scale,
+    );
+    // The close gadget in its title bar is how this is dismissed. There is
+    // no Cancel among the three because none of them answers a question --
+    // they are three things you might do, and not doing any of them is
+    // closing the window rather than choosing a fourth.
+    draw_title_bar(
+        frame,
+        dialog,
+        "Save configuration...",
+        hover == Some(UiControl::LauncherDialogClose),
+        scale,
+    );
+    for (control, item) in launcher_save_dialog_rects(rect) {
+        draw_text_button(
+            frame,
+            item,
+            launcher_action_label(control),
+            true,
+            hover == Some(control),
+            scale,
+        );
+    }
+    // Above the row, where a dialog's own words go, and never blank: with
+    // the pointer on none of the three it says what the dialog is for.
+    let help = save_dialog_help(hover.unwrap_or(UiControl::LauncherSaveAs));
+    let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
+    for (i, line) in wrap_text(help, chars, chars)
+        .into_iter()
+        .take(SAVE_DIALOG_HELP_LINES)
+        .enumerate()
+    {
+        draw_panel_text(
+            frame,
+            dialog.x + SAVE_DIALOG_MARGIN,
+            dialog.y + TITLE_H + SAVE_DIALOG_MARGIN + i * SAVE_DIALOG_LINE_H,
+            &line,
+            PANEL_TEXT,
+            1,
+            scale,
+        );
     }
 }
 
@@ -5901,10 +6215,11 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 }
                 RowKind::Path => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
-                    if browse.contains(pos) {
+                    let (has_browse, has_clear) = launcher_path_buttons(&state.setup, r.field);
+                    if has_browse && browse.contains(pos) {
                         return Some(UiControl::LauncherBrowse(r.field));
                     }
-                    if clear.contains(pos) {
+                    if has_clear && clear.contains(pos) {
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
@@ -6119,6 +6434,16 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
         }
     }
     None
+}
+
+/// Hit-test the Save dialog, which is over everything while it is up. A
+/// click anywhere else -- its close gadget, its own frame, the panel
+/// behind it -- puts it away without doing anything, so it can never be a
+/// mode you are stuck in.
+fn launcher_save_dialog_hit(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
+    launcher_save_dialog_rects(rect)
+        .into_iter()
+        .find_map(|(control, item)| item.contains(pos).then_some(control))
 }
 
 /// The Host Disk page: what the host has, and which of it to attach.
@@ -7317,7 +7642,7 @@ fn draw_launcher_row(
     } else {
         setup.disabled_reason(r.field)
     };
-    let label_color = if reason.is_none() {
+    let label_color = if reason.is_none() && !launcher_path_inherits(setup, r.field) {
         PANEL_TEXT
     } else {
         PANEL_TEXT_DIM
@@ -7860,34 +8185,56 @@ fn draw_launcher_row(
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
             let avail = browse.x.saturating_sub(value_x + 8);
-            // The printer output shows its full path (clipped to keep the file
-            // name if long, so the row never overflows), "(none)" until one is
-            // chosen; other path rows show the image file name.
-            let text = if r.field == LauncherField::ParallelOutput {
-                match setup.path(r.field) {
-                    Some(p) => clip_path_keep_name(&p.to_string_lossy(), avail),
-                    None => "(none)".to_string(),
-                }
-            } else {
-                truncate_to_width(&setup.value_label(r.field), avail)
+            // The printer output and the Paths rows show a whole path
+            // (clipped from the front if long, so the row never overflows
+            // and the end -- which is the part that identifies it -- stays);
+            // other path rows show the image file name.
+            let text = match setup.full_path_label(r.field) {
+                Some(full) => clip_path_keep_name(&full, avail),
+                None => truncate_to_width(&setup.value_label(r.field), avail),
             };
-            draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
-            draw_text_button(
-                frame,
-                browse,
-                "Browse",
-                true,
-                hover == Some(UiControl::LauncherBrowse(r.field)),
-                scale,
-            );
-            draw_text_button(
-                frame,
-                clear,
-                "Clear",
-                true,
-                hover == Some(UiControl::LauncherClear(r.field)),
-                scale,
-            );
+            // An inheriting row centres its `(default)`, which reads as a
+            // column of its own rather than as eleven short strings
+            // pretending to be paths. A row with a real path keeps the
+            // left edge every other path on the page is read from.
+            let inherits = launcher_path_inherits(setup, r.field);
+            let (value_color, text_x) = if inherits {
+                let text_w = text.chars().count() * font::GLYPH_W;
+                (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+            } else {
+                (PANEL_TEXT, value_x)
+            };
+            draw_panel_text(frame, text_x, browse.y + 6, &text, value_color, 1, scale);
+            let (has_browse, has_clear) = launcher_path_buttons(setup, r.field);
+            if has_browse {
+                draw_text_button(
+                    frame,
+                    browse,
+                    "Browse",
+                    true,
+                    hover == Some(UiControl::LauncherBrowse(r.field)),
+                    scale,
+                );
+            }
+            if has_clear {
+                // "Reset" on the Paths page, because that is what it does
+                // there: the row goes back to inheriting rather than being
+                // emptied. Everywhere else the button really does clear a
+                // path, and says so.
+                let label = if r.field.is_paths_field() {
+                    "Reset"
+                } else {
+                    "Clear"
+                };
+                draw_text_button(
+                    frame,
+                    clear,
+                    label,
+                    true,
+                    hover == Some(UiControl::LauncherClear(r.field)),
+                    scale,
+                );
+            }
         }
         #[cfg(feature = "game-library")]
         RowKind::Account => {
@@ -8558,6 +8905,8 @@ fn draw_launcher(
             scale,
         );
     }
+    draw_launcher_save_dialog(frame, rect, state, hover, scale);
+    draw_launcher_confirm(frame, rect, state, hover, scale);
     // Over everything, because it is the only thing being answered while
     // it is up.
     #[cfg(feature = "game-library")]
@@ -10897,7 +11246,7 @@ mod tests {
 
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        let save = |frame: &[u8], name: &str| {
+        let save_at = |frame: &[u8], name: &str, w: usize, h: usize| {
             if !crate::envcfg::flag("COPPERLINE_UI_PREVIEW") {
                 return;
             }
@@ -10910,6 +11259,9 @@ mod tests {
             writer.write_image_data(frame).unwrap();
             eprintln!("saved {path}");
         };
+        // Almost every preview is drawn at the base scale into the same
+        // frame size, so most callers need say nothing about it.
+        let save = |frame: &[u8], name: &str| save_at(frame, name, w, h);
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
             let probe = ((rect.y + 10) * w + rect.x + 4) * 4;
@@ -12301,6 +12653,282 @@ mod tests {
                     launcher_control_at(rect, state, centre),
                     Some(control),
                     "a mounted disk must not block {control:?}"
+                );
+            }
+        }
+
+        // A preview of the Paths page and of the Save menu, for eyes.
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::AvPaths;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-paths");
+
+            // And with two rows given directories of their own, which is
+            // the only state in which a Reset button exists. `set_path` on
+            // a Paths row adopts into the process-wide store that
+            // paths::tests assert against, hence the guard.
+            let _guard = crate::paths::adopted_store_lock();
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.tab = LauncherTab::AvPaths;
+            state.setup.set_path(
+                LauncherField::PathsBase,
+                std::path::PathBuf::from("/Volumes/AMIGA"),
+            );
+            state.setup.set_path(
+                LauncherField::PathsScreenshots,
+                std::path::PathBuf::from("/Users/someone/Pictures/Amiga screenshots"),
+            );
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-paths-set");
+
+            // Drawn at a scale of more than one, which is where anything
+            // handing an unscaled rect to a scaled draw shows up: at scale
+            // one the two are the same and the mistake is invisible.
+            let big = 2;
+            let (bw, bh) = (texture_width(big), texture_height(big));
+            let mut frame = vec![0u8; bw * bh * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.save_dialog = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            // With the pointer on the button whose description is longest,
+            // which is the one that has to fit.
+            draw(
+                &mut frame,
+                big,
+                &ui,
+                Some(UiControl::LauncherSaveDefault),
+                None,
+            );
+            save_at(&frame, "launcher-save-menu", bw, bh);
+
+            let mut frame = vec![0u8; w * h * 4];
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.confirm_reset = true;
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: menu::MenuNav::default(),
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None);
+            save(&frame, "launcher-confirm-reset");
+        }
+
+        // A Paths row must offer exactly the buttons it draws. A Reset
+        // that is not there but still answers would put a row back to
+        // inheriting on a click meant for nothing at all, and on the base
+        // -- where Browse and Reset swap places rather than sitting side
+        // by side -- the two would land on each other's rectangles.
+        {
+            // `set_path` on a Paths row adopts into the process-wide store
+            // that paths::tests assert against.
+            let _guard = crate::paths::adopted_store_lock();
+            let probe = |set: bool, field: LauncherField| {
+                let mut setup = launcher::MachineSetup::default();
+                if set {
+                    setup.set_path(field, std::path::PathBuf::from("/probe/dir"));
+                }
+                let mut state = LauncherState::new(setup);
+                state.tab = LauncherTab::AvPaths;
+                let panel = Panel::Launcher(Box::new(state));
+                let rect = panel_rect(&panel);
+                let row = launcher::rows(
+                    LauncherTab::AvPaths,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                )
+                .iter()
+                .position(|r| r.field == field)
+                .expect("the field has a row");
+                let row_y = launcher_row_y(rect, row) + launcher_nav_block_h(LauncherTab::AvPaths);
+                let (browse, reset) = launcher_path_rects(rect, row_y);
+                let at = |r: Rect| {
+                    panel_control_at(&panel, ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32))
+                };
+                (
+                    at(browse) == Some(UiControl::LauncherBrowse(field)),
+                    at(reset) == Some(UiControl::LauncherClear(field)),
+                )
+            };
+            // An ordinary row: Browse always, Reset only once it was set.
+            assert_eq!(probe(false, LauncherField::PathsScreenshots), (true, false));
+            assert_eq!(probe(true, LauncherField::PathsScreenshots), (true, true));
+            // The base swaps them.
+            assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
+            assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
+        }
+
+        // The confirm over Reset default answers every click on the panel:
+        // Yes only on its own button, and anything else -- Run included --
+        // cancels. A question about deleting something must not be
+        // answerable by a click that missed.
+        {
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.confirm_reset = true;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let centre = |r: Rect| ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+            let (yes, cancel) = launcher_confirm_button_rects(rect);
+            assert_eq!(
+                panel_control_at(&panel, centre(yes)),
+                Some(UiControl::LauncherConfirmReset)
+            );
+            // Named places again, not the panel's centre: that sits inside
+            // the dialog and would land on a button if it ever resized.
+            let dialog = launcher_confirm_rect(rect);
+            let title = Rect {
+                x: dialog.x,
+                y: dialog.y,
+                w: dialog.w,
+                h: TITLE_H,
+            };
+            let [load, _, _, run] = launcher_action_rects(rect);
+            for elsewhere in [cancel, title, load.1, run.1] {
+                assert_eq!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherCancelReset),
+                    "a click off Yes should cancel"
+                );
+            }
+            // And here too the gadget answers only for itself.
+            assert_eq!(
+                panel_control_at(&panel, centre(close_button_rect(dialog))),
+                Some(UiControl::LauncherDialogClose)
+            );
+            // The two dialogs are the same height, so they read as one
+            // window asking two things rather than two boxes.
+            assert_eq!(dialog.h, launcher_save_dialog_rect(rect).h);
+        }
+
+        // The Save dialog: every button reachable, nothing under it
+        // reachable while it is up, and anything that is not one of the
+        // three -- its close gadget included -- putting it away.
+        {
+            let mut state = LauncherState::new(launcher::MachineSetup::default());
+            state.save_dialog = true;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let dialog = launcher_save_dialog_rect(rect);
+            let centre = |r: Rect| ((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+            let items = launcher_save_dialog_rects(rect);
+            for (control, item) in items {
+                assert_eq!(
+                    panel_control_at(&panel, centre(item)),
+                    Some(control),
+                    "{control:?} is not reachable in the Save dialog"
+                );
+                assert!(
+                    item.x >= dialog.x && item.x + item.w <= dialog.x + dialog.w,
+                    "{control:?} is outside the dialog"
+                );
+                // Readable rather than truncated by the button it sits in,
+                // which is what sizes the dialog in the first place.
+                let fits = item.w.saturating_sub(8) / font::GLYPH_W;
+                let label = launcher_action_label(control);
+                assert!(
+                    label.chars().count() <= fits,
+                    "{label:?} does not fit its button"
+                );
+            }
+            for (a, b) in items.iter().zip(items.iter().skip(1)) {
+                assert!(a.1.x + a.1.w <= b.1.x, "the buttons overlap each other");
+                assert_eq!(a.1.y, b.1.y, "the buttons should be one row");
+            }
+            // The close gadget, the dialog's own body below the buttons,
+            // and the bar underneath: none of them does anything but put
+            // the dialog away. Probed at named places rather than at the
+            // panel's centre, which is inside the dialog and moves onto a
+            // button the moment the dialog changes height.
+            let close = Rect {
+                x: dialog.x + dialog.w - 18,
+                y: dialog.y + 4,
+                w: 12,
+                h: 12,
+            };
+            let body = Rect {
+                x: dialog.x,
+                y: dialog.y + TITLE_H,
+                w: dialog.w,
+                h: SAVE_DIALOG_MARGIN,
+            };
+            let [load, _, _, run] = launcher_action_rects(rect);
+            for elsewhere in [body, load.1, run.1] {
+                assert_eq!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherSave),
+                    "a click off the three should only put the dialog away"
+                );
+            }
+            // The gadget answers as itself, and nothing else does. It is
+            // drawn lit when the pointer is on it, so sharing a control
+            // with "anywhere else" lit it up for every hover in the dialog.
+            assert_eq!(
+                panel_control_at(&panel, centre(close)),
+                Some(UiControl::LauncherDialogClose)
+            );
+            for elsewhere in [body, load.1, run.1]
+                .into_iter()
+                .chain(items.map(|(_, item)| item))
+            {
+                assert_ne!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherDialogClose),
+                    "something that is not the gadget lights the gadget"
+                );
+            }
+            // Every description fits the two lines reserved for it. The
+            // dialog cannot grow to suit a longer one -- resizing under a
+            // pointer that is crossing the buttons would move them -- so a
+            // sentence that does not fit is silently cut off instead.
+            let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
+            for (control, _) in items {
+                let help = save_dialog_help(control);
+                assert!(!help.is_empty(), "{control:?} has nothing to say");
+                let lines = wrap_text(help, chars, chars);
+                assert!(
+                    lines.len() <= SAVE_DIALOG_HELP_LINES,
+                    "{help:?} wraps to {} lines, and there is room for {}",
+                    lines.len(),
+                    SAVE_DIALOG_HELP_LINES
+                );
+            }
+            // With the pointer on nothing, the dialog still says what it
+            // is for rather than leaving the space empty.
+            assert_eq!(
+                save_dialog_help(UiControl::LauncherSave),
+                save_dialog_help(UiControl::LauncherSaveAs)
+            );
+
+            // And with it closed, its buttons are not there to be hit.
+            let closed = Panel::Launcher(Box::new(LauncherState::new(
+                launcher::MachineSetup::default(),
+            )));
+            for (control, item) in items {
+                assert_ne!(
+                    panel_control_at(&closed, centre(item)),
+                    Some(control),
+                    "{control:?} answers with the dialog closed"
                 );
             }
         }

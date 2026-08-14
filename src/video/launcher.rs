@@ -202,6 +202,10 @@ pub enum LauncherTab {
     AvAudio,
     AvVideo,
     AvEmulation,
+    /// Where Copperline keeps what it produces and where its file dialogs
+    /// open. Its rows are the configuration's `[paths]` section, saved
+    /// with the rest of it and absent until one of them is set.
+    AvPaths,
     /// The Create Image workshop, reached from Storage: two pages that make
     /// fresh images and touch nothing about the machine.
     CreateFloppy,
@@ -285,6 +289,7 @@ impl LauncherTab {
             LauncherTab::AvAudio => "A/V & Emu",
             LauncherTab::AvVideo => "Video",
             LauncherTab::AvEmulation => "Emulation",
+            LauncherTab::AvPaths => "Paths",
             LauncherTab::CreateFloppy => "Floppy Disk",
             LauncherTab::CreateHard => "Hard Disk",
             LauncherTab::CreateGeometry => "Disk Geometry",
@@ -310,7 +315,9 @@ impl LauncherTab {
             | LauncherTab::CreateHard
             | LauncherTab::CreateGeometry => LauncherTab::Storage,
             LauncherTab::FluxBridge => LauncherTab::Floppy,
-            LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
+            LauncherTab::AvVideo | LauncherTab::AvEmulation | LauncherTab::AvPaths => {
+                LauncherTab::AvAudio
+            }
             other => other,
         }
     }
@@ -345,7 +352,10 @@ impl LauncherTab {
     pub fn nav_options(self) -> &'static [(&'static str, LauncherTab)] {
         match self {
             LauncherTab::Storage => STORAGE_NAV,
-            LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmulation => AV_NAV,
+            LauncherTab::AvAudio
+            | LauncherTab::AvVideo
+            | LauncherTab::AvEmulation
+            | LauncherTab::AvPaths => AV_NAV,
             LauncherTab::CreateFloppy | LauncherTab::CreateHard => CREATE_NAV,
             #[cfg(feature = "game-library")]
             LauncherTab::Whdload | LauncherTab::WhdloadLibrary => WHDLOAD_NAV,
@@ -397,6 +407,7 @@ const AV_NAV: &[(&str, LauncherTab)] = &[
     ("Audio", LauncherTab::AvAudio),
     ("Video", LauncherTab::AvVideo),
     ("Emulation", LauncherTab::AvEmulation),
+    ("Paths", LauncherTab::AvPaths),
 ];
 
 /// A single editable setting. Parameter-free variants keep the per-tab row
@@ -405,6 +416,22 @@ const AV_NAV: &[(&str, LauncherTab)] = &[
 /// same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherField {
+    // --- the Paths page ---------------------------------------------
+    //
+    // The configuration's `[paths]` section, edited here and written out
+    // with the rest of it. On `MachineSetup` because that is the
+    // launcher's edit buffer for everything a configuration holds.
+    PathsBase,
+    PathsStates,
+    PathsScreenshots,
+    PathsRecordings,
+    PathsNvram,
+    PathsTraces,
+    PathsConfigs,
+    PathsRoms,
+    PathsFloppies,
+    PathsHarddrives,
+    PathsCds,
     // Create Image workshop -- these edit no machine setting, only what the
     // next image will be made of.
     NewFloppyDensity,
@@ -748,6 +775,27 @@ impl LauncherField {
         matches!(filesys_slot(self), Some((_, false)))
     }
 
+    /// Whether this field is a row on the Paths page: a directory in
+    /// `[paths]` rather than anything belonging to the machine. They get
+    /// a folder picker, they show the whole path rather than a file name,
+    /// and they take effect the moment they change.
+    pub fn is_paths_field(self) -> bool {
+        matches!(
+            self,
+            LauncherField::PathsBase
+                | LauncherField::PathsStates
+                | LauncherField::PathsScreenshots
+                | LauncherField::PathsRecordings
+                | LauncherField::PathsNvram
+                | LauncherField::PathsTraces
+                | LauncherField::PathsConfigs
+                | LauncherField::PathsRoms
+                | LauncherField::PathsFloppies
+                | LauncherField::PathsHarddrives
+                | LauncherField::PathsCds
+        )
+    }
+
     /// Whether this field is a WHDLoad staging directory (folder picker):
     /// the Kickstart-image and game-library directories, but not the game
     /// package (an `.lha` file, picked as a file).
@@ -1067,6 +1115,27 @@ const EMULATION_ROWS: [Row; 5] = [
     // doing anything at all -- no database read, no cover worker, no scan.
     row(F::WhdloadEnabled, "WHDLoad", Cycle),
 ];
+/// The Paths page. Every row is optional: cleared, it inherits, and the
+/// value shown is the directory that would be used. Nothing here describes
+/// the machine, so none of it round-trips through [`RawConfig`].
+const PATHS_ROWS: [Row; 12] = [
+    row(F::PathsBase, "Base folder", PathRow),
+    section_header("Custom directories:"),
+    // Indented under the heading, the same as the sections on the I/O
+    // Ports and MT-32 pages: the base above it is not one of these, and
+    // the indent is what says so.
+    row(F::PathsStates, "  Save states", PathRow),
+    row(F::PathsScreenshots, "  Screenshots", PathRow),
+    row(F::PathsRecordings, "  Recordings", PathRow),
+    row(F::PathsNvram, "  NVRAM", PathRow),
+    row(F::PathsTraces, "  Traces", PathRow),
+    row(F::PathsConfigs, "  Config files", PathRow),
+    row(F::PathsRoms, "  ROMs", PathRow),
+    row(F::PathsFloppies, "  Floppies", PathRow),
+    row(F::PathsHarddrives, "  Hard drives", PathRow),
+    row(F::PathsCds, "  CD images", PathRow),
+];
+
 /// The floppy page. Every option the format carries is on it; nothing on
 /// it reads or writes the machine's configuration.
 const NEW_FLOPPY_ROWS: [Row; 8] = [
@@ -1181,6 +1250,7 @@ pub fn rows(
         LauncherTab::AvAudio => Cow::Borrowed(&AUDIO_ROWS),
         LauncherTab::AvVideo => Cow::Borrowed(&VIDEO_ROWS),
         LauncherTab::AvEmulation => Cow::Borrowed(&EMULATION_ROWS),
+        LauncherTab::AvPaths => Cow::Borrowed(&PATHS_ROWS),
     }
 }
 
@@ -1986,6 +2056,13 @@ pub struct MachineSetup {
     port_devices: [PortDevice; 2],
     // Extra Zorro boards (metadata path + plugin config schema/overrides)
     zorro_boards: Vec<ZorroBoardSetup>,
+    /// The Paths page: the configuration's `[paths]` section, saved with
+    /// the rest of it. Empty until somebody moves something, so a
+    /// configuration that never mentions directories stays as portable as
+    /// it was -- and one that does still starts on a machine that has
+    /// never seen them, because what cannot be reached is dropped when the
+    /// configuration is adopted.
+    paths: crate::pathconf::Paths,
 }
 
 impl Default for MachineSetup {
@@ -2205,12 +2282,18 @@ impl MachineSetup {
                     board
                 })
                 .collect(),
+            paths: raw.paths.clone(),
         })
     }
 
     /// Load a configuration file into the typed model, validating it.
     pub fn load_from(path: &Path) -> Result<Self> {
-        Self::from_raw(&crate::config::raw_from_path(path)?)
+        let setup = Self::from_raw(&crate::config::raw_from_path(path)?)?;
+        // The loaded configuration is now the one in hand, so its `[paths]`
+        // is where things go from here -- a screenshot taken after loading
+        // it should not still be following the one before.
+        setup.apply_paths();
+        Ok(setup)
     }
 
     /// Re-read the host MIDI endpoints for the device pickers.
@@ -2746,6 +2829,10 @@ impl MachineSetup {
                 }
             })
             .collect();
+        // Written out whole rather than compared against the baseline: every
+        // entry is already optional and skipped when unset, so an untouched
+        // Paths page emits no `[paths]` at all.
+        raw.paths = self.paths.clone();
         raw
     }
 
@@ -3224,7 +3311,151 @@ impl MachineSetup {
             F::WhdloadWhdPackage => self.whdload_whd_package.as_deref(),
             F::WhdloadSkickPackage => self.whdload_skick_package.as_deref(),
             F::WhdloadGames => self.whdload_games.as_deref(),
-            _ => None,
+            // What the entry says, not where it resolves to: this is the
+            // value being edited. `paths_resolved` answers the other
+            // question, and the row shows that one.
+            _ => self.paths_entry_ref(field).and_then(Option::as_deref),
+        }
+    }
+
+    /// The `[paths]` entry a Paths row edits.
+    ///
+    /// `None` for anything that is not a Paths row, which is what keeps the
+    /// twelve directories out of every other path accessor's way.
+    fn paths_entry(
+        paths: &mut crate::pathconf::Paths,
+        field: LauncherField,
+    ) -> Option<&mut Option<PathBuf>> {
+        let p = paths;
+        Some(match field {
+            F::PathsBase => &mut p.base,
+            F::PathsStates => &mut p.states,
+            F::PathsScreenshots => &mut p.screenshots,
+            F::PathsRecordings => &mut p.recordings,
+            F::PathsNvram => &mut p.nvram,
+            F::PathsTraces => &mut p.traces,
+            F::PathsConfigs => &mut p.configs,
+            F::PathsRoms => &mut p.roms,
+            F::PathsFloppies => &mut p.floppies,
+            F::PathsHarddrives => &mut p.harddrives,
+            F::PathsCds => &mut p.cds,
+            _ => return None,
+        })
+    }
+
+    /// The same entry, to read. Written out twice because a borrow cannot
+    /// be handed back from a copy; the test below walks every row through
+    /// both, so the pair cannot drift apart unnoticed.
+    fn paths_entry_ref(&self, field: LauncherField) -> Option<&Option<PathBuf>> {
+        let p = &self.paths;
+        Some(match field {
+            F::PathsBase => &p.base,
+            F::PathsStates => &p.states,
+            F::PathsScreenshots => &p.screenshots,
+            F::PathsRecordings => &p.recordings,
+            F::PathsNvram => &p.nvram,
+            F::PathsTraces => &p.traces,
+            F::PathsConfigs => &p.configs,
+            F::PathsRoms => &p.roms,
+            F::PathsFloppies => &p.floppies,
+            F::PathsHarddrives => &p.harddrives,
+            F::PathsCds => &p.cds,
+            _ => return None,
+        })
+    }
+
+    /// Where a Paths row points now, resolved -- which for an unset row is
+    /// the directory it inherits. The page is there to say where things
+    /// actually go, so an inherited row still names a directory rather than
+    /// going blank and leaving the answer somewhere else.
+    pub fn paths_resolved(&self, field: LauncherField) -> Option<PathBuf> {
+        let host = crate::paths::config_dir()?;
+        let p = &self.paths;
+        Some(match field {
+            F::PathsBase => p.base_dir(&host),
+            F::PathsStates => p.states_dir(&host),
+            F::PathsScreenshots => p.screenshots_dir(&host),
+            F::PathsRecordings => p.recordings_dir(&host),
+            F::PathsNvram => p.nvram_dir(&host),
+            F::PathsTraces => p.traces_dir(&host),
+            F::PathsConfigs => p.configs_dir(&host),
+            F::PathsRoms => p.roms_dir(&host),
+            F::PathsFloppies => p.floppies_dir(&host),
+            F::PathsHarddrives => p.harddrives_dir(&host),
+            F::PathsCds => p.cds_dir(&host),
+            _ => return None,
+        })
+    }
+
+    /// Whether a Paths row was set rather than inherited.
+    pub fn paths_is_set(&self, field: LauncherField) -> bool {
+        self.paths_entry_ref(field).is_some_and(Option::is_some)
+    }
+
+    /// What a path row shows when the whole path is the point rather than
+    /// the file at the end of it: the printer's capture file, and every row
+    /// on the Paths page. `None` leaves the row to its usual file name.
+    pub fn full_path_label(&self, field: LauncherField) -> Option<String> {
+        if field == F::ParallelOutput {
+            return Some(match self.path(field) {
+                Some(path) => path.display().to_string(),
+                None => "(none)".to_string(),
+            });
+        }
+        if !field.is_paths_field() {
+            return None;
+        }
+        // An inheriting row says so and stops there. Where a default goes
+        // is Copperline's business until somebody makes it theirs, and a
+        // page of eleven paths nobody chose is a page nobody reads.
+        //
+        // The base is the exception: it is the root the rest of them hang
+        // off, so it names its directory whether or not it was set. With
+        // it inheriting too, the page would say where nothing goes.
+        if !self.paths_is_set(field) && field != F::PathsBase {
+            return Some("(default)".to_string());
+        }
+        let resolved = self
+            .paths_resolved(field)
+            .or_else(|| self.path(field).map(Path::to_path_buf));
+        Some(match resolved {
+            Some(dir) => dir.display().to_string(),
+            // No host directory at all, so nothing is resolvable and the
+            // defaults land beside wherever Copperline was started.
+            None => "(default)".to_string(),
+        })
+    }
+
+    /// Put the edited directories in force.
+    ///
+    /// They are saved with the configuration like everything else on these
+    /// pages -- `[paths]` is a section of it, not a file of its own -- but
+    /// they take effect the moment they are changed, so a screenshot taken
+    /// after moving the row lands where the row now says rather than where
+    /// it said when the launcher opened.
+    fn apply_paths(&self) {
+        crate::paths::adopt(self.paths.clone());
+    }
+
+    /// Store a directory a Paths row was pointed at.
+    ///
+    /// A directory under the base is stored relative to it, so a tree that
+    /// was set up as one piece still moves as one piece: point the base at
+    /// a memory stick and everything under it follows, which is the whole
+    /// reason the entries resolve the way they do. The base itself is
+    /// always absolute -- a relative base is taken from the host-data
+    /// directory, and quietly re-anchoring it there is not what somebody
+    /// picking a folder meant.
+    fn set_paths_dir(&mut self, field: LauncherField, dir: PathBuf) {
+        let relative = (field != F::PathsBase)
+            .then(|| {
+                let base = crate::paths::config_dir()?;
+                let base = self.paths.base_dir(&base);
+                dir.strip_prefix(base).ok().map(Path::to_path_buf)
+            })
+            .flatten();
+        if let Some(entry) = Self::paths_entry(&mut self.paths, field) {
+            *entry = Some(relative.unwrap_or(dir));
         }
     }
 
@@ -4084,6 +4315,14 @@ impl MachineSetup {
         // the positional cascade, so drives added in the launcher (with no
         // config priorities of their own) do not all tie at 0. A slot that
         // already held an image keeps whatever priority it had.
+        // A Paths row is a host preference, not part of the machine, and
+        // shares nothing with the rest of this: it stores its directory and
+        // saves, and none of the drive bookkeeping below applies.
+        if field.is_paths_field() {
+            self.set_paths_dir(field, path);
+            self.apply_paths();
+            return;
+        }
         let seed_cascade = Self::is_drive_field(field)
             && self.path(field).is_none()
             && !crate::config::is_cd_image_path(&path);
@@ -4139,6 +4378,14 @@ impl MachineSetup {
 
     /// Clear a path field's value.
     pub fn clear_path(&mut self, field: LauncherField) {
+        // Cleared, a Paths row inherits again rather than pointing
+        // nowhere: the entry goes out of `[paths]` entirely, so it
+        // follows the default from then on instead of freezing today's.
+        if let Some(entry) = Self::paths_entry(&mut self.paths, field) {
+            *entry = None;
+            self.apply_paths();
+            return;
+        }
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
@@ -5618,6 +5865,15 @@ struct RomNote {
 #[derive(Debug, Clone)]
 pub struct LauncherState {
     pub setup: MachineSetup,
+    /// Whether the Save dialog is up: Save As, Set default, Reset default.
+    /// One flag, because it holds nothing -- three buttons and a close
+    /// gadget, and every click either picks one or puts it away.
+    pub save_dialog: bool,
+    /// Whether the "are you sure" over Reset default is up. Only ever set
+    /// when there is a default to delete -- with none saved there is
+    /// nothing to be sure about, and a dialog asking anyway is a dialog
+    /// that teaches people to dismiss dialogs.
+    pub confirm_reset: bool,
     /// What the Create Image pages will make. Not machine configuration, so
     /// it sits beside the setup rather than inside it.
     pub workshop: ImageWorkshop,
@@ -5950,12 +6206,12 @@ impl LoginDialog {
 #[cfg(feature = "game-library")]
 const USER_MAX: usize = 64;
 
-/// The support directory under a given configuration directory. The same
-/// place [`crate::paths::whdload_support_dir`] names, spelled from a root
-/// the caller chose so a test can point somewhere else.
+/// The support directory under a given configuration directory, from
+/// `paths` so this and the no-argument helpers cannot describe different
+/// trees. Kept as a name here because the call sites read better for it.
 #[cfg(feature = "game-library")]
 fn whdload_support_under(config_dir: &std::path::Path) -> PathBuf {
-    config_dir.join("whdload").join("support")
+    crate::paths::whdload_support_in(config_dir)
 }
 
 #[cfg(feature = "game-library")]
@@ -6862,6 +7118,8 @@ impl LauncherState {
         #[cfg(feature = "game-library")]
         setup.adopt_whdload_defaults();
         let mut state = Self {
+            save_dialog: false,
+            confirm_reset: false,
             #[cfg(feature = "game-library")]
             library: LibraryPage::default(),
             #[cfg(feature = "game-library")]
@@ -8716,6 +8974,87 @@ mod tests {
             Some(Path::new("/whd/library"))
         );
         assert_eq!(setup.to_raw().whdload, raw.whdload);
+    }
+
+    /// Every Paths row must reach an entry, resolve to a directory, and
+    /// come back out in `[paths]`. Three separate matches stand between a
+    /// row and its entry -- one to read, one to write, one to resolve -- so
+    /// this walks all of them for every row on the page: a row wired to the
+    /// wrong entry, or to none, cannot pass.
+    #[test]
+    fn every_paths_row_reaches_its_own_entry() {
+        // `set_path` on a Paths row adopts, which writes the process-wide
+        // store another test asserts against.
+        let _guard = crate::paths::adopted_store_lock();
+        let mut setup = MachineSetup::default();
+        let fields: Vec<LauncherField> = PATHS_ROWS
+            .iter()
+            .map(|row| row.field)
+            .filter(|field| field.is_paths_field())
+            .collect();
+        assert_eq!(fields.len(), 11, "every entry should have had a row");
+        for (i, &field) in fields.iter().enumerate() {
+            assert!(
+                !setup.paths_is_set(field),
+                "{field:?} starts out set, so nothing here proves anything"
+            );
+            let dir = PathBuf::from(format!("/probe/{i}"));
+            setup.set_path(field, dir.clone());
+            assert_eq!(
+                setup.path(field),
+                Some(dir.as_path()),
+                "{field:?} does not read back what it was given"
+            );
+            assert!(setup.paths_is_set(field), "{field:?} still reads inherited");
+        }
+        // Resolution is checked only once every row is set. Checked as each
+        // one is set, a row resolving through a *later* row's entry would
+        // still land on that row's untouched default and look fine.
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for &field in &fields {
+            let resolved = setup
+                .paths_resolved(field)
+                .expect("a Paths row resolves to a directory");
+            assert!(
+                !seen.contains(&resolved),
+                "{field:?} resolves to {resolved:?}, which another row already claimed"
+            );
+            seen.push(resolved);
+        }
+        // Out through the configuration and back, since that is the only
+        // way any of it survives.
+        let round_tripped = MachineSetup::from_raw(&setup.to_raw()).expect("valid");
+        for row in PATHS_ROWS {
+            if row.field.is_paths_field() {
+                assert_eq!(
+                    round_tripped.path(row.field),
+                    setup.path(row.field),
+                    "{:?} did not survive [paths]",
+                    row.field
+                );
+            }
+        }
+        // And cleared, each one goes back to inheriting rather than to a
+        // frozen copy of today's default.
+        for row in PATHS_ROWS {
+            if row.field.is_paths_field() {
+                setup.clear_path(row.field);
+            }
+        }
+        assert!(
+            setup.to_raw().paths.is_empty(),
+            "a cleared page emits no [paths]"
+        );
+    }
+
+    /// A machine configuration that never mentions directories must not
+    /// grow a `[paths]` section just by passing through the launcher.
+    #[test]
+    fn an_untouched_paths_page_writes_nothing() {
+        let raw = MachineSetup::default().to_raw();
+        assert!(raw.paths.is_empty());
+        let text = raw.to_toml_string().expect("serialises");
+        assert!(!text.contains("[paths]"), "{text}");
     }
 
     #[test]
@@ -10803,13 +11142,18 @@ mod tests {
         assert!(TABS.contains(&LauncherTab::AvAudio));
         assert!(!TABS.contains(&LauncherTab::AvVideo));
         assert!(!TABS.contains(&LauncherTab::AvEmulation));
-        for t in [LauncherTab::AvVideo, LauncherTab::AvEmulation] {
+        assert!(!TABS.contains(&LauncherTab::AvPaths));
+        for t in [
+            LauncherTab::AvVideo,
+            LauncherTab::AvEmulation,
+            LauncherTab::AvPaths,
+        ] {
             // They keep the A/V strip entry lit and have no Back button --
             // categories switch between each other via the top nav row.
             assert_eq!(t.strip_tab(), LauncherTab::AvAudio);
             assert_eq!(t.parent_tab(), None);
         }
-        // Every A/V page offers the same nav buttons: Audio / Video / Emulation.
+        // Every A/V page offers the same nav buttons.
         let nav = LauncherTab::AvAudio.nav_options();
         assert_eq!(
             nav,
@@ -10817,6 +11161,7 @@ mod tests {
                 ("Audio", LauncherTab::AvAudio),
                 ("Video", LauncherTab::AvVideo),
                 ("Emulation", LauncherTab::AvEmulation),
+                ("Paths", LauncherTab::AvPaths),
             ]
         );
         assert_eq!(LauncherTab::AvVideo.nav_options(), nav);

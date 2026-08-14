@@ -20,12 +20,8 @@ pub fn save(path: &Path, fb: &[u32], width: u32, height: u32) -> Result<()> {
             expected
         );
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-    }
+    crate::paths::ensure_parent(path)
+        .with_context(|| format!("creating the directory for {}", path.display()))?;
     let file =
         std::fs::File::create(path).with_context(|| format!("opening {}", path.display()))?;
     let writer = std::io::BufWriter::new(file);
@@ -217,8 +213,7 @@ pub fn stretch_rows_x_window(fb: &mut [u32], width: usize, rows: usize, src_x0: 
 
 /// Pick a default filename for an interactive screenshot grab.
 pub fn auto_filename() -> PathBuf {
-    let ts = crate::timestamp::compact_now();
-    PathBuf::from(format!("copperline-screenshot-{ts}.png"))
+    crate::paths::screenshot_file()
 }
 
 #[cfg(test)]

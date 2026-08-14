@@ -328,7 +328,9 @@ impl Nvram {
         self.phase = I2cPhase::DeviceAddress;
         if self.dirty {
             if let Some(path) = &self.path {
-                if let Err(e) = std::fs::write(path, &self.memory) {
+                if let Err(e) = crate::paths::ensure_parent(path)
+                    .and_then(|()| std::fs::write(path, &self.memory))
+                {
                     // Stay dirty so the next STOP retries: a transient
                     // host error must not lose the EEPROM contents (save
                     // games) until the guest happens to write them again.
@@ -1686,17 +1688,21 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("cd32-nvram.bin"); // parent dir missing
+        let path = dir.join("cd32-nvram.bin");
+        // A directory where the file goes: the write fails, and unlike a
+        // missing parent it stays failing, since the flush makes its own
+        // directories now.
+        std::fs::create_dir_all(&path).unwrap();
         akiko.set_nvram_path(path.clone());
 
         i2c::start(&mut akiko, &mut chip);
         assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xA2));
         assert!(!i2c::write_byte(&mut akiko, &mut chip, 0x42));
         assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xDE));
-        i2c::stop(&mut akiko, &mut chip); // flush fails
-        assert!(!path.exists());
+        i2c::stop(&mut akiko, &mut chip); // flush fails: a directory is in the way
+        assert!(path.is_dir(), "nothing should have been written over it");
 
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::remove_dir(&path).unwrap();
         i2c::start(&mut akiko, &mut chip);
         i2c::stop(&mut akiko, &mut chip); // still dirty: retried and lands
         let bytes = std::fs::read(&path).unwrap();

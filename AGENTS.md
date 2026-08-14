@@ -36,7 +36,14 @@ images go in via `[floppy.df0] path` in the config or `--insert-disk-after`:
 ```
 
 Running with no arguments at all opens an interactive launcher window; any
-flag suppresses it, so headless invocations never block on it.
+flag suppresses it, so headless invocations never block on it. A
+configuration saved with the launcher's Save default button auto-loads into
+any run that names no `--config` and finds no `./copperline.toml` -- so for
+reproducible results on a machine you do not control, pass `--factory` (or
+an explicit `--config`) to pin the machine to a known configuration. A
+config's optional `[paths]` section moves where unspecified outputs land;
+explicit flag paths (`--screenshot-after SECS PATH` and friends) are always
+used exactly as written.
 
 WHDLoad game packages boot directly -- `--whdload game.lha` (or a directory
 holding a `.slave`) stages a boot volume around the real WHDLoad program,

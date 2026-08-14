@@ -2280,11 +2280,7 @@ fn push_id(entry: &mut Value, id: Option<u32>) {
 }
 
 fn default_trace_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    PathBuf::from(format!("copperline-trace-{stamp}.txt"))
+    crate::paths::trace_file()
 }
 
 fn trace_status_value(emu: &Emulator) -> Value {

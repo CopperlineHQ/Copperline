@@ -295,13 +295,10 @@ where
     Ok(opts)
 }
 
-/// Timestamped default output path in the working directory.
+/// Timestamped default output path. Named by `paths`, with every other
+/// default a run produces.
 pub fn default_wave_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    PathBuf::from(format!("copperline-wave-{stamp}.vcd"))
+    crate::paths::waveform_file()
 }
 
 /// Snapshot of a capture's state for the console/debugger UI.
@@ -600,6 +597,7 @@ impl WaveCapture {
     /// Create the output file and write the declaration section. The
     /// capture starts in the Armed state.
     pub fn create(opts: WaveOptions) -> io::Result<Self> {
+        crate::paths::ensure_parent(&opts.path)?;
         let file = std::fs::File::create(&opts.path)?;
         let mut writer = VcdWriter::new(io::BufWriter::new(file));
         writer.header(&[format!(
@@ -963,7 +961,14 @@ mod tests {
             }
         );
         assert_eq!(opts.duration, WaveDuration::Cck(500));
-        assert!(opts.path.to_string_lossy().starts_with("copperline-wave-"));
+        assert!(
+            opts.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("copperline-wave-")),
+            "{:?}",
+            opts.path
+        );
         // Defaults with no arguments at all.
         let opts = parse_wave_args([]).unwrap();
         assert_eq!(opts.trigger, Trigger::Now);

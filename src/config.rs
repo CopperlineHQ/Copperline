@@ -275,6 +275,11 @@ pub struct Config {
     /// (`[display] bezel`). The `Cmd+M` / `Alt+M` toggle turns it off and
     /// back on live without affecting this start-up value.
     pub bezel: BezelStyle,
+    /// Where this machine's output goes and where its file dialogs open
+    /// (`[paths]`). Empty until somebody moves something; put in force by
+    /// [`crate::paths::adopt`], which drops whatever this host cannot
+    /// reach so a configuration written elsewhere still starts.
+    pub paths: crate::pathconf::Paths,
     /// Folder of PNG stickers drawn onto the monitor bezel
     /// (`[display] bezel_stickers`). Each PNG in the folder becomes a
     /// decal on the drawn front; an optional `stickers.toml` in the folder
@@ -2158,6 +2163,7 @@ impl Default for Config {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
+            paths: crate::pathconf::Paths::default(),
         }
     }
 }
@@ -2793,6 +2799,13 @@ pub struct RawConfig {
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
+    /// `[paths]`: where this machine's output goes and where its file
+    /// dialogs open. Absent until somebody moves something, and every
+    /// entry within it optional, so a configuration that never mentions
+    /// directories behaves exactly as one written before the section
+    /// existed.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) paths: crate::pathconf::Paths,
 }
 
 impl RawConfig {
@@ -2803,6 +2816,13 @@ impl RawConfig {
     #[cfg_attr(not(feature = "frontend"), allow(dead_code))]
     pub(crate) fn to_toml_string(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
+    }
+
+    /// The `[paths]` section, for the startup that must put it in force
+    /// before building a [`Config`] -- the conversion resolves the implicit
+    /// battery-RAM files through the paths already in force.
+    pub fn paths(&self) -> crate::pathconf::Paths {
+        self.paths.clone()
     }
 
     /// The configured menu size, for the paths that put a window up before a
@@ -4528,7 +4548,7 @@ impl TryFrom<RawConfig> for Config {
                  rtc_chip = \"RP5C01\" or drop battmem"
             ),
             Some(path) => Some(PathBuf::from(path)),
-            None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
+            None => rp5c01_fitted.then(crate::paths::battery_ram_file),
         };
 
         // A SCSI unit exists when something answers on it: a Zorro board
@@ -4613,7 +4633,7 @@ impl TryFrom<RawConfig> for Config {
                 .cd
                 .nvram
                 .map(PathBuf::from)
-                .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
+                .or_else(|| defaults.akiko.then(crate::paths::akiko_nvram_file)),
             rtc_present,
             rtc_chip,
             rtc_seed_unix,
@@ -4662,6 +4682,7 @@ impl TryFrom<RawConfig> for Config {
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
+            paths: raw.paths,
         })
     }
 }
@@ -6381,14 +6402,44 @@ mod tests {
         assert!(err.to_string().contains("rtc_chip"), "{err:#}");
     }
 
+    /// `Config::try_from` resolves the implicit battery-RAM files through
+    /// the paths in force, so a startup that adopted `[paths]` *after* the
+    /// conversion would site this run's NVRAM by the previous answer. The
+    /// conversion is exercised here with a section already in force, which
+    /// is the order `load_config` uses.
+    #[test]
+    fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
+        let _guard = crate::paths::adopted_store_lock();
+        crate::paths::adopt(crate::pathconf::Paths {
+            nvram: Some(PathBuf::from("elsewhere")),
+            ..Default::default()
+        });
+        let cfg = parse_config("[machine]\nprofile = \"A4000\"\n")?;
+        let battmem = cfg.battmem_path.expect("an A4000 fits an RP5C01");
+        // No host-data directory at all leaves the bare name, which is the
+        // documented degradation and has no directory to check.
+        if crate::paths::config_dir().is_some() {
+            assert!(
+                battmem.parent().is_some_and(|p| p.ends_with("elsewhere")),
+                "the section in force did not site the battery RAM: {battmem:?}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn battmem_defaults_to_a_backing_file_only_where_an_rp5c01_sits() -> Result<()> {
         // The big boxes get the default backing file with their Ricoh part.
         for profile in ["A3000", "A4000"] {
             let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+            // The file's name, not its directory: where it sits is
+            // `paths`' business and moves with the host-data directory.
             assert_eq!(
-                cfg.battmem_path.as_deref(),
-                Some(std::path::Path::new("battmem.nvram")),
+                cfg.battmem_path
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str()),
+                Some("battmem.nvram"),
                 "{profile}"
             );
         }
