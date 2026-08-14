@@ -1023,8 +1023,38 @@ fn paula_interrupt_write_addresses_use_write_only_custom_bus_readback() {
 
     assert_eq!(bus.custom_read(0x01C, 2), (INT_MASTER | INT_VERTB) as u64);
     assert_eq!(bus.custom_read(0x01E, 2), INT_AUD0 as u64);
-    assert_eq!(bus.custom_read(0x09A, 2), 0);
-    assert_eq!(bus.custom_read(0x09C, 2), 0);
+    // The write addresses drive nothing on a read: they return the floating
+    // chip data bus, never the INTENA/INTREQ latches.
+    bus.data_bus = 0x1234;
+    assert_eq!(bus.custom_read(0x09A, 2), 0x1234);
+    assert_eq!(bus.custom_read(0x09C, 2), 0x1234);
+}
+
+#[test]
+fn write_only_custom_register_reads_float_to_the_chip_data_bus() {
+    // BPLCON3 ($106) and BPL1MOD ($108) drive nothing on a read, so the
+    // CPU samples the residue of the last real chip-bus transfer, not a
+    // fixed zero. Software that reads a write-only register back and ORs
+    // the result into a fresh write must pick up the same garbage bits it
+    // would on real silicon (a floating LOCT bit in a read-back BPLCON3
+    // misroutes AGA palette writes into the low nibbles, collapsing the
+    // palette toward dark).
+    let mut bus = empty_bus();
+    bus.data_bus = 0xA53C;
+
+    assert_eq!(bus.custom_read(0x106, 2), 0xA53C);
+    assert_eq!(bus.custom_read(0x108, 2), 0xA53C);
+    // A 68000 byte read takes the high data-bus lane at even addresses
+    // and the low lane at odd.
+    assert_eq!(bus.custom_read(0x106, 1), 0xA5);
+    assert_eq!(bus.custom_read(0x107, 1), 0x3C);
+    // A longword read spans two undriven word cycles; the residue holds
+    // across both.
+    assert_eq!(bus.custom_read(0x106, 4), 0xA53C_A53C);
+
+    // A readable register still drives the bus with its own value.
+    bus.paula.write_intena(0x8000 | INT_MASTER | INT_VERTB);
+    assert_eq!(bus.custom_read(0x01C, 2), (INT_MASTER | INT_VERTB) as u64);
 }
 
 #[test]
