@@ -185,8 +185,6 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
 }
 
 fn decode(op: u16, s: &mut Stream, _cpu_type: CpuType) -> Option<String> {
-    let mode = ((op >> 3) & 7) as u8;
-    let reg = (op & 7) as u8;
     match op >> 12 {
         0x0 => decode_0(op, s),
         0x1 => decode_move(op, 0, s),
@@ -196,7 +194,6 @@ fn decode(op: u16, s: &mut Stream, _cpu_type: CpuType) -> Option<String> {
         0x5 => decode_5(op, s),
         0x6 => Some(decode_branch(op, s)),
         0x7 => {
-            // MOVEQ
             if op & 0x0100 != 0 {
                 return None;
             }
@@ -210,10 +207,7 @@ fn decode(op: u16, s: &mut Stream, _cpu_type: CpuType) -> Option<String> {
         0xC => decode_and_mul_abcd_exg(op, s),
         0xD => decode_addsub(op, "ADD", s),
         0xE => decode_shift(op, s),
-        _ => {
-            let _ = (mode, reg);
-            None
-        }
+        _ => None,
     }
 }
 
@@ -502,34 +496,39 @@ fn movem_list(mask: u16, predec: bool) -> String {
     }
 }
 
+fn dual_reg_operands(mode: u8, reg: u8, dn: usize) -> (String, String) {
+    if mode == 1 {
+        (format!("-({})", AN[reg as usize]), format!("-({})", AN[dn]))
+    } else {
+        (DN[reg as usize].to_string(), DN[dn].to_string())
+    }
+}
+
+fn format_dir_op(mnem: &str, size: u8, dn: usize, ea: &str, dir_to_ea: bool) -> String {
+    if dir_to_ea {
+        format!("{mnem}{} {},{ea}", size_suffix(size), DN[dn])
+    } else {
+        format!("{mnem}{} {ea},{}", size_suffix(size), DN[dn])
+    }
+}
+
 fn decode_addsub(op: u16, base: &str, s: &mut Stream) -> Option<String> {
     let mode = ((op >> 3) & 7) as u8;
     let reg = (op & 7) as u8;
     let dn = ((op >> 9) & 7) as usize;
     let opmode = ((op >> 6) & 7) as u8;
-    // ADDA/SUBA
     if opmode == 3 || opmode == 7 {
         let size = if opmode == 7 { 2 } else { 1 };
         let ea = effective_address(mode, reg, size, s);
         return Some(format!("{base}A{} {ea},{}", size_suffix(size), AN[dn]));
     }
     let size = opmode & 3;
-    // ADDX/SUBX: opmode 4/5/6 with EA mode 0 (Dn) or 1 (-(An))
     if opmode & 4 != 0 && (mode == 0 || mode == 1) {
-        let rm = mode == 1;
-        let (x, y) = if rm {
-            (format!("-({})", AN[reg as usize]), format!("-({})", AN[dn]))
-        } else {
-            (DN[reg as usize].to_string(), DN[dn].to_string())
-        };
+        let (x, y) = dual_reg_operands(mode, reg, dn);
         return Some(format!("{base}X{} {x},{y}", size_suffix(size)));
     }
     let ea = effective_address(mode, reg, size, s);
-    if opmode & 4 != 0 {
-        Some(format!("{base}{} {},{ea}", size_suffix(size), DN[dn]))
-    } else {
-        Some(format!("{base}{} {ea},{}", size_suffix(size), DN[dn]))
-    }
+    Some(format_dir_op(base, size, dn, &ea, opmode & 4 != 0))
 }
 
 fn decode_or_div_sbcd(op: u16, s: &mut Stream) -> Option<String> {
@@ -537,30 +536,18 @@ fn decode_or_div_sbcd(op: u16, s: &mut Stream) -> Option<String> {
     let reg = (op & 7) as u8;
     let dn = ((op >> 9) & 7) as usize;
     let opmode = ((op >> 6) & 7) as u8;
-    // DIVU/DIVS <ea>,Dn
     if opmode == 3 || opmode == 7 {
         let mnem = if opmode == 7 { "DIVS" } else { "DIVU" };
         let ea = effective_address(mode, reg, 1, s);
         return Some(format!("{mnem} {ea},{}", DN[dn]));
     }
-    // SBCD Dy,Dx / -(Ay),-(Ax)
     if opmode == 4 && (mode == 0 || mode == 1) {
-        let rm = mode == 1;
-        let (x, y) = if rm {
-            (format!("-({})", AN[reg as usize]), format!("-({})", AN[dn]))
-        } else {
-            (DN[reg as usize].to_string(), DN[dn].to_string())
-        };
+        let (x, y) = dual_reg_operands(mode, reg, dn);
         return Some(format!("SBCD {x},{y}"));
     }
-    // OR
     let size = opmode & 3;
     let ea = effective_address(mode, reg, size, s);
-    if opmode & 4 != 0 {
-        Some(format!("OR{} {},{ea}", size_suffix(size), DN[dn]))
-    } else {
-        Some(format!("OR{} {ea},{}", size_suffix(size), DN[dn]))
-    }
+    Some(format_dir_op("OR", size, dn, &ea, opmode & 4 != 0))
 }
 
 fn decode_and_mul_abcd_exg(op: u16, s: &mut Stream) -> Option<String> {
@@ -568,20 +555,13 @@ fn decode_and_mul_abcd_exg(op: u16, s: &mut Stream) -> Option<String> {
     let reg = (op & 7) as u8;
     let dn = ((op >> 9) & 7) as usize;
     let opmode = ((op >> 6) & 7) as u8;
-    // MULU/MULS
     if opmode == 3 || opmode == 7 {
         let mnem = if opmode == 7 { "MULS" } else { "MULU" };
         let ea = effective_address(mode, reg, 1, s);
         return Some(format!("{mnem} {ea},{}", DN[dn]));
     }
-    // ABCD / EXG
     if opmode == 4 && (mode == 0 || mode == 1) {
-        let rm = mode == 1;
-        let (x, y) = if rm {
-            (format!("-({})", AN[reg as usize]), format!("-({})", AN[dn]))
-        } else {
-            (DN[reg as usize].to_string(), DN[dn].to_string())
-        };
+        let (x, y) = dual_reg_operands(mode, reg, dn);
         return Some(format!("ABCD {x},{y}"));
     }
     if opmode == 5 && mode == 0 {
@@ -593,14 +573,9 @@ fn decode_and_mul_abcd_exg(op: u16, s: &mut Stream) -> Option<String> {
     if opmode == 6 && mode == 1 {
         return Some(format!("EXG {},{}", DN[dn], AN[reg as usize]));
     }
-    // AND
     let size = opmode & 3;
     let ea = effective_address(mode, reg, size, s);
-    if opmode & 4 != 0 {
-        Some(format!("AND{} {},{ea}", size_suffix(size), DN[dn]))
-    } else {
-        Some(format!("AND{} {ea},{}", size_suffix(size), DN[dn]))
-    }
+    Some(format_dir_op("AND", size, dn, &ea, opmode & 4 != 0))
 }
 
 fn decode_b(op: u16, s: &mut Stream) -> Option<String> {
@@ -820,6 +795,40 @@ mod tests {
         assert_eq!(dis(&[0xE388], 0).0, "LSL.L #1,D0");
         // ASR.W D2,D3 -> shift by reg
         assert_eq!(dis(&[0xE423], 0).0, "ASR.B D2,D3");
+    }
+
+    #[test]
+    fn alu_directions_and_dual_reg() {
+        assert_eq!(dis(&[0xD050], 0), ("ADD.W (A0),D0".into(), 2));
+        assert_eq!(dis(&[0xD150], 0), ("ADD.W D0,(A0)".into(), 2));
+        assert_eq!(dis(&[0xD2D0], 0), ("ADDA.W (A0),A1".into(), 2));
+        assert_eq!(dis(&[0xD3D0], 0), ("ADDA.L (A0),A1".into(), 2));
+        assert_eq!(dis(&[0x9150], 0), ("SUB.W D0,(A0)".into(), 2));
+        assert_eq!(dis(&[0x9390], 0), ("SUB.L D1,(A0)".into(), 2));
+        assert_eq!(dis(&[0xD101], 0), ("ADDX.B D1,D0".into(), 2));
+        assert_eq!(dis(&[0xD149], 0), ("ADDX.W -(A1),-(A0)".into(), 2));
+        assert_eq!(dis(&[0xD38A], 0), ("ADDX.L -(A2),-(A1)".into(), 2));
+        assert_eq!(dis(&[0x9342], 0), ("SUBX.W D2,D1".into(), 2));
+        assert_eq!(dis(&[0x9189], 0), ("SUBX.L -(A1),-(A0)".into(), 2));
+        assert_eq!(dis(&[0x8010], 0), ("OR.B (A0),D0".into(), 2));
+        assert_eq!(dis(&[0x8150], 0), ("OR.W D0,(A0)".into(), 2));
+        assert_eq!(dis(&[0x80D0], 0), ("DIVU (A0),D0".into(), 2));
+        assert_eq!(dis(&[0x81D0], 0), ("DIVS (A0),D0".into(), 2));
+        assert_eq!(dis(&[0x8101], 0), ("SBCD D1,D0".into(), 2));
+        assert_eq!(dis(&[0x8109], 0), ("SBCD -(A1),-(A0)".into(), 2));
+        assert_eq!(dis(&[0xC010], 0), ("AND.B (A0),D0".into(), 2));
+        assert_eq!(dis(&[0xC190], 0), ("AND.L D0,(A0)".into(), 2));
+        assert_eq!(dis(&[0xC0D0], 0), ("MULU (A0),D0".into(), 2));
+        assert_eq!(dis(&[0xC1D0], 0), ("MULS (A0),D0".into(), 2));
+        assert_eq!(dis(&[0xC101], 0), ("ABCD D1,D0".into(), 2));
+        assert_eq!(dis(&[0xC109], 0), ("ABCD -(A1),-(A0)".into(), 2));
+        assert_eq!(dis(&[0xC141], 0), ("EXG D0,D1".into(), 2));
+        assert_eq!(dis(&[0xC149], 0), ("EXG A0,A1".into(), 2));
+        assert_eq!(dis(&[0xC189], 0), ("EXG D0,A1".into(), 2));
+        assert_eq!(dis(&[0xB2D0], 0), ("CMPA.W (A0),A1".into(), 2));
+        assert_eq!(dis(&[0xB109], 0), ("CMPM.B (A1)+,(A0)+".into(), 2));
+        assert_eq!(dis(&[0xB149], 0), ("CMPM.W (A1)+,(A0)+".into(), 2));
+        assert_eq!(dis(&[0xB150], 0), ("EOR.W D0,(A0)".into(), 2));
     }
 
     #[test]
