@@ -174,9 +174,13 @@ HDF images, bare partition hardfiles wrapped in a synthesized RDB
 (bootable `DHn` named after the unit), gzip-compressed hardfiles (`.hdz`,
 sniffed by gzip magic and unpacked by `gzip.rs` into memory at open time
 because deflate has no random access, which is what makes their writes
-session-only), and host directories built into in-memory FFS volumes by
-`dirfs.rs` (whose volume label defaults to the directory name, or a `name`
-override configured on the drive). The SCSI-2 target layer in
+session-only), and host directories built into in-memory FFS or OFS volumes by
+`dirfs.rs` (FFS by default; `filesystem = "ofs"` on the drive picks OFS,
+the one every Kickstart from 1.2 onward can read with no guest-side
+setup -- FFS needs a handler loaded from disk or an RDB `FileSystemHeader`
+chain, neither of which Copperline bundles). The volume label defaults to
+the directory name, or a `name` override configured on the drive. The
+SCSI-2 target layer in
 `scsi.rs` answers INQUIRY, MODE SENSE pages 3/4, READ CAPACITY,
 READ/WRITE(6)/(10), REQUEST SENSE, and the no-op housekeeping commands,
 with sense state kept per target.
@@ -266,7 +270,7 @@ dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests).
 `[[filesys]]` mounts export host directories as live AmigaDOS volumes
 (`HOSTFS0:` ... up to 8 mounts), with no disk image in between -- distinct
 from the `dirfs.rs` path above, which snapshots a directory into an
-in-memory FFS volume behind a virtual drive. The guest side is a tiny
+in-memory FFS or OFS volume behind a virtual drive. The guest side is a tiny
 handler (see `guest/services/`) mapped into the Copperline services board
 with a mount table and a hand-built DiagArea. DiagPoint only patches a
 Romtag into the retained diag copy; Kickstart's cold-start resident scan

@@ -1087,8 +1087,9 @@ mod tests {
         assert_eq!(image.total_sectors(), 1234);
     }
 
-    /// Read every sector of an image and return the FFS volume label found in
-    /// its root block (block type 2 / secondary type 1). The directory mount
+    /// Read every sector of an image and return the volume label found in
+    /// its root block (block type 2 / secondary type 1; the same for FFS
+    /// and OFS). The directory mount
     /// prepends a synthesized RDB, so the root block is not at a fixed LBA;
     /// scan for it instead.
     fn volume_label(disk: &mut HardDriveImage) -> String {

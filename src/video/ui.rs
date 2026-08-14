@@ -5582,12 +5582,16 @@ fn row_archive(field: LauncherField) -> Option<crate::gamelib::support::Archive>
 
 /// The editable volume-name box on a drive row: it sits just left of the
 /// Browse button, with the path text filling the space before it.
-/// Whether a drive row's FFS/OFS toggle applies: only a directory mount has
-/// a filesystem choice to make (an HDF/gzip image already carries its own).
-/// A stricter condition than the volume-name box's (which shows for any
-/// image, directory or not -- a name is at least harmless on an HDF).
+/// Whether a drive row's FFS/OFS toggle applies: only a directory mount on
+/// one of the disk-backed drive fields (IDE/SCSI/lide) has a filesystem
+/// choice to make -- an HDF/gzip image already carries its own, and a
+/// `Filesys*Dir` row is a live HOSTFS mount, not a disk snapshot, so it has
+/// no filesystem to choose either. `drive_is_directory` restricts to
+/// exactly that field set on its own (returning `false` for anything else,
+/// same as `drive_filesystem`'s fallback) and reads a cached flag rather
+/// than statting the path here on every frame the row is drawn.
 fn launcher_drive_fs_applies(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
-    setup.drive_name_applies(field) && setup.path(field).is_some_and(|p| p.is_dir())
+    setup.drive_is_directory(field)
 }
 
 fn launcher_drive_name_rect(rect: Rect, row_y: usize) -> Rect {
@@ -5601,9 +5605,8 @@ fn launcher_drive_name_rect(rect: Rect, row_y: usize) -> Rect {
 }
 
 /// The FFS/OFS toggle button on a drive row: just left of the volume-name
-/// box, shown under the same condition (a directory mount -- see
-/// `MachineSetup::drive_filesystem`/`ui.rs`'s use of `path().is_dir()`
-/// alongside `drive_name_applies`).
+/// box, shown under the same condition as `launcher_drive_fs_applies`
+/// above (a directory mount on a disk-backed drive field).
 fn launcher_drive_fs_rect(rect: Rect, row_y: usize) -> Rect {
     let name_box = launcher_drive_name_rect(rect, row_y);
     Rect {

@@ -1644,8 +1644,8 @@ Each `[[filesys]]` entry exports a host directory to the guest as an
 AmigaDOS volume on its own `HOSTFS<n>:` device, served live by the
 emulator: no disk image is built, and guest reads always see the current
 host contents. This differs from giving `[ide]`/`[scsi]` a directory
-path, which snapshots the tree into an in-memory FFS volume at startup.
-Up to 8 mounts.
+path, which snapshots the tree into an in-memory FFS or OFS volume at
+startup (see `filesystem` above). Up to 8 mounts.
 
 The volumes are read-write by default: the guest creates, writes, renames,
 and deletes the host's files directly, and changes land in the directory
