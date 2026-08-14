@@ -98,27 +98,27 @@ pub struct Paths {
     pub cds: Option<PathBuf>,
 }
 
-/// Whether a directory is one Copperline can use: it is there, or it is one
-/// Copperline would make for itself inside `root`.
+/// Whether a directory is one Copperline can use: it is there, or it is
+/// inside `root`, which is Copperline's own tree and made on demand.
 ///
-/// The second half is what makes a fresh installation work. `screenshots =
-/// "shots"` names a directory that will not exist until the first screenshot
-/// is taken, and it must not inherit in the meantime -- but the same
-/// generosity extended to *any* missing directory would be worse than
-/// useless: `/Volumes/STICK/Copperline` with the stick unplugged has a
-/// perfectly good parent, and treating it as creatable would quietly build
-/// a shadow copy of somebody's library on the internal disk. So a missing
-/// directory counts only inside the root everything else already hangs off,
-/// which a removed volume is not.
+/// The second half is what makes a fresh installation work. Nothing under
+/// the host-data directory exists until something is written to it, so a
+/// check that insisted on finding `screenshots = "shots"` -- or the
+/// host-data directory containing it -- would drop every relative entry on
+/// a machine that had not run Copperline before. Everything inside the root
+/// is created with the write that needs it, so being missing says nothing.
 ///
-/// Two `stat`s at most, and nothing is created here. Whether the eventual
-/// write succeeds is the write's business to report; this only answers
-/// whether the place named still exists on this machine.
+/// Outside the root, existing is the whole test. `/Volumes/STICK/Copperline`
+/// with the stick unplugged is not there and inherits, rather than being
+/// treated as creatable and quietly built as a shadow copy of somebody's
+/// library on the internal disk.
+///
+/// One `stat` at most, and only for a path outside the root -- the inside
+/// case is a lexical prefix test that touches no disk and cannot block.
+/// Nothing is created here; whether the eventual write succeeds is the
+/// write's business to report.
 fn is_reachable(dir: &Path, root: &Path) -> bool {
-    dir.is_dir()
-        || dir
-            .parent()
-            .is_some_and(|parent| parent.starts_with(root) && parent.is_dir())
+    dir.starts_with(root) || dir.is_dir()
 }
 
 /// Check each directory, giving up at `deadline`.
@@ -514,6 +514,30 @@ mod tests {
         .reachable(&host());
         assert_eq!(paths.base, None);
         assert!(paths.screenshots.is_some());
+    }
+
+    /// A fresh installation has written nothing yet, so nothing under the
+    /// host-data directory is there -- including the host-data directory.
+    /// Relative entries must still stand: they name folders Copperline
+    /// makes when it writes to them, and dropping them would mean `[paths]`
+    /// quietly did nothing until the first screenshot had been taken
+    /// somewhere else. This is what CI caught and a developer's own machine,
+    /// which has all of these directories already, cannot.
+    #[test]
+    fn a_relative_entry_stands_before_anything_has_been_written() {
+        let untouched = std::env::temp_dir().join("copperline-never-created-7b2e");
+        assert!(
+            !untouched.is_dir(),
+            "the test needs a root that is not there"
+        );
+        let paths = Paths {
+            screenshots: Some(PathBuf::from("shots")),
+            base: Some(PathBuf::from("tree")),
+            ..Default::default()
+        }
+        .reachable(&untouched);
+        assert_eq!(paths.base.as_deref(), Some(Path::new("tree")));
+        assert_eq!(paths.screenshots.as_deref(), Some(Path::new("shots")));
     }
 
     /// Nothing set means nothing to check, so the common case never touches
