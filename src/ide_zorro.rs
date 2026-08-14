@@ -769,7 +769,7 @@ mod tests {
         // ...and the low-64K block containing offset 0 (bit12==bit13) too.
         assert_eq!(board.read(0, 1) as u8, flash[0]);
         // But the task-file block itself (bit12 != bit13) is not ROM.
-        assert_ne!(board.rom_visible(0x1000), true);
+        assert!(!board.rom_visible(0x1000));
     }
 
     #[test]
