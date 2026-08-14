@@ -140,11 +140,14 @@ impl IdeDrive {
         self.disk.pending_host_disk()
     }
 
-    /// Open an IDE unit (0 = master, 1 = slave; this picks the DHn device
-    /// name a synthesized RDB advertises). The path may be a raw HDF image
-    /// file, or a host directory, which is built into an in-memory FFS
-    /// volume at open time; `volume_name` labels that volume (directory
-    /// mounts only). `boot_pri` is the synthesized partition's `de_BootPri`.
+    /// Open an IDE unit; `unit` picks the DHn device name a synthesized RDB
+    /// advertises, so callers with more than one master/slave pair on the
+    /// bus (e.g. a multi-channel `[lide]` board) must pass a value that is
+    /// unique across every drive on the bus, not just channel-relative
+    /// master=0/slave=1. The path may be a raw HDF image file, or a host
+    /// directory, which is built into an in-memory FFS volume at open time;
+    /// `volume_name` labels that volume (directory mounts only). `boot_pri`
+    /// is the synthesized partition's `de_BootPri`.
     pub fn open(
         path: &Path,
         unit: usize,
@@ -625,7 +628,17 @@ impl AtaBus {
             Some(IdeReg::SectorNumber) => self.sector_number = byte,
             Some(IdeReg::CylLow) => self.cyl_low = byte,
             Some(IdeReg::CylHigh) => self.cyl_high = byte,
-            Some(IdeReg::DriveHead) => self.drive_head = byte,
+            Some(IdeReg::DriveHead) => {
+                self.drive_head = byte;
+                // Reapply the signature for whichever drive is now selected
+                // -- not just after a reset -- so probing a mixed disk+ATAPI
+                // bus by switching device-select sees the right signature on
+                // each slot without an intervening reset. Selecting mid
+                // transfer is undefined on real hardware too, so this isn't
+                // guarded against clobbering an in-progress PioIn/PioOut/
+                // Packet transfer's use of cyl_low/cyl_high as a byte count.
+                self.apply_atapi_signature();
+            }
             Some(IdeReg::StatusCommand) => self.command(byte),
             Some(IdeReg::AltStatusDevCtl) => {
                 let was_reset = self.devctl & CTL_SRST != 0;
@@ -799,6 +812,20 @@ impl AtaBus {
         (key & 0x0F) << 4
     }
 
+    /// Abort an ATA-only command (READ SECTORS, IDENTIFY DEVICE, DEVICE
+    /// RESET, ...) because the selected slot is ATAPI, not a disk. Beyond
+    /// the usual `ERR_ABRT`, this also posts an ILLEGAL REQUEST sense entry
+    /// on the ATAPI drive so a following REQUEST SENSE agrees with the error
+    /// the driver just saw, instead of reporting "no sense". Scoped to this
+    /// one case -- ordinary ATA-disk error paths (bad LBA, I/O error, ...)
+    /// keep going through the plain `command_error`.
+    fn atapi_type_mismatch_abort(&mut self) {
+        if let Some(drive) = self.atapi_drive() {
+            drive.cdrom.post_illegal_command_sense();
+        }
+        self.command_error(ERR_ABRT);
+    }
+
     /// Finish a PACKET command that produced neither a data-in nor a
     /// data-out phase: go straight to the final status phase, mapping the
     /// SCSI status byte to the ATAPI error/status convention.
@@ -821,6 +848,19 @@ impl AtaBus {
     fn packet_command_received(&mut self) {
         let cdb: [u8; 12] = self.buf[..12].try_into().unwrap();
         let byte_limit = self.packet_byte_limit;
+        // A PACKET CDB's LBA (READ(10)/READ(12)/READ CD all put it at
+        // cdb[2..6], big-endian) is not visible in `command()`'s own
+        // COPPERLINE_DIAG_GAYLE trace -- that fires at 0xA0 issue, before
+        // the CDB has been clocked in through the data port -- so trace it
+        // separately here, once the CDB is actually in hand.
+        if crate::envcfg::flag("COPPERLINE_DIAG_GAYLE") {
+            log::info!(
+                "ide packet cdb drv={} op={:#04X} lba={}",
+                self.selected(),
+                cdb[0],
+                u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]])
+            );
+        }
         let Some(drive) = self.atapi_drive() else {
             // The selected drive vanished mid-command (should not happen in
             // practice); abort cleanly rather than panic.
@@ -829,6 +869,15 @@ impl AtaBus {
         };
         let (exec, scsi_status) = drive.execute(&cdb, 0);
         match exec {
+            // A legitimate ATAPI idiom (INQUIRY/REQUEST SENSE/MODE SENSE
+            // with an allocation length of 0): there is no DRQ phase to
+            // enter at all, since `data_write_word`/`data_read_word` never
+            // complete a zero-length `buf` -- going through
+            // `Transfer::PacketDataIn` here would hang the bus forever with
+            // DRQ asserted and no interrupt to follow.
+            crate::scsi::ScsiExec::DataIn(data) if data.is_empty() => {
+                self.packet_finish_no_data(scsi_status);
+            }
             crate::scsi::ScsiExec::DataIn(data) => {
                 self.set_interrupt_reason(false, true); // C/D=0, I/O=1
                 let chunk = data.len().min(byte_limit as usize);
@@ -843,6 +892,17 @@ impl AtaBus {
                 };
                 self.status = ST_DRDY | ST_DSC | ST_DRQ;
                 self.raise_irq();
+            }
+            // Same idiom as the empty DataIn case above, for a zero-length
+            // data-out phase: no bytes to collect, so complete the command
+            // immediately rather than entering `Transfer::PacketDataOut`
+            // with an empty `buf` that `data_write_word` can never fill.
+            crate::scsi::ScsiExec::DataOut(0) => {
+                let status = self
+                    .atapi_drive()
+                    .map(|d| d.complete_out(&cdb, &[]))
+                    .unwrap_or(crate::scsi::CHECK_CONDITION);
+                self.packet_finish_no_data(status);
             }
             crate::scsi::ScsiExec::DataOut(expected) => {
                 self.set_interrupt_reason(false, false); // C/D=0, I/O=0
@@ -1096,7 +1156,7 @@ impl AtaBus {
             // tells "no drive" from "wrong IDENTIFY for a PACKET device".
             0xEC => {
                 if self.selected_is_atapi() {
-                    self.command_error(ERR_ABRT);
+                    self.atapi_type_mismatch_abort();
                     return;
                 }
                 self.buf = self.drive().map(|d| d.identify_block()).unwrap_or_default();
@@ -1146,22 +1206,38 @@ impl AtaBus {
                 // first block.
                 self.set_interrupt_reason(true, false); // C/D=1, I/O=0
             }
-            // DEVICE RESET: narrower than a full soft reset -- it only
+            // DEVICE RESET: ATAPI-only per ATA-4 (a plain-ATA slot has no
+            // such command and aborts it, like every other type-specific
+            // command above). Narrower than a full soft reset -- it only
             // resets the selected drive's register file and re-asserts its
-            // signature, leaving buf/transfer (shared bus state, which may
-            // belong to a transfer in progress on the other drive) alone.
+            // signature. Because this arm now only runs when the *selected*
+            // drive is ATAPI, and only one drive can be mid-PACKET-transfer
+            // at a time, buf/transfer here always belongs to the drive being
+            // reset -- so this is also the driver's real recovery path out
+            // of a wedged PACKET data phase (see the zero-length DataIn/
+            // DataOut handling above for the case that no longer wedges).
             0x08 => {
+                if !self.selected_is_atapi() {
+                    // Not a mismatch in the "ATA command against ATAPI"
+                    // sense (there's no ATAPI drive to post sense on) --
+                    // just DEVICE RESET being invalid against a disk slot.
+                    self.command_error(ERR_ABRT);
+                    return;
+                }
                 self.error = 0x01;
                 self.sector_count = 0x01;
                 self.sector_number = 0x01;
                 self.apply_atapi_signature();
+                self.transfer = Transfer::None;
+                self.buf.clear();
+                self.buf_pos = 0;
                 self.status = ST_DRDY | ST_DSC;
                 // Real DEVICE RESET does not raise a completion interrupt.
             }
             // READ SECTORS (with/without retry) and READ MULTIPLE.
             0x20 | 0x21 | 0xC4 => {
                 if self.selected_is_atapi() {
-                    self.command_error(ERR_ABRT);
+                    self.atapi_type_mismatch_abort();
                     return;
                 }
                 let block = if cmd == 0xC4 {
@@ -1187,7 +1263,7 @@ impl AtaBus {
             // WRITE SECTORS (with/without retry) and WRITE MULTIPLE.
             0x30 | 0x31 | 0xC5 => {
                 if self.selected_is_atapi() {
-                    self.command_error(ERR_ABRT);
+                    self.atapi_type_mismatch_abort();
                     return;
                 }
                 let block = if cmd == 0xC5 {
@@ -1229,7 +1305,11 @@ impl AtaBus {
             0x91 => {
                 let heads = (self.drive_head & 0x0F) + 1;
                 let spt = self.sector_count;
-                if spt == 0 || self.selected_is_atapi() {
+                if self.selected_is_atapi() {
+                    self.atapi_type_mismatch_abort();
+                    return;
+                }
+                if spt == 0 {
                     self.command_error(ERR_ABRT);
                     return;
                 }
@@ -1410,6 +1490,30 @@ mod tests {
         assert_eq!(disk_bus.cyl_high, 0);
     }
 
+    /// A mixed bus reselected from the disk slot to the ATAPI slot (no reset
+    /// in between) must show the ATAPI signature -- not the plain-ATA one
+    /// left over from whichever drive was selected at the last reset.
+    #[test]
+    fn atapi_signature_reapplies_on_reselection_without_a_reset() {
+        let disk_path = temp_disk_image(64);
+        let cd_path = temp_cd_image(2);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        bus.attach_drive(1, AtapiDrive::open(&cd_path).unwrap());
+        bus.reset();
+
+        // Select the disk slot: plain-ATA signature.
+        bus.write_reg(Some(IdeReg::DriveHead), 1, 0);
+        assert_eq!(bus.cyl_low, 0);
+        assert_eq!(bus.cyl_high, 0);
+
+        // Select the ATAPI slot, with no intervening reset: the signature
+        // must flip to match, purely from the device-select write.
+        bus.write_reg(Some(IdeReg::DriveHead), 1, u32::from(DH_DRV));
+        assert_eq!(bus.cyl_low, 0x14);
+        assert_eq!(bus.cyl_high, 0xEB);
+    }
+
     #[test]
     fn packet_inquiry_matches_a_direct_scsi_call() {
         let (mut bus, path) = atapi_bus(2);
@@ -1490,5 +1594,150 @@ mod tests {
         bus.drive_head = 0;
         bus.command(0xEC);
         assert_eq!(bus.status & ST_ERR, 0, "disk slot must be unaffected");
+    }
+
+    /// A PACKET command with a legitimately empty response (INQUIRY with
+    /// allocation length 0, a normal ATAPI idiom) must complete straight
+    /// away rather than entering a DRQ data-in phase with an empty buffer --
+    /// `data_read_word` can never clock an empty buffer to completion, so
+    /// that path hangs the bus forever with DRQ asserted and no interrupt.
+    #[test]
+    fn packet_zero_length_data_in_completes_without_hanging() {
+        let (mut bus, _path) = atapi_bus(2);
+        let mut cdb = inquiry_cdb();
+        cdb[4] = 0; // allocation length 0: a legitimate zero-byte response
+        issue_packet(&mut bus, &cdb, 0xFFFE);
+        assert_eq!(
+            bus.transfer,
+            Transfer::None,
+            "must not enter a DRQ data-in phase with nothing to transfer"
+        );
+        assert_eq!(bus.status & ST_DRQ, 0, "DRQ must not stay asserted");
+        assert_eq!(bus.status & ST_ERR, 0);
+        assert!(bus.take_irq_edge(), "the completion interrupt must fire");
+    }
+
+    /// The data-out counterpart: MODE SELECT with a zero-length parameter
+    /// list must likewise skip straight to the status phase instead of
+    /// wedging on an empty `Transfer::PacketDataOut`.
+    #[test]
+    fn packet_zero_length_data_out_completes_without_hanging() {
+        let (mut bus, _path) = atapi_bus(2);
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0x15; // MODE SELECT(6)
+        cdb[4] = 0; // parameter list length 0
+        issue_packet(&mut bus, &cdb, 0xFFFE);
+        assert_eq!(
+            bus.transfer,
+            Transfer::None,
+            "must not enter a DRQ data-out phase with nothing to transfer"
+        );
+        assert_eq!(bus.status & ST_DRQ, 0, "DRQ must not stay asserted");
+        assert_eq!(bus.status & ST_ERR, 0);
+        assert!(bus.take_irq_edge(), "the completion interrupt must fire");
+    }
+
+    /// DEVICE RESET (0x08) is ATAPI-only per ATA-4: issuing it against a
+    /// plain-ATA slot must abort, matching every other type-specific command.
+    #[test]
+    fn device_reset_aborts_against_a_plain_ata_slot() {
+        let disk_path = temp_disk_image(64);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        bus.command(0x08);
+        assert_ne!(bus.status & ST_ERR, 0);
+        assert_eq!(bus.error, ERR_ABRT);
+    }
+
+    /// DEVICE RESET against the ATAPI slot must cancel a hung PACKET
+    /// transfer left mid-data-phase (DRQ asserted): this is the driver's
+    /// real recovery path, complementary to the zero-length-phase fix above
+    /// which stops the hang from happening in the first place for a
+    /// well-behaved driver.
+    #[test]
+    fn device_reset_cancels_a_stuck_packet_transfer() {
+        let (mut bus, _path) = atapi_bus(8);
+        let cdb = read10_cdb(0, 4);
+        issue_packet(&mut bus, &cdb, 512);
+        assert!(matches!(bus.transfer, Transfer::PacketDataIn { .. }));
+        assert_ne!(bus.status & ST_DRQ, 0, "mid-transfer DRQ must be asserted");
+
+        bus.command(0x08);
+        assert_eq!(bus.status & ST_ERR, 0, "DEVICE RESET itself must not abort");
+        assert_eq!(bus.transfer, Transfer::None);
+        assert_eq!(bus.status & ST_DRQ, 0);
+
+        // A subsequent data-port access must do nothing, not replay stale
+        // bytes from the cancelled transfer.
+        assert_eq!(bus.data_read_word(), 0);
+    }
+
+    /// An ATA-only command aborted against the ATAPI slot must leave the
+    /// ATAPI drive's sense data agreeing with the error register: ERR set
+    /// with sense key 5 (ILLEGAL REQUEST), not "no sense" (key 0).
+    #[test]
+    fn ata_command_against_atapi_slot_leaves_matching_sense_data() {
+        let (mut bus, _path) = atapi_bus(2);
+        bus.sector_count = 1;
+        bus.command(0x20); // READ SECTORS: ATA-only
+        assert_ne!(bus.status & ST_ERR, 0);
+        assert_eq!(bus.error, ERR_ABRT);
+
+        let sense_cdb = request_sense_cdb();
+        issue_packet(&mut bus, &sense_cdb, 0xFFFE);
+        let sense = packet_read_data(&mut bus);
+        assert_eq!(
+            sense[2] & 0x0F,
+            crate::scsi::SK_ILLEGAL_REQUEST,
+            "REQUEST SENSE must agree with the ERR the driver just saw"
+        );
+    }
+
+    /// Two lide drives on different channels must get distinct DHn names
+    /// when both are bare-partition (non-RDB) hardfiles: the DOS device name
+    /// a synthesized RDB advertises has to be unique across the whole board,
+    /// not just within one channel, or a driver enumerating channel 1 finds
+    /// the same DH0/DH1 names channel 0 already claimed.
+    #[test]
+    fn lide_drives_on_different_channels_get_unique_dh_names() {
+        use crate::harddrive::SECTOR_SIZE as HD_SECTOR_SIZE;
+
+        fn bare_partition_image(name: &str) -> PathBuf {
+            const CYL_BYTES: usize = 16 * 32 * 512; // RDB_HEADS * RDB_SPT * SECTOR_SIZE
+            let mut data = vec![0u8; CYL_BYTES];
+            data[..4].copy_from_slice(b"DOS\x01"); // OFS boot block signature
+            let path = std::env::temp_dir().join(format!(
+                "copperline-ata-test-{}-{}-{name}",
+                std::process::id(),
+                rand_suffix()
+            ));
+            std::fs::write(&path, &data).unwrap();
+            path
+        }
+
+        fn dh_name(drive: &mut IdeDrive) -> String {
+            let mut sector = [0u8; HD_SECTOR_SIZE];
+            drive.disk.read_sector(1, &mut sector).unwrap();
+            assert_eq!(&sector[..4], b"PART");
+            let len = sector[36] as usize;
+            String::from_utf8(sector[37..37 + len].to_vec()).unwrap()
+        }
+
+        // Mirrors emulator.rs's lide drive-attach loop: `idx` (the flat
+        // 0..4 slot index) names the drive, `idx % 2` (channel-relative)
+        // addresses master/slave -- channel 0's master is idx 0, channel 1's
+        // master is idx 2.
+        let path0 = bare_partition_image("ch0.hdf");
+        let path2 = bare_partition_image("ch1.hdf");
+        let mut drive0 = IdeDrive::open(&path0, 0, None, 0).unwrap();
+        let mut drive2 = IdeDrive::open(&path2, 2, None, 0).unwrap();
+        let name0 = dh_name(&mut drive0);
+        let name2 = dh_name(&mut drive2);
+        assert_eq!(name0, "DH0");
+        assert_eq!(name2, "DH2");
+        assert_ne!(name0, name2, "channel 0 and channel 1 must not collide");
+
+        let _ = std::fs::remove_file(&path0);
+        let _ = std::fs::remove_file(&path2);
     }
 }

@@ -2451,8 +2451,9 @@ pub fn build_machine(
         devices.push(device);
     }
     // A lide.device-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
-    // or AT-Bus 2008. Hard disks only; the boot ROM is always user-supplied
-    // (never bundled), and its absence is a legal hardware-only mode.
+    // or AT-Bus 2008. Drives may be hard disks or ATAPI CD-ROMs; the boot
+    // ROM is always user-supplied (never bundled), and its absence is a
+    // legal hardware-only mode.
     if cfg.lide.enabled() {
         let slot = devices.len();
         let has_rom = cfg.lide.rom.is_some();
@@ -2482,9 +2483,18 @@ pub fn build_machine(
             if ch >= channels {
                 continue; // config validation already rejects this; defensive only
             }
+            // `unit` (master/slave, 0/1) is channel-relative and must stay
+            // that way for the attach slot below, but a bare-partition
+            // hardfile's synthesized RDB names its DOS device from this same
+            // argument (`open_ide_target` -> `IdeDrive::open`) -- reusing
+            // `unit` there would give every channel's master DH0 and every
+            // channel's slave DH1, colliding across channels on RIPPLE's two
+            // channels. `idx` (the flat 0..4 slot index) is unique per drive
+            // regardless of channel, so it -- not `unit` -- is what goes into
+            // the name.
             let target = open_ide_target(
                 &drive.path,
-                unit,
+                idx,
                 drive.volume_name.as_deref(),
                 drive.boot_pri,
             )?;

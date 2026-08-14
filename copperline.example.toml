@@ -810,5 +810,6 @@ floppy_sounds_volume = 100
 # [[host_disk]]
 # device = "sdb"                 # last name shown by --list-disks
 # fingerprint = "v1-..."        # launcher-generated; do not copy between disks
-# attach = "ide-master"          # ide-master (default), ide-slave, scsi0..scsi6
+# attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
+#                                 # lide0-slave, lide1-master, lide1-slave, or scsi0..scsi6
 # read_only = true               # the default; false explicitly allows writes

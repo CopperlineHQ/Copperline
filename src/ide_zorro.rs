@@ -5,9 +5,10 @@
 //! open-hardware card, two ATA channels), **RIDE** (an expansion-port board
 //! sharing RIPPLE's ROM image and register layout, one channel), and
 //! **AT-Bus 2008** (the register model shared by that board's whole clone
-//! family, one channel). Drives may be hard disks or ATAPI CD-ROMs (a `.cue`,
-//! `.iso`, or `.chd` image on any `[lide] drives` slot); no host block
-//! devices. The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
+//! family, one channel). Drives may be hard disks or ATAPI CD-ROMs, either a
+//! `.cue`/`.iso`/`.chd` image on any `[lide] drives` slot or a real host
+//! block device attached via `[[host_disk]] attach = "lide0-master"` (etc).
+//! The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
 //! release image from <https://github.com/LIV2/lide.device>) -- nothing is
 //! bundled or distributed.
 //!
@@ -570,8 +571,13 @@ impl crate::zorro_device::ZorroDevice for IdeZorro {
         Self::peek_word(self, off)
     }
 
-    fn tick(&mut self, _cck: u32, _host: &mut crate::zorro_device::DeviceHost) {
-        // No interrupts, no DMA, no timers: the board never has queued work.
+    fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
+        // No interrupts, no DMA, no timers of its own, but an attached ATAPI
+        // drive still needs its per-cck tick for pending disc-swap mounting
+        // and CD-DA audio streaming.
+        if let Some(cd) = self.first_atapi_mut() {
+            cd.tick(cck, host.cd_audio());
+        }
     }
 
     fn take_activity(&mut self) -> bool {

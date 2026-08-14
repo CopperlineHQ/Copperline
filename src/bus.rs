@@ -5766,6 +5766,31 @@ impl Bus {
             self.paula.intreq |= INT_PORTS;
         }
 
+        // Gayle/A4000 IDE are motherboard devices, not entries in the Zorro
+        // `devices` chain below, so an attached ATAPI drive needs its own
+        // explicit tick here (disc-swap mounting, CD-DA audio streaming) --
+        // nothing else drives it.
+        {
+            let Self { gayle, paula, .. } = self;
+            if let Some(cd) = gayle
+                .as_mut()
+                .and_then(crate::gayle::Gayle::first_atapi_mut)
+            {
+                cd.tick(cck, paula.cd_audio_mut());
+            }
+        }
+        {
+            let Self {
+                ide_a4000, paula, ..
+            } = self;
+            if let Some(cd) = ide_a4000
+                .as_mut()
+                .and_then(crate::ide_a4000::IdeA4000::first_atapi_mut)
+            {
+                cd.tick(cck, paula.cd_audio_mut());
+            }
+        }
+
         // SDMAC (A3000 motherboard SCSI): advance the WD33C93 and its DMA, and
         // level-feed its INT2 line like Gayle's. Kickstart's own scsi.device
         // drives it, so nothing boots until this interrupt arrives.

@@ -203,8 +203,9 @@ pub struct Config {
     /// and carry their own boot ROM and scsi.device; the A3000's does not.
     pub scsi: ScsiConfig,
     /// `lide.device`-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
-    /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Hard
-    /// disks only; the boot ROM is always user-supplied.
+    /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Drives
+    /// may be hard disks or ATAPI CD-ROMs; the boot ROM is always
+    /// user-supplied.
     pub lide: LideConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
@@ -3071,7 +3072,8 @@ pub(crate) struct RawHostDisk {
     #[serde(skip)]
     pub(crate) identity_confirmed: bool,
     /// Where the machine sees it: `ide-master` (the default), `ide-slave`,
-    /// or `scsi0`..`scsi6`.
+    /// `lide0-master`, `lide0-slave`, `lide1-master`, `lide1-slave`, or
+    /// `scsi0`..`scsi6`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attach: Option<String>,
     /// Protect the disk from the guest. Absent means read-only: real media is
@@ -4650,8 +4652,21 @@ impl TryFrom<RawConfig> for Config {
         // a disk is never accepted onto a bus that will not be built.
         let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
             || (defaults.sdmac && scsi.controller == ScsiController::A3000);
-        let host_disks =
-            parse_host_disks(&raw.host_disk, &ide, &scsi, &lide, has_ide_port, has_scsi)?;
+        // A `[lide]` table the user actually wrote (even bare, e.g.
+        // `board = "ripple"` with no rom/drives -- legal hardware-only
+        // mode) is a fitted board for host-disk purposes; `lide.enabled()`
+        // would say no since it only looks at rom/drives.
+        let lide_present =
+            raw.lide.board.is_some() || raw.lide.rom.is_some() || !raw.lide.drives.is_empty();
+        let host_disks = parse_host_disks(
+            &raw.host_disk,
+            &ide,
+            &scsi,
+            &lide,
+            lide_present,
+            has_ide_port,
+            has_scsi,
+        )?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
@@ -5860,6 +5875,13 @@ fn parse_host_disks(
     ide: &IdeConfig,
     scsi: &ScsiConfig,
     lide: &LideConfig,
+    // Whether the `[lide]` table carries at least one explicit key (board,
+    // rom, or drives), independent of `lide.enabled()` -- a board named with
+    // no images (`[lide] board = "ripple"`, hardware-only mode) is a real,
+    // legal board for host-disk purposes even though `LideConfig::enabled()`
+    // would say no drive/ROM makes it "off". `lide` above stays the source
+    // of truth for per-channel occupancy (the `taken` check).
+    lide_present: bool,
     has_ide_port: bool,
     has_scsi: bool,
 ) -> Result<Vec<HostDiskConfig>> {
@@ -5889,7 +5911,7 @@ fn parse_host_disks(
             HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave => has_ide_port,
             HostDiskAttach::Scsi(_) => has_scsi,
             HostDiskAttach::LideMaster(ch) | HostDiskAttach::LideSlave(ch) => {
-                lide.enabled() && usize::from(ch) < lide.board.channels()
+                lide_present && usize::from(ch) < lide.board.channels()
             }
         };
         if !fitted {
@@ -6311,9 +6333,17 @@ mod tests {
                 read_only: None,
             },
         ];
-        let error = parse_host_disks(&twice, &ide, &scsi, &LideConfig::default(), true, false)
-            .expect_err("the same disk on two slots is refused")
-            .to_string();
+        let error = parse_host_disks(
+            &twice,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            false,
+            true,
+            false,
+        )
+        .expect_err("the same disk on two slots is refused")
+        .to_string();
         assert!(error.contains("already attached"), "{error}");
 
         let same_identity = [
@@ -6337,6 +6367,7 @@ mod tests {
             &ide,
             &scsi,
             &LideConfig::default(),
+            false,
             true,
             false,
         )
@@ -6366,6 +6397,7 @@ mod tests {
             &ide,
             &scsi,
             &LideConfig::default(),
+            false,
             true,
             false,
         )
@@ -6394,11 +6426,20 @@ mod tests {
         let ide = IdeConfig::default();
         let scsi = ScsiConfig::default();
 
-        // No [lide] board at all: neither channel is fitted.
+        // No [lide] board at all: neither channel is fitted, and
+        // lide_present is false, matching "no [lide] section was written".
         let disks = [host_disk_entry("sdb", "lide0-master")];
-        let error = parse_host_disks(&disks, &ide, &scsi, &LideConfig::default(), true, false)
-            .expect_err("no [lide] board means no lide attachment point")
-            .to_string();
+        let error = parse_host_disks(
+            &disks,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            false,
+            true,
+            false,
+        )
+        .expect_err("no [lide] board means no lide attachment point")
+        .to_string();
         assert!(
             error.contains("Attach to Lide requires a [lide] board"),
             "{error}"
@@ -6417,6 +6458,7 @@ mod tests {
             &scsi,
             &ride,
             true,
+            true,
             false,
         )
         .expect("channel 0 is fitted on RIDE");
@@ -6426,6 +6468,7 @@ mod tests {
             &ide,
             &scsi,
             &ride,
+            true,
             true,
             false,
         )
@@ -6452,10 +6495,61 @@ mod tests {
             &scsi,
             &ripple,
             true,
+            true,
             false,
         )
         .expect("both channels are fitted on RIPPLE");
         assert_eq!(parsed.len(), 2);
+    }
+
+    /// A `[lide] board = "ripple"` section with no rom and no drive images
+    /// (legal hardware-only mode) still counts as a fitted board for a host
+    /// disk -- `LideConfig::enabled()` alone would wrongly say no, since it
+    /// only looks at rom/drives. This is the exact repro from the audit.
+    #[test]
+    fn lide_host_disk_attach_accepts_a_bare_board_with_no_images() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let bare = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            rom: None,
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        assert!(
+            !bare.enabled(),
+            "a bare board with no rom/drives is not `enabled()`, which is exactly the gap"
+        );
+        let parsed = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &bare,
+            true, // lide_present: the [lide] table named a board
+            true,
+            false,
+        )
+        .expect("a named board with no images still fits a host disk");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    /// End-to-end repro through `Config::from_raw`: `[lide] board = "ripple"`
+    /// with no rom/drives, plus a `[[host_disk]] attach = "lide0-master"`
+    /// entry, must parse rather than reject with "requires a [lide] board".
+    #[test]
+    fn lide_bare_board_config_accepts_a_host_disk() {
+        let toml = r#"
+            [lide]
+            board = "ripple"
+
+            [[host_disk]]
+            device = "sdb"
+            attach = "lide0-master"
+        "#;
+        let cfg = parse_config(toml).expect(
+            "a bare [lide] board with a host disk on its master channel should be accepted",
+        );
+        assert_eq!(cfg.host_disks.len(), 1);
     }
 
     /// A lide slot already holding an image cannot also take a real disk --
@@ -6484,6 +6578,7 @@ mod tests {
             &ide,
             &scsi,
             &ripple,
+            true,
             true,
             false,
         )

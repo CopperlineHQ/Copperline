@@ -4036,6 +4036,12 @@ impl MachineSetup {
                         self.lide_drive_boot_off[slot] = false;
                     }
                 }
+                // A real host disk on a channel the new personality lacks
+                // (e.g. RIPPLE channel 1 -> RIDE/AT-Bus 2008) is just as
+                // unreachable as an image drive there, and just as invisible
+                // if left attached -- drop it the same way ScsiController's
+                // handler above does for its own board switch.
+                self.drop_unreachable_host_disks();
             }
             #[cfg(feature = "midi")]
             F::SerialMode => {
@@ -5031,6 +5037,18 @@ impl MachineSetup {
                 }
                 if let Some(name) = self.lide_drive_names.get_mut(idx) {
                     *name = None;
+                }
+                // `[lide] drives` is a positional list -- a hole cannot be
+                // represented -- so a host disk taking over this slot must
+                // cascade-clear every later slot too, exactly like
+                // `clear_path` does for the image case, or `to_raw`'s
+                // `map_while` would silently stop emitting at this slot and
+                // drop any image still sitting in a later one.
+                for slot in idx + 1..self.lide_drives.len() {
+                    self.lide_drives[slot] = None;
+                    self.lide_drive_names[slot] = None;
+                    self.lide_drive_bootpri[slot] = None;
+                    self.lide_drive_boot_off[slot] = false;
                 }
             }
             crate::config::HostDiskAttach::Scsi(unit) => {
@@ -11429,6 +11447,69 @@ mod tests {
             MachineSetup::host_disk_attach_of(F::LideDrive3),
             Some(HostDiskAttach::LideSlave(1))
         );
+    }
+
+    /// Mounting a host disk on an earlier lide slot must cascade-clear later
+    /// slots exactly like `clear_path` does for the image case -- otherwise
+    /// `[lide] drives` (a positional array) would go on carrying images the
+    /// UI, and a saved config, no longer have any way to show.
+    #[test]
+    fn lide_host_disk_on_an_earlier_slot_cascades_to_later_slots() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::LideDrive0, PathBuf::from("ch0-master.hdf"));
+        s.set_path(F::LideDrive1, PathBuf::from("ch0-slave.hdf"));
+        s.set_path(F::LideDrive2, PathBuf::from("ch1-master.hdf"));
+        assert_eq!(s.to_raw().lide.drives.len(), 3);
+
+        s.set_host_disks_for_test(vec![HostDiskRow {
+            id: "disk4".to_string(),
+            fingerprint: None,
+            volume: "SanDisk".to_string(),
+            size: "31.9 GB".to_string(),
+            mounted: Vec::new(),
+            writable: true,
+            attach: Some(crate::config::HostDiskAttach::LideMaster(0)),
+        }]);
+        s.select_host_disk(0);
+        let mounted = s.mount_host_disks().expect("channel 0 master is fitted");
+        assert_eq!(mounted.len(), 1);
+
+        // The host disk took slot 0; slots 1 and 2's images must not be left
+        // dangling as invisible ghosts behind it.
+        assert_eq!(s.path(F::LideDrive1), None);
+        assert_eq!(s.path(F::LideDrive2), None);
+        assert!(s.to_raw().lide.drives.is_empty());
+    }
+
+    /// Cycling the lide board to a personality with fewer channels must drop
+    /// host disks on channels the new personality no longer has, exactly as
+    /// it already drops image drives there.
+    #[test]
+    fn lide_board_switch_drops_host_disks_on_lost_channels() {
+        use crate::config::HostDiskAttach;
+        use LauncherField as F;
+        let mut s = MachineSetup {
+            lide_board: Some(LidePersonality::Ripple), // two channels
+            host_disks_attached: vec![crate::config::HostDiskConfig {
+                device: "disk4".to_string(),
+                fingerprint: None,
+                identity_confirmed: true,
+                attach: HostDiskAttach::LideSlave(1), // RIPPLE-only channel
+                writable: true,
+            }],
+            host_disk_selected: vec!["disk4".to_string()],
+            ..Default::default()
+        };
+        assert!(s.host_disk_is_attached("disk4"));
+
+        s.cycle(F::LideBoard, true); // RIDE: one channel only
+        assert!(
+            !s.host_disk_is_attached("disk4"),
+            "channel 1 no longer exists on RIDE"
+        );
+        assert!(s.host_disks_attached().is_empty());
     }
 
     #[cfg(feature = "midi")]

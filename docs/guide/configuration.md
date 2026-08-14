@@ -1528,7 +1528,8 @@ as it is, with its own RDB, partitions, and filesystem.
 [[host_disk]]
 device = "sdb"                 # last name shown by `--list-disks`
 fingerprint = "v1-..."         # opaque identity written by the launcher
-attach = "ide-master"          # ide-master (default), ide-slave, or scsi0..scsi6
+attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
+                                # lide0-slave, lide1-master, lide1-slave, or scsi0..scsi6
 read_only = true               # the default; false explicitly allows writes
 ```
 
