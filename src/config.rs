@@ -1084,6 +1084,12 @@ pub struct LideConfig {
     /// Which of the three AutoConfig identities the board presents. Only
     /// meaningful when `enabled()`.
     pub board: crate::ide_zorro::LidePersonality,
+    /// Whether the raw `[lide]` table named a `board` explicitly. A board
+    /// can be selected with no ROM and no drive images yet (hardware-only
+    /// mode, or a board meant to carry only a `[[host_disk]]` attachment),
+    /// so this is tracked separately from `rom`/`drives` rather than left
+    /// for `enabled()` to infer from them.
+    pub board_named: bool,
     /// Boot ROM image (32768 bytes). Absent = hardware-only mode: no
     /// DiagArea, no autoboot; drives still work under a disk-loaded
     /// `lide.device`.
@@ -1097,9 +1103,12 @@ pub struct LideConfig {
 }
 
 impl LideConfig {
-    /// Whether a `[lide]` section asked for a board at all.
+    /// Whether a `[lide]` section asked for a board at all: an explicit
+    /// `board`, a ROM, or a drive image. `rom_bank2` alone does not count --
+    /// it is validated (and rejected) as needing `rom` below, and must not
+    /// silently skip that check.
     pub fn enabled(&self) -> bool {
-        self.rom.is_some() || self.drives.iter().any(Option::is_some)
+        self.board_named || self.rom.is_some() || self.drives.iter().any(Option::is_some)
     }
 }
 
@@ -4336,32 +4345,36 @@ impl TryFrom<RawConfig> for Config {
         }
         let lide = LideConfig {
             board: lide_board,
+            board_named: raw.lide.board.is_some(),
             rom: raw.lide.rom.as_ref().map(PathBuf::from),
             rom_bank2: raw.lide.rom_bank2.as_ref().map(PathBuf::from),
             drives: lide_drives,
         };
-        if lide.enabled() {
-            let max_drives = lide_board.max_drives();
-            if raw.lide.drives.len() > max_drives {
-                errors.push(anyhow!(
-                    "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
-                    raw.lide.drives.len(),
-                    lide_board.name()
-                ));
-            }
-            if lide.rom_bank2.is_some() && lide.rom.is_none() {
-                errors.push(anyhow!(
-                    "[lide] rom_bank2 needs rom (the primary bank image)"
-                ));
-            }
-            if lide.rom_bank2.is_some()
-                && lide_board == crate::ide_zorro::LidePersonality::AtBus2008
-            {
-                errors.push(anyhow!(
-                    "[lide] rom_bank2 does not apply to board = \"atbus2008\": that board has \
-                     no flash banking"
-                ));
-            }
+        // Unconditional, not gated on `lide.enabled()`: each checks a
+        // specific pair of fields directly (drive count vs. the board's
+        // channel count, `rom_bank2` vs. `rom`/`board`), so a `[lide]`
+        // section that names only `rom_bank2` -- otherwise `enabled() ==
+        // false`, since it looks at `board`/`rom`/`drives` -- still gets
+        // "rom_bank2 needs rom" instead of the whole table being silently
+        // accepted as a no-op.
+        let max_drives = lide_board.max_drives();
+        if raw.lide.drives.len() > max_drives {
+            errors.push(anyhow!(
+                "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
+                raw.lide.drives.len(),
+                lide_board.name()
+            ));
+        }
+        if lide.rom_bank2.is_some() && lide.rom.is_none() {
+            errors.push(anyhow!(
+                "[lide] rom_bank2 needs rom (the primary bank image)"
+            ));
+        }
+        if lide.rom_bank2.is_some() && lide_board == crate::ide_zorro::LidePersonality::AtBus2008 {
+            errors.push(anyhow!(
+                "[lide] rom_bank2 does not apply to board = \"atbus2008\": that board has \
+                 no flash banking"
+            ));
         }
 
         let a2065_net = match (&raw.a2065.net, &raw.a2065.interface) {
@@ -4652,21 +4665,8 @@ impl TryFrom<RawConfig> for Config {
         // a disk is never accepted onto a bus that will not be built.
         let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
             || (defaults.sdmac && scsi.controller == ScsiController::A3000);
-        // A `[lide]` table the user actually wrote (even bare, e.g.
-        // `board = "ripple"` with no rom/drives -- legal hardware-only
-        // mode) is a fitted board for host-disk purposes; `lide.enabled()`
-        // would say no since it only looks at rom/drives.
-        let lide_present =
-            raw.lide.board.is_some() || raw.lide.rom.is_some() || !raw.lide.drives.is_empty();
-        let host_disks = parse_host_disks(
-            &raw.host_disk,
-            &ide,
-            &scsi,
-            &lide,
-            lide_present,
-            has_ide_port,
-            has_scsi,
-        )?;
+        let host_disks =
+            parse_host_disks(&raw.host_disk, &ide, &scsi, &lide, has_ide_port, has_scsi)?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
@@ -5875,13 +5875,6 @@ fn parse_host_disks(
     ide: &IdeConfig,
     scsi: &ScsiConfig,
     lide: &LideConfig,
-    // Whether the `[lide]` table carries at least one explicit key (board,
-    // rom, or drives), independent of `lide.enabled()` -- a board named with
-    // no images (`[lide] board = "ripple"`, hardware-only mode) is a real,
-    // legal board for host-disk purposes even though `LideConfig::enabled()`
-    // would say no drive/ROM makes it "off". `lide` above stays the source
-    // of truth for per-channel occupancy (the `taken` check).
-    lide_present: bool,
     has_ide_port: bool,
     has_scsi: bool,
 ) -> Result<Vec<HostDiskConfig>> {
@@ -5911,7 +5904,7 @@ fn parse_host_disks(
             HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave => has_ide_port,
             HostDiskAttach::Scsi(_) => has_scsi,
             HostDiskAttach::LideMaster(ch) | HostDiskAttach::LideSlave(ch) => {
-                lide_present && usize::from(ch) < lide.board.channels()
+                lide.enabled() && usize::from(ch) < lide.board.channels()
             }
         };
         if !fitted {
@@ -6333,17 +6326,9 @@ mod tests {
                 read_only: None,
             },
         ];
-        let error = parse_host_disks(
-            &twice,
-            &ide,
-            &scsi,
-            &LideConfig::default(),
-            false,
-            true,
-            false,
-        )
-        .expect_err("the same disk on two slots is refused")
-        .to_string();
+        let error = parse_host_disks(&twice, &ide, &scsi, &LideConfig::default(), true, false)
+            .expect_err("the same disk on two slots is refused")
+            .to_string();
         assert!(error.contains("already attached"), "{error}");
 
         let same_identity = [
@@ -6367,7 +6352,6 @@ mod tests {
             &ide,
             &scsi,
             &LideConfig::default(),
-            false,
             true,
             false,
         )
@@ -6397,7 +6381,6 @@ mod tests {
             &ide,
             &scsi,
             &LideConfig::default(),
-            false,
             true,
             false,
         )
@@ -6426,20 +6409,11 @@ mod tests {
         let ide = IdeConfig::default();
         let scsi = ScsiConfig::default();
 
-        // No [lide] board at all: neither channel is fitted, and
-        // lide_present is false, matching "no [lide] section was written".
+        // No [lide] board at all: neither channel is fitted.
         let disks = [host_disk_entry("sdb", "lide0-master")];
-        let error = parse_host_disks(
-            &disks,
-            &ide,
-            &scsi,
-            &LideConfig::default(),
-            false,
-            true,
-            false,
-        )
-        .expect_err("no [lide] board means no lide attachment point")
-        .to_string();
+        let error = parse_host_disks(&disks, &ide, &scsi, &LideConfig::default(), true, false)
+            .expect_err("no [lide] board means no lide attachment point")
+            .to_string();
         assert!(
             error.contains("Attach to Lide requires a [lide] board"),
             "{error}"
@@ -6448,6 +6422,7 @@ mod tests {
         // RIDE: one channel. Channel 0 is fitted, channel 1 is not.
         let ride = LideConfig {
             board: crate::ide_zorro::LidePersonality::Ride,
+            board_named: true,
             rom: Some(PathBuf::from("lide.rom")),
             rom_bank2: None,
             drives: [None, None, None, None],
@@ -6458,7 +6433,6 @@ mod tests {
             &scsi,
             &ride,
             true,
-            true,
             false,
         )
         .expect("channel 0 is fitted on RIDE");
@@ -6468,7 +6442,6 @@ mod tests {
             &ide,
             &scsi,
             &ride,
-            true,
             true,
             false,
         )
@@ -6482,6 +6455,7 @@ mod tests {
         // RIPPLE: two channels, both fitted.
         let ripple = LideConfig {
             board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
             rom: Some(PathBuf::from("lide.rom")),
             rom_bank2: None,
             drives: [None, None, None, None],
@@ -6495,7 +6469,6 @@ mod tests {
             &scsi,
             &ripple,
             true,
-            true,
             false,
         )
         .expect("both channels are fitted on RIPPLE");
@@ -6504,28 +6477,30 @@ mod tests {
 
     /// A `[lide] board = "ripple"` section with no rom and no drive images
     /// (legal hardware-only mode) still counts as a fitted board for a host
-    /// disk -- `LideConfig::enabled()` alone would wrongly say no, since it
-    /// only looks at rom/drives. This is the exact repro from the audit.
+    /// disk. `LideConfig::enabled()` tracks `board_named` for exactly this --
+    /// without it, a bare board would wrongly read as `enabled() == false`,
+    /// silently skipping the `rom_bank2` validation below as well as
+    /// rejecting the host disk. This is the exact repro from the audit.
     #[test]
     fn lide_host_disk_attach_accepts_a_bare_board_with_no_images() {
         let ide = IdeConfig::default();
         let scsi = ScsiConfig::default();
         let bare = LideConfig {
             board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
             rom: None,
             rom_bank2: None,
             drives: [None, None, None, None],
         };
         assert!(
-            !bare.enabled(),
-            "a bare board with no rom/drives is not `enabled()`, which is exactly the gap"
+            bare.enabled(),
+            "a named board with no rom/drives is still `enabled()`"
         );
         let parsed = parse_host_disks(
             &[host_disk_entry("sdb", "lide0-master")],
             &ide,
             &scsi,
             &bare,
-            true, // lide_present: the [lide] table named a board
             true,
             false,
         )
@@ -6560,6 +6535,7 @@ mod tests {
         let scsi = ScsiConfig::default();
         let ripple = LideConfig {
             board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
             rom: Some(PathBuf::from("lide.rom")),
             rom_bank2: None,
             drives: [
@@ -6578,7 +6554,6 @@ mod tests {
             &ide,
             &scsi,
             &ripple,
-            true,
             true,
             false,
         )
@@ -8687,6 +8662,18 @@ mod tests {
             board = "ripple"
             rom_bank2 = "cdfs.rom"
             drives = ["dh0.hdf"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rom_bank2 needs rom"), "{err:#}");
+
+        // rom_bank2 alone, with no board/rom/drives, is not silently
+        // accepted just because `LideConfig::enabled()` would say the
+        // section is "off" -- rom_bank2 vs. rom is validated unconditionally.
+        let err = parse_config(
+            r#"
+            [lide]
+            rom_bank2 = "cdfs.rom"
             "#,
         )
         .unwrap_err();

@@ -454,6 +454,18 @@ impl AtaBus {
         })
     }
 
+    /// Advance every ATAPI drive on this cable (master and slave alike),
+    /// not just [`Self::first_atapi_mut`]'s single disc-swap target -- a
+    /// second CD-ROM's own pending-swap countdown or CD-DA playback needs
+    /// its own tick just as much as the first's.
+    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        for drive in self.drives.iter_mut().flatten() {
+            if let AtaDevice::Atapi(drive) = drive {
+                drive.cdrom.tick(cck, cd_audio);
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
         out.extend(self.drives.iter().flatten().filter_map(|d| match d {
@@ -868,6 +880,29 @@ impl AtaBus {
             return;
         };
         let (exec, scsi_status) = drive.execute(&cdb, 0);
+        // A second trace, after execute() rather than before: the CDB-issue
+        // trace above only proves the driver asked for something, not that
+        // the command actually succeeded or returned real data -- a
+        // regression that made execute() fail or return garbage would still
+        // satisfy that one. For a data-in response, also note whether an
+        // ISO9660 primary volume descriptor signature ("CD001") is present,
+        // so a test reading a real disc's PVD can assert on content
+        // actually round-tripping through the SCSI engine, not merely a
+        // status byte.
+        if crate::envcfg::flag("COPPERLINE_DIAG_GAYLE") {
+            let outcome = match &exec {
+                crate::scsi::ScsiExec::DataIn(data) => format!(
+                    "data_in bytes={} status={scsi_status:#04X} pvd_signature={}",
+                    data.len(),
+                    data.windows(5).any(|w| w == b"CD001")
+                ),
+                crate::scsi::ScsiExec::DataOut(n) => {
+                    format!("data_out bytes={n} status={scsi_status:#04X}")
+                }
+                crate::scsi::ScsiExec::NoData => format!("no_data status={scsi_status:#04X}"),
+            };
+            log::info!("ide packet result drv={} {outcome}", self.selected());
+        }
         match exec {
             // A legitimate ATAPI idiom (INQUIRY/REQUEST SENSE/MODE SENSE
             // with an allocation length of 0): there is no DRQ phase to
@@ -909,6 +944,8 @@ impl AtaBus {
                 let chunk = expected.min(byte_limit as usize);
                 self.buf = Self::pad_to_even(vec![0u8; chunk]);
                 self.buf_pos = 0;
+                self.cyl_low = (chunk & 0xFF) as u8;
+                self.cyl_high = ((chunk >> 8) & 0xFF) as u8;
                 self.transfer = Transfer::PacketDataOut {
                     cdb,
                     expected,
@@ -983,6 +1020,8 @@ impl AtaBus {
         let next_chunk = (expected - received.len()).min(byte_limit as usize);
         self.buf = Self::pad_to_even(vec![0u8; next_chunk]);
         self.buf_pos = 0;
+        self.cyl_low = (next_chunk & 0xFF) as u8;
+        self.cyl_high = ((next_chunk >> 8) & 0xFF) as u8;
         self.transfer = Transfer::PacketDataOut {
             cdb,
             expected,
@@ -1289,6 +1328,10 @@ impl AtaBus {
             }
             // SET MULTIPLE MODE
             0xC6 => {
+                if self.selected_is_atapi() {
+                    self.atapi_type_mismatch_abort();
+                    return;
+                }
                 let requested = self.sector_count;
                 let ok =
                     requested <= MAX_MULTIPLE && (requested == 0 || requested.is_power_of_two());
@@ -1326,7 +1369,7 @@ impl AtaBus {
             // RECALIBRATE
             0x10..=0x1F => {
                 if self.selected_is_atapi() {
-                    self.command_error(ERR_ABRT);
+                    self.atapi_type_mismatch_abort();
                     return;
                 }
                 self.status = ST_DRDY | ST_DSC;

@@ -72,6 +72,11 @@ impl Gayle {
         self.ata.first_atapi_mut()
     }
 
+    /// Advance every ATAPI drive behind this port (master and slave alike).
+    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        self.ata.tick_atapi(cck, cd_audio);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
         self.ata.pending_host_disks(out);

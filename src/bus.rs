@@ -5769,25 +5769,21 @@ impl Bus {
         // Gayle/A4000 IDE are motherboard devices, not entries in the Zorro
         // `devices` chain below, so an attached ATAPI drive needs its own
         // explicit tick here (disc-swap mounting, CD-DA audio streaming) --
-        // nothing else drives it.
+        // nothing else drives it. Both master and slave can be ATAPI at
+        // once, so this ticks every drive on the cable, not just the one
+        // `first_atapi_mut` would pick as the disc-swap target.
         {
             let Self { gayle, paula, .. } = self;
-            if let Some(cd) = gayle
-                .as_mut()
-                .and_then(crate::gayle::Gayle::first_atapi_mut)
-            {
-                cd.tick(cck, paula.cd_audio_mut());
+            if let Some(gayle) = gayle.as_mut() {
+                gayle.tick_atapi(cck, paula.cd_audio_mut());
             }
         }
         {
             let Self {
                 ide_a4000, paula, ..
             } = self;
-            if let Some(cd) = ide_a4000
-                .as_mut()
-                .and_then(crate::ide_a4000::IdeA4000::first_atapi_mut)
-            {
-                cd.tick(cck, paula.cd_audio_mut());
+            if let Some(ide_a4000) = ide_a4000.as_mut() {
+                ide_a4000.tick_atapi(cck, paula.cd_audio_mut());
             }
         }
 

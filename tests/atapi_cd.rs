@@ -237,6 +237,16 @@ fn atapi_cd_answers_a_real_lide_device_driver_probe() -> Result<(), Box<dyn std:
         log.contains("ide packet cdb drv=1 op=0x28 lba=16"),
         "driver never issued READ(10) for the ISO9660 PVD at LBA 16:\n{log}"
     );
+    // The issue-time trace above only proves the READ(10) was asked for --
+    // not that it actually succeeded or returned the real disc content a
+    // regression could otherwise silently drop or corrupt. The result-time
+    // trace (logged once ScsiCdRom::execute has actually run) must show a
+    // GOOD status and the real ISO9660 "CD001" signature bytes, proving
+    // genuine sector data made the round trip, not just a status byte.
+    assert!(
+        log.contains("ide packet result drv=1 data_in") && log.contains("pvd_signature=true"),
+        "READ(10) never returned a successful, PVD-signed response:\n{log}"
+    );
 
     std::fs::remove_dir_all(&temp).ok();
     std::fs::remove_dir_all(&boot_temp).ok();
