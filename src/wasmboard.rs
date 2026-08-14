@@ -205,6 +205,12 @@ struct Exports {
     int6: Option<TypedFunc<(), i32>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstantiationMode {
+    Active,
+    FaultedRestore,
+}
+
 /// The live wasmtime state for one plugin board. Holds the engine and compiled
 /// module so a power-on reset can re-instantiate a fresh module (clearing the
 /// plugin's RAM) without recompiling.
@@ -221,9 +227,15 @@ struct WasmRuntime {
 }
 
 impl WasmRuntime {
-    fn new(engine: Engine, module: Module, manifest: WasmManifest) -> Result<Self> {
+    fn new(
+        engine: Engine,
+        module: Module,
+        manifest: WasmManifest,
+        mode: InstantiationMode,
+    ) -> Result<Self> {
         let resources = load_resources(&manifest)?;
-        let (store, memory, exports) = Self::instantiate(&engine, &module, &manifest, &resources)?;
+        let (store, memory, exports) =
+            Self::instantiate(&engine, &module, &manifest, &resources, mode)?;
         Ok(Self {
             engine,
             module,
@@ -232,7 +244,7 @@ impl WasmRuntime {
             store,
             memory,
             exports,
-            faulted: false,
+            faulted: mode == InstantiationMode::FaultedRestore,
         })
     }
 
@@ -242,14 +254,19 @@ impl WasmRuntime {
         module: &Module,
         manifest: &WasmManifest,
         resources: &HashMap<String, Vec<u8>>,
+        mode: InstantiationMode,
     ) -> Result<(Store<HostCtx>, WasmMemory, Exports)> {
+        let net = match mode {
+            InstantiationMode::Active => make_backend(&manifest.net, None)
+                .with_context(|| format!("opening network backend for {}", manifest.name))?,
+            InstantiationMode::FaultedRestore => None,
+        };
         let mut store = Store::new(
             engine,
             HostCtx {
                 mem: 0,
                 name: manifest.name.clone(),
-                net: make_backend(&manifest.net, None)
-                    .with_context(|| format!("opening network backend for {}", manifest.name))?,
+                net,
                 config: manifest.config.clone(),
                 resources: resources.clone(),
                 resolve_jobs: HashMap::new(),
@@ -275,19 +292,26 @@ impl WasmRuntime {
             int2: instance.get_typed_func(&mut store, "int2").ok(),
             int6: instance.get_typed_func(&mut store, "int6").ok(),
         };
-        if let Ok(init) = instance.get_typed_func::<(), ()>(&mut store, "init") {
-            refuel(&mut store);
-            let init_res = init.call(&mut store, ());
-            store.data_mut().clear_pending_dma();
-            init_res.context("WASM plugin init() trapped")?;
+        if mode == InstantiationMode::Active {
+            if let Ok(init) = instance.get_typed_func::<(), ()>(&mut store, "init") {
+                refuel(&mut store);
+                let init_res = init.call(&mut store, ());
+                store.data_mut().clear_pending_dma();
+                init_res.context("WASM plugin init() trapped")?;
+            }
         }
         Ok((store, memory, exports))
     }
 
     /// Re-instantiate from the kept engine + module (cold reset: clears RAM).
     fn reset(&mut self) -> Result<()> {
-        let (store, memory, exports) =
-            Self::instantiate(&self.engine, &self.module, &self.manifest, &self.resources)?;
+        let (store, memory, exports) = Self::instantiate(
+            &self.engine,
+            &self.module,
+            &self.manifest,
+            &self.resources,
+            InstantiationMode::Active,
+        )?;
         self.store = store;
         self.memory = memory;
         self.exports = exports;
@@ -1730,7 +1754,15 @@ pub struct WasmBoard {
 impl WasmBoard {
     /// Load and instantiate a plugin module from a `.wasm` file.
     pub fn from_file(path: &Path, manifest: WasmManifest) -> Result<Self> {
-        if manifest.net != NetConfig::None {
+        Self::from_file_with_mode(path, manifest, InstantiationMode::Active)
+    }
+
+    fn from_file_with_mode(
+        path: &Path,
+        manifest: WasmManifest,
+        mode: InstantiationMode,
+    ) -> Result<Self> {
+        if mode == InstantiationMode::Active && manifest.net != NetConfig::None {
             log::warn!(
                 "wasm[{}]: network backend {:?} active -- deterministic replay \
                  and save-state reproducibility are not guaranteed while \
@@ -1738,7 +1770,7 @@ impl WasmBoard {
                 manifest.name,
                 manifest.net
             );
-        } else if manifest.caps.resolve {
+        } else if mode == InstantiationMode::Active && manifest.caps.resolve {
             // The resolve capability is just as non-deterministic as a net
             // backend (host-resolver answers arrive on the host's schedule
             // and vary with its DNS state), and a board can hold it without
@@ -1751,7 +1783,7 @@ impl WasmBoard {
                  while lookups run",
                 manifest.name
             );
-        } else if manifest.caps.host_sockets {
+        } else if mode == InstantiationMode::Active && manifest.caps.host_sockets {
             // Same reasoning as the resolve branch above: host sockets are
             // non-deterministic (and reach further than either net or
             // resolve -- see `WasmCaps::host_sockets`'s own doc comment),
@@ -1775,7 +1807,7 @@ impl WasmBoard {
             Module::from_file(&engine, path)
                 .with_context(|| format!("compiling WASM plugin {}", path.display()))?
         };
-        let rt = WasmRuntime::new(engine, module, manifest)?;
+        let rt = WasmRuntime::new(engine, module, manifest, mode)?;
         Ok(Self {
             module_path: path.to_path_buf(),
             rt: RefCell::new(rt),
@@ -1949,7 +1981,12 @@ impl Serialize for WasmBoard {
 impl<'de> Deserialize<'de> for WasmBoard {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let state = WasmBoardState::deserialize(deserializer)?;
-        let board = WasmBoard::from_file(&state.module_path, state.manifest)
+        let mode = if state.faulted {
+            InstantiationMode::FaultedRestore
+        } else {
+            InstantiationMode::Active
+        };
+        let board = WasmBoard::from_file_with_mode(&state.module_path, state.manifest, mode)
             .map_err(serde::de::Error::custom)?;
         let mut rt = board.rt.borrow_mut();
         rt.restore(state.pages, &state.bytes)
@@ -2138,6 +2175,31 @@ mod tests {
         )
     "#;
 
+    const INIT_COUNTER_WAT: &str = r#"
+        (module
+          (global $init_count (mut i32) (i32.const 0))
+          (memory (export "memory") 1)
+          (func (export "init")
+            (global.set $init_count
+              (i32.add (global.get $init_count) (i32.const 1))))
+          (func (export "read") (param $off i32) (param $size i32) (result i32)
+            (global.get $init_count))
+          (func (export "tick") (param $cck i32)
+            (loop $forever
+              (br $forever)))
+        )
+    "#;
+
+    fn runtime_probe(board: &WasmBoard) -> (bool, bool, i32) {
+        let mut rt = board.rt.borrow_mut();
+        let faulted = rt.faulted;
+        let has_network_backend = rt.store.data().net.is_some();
+        let read = rt.exports.read.clone().unwrap();
+        refuel(&mut rt.store);
+        let init_count = read.call(&mut rt.store, (0, 0)).unwrap();
+        (faulted, has_network_backend, init_count)
+    }
+
     #[test]
     fn runaway_plugin_loop_traps_on_fuel_instead_of_hanging() {
         let path = write_wasm("infinite_loop", INFINITE_LOOP_WAT);
@@ -2193,6 +2255,25 @@ mod tests {
 
         board.reset();
         assert!(board.rt.borrow().store.data().net.is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn faulted_restore_stays_inert_until_reset() {
+        let path = write_wasm("faulted_restore", INIT_COUNTER_WAT);
+        let mut board = WasmBoard::from_file(&path, net_manifest("faulted_restore")).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.tick(1, &mut host);
+        let snapshot = bincode::serialize(&board).unwrap();
+        let mut restored: WasmBoard = bincode::deserialize(&snapshot).unwrap();
+
+        assert_eq!(runtime_probe(&restored), (true, false, 0));
+
+        restored.reset();
+        assert_eq!(runtime_probe(&restored), (false, true, 1));
 
         let _ = std::fs::remove_file(&path);
     }
