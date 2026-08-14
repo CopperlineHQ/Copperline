@@ -236,6 +236,24 @@ impl ScsiCdRom {
         self.sense = [0u8; SENSE_LEN];
     }
 
+    /// The current sense key (fixed-format sense byte 2's low nibble),
+    /// without a REQUEST SENSE round trip -- ATAPI puts this in the error
+    /// register's top nibble immediately on CHECK CONDITION.
+    pub fn sense_key(&self) -> u8 {
+        self.sense[2] & 0x0F
+    }
+
+    /// Post a synthetic ILLEGAL REQUEST/"invalid command operation code"
+    /// sense entry, for the ATA task-file front end to call when it aborts
+    /// an ATA-only command (READ SECTORS, IDENTIFY DEVICE, ...) because the
+    /// selected slot is this ATAPI drive rather than a disk. Without this,
+    /// the error register's sense-key nibble (set from `sense_key` at abort
+    /// time) and a following REQUEST SENSE PACKET command would disagree --
+    /// ERR set but "no sense" (key 0) reported back.
+    pub(crate) fn post_illegal_command_sense(&mut self) {
+        self.set_sense(SK_ILLEGAL_REQUEST, ASC_INVALID_OPCODE);
+    }
+
     fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
         self.set_sense(key, asc);
         (ScsiExec::NoData, CHECK_CONDITION)

@@ -179,7 +179,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      pattern.
 //  52: WasmBoardState gained the faulted flag, preserving permanent plugin
 //      fault isolation across save-state restoration.
-pub const STATE_VERSION: u32 = 52;
+//  53: BoardDevice gained the IdeZorro variant (the lide.device-compatible
+//      Zorro II IDE board, `[lide]`), appended at the end of the enum.
+pub const STATE_VERSION: u32 = 53;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -369,6 +369,36 @@ slow = "512K"
 # unit2 = "game.cue"
 # unit0 = { path = "workbench.hdf", bootpri = 6 }   # table form, as for [ide]
 
+# A built-in Zorro II IDE board compatible with LIV2's actively-maintained
+# open-source lide.device (https://github.com/LIV2/lide.device). Drive
+# entries take the same bare-path/table form as
+# [ide]/[scsi], in (channel, master/slave) order: drives[0]/[1] are channel
+# 0's master/slave, drives[2]/[3] are channel 1's (RIPPLE only -- RIDE and
+# AT-Bus 2008 have one channel, two drives).
+#
+# board picks the AutoConfig identity:
+#   "ripple"    - LIV2's open-hardware Zorro II card. Two channels, four
+#                 drives. The default once [lide] is present.
+#   "ride"      - LIV2's expansion-port board. Shares RIPPLE's ROM image and
+#                 register layout; one channel, two drives.
+#   "atbus2008" - the AT-Bus 2008 and its clone family (Dicke Olga, the TK
+#                 accelerator boards' IDE, CDTV-RAM-IDE, Zorro-LAN-IDE). One
+#                 channel, two drives, no ROM banking.
+#
+# rom is always user-supplied: fetch a release from LIV2's GitHub releases
+# page (lide.rom for ripple/ride, lide-atbus.rom for atbus2008; both 32768
+# bytes) -- nothing is bundled or distributed with Copperline. Omitting rom
+# is a legal hardware-only mode: no DiagArea, no autoboot, but drives still
+# work once a disk-loaded lide.device finds them (the setup lide's own CI
+# uses to test in-development driver builds). rom_bank2 optionally supplies
+# a second flash bank (e.g. cdfs.rom, LIV2's CD filesystem); it needs rom
+# and does not apply to atbus2008, which has no banking.
+# [lide]
+# board = "ripple"
+# rom = "lide.rom"
+# drives = ["workbench.hdf", "data.hdf"]
+# drives = [{ path = "workbench.hdf", bootpri = 6 }]   # table form, as for [ide]
+
 
 [chipset]
 
@@ -409,6 +439,10 @@ video = "PAL"
 # bootpri = 6 boots the hard disk ahead of a floppy; -128 mounts the volume
 # without ever offering it for boot. Neither applies to an image carrying its
 # own RDB, which keeps the label and priorities recorded inside it.
+#
+# A path ending in .cue, .iso, or .chd attaches an ATAPI CD-ROM drive at
+# that slot instead of a hard disk (see [scsi], above, for the read-only
+# SCSI-2 command engine both share).
 # [ide]
 # master = "workbench.hdf"
 # slave = "data.hdf"
@@ -797,5 +831,6 @@ floppy_sounds_volume = 100
 # [[host_disk]]
 # device = "sdb"                 # last name shown by --list-disks
 # fingerprint = "v1-..."        # launcher-generated; do not copy between disks
-# attach = "ide-master"          # ide-master (default), ide-slave, scsi0..scsi6
+# attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
+#                                 # lide0-slave, lide1-master, lide1-slave, or scsi0..scsi6
 # read_only = true               # the default; false explicitly allows writes

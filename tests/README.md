@@ -50,6 +50,26 @@ into it (the committed guest probe from `guest/hostfs-test/`), and assert
 the file the probe creates arrives on the host side -- autoboot, handler
 startup, LoadSeg off the volume, and a write back through it, end to end.
 
+### ATAPI CD-ROM firmware compatibility
+
+`tests/atapi_cd.rs` boots a `[lide]` Zorro II IDE board with LIV2's real
+`cdfs.rom` filesystem driver against a genuine ISO9660 image on the ATAPI
+slave slot, and checks the emulator's own diagnostic log for the real
+driver's expected probe sequence (IDENTIFY DEVICE aborts on the ATAPI slot,
+IDENTIFY PACKET DEVICE succeeds, PACKET data-in transfers follow) -- a
+firmware-compatibility check that a synthetic-host unit test cannot give,
+since it exercises Copperline's ATAPI protocol implementation against real
+third-party driver code rather than against our own assumptions about it.
+No bundled Amiga OS ships ATAPI support in its stock drivers (see
+AGENTS.md), so this cannot be a "guest mounts the CD" test without also
+bundling a period driver as an asset; `cdfs.rom` is exactly that. Needs a
+local `lide.rom`, `cdfs.rom`, and a bootable hard-disk image under
+`test-assets/lide/`, plus a host ISO-authoring tool (`hdiutil` on macOS,
+`genisoimage`/`mkisofs` elsewhere); skips cleanly without any of these. The
+protocol contract itself (chunked PIO, interrupt-reason register,
+error/sense mapping, mixed disk+ATAPI buses) is covered without assets by
+the unit tests in `src/ata.rs`.
+
 ### WHDLoad boot
 
 `tests/whdload_boot.rs` boots the committed, project-owned

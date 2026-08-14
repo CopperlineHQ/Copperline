@@ -30,6 +30,7 @@ use crate::config::{
     RawFloppyDrive, RawHostDisk, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode,
     Tint, WarpSpeed, BOOT_PRI_NEVER,
 };
+use crate::ide_zorro::LidePersonality;
 use crate::memory::{RamInit, DEFAULT_RAM_PATTERN, DEFAULT_RANDOM_RAM_SEED};
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -190,6 +191,9 @@ pub enum LauncherTab {
     /// table with a single selection, not a field.
     HostDisk,
     Cd,
+    /// The `[lide]` built-in Zorro II IDE board: personality, boot ROM(s),
+    /// and its drives, reached from the Storage tab.
+    Lide,
     /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
     /// section headings.
     IoPorts,
@@ -283,6 +287,7 @@ impl LauncherTab {
             LauncherTab::WhdloadLibrary => "WHDLoad",
             LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
+            LauncherTab::Lide => "Lide",
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
@@ -311,6 +316,7 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
+            | LauncherTab::Lide
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard
             | LauncherTab::CreateGeometry => LauncherTab::Storage,
@@ -337,6 +343,7 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
+            | LauncherTab::Lide
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard => Some(LauncherTab::Storage),
             // Back goes to the page that sent you here, not to Storage.
@@ -379,8 +386,9 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     // rather than attaching something: nothing on its pages describes this
     // machine, which is why they are pages of their own.
     ("Create Image...", LauncherTab::CreateFloppy),
-    // Four to a row, so this one wraps onto a second.
+    // Four to a row, so these two wrap onto a second.
     ("CD", LauncherTab::Cd),
+    ("Lide", LauncherTab::Lide),
 ];
 
 /// The workshop's two pages. Reached from Storage, so they show a Back
@@ -532,6 +540,15 @@ pub enum LauncherField {
     ScsiUnit4,
     ScsiUnit5,
     ScsiUnit6,
+    // The `[lide]` built-in Zorro II IDE board, on its own Storage sub-page
+    // rather than crowding the Storage tab's own 12 rows.
+    LideBoard,
+    LideRom,
+    LideRomBank2,
+    LideDrive0,
+    LideDrive1,
+    LideDrive2,
+    LideDrive3,
     // Boot priority sub-page: the synthesized-RDB de_BootPri for each hard-disk
     // drive above, edited on its own page so it does not crowd the Storage tab.
     IdeMasterBoot,
@@ -543,6 +560,10 @@ pub enum LauncherField {
     ScsiUnit4Boot,
     ScsiUnit5Boot,
     ScsiUnit6Boot,
+    LideDrive0Boot,
+    LideDrive1Boot,
+    LideDrive2Boot,
+    LideDrive3Boot,
     // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
     Filesys0Dir,
     Filesys0Boot,
@@ -962,6 +983,9 @@ const HOSTFS_ROWS: [Row; 12] = [
 ];
 // One boot-priority row per hard-disk drive, matching the Storage tab's drive
 // rows. Greyed when the matching slot holds no image.
+// IDE and SCSI only: lide's drives get their own priority rows on the Lide
+// page (see `LIDE_ROWS`) rather than crowding this table -- with them added
+// here the page no longer fits (`every_launcher_tab_row_fits_inside_the_panel`).
 const BOOTPRI_ROWS: [Row; 9] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
@@ -977,6 +1001,24 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
+];
+// The `[lide]` Storage sub-page: board personality, boot ROM(s), up to four
+// drives (RIPPLE's two channels; RIDE/AT-Bus 2008 hide slots 2-3, and AT-Bus
+// 2008 also hides the second ROM bank -- it has no flash banking), and each
+// drive's boot priority. Boot priority sits here rather than on the shared
+// Boot Priority page: with lide's four slots added there it stopped fitting.
+const LIDE_ROWS: [Row; 11] = [
+    row(F::LideBoard, "Board", Cycle),
+    row(F::LideRom, "Boot ROM", PathRow),
+    row(F::LideRomBank2, "Boot ROM bank 2", PathRow),
+    row(F::LideDrive0, "Drive 0", Drive),
+    row(F::LideDrive1, "Drive 1", Drive),
+    row(F::LideDrive2, "Drive 2", Drive),
+    row(F::LideDrive3, "Drive 3", Drive),
+    row(F::LideDrive0Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive1Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive2Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive3Boot, "  Boot priority", Bootpri),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
 // draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
@@ -1238,6 +1280,7 @@ pub fn rows(
         // Drawn as its own layout: a disk table and its buttons, not rows.
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
+        LauncherTab::Lide => Cow::Borrowed(&LIDE_ROWS),
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
             serial_mode,
             midi_out_is_mt32,
@@ -1740,6 +1783,14 @@ const SCSI_CONTROLLERS: [Option<ScsiController>; 4] = [
     Some(ScsiController::A4091),
     Some(ScsiController::A3000),
 ];
+// `None` = no lide board fitted. Unlike SCSI's boards, all three personalities
+// work on any machine model, so there is no per-model filtering to do here.
+const LIDE_BOARDS: [Option<LidePersonality>; 4] = [
+    None,
+    Some(LidePersonality::Ripple),
+    Some(LidePersonality::Ride),
+    Some(LidePersonality::AtBus2008),
+];
 #[cfg(feature = "midi")]
 const SERIAL_MODES: [SerialMode; 6] = [
     SerialMode::Off,
@@ -1896,6 +1947,22 @@ pub struct MachineSetup {
     scsi_unit_names: [Option<String>; 7],
     scsi_unit_bootpri: [Option<i8>; 7],
     scsi_unit_boot_off: [bool; 7],
+    /// Which lide personality is fitted, or `None` for no board. Unlike
+    /// `[scsi]`, presence is inferred from the config's own `rom`/`drives`
+    /// (see `LideConfig::enabled`); this `Option` is purely the launcher's
+    /// session-level "is a board fitted" toggle.
+    lide_board: Option<LidePersonality>,
+    lide_rom: Option<PathBuf>,
+    lide_rom_bank2: Option<PathBuf>,
+    /// Drive slots in (channel, master/slave) order (RIPPLE's two channels;
+    /// RIDE/AT-Bus 2008 only ever use the first two). `[lide] drives` is a
+    /// positional list in the config file -- a hole cannot be represented --
+    /// so `clear_path` cascades: clearing slot N also clears every slot
+    /// after it, keeping this array always representable as a config.
+    lide_drives: [Option<PathBuf>; 4],
+    lide_drive_names: [Option<String>; 4],
+    lide_drive_bootpri: [Option<i8>; 4],
+    lide_drive_boot_off: [bool; 4],
     // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
     // (directory + optional volume name + boot priority, -128 = never boot);
     // any further hand-written [[filesys]] entries are carried in
@@ -2165,6 +2232,23 @@ impl MachineSetup {
             }),
             scsi_unit_boot_off: std::array::from_fn(|i| {
                 boot_is_off(raw_scsi_unit(&raw.scsi, i).and_then(|d| d.bootpri))
+            }),
+            lide_board: cfg.lide.enabled().then_some(cfg.lide.board),
+            lide_rom: cfg.lide.rom.clone(),
+            lide_rom_bank2: cfg.lide.rom_bank2.clone(),
+            lide_drives: std::array::from_fn(|i| {
+                cfg.lide.drives[i].as_ref().map(|d| d.path.clone())
+            }),
+            lide_drive_names: std::array::from_fn(|i| {
+                cfg.lide.drives[i]
+                    .as_ref()
+                    .and_then(|d| d.volume_name.clone())
+            }),
+            lide_drive_bootpri: std::array::from_fn(|i| {
+                boot_priority_of(raw.lide.drives.get(i).and_then(|d| d.bootpri))
+            }),
+            lide_drive_boot_off: std::array::from_fn(|i| {
+                boot_is_off(raw.lide.drives.get(i).and_then(|d| d.bootpri))
             }),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
@@ -2576,6 +2660,35 @@ impl MachineSetup {
                 self.scsi_unit_names[6].as_deref(),
                 self.effective_bootpri(F::ScsiUnit6Boot),
             );
+        }
+        // Only emit `[lide]` when a board is fitted, matching `[scsi]` above.
+        if let Some(board) = self.lide_board {
+            raw.lide.board = Some(board.name().to_string());
+            raw.lide.rom = self.lide_rom.as_deref().map(path_string);
+            // AT-Bus 2008 has no flash banking; a second bank there does not
+            // validate, so the row is hidden and nothing is ever emitted for it.
+            raw.lide.rom_bank2 = (board != LidePersonality::AtBus2008)
+                .then(|| self.lide_rom_bank2.as_deref().map(path_string))
+                .flatten();
+            // `[lide] drives` is a positional list in the config file -- a hole
+            // cannot be represented -- so this stops at the first empty slot
+            // rather than filtering, trusting `clear_path`'s cascade to keep
+            // the array itself always gap-free.
+            const LIDE_DRIVE_BOOT_FIELDS: [LauncherField; 4] = [
+                F::LideDrive0Boot,
+                F::LideDrive1Boot,
+                F::LideDrive2Boot,
+                F::LideDrive3Boot,
+            ];
+            raw.lide.drives = (0..board.max_drives())
+                .map_while(|i| {
+                    drive_raw(
+                        self.lide_drives[i].as_deref(),
+                        self.lide_drive_names[i].as_deref(),
+                        self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
+                    )
+                })
+                .collect();
         }
         // Host FS mounts: the edited slots (empty ones drop out), then any
         // hand-written extras beyond what the GUI shows.
@@ -3061,6 +3174,29 @@ impl MachineSetup {
                         .and_then(|drive| self.drive_holds(drive))
                         .is_none()
             }
+            F::LideDrive0Boot | F::LideDrive1Boot | F::LideDrive2Boot | F::LideDrive3Boot => {
+                self.lide_board.is_none()
+                    || Self::boot_field_drive(field)
+                        .and_then(|drive| self.drive_holds(drive))
+                        .is_none()
+            }
+            // Nothing to configure without a board fitted.
+            F::LideRom => self.lide_board.is_none(),
+            // AT-Bus 2008 has no flash banking.
+            F::LideRomBank2 => self
+                .lide_board
+                .is_none_or(|b| b == LidePersonality::AtBus2008),
+            // `[lide] drives` is a positional list in the config file -- a
+            // hole cannot be represented -- so a slot beyond the board's
+            // channel count (RIDE/AT-Bus 2008 have one; RIPPLE has two) or
+            // beyond the first empty slot stays hidden: it is not just
+            // inapplicable, filling it would be unrepresentable.
+            F::LideDrive0 | F::LideDrive1 | F::LideDrive2 | F::LideDrive3 => {
+                lide_drive_index(field).is_some_and(|i| {
+                    self.lide_board.is_none_or(|b| b.max_drives() <= i)
+                        || (i > 0 && self.lide_drives[i - 1].is_none())
+                })
+            }
             _ => false,
         }
     }
@@ -3107,7 +3243,9 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
+            F::IdeMaster | F::IdeSlave => {
+                reason(self.has_ide(), "needs A600/A1200/A4000 (or Lide)")
+            }
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
             // rom_odd is an A2091 split-EPROM option only.
@@ -3131,7 +3269,9 @@ impl MachineSetup {
                 self.scsi_controller == Some(ScsiController::A2091),
                 "A2091 only",
             ),
-            F::CdImage | F::CdInsertDelay => reason(self.has_cd(), "needs CDTV/CD32"),
+            F::CdImage | F::CdInsertDelay => {
+                reason(self.has_cd(), "needs CDTV/CD32 (or SCSI/IDE/Lide)")
+            }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
@@ -3164,7 +3304,11 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => {
+            | F::ScsiUnit6Boot
+            | F::LideDrive0Boot
+            | F::LideDrive1Boot
+            | F::LideDrive2Boot
+            | F::LideDrive3Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.drive_holds(drive) {
                     None => Some("No drive"),
@@ -3298,6 +3442,12 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4].as_deref(),
             F::ScsiUnit5 => self.scsi_units[5].as_deref(),
             F::ScsiUnit6 => self.scsi_units[6].as_deref(),
+            F::LideRom => self.lide_rom.as_deref(),
+            F::LideRomBank2 => self.lide_rom_bank2.as_deref(),
+            F::LideDrive0 => self.lide_drives[0].as_deref(),
+            F::LideDrive1 => self.lide_drives[1].as_deref(),
+            F::LideDrive2 => self.lide_drives[2].as_deref(),
+            F::LideDrive3 => self.lide_drives[3].as_deref(),
             F::Filesys0Dir => self.filesys_dirs[0].as_deref(),
             F::Filesys1Dir => self.filesys_dirs[1].as_deref(),
             F::Filesys2Dir => self.filesys_dirs[2].as_deref(),
@@ -3473,6 +3623,10 @@ impl MachineSetup {
                 | F::ScsiUnit4
                 | F::ScsiUnit5
                 | F::ScsiUnit6
+                | F::LideDrive0
+                | F::LideDrive1
+                | F::LideDrive2
+                | F::LideDrive3
                 | F::Filesys0Dir
                 | F::Filesys1Dir
                 | F::Filesys2Dir
@@ -3492,6 +3646,10 @@ impl MachineSetup {
             F::ScsiUnit4 => &self.scsi_unit_names[4],
             F::ScsiUnit5 => &self.scsi_unit_names[5],
             F::ScsiUnit6 => &self.scsi_unit_names[6],
+            F::LideDrive0 => &self.lide_drive_names[0],
+            F::LideDrive1 => &self.lide_drive_names[1],
+            F::LideDrive2 => &self.lide_drive_names[2],
+            F::LideDrive3 => &self.lide_drive_names[3],
             F::Filesys0Dir => &self.filesys_names[0],
             F::Filesys1Dir => &self.filesys_names[1],
             F::Filesys2Dir => &self.filesys_names[2],
@@ -3518,6 +3676,10 @@ impl MachineSetup {
             F::ScsiUnit4 => &mut self.scsi_unit_names[4],
             F::ScsiUnit5 => &mut self.scsi_unit_names[5],
             F::ScsiUnit6 => &mut self.scsi_unit_names[6],
+            F::LideDrive0 => &mut self.lide_drive_names[0],
+            F::LideDrive1 => &mut self.lide_drive_names[1],
+            F::LideDrive2 => &mut self.lide_drive_names[2],
+            F::LideDrive3 => &mut self.lide_drive_names[3],
             F::Filesys0Dir => &mut self.filesys_names[0],
             F::Filesys1Dir => &mut self.filesys_names[1],
             F::Filesys2Dir => &mut self.filesys_names[2],
@@ -3707,6 +3869,12 @@ impl MachineSetup {
                 Some(ScsiController::A4091) => "A4091 (Z3)".to_string(),
                 Some(ScsiController::A3000) => "A3000 (onboard)".to_string(),
             },
+            F::LideBoard => match self.lide_board {
+                None => "None".to_string(),
+                Some(LidePersonality::Ripple) => "RIPPLE".to_string(),
+                Some(LidePersonality::Ride) => "RIDE".to_string(),
+                Some(LidePersonality::AtBus2008) => "AT-Bus 2008".to_string(),
+            },
             #[cfg(feature = "midi")]
             F::SerialMode => match self.serial_mode {
                 // "None" (matching the Parallel device selector) reads better
@@ -3816,7 +3984,11 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => drive_bootpri_label(self.effective_bootpri(field)),
+            | F::ScsiUnit6Boot
+            | F::LideDrive0Boot
+            | F::LideDrive1Boot
+            | F::LideDrive2Boot
+            | F::LideDrive3Boot => drive_bootpri_label(self.effective_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -3828,15 +4000,21 @@ impl MachineSetup {
                     "Read-write".to_string()
                 }
             }
-            // SCSI units: flag CD images, which attach a CD-ROM drive
-            // rather than a hard disk at that ID.
+            // SCSI, IDE, and lide drive slots: flag CD images, which attach
+            // a CD-ROM drive (SCSI or ATAPI) rather than a hard disk there.
             F::ScsiUnit0
             | F::ScsiUnit1
             | F::ScsiUnit2
             | F::ScsiUnit3
             | F::ScsiUnit4
             | F::ScsiUnit5
-            | F::ScsiUnit6 => {
+            | F::ScsiUnit6
+            | F::IdeMaster
+            | F::IdeSlave
+            | F::LideDrive0
+            | F::LideDrive1
+            | F::LideDrive2
+            | F::LideDrive3 => {
                 let label = self.path_label(field, "(none)");
                 match self.path(field) {
                     Some(p) if crate::config::is_cd_image_path(p) => format!("{label} (CD-ROM)"),
@@ -4075,6 +4253,27 @@ impl MachineSetup {
                 self.scsi_controller = cycle_slice(&choices, self.scsi_controller, forward);
                 self.drop_unreachable_host_disks();
             }
+            F::LideBoard => {
+                self.lide_board = cycle_slice(&LIDE_BOARDS, self.lide_board, forward);
+                // Drop drives beyond the new board's channel count, so a
+                // RIPPLE-only channel 1 drive does not linger unreachable
+                // (and unrepresentable -- `[lide] drives` is positional)
+                // behind a board that no longer has that channel.
+                if let Some(board) = self.lide_board {
+                    for slot in board.max_drives()..self.lide_drives.len() {
+                        self.lide_drives[slot] = None;
+                        self.lide_drive_names[slot] = None;
+                        self.lide_drive_bootpri[slot] = None;
+                        self.lide_drive_boot_off[slot] = false;
+                    }
+                }
+                // A real host disk on a channel the new personality lacks
+                // (e.g. RIPPLE channel 1 -> RIDE/AT-Bus 2008) is just as
+                // unreachable as an image drive there, and just as invisible
+                // if left attached -- drop it the same way ScsiController's
+                // handler above does for its own board switch.
+                self.drop_unreachable_host_disks();
+            }
             #[cfg(feature = "midi")]
             F::SerialMode => {
                 // Every mode is on offer: choosing tcp-connect brings its
@@ -4253,7 +4452,11 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => {
+            | F::ScsiUnit6Boot
+            | F::LideDrive0Boot
+            | F::LideDrive1Boot
+            | F::LideDrive2Boot
+            | F::LideDrive3Boot => {
                 // The arrows only move a live priority; a drive whose Bootable
                 // box is cleared shows its number greyed and does not step.
                 if !self.drive_boot_off(field) {
@@ -4346,6 +4549,12 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = Some(path),
             F::ScsiUnit5 => self.scsi_units[5] = Some(path),
             F::ScsiUnit6 => self.scsi_units[6] = Some(path),
+            F::LideRom => self.lide_rom = Some(path),
+            F::LideRomBank2 => self.lide_rom_bank2 = Some(path),
+            F::LideDrive0 => self.lide_drives[0] = Some(path),
+            F::LideDrive1 => self.lide_drives[1] = Some(path),
+            F::LideDrive2 => self.lide_drives[2] = Some(path),
+            F::LideDrive3 => self.lide_drives[3] = Some(path),
             F::CdImage => self.cd_image = Some(path),
             F::Cd32Nvram => self.cd32_nvram = Some(path),
             F::ParallelOutput => self.parallel_output = Some(path),
@@ -4406,6 +4615,12 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = None,
             F::ScsiUnit5 => self.scsi_units[5] = None,
             F::ScsiUnit6 => self.scsi_units[6] = None,
+            F::LideRom => self.lide_rom = None,
+            F::LideRomBank2 => self.lide_rom_bank2 = None,
+            F::LideDrive0 => self.lide_drives[0] = None,
+            F::LideDrive1 => self.lide_drives[1] = None,
+            F::LideDrive2 => self.lide_drives[2] = None,
+            F::LideDrive3 => self.lide_drives[3] = None,
             F::CdImage => self.cd_image = None,
             F::Cd32Nvram => self.cd32_nvram = None,
             F::ParallelOutput => self.parallel_output = None,
@@ -4431,6 +4646,17 @@ impl MachineSetup {
             self.set_drive_name(field, String::new());
             self.clear_drive_bootpri(field);
         }
+        // `[lide] drives` is a positional list in the config file -- a hole
+        // cannot be represented -- so clearing a slot also clears every slot
+        // after it, keeping the array always representable as a config.
+        if let Some(i) = lide_drive_index(field) {
+            for slot in i + 1..self.lide_drives.len() {
+                self.lide_drives[slot] = None;
+                self.lide_drive_names[slot] = None;
+                self.lide_drive_bootpri[slot] = None;
+                self.lide_drive_boot_off[slot] = false;
+            }
+        }
     }
 
     /// Reset a hard-disk drive's boot priority to unset (shown as 0) and its
@@ -4452,6 +4678,9 @@ impl MachineSetup {
                 if let Some(i) = scsi_boot_index(field) {
                     self.scsi_unit_bootpri[i] = None;
                     self.scsi_unit_boot_off[i] = false;
+                } else if let Some(i) = lide_drive_index(field) {
+                    self.lide_drive_bootpri[i] = None;
+                    self.lide_drive_boot_off[i] = false;
                 }
             }
         }
@@ -4481,6 +4710,10 @@ impl MachineSetup {
             F::ScsiUnit4Boot => F::ScsiUnit4,
             F::ScsiUnit5Boot => F::ScsiUnit5,
             F::ScsiUnit6Boot => F::ScsiUnit6,
+            F::LideDrive0Boot => F::LideDrive0,
+            F::LideDrive1Boot => F::LideDrive1,
+            F::LideDrive2Boot => F::LideDrive2,
+            F::LideDrive3Boot => F::LideDrive3,
             _ => return None,
         })
     }
@@ -4500,7 +4733,7 @@ impl MachineSetup {
             F::ScsiUnit4Boot => self.scsi_unit_bootpri[4],
             F::ScsiUnit5Boot => self.scsi_unit_bootpri[5],
             F::ScsiUnit6Boot => self.scsi_unit_bootpri[6],
-            _ => None,
+            _ => lide_drive_index(field).and_then(|i| self.lide_drive_bootpri[i]),
         }
     }
 
@@ -4517,7 +4750,11 @@ impl MachineSetup {
             F::ScsiUnit4Boot => self.scsi_unit_bootpri[4] = value,
             F::ScsiUnit5Boot => self.scsi_unit_bootpri[5] = value,
             F::ScsiUnit6Boot => self.scsi_unit_bootpri[6] = value,
-            _ => {}
+            _ => {
+                if let Some(i) = lide_drive_index(field) {
+                    self.lide_drive_bootpri[i] = value;
+                }
+            }
         }
     }
 
@@ -4547,7 +4784,10 @@ impl MachineSetup {
         match field {
             F::IdeMasterBoot => self.ide_master_boot_off,
             F::IdeSlaveBoot => self.ide_slave_boot_off,
-            _ => scsi_boot_index(field).is_some_and(|i| self.scsi_unit_boot_off[i]),
+            _ => {
+                scsi_boot_index(field).is_some_and(|i| self.scsi_unit_boot_off[i])
+                    || lide_drive_index(field).is_some_and(|i| self.lide_drive_boot_off[i])
+            }
         }
     }
 
@@ -4578,6 +4818,8 @@ impl MachineSetup {
             _ => {
                 if let Some(i) = scsi_boot_index(field) {
                     self.scsi_unit_boot_off[i] = off;
+                } else if let Some(i) = lide_drive_index(field) {
+                    self.lide_drive_boot_off[i] = off;
                 }
             }
         }
@@ -4824,10 +5066,13 @@ impl MachineSetup {
 
     /// Whether the machine has the port an attachment point needs.
     fn attach_is_fitted(&self, attach: crate::config::HostDiskAttach) -> bool {
-        if attach.is_scsi() {
-            self.has_scsi_controller()
-        } else {
-            self.has_ide()
+        use crate::config::HostDiskAttach as A;
+        match attach {
+            A::IdeMaster | A::IdeSlave => self.has_ide(),
+            A::Scsi(_) => self.has_scsi_controller(),
+            A::LideMaster(ch) | A::LideSlave(ch) => self
+                .lide_board
+                .is_some_and(|b| usize::from(ch) < b.channels()),
         }
     }
 
@@ -5027,6 +5272,32 @@ impl MachineSetup {
                 self.ide_slave = None;
                 self.ide_slave_name = None;
             }
+            crate::config::HostDiskAttach::LideMaster(ch)
+            | crate::config::HostDiskAttach::LideSlave(ch) => {
+                let idx = usize::from(ch) * 2
+                    + usize::from(matches!(
+                        attach,
+                        crate::config::HostDiskAttach::LideSlave(_)
+                    ));
+                if let Some(slot) = self.lide_drives.get_mut(idx) {
+                    *slot = None;
+                }
+                if let Some(name) = self.lide_drive_names.get_mut(idx) {
+                    *name = None;
+                }
+                // `[lide] drives` is a positional list -- a hole cannot be
+                // represented -- so a host disk taking over this slot must
+                // cascade-clear every later slot too, exactly like
+                // `clear_path` does for the image case, or `to_raw`'s
+                // `map_while` would silently stop emitting at this slot and
+                // drop any image still sitting in a later one.
+                for slot in idx + 1..self.lide_drives.len() {
+                    self.lide_drives[slot] = None;
+                    self.lide_drive_names[slot] = None;
+                    self.lide_drive_bootpri[slot] = None;
+                    self.lide_drive_boot_off[slot] = false;
+                }
+            }
             crate::config::HostDiskAttach::Scsi(unit) => {
                 if let Some(slot) = self.scsi_units.get_mut(usize::from(unit)) {
                     *slot = None;
@@ -5117,6 +5388,10 @@ impl MachineSetup {
         match field {
             F::IdeMaster => Some(crate::config::HostDiskAttach::IdeMaster),
             F::IdeSlave => Some(crate::config::HostDiskAttach::IdeSlave),
+            F::LideDrive0 => Some(crate::config::HostDiskAttach::LideMaster(0)),
+            F::LideDrive1 => Some(crate::config::HostDiskAttach::LideSlave(0)),
+            F::LideDrive2 => Some(crate::config::HostDiskAttach::LideMaster(1)),
+            F::LideDrive3 => Some(crate::config::HostDiskAttach::LideSlave(1)),
             F::ScsiUnit0 => Some(crate::config::HostDiskAttach::Scsi(0)),
             F::ScsiUnit1 => Some(crate::config::HostDiskAttach::Scsi(1)),
             F::ScsiUnit2 => Some(crate::config::HostDiskAttach::Scsi(2)),
@@ -7538,6 +7813,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &HOSTFS_ROWS,
         &WHDLOAD_ROWS,
         &CD_ROWS,
+        &LIDE_ROWS,
         &INPUT_ROWS,
         &VIDEO_ROWS,
         &AUDIO_ROWS,
@@ -7646,6 +7922,18 @@ fn scsi_boot_index(field: LauncherField) -> Option<usize> {
     })
 }
 
+/// Lide drive index behind a `LideDriveN`/`LideDriveNBoot` field.
+fn lide_drive_index(field: LauncherField) -> Option<usize> {
+    use LauncherField as F;
+    Some(match field {
+        F::LideDrive0 | F::LideDrive0Boot => 0,
+        F::LideDrive1 | F::LideDrive1Boot => 1,
+        F::LideDrive2 | F::LideDrive2Boot => 2,
+        F::LideDrive3 | F::LideDrive3Boot => 3,
+        _ => return None,
+    })
+}
+
 /// The boot-priority field for a hard-disk drive field (inverse of
 /// [`MachineSetup::boot_field_drive`]).
 fn drive_boot_field(drive: LauncherField) -> Option<LauncherField> {
@@ -7660,6 +7948,10 @@ fn drive_boot_field(drive: LauncherField) -> Option<LauncherField> {
         F::ScsiUnit4 => F::ScsiUnit4Boot,
         F::ScsiUnit5 => F::ScsiUnit5Boot,
         F::ScsiUnit6 => F::ScsiUnit6Boot,
+        F::LideDrive0 => F::LideDrive0Boot,
+        F::LideDrive1 => F::LideDrive1Boot,
+        F::LideDrive2 => F::LideDrive2Boot,
+        F::LideDrive3 => F::LideDrive3Boot,
         _ => return None,
     })
 }
@@ -11066,6 +11358,7 @@ mod tests {
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
             LauncherTab::BootPriority,
+            LauncherTab::Lide,
         ] {
             assert!(!TABS.contains(&t));
             // Each keeps the Storage strip tab highlighted and returns to it.
@@ -11091,6 +11384,7 @@ mod tests {
                 LauncherTab::BootPriority,
                 LauncherTab::CreateFloppy,
                 LauncherTab::Cd,
+                LauncherTab::Lide,
             ]
         );
 
@@ -11128,6 +11422,7 @@ mod tests {
             (LauncherTab::HostFs, LauncherField::Filesys0Dir),
             (LauncherTab::Cd, LauncherField::CdImage),
             (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
+            (LauncherTab::Lide, LauncherField::LideBoard),
         ] {
             let page = rows(tab, ParallelDevice::None, SerialMode::default(), false);
             assert!(page.iter().any(|r| r.field == marker));
@@ -11321,6 +11616,245 @@ mod tests {
         assert_eq!(parse_drive_bootpri("  "), Ok(None));
         assert_eq!(parse_drive_bootpri("-128"), Ok(Some(-128)));
         assert!(parse_drive_bootpri("200").is_err());
+    }
+
+    #[test]
+    fn lide_board_cycles_and_round_trips() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        assert_eq!(s.value_label(F::LideBoard), "None");
+        assert!(s.to_raw().lide.board.is_none());
+
+        s.cycle(F::LideBoard, true);
+        assert_eq!(s.value_label(F::LideBoard), "RIPPLE");
+        s.cycle(F::LideBoard, true);
+        assert_eq!(s.value_label(F::LideBoard), "RIDE");
+        s.cycle(F::LideBoard, true);
+        assert_eq!(s.value_label(F::LideBoard), "AT-Bus 2008");
+
+        // A bare board with nothing attached is indistinguishable from no
+        // board at all (`LideConfig::enabled`, matching `[scsi]`), so give it
+        // a ROM before checking the round trip.
+        s.set_path(F::LideRom, PathBuf::from("lide-atbus.rom"));
+        let raw = s.to_raw();
+        assert_eq!(raw.lide.board.as_deref(), Some("atbus2008"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.value_label(F::LideBoard), "AT-Bus 2008");
+
+        s.cycle(F::LideBoard, true);
+        assert_eq!(s.value_label(F::LideBoard), "None");
+        assert!(s.to_raw().lide.board.is_none());
+    }
+
+    #[test]
+    fn lide_rows_are_hidden_without_a_board_and_rom_bank2_hidden_on_atbus2008() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        // Nothing to configure without a board fitted.
+        assert!(s.row_hidden(F::LideRom));
+        assert!(s.row_hidden(F::LideRomBank2));
+        assert!(s.row_hidden(F::LideDrive0));
+        assert!(s.row_hidden(F::LideDrive1));
+
+        s.cycle(F::LideBoard, true); // RIPPLE: two channels, four drives
+        assert!(!s.row_hidden(F::LideRom));
+        assert!(!s.row_hidden(F::LideRomBank2));
+        assert!(!s.row_hidden(F::LideDrive0));
+        // Drive 1 is gated on drive 0 holding an image: `[lide] drives` is a
+        // positional list, so a hole cannot be represented in the config.
+        assert!(s.row_hidden(F::LideDrive1));
+        s.set_path(F::LideDrive0, PathBuf::from("a.hdf"));
+        assert!(!s.row_hidden(F::LideDrive1));
+        assert!(s.row_hidden(F::LideDrive2), "drive 1 is still empty");
+        s.set_path(F::LideDrive1, PathBuf::from("b.hdf"));
+        s.set_path(F::LideDrive2, PathBuf::from("c.hdf"));
+        assert!(!s.row_hidden(F::LideDrive3));
+
+        s.cycle(F::LideBoard, true); // RIDE: one channel, two drives, four banks
+        assert!(!s.row_hidden(F::LideRomBank2), "RIDE has flash banking too");
+        assert!(s.row_hidden(F::LideDrive2), "RIDE has only one channel");
+        assert!(s.row_hidden(F::LideDrive3));
+        // Cycling the board dropped the drives beyond RIDE's channel count.
+        assert!(s.to_raw().lide.drives.len() <= 2);
+
+        s.cycle(F::LideBoard, true); // AT-Bus 2008: one channel, no banking
+        assert!(s.row_hidden(F::LideRomBank2));
+        assert!(s.row_hidden(F::LideDrive2));
+    }
+
+    #[test]
+    fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::LideDrive0, PathBuf::from("ch0-master.hdf"));
+        s.set_path(F::LideDrive1, PathBuf::from("ch0-slave.hdf"));
+        s.set_drive_bootpri(F::LideDrive0Boot, Some(5));
+
+        // Boot priority sits on the Lide page itself, not the shared Boot
+        // Priority page (see LIDE_ROWS's comment) -- so `has_boot_priority_rows`
+        // (which only tracks IDE/SCSI) is untouched by these two lide drives.
+        assert!(!s.has_boot_priority_rows());
+        assert_eq!(s.value_label(F::LideDrive0Boot), "5");
+        assert_eq!(s.disabled_reason(F::LideDrive1Boot), None);
+        assert!(
+            s.row_hidden(F::LideDrive2Boot),
+            "empty slot stays off the page"
+        );
+
+        let raw = s.to_raw();
+        assert_eq!(raw.lide.board.as_deref(), Some("ripple"));
+        assert_eq!(raw.lide.drives.len(), 2);
+        assert_eq!(raw.lide.drives[0].path, "ch0-master.hdf");
+        assert_eq!(raw.lide.drives[0].bootpri, Some(5));
+        assert_eq!(raw.lide.drives[1].path, "ch0-slave.hdf");
+
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.path(F::LideDrive0), Some(Path::new("ch0-master.hdf")));
+        assert_eq!(back.path(F::LideDrive1), Some(Path::new("ch0-slave.hdf")));
+        assert_eq!(back.value_label(F::LideDrive0Boot), "5");
+    }
+
+    #[test]
+    fn ide_and_lide_cd_images_label_and_grey_boot_priority_like_scsi() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::IdeMaster, PathBuf::from("game.iso"));
+        s.set_path(F::LideDrive0, PathBuf::from("game.cue"));
+
+        assert_eq!(s.value_label(F::IdeMaster), "game.iso (CD-ROM)");
+        assert_eq!(s.value_label(F::LideDrive0), "game.cue (CD-ROM)");
+        assert_eq!(s.disabled_reason(F::IdeMasterBoot), Some("CD-ROM"));
+        assert_eq!(s.disabled_reason(F::LideDrive0Boot), Some("CD-ROM"));
+
+        // A hard disk at the same fields gets no such treatment.
+        s.set_path(F::IdeSlave, PathBuf::from("work.hdf"));
+        assert_eq!(s.value_label(F::IdeSlave), "work.hdf");
+        assert_eq!(s.disabled_reason(F::IdeSlaveBoot), None);
+    }
+
+    #[test]
+    fn lide_clearing_a_drive_cascades_to_later_slots() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::LideDrive0, PathBuf::from("a.hdf"));
+        s.set_path(F::LideDrive1, PathBuf::from("b.hdf"));
+        s.set_path(F::LideDrive2, PathBuf::from("c.hdf"));
+        assert_eq!(s.to_raw().lide.drives.len(), 3);
+
+        // Clearing an earlier slot cannot leave a later one dangling: the
+        // config format has no way to represent the resulting gap.
+        s.clear_path(F::LideDrive0);
+        assert_eq!(s.path(F::LideDrive1), None);
+        assert_eq!(s.path(F::LideDrive2), None);
+        assert!(s.to_raw().lide.drives.is_empty());
+    }
+
+    /// Lide host-disk attachment points are only fitted for a channel the
+    /// selected board personality actually has.
+    #[test]
+    fn lide_host_disk_attach_points_are_fitted_by_board_channel_count() {
+        use crate::config::HostDiskAttach;
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+
+        // No board at all: nothing is fitted.
+        assert!(!s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+
+        // RIDE: one channel.
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.cycle(F::LideBoard, true); // RIDE
+        assert!(s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+        assert!(!s.attach_is_fitted(HostDiskAttach::LideMaster(1)));
+
+        // RIPPLE: two channels.
+        s.cycle(F::LideBoard, true); // AT-Bus 2008
+        s.cycle(F::LideBoard, true); // None
+        s.cycle(F::LideBoard, true); // RIPPLE
+        assert!(s.attach_is_fitted(HostDiskAttach::LideMaster(0)));
+        assert!(s.attach_is_fitted(HostDiskAttach::LideSlave(1)));
+
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive0),
+            Some(HostDiskAttach::LideMaster(0))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive1),
+            Some(HostDiskAttach::LideSlave(0))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive2),
+            Some(HostDiskAttach::LideMaster(1))
+        );
+        assert_eq!(
+            MachineSetup::host_disk_attach_of(F::LideDrive3),
+            Some(HostDiskAttach::LideSlave(1))
+        );
+    }
+
+    /// Mounting a host disk on an earlier lide slot must cascade-clear later
+    /// slots exactly like `clear_path` does for the image case -- otherwise
+    /// `[lide] drives` (a positional array) would go on carrying images the
+    /// UI, and a saved config, no longer have any way to show.
+    #[test]
+    fn lide_host_disk_on_an_earlier_slot_cascades_to_later_slots() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        s.cycle(F::LideBoard, true); // RIPPLE
+        s.set_path(F::LideDrive0, PathBuf::from("ch0-master.hdf"));
+        s.set_path(F::LideDrive1, PathBuf::from("ch0-slave.hdf"));
+        s.set_path(F::LideDrive2, PathBuf::from("ch1-master.hdf"));
+        assert_eq!(s.to_raw().lide.drives.len(), 3);
+
+        s.set_host_disks_for_test(vec![HostDiskRow {
+            id: "disk4".to_string(),
+            fingerprint: None,
+            volume: "SanDisk".to_string(),
+            size: "31.9 GB".to_string(),
+            mounted: Vec::new(),
+            writable: true,
+            attach: Some(crate::config::HostDiskAttach::LideMaster(0)),
+        }]);
+        s.select_host_disk(0);
+        let mounted = s.mount_host_disks().expect("channel 0 master is fitted");
+        assert_eq!(mounted.len(), 1);
+
+        // The host disk took slot 0; slots 1 and 2's images must not be left
+        // dangling as invisible ghosts behind it.
+        assert_eq!(s.path(F::LideDrive1), None);
+        assert_eq!(s.path(F::LideDrive2), None);
+        assert!(s.to_raw().lide.drives.is_empty());
+    }
+
+    /// Cycling the lide board to a personality with fewer channels must drop
+    /// host disks on channels the new personality no longer has, exactly as
+    /// it already drops image drives there.
+    #[test]
+    fn lide_board_switch_drops_host_disks_on_lost_channels() {
+        use crate::config::HostDiskAttach;
+        use LauncherField as F;
+        let mut s = MachineSetup {
+            lide_board: Some(LidePersonality::Ripple), // two channels
+            host_disks_attached: vec![crate::config::HostDiskConfig {
+                device: "disk4".to_string(),
+                fingerprint: None,
+                identity_confirmed: true,
+                attach: HostDiskAttach::LideSlave(1), // RIPPLE-only channel
+                writable: true,
+            }],
+            host_disk_selected: vec!["disk4".to_string()],
+            ..Default::default()
+        };
+        assert!(s.host_disk_is_attached("disk4"));
+
+        s.cycle(F::LideBoard, true); // RIDE: one channel only
+        assert!(
+            !s.host_disk_is_attached("disk4"),
+            "channel 1 no longer exists on RIDE"
+        );
+        assert!(s.host_disks_attached().is_empty());
     }
 
     #[cfg(feature = "midi")]

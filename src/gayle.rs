@@ -15,9 +15,9 @@
 //! in [`crate::ata`]; Gayle is the front-end that decodes for it and adds its
 //! own ID, interrupt, and PCMCIA registers.
 
-use crate::ata::{task_file_reg, AtaBus, IdeReg};
+use crate::ata::{task_file_reg, AtaBus, AtaDevice, IdeReg};
 
-pub use crate::ata::{IdeDrive, MAX_MULTIPLE, SECTOR_SIZE};
+pub use crate::ata::{AtapiDrive, IdeDrive, MAX_MULTIPLE, SECTOR_SIZE};
 
 // Gayle interrupt/status bit layout (shared by the status, interrupt
 // change, and interrupt enable registers).
@@ -57,8 +57,24 @@ impl Gayle {
         self.ata.take_activity()
     }
 
-    pub fn attach_drive(&mut self, slot: usize, drive: IdeDrive) {
+    pub fn attach_drive(&mut self, slot: usize, drive: impl Into<AtaDevice>) {
         self.ata.attach_drive(slot, drive);
+    }
+
+    /// The ATAPI CD-ROM drive behind this port, if either slot holds one;
+    /// the runtime disc-swap target.
+    pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.ata.first_atapi_ref()
+    }
+
+    /// Mutable counterpart of [`Self::first_atapi_ref`].
+    pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.ata.first_atapi_mut()
+    }
+
+    /// Advance every ATAPI drive behind this port (master and slave alike).
+    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        self.ata.tick_atapi(cck, cd_audio);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -595,6 +611,32 @@ mod tests {
             g.read(IDE_STATUS, 1) as u8,
             0x01,
             "no phantom IDENTIFY: status stays at the pair-present pattern"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A `.iso` path attaches as an ATAPI drive rather than being rejected:
+    /// IDENTIFY PACKET DEVICE (0xA1) answers, and plain IDENTIFY DEVICE
+    /// (0xEC) aborts. The full PACKET protocol is exercised in `ata.rs`.
+    #[test]
+    fn a_cd_image_path_attaches_as_atapi() {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-gayle-test-{}-{}.iso",
+            std::process::id(),
+            rand_suffix()
+        ));
+        std::fs::write(&path, vec![0u8; 2048]).unwrap();
+        let mut g = Gayle::new(0xD0);
+        g.attach_drive(0, crate::ata::AtapiDrive::open(&path).unwrap());
+        g.write(IDE_SELECT, 1, 0xA0);
+        g.write(IDE_STATUS, 1, 0xA1);
+        assert_eq!(g.read(IDE_STATUS, 1) as u8, ST_DRDY | ST_DSC | ST_DRQ);
+        g.write(IDE_SELECT, 1, 0xA0);
+        g.write(IDE_STATUS, 1, 0xEC);
+        assert_eq!(
+            g.read(IDE_STATUS, 1) as u8,
+            ST_DRDY | ST_DSC | ST_ERR,
+            "IDENTIFY DEVICE must abort against an ATAPI slot"
         );
         std::fs::remove_file(path).ok();
     }

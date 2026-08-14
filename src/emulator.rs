@@ -2111,11 +2111,13 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
 #[cfg(not(target_arch = "wasm32"))]
 fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata::IdeDrive)) {
     for disk in &cfg.host_disks {
-        // SCSI units are attached with their controller, further down.
+        // SCSI units and lide positions are attached elsewhere.
         let slot = match disk.attach {
             crate::config::HostDiskAttach::IdeMaster => 0,
             crate::config::HostDiskAttach::IdeSlave => 1,
-            crate::config::HostDiskAttach::Scsi(_) => continue,
+            crate::config::HostDiskAttach::LideMaster(_)
+            | crate::config::HostDiskAttach::LideSlave(_)
+            | crate::config::HostDiskAttach::Scsi(_) => continue,
         };
         match crate::ata::IdeDrive::open_host_disk(
             &disk.device,
@@ -2138,6 +2140,51 @@ fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata:
             }
             Err(error) => warn!(
                 "ide: {} asked for host disk {}, which is not available: {error}",
+                disk.attach.label(),
+                disk.device
+            ),
+        }
+    }
+}
+
+/// Attach every real host disk the config puts on a `[lide]` channel.
+///
+/// A configuration outlives the disk it names, so one that is not here is
+/// reported and skipped: the machine comes up with that position empty, as
+/// it would if the drive had been unplugged. Only a disk that is present is
+/// opened, so a missing one never raises the host's permission prompt.
+#[cfg(not(target_arch = "wasm32"))]
+fn attach_lide_host_disks(
+    cfg: &Config,
+    mut attach: impl FnMut(usize, usize, crate::ata::IdeDrive),
+) {
+    for disk in &cfg.host_disks {
+        let (channel, slot) = match disk.attach {
+            crate::config::HostDiskAttach::LideMaster(ch) => (usize::from(ch), 0),
+            crate::config::HostDiskAttach::LideSlave(ch) => (usize::from(ch), 1),
+            _ => continue,
+        };
+        match crate::ata::IdeDrive::open_host_disk(
+            &disk.device,
+            disk.fingerprint.as_deref(),
+            disk.identity_confirmed,
+            disk.writable,
+        ) {
+            Ok(drive) => {
+                attach(channel, slot, drive);
+                info!(
+                    "lide: {} is host disk {}{}",
+                    disk.attach.label(),
+                    disk.device,
+                    if disk.writable {
+                        " (WRITABLE)"
+                    } else {
+                        " (read-only)"
+                    }
+                );
+            }
+            Err(error) => warn!(
+                "lide: {} asked for host disk {}, which is not available: {error}",
                 disk.attach.label(),
                 disk.device
             ),
@@ -2210,6 +2257,23 @@ fn open_scsi_target(
             drive.boot_pri,
         )?;
         info!("scsi: unit {unit} {}", drive.path.display());
+        Ok(disk.into())
+    }
+}
+
+/// Open an `[ide]`/`[lide]` drive slot: a CD image attaches as ATAPI, exactly
+/// as `open_scsi_target` attaches one as a SCSI CD-ROM.
+fn open_ide_target(
+    path: &std::path::Path,
+    unit: usize,
+    volume_name: Option<&str>,
+    boot_pri: i8,
+) -> Result<crate::ata::AtaDevice> {
+    if crate::config::is_cd_image_path(path) {
+        let cd = crate::ata::AtapiDrive::open(path)?;
+        Ok(cd.into())
+    } else {
+        let disk = crate::ata::IdeDrive::open(path, unit, volume_name, boot_pri)?;
         Ok(disk.into())
     }
 }
@@ -2385,6 +2449,75 @@ pub fn build_machine(
             }
         };
         devices.push(device);
+    }
+    // A lide.device-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
+    // or AT-Bus 2008. Drives may be hard disks or ATAPI CD-ROMs; the boot
+    // ROM is always user-supplied (never bundled), and its absence is a
+    // legal hardware-only mode.
+    if cfg.lide.enabled() {
+        let slot = devices.len();
+        let has_rom = cfg.lide.rom.is_some();
+        let mut flash = Vec::new();
+        if let Some(rom_path) = &cfg.lide.rom {
+            // Same --load-state placeholder handling as the A4091: the flash
+            // is serialized into save states, so a ROM that is temporarily
+            // unavailable while resuming is fine -- the state replaces it.
+            if rom_optional && !rom_path.is_file() {
+                info!(
+                    "--load-state: lide ROM {} is unavailable; building with \
+                     a placeholder the save state will replace",
+                    rom_path.display()
+                );
+            } else {
+                flash = crate::ide_zorro::IdeZorro::load_rom(rom_path)?;
+                if let Some(bank2_path) = &cfg.lide.rom_bank2 {
+                    flash.extend(crate::ide_zorro::IdeZorro::load_rom(bank2_path)?);
+                }
+            }
+        }
+        let mut board = crate::ide_zorro::IdeZorro::new(cfg.lide.board, flash)?;
+        let channels = cfg.lide.board.channels();
+        for (idx, drive) in cfg.lide.drives.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            let (ch, unit) = (idx / 2, idx % 2);
+            if ch >= channels {
+                continue; // config validation already rejects this; defensive only
+            }
+            // `unit` (master/slave, 0/1) is channel-relative and must stay
+            // that way for the attach slot below, but a bare-partition
+            // hardfile's synthesized RDB names its DOS device from this same
+            // argument (`open_ide_target` -> `IdeDrive::open`) -- reusing
+            // `unit` there would give every channel's master DH0 and every
+            // channel's slave DH1, colliding across channels on RIPPLE's two
+            // channels. `idx` (the flat 0..4 slot index) is unique per drive
+            // regardless of channel, so it -- not `unit` -- is what goes into
+            // the name.
+            let target = open_ide_target(
+                &drive.path,
+                idx,
+                drive.volume_name.as_deref(),
+                drive.boot_pri,
+            )?;
+            board.attach_drive(ch, unit, target);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        attach_lide_host_disks(cfg, |ch, unit, drive| {
+            if ch >= channels {
+                return; // config validation already rejects this; defensive only
+            }
+            board.attach_drive(ch, unit, drive);
+        });
+        zorro.add_board(crate::zorro::BoardSpec::lide(cfg.lide.board, slot, has_rom))?;
+        info!(
+            "lide: {} controller on the Zorro chain (slot {slot}){}",
+            cfg.lide.board.name(),
+            cfg.lide
+                .rom
+                .as_ref()
+                .map(|p| format!(", ROM {}", p.display()))
+                .unwrap_or_default()
+        );
+        devices.push(crate::zorro_device::BoardDevice::IdeZorro(board));
     }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
@@ -2616,24 +2749,14 @@ pub fn build_machine(
         if let Some(drive) = &cfg.ide.master {
             gayle.attach_drive(
                 0,
-                crate::gayle::IdeDrive::open(
-                    &drive.path,
-                    0,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                )?,
+                open_ide_target(&drive.path, 0, drive.volume_name.as_deref(), drive.boot_pri)?,
             );
             info!("ide: master {}", drive.path.display());
         }
         if let Some(drive) = &cfg.ide.slave {
             gayle.attach_drive(
                 1,
-                crate::gayle::IdeDrive::open(
-                    &drive.path,
-                    1,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                )?,
+                open_ide_target(&drive.path, 1, drive.volume_name.as_deref(), drive.boot_pri)?,
             );
             info!("ide: slave {}", drive.path.display());
         }
@@ -2649,7 +2772,7 @@ pub fn build_machine(
             let Some(drive) = drive else { continue };
             ide.attach_drive(
                 slot,
-                crate::ata::IdeDrive::open(
+                open_ide_target(
                     &drive.path,
                     slot,
                     drive.volume_name.as_deref(),

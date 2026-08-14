@@ -70,6 +70,13 @@ WinUAE-verified model so device scans terminate correctly. PCMCIA reports
 an empty slot (the status/config registers exist so card.resource
 behaves); credit-card device emulation is a non-goal.
 
+Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.chd`
+image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
+handing 12-byte CDBs to the same bus-agnostic SCSI-2 CD-ROM command engine
+(`scsi/cd.rs`'s `ScsiCdRom`) the `[scsi]` host adapters use, so the read
+family, TOC/sub-channel queries, mode pages, and CD-DA playback all behave
+identically over ATAPI PACKET or a WD33C93 SCSI bus.
+
 ## A4000 motherboard IDE (`ide_a4000.rs`)
 
 The A4000 profile decodes the same ATA task file (`ata.rs`) at `$DD2020`
@@ -79,7 +86,8 @@ control block one A12 page up at `$DD3038`, and an interrupt status byte
 at `$DD3020` whose bit 7 is the drive's INTRQ. Unlike Gayle there is no
 interrupt-change latch: INTRQ feeds INT2 directly and the driver drops it
 by reading the status register. Drives come from the same `[ide]`
-section as Gayle machines.
+section as Gayle machines, ATAPI CD-ROMs included -- same `ata.rs` engine,
+same PACKET protocol.
 
 ## SCSI controllers (`a2091.rs`, `a4091.rs`, `sdmac.rs`, `scsi.rs`)
 
@@ -175,9 +183,83 @@ with sense state kept per target.
 
 The drive controllers latch read/write activity, which the bus drains to
 light the status-bar HDD LED; the LED holds for a short minimum period so
-brief accesses stay visible. Gayle, the A4000 IDE, the A2091, and the
-SDMAC report activity today; the A4091 shows the LED but does not latch
-activity into it yet.
+brief accesses stay visible. Gayle, the A4000 IDE, the A2091, the SDMAC,
+and the lide-compatible board (below) report activity today; the A4091
+shows the LED but does not latch activity into it yet.
+
+## lide.device-compatible Zorro II IDE (`ide_zorro.rs`)
+
+`[lide]` attaches a Zorro II IDE board compatible with LIV2's
+actively-maintained open-source `lide.device`, in three AutoConfig
+personalities selected by `board`: **RIPPLE** (mfg `0x144A`/product 7, two
+ATA channels), **RIDE** (mfg `0x144A`/product 9, one channel, sharing
+RIPPLE's ROM image and register layout), and **AT-Bus 2008** (mfg
+`0x082C`/product 6, one channel, the register model shared by that board's
+whole clone family). All three reuse the front-end-agnostic ATA core in
+`ata.rs` (the same one Gayle and the A4000 IDE port use) and the shared
+drive backend above; the new work is entirely in the board's own address
+decode, since none of the three personalities resemble Gayle's 4-byte task
+file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
+PACKET support, `.cue`/`.iso`/`.chd` CD-ROM images.
+
+**Register decode.** Each ATA channel occupies a 4K block of the board
+window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
+CPU A9-A11, so a register answers throughout its 512-byte slot, which is
+what lets the driver bulk-transfer a sector with `movem.l`. Every register
+but the 16-bit data port sits on the *upper* byte lane (even addresses,
+D15-D8); the odd lane floats. RIPPLE's two channels sit at window offset
+`$1000`/control `$5000` (channel 0) and `$2000`/`$6000` (channel 1) -- two
+chip selects per physical connector, task file and control block, per the
+RTL's own decode; RIDE and AT-Bus 2008 have one channel at `$1000`, control
+block at `$2000` (so `$2C00` is the alternate-status register the driver's
+channel-autodetect polls against `$1E00`). A channel with **no drives
+attached at all** floats every register, not only status: `AtaBus::read_reg`
+only special-cases status/alt-status for "no drive selected", so the
+front-end checks `AtaBus::any_drive_attached` itself -- without it, an
+empty channel's device/head register reads a hard zero, which real
+`lide.device` reads as "a device answered" and polls forever waiting for
+it to respond. (Found and fixed by booting a downloaded `lide.rom` under
+RIPPLE with only channel 0 populated -- see `ide_zorro.rs`'s tests and
+module docs.)
+
+**ROM window and banking.** The flash is byte-wide, so a 32K bank fills 64K
+of window at even addresses (stride 2; the odd lane on AT-Bus 2008, whose
+`er_InitDiagVec` is `1` rather than `8` for exactly this reason). Before
+the first write anywhere in the window, ROM covers the whole window (bank
+selected by address bit 16 -- bank 1 being the optional CD filesystem);
+that first write latches `ide_enabled`, after which ROM remains only in
+the upper 64K (RIPPLE also keeps it in the low 64K wherever address bits
+12 and 13 agree, which is exactly where the register blocks above are
+not). The bank register is written anywhere in `$8000-$FFFF`: RIPPLE has
+two banks and it is write-only; RIDE has four and reads back with
+`otherram_en`/`maprom_en` on the next nibble down. AT-Bus 2008 has no latch
+and no banking: its image sits on the odd lane across the whole window,
+always. None of the three boards wire an interrupt line -- `lide.device`
+is a purely polling driver.
+
+**ROM is always user-supplied** (`rom`, optionally `rom_bank2`): LIV2's
+GitHub releases ship `lide.rom` (RIPPLE/RIDE), `lide-atbus.rom`, and
+`cdfs.rom`, all 32768 bytes; Copperline never bundles or distributes them.
+Omitting `rom` is hardware-only mode: no DiagArea, no autoboot, `diag_vec`
+absent from the `BoardSpec`, but drives still answer once a disk-loaded
+driver finds them.
+
+All three personalities have booted a real `lide.rom`/`lide-atbus.rom`
+release end-to-end to a real Workbench (Kickstart 1.3 and 3.1, `--cpu
+68020`): AutoConfig, the DiagArea, `lide.device` loading as a resident
+module, finding an attached drive, and mounting a boot node from a real
+RDB image.
+
+AT-Bus 2008's ROM and register blocks share address space by byte lane
+(ROM odd, registers even, per above), including inside the control block
+at `$2000`: the board's read dispatch used to match the control block
+first regardless of lane, so odd-lane reads there -- exactly where the
+boot ROM's chainloader fetches its relocatable driver payload -- floated
+as an unpopulated register instead of reaching ROM. `lide.device` never
+loaded and the machine never got past the "insert disk" screen; RIPPLE and
+RIDE were unaffected, since their ROM sits on the even lane, clear of any
+register. Fixed by checking the ROM lane ahead of the register-block
+dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests).
 
 ## Host filesystem service (`filesys.rs`)
 

@@ -63,6 +63,7 @@ pub mod harddrive;
 pub mod heatmap;
 pub mod hostsocket;
 pub mod ide_a4000;
+pub mod ide_zorro;
 pub mod inputrec;
 pub mod inputsched;
 pub mod ipf;

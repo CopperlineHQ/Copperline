@@ -519,17 +519,24 @@ The layout is:
   headed with the built-in FluxBridge library and its version, for the
   serial port, drive select, density, read mode and replay speed, greying
   whatever the chosen interface does not honour. See [](fluxbridge)),
-  *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units; a block of buttons at
-  the top links to five sub-pages: **Host Folder**, for host directories
+  *Storage* (IDE master/slave -- either can be a CD image instead of a hard
+  disk, attaching an ATAPI CD-ROM drive there -- the SCSI controller --
+  A2091, A4091, or the A3000's onboard SCSI -- and its boot ROM and units,
+  a unit likewise a CD image attaching a SCSI CD-ROM drive; a block of buttons at
+  the top links to six sub-pages: **Host Folder**, for host directories
   served live as AmigaDOS volumes (up to four mounts, each with a boot
   priority and a read-write/read-only **Access** field -- the config file
   itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
   the first four); **Host Disk**, for a real disk of this computer's (see
-  [](host-disks.md)); **Boot Priority**, which sets each hard-disk drive's
+  [](host-disks.md)); **Boot Priority**, which sets each IDE/SCSI drive's
   synthesized-RDB boot priority (see below); **Create Image...**, which
-  makes new ADF and HDF images (see below); and **CD** (image, insert
-  delay, CD32 NVRAM). Each sub-page has a **< Back** button in that block
+  makes new ADF and HDF images (see below); **CD** (image, insert delay,
+  CD32 NVRAM); and **Lide**, the built-in `[lide]` Zorro II IDE board --
+  personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), up to four drives (two
+  on RIDE/AT-Bus 2008, any of which can likewise be a CD image), and each
+  drive's own boot priority, kept on this page
+  rather than the shared Boot Priority one so the board's up-to-four drives
+  fit alongside it. Each sub-page has a **< Back** button in that block
   that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),

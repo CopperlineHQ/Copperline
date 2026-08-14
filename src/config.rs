@@ -202,6 +202,11 @@ pub struct Config {
     /// drive images on SCSI IDs 0-6. The Zorro boards autoconfig on the chain
     /// and carry their own boot ROM and scsi.device; the A3000's does not.
     pub scsi: ScsiConfig,
+    /// `lide.device`-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
+    /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Drives
+    /// may be hard disks or ATAPI CD-ROMs; the boot ROM is always
+    /// user-supplied.
+    pub lide: LideConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
@@ -1076,6 +1081,42 @@ impl ScsiConfig {
     }
 }
 
+/// `[lide]`: a built-in Zorro II IDE board compatible with LIV2's
+/// `lide.device`. Drives may be hard disks or ATAPI CD-ROMs; the boot ROM is
+/// always user-supplied (never bundled).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LideConfig {
+    /// Which of the three AutoConfig identities the board presents. Only
+    /// meaningful when `enabled()`.
+    pub board: crate::ide_zorro::LidePersonality,
+    /// Whether the raw `[lide]` table named a `board` explicitly. A board
+    /// can be selected with no ROM and no drive images yet (hardware-only
+    /// mode, or a board meant to carry only a `[[host_disk]]` attachment),
+    /// so this is tracked separately from `rom`/`drives` rather than left
+    /// for `enabled()` to infer from them.
+    pub board_named: bool,
+    /// Boot ROM image (32768 bytes). Absent = hardware-only mode: no
+    /// DiagArea, no autoboot; drives still work under a disk-loaded
+    /// `lide.device`.
+    pub rom: Option<PathBuf>,
+    /// Optional second flash bank (e.g. a CD filesystem image). Requires
+    /// `rom`; not valid on the AT-Bus 2008 personality.
+    pub rom_bank2: Option<PathBuf>,
+    /// Drive images, in (channel, master/slave) order: 0-1 are channel 0's,
+    /// 2-3 are channel 1's (RIPPLE only).
+    pub drives: [Option<DriveImage>; 4],
+}
+
+impl LideConfig {
+    /// Whether a `[lide]` section asked for a board at all: an explicit
+    /// `board`, a ROM, or a drive image. `rom_bank2` alone does not count --
+    /// it is validated (and rejected) as needing `rom` below, and must not
+    /// silently skip that check.
+    pub fn enabled(&self) -> bool {
+        self.board_named || self.rom.is_some() || self.drives.iter().any(Option::is_some)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Emulation {
     /// Whether the machine starts running (powered on) at launch. When
@@ -1384,6 +1425,10 @@ pub enum HostDiskAttach {
     #[default]
     IdeMaster,
     IdeSlave,
+    /// Master on a `[lide]` Zorro II IDE board channel (0 or 1).
+    LideMaster(u8),
+    /// Slave on a `[lide]` Zorro II IDE board channel (0 or 1).
+    LideSlave(u8),
     /// A unit on whichever SCSI controller the machine has fitted.
     Scsi(u8),
 }
@@ -1397,6 +1442,8 @@ impl HostDiskAttach {
         match self {
             Self::IdeMaster => "ide-master".to_string(),
             Self::IdeSlave => "ide-slave".to_string(),
+            Self::LideMaster(ch) => format!("lide{ch}-master"),
+            Self::LideSlave(ch) => format!("lide{ch}-slave"),
             Self::Scsi(unit) => format!("scsi{unit}"),
         }
     }
@@ -1406,6 +1453,8 @@ impl HostDiskAttach {
         match self {
             Self::IdeMaster => "IDE Master".to_string(),
             Self::IdeSlave => "IDE Slave".to_string(),
+            Self::LideMaster(ch) => format!("Lide {ch} Master"),
+            Self::LideSlave(ch) => format!("Lide {ch} Slave"),
             Self::Scsi(unit) => format!("SCSI Unit {unit}"),
         }
     }
@@ -1422,6 +1471,7 @@ impl HostDiskAttach {
     pub fn requirement(self) -> &'static str {
         match self {
             Self::IdeMaster | Self::IdeSlave => "Attach to IDE requires an A600, A1200 or A4000",
+            Self::LideMaster(_) | Self::LideSlave(_) => "Attach to Lide requires a [lide] board",
             Self::Scsi(_) => "Attach to SCSI requires a SCSI controller",
         }
     }
@@ -1433,7 +1483,14 @@ impl HostDiskAttach {
 
     /// Every attachment point, in the order a picker cycles them.
     pub fn all() -> Vec<Self> {
-        let mut all = vec![Self::IdeMaster, Self::IdeSlave];
+        let mut all = vec![
+            Self::IdeMaster,
+            Self::IdeSlave,
+            Self::LideMaster(0),
+            Self::LideSlave(0),
+            Self::LideMaster(1),
+            Self::LideSlave(1),
+        ];
         all.extend((0..SCSI_UNITS).map(Self::Scsi));
         all
     }
@@ -2133,6 +2190,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
+            lide: LideConfig::default(),
             a2065_net: None,
             hostsocket_net: None,
             hostsocket_transport: None,
@@ -2773,6 +2831,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) scsi: RawScsi,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) lide: RawLide,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
@@ -3041,7 +3101,8 @@ pub(crate) struct RawHostDisk {
     #[serde(skip)]
     pub(crate) identity_confirmed: bool,
     /// Where the machine sees it: `ide-master` (the default), `ide-slave`,
-    /// or `scsi0`..`scsi6`.
+    /// `lide0-master`, `lide0-slave`, `lide1-master`, `lide1-slave`, or
+    /// `scsi0`..`scsi6`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attach: Option<String>,
     /// Protect the disk from the guest. Absent means read-only: real media is
@@ -3305,6 +3366,30 @@ pub(crate) struct RawScsi {
     pub(crate) unit5: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unit6: Option<RawDrive>,
+}
+
+/// `[lide]` `lide.device`-compatible Zorro II IDE board.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLide {
+    /// Board personality: "ripple" (default once the section is present),
+    /// "ride", or "atbus2008".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) board: Option<String>,
+    /// Boot ROM image (a `lide.rom`/`lide-atbus.rom` release download, 32768
+    /// bytes). Absent means hardware-only mode: no autoboot, drives still
+    /// work under a disk-loaded `lide.device`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom: Option<String>,
+    /// Optional second flash bank (e.g. `cdfs.rom`), also 32768 bytes.
+    /// Requires `rom`; not valid on the AT-Bus 2008 personality, which has
+    /// no banking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom_bank2: Option<String>,
+    /// Drive images, in (channel, master/slave) order: index 0-1 are
+    /// channel 0's master/slave, index 2-3 are channel 1's (RIPPLE only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) drives: Vec<RawDrive>,
 }
 
 /// `[a2065]` Ethernet board. Fitting the board enables host networking, which
@@ -4157,18 +4242,6 @@ impl TryFrom<RawConfig> for Config {
                  (or A1200, or A4000)"
             ));
         }
-        // The IDE interfaces speak plain ATA, not ATAPI: a CD image on the
-        // cable would be served as a garbage hard disk.
-        for drive in [&ide.master, &ide.slave].into_iter().flatten() {
-            if is_cd_image_path(&drive.path) {
-                errors.push(anyhow!(
-                    "[ide] {}: CD images attach a CD-ROM drive on the SCSI bus \
-                     ([scsi] unit0..unit6); the IDE port has no ATAPI support",
-                    drive.path.display()
-                ));
-            }
-        }
-
         let scsi_controller = match raw.scsi.controller.as_deref() {
             // A machine with a Super DMAC already has a SCSI bus, so drives go
             // on it unless the config asks for a Zorro board instead.
@@ -4267,6 +4340,61 @@ impl TryFrom<RawConfig> for Config {
         }
         if scsi.rom_odd.is_some() && scsi.rom.is_none() {
             errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
+        }
+
+        let lide_board = match raw.lide.board.as_deref() {
+            None => crate::ide_zorro::LidePersonality::Ripple,
+            Some(raw_board) => match raw_board.trim().to_ascii_lowercase().as_str() {
+                "ripple" => crate::ide_zorro::LidePersonality::Ripple,
+                "ride" => crate::ide_zorro::LidePersonality::Ride,
+                "atbus2008" | "at-bus2008" | "atbus" => {
+                    crate::ide_zorro::LidePersonality::AtBus2008
+                }
+                _ => {
+                    errors.push(anyhow!(
+                        "[lide] board = {raw_board:?} is not known \
+                         (expected \"ripple\", \"ride\", or \"atbus2008\")"
+                    ));
+                    crate::ide_zorro::LidePersonality::Ripple
+                }
+            },
+        };
+        let mut lide_drives: [Option<DriveImage>; 4] = Default::default();
+        for (slot, raw_drive) in raw.lide.drives.iter().enumerate().take(4) {
+            lide_drives[slot] = Some(drive_image(raw_drive.clone())?);
+        }
+        let lide = LideConfig {
+            board: lide_board,
+            board_named: raw.lide.board.is_some(),
+            rom: raw.lide.rom.as_ref().map(PathBuf::from),
+            rom_bank2: raw.lide.rom_bank2.as_ref().map(PathBuf::from),
+            drives: lide_drives,
+        };
+        // Unconditional, not gated on `lide.enabled()`: each checks a
+        // specific pair of fields directly (drive count vs. the board's
+        // channel count, `rom_bank2` vs. `rom`/`board`), so a `[lide]`
+        // section that names only `rom_bank2` -- otherwise `enabled() ==
+        // false`, since it looks at `board`/`rom`/`drives` -- still gets
+        // "rom_bank2 needs rom" instead of the whole table being silently
+        // accepted as a no-op.
+        let max_drives = lide_board.max_drives();
+        if raw.lide.drives.len() > max_drives {
+            errors.push(anyhow!(
+                "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
+                raw.lide.drives.len(),
+                lide_board.name()
+            ));
+        }
+        if lide.rom_bank2.is_some() && lide.rom.is_none() {
+            errors.push(anyhow!(
+                "[lide] rom_bank2 needs rom (the primary bank image)"
+            ));
+        }
+        if lide.rom_bank2.is_some() && lide_board == crate::ide_zorro::LidePersonality::AtBus2008 {
+            errors.push(anyhow!(
+                "[lide] rom_bank2 does not apply to board = \"atbus2008\": that board has \
+                 no flash banking"
+            ));
         }
 
         let a2065_net = match (&raw.a2065.net, &raw.a2065.interface) {
@@ -4557,7 +4685,8 @@ impl TryFrom<RawConfig> for Config {
         // a disk is never accepted onto a bus that will not be built.
         let has_scsi = (scsi.enabled() && scsi.controller.is_zorro_board())
             || (defaults.sdmac && scsi.controller == ScsiController::A3000);
-        let host_disks = parse_host_disks(&raw.host_disk, &ide, &scsi, has_ide_port, has_scsi)?;
+        let host_disks =
+            parse_host_disks(&raw.host_disk, &ide, &scsi, &lide, has_ide_port, has_scsi)?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
@@ -4652,6 +4781,7 @@ impl TryFrom<RawConfig> for Config {
             audio,
             ide,
             scsi,
+            lide,
             a2065_net,
             hostsocket_net,
             hostsocket_transport,
@@ -5765,6 +5895,7 @@ fn parse_host_disks(
     raw: &[RawHostDisk],
     ide: &IdeConfig,
     scsi: &ScsiConfig,
+    lide: &LideConfig,
     has_ide_port: bool,
     has_scsi: bool,
 ) -> Result<Vec<HostDiskConfig>> {
@@ -5790,10 +5921,12 @@ fn parse_host_disks(
         // A disk attached where the machine has no port is not a disk at
         // all: nothing would ever look at it, so say so now rather than
         // opening it and leaving it unreachable.
-        let fitted = if attach.is_scsi() {
-            has_scsi
-        } else {
-            has_ide_port
+        let fitted = match attach {
+            HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave => has_ide_port,
+            HostDiskAttach::Scsi(_) => has_scsi,
+            HostDiskAttach::LideMaster(ch) | HostDiskAttach::LideSlave(ch) => {
+                lide.enabled() && usize::from(ch) < lide.board.channels()
+            }
         };
         if !fitted {
             bail!("host_disk[{index}]: {}", attach.requirement());
@@ -5831,6 +5964,8 @@ fn parse_host_disks(
                 .units
                 .get(usize::from(unit))
                 .is_some_and(Option::is_some),
+            HostDiskAttach::LideMaster(ch) => lide.drives[usize::from(ch) * 2].is_some(),
+            HostDiskAttach::LideSlave(ch) => lide.drives[usize::from(ch) * 2 + 1].is_some(),
         };
         if taken {
             bail!(
@@ -6212,7 +6347,7 @@ mod tests {
                 read_only: None,
             },
         ];
-        let error = parse_host_disks(&twice, &ide, &scsi, true, false)
+        let error = parse_host_disks(&twice, &ide, &scsi, &LideConfig::default(), true, false)
             .expect_err("the same disk on two slots is refused")
             .to_string();
         assert!(error.contains("already attached"), "{error}");
@@ -6233,9 +6368,16 @@ mod tests {
                 read_only: Some(true),
             },
         ];
-        let error = parse_host_disks(&same_identity, &ide, &scsi, true, false)
-            .expect_err("one fingerprint cannot become two guest drives")
-            .to_string();
+        let error = parse_host_disks(
+            &same_identity,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            true,
+            false,
+        )
+        .expect_err("one fingerprint cannot become two guest drives")
+        .to_string();
         assert!(error.contains("one disk cannot be two drives"), "{error}");
 
         // Two different disks on two slots is the ordinary case.
@@ -6255,13 +6397,206 @@ mod tests {
                 read_only: None,
             },
         ];
-        let parsed =
-            parse_host_disks(&separately, &ide, &scsi, true, false).expect("two disks, two slots");
+        let parsed = parse_host_disks(
+            &separately,
+            &ide,
+            &scsi,
+            &LideConfig::default(),
+            true,
+            false,
+        )
+        .expect("two disks, two slots");
         assert_eq!(parsed.len(), 2);
         assert!(
             parsed.iter().all(|disk| !disk.writable),
             "an omitted physical-disk access mode is safely read-only"
         );
+    }
+
+    fn host_disk_entry(device: &str, attach: &str) -> RawHostDisk {
+        RawHostDisk {
+            device: device.to_string(),
+            fingerprint: None,
+            identity_confirmed: false,
+            attach: Some(attach.to_string()),
+            read_only: None,
+        }
+    }
+
+    /// A `[lide]` attachment point requires an actual `[lide]` board, and
+    /// then only a channel that board's personality has.
+    #[test]
+    fn lide_host_disk_attach_requires_a_fitted_channel() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+
+        // No [lide] board at all: neither channel is fitted.
+        let disks = [host_disk_entry("sdb", "lide0-master")];
+        let error = parse_host_disks(&disks, &ide, &scsi, &LideConfig::default(), true, false)
+            .expect_err("no [lide] board means no lide attachment point")
+            .to_string();
+        assert!(
+            error.contains("Attach to Lide requires a [lide] board"),
+            "{error}"
+        );
+
+        // RIDE: one channel. Channel 0 is fitted, channel 1 is not.
+        let ride = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ride,
+            board_named: true,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        let ok = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &ride,
+            true,
+            false,
+        )
+        .expect("channel 0 is fitted on RIDE");
+        assert_eq!(ok.len(), 1);
+        let error = parse_host_disks(
+            &[host_disk_entry("sdb", "lide1-master")],
+            &ide,
+            &scsi,
+            &ride,
+            true,
+            false,
+        )
+        .expect_err("RIDE has only one channel")
+        .to_string();
+        assert!(
+            error.contains("Attach to Lide requires a [lide] board"),
+            "{error}"
+        );
+
+        // RIPPLE: two channels, both fitted.
+        let ripple = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        let parsed = parse_host_disks(
+            &[
+                host_disk_entry("sdb", "lide0-master"),
+                host_disk_entry("sdc", "lide1-slave"),
+            ],
+            &ide,
+            &scsi,
+            &ripple,
+            true,
+            false,
+        )
+        .expect("both channels are fitted on RIPPLE");
+        assert_eq!(parsed.len(), 2);
+    }
+
+    /// A `[lide] board = "ripple"` section with no rom and no drive images
+    /// (legal hardware-only mode) still counts as a fitted board for a host
+    /// disk. `LideConfig::enabled()` tracks `board_named` for exactly this --
+    /// without it, a bare board would wrongly read as `enabled() == false`,
+    /// silently skipping the `rom_bank2` validation below as well as
+    /// rejecting the host disk. This is the exact repro from the audit.
+    #[test]
+    fn lide_host_disk_attach_accepts_a_bare_board_with_no_images() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let bare = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
+            rom: None,
+            rom_bank2: None,
+            drives: [None, None, None, None],
+        };
+        assert!(
+            bare.enabled(),
+            "a named board with no rom/drives is still `enabled()`"
+        );
+        let parsed = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &bare,
+            true,
+            false,
+        )
+        .expect("a named board with no images still fits a host disk");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    /// End-to-end repro through `Config::from_raw`: `[lide] board = "ripple"`
+    /// with no rom/drives, plus a `[[host_disk]] attach = "lide0-master"`
+    /// entry, must parse rather than reject with "requires a [lide] board".
+    #[test]
+    fn lide_bare_board_config_accepts_a_host_disk() {
+        let toml = r#"
+            [lide]
+            board = "ripple"
+
+            [[host_disk]]
+            device = "sdb"
+            attach = "lide0-master"
+        "#;
+        let cfg = parse_config(toml).expect(
+            "a bare [lide] board with a host disk on its master channel should be accepted",
+        );
+        assert_eq!(cfg.host_disks.len(), 1);
+    }
+
+    /// A lide slot already holding an image cannot also take a real disk --
+    /// one slot holds one drive.
+    #[test]
+    fn lide_host_disk_attach_rejects_a_slot_already_holding_an_image() {
+        let ide = IdeConfig::default();
+        let scsi = ScsiConfig::default();
+        let ripple = LideConfig {
+            board: crate::ide_zorro::LidePersonality::Ripple,
+            board_named: true,
+            rom: Some(PathBuf::from("lide.rom")),
+            rom_bank2: None,
+            drives: [
+                Some(DriveImage {
+                    path: PathBuf::from("ch0-master.hdf"),
+                    volume_name: None,
+                    boot_pri: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let error = parse_host_disks(
+            &[host_disk_entry("sdb", "lide0-master")],
+            &ide,
+            &scsi,
+            &ripple,
+            true,
+            false,
+        )
+        .expect_err("channel 0 master already has an image")
+        .to_string();
+        assert!(error.contains("already has an image"), "{error}");
+    }
+
+    /// Tokens for the new lide attachment points round-trip, and label
+    /// exactly as written.
+    #[test]
+    fn lide_host_disk_attach_tokens_round_trip() {
+        assert_eq!(
+            HostDiskAttach::from_token("lide1-slave"),
+            Some(HostDiskAttach::LideSlave(1))
+        );
+        assert_eq!(
+            HostDiskAttach::from_token("lide0-master"),
+            Some(HostDiskAttach::LideMaster(0))
+        );
+        assert_eq!(HostDiskAttach::LideMaster(0).label(), "Lide 0 Master");
+        assert_eq!(HostDiskAttach::LideSlave(1).label(), "Lide 1 Slave");
     }
 
     /// Where several disks went, said once. A single point reads as its own
@@ -8310,11 +8645,111 @@ mod tests {
         Ok(())
     }
 
-    /// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
-    /// they attach as SCSI CD-ROM drives, and the ATA-only IDE port rejects
-    /// them.
     #[test]
-    fn cd_images_fit_scsi_units_but_not_the_ide_port() -> Result<()> {
+    fn lide_section_parses_board_rom_and_drives() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom = "lide.rom"
+            drives = ["dh0.hdf", "dh1.hdf"]
+            "#,
+        )?;
+        assert!(cfg.lide.enabled());
+        assert_eq!(cfg.lide.board, crate::ide_zorro::LidePersonality::Ripple);
+        assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new("lide.rom")));
+        assert_eq!(
+            cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("dh0.hdf"))
+        );
+        assert_eq!(
+            cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("dh1.hdf"))
+        );
+        assert!(cfg.lide.drives[2].is_none());
+
+        // Hardware-only mode (no rom) is legal: no ROM, no autoboot, but the
+        // section still "enabled" via drives alone.
+        let cfg = parse_config(
+            r#"
+            [lide]
+            board = "ride"
+            drives = ["dh0.hdf"]
+            "#,
+        )?;
+        assert!(cfg.lide.enabled());
+        assert!(cfg.lide.rom.is_none());
+
+        // CD images attach as ATAPI drives, exactly as they do on [ide].
+        let cfg = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom = "lide.rom"
+            drives = ["game.cue"]
+            "#,
+        )?;
+        assert_eq!(
+            cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("game.cue"))
+        );
+
+        // RIDE only has one channel (two drives); a third entry overflows it.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "ride"
+            rom = "lide.rom"
+            drives = ["dh0.hdf", "dh1.hdf", "dh2.hdf"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("drive(s)"), "{err:#}");
+
+        // rom_bank2 needs rom.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "ripple"
+            rom_bank2 = "cdfs.rom"
+            drives = ["dh0.hdf"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rom_bank2 needs rom"), "{err:#}");
+
+        // rom_bank2 alone, with no board/rom/drives, is not silently
+        // accepted just because `LideConfig::enabled()` would say the
+        // section is "off" -- rom_bank2 vs. rom is validated unconditionally.
+        let err = parse_config(
+            r#"
+            [lide]
+            rom_bank2 = "cdfs.rom"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rom_bank2 needs rom"), "{err:#}");
+
+        // rom_bank2 does not apply to AT-Bus 2008.
+        let err = parse_config(
+            r#"
+            [lide]
+            board = "atbus2008"
+            rom = "lide-atbus.rom"
+            rom_bank2 = "cdfs.rom"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no flash banking"), "{err:#}");
+
+        Ok(())
+    }
+
+    /// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
+    /// they attach as SCSI CD-ROM drives on [scsi], and as ATAPI drives on
+    /// [ide]/[lide].
+    #[test]
+    fn cd_images_fit_scsi_units_and_the_ide_port() -> Result<()> {
         assert!(is_cd_image_path(Path::new("games/Disc.CUE")));
         assert!(is_cd_image_path(Path::new("cd32.iso")));
         assert!(!is_cd_image_path(Path::new("workbench.hdf")));
@@ -8333,16 +8768,18 @@ mod tests {
             Some(Path::new("game.cue"))
         );
 
-        let err = parse_config(
+        let cfg = parse_config(
             r#"
             [machine]
             profile = "A1200"
             [ide]
             master = "game.iso"
             "#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("ATAPI"), "{err:#}");
+        )?;
+        assert_eq!(
+            cfg.ide.master.as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("game.iso"))
+        );
         Ok(())
     }
 

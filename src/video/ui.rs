@@ -9942,6 +9942,7 @@ mod tests {
             LauncherTab::HostFs,
             LauncherTab::Whdload,
             LauncherTab::BootPriority,
+            LauncherTab::Lide,
             LauncherTab::AvVideo,
             LauncherTab::AvEmulation,
         ];

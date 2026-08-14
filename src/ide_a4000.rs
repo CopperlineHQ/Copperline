@@ -11,7 +11,7 @@
 //! decode. Unlike Gayle there is no interrupt-change latch: INTRQ feeds INT2
 //! directly, and the driver clears it by reading the status register.
 
-use crate::ata::{task_file_reg, AtaBus, IdeDrive, IdeReg};
+use crate::ata::{task_file_reg, AtaBus, AtaDevice, IdeReg};
 
 /// Base of the IDE window. The task file runs to $DD203F and the control block
 /// lives one A12 page up.
@@ -39,8 +39,24 @@ impl IdeA4000 {
         Self { ata: AtaBus::new() }
     }
 
-    pub fn attach_drive(&mut self, slot: usize, drive: IdeDrive) {
+    pub fn attach_drive(&mut self, slot: usize, drive: impl Into<AtaDevice>) {
         self.ata.attach_drive(slot, drive);
+    }
+
+    /// The ATAPI CD-ROM drive on this interface, if either slot holds one;
+    /// the runtime disc-swap target.
+    pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.ata.first_atapi_ref()
+    }
+
+    /// Mutable counterpart of [`Self::first_atapi_ref`].
+    pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.ata.first_atapi_mut()
+    }
+
+    /// Advance every ATAPI drive on this interface (master and slave alike).
+    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        self.ata.tick_atapi(cck, cd_audio);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -136,6 +152,7 @@ impl IdeA4000 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ata::IdeDrive;
 
     /// The decode the ROM's probe walks: drive/head at $DD203A, status at
     /// $DD203E, cylinder low/high at $DD2032/$DD2036 -- Gayle's 4-byte stride,
@@ -202,6 +219,40 @@ mod tests {
         ide.read(0x00DD_203E, 1);
         assert_eq!(ide.read(IDE_IRQ, 1) as u8 & IRQ_IDE, 0);
         assert!(!ide.int2_line());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A `.iso` path attaches as an ATAPI drive rather than being rejected:
+    /// IDENTIFY PACKET DEVICE (0xA1) answers, and plain IDENTIFY DEVICE
+    /// (0xEC) aborts. The full PACKET protocol is exercised in `ata.rs`.
+    #[test]
+    fn a_cd_image_path_attaches_as_atapi() {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-a4000-ide-cd-{}-{}.iso",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::write(&path, vec![0u8; 2048]).unwrap();
+        let mut ide = IdeA4000::new();
+        ide.attach_drive(0, crate::ata::AtapiDrive::open(&path).unwrap());
+
+        ide.write(0x00DD_203A, 1, 0xA0);
+        ide.write(0x00DD_203E, 1, 0xA1);
+        assert_eq!(
+            ide.read(0x00DD_203E, 1) as u8,
+            crate::ata::ST_DRDY | crate::ata::ST_DSC | crate::ata::ST_DRQ
+        );
+
+        ide.write(0x00DD_203A, 1, 0xA0);
+        ide.write(0x00DD_203E, 1, 0xEC);
+        assert_eq!(
+            ide.read(0x00DD_203E, 1) as u8,
+            crate::ata::ST_DRDY | crate::ata::ST_DSC | crate::ata::ST_ERR,
+            "IDENTIFY DEVICE must abort against an ATAPI slot"
+        );
         std::fs::remove_file(&path).ok();
     }
 }

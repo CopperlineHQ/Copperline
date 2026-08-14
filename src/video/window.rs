@@ -8029,6 +8029,8 @@ impl App {
             | LauncherField::ExtendedRom
             | LauncherField::ScsiRom
             | LauncherField::ScsiRomOdd
+            | LauncherField::LideRom
+            | LauncherField::LideRomBank2
             | LauncherField::Mt32ControlRom
             | LauncherField::Mt32PcmRom => {
                 // Both cases spelled out: ROM dumps are as often shouted as
@@ -8057,15 +8059,22 @@ impl App {
                 ],
             ),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
-            // SCSI units take hard disks or CD images (a cue/iso/chd
-            // attaches a CD-ROM drive at that ID).
+            // SCSI, IDE, and lide drive slots all take hard disks or CD
+            // images (a cue/iso/chd attaches a CD-ROM drive at that slot,
+            // over SCSI or ATAPI as appropriate).
             LauncherField::ScsiUnit0
             | LauncherField::ScsiUnit1
             | LauncherField::ScsiUnit2
             | LauncherField::ScsiUnit3
             | LauncherField::ScsiUnit4
             | LauncherField::ScsiUnit5
-            | LauncherField::ScsiUnit6 => dialog
+            | LauncherField::ScsiUnit6
+            | LauncherField::IdeMaster
+            | LauncherField::IdeSlave
+            | LauncherField::LideDrive0
+            | LauncherField::LideDrive1
+            | LauncherField::LideDrive2
+            | LauncherField::LideDrive3 => dialog
                 .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
                 .add_filter("CD images", &["cue", "iso", "chd"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
