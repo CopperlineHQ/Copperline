@@ -8012,6 +8012,8 @@ impl App {
             | LauncherField::ExtendedRom
             | LauncherField::ScsiRom
             | LauncherField::ScsiRomOdd
+            | LauncherField::LideRom
+            | LauncherField::LideRomBank2
             | LauncherField::Mt32ControlRom
             | LauncherField::Mt32PcmRom => {
                 // Both cases spelled out: ROM dumps are as often shouted as
