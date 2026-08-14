@@ -165,8 +165,9 @@ or calling DMA outside active transactions):
   - Register writes and clock ticks are ignored (no-ops).
   - Interrupt lines (`int2`, `int6`) remain unasserted (low / `0`).
 - The faulted state is preserved across save-state snapshots and restores.
-- The board remains offline until a bus power-on/cold reset (`reset()`), which
-  re-instantiates a clean module instance with reset linear memory.
+- The board remains offline until a bus reset (`reset()`), including a warm
+  keyboard reset, which re-instantiates a clean module instance with reset
+  linear memory.
 
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
