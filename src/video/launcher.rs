@@ -1129,7 +1129,7 @@ const PATHS_ROWS: [Row; 12] = [
     row(F::PathsRecordings, "  Recordings", PathRow),
     row(F::PathsNvram, "  NVRAM", PathRow),
     row(F::PathsTraces, "  Traces", PathRow),
-    row(F::PathsConfigs, "  Configurations", PathRow),
+    row(F::PathsConfigs, "  Config files", PathRow),
     row(F::PathsRoms, "  ROMs", PathRow),
     row(F::PathsFloppies, "  Floppies", PathRow),
     row(F::PathsHarddrives, "  Hard drives", PathRow),
