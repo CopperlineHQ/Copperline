@@ -6833,6 +6833,12 @@ impl App {
             UiControl::LauncherResetDefault => self.launcher_reset_default(),
             UiControl::LauncherConfirmReset => self.launcher_reset_default_confirmed(),
             UiControl::LauncherCancelReset => self.launcher_close_confirm(),
+            // Whichever is up. Only one ever is: opening the confirm puts
+            // the Save dialog away rather than stacking on it.
+            UiControl::LauncherDialogClose => {
+                self.launcher_close_confirm();
+                self.launcher_close_save_dialog();
+            }
             UiControl::LauncherRun => self.launcher_run(),
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)

@@ -500,13 +500,22 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
             if yes.contains(pos) {
                 return Some(UiControl::LauncherConfirmReset);
             }
+            if close_button_rect(launcher_confirm_rect(rect)).contains(pos) {
+                return Some(UiControl::LauncherDialogClose);
+            }
             // Anywhere else, the dialog's own frame included, is the
             // answer that changes nothing. A question about deleting
             // something should not be answerable by a stray click.
             return Some(UiControl::LauncherCancelReset);
         }
         if state.save_dialog {
-            return launcher_save_dialog_hit(rect, pos).or(Some(UiControl::LauncherSave));
+            if let Some(control) = launcher_save_dialog_hit(rect, pos) {
+                return Some(control);
+            }
+            if close_button_rect(launcher_save_dialog_rect(rect)).contains(pos) {
+                return Some(UiControl::LauncherDialogClose);
+            }
+            return Some(UiControl::LauncherSave);
         }
     }
     if !modal && close_button_rect(rect).contains(pos) {
@@ -928,6 +937,13 @@ pub enum UiControl {
     LauncherConfirmReset,
     /// The "are you sure" over Reset default: leave it alone.
     LauncherCancelReset,
+    /// The close gadget on whichever launcher dialog is up.
+    ///
+    /// Its own control rather than sharing the one a click anywhere else
+    /// returns. Both mean "put this away", but only one of them is the
+    /// gadget, and the gadget lights up when the pointer is on it -- share
+    /// the control and it lights up for every hover in the dialog.
+    LauncherDialogClose,
     /// Configuration screen: reset to the selected profile's defaults.
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
@@ -5666,10 +5682,11 @@ fn launcher_zorro_add_rect(rect: Rect) -> Rect {
 
 /// The "are you sure" over Reset default, centred on the panel.
 fn launcher_confirm_rect(rect: Rect) -> Rect {
-    // Sized by its title bar -- the name plus its close gadget -- and its
-    // two buttons, both of which want more room than the one line inside
-    // it does.
-    let (w, h) = (268, TITLE_H + 62);
+    // Its own width, which its title bar and two buttons decide, but the
+    // Save dialog's height exactly: they are the same window asking two
+    // things, and one being shorter than the other made them look like two
+    // unrelated boxes that happened to open in the same place.
+    let (w, h) = (268, launcher_save_dialog_rect(rect).h);
     Rect {
         x: rect.x + rect.w.saturating_sub(w) / 2,
         y: rect.y + rect.h.saturating_sub(h) / 2,
@@ -5682,8 +5699,8 @@ fn launcher_confirm_rect(rect: Rect) -> Rect {
 /// dialog's least destructive answer usually sits.
 fn launcher_confirm_button_rects(rect: Rect) -> (Rect, Rect) {
     let dialog = launcher_confirm_rect(rect);
-    let (w, h) = (66, 20);
-    let y = dialog.y + dialog.h - h - 12;
+    let (w, h) = (66, SAVE_DIALOG_BUTTON.1);
+    let y = dialog.y + dialog.h - SAVE_DIALOG_MARGIN - h;
     (
         Rect {
             x: dialog.x + dialog.w - 2 * w - 20,
@@ -5724,7 +5741,7 @@ fn draw_launcher_confirm(
         frame,
         dialog,
         "Reset default",
-        hover == Some(UiControl::LauncherCancelReset),
+        hover == Some(UiControl::LauncherDialogClose),
         scale,
     );
     // The title bar has already said which default, and the buttons say
@@ -5732,8 +5749,8 @@ fn draw_launcher_confirm(
     // reads standing between somebody and a decision they have made.
     draw_panel_text(
         frame,
-        dialog.x + 12,
-        dialog.y + TITLE_H + 10,
+        dialog.x + SAVE_DIALOG_MARGIN,
+        dialog.y + TITLE_H + SAVE_DIALOG_MARGIN,
         "Are you sure?",
         PANEL_TEXT,
         1,
@@ -5765,7 +5782,7 @@ fn launcher_action_label(control: UiControl) -> &'static str {
         UiControl::LauncherDefaults => "Defaults",
         UiControl::LauncherRun => "Run",
         UiControl::LauncherSaveAs => "Save As",
-        UiControl::LauncherSaveDefault => "Set default",
+        UiControl::LauncherSaveDefault => "Save default",
         UiControl::LauncherResetDefault => "Reset default",
         _ => "",
     }
@@ -5804,10 +5821,10 @@ const SAVE_DIALOG_HELP_GAP: usize = 16;
 fn save_dialog_help(control: UiControl) -> &'static str {
     match control {
         UiControl::LauncherSaveDefault => {
-            "Saves the current running configuration as the default when you launch Copperline."
+            "Sets the running configuration as the default when you launch Copperline."
         }
         UiControl::LauncherResetDefault => "Resets the current default config to factory settings.",
-        _ => "Save the configuration to a file",
+        _ => "Save the running configuration to a file.",
     }
 }
 
@@ -5874,7 +5891,7 @@ fn draw_launcher_save_dialog(
         frame,
         dialog,
         "Save configuration...",
-        hover == Some(UiControl::LauncherSave),
+        hover == Some(UiControl::LauncherDialogClose),
         scale,
     );
     for (control, item) in launcher_save_dialog_rects(rect) {
@@ -12788,6 +12805,14 @@ mod tests {
                     "a click off Yes should cancel"
                 );
             }
+            // And here too the gadget answers only for itself.
+            assert_eq!(
+                panel_control_at(&panel, centre(close_button_rect(dialog))),
+                Some(UiControl::LauncherDialogClose)
+            );
+            // The two dialogs are the same height, so they read as one
+            // window asking two things rather than two boxes.
+            assert_eq!(dialog.h, launcher_save_dialog_rect(rect).h);
         }
 
         // The Save dialog: every button reachable, nothing under it
@@ -12842,11 +12867,28 @@ mod tests {
                 h: SAVE_DIALOG_MARGIN,
             };
             let [load, _, _, run] = launcher_action_rects(rect);
-            for elsewhere in [close, body, load.1, run.1] {
+            for elsewhere in [body, load.1, run.1] {
                 assert_eq!(
                     panel_control_at(&panel, centre(elsewhere)),
                     Some(UiControl::LauncherSave),
                     "a click off the three should only put the dialog away"
+                );
+            }
+            // The gadget answers as itself, and nothing else does. It is
+            // drawn lit when the pointer is on it, so sharing a control
+            // with "anywhere else" lit it up for every hover in the dialog.
+            assert_eq!(
+                panel_control_at(&panel, centre(close)),
+                Some(UiControl::LauncherDialogClose)
+            );
+            for elsewhere in [body, load.1, run.1]
+                .into_iter()
+                .chain(items.map(|(_, item)| item))
+            {
+                assert_ne!(
+                    panel_control_at(&panel, centre(elsewhere)),
+                    Some(UiControl::LauncherDialogClose),
+                    "something that is not the gadget lights the gadget"
                 );
             }
             // Every description fits the two lines reserved for it. The
