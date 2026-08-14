@@ -371,13 +371,25 @@ impl AtapiDrive {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AtaBus {
     drives: [Option<AtaDevice>; 2],
-    // Shared task file (one register file per bus, like the real cable).
+    // Shared task file. On a real cable each device carries its own
+    // register file, but host writes reach both devices at once (only the
+    // DEV bit picks which one executes commands and answers reads), so a
+    // single copy is observationally the same -- except for the cylinder
+    // registers below.
     feature: u8,
     error: u8,
     sector_count: u8,
     sector_number: u8,
-    cyl_low: u8,
-    cyl_high: u8,
+    /// Cylinder registers, one pair per device slot: a host write lands in
+    /// both (task-file writes broadcast down the cable), a read comes from
+    /// the selected slot, and a device's own updates (PACKET byte counts,
+    /// task-file advance after a transfer) touch only its slot. Per-slot
+    /// because these are where the post-reset device signature lives: a
+    /// PACKET device's 0x14/0xEB has to sit beside the disk's zeros so
+    /// device-select can reveal either without rewriting -- and clobbering
+    /// -- a cylinder address the host just programmed.
+    cyl_low: [u8; 2],
+    cyl_high: [u8; 2],
     drive_head: u8,
     status: u8,
     devctl: u8,
@@ -414,8 +426,8 @@ impl AtaBus {
             error: 0x01, // diagnostics passed
             sector_count: 0x01,
             sector_number: 0x01,
-            cyl_low: 0,
-            cyl_high: 0,
+            cyl_low: [0; 2],
+            cyl_high: [0; 2],
             drive_head: 0,
             status: ST_DRDY | ST_DSC,
             devctl: 0,
@@ -527,8 +539,8 @@ impl AtaBus {
         self.sector_number = 0x01;
         self.drive_head = 0;
         self.devctl = 0;
-        // cyl_low/cyl_high are set by soft_reset(), below, since they carry
-        // the ATAPI signature and depend on the (now-reset) drive selection.
+        // cyl_low/cyl_high are stamped by soft_reset(), below, since they
+        // carry each device's post-reset signature.
         self.soft_reset();
     }
 
@@ -620,8 +632,8 @@ impl AtaBus {
             Some(IdeReg::ErrorFeature) => u32::from(self.error),
             Some(IdeReg::SectorCount) => u32::from(self.sector_count),
             Some(IdeReg::SectorNumber) => u32::from(self.sector_number),
-            Some(IdeReg::CylLow) => u32::from(self.cyl_low),
-            Some(IdeReg::CylHigh) => u32::from(self.cyl_high),
+            Some(IdeReg::CylLow) => u32::from(self.cyl_low[self.selected()]),
+            Some(IdeReg::CylHigh) => u32::from(self.cyl_high[self.selected()]),
             Some(IdeReg::DriveHead) => u32::from(self.drive_head),
             Some(IdeReg::StatusCommand) => {
                 let v = self.status;
@@ -647,19 +659,17 @@ impl AtaBus {
             Some(IdeReg::ErrorFeature) => self.feature = byte,
             Some(IdeReg::SectorCount) => self.sector_count = byte,
             Some(IdeReg::SectorNumber) => self.sector_number = byte,
-            Some(IdeReg::CylLow) => self.cyl_low = byte,
-            Some(IdeReg::CylHigh) => self.cyl_high = byte,
-            Some(IdeReg::DriveHead) => {
-                self.drive_head = byte;
-                // Reapply the signature for whichever drive is now selected
-                // -- not just after a reset -- so probing a mixed disk+ATAPI
-                // bus by switching device-select sees the right signature on
-                // each slot without an intervening reset. Selecting mid
-                // transfer is undefined on real hardware too, so this isn't
-                // guarded against clobbering an in-progress PioIn/PioOut/
-                // Packet transfer's use of cyl_low/cyl_high as a byte count.
-                self.apply_atapi_signature();
-            }
+            // A cylinder write reaches both devices on the cable, so both
+            // slots take the value; the per-slot split only shows once a
+            // reset stamps each device's own signature.
+            Some(IdeReg::CylLow) => self.cyl_low = [byte; 2],
+            Some(IdeReg::CylHigh) => self.cyl_high = [byte; 2],
+            // Selecting a device must not touch the cylinder registers: the
+            // signature is placed only by a reset (and DEVICE RESET), never
+            // by device-select. Drivers routinely program the cylinder
+            // address before drive/head -- KS3.1 scsi.device does -- and a
+            // select that rewrote them sent every read to cylinder 0.
+            Some(IdeReg::DriveHead) => self.drive_head = byte,
             Some(IdeReg::StatusCommand) => self.command(byte),
             Some(IdeReg::AltStatusDevCtl) => {
                 let was_reset = self.devctl & CTL_SRST != 0;
@@ -679,21 +689,27 @@ impl AtaBus {
         self.buf.clear();
         self.buf_pos = 0;
         self.clear_irq();
-        self.apply_atapi_signature();
+        // A soft reset resets both devices on the cable, so both slots get
+        // their signatures; a mixed disk+ATAPI bus probed by toggling
+        // device-select afterwards (no further reset) sees each slot's own.
+        self.stamp_signature(0);
+        self.stamp_signature(1);
     }
 
-    /// The ATAPI signature (ATA/ATAPI-4 9.1): after a reset, a PACKET device
-    /// reports cyl_low/cyl_high = 0x14/0xEB (sector_count/sector_number are
-    /// already 0x01/0x01 for either device type) so a host driver can probe
-    /// for a PACKET device without issuing a command. A disk (or an absent
-    /// slot) keeps the plain-ATA convention of zero.
-    fn apply_atapi_signature(&mut self) {
-        if self.selected_is_atapi() {
-            self.cyl_low = 0x14;
-            self.cyl_high = 0xEB;
+    /// One slot's post-reset device signature (ATA/ATAPI-4 9.1): a PACKET
+    /// device reports cyl_low/cyl_high = 0x14/0xEB (sector_count/
+    /// sector_number are already 0x01/0x01 for either device type) so a
+    /// host driver can probe for a PACKET device without issuing a command.
+    /// A disk (or an absent slot) keeps the plain-ATA convention of zero.
+    /// Stamped only by a reset -- and, for the one device it addresses, by
+    /// DEVICE RESET -- never by device-select.
+    fn stamp_signature(&mut self, slot: usize) {
+        if matches!(self.drives[slot], Some(AtaDevice::Atapi(_))) {
+            self.cyl_low[slot] = 0x14;
+            self.cyl_high[slot] = 0xEB;
         } else {
-            self.cyl_low = 0;
-            self.cyl_high = 0;
+            self.cyl_low[slot] = 0;
+            self.cyl_high[slot] = 0;
         }
     }
 
@@ -927,8 +943,7 @@ impl AtaBus {
                 let chunk = data.len().min(byte_limit as usize);
                 self.buf = Self::pad_to_even(data[..chunk].to_vec());
                 self.buf_pos = 0;
-                self.cyl_low = (chunk & 0xFF) as u8;
-                self.cyl_high = ((chunk >> 8) & 0xFF) as u8;
+                self.set_packet_byte_count(chunk);
                 self.transfer = Transfer::PacketDataIn {
                     data,
                     pos: chunk,
@@ -953,8 +968,7 @@ impl AtaBus {
                 let chunk = expected.min(byte_limit as usize);
                 self.buf = Self::pad_to_even(vec![0u8; chunk]);
                 self.buf_pos = 0;
-                self.cyl_low = (chunk & 0xFF) as u8;
-                self.cyl_high = ((chunk >> 8) & 0xFF) as u8;
+                self.set_packet_byte_count(chunk);
                 self.transfer = Transfer::PacketDataOut {
                     cdb,
                     expected,
@@ -967,6 +981,16 @@ impl AtaBus {
             }
             crate::scsi::ScsiExec::NoData => self.packet_finish_no_data(scsi_status),
         }
+    }
+
+    /// Report a PACKET data-phase chunk's byte count in the cylinder
+    /// registers (ATAPI repurposes them for this during the data phase).
+    /// The reporting device writes only its own register file, so the
+    /// other slot's registers are untouched.
+    fn set_packet_byte_count(&mut self, chunk: usize) {
+        let slot = self.selected();
+        self.cyl_low[slot] = (chunk & 0xFF) as u8;
+        self.cyl_high[slot] = ((chunk >> 8) & 0xFF) as u8;
     }
 
     /// A PACKET data-in DRQ block has been fully read: stage the next chunk
@@ -988,8 +1012,7 @@ impl AtaBus {
         let chunk = (data.len() - pos).min(byte_limit as usize);
         self.buf = Self::pad_to_even(data[pos..pos + chunk].to_vec());
         self.buf_pos = 0;
-        self.cyl_low = (chunk & 0xFF) as u8;
-        self.cyl_high = ((chunk >> 8) & 0xFF) as u8;
+        self.set_packet_byte_count(chunk);
         self.set_interrupt_reason(false, true); // C/D=0, I/O=1
         self.transfer = Transfer::PacketDataIn {
             data,
@@ -1029,8 +1052,7 @@ impl AtaBus {
         let next_chunk = (expected - received.len()).min(byte_limit as usize);
         self.buf = Self::pad_to_even(vec![0u8; next_chunk]);
         self.buf_pos = 0;
-        self.cyl_low = (next_chunk & 0xFF) as u8;
-        self.cyl_high = ((next_chunk >> 8) & 0xFF) as u8;
+        self.set_packet_byte_count(next_chunk);
         self.transfer = Transfer::PacketDataOut {
             cdb,
             expected,
@@ -1048,7 +1070,8 @@ impl AtaBus {
         let lba_mode = self.drive_head & DH_LBA != 0;
         let head = u64::from(self.drive_head & 0x0F);
         let sector = u64::from(self.sector_number);
-        let cyl = (u64::from(self.cyl_high) << 8) | u64::from(self.cyl_low);
+        let slot = self.selected();
+        let cyl = (u64::from(self.cyl_high[slot]) << 8) | u64::from(self.cyl_low[slot]);
         let drive = self.drive()?;
         if lba_mode {
             Some((head << 24) | (cyl << 8) | sector)
@@ -1065,15 +1088,18 @@ impl AtaBus {
     /// Advance the task-file position by one sector, as real drives do, so
     /// software can resume after a partial transfer.
     fn advance_lba(&mut self) {
+        // The device advancing its position writes only its own register
+        // file, so the cylinder updates below stay in the selected slot.
+        let slot = self.selected();
         if self.drive_head & DH_LBA != 0 {
             let lba = ((u32::from(self.drive_head & 0x0F) << 24)
-                | (u32::from(self.cyl_high) << 16)
-                | (u32::from(self.cyl_low) << 8)
+                | (u32::from(self.cyl_high[slot]) << 16)
+                | (u32::from(self.cyl_low[slot]) << 8)
                 | u32::from(self.sector_number))
             .wrapping_add(1);
             self.sector_number = (lba & 0xFF) as u8;
-            self.cyl_low = ((lba >> 8) & 0xFF) as u8;
-            self.cyl_high = ((lba >> 16) & 0xFF) as u8;
+            self.cyl_low[slot] = ((lba >> 8) & 0xFF) as u8;
+            self.cyl_high[slot] = ((lba >> 16) & 0xFF) as u8;
             self.drive_head = (self.drive_head & 0xF0) | ((lba >> 24) & 0x0F) as u8;
             return;
         }
@@ -1092,9 +1118,10 @@ impl AtaBus {
             return;
         }
         self.drive_head &= 0xF0;
-        let cyl = ((u16::from(self.cyl_high) << 8) | u16::from(self.cyl_low)).wrapping_add(1);
-        self.cyl_low = (cyl & 0xFF) as u8;
-        self.cyl_high = (cyl >> 8) as u8;
+        let cyl =
+            ((u16::from(self.cyl_high[slot]) << 8) | u16::from(self.cyl_low[slot])).wrapping_add(1);
+        self.cyl_low[slot] = (cyl & 0xFF) as u8;
+        self.cyl_high[slot] = (cyl >> 8) as u8;
     }
 
     fn fill_read_buffer(&mut self, sectors: u32) -> Result<(), ()> {
@@ -1174,8 +1201,8 @@ impl AtaBus {
                 self.selected(),
                 lba,
                 self.drive_head & 0x0F,
-                self.cyl_high,
-                self.cyl_low,
+                self.cyl_high[self.selected()],
+                self.cyl_low[self.selected()],
                 self.sector_number,
                 self.sector_count
             );
@@ -1241,7 +1268,9 @@ impl AtaBus {
                     self.command_error(ERR_ABRT);
                     return;
                 }
-                let raw_limit = u16::from(self.cyl_low) | (u16::from(self.cyl_high) << 8);
+                let slot = self.selected();
+                let raw_limit =
+                    u16::from(self.cyl_low[slot]) | (u16::from(self.cyl_high[slot]) << 8);
                 // 0 conventionally means "no limit"; rather than model an
                 // unbounded transfer, clamp to a large default.
                 self.packet_byte_limit = if raw_limit == 0 { 0xFFFE } else { raw_limit };
@@ -1275,7 +1304,10 @@ impl AtaBus {
                 self.error = 0x01;
                 self.sector_count = 0x01;
                 self.sector_number = 0x01;
-                self.apply_atapi_signature();
+                // DEVICE RESET addresses one device; only its slot's
+                // signature is re-stamped.
+                let slot = self.selected();
+                self.stamp_signature(slot);
                 self.transfer = Transfer::None;
                 self.buf.clear();
                 self.buf_pos = 0;
@@ -1459,7 +1491,8 @@ mod tests {
     fn packet_read_data(bus: &mut AtaBus) -> Vec<u8> {
         let mut out = Vec::new();
         while matches!(bus.transfer, Transfer::PacketDataIn { .. }) {
-            let count = (u16::from(bus.cyl_low) | (u16::from(bus.cyl_high) << 8)) as usize;
+            let count = (bus.read_reg(Some(IdeReg::CylLow), 1)
+                | (bus.read_reg(Some(IdeReg::CylHigh), 1) << 8)) as usize;
             let words = count.div_ceil(2);
             let mut block = Vec::with_capacity(words * 2);
             for _ in 0..words {
@@ -1534,8 +1567,8 @@ mod tests {
         bus.reset();
         assert_eq!(bus.sector_count, 0x01);
         assert_eq!(bus.sector_number, 0x01);
-        assert_eq!(bus.cyl_low, 0x14);
-        assert_eq!(bus.cyl_high, 0xEB);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0x14);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0xEB);
 
         let disk_path = temp_disk_image(64);
         let mut disk_bus = AtaBus::new();
@@ -1544,15 +1577,16 @@ mod tests {
             IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
         );
         disk_bus.reset();
-        assert_eq!(disk_bus.cyl_low, 0);
-        assert_eq!(disk_bus.cyl_high, 0);
+        assert_eq!(disk_bus.read_reg(Some(IdeReg::CylLow), 1), 0);
+        assert_eq!(disk_bus.read_reg(Some(IdeReg::CylHigh), 1), 0);
     }
 
     /// A mixed bus reselected from the disk slot to the ATAPI slot (no reset
-    /// in between) must show the ATAPI signature -- not the plain-ATA one
-    /// left over from whichever drive was selected at the last reset.
+    /// in between) must show the ATAPI signature -- each device keeps its
+    /// own post-reset registers, and device-select picks which pair the
+    /// host reads back.
     #[test]
-    fn atapi_signature_reapplies_on_reselection_without_a_reset() {
+    fn each_slot_keeps_its_own_signature_across_reselection() {
         let disk_path = temp_disk_image(64);
         let cd_path = temp_cd_image(2);
         let mut bus = AtaBus::new();
@@ -1565,14 +1599,55 @@ mod tests {
 
         // Select the disk slot: plain-ATA signature.
         bus.write_reg(Some(IdeReg::DriveHead), 1, 0);
-        assert_eq!(bus.cyl_low, 0);
-        assert_eq!(bus.cyl_high, 0);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0);
 
-        // Select the ATAPI slot, with no intervening reset: the signature
-        // must flip to match, purely from the device-select write.
+        // Select the ATAPI slot, with no intervening reset: its slot still
+        // holds the signature stamped at reset.
         bus.write_reg(Some(IdeReg::DriveHead), 1, u32::from(DH_DRV));
-        assert_eq!(bus.cyl_low, 0x14);
-        assert_eq!(bus.cyl_high, 0xEB);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0x14);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0xEB);
+
+        // And back to the disk slot: still zeros, not the ATAPI pair.
+        bus.write_reg(Some(IdeReg::DriveHead), 1, 0);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0);
+    }
+
+    /// Host-written cylinder registers survive a drive-select write:
+    /// task-file writes broadcast to both devices, and the signature is
+    /// placed only by a reset, never by device-select. KS3.1's scsi.device
+    /// programs the cylinder address before drive/head, so a select that
+    /// rewrote the registers sent every disk read to cylinder 0 -- the
+    /// synthesized RDB cylinder -- and the mounted partition came up
+    /// "Not a DOS disk".
+    #[test]
+    fn host_written_cylinder_registers_survive_drive_select() {
+        let disk_path = temp_disk_image(64);
+        let cd_path = temp_cd_image(2);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
+        bus.attach_drive(1, AtapiDrive::open(&cd_path).unwrap());
+        bus.reset();
+
+        bus.write_reg(Some(IdeReg::CylLow), 1, 0x34);
+        bus.write_reg(Some(IdeReg::CylHigh), 1, 0x12);
+        bus.write_reg(Some(IdeReg::DriveHead), 1, u32::from(DH_LBA));
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0x34);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0x12);
+
+        // The write reached the other device too (broadcast), so selecting
+        // it shows the same value -- the signature returns only at reset.
+        bus.write_reg(Some(IdeReg::DriveHead), 1, u32::from(DH_DRV));
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0x34);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0x12);
+        bus.reset();
+        bus.write_reg(Some(IdeReg::DriveHead), 1, u32::from(DH_DRV));
+        assert_eq!(bus.read_reg(Some(IdeReg::CylLow), 1), 0x14);
+        assert_eq!(bus.read_reg(Some(IdeReg::CylHigh), 1), 0xEB);
     }
 
     #[test]
