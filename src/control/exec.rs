@@ -1283,8 +1283,11 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
         "catch" => Ok(BreakSpec::Catch {
             vector: p.u16_req("vector")?,
         }),
+        "loadseg" => Ok(BreakSpec::LoadSeg {
+            name: p.str_opt("name")?,
+        }),
         other => Err(CtlError::invalid_params(format!(
-            "kind must be pc|watch|reg_watch|beam|copper|catch, got {other}"
+            "kind must be pc|watch|reg_watch|beam|copper|catch|loadseg, got {other}"
         ))),
     }
 }
@@ -2114,6 +2117,7 @@ pub fn stop_reason_of(stop: &DebugStop) -> (&'static str, String) {
         DebugStop::CopperBreak { .. } => "copper_break",
         DebugStop::Exception { .. } => "catch",
         DebugStop::Task { .. } => "task_catch",
+        DebugStop::LoadSeg { .. } => "loadseg",
     };
     (reason, stop.describe())
 }
@@ -2246,6 +2250,19 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
             "name": crate::debugger::exception_vector_name(vector),
         });
         push_id(&mut entry, ctx.id_for(&BreakSpec::Catch { vector }));
+        entries.push(entry);
+    }
+    if let Some(catch) = &breaks.loadseg_catch {
+        let mut entry = json!({"kind": "loadseg"});
+        if let Some(name) = &catch.name {
+            entry["name"] = Value::from(name.clone());
+        }
+        push_id(
+            &mut entry,
+            ctx.id_for(&BreakSpec::LoadSeg {
+                name: catch.name.clone(),
+            }),
+        );
         entries.push(entry);
     }
     for trap in emu.bus().ui_beam_traps() {
@@ -2776,6 +2793,45 @@ mod tests {
         assert_eq!(cpu["class"], "cpu");
         assert_eq!(cpu["pc"], 0xF80010);
         assert_eq!(cpu["id"], pc_id);
+    }
+
+    #[test]
+    fn loadseg_break_kind_parses_toggles_and_lists() {
+        // Parse: bare and name-filtered forms; an unknown kind still names
+        // the full kind list.
+        let spec = parse_method("break.add", &json!({"kind": "loadseg"})).unwrap();
+        assert!(matches!(
+            spec,
+            Request::Core(CoreOp::BreakAdd(BreakSpec::LoadSeg { name: None }))
+        ));
+        let spec = parse_method("break.add", &json!({"kind": "loadseg", "name": "hello"})).unwrap();
+        assert!(matches!(
+            spec,
+            Request::Core(CoreOp::BreakAdd(BreakSpec::LoadSeg { name: Some(ref n) }))
+                if n == "hello"
+        ));
+        let err = parse_method("break.add", &json!({"kind": "loadprog"})).unwrap_err();
+        assert!(err.message.contains("loadseg"), "err: {}", err.message);
+
+        // Install/list/remove round trip through the machine store.
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let add = core("break.add", json!({"kind": "loadseg", "name": "hello"}));
+        let id = exec_core(&mut emu, &mut ctx, &add).unwrap()["id"]
+            .as_u64()
+            .unwrap() as u32;
+        assert!(emu.machine.ui_breaks().loadseg_catch.is_some());
+        let list = exec_core(&mut emu, &mut ctx, &CoreOp::BreakList).unwrap();
+        let entry = list["breaks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["kind"] == "loadseg")
+            .expect("loadseg entry listed");
+        assert_eq!(entry["name"], "hello");
+        assert_eq!(entry["id"], id);
+        exec_core(&mut emu, &mut ctx, &CoreOp::BreakRemove { id }).unwrap();
+        assert!(emu.machine.ui_breaks().loadseg_catch.is_none());
     }
 
     #[test]

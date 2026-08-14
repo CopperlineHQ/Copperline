@@ -227,6 +227,10 @@ pub enum DebugStop {
     Exception { vector: u16, pc: u32 },
     /// Exec scheduled a task matching the armed task catch.
     Task { name: String, addr: u32 },
+    /// The guest OS loaded a program matching the armed loadseg catch;
+    /// `addr` is its first hunk's start (the `add-symbol-file` anchor).
+    /// The stop lands before the program's first instruction executes.
+    LoadSeg { name: String, addr: u32 },
 }
 
 /// Human name of a 68000 exception vector, for catchpoint listings and
@@ -299,6 +303,9 @@ impl DebugStop {
             ),
             DebugStop::Task { name, addr } => {
                 format!("Task scheduled: {name} (task ${addr:06X})")
+            }
+            DebugStop::LoadSeg { name, addr } => {
+                format!("Program loaded: {name} (first hunk ${addr:06X})")
             }
         }
     }
@@ -795,7 +802,18 @@ pub struct InteractiveBreaks {
     /// Stop when exec schedules a task whose name contains this
     /// (case-insensitive) fragment; None = disabled.
     pub task_catch: Option<String>,
+    /// Stop when the guest OS loads a program (a new seglist appears in
+    /// the scheduled process; src/amigaos.rs); None = disabled.
+    pub loadseg_catch: Option<LoadSegCatch>,
     armed: bool,
+}
+
+/// The loadseg catch's filter: `name` limits the stop to a program whose
+/// basename equals it (case-insensitive, matching the warp-launch and
+/// gdb stop-on-load semantics); None stops on every program load.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadSegCatch {
+    pub name: Option<String>,
 }
 
 impl InteractiveBreaks {
@@ -809,6 +827,7 @@ impl InteractiveBreaks {
             reg_watches: Vec::new(),
             catches: Vec::new(),
             task_catch: None,
+            loadseg_catch: None,
             armed: false,
         }
     }
@@ -822,7 +841,8 @@ impl InteractiveBreaks {
             && self.watches.is_empty()
             && self.reg_watches.is_empty()
             && self.catches.is_empty()
-            && self.task_catch.is_none());
+            && self.task_catch.is_none()
+            && self.loadseg_catch.is_none());
     }
 
     /// Whether any breakpoint is set at `pc`, ignoring its condition. Used for
@@ -955,12 +975,20 @@ impl InteractiveBreaks {
         previous
     }
 
+    /// Set or clear the loadseg catch. Returns the previous value.
+    pub fn set_loadseg_catch(&mut self, catch: Option<LoadSegCatch>) -> Option<LoadSegCatch> {
+        let previous = std::mem::replace(&mut self.loadseg_catch, catch);
+        self.rearm();
+        previous
+    }
+
     pub fn clear(&mut self) {
         self.breakpoints.clear();
         self.watches.clear();
         self.reg_watches.clear();
         self.catches.clear();
         self.task_catch = None;
+        self.loadseg_catch = None;
         self.armed = false;
     }
 }

@@ -40,6 +40,11 @@ pub enum BreakSpec {
     Catch {
         vector: u16,
     },
+    LoadSeg {
+        /// Stop only for a program with this basename (case-insensitive);
+        /// None stops on every program load.
+        name: Option<String>,
+    },
 }
 
 /// One machine-visible input transition a client asked for. Applied
@@ -266,6 +271,7 @@ impl SessionCtx {
                 .any(|t| !t.once && t.vpos == *vpos && t.hpos == *hpos),
             BreakSpec::Copper { addr } => emu.bus().ui_copper_breaks().contains(addr),
             BreakSpec::Catch { vector } => emu.machine.ui_breaks().catches.contains(vector),
+            BreakSpec::LoadSeg { .. } => emu.machine.ui_breaks().loadseg_catch.is_some(),
         }
     }
 
@@ -335,9 +341,10 @@ fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
         BreakSpec::Copper { addr } => BreakSpec::Copper {
             addr: addr & 0x00FF_FFFE,
         },
-        other @ (BreakSpec::RegWatch { .. } | BreakSpec::Beam { .. } | BreakSpec::Catch { .. }) => {
-            other
-        }
+        other @ (BreakSpec::RegWatch { .. }
+        | BreakSpec::Beam { .. }
+        | BreakSpec::Catch { .. }
+        | BreakSpec::LoadSeg { .. }) => other,
     }
 }
 
@@ -354,6 +361,9 @@ fn same_point(a: &BreakSpec, b: &BreakSpec) -> bool {
         }
         (BreakSpec::Copper { addr: x }, BreakSpec::Copper { addr: y }) => x == y,
         (BreakSpec::Catch { vector: x }, BreakSpec::Catch { vector: y }) => x == y,
+        // The machine's store holds at most one loadseg catch, so any two
+        // specs address the same point whatever their name filters.
+        (BreakSpec::LoadSeg { .. }, BreakSpec::LoadSeg { .. }) => true,
         _ => false,
     }
 }
@@ -372,6 +382,7 @@ fn toggle_spec(emu: &mut Emulator, spec: &BreakSpec) -> bool {
         BreakSpec::Beam { vpos, hpos } => emu.bus_mut().ui_toggle_beam_trap(*vpos, *hpos),
         BreakSpec::Copper { addr } => emu.bus_mut().ui_toggle_copper_break(*addr),
         BreakSpec::Catch { vector } => emu.machine.ui_toggle_catch(*vector),
+        BreakSpec::LoadSeg { name } => emu.machine.ui_toggle_loadseg_catch(name.clone()),
     }
 }
 
@@ -409,6 +420,10 @@ pub fn describe_spec(spec: &BreakSpec) -> String {
             "catch {} (vector {vector})",
             crate::debugger::exception_vector_name(*vector)
         ),
+        BreakSpec::LoadSeg { name } => match name {
+            Some(name) => format!("loadseg catch (name {name:?})"),
+            None => "loadseg catch".to_string(),
+        },
     }
 }
 

@@ -94,6 +94,7 @@ pub mod romdb;
 pub mod romsearch;
 pub mod romtags;
 pub mod rtc;
+pub mod runprog;
 pub mod sampler;
 pub mod savestate;
 pub mod screenshot;
