@@ -12672,7 +12672,10 @@ mod tests {
             save(&frame, "launcher-paths");
 
             // And with two rows given directories of their own, which is
-            // the only state in which a Reset button exists.
+            // the only state in which a Reset button exists. `set_path` on
+            // a Paths row adopts into the process-wide store that
+            // paths::tests assert against, hence the guard.
+            let _guard = crate::paths::adopted_store_lock();
             let mut frame = vec![0u8; w * h * 4];
             let mut state = LauncherState::new(launcher::MachineSetup::default());
             state.tab = LauncherTab::AvPaths;
@@ -12737,6 +12740,9 @@ mod tests {
         // -- where Browse and Reset swap places rather than sitting side
         // by side -- the two would land on each other's rectangles.
         {
+            // `set_path` on a Paths row adopts into the process-wide store
+            // that paths::tests assert against.
+            let _guard = crate::paths::adopted_store_lock();
             let probe = |set: bool, field: LauncherField| {
                 let mut setup = launcher::MachineSetup::default();
                 if set {

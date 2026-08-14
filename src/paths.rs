@@ -236,6 +236,17 @@ pub fn configured() -> std::sync::Arc<crate::pathconf::Paths> {
     write.get_or_insert_with(Default::default).clone()
 }
 
+/// Serialises the tests that touch the adopted set. [`adopt`] writes one
+/// process-wide store, `cargo test` runs threads in one process, and a test
+/// that adopts and then asserts can otherwise be clobbered by another
+/// test's adopt landing between the two. Production has no such caller:
+/// adoption happens at startup and on launcher edits, both on one thread.
+#[cfg(test)]
+pub(crate) fn adopted_store_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Put a configuration's `[paths]` in force, dropping whatever it names that
 /// this machine cannot reach.
 ///
@@ -353,9 +364,7 @@ pub fn trace_file() -> PathBuf {
 fn battery_ram(name: &str) -> PathBuf {
     let legacy = PathBuf::from(name);
     if legacy.is_file() {
-        log::info!(
-            "using the existing {name} in the working directory; new machines keep theirs under the host data directory"
-        );
+        log::info!("using the existing {name} in the working directory");
         return legacy;
     }
     match config_dir() {
@@ -429,8 +438,15 @@ pub fn configs_dir() -> Option<PathBuf> {
 /// "back to factory settings" a matter of deleting one file: with no
 /// default saved there is nothing to override, so most installations never
 /// have one and `--factory` never has anything to do.
+///
+/// Deliberately *not* [`configs_dir`]: this file is found at startup,
+/// before any configuration -- including its own `[paths]` -- has been
+/// adopted, so a location that followed `[paths] configs` could never be
+/// found by the startup that needs it. Saved and looked for in the factory
+/// location always; the `configs` entry steers the file dialogs, not this.
 pub fn default_config_file() -> Option<PathBuf> {
-    configs_dir().map(|dir| dir.join(DEFAULT_CONFIG))
+    let factory = crate::pathconf::Paths::default();
+    config_dir().map(|host| factory.configs_dir(&host).join(DEFAULT_CONFIG))
 }
 
 /// The saved default's filename.
@@ -525,6 +541,7 @@ mod tests {
     /// touch, and it puts the defaults back when it is done.
     #[test]
     fn what_a_run_writes_follows_the_adopted_section() {
+        let _guard = adopted_store_lock();
         let Some(host) = config_dir() else {
             // No per-user directory on this host, so every default is a
             // bare name and there is nothing for a section to move.
@@ -574,10 +591,23 @@ mod tests {
         assert_eq!(cfg.mt32_roms_dir(host), roms.join("mt32"));
     }
 
+    /// Restores the working directory when dropped, so a failing assertion
+    /// cannot leave the rest of the suite running somewhere else: the CWD
+    /// is process state, and `set_current_dir` with no guard holds until
+    /// the process ends, not until the test does.
+    struct CwdGuard(PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
     #[test]
     fn an_existing_battery_ram_is_not_abandoned() {
+        // The no-legacy branch below reads the adopted store.
+        let _store = adopted_store_lock();
         let scratch = ScratchDir::new("battery");
-        let here = std::env::current_dir().unwrap();
+        let _cwd = CwdGuard(std::env::current_dir().unwrap());
         std::env::set_current_dir(&scratch.0).unwrap();
 
         // Nothing there: the new place, under the host data directory.
@@ -592,8 +622,6 @@ mod tests {
         assert_eq!(akiko_nvram_file(), PathBuf::from("cd32-nvram.bin"));
         std::fs::write("battmem.nvram", []).unwrap();
         assert_eq!(battery_ram_file(), PathBuf::from("battmem.nvram"));
-
-        std::env::set_current_dir(here).unwrap();
     }
 
     #[test]

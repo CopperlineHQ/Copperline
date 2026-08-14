@@ -8964,7 +8964,7 @@ impl App {
 
     /// Save the configuration as the one Copperline starts with.
     ///
-    /// The same TOML as Save as..., in a fixed place. It replaces whatever
+    /// The same TOML as Save As, in a fixed place. It replaces whatever
     /// was there without asking: pressing Save default is a statement about
     /// what the default should be now, and the thing it overwrites is a
     /// previous answer to that same question rather than anything a person
@@ -8975,18 +8975,27 @@ impl App {
             return;
         };
         let Some(path) = crate::paths::default_config_file() else {
-            self.set_launcher_status(StatusMessage::err("No place to save a default"));
+            // No host-data directory at all (no HOME, XDG_CONFIG_HOME or
+            // APPDATA), so there is nowhere the next launch would look.
+            warn!("no host data directory to save a default configuration in");
+            self.set_launcher_status(StatusMessage::err(
+                "Failed to set the default config (see log)",
+            ));
             return;
         };
         let written = crate::paths::ensure_parent(&path).and_then(|()| std::fs::write(&path, text));
         match written {
             Ok(()) => {
                 info!("saved the default configuration to {}", path.display());
-                self.set_launcher_status(StatusMessage::ok("Saved as the default"));
+                self.set_launcher_status(StatusMessage::ok(
+                    "Saved the running config as the default",
+                ));
             }
             Err(e) => {
                 warn!("default save failed ({}): {e}", path.display());
-                self.set_launcher_status(StatusMessage::err("Save failed (see log)"));
+                self.set_launcher_status(StatusMessage::err(
+                    "Failed to set the default config (see log)",
+                ));
             }
         }
     }
@@ -9000,7 +9009,7 @@ impl App {
         self.launcher_close_save_dialog();
         let saved = crate::paths::default_config_file().is_some_and(|path| path.is_file());
         if !saved {
-            self.set_launcher_status(StatusMessage::ok("No default saved"));
+            self.set_launcher_status(StatusMessage::ok("No default config currently set"));
             return;
         }
         if let Some(state) = self.launcher_state_mut() {
@@ -9026,17 +9035,21 @@ impl App {
             return;
         };
         if !path.is_file() {
-            self.set_launcher_status(StatusMessage::ok("No default saved"));
+            self.set_launcher_status(StatusMessage::ok("No default config currently set"));
             return;
         }
         match std::fs::remove_file(&path) {
             Ok(()) => {
                 info!("removed the default configuration {}", path.display());
-                self.set_launcher_status(StatusMessage::ok("Default reset"));
+                self.set_launcher_status(StatusMessage::ok(
+                    "Reset the current default config to factory settings",
+                ));
             }
             Err(e) => {
                 warn!("default reset failed ({}): {e}", path.display());
-                self.set_launcher_status(StatusMessage::err("Reset failed (see log)"));
+                self.set_launcher_status(StatusMessage::err(
+                    "Unable to reset the default config (see log)",
+                ));
             }
         }
     }

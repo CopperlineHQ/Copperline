@@ -8983,6 +8983,9 @@ mod tests {
     /// wrong entry, or to none, cannot pass.
     #[test]
     fn every_paths_row_reaches_its_own_entry() {
+        // `set_path` on a Paths row adopts, which writes the process-wide
+        // store another test asserts against.
+        let _guard = crate::paths::adopted_store_lock();
         let mut setup = MachineSetup::default();
         let fields: Vec<LauncherField> = PATHS_ROWS
             .iter()
