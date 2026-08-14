@@ -8082,7 +8082,39 @@ impl App {
         if let Some(dir) = start_dir {
             dialog = dialog.set_directory(dir);
         }
-        let picked = dialog.pick_file();
+        // A hard-drive slot can be a raw image or a host directory (built
+        // into an in-memory FFS volume at open time; see `HardDriveImage`,
+        // shared by IdeDrive/ScsiDisk/lide's own open call) -- so its dialog
+        // should let the user pick either, not just a file. `rfd` only
+        // offers a combined file-or-folder picker on macOS; elsewhere this
+        // falls back to the file-only dialog it already had, unchanged.
+        let hard_drive_slot = matches!(
+            field,
+            LauncherField::ScsiUnit0
+                | LauncherField::ScsiUnit1
+                | LauncherField::ScsiUnit2
+                | LauncherField::ScsiUnit3
+                | LauncherField::ScsiUnit4
+                | LauncherField::ScsiUnit5
+                | LauncherField::ScsiUnit6
+                | LauncherField::IdeMaster
+                | LauncherField::IdeSlave
+                | LauncherField::LideDrive0
+                | LauncherField::LideDrive1
+                | LauncherField::LideDrive2
+                | LauncherField::LideDrive3
+        );
+        #[cfg(target_os = "macos")]
+        let picked = if hard_drive_slot {
+            dialog.pick_file_or_folder()
+        } else {
+            dialog.pick_file()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let picked = {
+            let _ = hard_drive_slot;
+            dialog.pick_file()
+        };
         if let Some(mut path) = picked {
             if field == LauncherField::WhdloadGame {
                 path = whdload_game_config_path(path);
