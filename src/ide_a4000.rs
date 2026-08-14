@@ -199,7 +199,10 @@ mod tests {
         ));
         std::fs::write(&path, vec![0u8; 64 * crate::ata::SECTOR_SIZE]).unwrap();
         let mut ide = IdeA4000::new();
-        ide.attach_drive(0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        ide.attach_drive(
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
 
         assert_eq!(
             ide.read(IDE_IRQ, 1) as u8 & IRQ_IDE,

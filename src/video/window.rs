@@ -6383,6 +6383,12 @@ impl App {
                     state.begin_edit_drive_name(field);
                 }
             }
+            UiControl::LauncherDriveFilesystemToggle(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.cycle_drive_filesystem(field);
+                    state.status = None;
+                }
+            }
             UiControl::LauncherNewImageEdit(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.begin_edit_new_image(field);

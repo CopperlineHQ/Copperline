@@ -676,7 +676,11 @@ mod tests {
     fn release_host_disks_on_a_board_with_only_image_drives_returns_zero() {
         let path = temp_image(64);
         let mut board = IdeZorro::new(LidePersonality::Ripple, Vec::new()).unwrap();
-        board.attach_drive(0, 0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        board.attach_drive(
+            0,
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         assert_eq!(board.release_host_disks(), 0);
 
         let mut empty = IdeZorro::new(LidePersonality::AtBus2008, Vec::new()).unwrap();
@@ -687,7 +691,11 @@ mod tests {
     fn byte_lanes_put_registers_on_the_upper_byte_and_float_the_dead_lane() {
         let path = temp_image(64);
         let mut board = IdeZorro::new(LidePersonality::Ride, Vec::new()).unwrap();
-        board.attach_drive(0, 0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        board.attach_drive(
+            0,
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         board.write(0x1000 + 6 * 0x200, 1, 0xE0); // drive/head, even (upper) lane
         assert_eq!(board.read(0x1000 + 6 * 0x200, 1) as u8, 0xE0);
         assert_eq!(board.read(0x1000 + 6 * 0x200 + 1, 1) as u8, 0xFF);
@@ -707,7 +715,11 @@ mod tests {
         }
         std::fs::write(&path, &img).unwrap();
         let mut board = IdeZorro::new(LidePersonality::Ride, Vec::new()).unwrap();
-        board.attach_drive(0, 0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        board.attach_drive(
+            0,
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
 
         // Select LBA 7, one sector, READ SECTORS ($20).
         board.write(0x1000 + 6 * 0x200, 1, 0xE0); // drive/head: LBA, drive 0
@@ -744,7 +756,11 @@ mod tests {
         let mut board = IdeZorro::new(LidePersonality::Ripple, Vec::new()).unwrap();
         // Channel 0 has a drive; channel 1 has none at all.
         let path = temp_image(64);
-        board.attach_drive(0, 0, IdeDrive::open(&path, 0, None, 0).unwrap());
+        board.attach_drive(
+            0,
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
 
         // Channel 1's device/head register: AtaBus alone would answer 0
         // (write lands in the register file, but nothing is selected so a
@@ -822,8 +838,30 @@ mod tests {
         // cable), so attach a master on each channel; both values below
         // clear DH_DRV (bit 4) and so select that master.
         let mut ripple = IdeZorro::new(LidePersonality::Ripple, Vec::new()).unwrap();
-        ripple.attach_drive(0, 0, IdeDrive::open(&temp_image(64), 0, None, 0).unwrap());
-        ripple.attach_drive(1, 0, IdeDrive::open(&temp_image(64), 0, None, 0).unwrap());
+        ripple.attach_drive(
+            0,
+            0,
+            IdeDrive::open(
+                &temp_image(64),
+                0,
+                None,
+                0,
+                crate::diskimage::FileSystem::FFS,
+            )
+            .unwrap(),
+        );
+        ripple.attach_drive(
+            1,
+            0,
+            IdeDrive::open(
+                &temp_image(64),
+                0,
+                None,
+                0,
+                crate::diskimage::FileSystem::FFS,
+            )
+            .unwrap(),
+        );
         ripple.write(0x1000, 1, 0); // latch via a task-file write
         ripple.write(0x1000 + 6 * 0x200, 1, 0xA0); // ch0 drive/head
         ripple.write(0x2000 + 6 * 0x200, 1, 0xE0); // ch1 drive/head

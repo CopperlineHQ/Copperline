@@ -975,9 +975,9 @@ impl Default for ParallelConfig {
 
 /// A configured hard-drive image: the host path plus an optional volume-name
 /// override. The override only changes a host *directory* mounted as an
-/// in-memory FFS volume -- it sets the FFS volume label instead of deriving it
-/// from the directory name. A raw HDF carries its own label inside the image
-/// and ignores the override.
+/// in-memory FFS/OFS volume -- it sets the volume label instead of deriving
+/// it from the directory name. A raw HDF carries its own label inside the
+/// image and ignores the override.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriveImage {
     pub path: PathBuf,
@@ -986,6 +986,23 @@ pub struct DriveImage {
     /// bare hardfile. Only reaches the guest for such images: an HDF that
     /// carries its own RDB keeps the priorities recorded inside it.
     pub boot_pri: i8,
+    /// The filesystem an in-memory directory-mount volume is built with.
+    /// Only meaningful for a host *directory* mount (an HDF/gzip image
+    /// already carries its own filesystem). Defaults to FFS; Kickstart
+    /// 1.3's ROM has no FFS handler built in, so OFS is the choice for a
+    /// directory mount meant to work under 1.3 with no guest-side setup.
+    pub filesystem: crate::diskimage::FileSystem,
+}
+
+impl Default for DriveImage {
+    fn default() -> Self {
+        DriveImage {
+            path: PathBuf::new(),
+            volume_name: None,
+            boot_pri: HARDFILE_DEFAULT_BOOT_PRI,
+            filesystem: crate::diskimage::FileSystem::FFS,
+        }
+    }
 }
 
 /// Priority a synthesized hard-disk partition boots at when the config says
@@ -3226,6 +3243,9 @@ pub(crate) struct RawDrive {
     /// (-128..=127); defaults to 0, the priority HDToolBox gives a hard-disk
     /// boot partition. -128 mounts the partition without offering it for boot.
     pub(crate) bootpri: Option<i8>,
+    /// "ofs" or "ffs"; only valid on a host-directory mount. Defaults to FFS
+    /// when absent.
+    pub(crate) filesystem: Option<String>,
 }
 
 impl RawDrive {
@@ -3234,6 +3254,7 @@ impl RawDrive {
             path: path.into(),
             name: None,
             bootpri: None,
+            filesystem: None,
         }
     }
 }
@@ -3243,12 +3264,15 @@ impl Serialize for RawDrive {
     where
         S: serde::Serializer,
     {
-        if self.name.is_none() && self.bootpri.is_none() {
+        if self.name.is_none() && self.bootpri.is_none() && self.filesystem.is_none() {
             // No overrides: a plain string keeps saved configs minimal.
             return serializer.serialize_str(&self.path);
         }
         use serde::ser::SerializeMap;
-        let len = 1 + usize::from(self.name.is_some()) + usize::from(self.bootpri.is_some());
+        let len = 1
+            + usize::from(self.name.is_some())
+            + usize::from(self.bootpri.is_some())
+            + usize::from(self.filesystem.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("path", &self.path)?;
         if let Some(name) = &self.name {
@@ -3256,6 +3280,9 @@ impl Serialize for RawDrive {
         }
         if let Some(bootpri) = &self.bootpri {
             map.serialize_entry("bootpri", bootpri)?;
+        }
+        if let Some(filesystem) = &self.filesystem {
+            map.serialize_entry("filesystem", filesystem)?;
         }
         map.end()
     }
@@ -3290,6 +3317,7 @@ impl<'de> Deserialize<'de> for RawDrive {
                 let mut path: Option<String> = None;
                 let mut name: Option<String> = None;
                 let mut bootpri: Option<i8> = None;
+                let mut filesystem: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => {
@@ -3310,10 +3338,16 @@ impl<'de> Deserialize<'de> for RawDrive {
                             }
                             bootpri = Some(map.next_value()?);
                         }
+                        "filesystem" => {
+                            if filesystem.is_some() {
+                                return Err(serde::de::Error::duplicate_field("filesystem"));
+                            }
+                            filesystem = Some(map.next_value()?);
+                        }
                         other => {
                             return Err(serde::de::Error::unknown_field(
                                 other,
-                                &["path", "name", "bootpri"],
+                                &["path", "name", "bootpri", "filesystem"],
                             ));
                         }
                     }
@@ -3323,6 +3357,7 @@ impl<'de> Deserialize<'de> for RawDrive {
                     path,
                     name,
                     bootpri,
+                    filesystem,
                 })
             }
         }
@@ -3797,10 +3832,11 @@ pub(crate) enum RawReplaySpeed {
     Word(String),
 }
 
-/// Convert a parsed `[ide]`/`[scsi]` drive entry into a `DriveImage`,
-/// validating any volume-name override. An empty/whitespace name is treated as
-/// no override; AmigaDOS volume names cannot contain ':' or '/' and the FFS
-/// root block stores at most 30 characters.
+/// Convert a parsed `[ide]`/`[scsi]`/`[lide]` drive entry into a `DriveImage`,
+/// validating any volume-name override and the `filesystem` key. An
+/// empty/whitespace name is treated as no override; AmigaDOS volume names
+/// cannot contain ':' or '/' and the FFS/OFS root block stores at most 30
+/// characters.
 fn drive_image(raw: RawDrive) -> Result<DriveImage> {
     let volume_name = match raw.name {
         None => None,
@@ -3815,10 +3851,28 @@ fn drive_image(raw: RawDrive) -> Result<DriveImage> {
             }
         }
     };
+    let path = PathBuf::from(raw.path);
+    let filesystem = match raw.filesystem {
+        None => crate::diskimage::FileSystem::FFS,
+        Some(fs) => {
+            if !path.is_dir() {
+                bail!(
+                    "drive filesystem = {fs:?}: only applies to a host-directory mount, not \
+                     an image file"
+                );
+            }
+            match fs.trim().to_ascii_lowercase().as_str() {
+                "ofs" => crate::diskimage::FileSystem::OFS,
+                "ffs" => crate::diskimage::FileSystem::FFS,
+                _ => bail!("drive filesystem = {fs:?} is not known (expected \"ofs\" or \"ffs\")"),
+            }
+        }
+    };
     Ok(DriveImage {
-        path: PathBuf::from(raw.path),
+        path,
         volume_name,
         boot_pri: raw.bootpri.unwrap_or(HARDFILE_DEFAULT_BOOT_PRI),
+        filesystem,
     })
 }
 
@@ -6564,6 +6618,7 @@ mod tests {
                     path: PathBuf::from("ch0-master.hdf"),
                     volume_name: None,
                     boot_pri: 0,
+                    filesystem: crate::diskimage::FileSystem::FFS,
                 }),
                 None,
                 None,
@@ -8931,6 +8986,82 @@ mod tests {
     }
 
     #[test]
+    fn drive_filesystem_key_selects_ofs_or_ffs_for_a_directory_mount() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("copperline-config-fs-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_toml = dir.to_string_lossy().replace('\\', "\\\\");
+
+        // Explicit "ofs".
+        let cfg = parse_config(&format!(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = {{ path = "{dir_toml}", filesystem = "ofs" }}
+            "#,
+        ))?;
+        let master = cfg.ide.master.as_ref().expect("master configured");
+        assert_eq!(master.filesystem, crate::diskimage::FileSystem::OFS);
+
+        // Explicit "ffs" (case-insensitive).
+        let cfg = parse_config(&format!(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = {{ path = "{dir_toml}", filesystem = "FFS" }}
+            "#,
+        ))?;
+        let master = cfg.ide.master.as_ref().expect("master configured");
+        assert_eq!(master.filesystem, crate::diskimage::FileSystem::FFS);
+
+        // Absent key: defaults to FFS.
+        let cfg = parse_config(&format!(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = "{dir_toml}"
+            "#,
+        ))?;
+        let master = cfg.ide.master.as_ref().expect("master configured");
+        assert_eq!(master.filesystem, crate::diskimage::FileSystem::FFS);
+
+        // An unknown token is a clear error.
+        let err = parse_config(&format!(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = {{ path = "{dir_toml}", filesystem = "qfs" }}
+            "#,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("qfs"), "{err:#}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn drive_filesystem_key_is_rejected_on_a_non_directory_path() {
+        // filesystem only means something for a host-directory mount; an
+        // image file has its own dostype baked into the bytes.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = { path = "data.hdf", filesystem = "ofs" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("filesystem"), "{err:#}");
+        assert!(err.to_string().contains("directory"), "{err:#}");
+    }
+
+    #[test]
     fn the_memory_controller_can_be_selected() -> anyhow::Result<()> {
         let cfg = parse_config(
             r#"
@@ -9052,6 +9183,7 @@ mod tests {
                     path: "work/".to_string(),
                     name: Some("Work".to_string()),
                     bootpri: None,
+                    filesystem: None,
                 }),
                 unit1: Some(RawDrive::from_path("data.hdf")),
                 ..RawScsi::default()
@@ -9079,6 +9211,7 @@ mod tests {
                 path: "games/".to_string(),
                 name: Some("Games".to_string()),
                 bootpri: None,
+                filesystem: None,
             }),
             slave: None,
         };
@@ -9093,6 +9226,7 @@ mod tests {
                 path: "wb.hdf".to_string(),
                 name: None,
                 bootpri: Some(6),
+                filesystem: None,
             }),
             slave: None,
         };

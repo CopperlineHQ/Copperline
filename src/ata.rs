@@ -145,16 +145,25 @@ impl IdeDrive {
     /// bus (e.g. a multi-channel `[lide]` board) must pass a value that is
     /// unique across every drive on the bus, not just channel-relative
     /// master=0/slave=1. The path may be a raw HDF image file, or a host
-    /// directory, which is built into an in-memory FFS volume at open time;
-    /// `volume_name` labels that volume (directory mounts only). `boot_pri`
-    /// is the synthesized partition's `de_BootPri`.
+    /// directory, which is built into an in-memory FFS or OFS volume at open
+    /// time (`filesystem` picks which; directory mounts only -- ignored for
+    /// every other path form). `volume_name` labels that volume (directory
+    /// mounts only). `boot_pri` is the synthesized partition's `de_BootPri`.
     pub fn open(
         path: &Path,
         unit: usize,
         volume_name: Option<&str>,
         boot_pri: i8,
+        filesystem: crate::diskimage::FileSystem,
     ) -> anyhow::Result<Self> {
-        let disk = HardDriveImage::open(path, &format!("DH{unit}"), "ide", volume_name, boot_pri)?;
+        let disk = HardDriveImage::open(
+            path,
+            &format!("DH{unit}"),
+            "ide",
+            volume_name,
+            boot_pri,
+            filesystem,
+        )?;
         // The classic Amiga HDF geometry: 16 surfaces, 32 sectors per track
         // (what HDToolBox/RDB tooling defaults to), so the CHS the host
         // computes from an RDB's physical-drive block agrees with what the
@@ -1502,7 +1511,10 @@ mod tests {
         // The same command against a plain disk slot aborts.
         let disk_path = temp_disk_image(64);
         let mut disk_bus = AtaBus::new();
-        disk_bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        disk_bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         disk_bus.command(0xA1);
         assert_ne!(disk_bus.status & ST_ERR, 0);
         assert_eq!(disk_bus.error, ERR_ABRT);
@@ -1527,7 +1539,10 @@ mod tests {
 
         let disk_path = temp_disk_image(64);
         let mut disk_bus = AtaBus::new();
-        disk_bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        disk_bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         disk_bus.reset();
         assert_eq!(disk_bus.cyl_low, 0);
         assert_eq!(disk_bus.cyl_high, 0);
@@ -1541,7 +1556,10 @@ mod tests {
         let disk_path = temp_disk_image(64);
         let cd_path = temp_cd_image(2);
         let mut bus = AtaBus::new();
-        bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         bus.attach_drive(1, AtapiDrive::open(&cd_path).unwrap());
         bus.reset();
 
@@ -1618,7 +1636,10 @@ mod tests {
         let disk_path = temp_disk_image(64);
         let cd_path = temp_cd_image(2);
         let mut bus = AtaBus::new();
-        bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         bus.attach_drive(1, AtapiDrive::open(&cd_path).unwrap());
 
         // Master (disk) selected: IDENTIFY DEVICE succeeds.
@@ -1686,7 +1707,10 @@ mod tests {
     fn device_reset_aborts_against_a_plain_ata_slot() {
         let disk_path = temp_disk_image(64);
         let mut bus = AtaBus::new();
-        bus.attach_drive(0, IdeDrive::open(&disk_path, 0, None, 0).unwrap());
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&disk_path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
         bus.command(0x08);
         assert_ne!(bus.status & ST_ERR, 0);
         assert_eq!(bus.error, ERR_ABRT);
@@ -1748,7 +1772,7 @@ mod tests {
         fn bare_partition_image(name: &str) -> PathBuf {
             const CYL_BYTES: usize = 16 * 32 * 512; // RDB_HEADS * RDB_SPT * SECTOR_SIZE
             let mut data = vec![0u8; CYL_BYTES];
-            data[..4].copy_from_slice(b"DOS\x01"); // OFS boot block signature
+            data[..4].copy_from_slice(b"DOS\x01"); // FFS boot block signature
             let path = std::env::temp_dir().join(format!(
                 "copperline-ata-test-{}-{}-{name}",
                 std::process::id(),
@@ -1772,8 +1796,10 @@ mod tests {
         // master is idx 2.
         let path0 = bare_partition_image("ch0.hdf");
         let path2 = bare_partition_image("ch1.hdf");
-        let mut drive0 = IdeDrive::open(&path0, 0, None, 0).unwrap();
-        let mut drive2 = IdeDrive::open(&path2, 2, None, 0).unwrap();
+        let mut drive0 =
+            IdeDrive::open(&path0, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        let mut drive2 =
+            IdeDrive::open(&path2, 2, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         let name0 = dh_name(&mut drive0);
         let name2 = dh_name(&mut drive2);
         assert_eq!(name0, "DH0");
