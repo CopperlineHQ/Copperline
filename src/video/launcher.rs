@@ -3156,7 +3156,9 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
+            F::IdeMaster | F::IdeSlave => {
+                reason(self.has_ide(), "needs A600/A1200/A4000 (or Lide)")
+            }
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
             // rom_odd is an A2091 split-EPROM option only.
@@ -3180,7 +3182,9 @@ impl MachineSetup {
                 self.scsi_controller == Some(ScsiController::A2091),
                 "A2091 only",
             ),
-            F::CdImage | F::CdInsertDelay => reason(self.has_cd(), "needs CDTV/CD32"),
+            F::CdImage | F::CdInsertDelay => {
+                reason(self.has_cd(), "needs CDTV/CD32 (or SCSI/IDE/Lide)")
+            }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
