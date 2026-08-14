@@ -178,6 +178,21 @@ struct HostCtx {
     sockets: HashMap<i32, Socket>,
     /// The next handle `sock_open` will hand out.
     next_socket_id: i32,
+    pending_dma: Vec<(u32, Vec<u8>)>,
+    pending_dma_bytes: usize,
+}
+
+impl HostCtx {
+    fn cleanup_resources(&mut self) {
+        self.sockets.clear();
+        self.resolve_jobs.clear();
+        self.clear_pending_dma();
+    }
+
+    fn clear_pending_dma(&mut self) {
+        self.pending_dma.clear();
+        self.pending_dma_bytes = 0;
+    }
 }
 
 /// The typed entry points a plugin may export.
@@ -201,6 +216,7 @@ struct WasmRuntime {
     store: Store<HostCtx>,
     memory: WasmMemory,
     exports: Exports,
+    faulted: bool,
 }
 
 impl WasmRuntime {
@@ -215,6 +231,7 @@ impl WasmRuntime {
             store,
             memory,
             exports,
+            faulted: false,
         })
     }
 
@@ -238,6 +255,8 @@ impl WasmRuntime {
                 next_resolve_id: 0,
                 sockets: HashMap::new(),
                 next_socket_id: 0,
+                pending_dma: Vec::new(),
+                pending_dma_bytes: 0,
             },
         );
         let mut linker = Linker::new(engine);
@@ -257,8 +276,9 @@ impl WasmRuntime {
         };
         if let Ok(init) = instance.get_typed_func::<(), ()>(&mut store, "init") {
             refuel(&mut store);
-            init.call(&mut store, ())
-                .context("WASM plugin init() trapped")?;
+            let init_res = init.call(&mut store, ());
+            store.data_mut().clear_pending_dma();
+            init_res.context("WASM plugin init() trapped")?;
         }
         Ok((store, memory, exports))
     }
@@ -270,7 +290,29 @@ impl WasmRuntime {
         self.store = store;
         self.memory = memory;
         self.exports = exports;
+        self.faulted = false;
         Ok(())
+    }
+
+    fn trigger_fault(&mut self, reason: &str) {
+        if self.faulted {
+            return;
+        }
+        log::warn!(
+            "wasm[{}]: board faulted and entering offline state: {}",
+            self.manifest.name,
+            reason
+        );
+        self.faulted = true;
+        self.store.data_mut().cleanup_resources();
+    }
+
+    fn commit_dma(&mut self, host: &mut DeviceHost) {
+        let pending = std::mem::take(&mut self.store.data_mut().pending_dma);
+        self.store.data_mut().pending_dma_bytes = 0;
+        for (addr, buf) in pending {
+            host.dma_write(addr, &buf);
+        }
     }
 
     /// Point the store at the live Amiga memory for the duration of a call.
@@ -465,6 +507,9 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             "env",
             "dma_read",
             |mut caller: Caller<'_, HostCtx>, addr: i32, ptr: i32, len: i32| -> Result<()> {
+                if caller.data().mem == 0 {
+                    anyhow::bail!("dma_read called outside of active host transaction");
+                }
                 // Validate the destination window before allocating, so a
                 // plugin-controlled `len` can't force an oversized host
                 // allocation (see `checked_wasm_window`). `write_wasm_bytes`
@@ -475,6 +520,23 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                 with_amiga_memory(&caller, |amiga| {
                     DeviceHost::new(amiga).dma_read(addr as u32, &mut buf);
                 });
+
+                for (r_start, r_end, r_off) in dma_segments(addr as u32, len) {
+                    for (p_addr, p_buf) in &caller.data().pending_dma {
+                        for (p_start, p_end, p_off) in dma_segments(*p_addr, p_buf.len()) {
+                            if r_start < p_end && p_start < r_end {
+                                let overlap_start = r_start.max(p_start);
+                                let overlap_end = r_end.min(p_end);
+                                let overlap_len = (overlap_end - overlap_start) as usize;
+                                let dst_offset = r_off + (overlap_start - r_start) as usize;
+                                let src_offset = p_off + (overlap_start - p_start) as usize;
+                                buf[dst_offset..dst_offset + overlap_len]
+                                    .copy_from_slice(&p_buf[src_offset..src_offset + overlap_len]);
+                            }
+                        }
+                    }
+                }
+
                 write_wasm_bytes(&mut caller, ptr, &buf)
             },
         )?;
@@ -484,10 +546,33 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             "env",
             "dma_write",
             |mut caller: Caller<'_, HostCtx>, addr: i32, ptr: i32, len: i32| -> Result<()> {
-                let buf = read_wasm_bytes(&mut caller, ptr, len)?;
-                with_amiga_memory(&caller, |amiga| {
-                    DeviceHost::new(amiga).dma_write(addr as u32, &buf);
-                });
+                if caller.data().mem == 0 {
+                    anyhow::bail!("dma_write called outside of active host transaction");
+                }
+                let memory = caller_memory(&mut caller)?;
+                let (ptr, len) = checked_wasm_window(ptr, len, memory.data_size(&caller))?;
+                let host_ctx = caller.data();
+                if host_ctx.pending_dma.len() >= MAX_PENDING_DMA_ENTRIES {
+                    anyhow::bail!(
+                        "WASM plugin exceeded maximum pending DMA entries ({MAX_PENDING_DMA_ENTRIES})"
+                    );
+                }
+                let new_total = host_ctx
+                    .pending_dma_bytes
+                    .checked_add(len)
+                    .ok_or_else(|| anyhow!("WASM plugin pending DMA byte count overflow"))?;
+                if new_total > MAX_PENDING_DMA_BYTES {
+                    anyhow::bail!(
+                        "WASM plugin exceeded maximum pending DMA buffer size ({new_total} > {MAX_PENDING_DMA_BYTES} bytes)"
+                    );
+                }
+                let mut buf = vec![0u8; len];
+                memory
+                    .read(&mut caller, ptr, &mut buf)
+                    .context("reading WASM plugin memory")?;
+                let ctx = caller.data_mut();
+                ctx.pending_dma_bytes = new_total;
+                ctx.pending_dma.push((addr as u32, buf));
                 Ok(())
             },
         )?;
@@ -1212,6 +1297,9 @@ const MAX_OUTSTANDING_RESOLVES: usize = 8;
 /// [`MAX_OUTSTANDING_RESOLVES`].
 const MAX_OPEN_HOST_SOCKETS: usize = 64;
 
+const MAX_PENDING_DMA_ENTRIES: usize = 4096;
+const MAX_PENDING_DMA_BYTES: usize = 16 * 1024 * 1024;
+
 // BSD-style errno values the guest's bsdsocket.library expects, matching
 // `crates/hostsocket-plugin`'s own copy of this table (see this module's
 // `sock_*` doc comment for why the two are hand-kept in sync rather than
@@ -1584,6 +1672,23 @@ fn checked_wasm_window(ptr: i32, len: i32, mem_size: usize) -> Result<(usize, us
     Ok((ptr, len))
 }
 
+fn dma_segments(addr: u32, len: usize) -> impl Iterator<Item = (u64, u64, usize)> {
+    let (seg1, seg2) = if len == 0 {
+        (None, None)
+    } else {
+        let first_len = len.min((u32::MAX - addr) as usize + 1);
+        let start = addr as u64;
+        let s1 = Some((start, start + first_len as u64, 0));
+        let s2 = if first_len < len {
+            Some((0, (len - first_len) as u64, first_len))
+        } else {
+            None
+        };
+        (s1, s2)
+    };
+    seg1.into_iter().chain(seg2)
+}
+
 /// Read `len` bytes from the plugin's linear memory at `ptr`.
 fn read_wasm_bytes(caller: &mut Caller<'_, HostCtx>, ptr: i32, len: i32) -> Result<Vec<u8>> {
     let memory = caller_memory(caller)?;
@@ -1680,14 +1785,19 @@ impl WasmBoard {
     /// `i32` result (0 if the export is absent or traps).
     fn call_flag(&self, sel: impl FnOnce(&Exports) -> Option<TypedFunc<(), i32>>) -> bool {
         let mut rt = self.rt.borrow_mut();
+        if rt.faulted {
+            return false;
+        }
         let Some(func) = sel(&rt.exports) else {
             return false;
         };
         refuel(&mut rt.store);
-        match func.call(&mut rt.store, ()) {
+        let result = func.call(&mut rt.store, ());
+        rt.store.data_mut().clear_pending_dma();
+        match result {
             Ok(v) => v != 0,
             Err(e) => {
-                log::warn!("wasm[{}]: int line query trapped: {e}", rt.manifest.name);
+                rt.trigger_fault(&format!("int line query trapped: {e}"));
                 false
             }
         }
@@ -1697,6 +1807,9 @@ impl WasmBoard {
 impl ZorroDevice for WasmBoard {
     fn read(&mut self, off: u32, size: usize, host: &mut DeviceHost) -> u32 {
         let rt = self.rt.get_mut();
+        if rt.faulted {
+            return 0xFFFF_FFFF;
+        }
         let Some(func) = rt.exports.read.clone() else {
             return 0xFFFF_FFFF;
         };
@@ -1705,9 +1818,13 @@ impl ZorroDevice for WasmBoard {
         let result = func.call(&mut rt.store, (off as i32, size as i32));
         rt.leave();
         match result {
-            Ok(v) => v as u32,
+            Ok(v) => {
+                rt.commit_dma(host);
+                v as u32
+            }
             Err(e) => {
-                log::warn!("wasm[{}]: read trapped: {e}", rt.manifest.name);
+                rt.store.data_mut().clear_pending_dma();
+                rt.trigger_fault(&format!("read trapped: {e}"));
                 0xFFFF_FFFF
             }
         }
@@ -1715,6 +1832,9 @@ impl ZorroDevice for WasmBoard {
 
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
         let rt = self.rt.get_mut();
+        if rt.faulted {
+            return;
+        }
         let Some(func) = rt.exports.write.clone() else {
             return;
         };
@@ -1722,13 +1842,22 @@ impl ZorroDevice for WasmBoard {
         refuel(&mut rt.store);
         let result = func.call(&mut rt.store, (off as i32, size as i32, value as i32));
         rt.leave();
-        if let Err(e) = result {
-            log::warn!("wasm[{}]: write trapped: {e}", rt.manifest.name);
+        match result {
+            Ok(()) => {
+                rt.commit_dma(host);
+            }
+            Err(e) => {
+                rt.store.data_mut().clear_pending_dma();
+                rt.trigger_fault(&format!("write trapped: {e}"));
+            }
         }
     }
 
     fn tick(&mut self, cck: u32, host: &mut DeviceHost) {
         let rt = self.rt.get_mut();
+        if rt.faulted {
+            return;
+        }
         let Some(func) = rt.exports.tick.clone() else {
             return;
         };
@@ -1736,8 +1865,14 @@ impl ZorroDevice for WasmBoard {
         refuel(&mut rt.store);
         let result = func.call(&mut rt.store, cck as i32);
         rt.leave();
-        if let Err(e) = result {
-            log::warn!("wasm[{}]: tick trapped: {e}", rt.manifest.name);
+        match result {
+            Ok(()) => {
+                rt.commit_dma(host);
+            }
+            Err(e) => {
+                rt.store.data_mut().clear_pending_dma();
+                rt.trigger_fault(&format!("tick trapped: {e}"));
+            }
         }
     }
 
@@ -1790,6 +1925,8 @@ struct WasmBoardState {
     /// value handed out before the save is ever handed out again after.
     #[serde(default)]
     next_socket_id: i32,
+    #[serde(default)]
+    faulted: bool,
 }
 
 impl Serialize for WasmBoard {
@@ -1802,6 +1939,7 @@ impl Serialize for WasmBoard {
             pages,
             bytes,
             next_socket_id: rt.next_socket_id(),
+            faulted: rt.faulted,
         };
         state.serialize(serializer)
     }
@@ -1816,6 +1954,7 @@ impl<'de> Deserialize<'de> for WasmBoard {
         rt.restore(state.pages, &state.bytes)
             .map_err(serde::de::Error::custom)?;
         rt.set_next_socket_id(state.next_socket_id);
+        rt.faulted = state.faulted;
         drop(rt);
         Ok(board)
     }
@@ -1868,14 +2007,12 @@ mod tests {
     "#;
 
     fn write_wasm(name: &str, wat: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bytes = wat::parse_str(wat).expect("valid WAT");
         let path = std::env::temp_dir().join(format!(
-            "copperline-wasmboard-{name}-{}-{}.wasm",
+            "copperline-wasmboard-{name}-{}-{seq}.wasm",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
         ));
         std::fs::write(&path, &bytes).expect("write wasm");
         path
@@ -2014,6 +2151,166 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn fault_isolation_state_and_recovery_on_reset() {
+        let path = write_wasm("infinite_loop_isolation", INFINITE_LOOP_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, manifest("infinite_loop_isolation", false)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.tick(1, &mut host);
+        assert!(board.rt.borrow().faulted);
+
+        board.tick(1, &mut host);
+        assert!(board.rt.borrow().faulted);
+
+        assert_eq!(board.read(0, 2, &mut host), 0xFFFF_FFFF);
+        assert!(!board.int2_line());
+        assert!(!board.int6_line());
+
+        let snapshot = bincode::serialize(&board).unwrap();
+        let restored: WasmBoard = bincode::deserialize(&snapshot).unwrap();
+        assert!(restored.rt.borrow().faulted);
+
+        board.reset();
+        assert!(!board.rt.borrow().faulted);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_TRAP_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "write") (param $off i32) (param $size i32) (param $val i32)
+            (i32.store (i32.const 0) (i32.const 16909060))
+            (call $dma_write (i32.const 0) (i32.const 0) (i32.const 4))
+            (unreachable))
+        )
+    "#;
+
+    #[test]
+    fn dma_write_rolls_back_on_plugin_trap() {
+        let path = write_wasm("dma_trap", DMA_TRAP_WAT);
+        let mut manifest = manifest("dma_trap", false);
+        manifest.caps.dma = true;
+        let mut board = WasmBoard::from_file(&path, manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(0, 4, 0, &mut host);
+        assert!(board.rt.borrow().faulted);
+        assert_eq!(mem.chip_ram[0..4], [0, 0, 0, 0]);
+        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_COHERENCY_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (import "env" "dma_read" (func $dma_read (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "write") (param $off i32) (param $size i32) (param $val i32)
+            (i32.store (i32.const 0) (i32.const 16909060))
+            (call $dma_write (i32.const 0) (i32.const 0) (i32.const 4))
+            (call $dma_read (i32.const 0) (i32.const 16) (i32.const 4)))
+        )
+    "#;
+
+    #[test]
+    fn dma_read_overlays_pending_uncommitted_dma_writes() {
+        let path = write_wasm("dma_coherency", DMA_COHERENCY_WAT);
+        let mut manifest = manifest("dma_coherency", false);
+        manifest.caps.dma = true;
+        let mut board = WasmBoard::from_file(&path, manifest).unwrap();
+        let mut mem = empty_memory();
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.write(0, 4, 0, &mut host);
+        }
+        assert!(!board.rt.borrow().faulted);
+
+        let mut rt = board.rt.borrow_mut();
+        let memory = rt.memory;
+        let mut wasm_buf = vec![0u8; 4];
+        memory.read(&mut rt.store, 16, &mut wasm_buf).unwrap();
+        assert_eq!(wasm_buf, [4, 3, 2, 1]);
+        drop(rt);
+
+        assert_eq!(mem.chip_ram[0..4], [4, 3, 2, 1]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_wasmboard_fault_isolation_performance() {
+        let path = write_wasm("bench_infinite_loop", INFINITE_LOOP_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, manifest("bench_infinite_loop", false)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.tick(1, &mut host);
+        assert!(board.rt.borrow().faulted);
+
+        let iterations = 100_000;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            board.tick(1, &mut host);
+        }
+        let elapsed = start.elapsed();
+        let nanos_per_op = elapsed.as_nanos() as f64 / iterations as f64;
+
+        assert!(
+            nanos_per_op < 1000.0,
+            "faulted tick fast-path took too long: {nanos_per_op:.2} ns/tick"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_wasmboard_normal_vs_faulted_performance() {
+        let path_healthy = write_wasm("bench_healthy", COUNTER_WAT);
+        let path_faulted = write_wasm("bench_faulted", INFINITE_LOOP_WAT);
+
+        let mut board_healthy =
+            WasmBoard::from_file(&path_healthy, manifest("bench_healthy", false)).unwrap();
+        let mut board_faulted =
+            WasmBoard::from_file(&path_faulted, manifest("bench_faulted", false)).unwrap();
+
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        let iterations = 100_000;
+
+        let start_healthy = std::time::Instant::now();
+        for _ in 0..iterations {
+            board_healthy.tick(1, &mut host);
+        }
+        let elapsed_healthy = start_healthy.elapsed();
+        let nanos_healthy = elapsed_healthy.as_nanos() as f64 / iterations as f64;
+
+        board_faulted.tick(1, &mut host);
+        assert!(board_faulted.rt.borrow().faulted);
+
+        let start_faulted = std::time::Instant::now();
+        for _ in 0..iterations {
+            board_faulted.tick(1, &mut host);
+        }
+        let elapsed_faulted = start_faulted.elapsed();
+        let nanos_faulted = elapsed_faulted.as_nanos() as f64 / iterations as f64;
+
+        assert!(nanos_faulted < nanos_healthy);
+
+        let _ = std::fs::remove_file(&path_healthy);
+        let _ = std::fs::remove_file(&path_faulted);
+    }
+
     /// `write(off, size, len)` calls `dma_read` with a caller-supplied
     /// length instead of a fixed one, to exercise an oversized `len`.
     const DMA_OVERSIZED_LEN_WAT: &str = r#"
@@ -2036,6 +2333,175 @@ mod tests {
         // actual (1-page = 64 KiB) linear memory, this would attempt a
         // ~2 GiB host allocation on every call.
         board.write(0, 0, i32::MAX as u32, &mut host);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_JOURNAL_FLOOD_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "write") (param $off i32) (param $size i32) (param $count i32)
+            (local $i i32)
+            (block $done
+              (loop $loop
+                (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+                (call $dma_write (i32.const 0) (i32.const 0) (i32.const 4))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $loop)
+              )
+            )
+          )
+        )
+    "#;
+
+    #[test]
+    fn dma_write_exceeding_journal_entry_limit_traps_and_faults_cleanly() {
+        let path = write_wasm("dma_journal_flood", DMA_JOURNAL_FLOOD_WAT);
+        let mut board = WasmBoard::from_file(&path, manifest("dma_journal_flood", true)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(0, 0, 5000, &mut host);
+        assert!(board.rt.borrow().faulted);
+        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_JOURNAL_BYTE_FLOOD_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "write") (param $off i32) (param $size i32) (param $count i32)
+            (local $i i32)
+            (block $done
+              (loop $loop
+                (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+                (call $dma_write (i32.const 0) (i32.const 0) (i32.const 65536))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $loop)
+              )
+            )
+          )
+        )
+    "#;
+
+    #[test]
+    fn dma_write_exceeding_journal_byte_limit_traps_and_faults_cleanly() {
+        let path = write_wasm("dma_journal_byte_flood", DMA_JOURNAL_BYTE_FLOOD_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, manifest("dma_journal_byte_flood", true)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(0, 0, 300, &mut host);
+        assert!(board.rt.borrow().faulted);
+        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_INIT_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "init")
+            (call $dma_write (i32.const 0) (i32.const 0) (i32.const 4)))
+        )
+    "#;
+
+    #[test]
+    fn dma_write_during_init_fails_instantiation() {
+        let path = write_wasm("dma_init", DMA_INIT_WAT);
+        let mut manifest = manifest("dma_init", false);
+        manifest.caps.dma = true;
+        let res = WasmBoard::from_file(&path, manifest);
+        assert!(res.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    const DMA_INT2_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "int2") (result i32)
+            (call $dma_write (i32.const 0) (i32.const 0) (i32.const 4))
+            (i32.const 1))
+          (func (export "write") (param $off i32) (param $size i32) (param $val i32))
+        )
+    "#;
+
+    #[test]
+    fn dma_write_during_int_line_query_traps_and_does_not_leak_dma() {
+        let path = write_wasm("dma_int2", DMA_INT2_WAT);
+        let mut manifest = manifest("dma_int2", false);
+        manifest.caps.dma = true;
+        let mut board = WasmBoard::from_file(&path, manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        assert!(!board.int2_line());
+        assert!(board.rt.borrow().faulted);
+        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+
+        board.write(0, 4, 123, &mut host);
+        assert_eq!(mem.chip_ram[0..4], [0, 0, 0, 0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dma_segments_handles_non_wrapping_and_wrapping_ranges() {
+        let segs: Vec<_> = dma_segments(100, 4).collect();
+        assert_eq!(segs, vec![(100, 104, 0)]);
+
+        let segs: Vec<_> = dma_segments(0xFFFF_FFFE, 4).collect();
+        assert_eq!(segs, vec![(0xFFFF_FFFE, 0x1_0000_0000, 0), (0, 2, 2)]);
+
+        let segs: Vec<_> = dma_segments(0xFFFF_FFFF, 1).collect();
+        assert_eq!(segs, vec![(0xFFFF_FFFF, 0x1_0000_0000, 0)]);
+
+        let segs: Vec<_> = dma_segments(0, 0).collect();
+        assert!(segs.is_empty());
+    }
+
+    const DMA_WRAP_WAT: &str = r#"
+        (module
+          (import "env" "dma_write" (func $dma_write (param i32 i32 i32)))
+          (import "env" "dma_read" (func $dma_read (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "write") (param $off i32) (param $size i32) (param $val i32)
+            (i32.store8 (i32.const 0) (i32.const 10))
+            (i32.store8 (i32.const 1) (i32.const 20))
+            (i32.store8 (i32.const 2) (i32.const 30))
+            (i32.store8 (i32.const 3) (i32.const 40))
+            (call $dma_write (i32.const -2) (i32.const 0) (i32.const 4))
+            (call $dma_read (i32.const -1) (i32.const 16) (i32.const 3)))
+        )
+    "#;
+
+    #[test]
+    fn dma_read_overlays_pending_uncommitted_writes_with_wrapping_address() {
+        let path = write_wasm("dma_wrap", DMA_WRAP_WAT);
+        let mut manifest = manifest("dma_wrap", false);
+        manifest.caps.dma = true;
+        let mut board = WasmBoard::from_file(&path, manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(0, 4, 0, &mut host);
+        assert!(!board.rt.borrow().faulted);
+
+        let mut rt = board.rt.borrow_mut();
+        let memory = rt.memory;
+        let mut wasm_buf = vec![0u8; 3];
+        memory.read(&mut rt.store, 16, &mut wasm_buf).unwrap();
+        assert_eq!(wasm_buf, [20, 30, 40]);
+        drop(rt);
 
         let _ = std::fs::remove_file(&path);
     }
