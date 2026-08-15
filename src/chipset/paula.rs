@@ -315,6 +315,39 @@ impl CdAudioRing {
     }
 }
 
+/// Toccata audio stream from the board to the host mixer. Unlike CD-DA's
+/// bursty per-sector delivery, the board's own tick accumulates emulated
+/// time the same way `Paula::advance_audio` does (see
+/// `Toccata::tick`/`push_mixed_frame`'s fifth tap), so the two sides stay
+/// in near-lockstep -- a small fixed capacity is a safety margin, not a
+/// buffering requirement.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ToccataAudioRing {
+    samples: std::collections::VecDeque<(f32, f32)>,
+}
+
+/// A generous safety margin (well beyond what near-lockstep production
+/// ever needs) so a stalled consumer cannot grow the ring unbounded.
+const TOCCATA_AUDIO_RING_LIMIT: usize = 4096;
+
+impl ToccataAudioRing {
+    pub fn push_frame(&mut self, left: f32, right: f32) -> bool {
+        if self.samples.len() >= TOCCATA_AUDIO_RING_LIMIT {
+            return false;
+        }
+        self.samples.push_back((left, right));
+        true
+    }
+
+    pub fn next_sample(&mut self) -> (f32, f32) {
+        self.samples.pop_front().unwrap_or((0.0, 0.0))
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
 /// Push one sample into a debugger oscilloscope ring, evicting the oldest
 /// once the ring is full so it always holds the most recent AUDIO_SCOPE_LEN.
 fn scope_push(ring: &mut std::collections::VecDeque<i8>, sample: i8) {
@@ -417,6 +450,10 @@ pub struct Paula {
     // CD audio samples streamed by the CD controller (CD32 Akiko), mixed
     // into the host output at the shared 44.1 kHz mixer rate.
     cd_audio: CdAudioRing,
+    // Toccata board audio, already resampled to the mixer rate by the
+    // board's own tick before it reaches this ring -- see
+    // `ToccataAudioRing`'s doc comment.
+    toccata_audio: ToccataAudioRing,
     // Set once the device on the serial port has said it makes no sound
     // here, which is the usual answer: a machine with nothing on its MIDI
     // port then costs one predictable branch a sample and nothing else.
@@ -494,6 +531,7 @@ impl Paula {
             mono_output: false,
             stereo_separation: 1.0,
             cd_audio: CdAudioRing::default(),
+            toccata_audio: ToccataAudioRing::default(),
             synth_silent: false,
             drive_sounds: DriveSounds::new(),
             dma_addr_mask: 0x001F_FFFF,
@@ -734,6 +772,17 @@ impl Paula {
 
     pub fn cd_audio_mut(&mut self) -> &mut CdAudioRing {
         &mut self.cd_audio
+    }
+
+    pub fn toccata_audio_mut(&mut self) -> &mut ToccataAudioRing {
+        &mut self.toccata_audio
+    }
+
+    /// Both rings together, as disjoint field borrows -- the bus's generic
+    /// Zorro-board tick host needs both at once (`DeviceHost::for_slot_with_audio`),
+    /// which two separate `&mut self` accessor calls cannot express.
+    pub fn audio_rings_mut(&mut self) -> (&mut CdAudioRing, &mut ToccataAudioRing) {
+        (&mut self.cd_audio, &mut self.toccata_audio)
     }
 
     pub fn output_volume_percent(&self) -> u8 {
@@ -1837,6 +1886,14 @@ impl Paula {
             }
         }
         self.audio.push_source("mt32", synth_left, synth_right);
+        // A Toccata board resamples its own codec-rate output to the mixer
+        // rate before pushing here (see `Toccata::tick`), so this is a
+        // plain per-frame pop like CD-DA, not a rate conversion.
+        let (toccata_left, toccata_right) = self.toccata_audio.next_sample();
+        left += toccata_left;
+        right += toccata_right;
+        self.audio
+            .push_source("toccata", toccata_left, toccata_right);
         if let Some(capture) = &mut self.capture {
             capture.push((left, right));
         }

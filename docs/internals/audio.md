@@ -20,24 +20,25 @@ is now an `AudioMux` instead of a bare `Box<dyn AudioSink>`, and
 `push_mixed_frame`'s tail calls `push_master`/`push_source`/
 `push_source_channel` instead of pushing straight into the sink. This is
 what lets `--audio-stems` capture the same signal at finer granularity
-with no change to the mixing math, and is the seam a future board (a
-MacroSystem Toccata AHI card, for instance) will register through as
-just another named source -- see the project's Toccata proposal for the
-board work itself, which this milestone only prepares for.
+with no change to the mixing math, and is the seam boards register
+through as just another named source: the MacroSystem Toccata
+(`src/toccata.rs`, [](toccata)) is the first, feeding a fifth `"toccata"`
+tap the same way CD-DA and MT-32 do.
 
 ## The taps
 
-`push_mixed_frame` pushes four named sources, each at the point in the
+`push_mixed_frame` pushes five named sources, each at the point in the
 signal chain described below (not necessarily the point that ends up in
 the master mix -- see each entry):
 
 | Source | Tap point | Notes |
 |---|---|---|
-| `paula` | Post-LED-filter, pre-drive/CD/MT-32 | The pure Paula-channel sum |
+| `paula` | Post-LED-filter, pre-drive/CD/MT-32/Toccata | The pure Paula-channel sum |
 | `paula` sub-channels `0`..`3` | `channel_mixed_sample(i)`, scaled | **Not** LED-filtered -- real hardware's filter sits after the channel mixer's summation, so a per-channel stem naturally excludes it |
 | `drivesounds` | The synthesized drive-noise sample | Mono; written to a stem as `(sample, sample)` |
 | `cdda` | Post `cd_muted` gate | Reflects audible content -- unlike the debugger's CD scope tap, which stays pre-mute for visibility |
 | `mt32` | The in-process MT-32 synth frame | Silence (`0.0, 0.0`) once the serial sink has latched `synth_silent` |
+| `toccata` | One frame popped from `ToccataAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](toccata) |
 
 The **master** signal (`push_master`) is the final `out_left`/`out_right`
 after master volume and stereo width -- unchanged from what every sink has

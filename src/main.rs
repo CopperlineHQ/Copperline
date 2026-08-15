@@ -1822,23 +1822,24 @@ fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -
 /// The `--audio-stems` source set for this run: Paula (always present, with
 /// its four physical channels) and drive sounds (always registered --
 /// `[audio] floppy_sounds = false` just means the stem is silent, like a
-/// disabled DriveSounds today), plus CD-DA and MT-32 only when this run's
-/// config plausibly produces them. A source absent here never gets a stem
-/// file at all, even if `--audio-stems-mode` includes `source`/`channel`.
+/// disabled DriveSounds today), plus CD-DA, MT-32, and Toccata only when
+/// this run's config plausibly produces them. A source absent here never
+/// gets a stem file at all, even if `--audio-stems-mode` includes
+/// `source`/`channel`.
 ///
-/// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
-/// make sound" oracle (e.g. a CD swapped into an empty drive mid-run by
-/// `--insert-cd-after` or the control protocol is missed) -- see
-/// docs/internals/audio.md for the exact rule and its limits.
+/// The CD/MT-32/Toccata checks are a heuristic, not a perfect "will this
+/// run ever make sound" oracle (e.g. a CD swapped into an empty drive
+/// mid-run by `--insert-cd-after` or the control protocol is missed) --
+/// see docs/internals/audio.md for the exact rule and its limits.
 ///
 /// `state_loaded` must be true when this run passes `--load-state`: the
 /// restored machine can describe entirely different hardware than `cfg`
 /// (a state's own descriptor can disagree with the config that started
 /// this process, and the host reconfigures to match it -- see
 /// `Emulator::adopt_loaded_state`), so `cfg` alone cannot say whether the
-/// resumed machine has a CD drive or an MT-32. Rather than risk silently
-/// missing an active source, a state load conservatively registers both
-/// regardless of what `cfg` says.
+/// resumed machine has a CD drive, an MT-32, or a Toccata board. Rather
+/// than risk silently missing an active source, a state load
+/// conservatively registers all three regardless of what `cfg` says.
 fn configured_audio_stem_sources(
     cfg: &config::Config,
     state_loaded: bool,
@@ -1886,6 +1887,12 @@ fn configured_audio_stem_sources(
     if has_mt32 {
         sources.push(SourceSpec {
             id: "mt32",
+            channel_names: &[],
+        });
+    }
+    if state_loaded || cfg.toccata {
+        sources.push(SourceSpec {
+            id: "toccata",
             channel_names: &[],
         });
     }
@@ -2852,11 +2859,11 @@ mod tests {
 
     #[test]
     fn stem_sources_are_conservative_after_a_state_load() {
-        // A bare config says no CD/MT-32 -- but a --load-state run can
-        // resume a machine describing entirely different hardware than
+        // A bare config says no CD/MT-32/Toccata -- but a --load-state run
+        // can resume a machine describing entirely different hardware than
         // this process's own cfg (the host reconfigures to match a
-        // state's descriptor), so state_loaded=true must register both
-        // regardless of what the pre-load config says.
+        // state's descriptor), so state_loaded=true must register all
+        // three regardless of what the pre-load config says.
         let cfg = config::Config::default();
         let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, true)
             .iter()
@@ -2864,14 +2871,19 @@ mod tests {
             .collect();
         assert!(ids.contains(&"cdda"), "state loads must not skip cdda");
         assert!(ids.contains(&"mt32"), "state loads must not skip mt32");
+        assert!(
+            ids.contains(&"toccata"),
+            "state loads must not skip toccata"
+        );
 
-        // Without a state load, the same bare config registers neither.
+        // Without a state load, the same bare config registers none of them.
         let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, false)
             .iter()
             .map(|s| s.id)
             .collect();
         assert!(!ids.contains(&"cdda"));
         assert!(!ids.contains(&"mt32"));
+        assert!(!ids.contains(&"toccata"));
     }
 
     #[test]

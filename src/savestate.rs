@@ -187,7 +187,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  55: BoardDevice gained the GraffityZ2 and GraffityZ3 variants (the Atéo
 //      Concepts Graffity RTG boards, `[rtg] card`), appended at the end of
 //      the enum.
-pub const STATE_VERSION: u32 = 55;
+//  56: BoardDevice gained the Toccata variant (the MacroSystem Toccata
+//      AD1848 sound board, `[toccata]`), appended at the end of the enum.
+pub const STATE_VERSION: u32 = 56;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
