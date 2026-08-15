@@ -136,6 +136,13 @@ pub struct CliArgs {
     /// (32-bit float, 44100 Hz). No live output. Useful for headless
     /// verification of the audio path.
     pub audio_wav: Option<PathBuf>,
+    /// `--audio-stems DIR`: write per-granularity stem WAVs (selected by
+    /// `--audio-stems-mode`) into DIR instead of a single mixed file. No
+    /// live output; mutually exclusive with `--audio-wav`/`--audio`.
+    pub audio_stems: Option<PathBuf>,
+    /// `--audio-stems-mode LIST`: comma-separated granularities to write
+    /// under `--audio-stems` (`master`, `source`, `channel`, combinable).
+    pub audio_stems_mode: Option<Vec<copperline::audio::mux::StemGranularity>>,
     /// `--profile-live-audio SECS`: run a no-window Paula-to-cpal
     /// profile workload for SECS seconds. Use COPPERLINE_AUDIO_PROFILE=1
     /// to emit the live-audio counters while it runs.
@@ -359,6 +366,8 @@ where
     let mut explicit_audio_live = false;
     let mut explicit_noaudio = false;
     let mut audio_wav: Option<PathBuf> = None;
+    let mut audio_stems: Option<PathBuf> = None;
+    let mut audio_stems_mode: Option<Vec<copperline::audio::mux::StemGranularity>> = None;
     let mut live_audio_profile_secs: Option<f32> = None;
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
@@ -1054,6 +1063,22 @@ where
                 audio_wav = Some(PathBuf::from(v));
                 audio_live = false;
             }
+            "--audio-stems" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--audio-stems requires a directory"))?;
+                audio_stems = Some(PathBuf::from(v));
+                audio_live = false;
+            }
+            "--audio-stems-mode" => {
+                let v = args.next().ok_or_else(|| {
+                    anyhow!("--audio-stems-mode requires a list, e.g. \"master,source\"")
+                })?;
+                audio_stems_mode = Some(
+                    copperline::audio::mux::StemGranularity::parse_list(&v)
+                        .map_err(|e| anyhow!("--audio-stems-mode: {e}"))?,
+                );
+            }
             "--profile-live-audio" => {
                 let secs: f32 = next_arg(
                     &mut args,
@@ -1090,6 +1115,22 @@ where
     }
     if explicit_audio_live && audio_wav.is_some() {
         return Err(anyhow!("--audio and --audio-wav are mutually exclusive"));
+    }
+    if audio_stems.is_some() && audio_wav.is_some() {
+        return Err(anyhow!(
+            "--audio-stems and --audio-wav are mutually exclusive"
+        ));
+    }
+    if explicit_audio_live && audio_stems.is_some() {
+        return Err(anyhow!("--audio and --audio-stems are mutually exclusive"));
+    }
+    if audio_stems.is_some() && audio_stems_mode.is_none() {
+        return Err(anyhow!(
+            "--audio-stems requires --audio-stems-mode LIST (e.g. \"master,source\")"
+        ));
+    }
+    if audio_stems.is_none() && audio_stems_mode.is_some() {
+        return Err(anyhow!("--audio-stems-mode requires --audio-stems DIR"));
     }
     if live_audio_profile_secs.is_some() && explicit_noaudio {
         return Err(anyhow!(
@@ -1197,6 +1238,8 @@ where
         audio_live,
         audio_live_forced: explicit_audio_live,
         audio_wav,
+        audio_stems,
+        audio_stems_mode,
         live_audio_profile_secs,
         calibrate_gamepad,
         list_midi,
@@ -1374,6 +1417,10 @@ fn print_help() {
          --net-helper-status            report Linux bridge-helper status\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
          \x20                            instead of live output\n  \
+         --audio-stems DIR              write per-granularity stem WAVs into DIR (needs\n  \
+         \x20                            --audio-stems-mode); instead of live output\n  \
+         --audio-stems-mode LIST        comma-separated stem granularities to write:\n  \
+         \x20                            \"master\", \"source\", \"channel\" (combinable)\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
@@ -1774,6 +1821,51 @@ fn report_benchmark_frame_times(start_frame: u64, frame_times: &[f64]) {
 /// `--audio-wav` still win; those are handled by the caller.
 fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -> bool {
     audio_live && (forced_on || config_enabled)
+}
+
+/// The `--audio-stems` source set for this run: Paula (always present, with
+/// its four physical channels) and drive sounds (always registered --
+/// `[audio] floppy_sounds = false` just means the stem is silent, like a
+/// disabled DriveSounds today), plus CD-DA and MT-32 only when this run's
+/// config plausibly produces them. A source absent here never gets a stem
+/// file at all, even if `--audio-stems-mode` includes `source`/`channel`.
+///
+/// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
+/// make sound" oracle (e.g. a SCSI CD-ROM unit with no image preset here
+/// is missed) -- see docs/internals/audio.md for the exact rule and its
+/// limits.
+fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio::mux::SourceSpec> {
+    use copperline::audio::mux::SourceSpec;
+    let mut sources = vec![
+        SourceSpec {
+            id: "paula",
+            channel_names: &["0", "1", "2", "3"],
+        },
+        SourceSpec {
+            id: "drivesounds",
+            channel_names: &[],
+        },
+    ];
+    let has_cd = matches!(
+        cfg.machine,
+        Some(config::MachineModel::Cd32) | Some(config::MachineModel::Cdtv)
+    ) || cfg.cd_image_path.is_some();
+    if has_cd {
+        sources.push(SourceSpec {
+            id: "cdda",
+            channel_names: &[],
+        });
+    }
+    let has_mt32 = config::midi_out_is_mt32(cfg.serial.midi_out.as_deref())
+        && cfg.serial.mt32_control_rom.is_some()
+        && cfg.serial.mt32_pcm_rom.is_some();
+    if has_mt32 {
+        sources.push(SourceSpec {
+            id: "mt32",
+            channel_names: &[],
+        });
+    }
+    sources
 }
 
 /// Print the host audio output devices for `--list-audio-devices`. These are the
@@ -2214,6 +2306,17 @@ fn main() -> Result<()> {
     }
     info!("emulation timing: deterministic core, paced={paced}");
     let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
+    if let Some(dir) = &cli.audio_stems {
+        let granularities = cli
+            .audio_stems_mode
+            .as_deref()
+            .expect("--audio-stems requires --audio-stems-mode (checked during CLI parsing)");
+        let sources = configured_audio_stem_sources(&cfg);
+        emu.bus_mut()
+            .paula
+            .audio
+            .enable_stems(dir, granularities, &sources)?;
+    }
     if let Some(path) = &cli.load_state {
         let outcome = emu.load_state(path)?;
         info!(
