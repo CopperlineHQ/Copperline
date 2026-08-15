@@ -4244,6 +4244,13 @@ impl ApplicationHandler for App {
                 self.report_mt32_fault();
             }
         }
+        // The General MIDI synth's faults and display lines ride the same
+        // frame poll; the display only ever has lines while a game writes
+        // them, so this is a cheap drain of an empty Vec almost always.
+        #[cfg(feature = "gm")]
+        if self.serial_is_midi {
+            self.report_gm();
+        }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
         let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
@@ -6031,6 +6038,25 @@ impl App {
             .and_then(crate::midi::MidiSerialSink::take_mt32_fault);
         if let Some(fault) = fault {
             self.warn_osd(format!("MT-32: {fault}"));
+        }
+    }
+
+    /// Surface what the General MIDI synth has to say: a fault when it
+    /// could not be fitted, and the display lines a game wrote to what it
+    /// believes is an MT-32 -- the "Insert disk 2" class of message,
+    /// which without a front panel lands on the OSD.
+    #[cfg(feature = "gm")]
+    fn report_gm(&mut self) {
+        let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
+            return;
+        };
+        let fault = sink.take_gm_fault();
+        let display = sink.take_gm_display();
+        if let Some(fault) = fault {
+            self.warn_osd(format!("General MIDI: {fault}"));
+        }
+        for line in display {
+            self.show_osd(line);
         }
     }
 
@@ -8119,6 +8145,8 @@ impl App {
                 ],
             ),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
+            #[cfg(feature = "gm")]
+            LauncherField::GmSoundfont => dialog.add_filter("Soundfonts", &["sf2", "SF2"]),
             // SCSI, IDE, and lide drive slots all take hard disks or CD
             // images (a cue/iso/chd attaches a CD-ROM drive at that slot,
             // over SCSI or ATAPI as appropriate).

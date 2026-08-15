@@ -6083,6 +6083,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
+            state.setup.midi_out_is_gm(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -8726,6 +8727,7 @@ fn draw_launcher(
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
+            state.setup.midi_out_is_gm(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -8780,6 +8782,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
+                state.setup.midi_out_is_gm(),
             )
             .len()
                 + 1,
@@ -8816,6 +8819,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
+                state.setup.midi_out_is_gm(),
             )
             .len()
                 + 1,
@@ -8856,6 +8860,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
+                state.setup.midi_out_is_gm(),
             )
             .len()
                 + 1,
@@ -8899,6 +8904,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
+                state.setup.midi_out_is_gm(),
             )
             .len()
                 + 1,
@@ -10017,7 +10023,7 @@ mod tests {
             };
             for &device in &devices {
                 for &mode in &modes {
-                    let rows = launcher::rows(tab, device, mode, false);
+                    let rows = launcher::rows(tab, device, mode, false, false);
                     for (i, r) in rows.iter().enumerate() {
                         let row_y = launcher_row_y(rect, i) + row_offset;
                         let (prev, value, next) = launcher_cycle_rects(rect, row_y);
@@ -10658,6 +10664,7 @@ mod tests {
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
+            state.setup.midi_out_is_gm(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -10693,6 +10700,7 @@ mod tests {
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
+            state.setup.midi_out_is_gm(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -12124,6 +12132,7 @@ mod tests {
                 crate::config::ParallelDevice::None,
                 crate::config::SerialMode::default(),
                 false,
+                false,
             )
             .len()
                 + 1,
@@ -12817,6 +12826,7 @@ mod tests {
                     LauncherTab::AvPaths,
                     Default::default(),
                     Default::default(),
+                    false,
                     false,
                 )
                 .iter()

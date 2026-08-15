@@ -155,6 +155,20 @@ pub struct MidiSerialSink {
     /// dump arrives over the wire at MIDI speed rather than all at once.
     #[cfg(feature = "mt32")]
     mt32_reply: std::collections::VecDeque<u8>,
+    /// The `[gm]` settings the General MIDI synth would be fitted with.
+    #[cfg(feature = "gm")]
+    gm_options: crate::gm::GmOptions,
+    /// The fitted General MIDI synth. Absent costs nothing, exactly as
+    /// the MT-32 above; the two are never fitted together, because the
+    /// output points at one device at a time.
+    #[cfg(feature = "gm")]
+    gm: Option<crate::gm::GmDevice>,
+    /// Whether the General MIDI synth is the chosen output.
+    #[cfg(feature = "gm")]
+    gm_selected: bool,
+    /// Why it could not be fitted when it was last asked for.
+    #[cfg(feature = "gm")]
+    gm_fault: Option<String>,
 }
 
 /// The output-device name that means the built-in MT-32 rather than a host
@@ -164,6 +178,13 @@ pub use crate::config::MIDI_OUT_MT32;
 
 /// What the MT-32 output is called anywhere a person reads it.
 pub const MIDI_OUT_MT32_LABEL: &str = "MT-32";
+
+/// The output-device name that means the built-in General MIDI synth.
+#[cfg(feature = "gm")]
+pub use crate::config::MIDI_OUT_GM;
+
+/// What the General MIDI output is called anywhere a person reads it.
+pub const MIDI_OUT_GM_LABEL: &str = "General MIDI";
 
 /// MIDI Active Sensing status byte.
 pub(crate) const ACTIVE_SENSE: u8 = 0xFE;
@@ -392,6 +413,14 @@ impl MidiSerialSink {
             mt32_input: false,
             #[cfg(feature = "mt32")]
             mt32_reply: std::collections::VecDeque::new(),
+            #[cfg(feature = "gm")]
+            gm_options: crate::gm::GmOptions::default(),
+            #[cfg(feature = "gm")]
+            gm: None,
+            #[cfg(feature = "gm")]
+            gm_selected: false,
+            #[cfg(feature = "gm")]
+            gm_fault: None,
         })
     }
 
@@ -435,21 +464,90 @@ impl MidiSerialSink {
     pub fn set_output_endpoint(&mut self, endpoint: Option<&str>) {
         #[cfg(feature = "mt32")]
         if crate::config::midi_out_is_mt32(endpoint) {
+            #[cfg(feature = "gm")]
+            self.drop_gm();
             self.attach_mt32();
             return;
         }
-        #[cfg(feature = "mt32")]
-        {
-            self.mt32 = None;
-            self.mt32_selected = false;
-            // Nothing reaches the module any more, so it has nothing left
-            // to answer: its MIDI OUT goes with its MIDI IN.
-            self.mt32_input = false;
+        #[cfg(feature = "gm")]
+        if crate::config::midi_out_is_gm(endpoint) {
+            #[cfg(feature = "mt32")]
+            self.drop_mt32();
+            self.attach_gm();
+            return;
         }
+        #[cfg(feature = "gm")]
+        self.drop_gm();
         #[cfg(feature = "mt32")]
-        self.stop_answering();
+        self.drop_mt32();
         self.backend.set_output(endpoint);
         log::info!("midi: output -> {}", self.output_label());
+    }
+
+    /// Unfit the MT-32 entirely: the output has moved elsewhere.
+    #[cfg(feature = "mt32")]
+    fn drop_mt32(&mut self) {
+        self.mt32 = None;
+        self.mt32_selected = false;
+        // Nothing reaches the module any more, so it has nothing left
+        // to answer: its MIDI OUT goes with its MIDI IN.
+        self.mt32_input = false;
+        self.stop_answering();
+    }
+
+    /// Unfit the General MIDI synth entirely.
+    #[cfg(feature = "gm")]
+    fn drop_gm(&mut self) {
+        self.gm = None;
+        self.gm_selected = false;
+    }
+
+    /// The `[gm]` settings the synth is fitted with when selected.
+    #[cfg(feature = "gm")]
+    pub fn set_gm_options(&mut self, options: crate::gm::GmOptions) {
+        self.gm_options = options;
+    }
+
+    /// Fit the General MIDI synth, leaving the host output silent: the
+    /// device on the far end of the cable is the one here.
+    #[cfg(feature = "gm")]
+    fn attach_gm(&mut self) {
+        if self.gm.is_some() {
+            return;
+        }
+        self.gm_selected = true;
+        self.gm_fault = None;
+        match crate::gm::GmDevice::open(&self.gm_options) {
+            Ok(device) => {
+                self.backend.set_output(None);
+                self.gm = Some(device);
+            }
+            Err(e) => {
+                log::warn!("midi: {MIDI_OUT_GM_LABEL} could not be fitted: {e:#}");
+                self.gm_fault = Some(format!("{e:#}"));
+            }
+        }
+    }
+
+    /// Why the General MIDI synth could not be fitted, if it could not.
+    #[cfg(feature = "gm")]
+    pub fn take_gm_fault(&mut self) -> Option<String> {
+        self.gm_fault.take()
+    }
+
+    /// Display lines the guest wrote through the translation layer.
+    #[cfg(feature = "gm")]
+    pub fn take_gm_display(&mut self) -> Vec<String> {
+        self.gm
+            .as_mut()
+            .map(crate::gm::GmDevice::take_display)
+            .unwrap_or_default()
+    }
+
+    /// Whether the General MIDI synth is the chosen output.
+    #[cfg(feature = "gm")]
+    pub fn gm_selected(&self) -> bool {
+        self.gm_selected
     }
 
     /// Fit the MT-32, leaving the host output silent: the device on the far
@@ -643,6 +741,10 @@ impl MidiSerialSink {
         if self.mt32_selected {
             return MIDI_OUT_MT32_LABEL.to_string();
         }
+        #[cfg(feature = "gm")]
+        if self.gm_selected {
+            return MIDI_OUT_GM_LABEL.to_string();
+        }
         self.backend
             .current_output()
             .unwrap_or_else(|| "None".to_string())
@@ -661,7 +763,19 @@ impl MidiSerialSink {
 }
 
 impl SerialSink for MidiSerialSink {
+    fn synth_source_name(&self) -> &'static str {
+        #[cfg(feature = "gm")]
+        if self.gm.is_some() {
+            return "gm";
+        }
+        "mt32"
+    }
+
     fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
+        #[cfg(feature = "gm")]
+        if let Some(gm) = &mut self.gm {
+            return Some(gm.next_frame());
+        }
         #[cfg(feature = "mt32")]
         if let Some(mt32) = &mut self.mt32 {
             let frame = mt32.next_frame();
@@ -692,6 +806,16 @@ impl SerialSink for MidiSerialSink {
                 dbg.tx_bytes += 1;
             }
             mt32.write_byte(b);
+            return;
+        }
+        // The General MIDI synth is the same shape of thing: in-process,
+        // answering in emulated time, no scheduling.
+        #[cfg(feature = "gm")]
+        if let Some(gm) = &mut self.gm {
+            if let Some(dbg) = &mut self.debug {
+                dbg.tx_bytes += 1;
+            }
+            gm.write_byte(b);
             return;
         }
         // Map the emit clock onto host time so the byte is scheduled rather
@@ -843,6 +967,14 @@ mod tests {
             mt32_input: false,
             #[cfg(feature = "mt32")]
             mt32_reply: std::collections::VecDeque::new(),
+            #[cfg(feature = "gm")]
+            gm_options: crate::gm::GmOptions::default(),
+            #[cfg(feature = "gm")]
+            gm: None,
+            #[cfg(feature = "gm")]
+            gm_selected: false,
+            #[cfg(feature = "gm")]
+            gm_fault: None,
         }
     }
 

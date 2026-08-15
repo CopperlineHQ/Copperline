@@ -2025,7 +2025,8 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             // "mt32" names the built-in synth, not a host endpoint, so the
             // host output starts unset and the device is attached below.
             let wants_mt32 = crate::config::midi_out_is_mt32(cfg.serial.midi_out.as_deref());
-            let host_out = (!wants_mt32)
+            let wants_gm = crate::config::midi_out_is_gm(cfg.serial.midi_out.as_deref());
+            let host_out = (!wants_mt32 && !wants_gm)
                 .then_some(cfg.serial.midi_out.as_deref())
                 .flatten();
             // Likewise on the way in: "mt32" is the module's own MIDI OUT,
@@ -2051,6 +2052,31 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
                 if wants_mt32_in {
                     sink.set_input_endpoint(Some(crate::config::MIDI_OUT_MT32));
                 }
+            }
+            #[cfg(feature = "gm")]
+            {
+                sink.set_gm_options(crate::gm::GmOptions {
+                    soundfont: cfg.gm.soundfont.clone(),
+                    mt32_translation: cfg.gm.mt32_translation.clone(),
+                });
+                if wants_gm {
+                    sink.set_output_endpoint(Some(crate::config::MIDI_OUT_GM));
+                }
+            }
+            #[cfg(not(feature = "gm"))]
+            if wants_gm {
+                log::warn!(
+                    "[serial] midi_out = \"gm\" needs a build with --features gm; \
+                     the MIDI output is unset"
+                );
+            }
+            // The GM synth has no MIDI OUT jack of its own, so there is
+            // nothing to wire back as an input.
+            if wants_gm && crate::config::midi_out_is_gm(cfg.serial.midi_in.as_deref()) {
+                log::warn!(
+                    "[serial] midi_in = \"gm\": the General MIDI synth has no MIDI \
+                     output to read back; the MIDI input is unset"
+                );
             }
             #[cfg(not(feature = "mt32"))]
             let _ = wants_mt32_in;

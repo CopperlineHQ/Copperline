@@ -611,6 +611,14 @@ pub enum LauncherField {
     Mt32Lcd,
     #[cfg(feature = "midi")]
     MidiIn,
+    /// The General MIDI synth's soundfont (.sf2); unset means the bundled
+    /// default's search path.
+    #[cfg(feature = "gm")]
+    GmSoundfont,
+    /// Whether the MT-32 translation layer sits in front of the GM synth:
+    /// Auto / On / Off.
+    #[cfg(feature = "gm")]
+    GmMt32Translation,
     // Parallel
     ParallelDevice,
     ParallelOutput,
@@ -1096,6 +1104,16 @@ const SERIAL_ROWS_MT32: [Row; 7] = [
     row(F::Mt32Panel, "  Front panel", Toggle),
     row(F::Mt32Lcd, "  Display", Cycle),
 ];
+// The General MIDI synth needs no ROMs: its rows are the soundfont it
+// plays and whether the MT-32 translation layer sits in front of it.
+#[cfg(all(feature = "midi", feature = "gm"))]
+const SERIAL_ROWS_GM: [Row; 5] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::MidiIn, "  MIDI input", Cycle),
+    row(F::MidiOut, "  MIDI output", Cycle),
+    row(F::GmSoundfont, "  Soundfont", PathRow),
+    row(F::GmMt32Translation, "  MT-32 translation", Cycle),
+];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
 const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "  Device", Cycle)];
@@ -1245,6 +1263,7 @@ pub fn rows(
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
+    midi_out_is_gm: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
         LauncherTab::CreateFloppy => Cow::Borrowed(&NEW_FLOPPY_ROWS),
@@ -1284,6 +1303,7 @@ pub fn rows(
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
             serial_mode,
             midi_out_is_mt32,
+            midi_out_is_gm,
             parallel_device,
         )),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
@@ -1304,10 +1324,11 @@ pub fn rows(
 fn io_ports_rows(
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
+    midi_out_is_gm: bool,
     parallel_device: ParallelDevice,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    let serial = serial_rows(serial_mode, midi_out_is_mt32);
+    let serial = serial_rows(serial_mode, midi_out_is_mt32, midi_out_is_gm);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
@@ -1321,7 +1342,11 @@ fn io_ports_rows(
 
 /// Serial rows for the current mode. Only the `midi` build has any; without it
 /// the Serial section is empty and omitted from the I/O Ports tab.
-fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row] {
+fn serial_rows(
+    serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
+    midi_out_is_gm: bool,
+) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
         if serial_mode != SerialMode::Midi {
@@ -1335,12 +1360,16 @@ fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row
         if midi_out_is_mt32 {
             return &SERIAL_ROWS_MT32;
         }
-        let _ = midi_out_is_mt32;
+        #[cfg(feature = "gm")]
+        if midi_out_is_gm {
+            return &SERIAL_ROWS_GM;
+        }
+        let _ = (midi_out_is_mt32, midi_out_is_gm);
         &SERIAL_ROWS_MIDI
     }
     #[cfg(not(feature = "midi"))]
     {
-        let _ = (serial_mode, midi_out_is_mt32);
+        let _ = (serial_mode, midi_out_is_mt32, midi_out_is_gm);
         &[]
     }
 }
@@ -2129,6 +2158,9 @@ pub struct MachineSetup {
     mt32_pcm_rom: Option<PathBuf>,
     mt32_panel: bool,
     mt32_lcd: Mt32Lcd,
+    /// The General MIDI synth's soundfont and translation mode ([gm]).
+    gm_soundfont: Option<PathBuf>,
+    gm_mt32_translation: Option<String>,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -2396,6 +2428,8 @@ impl MachineSetup {
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
             mt32_panel: cfg.serial.mt32_panel,
             mt32_lcd: cfg.serial.mt32_lcd,
+            gm_soundfont: cfg.gm.soundfont.clone(),
+            gm_mt32_translation: cfg.gm.mt32_translation.clone(),
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2461,6 +2495,10 @@ impl MachineSetup {
     /// what puts its ROM and panel rows on the I/O Ports tab.
     pub fn midi_out_is_mt32(&self) -> bool {
         crate::config::midi_out_is_mt32(self.midi_out.as_deref())
+    }
+
+    pub fn midi_out_is_gm(&self) -> bool {
+        crate::config::midi_out_is_gm(self.midi_out.as_deref())
     }
 
     pub fn serial_mode(&self) -> SerialMode {
@@ -2867,6 +2905,12 @@ impl MachineSetup {
         if self.mt32_lcd != base.serial.mt32_lcd {
             raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
         }
+        if self.gm_soundfont != base.gm.soundfont {
+            raw.gm.soundfont = self.gm_soundfont.as_ref().map(|p| p.display().to_string());
+        }
+        if self.gm_mt32_translation != base.gm.mt32_translation {
+            raw.gm.mt32_translation = self.gm_mt32_translation.clone();
+        }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
@@ -3148,6 +3192,8 @@ impl MachineSetup {
         self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
         self.mt32_panel = base.serial.mt32_panel;
         self.mt32_lcd = base.serial.mt32_lcd;
+        self.gm_soundfont = base.gm.soundfont.clone();
+        self.gm_mt32_translation = base.gm.mt32_translation.clone();
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -3501,6 +3547,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom.as_deref(),
             F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
+            #[cfg(feature = "gm")]
+            F::GmSoundfont => self.gm_soundfont.as_deref(),
             F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
@@ -4086,6 +4134,9 @@ impl MachineSetup {
                 if self.midi_out_is_mt32() {
                     return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
                 }
+                if self.midi_out_is_gm() {
+                    return crate::midi::MIDI_OUT_GM_LABEL.to_string();
+                }
                 self.midi_out.clone().unwrap_or_else(|| "None".to_string())
             }
             #[cfg(feature = "midi")]
@@ -4096,6 +4147,13 @@ impl MachineSetup {
                 }
                 self.midi_in.clone().unwrap_or_else(|| "None".to_string())
             }
+            #[cfg(feature = "gm")]
+            F::GmMt32Translation => match self.gm_mt32_translation.as_deref() {
+                None => "Auto".to_string(),
+                Some(m) if m.eq_ignore_ascii_case("on") => "On".to_string(),
+                Some(m) if m.eq_ignore_ascii_case("off") => "Off".to_string(),
+                Some(_) => "Auto".to_string(),
+            },
             F::ParallelDevice => match self.parallel_device {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
@@ -4466,14 +4524,16 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::MidiOut => {
-                // MT-32 rides at the end of the output list: it is
-                // always there to be chosen, whatever the host offers.
+                // The built-in synths ride at the end of the output
+                // list: always there to be chosen, whatever the host
+                // offers -- the MT-32 first, then General MIDI.
                 let names: Vec<String> = self
                     .midi_endpoints
                     .outputs
                     .iter()
                     .map(|e| e.name.clone())
                     .chain(mt32_endpoint(true))
+                    .chain(gm_endpoint(true))
                     .collect();
                 self.midi_out =
                     crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
@@ -4500,6 +4560,29 @@ impl MachineSetup {
                     .chain(mt32_endpoint(self.midi_out_is_mt32()))
                     .collect();
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
+            }
+            #[cfg(feature = "gm")]
+            F::GmMt32Translation => {
+                // Auto -> On -> Off, stored as the config spells it, with
+                // Auto stored as unset so an untouched row emits nothing.
+                let next = match self.gm_mt32_translation.as_deref() {
+                    None => Some("on"),
+                    Some(m) if m.eq_ignore_ascii_case("on") => Some("off"),
+                    Some(m) if m.eq_ignore_ascii_case("off") => None,
+                    Some(_) => Some("on"),
+                };
+                let next = if forward {
+                    next
+                } else {
+                    // The same ring walked the other way.
+                    match self.gm_mt32_translation.as_deref() {
+                        None => Some("off"),
+                        Some(m) if m.eq_ignore_ascii_case("off") => Some("on"),
+                        Some(m) if m.eq_ignore_ascii_case("on") => None,
+                        Some(_) => None,
+                    }
+                };
+                self.gm_mt32_translation = next.map(str::to_string);
             }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its
@@ -4715,6 +4798,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = Some(path),
             F::Mt32ControlRom => self.mt32_control_rom = Some(path),
+            #[cfg(feature = "gm")]
+            F::GmSoundfont => self.gm_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
@@ -4783,6 +4868,8 @@ impl MachineSetup {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
             F::Mt32ControlRom => self.mt32_control_rom = None,
+            #[cfg(feature = "gm")]
+            F::GmSoundfont => self.gm_soundfont = None,
             F::Mt32PcmRom => self.mt32_pcm_rom = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
@@ -7974,7 +8061,15 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
 /// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    #[cfg(all(feature = "midi", feature = "mt32"))]
+    #[cfg(all(feature = "midi", feature = "mt32", feature = "gm"))]
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_MT32,
+        &SERIAL_ROWS_GM,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
+    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "gm")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_MT32,
@@ -8192,6 +8287,10 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
 #[cfg(feature = "midi")]
 fn mt32_endpoint(wanted: bool) -> Option<String> {
     (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
+}
+
+fn gm_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "gm")).then(|| crate::config::MIDI_OUT_GM.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -9606,6 +9705,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::Off,
             false,
+            false,
         );
         let shape: Vec<(&str, RowKind, LauncherField)> =
             rows.iter().map(|r| (r.label, r.kind, r.field)).collect();
@@ -10133,6 +10233,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::Off,
             false,
+            false,
         );
         let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
         // What to boot and how first, then the places things live.
@@ -10367,6 +10468,7 @@ mod tests {
                 ParallelDevice::None,
                 SerialMode::Midi,
                 s.midi_out_is_mt32(),
+                false,
             )
             .iter()
             .map(|r| r.field)
@@ -10730,9 +10832,15 @@ mod tests {
     #[test]
     fn serial_address_rows_appear_only_in_their_tcp_mode() {
         let has = |mode, field| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
-                .iter()
-                .any(|r| r.field == field)
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == field)
         };
         // Dialling out needs somewhere to dial; listening needs somewhere to
         // bind. Neither mode carries the other's address, and the modes with
@@ -10751,7 +10859,13 @@ mod tests {
             (SerialMode::TcpConnect, LauncherField::SerialConnect),
             (SerialMode::Tcp, LauncherField::SerialListen),
         ] {
-            let r = rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false);
+            let r = rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            );
             let found = r.iter().find(|r| r.field == field).unwrap();
             assert_eq!(found.kind, RowKind::Text);
             assert!(LauncherState::is_serial_addr(field));
@@ -10912,7 +11026,15 @@ mod tests {
             LauncherTab::CreateHard,
             LauncherTab::CreateGeometry,
         ] {
-            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+            for r in rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            {
                 // The page heading is inert and carries no field.
                 if r.kind == RowKind::SectionHeader {
                     continue;
@@ -11029,7 +11151,15 @@ mod tests {
 
         // Every row shows something in its value column.
         for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
-            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+            for r in rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            {
                 match r.kind {
                     RowKind::Cycle | RowKind::Text | RowKind::Size => assert!(
                         !state.row_value(r.field).is_empty(),
@@ -11625,6 +11755,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::default(),
             false,
+            false,
         );
         assert_eq!(
             storage.first().map(|r| r.field),
@@ -11639,7 +11770,13 @@ mod tests {
             (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
             (LauncherTab::Lide, LauncherField::LideBoard),
         ] {
-            let page = rows(tab, ParallelDevice::None, SerialMode::default(), false);
+            let page = rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            );
             assert!(page.iter().any(|r| r.field == marker));
         }
     }
@@ -11680,7 +11817,7 @@ mod tests {
         assert!(!LauncherTab::System.has_top_nav());
 
         // Each category shows only its own settings; the default is Audio.
-        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false);
+        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false, false);
         let audio = page(LauncherTab::AvAudio);
         assert!(audio.iter().any(|r| r.field == F::AudioDevice));
         assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
@@ -12121,6 +12258,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::Midi,
             false,
+            false,
         );
         let headers: Vec<_> = r
             .iter()
@@ -12306,9 +12444,15 @@ mod tests {
     #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::SamplerInput)
+            rows(
+                LauncherTab::IoPorts,
+                device,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::SamplerInput)
         };
         // The sampler rows are hidden (not greyed) unless the sampler is chosen.
         assert!(!has(ParallelDevice::None));
@@ -12319,9 +12463,15 @@ mod tests {
     #[test]
     fn midi_rows_appear_only_in_midi_mode() {
         let has = |mode| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
-                .iter()
-                .any(|r| r.field == LauncherField::MidiOut)
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::MidiOut)
         };
         assert!(!has(SerialMode::Stdout));
         assert!(has(SerialMode::Midi));
@@ -12344,9 +12494,15 @@ mod tests {
         let mut s = MachineSetup::default();
         // The Output file row shows only when the printer is selected.
         let has_output = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::ParallelOutput)
+            rows(
+                LauncherTab::IoPorts,
+                device,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::ParallelOutput)
         };
         assert!(!has_output(ParallelDevice::None));
         assert!(has_output(ParallelDevice::Printer));
@@ -12886,6 +13042,7 @@ mod tests {
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Stdout,
+            false,
             false,
         );
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiOut));
