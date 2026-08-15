@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The one rate conversion between the module and the mix.
+//! Rate conversion between an emulated audio source's native rate and the
+//! mixer's rate ([`crate::audio::MIX_SAMPLE_RATE`]).
 //!
-//! The engine renders at the analogue model's rate; the mixer runs at
-//! [`crate::audio::MIX_SAMPLE_RATE`]. The two are in a fixed rational
-//! ratio, so the conversion is a polyphase windowed-sinc filter: a bank
-//! of one kernel per output phase, computed once, each output frame one
-//! pass of taps over the input history. Band-limited at whichever
-//! Nyquist is lower, so raising a rate adds no images and lowering one
-//! folds none back; the phase advances by an exact integer counter, so
-//! a run never drifts.
+//! A source with its own clock (the MT-32 engine's 48 kHz output, a
+//! Toccata's AD1848 codec at one of its 14 programmable rates) and the
+//! mixer are in a fixed rational ratio at any moment, so the conversion is
+//! a polyphase windowed-sinc filter: a bank of one kernel per output phase,
+//! computed once per (from, to) pair, each output frame one pass of taps
+//! over the input history. Band-limited at whichever Nyquist is lower, so
+//! raising a rate adds no images and lowering one folds none back; the
+//! phase advances by an exact integer counter, so a run never drifts --
+//! deterministic and warp-safe like everything else in the emulated audio
+//! path.
 
 /// Taps each side of the output instant. Sixty-four in all keeps the
 /// passband flat to the top of what the module produces and the

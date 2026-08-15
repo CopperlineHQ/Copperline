@@ -6,6 +6,7 @@
 //! on CLI flags.
 
 pub mod mux;
+pub(crate) mod resample;
 
 #[cfg(feature = "frontend")]
 use crate::timebase::Instant;

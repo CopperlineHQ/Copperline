@@ -14,10 +14,10 @@
 //! not Copperline's to ship and so are the user's to supply. Without them the
 //! machine still runs; it simply has nothing on the far end of the cable.
 
+use crate::audio::resample::Resampler;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-mod resample;
 pub mod rom;
 mod sink;
 
@@ -57,7 +57,7 @@ pub struct Mt32Synth {
     parser: mt32_rs::midi::Parser,
     /// The rate frames leave at, which is what the mixer asked for.
     sample_rate: u32,
-    resampler: resample::Resampler,
+    resampler: Resampler,
     /// Native frames rendered and not yet resampled, and how far the
     /// resampler has drunk from them.
     native: Vec<(i16, i16)>,
@@ -82,7 +82,7 @@ impl Mt32Synth {
         )
         .map_err(|e| anyhow!("the MT-32 engine refused the ROM pair: {e}"))?;
         Ok(Self {
-            resampler: resample::Resampler::new(engine.output_sample_rate(), sample_rate),
+            resampler: Resampler::new(engine.output_sample_rate(), sample_rate),
             engine,
             parser: mt32_rs::midi::Parser::new(),
             sample_rate,
