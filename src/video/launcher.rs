@@ -8412,8 +8412,8 @@ fn rtg_card_name(card: RtgCard) -> &'static str {
         RtgCard::Picasso2 => "Picasso II",
         RtgCard::Picasso2Plus => "Picasso II+",
         RtgCard::Z3660 => "Z3660",
-        RtgCard::GraffityZ2 => "Graffity [Zorro II]",
-        RtgCard::GraffityZ3 => "Graffity [Zorro III]",
+        RtgCard::GraffityZ2 => "Graffity Z2",
+        RtgCard::GraffityZ3 => "Graffity Z3",
     }
 }
 
@@ -10606,7 +10606,7 @@ mod tests {
         // cards do not (the cycle wraps back to None instead).
         s.cycle(LauncherField::Rtg, true);
         assert_eq!(s.rtg, RtgCard::GraffityZ2);
-        assert_eq!(s.value_label(LauncherField::Rtg), "Graffity [Zorro II]");
+        assert_eq!(s.value_label(LauncherField::Rtg), "Graffity Z2");
         let raw = s.to_raw();
         assert_eq!(raw.rtg.card.as_deref(), Some("graffityz2"));
         assert_eq!(
