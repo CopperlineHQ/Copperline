@@ -105,6 +105,7 @@ pub mod smc;
 pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;
+pub mod toccata;
 pub mod video;
 pub mod wasm_manifest;
 #[cfg(feature = "wasm-boards")]
