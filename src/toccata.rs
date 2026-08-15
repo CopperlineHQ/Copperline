@@ -8,14 +8,20 @@
 //! `ad1848` is the register-accurate codec/FIFO core, modelled against
 //! WinUAE/amiberry's `sndboard.cpp` as a behavioural oracle. This module is
 //! the board wrapper: autoconfig (`BoardSpec::toccata`, `src/zorro.rs`),
-//! address decode within the board's 64 KB Zorro II I/O window, and the
-//! `ZorroDevice` glue. The mixer/audio-ring integration lands in the next
-//! commit; `tick` only paces the codec's auto-calibration timer for now.
+//! address decode within the board's 64 KB Zorro II I/O window, the
+//! `ZorroDevice` glue, and the mixer cadence -- resampling the codec's own
+//! programmed rate to the mixer's fixed rate and pushing frames into
+//! Paula's `ToccataAudioRing`. See `docs/internals/audio.md` for how that
+//! ring fits into the wider mixer/stem-capture picture.
 
 pub mod ad1848;
 
+use crate::audio::resample::Resampler;
+use crate::audio::MIX_SAMPLE_RATE;
+use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use ad1848::Ad1848;
+use std::collections::HashMap;
 
 /// One of the four port families the board's 64 KB window decodes to, by
 /// address bit pattern (heavily mirrored -- see `decode_port`).
@@ -56,16 +62,50 @@ fn decode_port(off: u32) -> Option<Port> {
 }
 
 /// The Toccata board: autoconfig glue and register-window decode around
-/// the chip-only [`Ad1848`] core.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// the chip-only [`Ad1848`] core, plus the mixer-rate cadence.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Toccata {
     ad1848: Ad1848,
+    /// Mixer-rate accumulator, in units of colour-clocks * MIX_SAMPLE_RATE
+    /// -- the exact same accumulator shape `Paula::advance_audio` uses.
+    /// One output frame is due each time this reaches PAULA_CLOCK_HZ.
+    mixer_acc: u64,
+    /// One resampler per codec rate this session has used (at most 14, the
+    /// AD1848's legal rate count), so switching back to an already-seen
+    /// rate never rebuilds its kernel table. Purely a host-side cache, not
+    /// machine state -- rebuilt lazily after a savestate load.
+    #[serde(skip)]
+    resamplers: HashMap<u32, Resampler>,
 }
 
 impl Toccata {
     pub fn new() -> Self {
         Self {
             ad1848: Ad1848::new(),
+            mixer_acc: 0,
+            resamplers: HashMap::new(),
+        }
+    }
+
+    /// Advance the mixer-rate cadence by `cck` colour clocks, resampling
+    /// the codec's own programmed rate onto the mixer grid and pushing
+    /// each produced frame into `ring`. Exact-ratio accumulator, so it
+    /// never drifts against `Paula::advance_audio`'s own.
+    fn advance_mixer(&mut self, cck: u32, ring: &mut crate::chipset::paula::ToccataAudioRing) {
+        self.mixer_acc += u64::from(cck) * u64::from(MIX_SAMPLE_RATE);
+        while self.mixer_acc >= u64::from(PAULA_CLOCK_HZ) {
+            self.mixer_acc -= u64::from(PAULA_CLOCK_HZ);
+            // Disjoint field borrows: the resampler cache and the chip it
+            // pulls from via the refill closure below.
+            let Self {
+                ad1848, resamplers, ..
+            } = self;
+            let rate = ad1848.sample_rate_hz();
+            let resampler = resamplers
+                .entry(rate)
+                .or_insert_with(|| Resampler::new(rate, MIX_SAMPLE_RATE));
+            let (left, right) = resampler.next(|| ad1848.produce_one_sample());
+            ring.push_frame(left, right);
         }
     }
 
@@ -115,8 +155,9 @@ impl ZorroDevice for Toccata {
         }
     }
 
-    fn tick(&mut self, cck: u32, _host: &mut DeviceHost) {
+    fn tick(&mut self, cck: u32, host: &mut DeviceHost) {
         self.ad1848.advance_cck(cck);
+        self.advance_mixer(cck, host.toccata_audio());
     }
 
     fn int6_line(&self) -> bool {
@@ -233,5 +274,58 @@ mod tests {
         board.reset();
         assert_eq!(board.read(0x0000, 1, &mut host), 0x80);
         assert_eq!(board.kind(), "toccata");
+    }
+
+    /// Colour clocks needed to cross one mixer-rate (44.1 kHz) frame
+    /// boundary from a zero accumulator: `ceil(PAULA_CLOCK_HZ / MIX_SAMPLE_RATE)`.
+    fn one_mixer_frame_cck() -> u32 {
+        PAULA_CLOCK_HZ.div_ceil(MIX_SAMPLE_RATE)
+    }
+
+    #[test]
+    fn tick_at_the_mixer_native_rate_reaches_the_ring_as_a_near_pass_through() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0b, &mut host); // divider idx 5, crystal1 -> 44100 Hz, mono 8-bit
+        board.write(0x6001, 1, 6, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host); // DAC L unmuted, full scale
+        board.write(0x6001, 1, 7, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host); // DAC R unmuted, full scale
+        board.write(0x2000, 1, 0xff, &mut host); // one 8-bit sample: (255-128)/128
+
+        ZorroDevice::tick(&mut board, one_mixer_frame_cck(), &mut host);
+
+        let (l, r) = toccata_audio.next_sample();
+        // 44100 Hz codec into a 44100 Hz mixer is an identity resample
+        // (l=m=1 in the polyphase ratio), so the frame should be very
+        // close to the raw decoded sample, not zero and not wildly off.
+        assert!(l > 0.9, "left sample too quiet: {l}");
+        assert!(r > 0.9, "right sample too quiet: {r}");
+    }
+
+    #[test]
+    fn tick_advances_the_autocalibration_countdown() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        board.write(0x6001, 1, 9, &mut host);
+        board.write(0x6801, 1, 0x08, &mut host); // request calibration only
+        board.write(0x6001, 1, 11, &mut host);
+        assert_eq!(board.read(0x6801, 1, &mut host) & 0x20, 0); // not yet busy
+
+        ZorroDevice::tick(&mut board, 227 * 25, &mut host);
+
+        assert_ne!(board.read(0x6801, 1, &mut host) & 0x20, 0); // busy window
     }
 }

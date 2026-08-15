@@ -17,7 +17,7 @@
 //! open-coded. Zorro II masters only drive the low 24 bits; a Zorro III master
 //! like the A4091 reaches the 32-bit motherboard and accelerator banks too.
 
-use crate::chipset::paula::CdAudioRing;
+use crate::chipset::paula::{CdAudioRing, ToccataAudioRing};
 use crate::memory::{Memory, ACCEL_RAM_BASE, SLOW_RAM_BASE};
 
 /// DMA bus-master word read: the chip / slow / motherboard / accelerator /
@@ -155,6 +155,9 @@ pub struct DeviceHost<'a> {
     mem: &'a mut Memory,
     /// Paula's CD-audio ring, available only on a host built for the CDTV tick.
     cd_audio: Option<&'a mut CdAudioRing>,
+    /// Paula's Toccata-board audio ring, available only on the bus's
+    /// generic Zorro-board tick host (see `for_slot_with_audio`).
+    toccata_audio: Option<&'a mut ToccataAudioRing>,
     /// The device slot this host was built for, so a bus-mastering board
     /// can recognize DMA addresses inside its own configured window (the
     /// A4091 self-test DMAs its own registers) without re-entering itself.
@@ -171,6 +174,7 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: None,
+            toccata_audio: None,
             self_slot: None,
             touched_memory: false,
         }
@@ -181,6 +185,7 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: None,
+            toccata_audio: None,
             self_slot: Some(slot),
             touched_memory: false,
         }
@@ -203,21 +208,28 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: Some(cd_audio),
+            toccata_audio: None,
             self_slot: None,
             touched_memory: false,
         }
     }
 
-    /// A slot-aware host that also exposes Paula's CD-audio ring: the bus
-    /// device-tick loop, where a SCSI board's CD-ROM target streams CD-DA.
-    pub fn for_slot_with_cd_audio(
+    /// A slot-aware host that also exposes Paula's CD-audio and Toccata
+    /// rings: the bus's generic Zorro-board tick loop, where a SCSI board's
+    /// CD-ROM target streams CD-DA and a fitted Toccata streams its own
+    /// resampled output. Either ring is `None` for a run without that
+    /// hardware; a board that never asks for a ring it wasn't given never
+    /// notices the difference.
+    pub fn for_slot_with_audio(
         mem: &'a mut Memory,
         slot: usize,
         cd_audio: &'a mut CdAudioRing,
+        toccata_audio: &'a mut ToccataAudioRing,
     ) -> Self {
         Self {
             mem,
             cd_audio: Some(cd_audio),
+            toccata_audio: Some(toccata_audio),
             self_slot: Some(slot),
             touched_memory: false,
         }
@@ -249,6 +261,15 @@ impl<'a> DeviceHost<'a> {
     /// provides it; hosts built for memory-access dispatch do not.
     pub fn cd_audio_opt(&mut self) -> Option<&mut CdAudioRing> {
         self.cd_audio.as_deref_mut()
+    }
+
+    /// Paula's Toccata-audio ring. Only present on a host built via
+    /// [`DeviceHost::for_slot_with_audio`] (the bus tick loop); requesting
+    /// it elsewhere is a wiring bug.
+    pub fn toccata_audio(&mut self) -> &mut ToccataAudioRing {
+        self.toccata_audio
+            .as_deref_mut()
+            .expect("DeviceHost::toccata_audio requested without a Toccata-audio ring")
     }
 
     // These wrap the shared decode for boards that hold a `DeviceHost` rather
