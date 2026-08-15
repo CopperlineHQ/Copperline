@@ -64,6 +64,7 @@ running in Copperline.
   contributors.
 - [](internals/picasso2) -- the Picasso II/II+ and CL-GD5426/5428 RTG model.
 - [](internals/audio) -- the audio mixer/sink service and stem capture.
+- [](internals/toccata) -- the MacroSystem Toccata AD1848 sound board model.
 
 ## Design principles
 

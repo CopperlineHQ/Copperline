@@ -21,10 +21,10 @@ There are two board kinds:
   forking and recompiling Copperline. See
   [WASM plugin boards](#wasm-plugin-boards) below.
 
-Functional boards (the A2091, the A4091, the A2065, the CDTV DMAC, and WASM
-plugins) all implement the `ZorroDevice` trait (`src/zorro_device.rs`): the
-bus drives every board through that one boundary for register access,
-ticking, interrupts, and DMA.
+Functional boards (the A2091, the A4091, the A2065, the CDTV DMAC, the
+Toccata, and WASM plugins) all implement the `ZorroDevice` trait
+(`src/zorro_device.rs`): the bus drives every board through that one
+boundary for register access, ticking, interrupts, and DMA.
 
 ## Describing a board in TOML
 
@@ -312,6 +312,25 @@ plugin) breaks Copperline's byte-identical replay and save-state reproducibility
 while traffic flows -- the emulator logs this when the board is attached. Save
 states record only the chosen backend and bring up a fresh one on load
 (in-flight frames are dropped; the guest's TCP retransmits).
+
+## Audio: the Toccata sound board
+
+`[toccata]` fits an in-tree MacroSystem Toccata (`src/toccata.rs`), a Zorro
+II AD1848-based sound board with a mature, open-source AHI driver
+(`toccata.audio`), so AHI-aware guest software gets 16-bit sound with no
+Copperline-specific driver work:
+
+```toml
+[toccata]
+enabled = true
+```
+
+No other options exist yet. Unlike the A2065/HostSocket boards above,
+Toccata's guest interface is purely register-and-FIFO, not bus-mastering
+DMA, and its output joins Copperline's own mixer as a named source (the
+`toccata` stem in `--audio-stems`) rather than talking to a host device
+directly -- see [](internals/toccata) for the register model and
+[](internals/audio) for the mixer/stem-capture integration.
 
 ## Networking: the bundled HostSocket board
 

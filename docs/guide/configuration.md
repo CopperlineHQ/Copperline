@@ -1807,6 +1807,21 @@ bridge adapter identifier and must be restored on a host where that adapter can
 be opened. See [](../zorro) for board details, platform bridge setup, and the
 NAT's limitations.
 
+## `[toccata]` -- AD1848 sound board
+
+```toml
+[toccata]
+enabled = true
+```
+
+Fits a MacroSystem Toccata sound board (an AD1848 codec) on the Zorro
+chain. Its stock, open-source AHI driver (`toccata.audio`) works unmodified,
+so any AHI-aware guest application gets 16-bit sound with no
+Copperline-specific setup. No other options exist yet. Omit the section
+(or `enabled = false`) for no board. The board's output joins the mixer as
+the `toccata` source for `--audio-stems` (see [](headless)); see
+[](../zorro) and [](../internals/toccata) for the register model.
+
 ## `[hostsocket]` -- bsdsocket.library without a guest TCP/IP stack
 
 ```toml
