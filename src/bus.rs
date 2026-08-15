@@ -4208,6 +4208,8 @@ impl Bus {
         self.devices.iter().any(|d| match d {
             crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_active(),
             crate::zorro_device::BoardDevice::Picasso2(p) => p.rtg_active(),
+            crate::zorro_device::BoardDevice::GraffityZ2(g) => g.rtg_active(),
+            crate::zorro_device::BoardDevice::GraffityZ3(g) => g.rtg_active(),
             _ => false,
         })
     }
@@ -4219,6 +4221,8 @@ impl Bus {
         self.devices.iter().find_map(|d| match d {
             crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_frame(out),
             crate::zorro_device::BoardDevice::Picasso2(p) => p.rtg_frame(out),
+            crate::zorro_device::BoardDevice::GraffityZ2(g) => g.rtg_frame(out),
+            crate::zorro_device::BoardDevice::GraffityZ3(g) => g.rtg_frame(out),
             _ => None,
         })
     }

@@ -232,7 +232,7 @@ pub struct Config {
     /// the Zorro chain and presents RTG screens (all pixel formats, core
     /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
     pub rtg: RtgCard,
-    /// Picasso II/II+ display memory. Ignored by other RTG cards.
+    /// Picasso II/II+ and Graffity display memory. Ignored by the Z3660.
     pub rtg_vram_bytes: usize,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
@@ -1049,6 +1049,12 @@ pub enum RtgCard {
     /// Village Tronic Picasso II+: Zorro II, CL-GD5428, 1 or 2 MB VRAM,
     /// with vertical blank wired to INT2.
     Picasso2Plus,
+    /// Atéo Concepts Graffity [Zorro II]: CL-GD5428, 1 or 2 MB VRAM, a
+    /// chained VRAM + register aperture pair like Picasso II's.
+    GraffityZ2,
+    /// Atéo Concepts Graffity [Zorro III]: CL-GD5428, 1 or 2 MB VRAM, one
+    /// 16 MB autoconfig window.
+    GraffityZ3,
 }
 
 /// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
@@ -3507,10 +3513,11 @@ pub(crate) struct RawHostSocket {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRtg {
-    /// Card to fit: "z3660", "picasso2", "picasso2plus", or "none".
+    /// Card to fit: "z3660", "picasso2", "picasso2plus", "graffityz2",
+    /// "graffityz3", or "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) card: Option<String>,
-    /// Picasso II/II+ display memory: "1M" or "2M" (default).
+    /// Picasso II/II+ and Graffity display memory: "1M" or "2M" (default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vram: Option<String>,
 }
@@ -4341,19 +4348,25 @@ impl TryFrom<RawConfig> for Config {
                 "z3660" => RtgCard::Z3660,
                 "picasso2" => RtgCard::Picasso2,
                 "picasso2plus" | "picasso2+" => RtgCard::Picasso2Plus,
+                "graffityz2" => RtgCard::GraffityZ2,
+                "graffityz3" => RtgCard::GraffityZ3,
                 _ => {
                     errors.push(anyhow!(
                         "[rtg] card = {raw_card:?} is not known \
-                         (expected \"z3660\", \"picasso2\", \"picasso2plus\", or \"none\")"
+                         (expected \"z3660\", \"picasso2\", \"picasso2plus\", \
+                         \"graffityz2\", \"graffityz3\", or \"none\")"
                     ));
                     RtgCard::None
                 }
             },
         };
-        // Only the Picasso II cards have configurable display memory; other
-        // cards ignore [rtg] vram entirely, so a leftover value must not
-        // fail an unrelated configuration.
-        let rtg_vram_bytes = if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus) {
+        // Only the Picasso II and Graffity cards have configurable display
+        // memory; other cards ignore [rtg] vram entirely, so a leftover
+        // value must not fail an unrelated configuration.
+        let rtg_vram_bytes = if matches!(
+            rtg,
+            RtgCard::Picasso2 | RtgCard::Picasso2Plus | RtgCard::GraffityZ2 | RtgCard::GraffityZ3
+        ) {
             match raw.rtg.vram.as_deref() {
                 None => defaults.rtg_vram_bytes,
                 Some(value) => parse_size(value, "RTG VRAM")?,
@@ -5684,11 +5697,21 @@ fn validate_rtg_card(rtg: RtgCard, vram_bytes: usize, cpu: CpuModel) -> Result<(
             cpu
         );
     }
-    if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus)
-        && !matches!(vram_bytes, 0x10_0000 | 0x20_0000)
+    if rtg == RtgCard::GraffityZ3 && !cpu_has_32bit_bus(cpu) {
+        bail!(
+            "[rtg] card = \"graffityz3\" is a Zorro III board and needs a CPU \
+             with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
+             a 24-bit bus",
+            cpu
+        );
+    }
+    if matches!(
+        rtg,
+        RtgCard::Picasso2 | RtgCard::Picasso2Plus | RtgCard::GraffityZ2 | RtgCard::GraffityZ3
+    ) && !matches!(vram_bytes, 0x10_0000 | 0x20_0000)
     {
         bail!(
-            "[rtg] vram for Picasso II cards must be \"1M\" or \"2M\", got {} bytes",
+            "[rtg] vram for Picasso II and Graffity cards must be \"1M\" or \"2M\", got {} bytes",
             vram_bytes
         );
     }
