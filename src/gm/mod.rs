@@ -3,7 +3,7 @@
 //! The General MIDI synthesizer as one of the devices Paula's MIDI output
 //! can be pointed at.
 //!
-//! Everything that makes sound lives in the `copperline-gm` engine (a
+//! Everything that makes sound lives in the Coppersynth engine (a
 //! soundfont player with an MT-32 translation layer in front); this module
 //! is the glue that finds a soundfont, runs the engine at the mixer's
 //! rate, and hands frames to the same line-mix seam the MT-32 uses. Like
@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-pub use copperline_gm::mt32::translator::Mt32Mode;
+pub use coppersynth::mt32::translator::Mt32Mode;
 
 /// How many frames the engine is asked for at a time.
 const BLOCK_FRAMES: usize = 256;
@@ -21,24 +21,28 @@ const BLOCK_FRAMES: usize = 256;
 /// The soundfont's canonical filename, for the search path and messages.
 pub const SOUNDFONT_NAME: &str = "GeneralUser-GS.sf2";
 
+/// The zipped spelling release packages bundle (32 MB -> 29 MB), read
+/// with the archive support Copperline already carries for WHDLoad.
+pub const SOUNDFONT_ZIP_NAME: &str = "GeneralUser-GS.zip";
+
 /// The `[gm]` settings the device is fitted with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GmOptions {
     /// An explicit soundfont; unset means the search path below.
     pub soundfont: Option<PathBuf>,
-    /// MT-32 translation: auto (default), on, off.
-    pub mt32_translation: Option<String>,
+    /// MT-32 mode: auto (default), on, off.
+    pub mt32_mode: Option<String>,
 }
 
 impl GmOptions {
     pub fn mode(&self) -> Result<Mt32Mode> {
-        match self.mt32_translation.as_deref().map(str::trim) {
+        match self.mt32_mode.as_deref().map(str::trim) {
             None => Ok(Mt32Mode::Auto),
             Some(s) if s.eq_ignore_ascii_case("auto") => Ok(Mt32Mode::Auto),
             Some(s) if s.eq_ignore_ascii_case("on") => Ok(Mt32Mode::On),
             Some(s) if s.eq_ignore_ascii_case("off") => Ok(Mt32Mode::Off),
             Some(other) => Err(anyhow!(
-                "[gm] mt32_translation must be \"auto\", \"on\", or \"off\", got {other:?}"
+                "[gm] mt32_mode must be \"auto\", \"on\", or \"off\", got {other:?}"
             )),
         }
     }
@@ -73,16 +77,18 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for candidate in [
-                dir.join(SOUNDFONT_NAME),
-                dir.join("share").join("copperline").join(SOUNDFONT_NAME),
-                dir.join("..")
-                    .join("share")
-                    .join("copperline")
-                    .join(SOUNDFONT_NAME),
+            // The zipped bank ships smaller and is preferred when both
+            // are present; either spelling works in every location.
+            for dir in [
+                dir.to_path_buf(),
+                dir.join("share").join("copperline"),
+                dir.join("..").join("share").join("copperline"),
             ] {
-                if candidate.is_file() {
-                    return Ok(candidate);
+                for name in [SOUNDFONT_ZIP_NAME, SOUNDFONT_NAME] {
+                    let candidate = dir.join(name);
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
                 }
             }
         }
@@ -93,9 +99,40 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
     ))
 }
 
+/// Build the engine from a soundfont file, unpacking a zipped one on the
+/// way in: the first `.sf2` entry is the bank, whatever it is called.
+fn open_engine(path: &std::path::Path, mode: Mt32Mode) -> Result<coppersynth::engine::GmEngine> {
+    let zipped = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if zipped {
+        let file = std::fs::File::open(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+        let entry = (0..archive.len())
+            .find(|&i| {
+                archive
+                    .by_index(i)
+                    .is_ok_and(|f| f.name().to_ascii_lowercase().ends_with(".sf2"))
+            })
+            .ok_or_else(|| anyhow!("{}: no .sf2 inside", path.display()))?;
+        let mut reader = archive
+            .by_index(entry)
+            .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+        return coppersynth::engine::GmEngine::open_reader(
+            &mut reader,
+            crate::audio::MIX_SAMPLE_RATE,
+            mode,
+        )
+        .map_err(|e| anyhow!("{}: {e}", path.display()));
+    }
+    coppersynth::engine::GmEngine::open(path, crate::audio::MIX_SAMPLE_RATE, mode)
+        .map_err(|e| anyhow!("{e}"))
+}
+
 /// A General MIDI synthesizer attached to the MIDI output.
 pub struct GmDevice {
-    engine: copperline_gm::engine::GmEngine,
+    engine: coppersynth::engine::GmEngine,
     /// The block last rendered, and how much of it the mixer has taken.
     block: Vec<(f32, f32)>,
     played: usize,
@@ -114,12 +151,10 @@ impl GmDevice {
     pub fn open(options: &GmOptions) -> Result<Self> {
         let mode = options.mode()?;
         let soundfont = find_soundfont(options.soundfont.as_deref())?;
-        let engine =
-            copperline_gm::engine::GmEngine::open(&soundfont, crate::audio::MIX_SAMPLE_RATE, mode)
-                .map_err(|e| anyhow!("{e}"))?;
+        let engine = open_engine(&soundfont, mode)?;
         log::info!(
-            "midi: General MIDI attached ({}, {}, mt32 translation {})",
-            copperline_gm::version(),
+            "midi: General MIDI attached ({}, {}, MT-32 mode {})",
+            coppersynth::version(),
             soundfont.display(),
             match mode {
                 Mt32Mode::Auto => "auto",
@@ -207,7 +242,7 @@ mod tests {
         let Some(sf) = soundfont() else { return };
         let options = GmOptions {
             soundfont: Some(sf),
-            mt32_translation: Some("off".to_string()),
+            mt32_mode: Some("off".to_string()),
         };
         let render = || {
             let mut device = GmDevice::open(&options).expect("device opens");
@@ -227,6 +262,46 @@ mod tests {
         assert_eq!(a, b, "the audible path must be deterministic");
     }
 
+    /// A zipped bank is the same instrument: the archive path renders
+    /// byte-identically to the flat file it wraps.
+    #[test]
+    fn a_zipped_soundfont_opens() {
+        let Some(sf) = soundfont() else { return };
+        let zip_path = sf.with_file_name("test-GeneralUser-GS.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip creates");
+            let mut writer = zip::ZipWriter::new(file);
+            // Stored, not deflated: the test exercises the archive path,
+            // not the compressor, and skips a multi-second deflate.
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(true);
+            writer.start_file(SOUNDFONT_NAME, options).expect("entry");
+            std::io::copy(
+                &mut std::fs::File::open(&sf).expect("soundfont opens"),
+                &mut writer,
+            )
+            .expect("entry written");
+            writer.finish().expect("zip finishes");
+        }
+        let render = |path: PathBuf| {
+            let options = GmOptions {
+                soundfont: Some(path),
+                mt32_mode: Some("off".to_string()),
+            };
+            let mut device = GmDevice::open(&options).expect("device opens");
+            for b in [0xC0u8, 0x00, 0x90, 60, 100] {
+                device.write_byte(b);
+            }
+            let mut frames = Vec::with_capacity(4410);
+            for _ in 0..4410 {
+                frames.push(device.next_frame());
+            }
+            frames
+        };
+        assert_eq!(render(zip_path), render(sf));
+    }
+
     /// MT-32 translation in front of the same synth: an MT-32 patch
     /// number arrives as its GM instrument.
     #[test]
@@ -234,7 +309,7 @@ mod tests {
         let Some(sf) = soundfont() else { return };
         let options = GmOptions {
             soundfont: Some(sf),
-            mt32_translation: Some("on".to_string()),
+            mt32_mode: Some("on".to_string()),
         };
         let mut device = GmDevice::open(&options).expect("device opens");
         // MT-32 patch 12 (Pipe Org 1) plus a note; the church organ that

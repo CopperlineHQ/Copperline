@@ -3256,10 +3256,10 @@ pub(crate) struct RawGm {
     /// path (COPPERLINE_GM_SOUNDFONT, beside the executable, share/).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) soundfont: Option<String>,
-    /// MT-32 translation: "auto" (default; translates once MT-32 sysex is
+    /// MT-32 mode: "auto" (default; translates once MT-32 sysex is
     /// seen), "on", or "off".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) mt32_translation: Option<String>,
+    pub(crate) mt32_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -4967,22 +4967,22 @@ impl TryFrom<RawConfig> for Config {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GmConfig {
     pub soundfont: Option<PathBuf>,
-    pub mt32_translation: Option<String>,
+    pub mt32_mode: Option<String>,
 }
 
 fn resolve_gm(raw: RawGm) -> Result<GmConfig> {
-    if let Some(mode) = raw.mt32_translation.as_deref() {
+    if let Some(mode) = raw.mt32_mode.as_deref() {
         let m = mode.trim();
         if !(m.eq_ignore_ascii_case("auto")
             || m.eq_ignore_ascii_case("on")
             || m.eq_ignore_ascii_case("off"))
         {
-            bail!("[gm] mt32_translation must be \"auto\", \"on\", or \"off\", got {mode:?}");
+            bail!("[gm] mt32_mode must be \"auto\", \"on\", or \"off\", got {mode:?}");
         }
     }
     Ok(GmConfig {
         soundfont: raw.soundfont.map(PathBuf::from),
-        mt32_translation: raw.mt32_translation,
+        mt32_mode: raw.mt32_mode,
     })
 }
 

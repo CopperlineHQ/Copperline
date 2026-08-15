@@ -615,10 +615,9 @@ pub enum LauncherField {
     /// default's search path.
     #[cfg(feature = "gm")]
     GmSoundfont,
-    /// Whether the MT-32 translation layer sits in front of the GM synth:
-    /// Auto / On / Off.
+    /// The MT-32 mode of the GM synth: Auto / On / Off.
     #[cfg(feature = "gm")]
-    GmMt32Translation,
+    GmMt32Mode,
     // Parallel
     ParallelDevice,
     ParallelOutput,
@@ -1112,7 +1111,7 @@ const SERIAL_ROWS_GM: [Row; 5] = [
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
     row(F::GmSoundfont, "  Soundfont", PathRow),
-    row(F::GmMt32Translation, "  MT-32 translation", Cycle),
+    row(F::GmMt32Mode, "  MT-32 mode", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
@@ -2160,7 +2159,7 @@ pub struct MachineSetup {
     mt32_lcd: Mt32Lcd,
     /// The General MIDI synth's soundfont and translation mode ([gm]).
     gm_soundfont: Option<PathBuf>,
-    gm_mt32_translation: Option<String>,
+    gm_mt32_mode: Option<String>,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -2429,7 +2428,7 @@ impl MachineSetup {
             mt32_panel: cfg.serial.mt32_panel,
             mt32_lcd: cfg.serial.mt32_lcd,
             gm_soundfont: cfg.gm.soundfont.clone(),
-            gm_mt32_translation: cfg.gm.mt32_translation.clone(),
+            gm_mt32_mode: cfg.gm.mt32_mode.clone(),
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2908,8 +2907,8 @@ impl MachineSetup {
         if self.gm_soundfont != base.gm.soundfont {
             raw.gm.soundfont = self.gm_soundfont.as_ref().map(|p| p.display().to_string());
         }
-        if self.gm_mt32_translation != base.gm.mt32_translation {
-            raw.gm.mt32_translation = self.gm_mt32_translation.clone();
+        if self.gm_mt32_mode != base.gm.mt32_mode {
+            raw.gm.mt32_mode = self.gm_mt32_mode.clone();
         }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
@@ -3193,7 +3192,7 @@ impl MachineSetup {
         self.mt32_panel = base.serial.mt32_panel;
         self.mt32_lcd = base.serial.mt32_lcd;
         self.gm_soundfont = base.gm.soundfont.clone();
-        self.gm_mt32_translation = base.gm.mt32_translation.clone();
+        self.gm_mt32_mode = base.gm.mt32_mode.clone();
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -4148,7 +4147,13 @@ impl MachineSetup {
                 self.midi_in.clone().unwrap_or_else(|| "None".to_string())
             }
             #[cfg(feature = "gm")]
-            F::GmMt32Translation => match self.gm_mt32_translation.as_deref() {
+            F::GmSoundfont if self.gm_soundfont.is_none() => {
+                // The bundled bank, named rather than blank: an unset row
+                // is not an empty setting, it is the default in force.
+                "GeneralUser-GS".to_string()
+            }
+            #[cfg(feature = "gm")]
+            F::GmMt32Mode => match self.gm_mt32_mode.as_deref() {
                 None => "Auto".to_string(),
                 Some(m) if m.eq_ignore_ascii_case("on") => "On".to_string(),
                 Some(m) if m.eq_ignore_ascii_case("off") => "Off".to_string(),
@@ -4562,10 +4567,10 @@ impl MachineSetup {
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
             }
             #[cfg(feature = "gm")]
-            F::GmMt32Translation => {
+            F::GmMt32Mode => {
                 // Auto -> On -> Off, stored as the config spells it, with
                 // Auto stored as unset so an untouched row emits nothing.
-                let next = match self.gm_mt32_translation.as_deref() {
+                let next = match self.gm_mt32_mode.as_deref() {
                     None => Some("on"),
                     Some(m) if m.eq_ignore_ascii_case("on") => Some("off"),
                     Some(m) if m.eq_ignore_ascii_case("off") => None,
@@ -4575,14 +4580,14 @@ impl MachineSetup {
                     next
                 } else {
                     // The same ring walked the other way.
-                    match self.gm_mt32_translation.as_deref() {
+                    match self.gm_mt32_mode.as_deref() {
                         None => Some("off"),
                         Some(m) if m.eq_ignore_ascii_case("off") => Some("on"),
                         Some(m) if m.eq_ignore_ascii_case("on") => None,
                         Some(_) => None,
                     }
                 };
-                self.gm_mt32_translation = next.map(str::to_string);
+                self.gm_mt32_mode = next.map(str::to_string);
             }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its

@@ -2057,7 +2057,7 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             {
                 sink.set_gm_options(crate::gm::GmOptions {
                     soundfont: cfg.gm.soundfont.clone(),
-                    mt32_translation: cfg.gm.mt32_translation.clone(),
+                    mt32_mode: cfg.gm.mt32_mode.clone(),
                 });
                 if wants_gm {
                     sink.set_output_endpoint(Some(crate::config::MIDI_OUT_GM));

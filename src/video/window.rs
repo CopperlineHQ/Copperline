@@ -6051,12 +6051,14 @@ impl App {
             return;
         };
         let fault = sink.take_gm_fault();
-        let display = sink.take_gm_display();
+        // Display lines are drained but no longer shown: the front panel's
+        // LCD is where they belong, and it is on its way. (Surfacing them
+        // on the OSD as an option may return; the tap in the sink stays.)
+        for line in sink.take_gm_display() {
+            log::debug!("gm display: {line}");
+        }
         if let Some(fault) = fault {
             self.warn_osd(format!("General MIDI: {fault}"));
-        }
-        for line in display {
-            self.show_osd(line);
         }
     }
 
@@ -8146,7 +8148,9 @@ impl App {
             ),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
             #[cfg(feature = "gm")]
-            LauncherField::GmSoundfont => dialog.add_filter("Soundfonts", &["sf2", "SF2"]),
+            LauncherField::GmSoundfont => {
+                dialog.add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
+            }
             // SCSI, IDE, and lide drive slots all take hard disks or CD
             // images (a cue/iso/chd attaches a CD-ROM drive at that slot,
             // over SCSI or ATAPI as appropriate).

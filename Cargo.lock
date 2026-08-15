@@ -500,7 +500,7 @@ dependencies = [
  "arboard",
  "bincode",
  "chd",
- "copperline-gm",
+ "coppersynth",
  "cpal",
  "delharc",
  "env_logger",
@@ -540,7 +540,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "copperline-gm"
+name = "coppersynth"
 version = "0.1.0"
 dependencies = [
  "rustysynth",

@@ -33,10 +33,10 @@ default = [
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
-# The built-in General MIDI synthesizer (soundfont player with an MT-32
-# translation layer), reachable as the "gm" MIDI-Out device. No ROMs
-# needed; the soundfont is fetched or bundled separately.
-gm = ["dep:copperline-gm"]
+# Coppersynth, the built-in General MIDI synthesizer (soundfont player
+# with an MT-32 translation layer), reachable as the "gm" MIDI-Out
+# device. No ROMs needed; the soundfont is fetched or bundled separately.
+gm = ["dep:coppersynth"]
 # The WHDLoad game library: the launcher's Library page, the local game
 # database it reads, and the OpenRetro sync that fills it.
 #
@@ -120,10 +120,10 @@ fluxbridge = ["dep:fluxbridge"]
 m68k = { version = "0.10", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
-# LOCAL TESTING PIN: copperline-gm lives beside this checkout while it is
+# LOCAL TESTING PIN: Coppersynth lives beside this checkout while it is
 # developed; it moves to a CopperlineHQ git pin (like mt32-rs above)
 # before this branch is ever proposed upstream.
-copperline-gm = { path = "../repos/rusty-gm/copperline-gm", optional = true }
+coppersynth = { path = "../repos/coppersynth/coppersynth", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

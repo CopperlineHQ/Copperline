@@ -5511,6 +5511,12 @@ fn launcher_bridge_configure_rect(rect: Rect, row_y: usize) -> Rect {
 /// a Reset that is not there must not still answer, and a Browse that is
 /// not there must not still open a dialog.
 fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -> (bool, bool) {
+    // The soundfont row behaves like a Paths row: unset means the bundled
+    // GeneralUser GS is in force, and a default has nothing to clear.
+    #[cfg(feature = "gm")]
+    if field == LauncherField::GmSoundfont {
+        return (true, setup.path(field).is_some());
+    }
     if !field.is_paths_field() {
         return (true, true);
     }
