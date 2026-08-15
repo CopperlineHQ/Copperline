@@ -619,6 +619,12 @@ floppy_sounds_volume = 100
 # filter is engaged.
 # audio_filter = "auto"
 
+# Default granularity list for `--audio-stems` (headless-only; see
+# docs/guide/headless.md) when a run doesn't pass `--audio-stems-mode`
+# explicitly -- a comma-separated subset of "master", "source", "channel".
+# Has no effect without `--audio-stems DIR` on the command line.
+# stem_granularity = "master,source"
+
 
 # Host input preferences.
 # [input]

@@ -1827,13 +1827,23 @@ fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -
 /// gets a stem file at all, even if `--audio-stems-mode` includes
 /// `source`/`channel`.
 ///
-/// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
-/// make sound" oracle (e.g. a CD swapped into an empty drive mid-run by
-/// `--insert-cd-after` or the control protocol is missed) -- see
-/// docs/internals/audio.md for the exact rule and its limits. `toccata` is
-/// exact, not a heuristic: `[toccata] enabled` is the only thing that fits
-/// the board at all.
-fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio::mux::SourceSpec> {
+/// The CD/MT-32/Toccata checks are a heuristic, not a perfect "will this
+/// run ever make sound" oracle (e.g. a CD swapped into an empty drive
+/// mid-run by `--insert-cd-after` or the control protocol is missed) --
+/// see docs/internals/audio.md for the exact rule and its limits.
+///
+/// `state_loaded` must be true when this run passes `--load-state`: the
+/// restored machine can describe entirely different hardware than `cfg`
+/// (a state's own descriptor can disagree with the config that started
+/// this process, and the host reconfigures to match it -- see
+/// `Emulator::adopt_loaded_state`), so `cfg` alone cannot say whether the
+/// resumed machine has a CD drive, an MT-32, or a Toccata board. Rather
+/// than risk silently missing an active source, a state load
+/// conservatively registers all three regardless of what `cfg` says.
+fn configured_audio_stem_sources(
+    cfg: &config::Config,
+    state_loaded: bool,
+) -> Vec<copperline::audio::mux::SourceSpec> {
     use copperline::audio::mux::SourceSpec;
     let mut sources = vec![
         SourceSpec {
@@ -1854,10 +1864,12 @@ fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio:
             .as_ref()
             .is_some_and(|d| config::is_cd_image_path(&d.path))
     };
-    let has_cd = matches!(
-        cfg.machine,
-        Some(config::MachineModel::Cd32) | Some(config::MachineModel::Cdtv)
-    ) || cfg.cd_image_path.is_some()
+    let has_cd = state_loaded
+        || matches!(
+            cfg.machine,
+            Some(config::MachineModel::Cd32) | Some(config::MachineModel::Cdtv)
+        )
+        || cfg.cd_image_path.is_some()
         || unit_has_cd_image(&cfg.ide.master)
         || unit_has_cd_image(&cfg.ide.slave)
         || cfg.lide.drives.iter().any(unit_has_cd_image)
@@ -1868,16 +1880,17 @@ fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio:
             channel_names: &[],
         });
     }
-    let has_mt32 = config::midi_out_is_mt32(cfg.serial.midi_out.as_deref())
-        && cfg.serial.mt32_control_rom.is_some()
-        && cfg.serial.mt32_pcm_rom.is_some();
+    let has_mt32 = state_loaded
+        || (config::midi_out_is_mt32(cfg.serial.midi_out.as_deref())
+            && cfg.serial.mt32_control_rom.is_some()
+            && cfg.serial.mt32_pcm_rom.is_some());
     if has_mt32 {
         sources.push(SourceSpec {
             id: "mt32",
             channel_names: &[],
         });
     }
-    if cfg.toccata {
+    if state_loaded || cfg.toccata {
         sources.push(SourceSpec {
             id: "toccata",
             channel_names: &[],
@@ -2324,6 +2337,15 @@ fn main() -> Result<()> {
     }
     info!("emulation timing: deterministic core, paced={paced}");
     let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
+    if let Some(path) = &cli.load_state {
+        let outcome = emu.load_state(path)?;
+        info!(
+            "save state loaded: {} ({}, resuming at {:.1}s emulated time)",
+            path.display(),
+            outcome.summary,
+            emu.bus().emulated_seconds()
+        );
+    }
     if let Some(dir) = &cli.audio_stems {
         let granularities = cli
             .audio_stems_mode
@@ -2335,20 +2357,15 @@ fn main() -> Result<()> {
                      or a [audio] stem_granularity default in the config"
                 )
             })?;
-        let sources = configured_audio_stem_sources(&cfg);
+        // After any --load-state: the resumed machine can describe
+        // different hardware than cfg (see configured_audio_stem_sources'
+        // own doc comment), so this reads the config only to *supplement*
+        // a conservative state-loaded registration, never to narrow it.
+        let sources = configured_audio_stem_sources(&cfg, cli.load_state.is_some());
         emu.bus_mut()
             .paula
             .audio
             .enable_stems(dir, granularities, &sources)?;
-    }
-    if let Some(path) = &cli.load_state {
-        let outcome = emu.load_state(path)?;
-        info!(
-            "save state loaded: {} ({}, resuming at {:.1}s emulated time)",
-            path.display(),
-            outcome.summary,
-            emu.bus().emulated_seconds()
-        );
     }
     // Arm reverse debugging (snapshot ring + optional one-shot "last writer"
     // watchpoint) from the COPPERLINE_DBG_RR*/RWATCH environment.
@@ -2789,7 +2806,7 @@ mod tests {
     fn stem_sources_register_cdda_for_every_static_cd_attachment() {
         use std::path::PathBuf;
         let ids = |cfg: &config::Config| -> Vec<&'static str> {
-            configured_audio_stem_sources(cfg)
+            configured_audio_stem_sources(cfg, false)
                 .iter()
                 .map(|s| s.id)
                 .collect()
@@ -2838,6 +2855,35 @@ mod tests {
             ..Default::default()
         });
         assert!(!ids(&cfg).contains(&"cdda"));
+    }
+
+    #[test]
+    fn stem_sources_are_conservative_after_a_state_load() {
+        // A bare config says no CD/MT-32/Toccata -- but a --load-state run
+        // can resume a machine describing entirely different hardware than
+        // this process's own cfg (the host reconfigures to match a
+        // state's descriptor), so state_loaded=true must register all
+        // three regardless of what the pre-load config says.
+        let cfg = config::Config::default();
+        let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, true)
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(ids.contains(&"cdda"), "state loads must not skip cdda");
+        assert!(ids.contains(&"mt32"), "state loads must not skip mt32");
+        assert!(
+            ids.contains(&"toccata"),
+            "state loads must not skip toccata"
+        );
+
+        // Without a state load, the same bare config registers none of them.
+        let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, false)
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(!ids.contains(&"cdda"));
+        assert!(!ids.contains(&"mt32"));
+        assert!(!ids.contains(&"toccata"));
     }
 
     #[test]

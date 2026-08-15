@@ -101,8 +101,8 @@ the pre-mux mixing path. Nothing about stem capture depends on wall-clock
 time, so it is warp-safe (a warped run renders the same sample stream
 faster, not differently) and reproducible: two runs of the same scenario
 produce byte-identical stem directories, which is what
-`tests/audio_stems_determinism.rs` checks by hashing every file in two
-runs' output directories and comparing the hash sets.
+`tests/audio_stems_determinism.rs` checks by reading every file from two
+runs' output directories and comparing the bytes directly.
 
 ## Savestates
 

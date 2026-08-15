@@ -112,6 +112,13 @@ impl AudioMux {
     /// its per-channel files, and a source absent from `sources` never gets
     /// a file at all (the caller decides which sources are worth capturing,
     /// e.g. omitting `cdda` when no CD drive is configured this run).
+    ///
+    /// `dir` must be empty (or not yet exist). A stem directory's file set
+    /// says what this run captured; silently writing into a directory that
+    /// already holds stems from an earlier run (possibly a different
+    /// granularity selection) would leave stale files mixed in with fresh
+    /// ones, contradicting that and making directory-based comparisons
+    /// unreliable.
     pub fn enable_stems(
         &mut self,
         dir: &Path,
@@ -120,6 +127,15 @@ impl AudioMux {
     ) -> Result<()> {
         std::fs::create_dir_all(dir)
             .map_err(|e| anyhow!("create audio stems directory {}: {e}", dir.display()))?;
+        let mut existing = std::fs::read_dir(dir)
+            .map_err(|e| anyhow!("read audio stems directory {}: {e}", dir.display()))?;
+        if existing.next().is_some() {
+            return Err(anyhow!(
+                "audio stems directory {} is not empty; pick an empty directory so this \
+                 run's stem files aren't mixed with an earlier run's",
+                dir.display()
+            ));
+        }
 
         let master = granularities
             .contains(&StemGranularity::Master)
@@ -321,6 +337,7 @@ mod tests {
             .collect();
         entries.sort();
         assert_eq!(entries, vec!["master.wav"]);
+        drop(mux); // close the open WavWriter before removing its file (Windows)
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -359,6 +376,7 @@ mod tests {
                 "paula.wav",
             ]
         );
+        drop(mux); // close the open WavWriters before removing their files (Windows)
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
