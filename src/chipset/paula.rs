@@ -3,6 +3,7 @@
 //! Paula-side state: serial UART registers, interrupt enable/request,
 //! and four-channel audio DMA + mixer.
 
+use crate::audio::mux::AudioMux;
 use crate::audio::{AudioRuntimeStatus, AudioSink, MIX_SAMPLE_RATE};
 use crate::drive_sounds::DriveSounds;
 use crate::serial::SerialSink;
@@ -327,8 +328,8 @@ fn null_serial_sink() -> Box<dyn SerialSink> {
     Box::new(crate::serial::NullSerialSink)
 }
 
-fn null_audio_sink() -> Box<dyn AudioSink> {
-    Box::new(crate::audio::NullSink)
+fn null_audio_sink() -> AudioMux {
+    AudioMux::new(Box::new(crate::audio::NullSink))
 }
 
 /// serde default for the skipped `stereo_separation` field: full width, so a
@@ -357,7 +358,7 @@ pub struct Paula {
     #[serde(skip)]
     pub(crate) serial_observer: Option<crate::serial::SerialObserver>,
     #[serde(skip, default = "null_audio_sink")]
-    pub audio: Box<dyn AudioSink>,
+    pub audio: AudioMux,
     pub adkcon: u16,
     pub potgo: u16,
 
@@ -458,7 +459,7 @@ impl Paula {
             intreq: 0,
             serial,
             serial_observer: None,
-            audio,
+            audio: AudioMux::new(audio),
             adkcon: 0,
             potgo: 0,
             chans: [
@@ -1836,7 +1837,7 @@ impl Paula {
             out_left = mid + side;
             out_right = mid - side;
         }
-        self.audio.push(out_left, out_right);
+        self.audio.push_master(out_left, out_right);
     }
 
     fn channel_mixed_sample(&self, ch_idx: usize) -> i32 {
