@@ -237,6 +237,36 @@ freeze, and resume the clock mid-run with `rtc.get` / `rtc.set`.
 - `--audio-wav PATH` writes the mixed stereo output as a 32-bit float
   44.1 kHz WAV in emulated time instead of playing it -- useful for
   comparing audio behaviour across runs.
+- `--audio-stems DIR --audio-stems-mode LIST` writes one or more
+  granularities of stem WAV into `DIR` instead of a single mixed file
+  (still 32-bit float, 44.1 kHz). `LIST` is a comma-separated subset of:
+  - `master` -- `DIR/master.wav`, the same mixed-master signal
+    `--audio-wav` writes, just under a different name.
+  - `source` -- one file per audio source: `DIR/paula.wav`,
+    `DIR/drivesounds.wav`, and (only when this run's config plausibly
+    produces them) `DIR/cdda.wav` and `DIR/mt32.wav`.
+  - `channel` -- one file per named sub-channel of a source. In this
+    milestone only Paula exposes sub-channels: `DIR/paula-0.wav` ..
+    `DIR/paula-3.wav`, its four physical channels. `channel` is a
+    deliberate opt-in -- `source` alone never writes these.
+
+  All three are independently selectable and combinable, e.g.
+  `--audio-stems-mode master,source,channel` writes every file at once.
+  A `[audio] stem_granularity` config key sets the default `LIST` so it
+  doesn't need repeating on every invocation; the CLI flag wins when
+  both are given. `--audio-stems` is mutually exclusive with
+  `--audio-wav` and with live audio, matching `--audio-wav` itself.
+
+  A source that this run's config says it doesn't have never gets a
+  stem file at all (not even a silent one) -- e.g. `cdda.wav` is only
+  written when a CD32/CDTV profile or a configured CD image is present.
+  This is decided once from config at startup, not from whether the
+  source stays silent during the run.
+
+  Capture is driven purely by emulated time, so it is warp-safe and
+  deterministic: two runs of the same scenario produce byte-identical
+  stem files, which makes them usable as golden files for regression
+  tests. See [](../internals/audio) for the mixer/stem architecture.
 - `--profile-live-audio SECS` runs a windowless Paula-to-cpal profiling
   workload; combine with `COPPERLINE_AUDIO_PROFILE=1` for live-audio
   counters (see [](../internals/peripherals)).

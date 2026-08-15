@@ -63,6 +63,7 @@ running in Copperline.
 - [](internals/architecture) -- how the emulator works inside, for
   contributors.
 - [](internals/picasso2) -- the Picasso II/II+ and CL-GD5426/5428 RTG model.
+- [](internals/audio) -- the audio mixer/sink service and stem capture.
 
 ## Design principles
 

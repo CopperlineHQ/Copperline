@@ -981,6 +981,7 @@ floppy_sounds_volume = 100  # 0-100, relative to Paula's output
 channel_mode = "stereo"     # "stereo" (default) or "mono"
 stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
 audio_filter = "auto"       # Paula filter: "auto" (guest-driven), "on", or "off"
+# stem_granularity = "master,source"  # default --audio-stems-mode; see below
 ```
 
 The drive sounds are generated from scratch: motor hum with spin-up/down
@@ -1025,6 +1026,11 @@ On Linux with PipeWire/PulseAudio, individual sinks are not ALSA devices, so
 only the `default`/`pipewire` route is offered; pick the output in the desktop
 sound settings (or route Copperline in `pavucontrol`) and it follows. macOS and
 Windows select each device directly.
+
+`stem_granularity` sets the default granularity list for `--audio-stems`
+(headless-only; see [](headless.md)) so it doesn't need `--audio-stems-mode`
+repeated on every invocation -- the CLI flag still wins when both are given.
+It has no effect without `--audio-stems DIR` on the command line.
 
 ## `[input]`
 
