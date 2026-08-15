@@ -211,6 +211,11 @@ pub struct Config {
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
     pub a2065_net: Option<crate::net::NetConfig>,
+    /// MacroSystem Toccata sound board (`[toccata] enabled = true`): when
+    /// true, a Toccata autoconfigs on the Zorro chain and its AD1848 output
+    /// joins the mixer as the `toccata` audio source. No other options
+    /// exist yet (see docs/internals/toccata.md).
+    pub toccata: bool,
     /// HostSocket board backend (`[hostsocket] net`): when set, the bundled
     /// bsdsocket.library plugin board is fitted with this backend. The board
     /// itself travels in [`Config::wasm_boards`]; this field records the
@@ -2215,6 +2220,7 @@ impl Default for Config {
             scsi: ScsiConfig::default(),
             lide: LideConfig::default(),
             a2065_net: None,
+            toccata: false,
             hostsocket_net: None,
             hostsocket_transport: None,
             rtg: RtgCard::None,
@@ -2858,6 +2864,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) toccata: RawToccata,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) rtg: RawRtg,
@@ -3445,6 +3453,15 @@ pub(crate) struct RawA2065 {
     /// Host adapter identifier used by `net = "bridge"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) interface: Option<String>,
+}
+
+/// `[toccata]` MacroSystem Toccata sound board.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawToccata {
+    /// Fit the board. Absent/false means no Toccata is on the chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
 }
 
 /// `[hostsocket]` bundled bsdsocket.library board: a host-side TCP/IP stack
@@ -4490,6 +4507,8 @@ impl TryFrom<RawConfig> for Config {
             }
         };
 
+        let toccata = raw.toccata.enabled.unwrap_or(defaults.toccata);
+
         // `[hostsocket]` expands to the bundled WASM plugin board (see
         // crate::hostsocket), appended after any [[zorro]] metadata boards.
         // `net = "host"` is not one of `crate::net::NetConfig`'s own
@@ -4857,6 +4876,7 @@ impl TryFrom<RawConfig> for Config {
             scsi,
             lide,
             a2065_net,
+            toccata,
             hostsocket_net,
             hostsocket_transport,
             rtg,
@@ -9589,6 +9609,14 @@ mod tests {
         // No boards configured at all: the autoconfig window floats.
         let chain = cfg.build_zorro_chain()?;
         assert_eq!(chain.config_read(crate::zorro::AUTOCONFIG_BASE, 1), 0xFF);
+        Ok(())
+    }
+
+    #[test]
+    fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
+        assert!(!parse_config("")?.toccata);
+        let cfg = parse_config("[toccata]\nenabled = true\n")?;
+        assert!(cfg.toccata);
         Ok(())
     }
 

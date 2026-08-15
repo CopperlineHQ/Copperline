@@ -1822,14 +1822,17 @@ fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -
 /// The `--audio-stems` source set for this run: Paula (always present, with
 /// its four physical channels) and drive sounds (always registered --
 /// `[audio] floppy_sounds = false` just means the stem is silent, like a
-/// disabled DriveSounds today), plus CD-DA and MT-32 only when this run's
-/// config plausibly produces them. A source absent here never gets a stem
-/// file at all, even if `--audio-stems-mode` includes `source`/`channel`.
+/// disabled DriveSounds today), plus CD-DA, MT-32, and Toccata only when
+/// this run's config plausibly produces them. A source absent here never
+/// gets a stem file at all, even if `--audio-stems-mode` includes
+/// `source`/`channel`.
 ///
 /// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
 /// make sound" oracle (e.g. a CD swapped into an empty drive mid-run by
 /// `--insert-cd-after` or the control protocol is missed) -- see
-/// docs/internals/audio.md for the exact rule and its limits.
+/// docs/internals/audio.md for the exact rule and its limits. `toccata` is
+/// exact, not a heuristic: `[toccata] enabled` is the only thing that fits
+/// the board at all.
 fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio::mux::SourceSpec> {
     use copperline::audio::mux::SourceSpec;
     let mut sources = vec![
@@ -1871,6 +1874,12 @@ fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio:
     if has_mt32 {
         sources.push(SourceSpec {
             id: "mt32",
+            channel_names: &[],
+        });
+    }
+    if cfg.toccata {
+        sources.push(SourceSpec {
+            id: "toccata",
             channel_names: &[],
         });
     }

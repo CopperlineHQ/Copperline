@@ -2585,6 +2585,14 @@ pub fn build_machine(
             crate::a2065::A2065::new(net_config.clone())?,
         ));
     }
+    // Toccata sound board (`[toccata] enabled`): AD1848-based, its output
+    // joins the mixer as the "toccata" audio source (see crate::toccata).
+    if cfg.toccata {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::toccata(slot))?;
+        info!("toccata: AD1848 sound board on the Zorro chain (slot {slot})");
+        devices.push(crate::zorro_device::BoardDevice::Toccata(Box::default()));
+    }
     // RTG board (`[rtg] card`): the Z3660.card P96 driver drives RTG screens
     // through its register file and framebuffer; see crate::z3660.
     if cfg.rtg == crate::config::RtgCard::Z3660 {
