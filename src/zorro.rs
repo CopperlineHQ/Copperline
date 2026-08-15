@@ -82,6 +82,21 @@ pub const PICASSO2_SERIAL: u32 = 0x0002_0000;
 /// this serial to distinguish the CL-GD5428 revision from the original card.
 pub const PICASSO2PLUS_SERIAL: u32 = 0x0010_0000;
 
+/// Atéo Concepts' registered expansion manufacturer ID (also used by the
+/// Graffity boards' Zorro III identity).
+pub const GRAFFITY_MANUFACTURER_ID: u16 = 2092;
+/// Graffity [Zorro II] linear VRAM aperture.
+pub const GRAFFITY_Z2_PRODUCT_VRAM: u8 = 34;
+/// Graffity [Zorro II] VGA I/O and monitor-switch aperture. Physically 128 KB
+/// (twice Picasso II's register window), though only the low VGA port range
+/// within it is live.
+pub const GRAFFITY_Z2_PRODUCT_REGS: u8 = 33;
+const GRAFFITY_Z2_REGS_SIZE: usize = 0x2_0000;
+/// Graffity [Zorro III]'s single autoconfig identity: one 16 MB window
+/// holding the switch-strobe trap, VGA-register, and VRAM sub-apertures.
+pub const GRAFFITY_Z3_PRODUCT: u8 = 33;
+const GRAFFITY_Z3_WINDOW_BYTES: usize = 0x0100_0000;
+
 /// Device-window offsets carry this tag to distinguish multiple autoconfig
 /// apertures owned by one [`crate::zorro_device::ZorroDevice`]. Physical
 /// in-tree device windows are at most 128 MB, so bits 31:28 are otherwise
@@ -417,6 +432,65 @@ impl BoardSpec {
             product: PICASSO2_PRODUCT_REGS,
             serial,
             size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
+    /// Graffity [Zorro II] linear framebuffer aperture (product 34), chained
+    /// to a 128 KB register aperture. Like Picasso II's, it is left out of
+    /// Exec's free-memory list: Picasso96 owns the VRAM.
+    pub fn graffity_z2_vram(slot: usize, size_bytes: usize) -> Self {
+        Self {
+            name: "Graffity VRAM".into(),
+            version: ZorroVersion::II,
+            manufacturer: GRAFFITY_MANUFACTURER_ID,
+            product: GRAFFITY_Z2_PRODUCT_VRAM,
+            serial: 0,
+            size_bytes,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: true,
+            chained: true,
+            window: 1,
+            diag_vec: None,
+        }
+    }
+
+    /// Graffity [Zorro II] VGA I/O and monitor-switch aperture (product 33).
+    pub fn graffity_z2_regs(slot: usize) -> Self {
+        Self {
+            name: "Graffity registers".into(),
+            version: ZorroVersion::II,
+            manufacturer: GRAFFITY_MANUFACTURER_ID,
+            product: GRAFFITY_Z2_PRODUCT_REGS,
+            serial: 0,
+            size_bytes: GRAFFITY_Z2_REGS_SIZE,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
+    /// Graffity [Zorro III]: one 16 MB window (manufacturer 2092, product
+    /// 33) holding the switch-strobe trap, VGA-register, and VRAM
+    /// sub-apertures; no autoboot ROM. `slot` is the index of the matching
+    /// `GraffityZ3` device in `Bus::devices`.
+    pub fn graffity_z3(slot: usize) -> Self {
+        Self {
+            name: "Graffity [Zorro III]".into(),
+            version: ZorroVersion::III,
+            manufacturer: GRAFFITY_MANUFACTURER_ID,
+            product: GRAFFITY_Z3_PRODUCT,
+            serial: 0,
+            size_bytes: GRAFFITY_Z3_WINDOW_BYTES,
             backing: BoardBacking::Device(slot),
             memlist: false,
             memory_space: false,
@@ -1679,6 +1753,71 @@ mod tests {
         assert_eq!(chain.config_logical_byte(0, 9), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 6), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 7), Some(0x10));
+    }
+
+    #[test]
+    fn graffity_z2_chained_identities_share_one_tagged_device() {
+        let mut chain = chain_with(vec![
+            BoardSpec::graffity_z2_vram(3, 2 * 1024 * 1024),
+            BoardSpec::graffity_z2_regs(3),
+        ]);
+
+        // Product 34 is a 2 MB Zorro II memory-space aperture (same size
+        // code as Picasso II's) and announces the chained register board.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xce));
+        assert_eq!(
+            chain.config_logical_byte(0, 1),
+            Some(GRAFFITY_Z2_PRODUCT_VRAM)
+        );
+        assert_eq!(chain.config_logical_byte(0, 2), Some(ERFF_MEMSPACE));
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x08));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x2c));
+
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 1, 0x20);
+        assert_eq!(
+            chain.device_region_at(0x0020_0123, 1),
+            Some((BoardBacking::Device(3), 1 << DEVICE_WINDOW_SHIFT | 0x123))
+        );
+
+        // Product 33 follows as a 128 KB I/O aperture with no tag.
+        assert_eq!(chain.config_logical_byte(1, 0), Some(0xc2));
+        assert_eq!(
+            chain.config_logical_byte(1, 1),
+            Some(GRAFFITY_Z2_PRODUCT_REGS)
+        );
+        assert_eq!(chain.config_logical_byte(1, 2), Some(0));
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 1, 0xe9);
+        assert_eq!(
+            chain.device_region_at(0x00e9_03c4, 2),
+            Some((BoardBacking::Device(3), 0x3c4))
+        );
+    }
+
+    #[test]
+    fn graffity_z3_is_a_single_extended_size_zorro_iii_window() {
+        let mut chain = chain_with(vec![BoardSpec::graffity_z3(5)]);
+
+        // 16 MB needs the extended Zorro III size encoding: er_Type carries
+        // no size bits of its own (code 0) and er_Flags sets both the
+        // Zorro III and extended-size bits.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(ERT_ZORROIII));
+        assert_eq!(chain.config_logical_byte(0, 1), Some(GRAFFITY_Z3_PRODUCT));
+        assert_eq!(
+            chain.config_logical_byte(0, 2),
+            Some(ERFF_ZORRO_III | ERFF_EXTENDED)
+        );
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x08));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x2c));
+
+        chain.config_write(AUTOCONFIG_BASE + EC_Z3_BASEADDRESS_PHYS, 2, 0x4000);
+        assert_eq!(
+            chain.device_region_at(0x4080_03c4, 2),
+            Some((BoardBacking::Device(5), 0x0080_03c4))
+        );
+        assert_eq!(
+            chain.device_region_at(0x4000_0000 + 0x00c0_0002, 4),
+            Some((BoardBacking::Device(5), 0x00c0_0002))
+        );
     }
 
     #[test]

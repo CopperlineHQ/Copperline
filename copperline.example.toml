@@ -333,11 +333,13 @@ slow = "512K"
 
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.
 # Z3660 is fitted by default on any machine whose CPU has a 32-bit address bus
-# (stock A3000/A4000, or any profile given a 68020+ full-bus CPU). Picasso II
-# and Picasso II+ are opt-in Zorro II cards and work with 24-bit CPUs too.
+# (stock A3000/A4000, or any profile given a 68020+ full-bus CPU). Picasso II,
+# Picasso II+, and Graffity [Zorro II] are opt-in Zorro II cards and work with
+# 24-bit CPUs too; Graffity [Zorro III] needs a 32-bit-bus CPU like Z3660.
 # [rtg]
-# card = "picasso2plus"    # "z3660", "picasso2", "picasso2plus", or "none"
-# vram = "2M"              # Picasso II/II+ only: "1M" or "2M" (default)
+# card = "picasso2plus"    # "z3660", "picasso2", "picasso2plus",
+#                          # "graffityz2", "graffityz3", or "none"
+# vram = "2M"              # Picasso II/II+ and Graffity: "1M" or "2M" (default)
 
 
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]

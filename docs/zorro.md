@@ -422,6 +422,40 @@ vertical interrupt latches at the CRTC-programmed retrace edge in emulated
 time; writing CRTC `$11` with bit 4 clear acknowledges it. The original card
 stores the board-enable bit for register compatibility but never asserts INT2.
 
+### Atéo Concepts Graffity [Zorro II] and [Zorro III]
+
+`[rtg] card = "graffityz2"`/`"graffityz3"` fit Graffity, a lesser-known board
+that reuses Picasso II+'s CL-GD5428 core under Atéo Concepts' own registered
+manufacturer ID 2092 (`$082C`). Both take 1 or 2 MB of VRAM (`[rtg] vram`);
+see [](internals/graffity) for the chip-level detail. Graffity ships a
+first-class Picasso96 board driver (`Graffity.card` in the classic Aminet
+`Picasso96Install` package), so no CyberGraphX or custom driver is needed.
+
+The Zorro II variant enumerates the same way Picasso II does -- a chained
+VRAM aperture (product 34) and a register aperture (product 33), except the
+register aperture is 128 KB rather than 64 KB, and its VGA ports sit directly
+at the window offset (no odd-lane `+0x1000` mirror):
+
+| product | size | autoconfig space | purpose |
+| --- | ---: | --- | --- |
+| 34 | 1 or 2 MB | Zorro II memory | linear VRAM aperture |
+| 33 | 128 KB | Zorro II I/O | VGA registers and monitor switch |
+
+The Zorro III variant is a single 16 MB window (product 33, no chained
+identity) with three fixed sub-apertures instead of one shared register
+window:
+
+| offset | size | purpose |
+| --- | ---: | --- |
+| `+$400000` | 64 KB | monitor-switch strobe trap only; never reaches VGA registers |
+| `+$800000` | 64 KB | VGA registers, same direct port addressing as the Zorro II variant |
+| `+$C00000` | 1 or 2 MB | linear VRAM |
+
+Both variants decode the monitor switch the same way Picasso II does (`$60`
+selects RTG, `$40` selects native Amiga pass-through), but neither has a
+board-level interrupt-enable latch: INT2 follows the CL-GD5428 core's own
+vertical-blank state directly.
+
 ## How autoconfig works in Copperline
 
 Everything below happens automatically; it is documented so you can debug a
