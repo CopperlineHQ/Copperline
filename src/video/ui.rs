@@ -12588,6 +12588,8 @@ mod tests {
             mt32_attached: false,
             mt32_input: false,
             mt32_panel: false,
+            gm_attached: false,
+            gm_panel: false,
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: &none,

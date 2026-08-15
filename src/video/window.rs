@@ -185,7 +185,11 @@ const STATUS_BAR_HEIGHT: usize = 44;
 /// plus the status bar below it unless it is hidden (in which case the display
 /// scales to fill the whole window).
 fn window_present_height() -> usize {
-    present_height() + mt32_panel_height() + keyboard_panel_height() + status_bar_height()
+    present_height()
+        + mt32_panel_height()
+        + gm_panel_height()
+        + keyboard_panel_height()
+        + status_bar_height()
 }
 
 /// Scanlines the CRT pass draws across the display rect: the emulated field
@@ -250,10 +254,25 @@ fn mt32_panel_height() -> usize {
     0
 }
 
-/// Where the on-screen keyboard starts: under the display and under the
-/// MT-32's panel, the way a keyboard sits below whatever is on the desk.
-fn keyboard_panel_top() -> usize {
+/// The General MIDI panel's height, or 0 while it is not shown.
+fn gm_panel_height() -> usize {
+    #[cfg(feature = "gm")]
+    if super::gm_panel_shown() {
+        return gmpanel::GM_PANEL_HEIGHT;
+    }
+    0
+}
+
+/// Where the General MIDI panel starts: under the display, below the
+/// MT-32's strip when that one is up as well.
+fn gm_panel_top() -> usize {
     present_height() + mt32_panel_height()
+}
+
+/// Where the on-screen keyboard starts: under the display and under the
+/// synth panels, the way a keyboard sits below whatever is on the desk.
+fn keyboard_panel_top() -> usize {
+    gm_panel_top() + gm_panel_height()
 }
 
 /// The on-screen keyboard's height, or 0 while it is not shown.
@@ -1204,6 +1223,17 @@ pub struct App {
     /// hardware this is firmware -- so it is kept here.
     #[cfg(feature = "mt32")]
     mt32_panel: mt32panel::Mt32Panel,
+    /// The General MIDI panel's pointer mechanics: latched buttons, the
+    /// momentary flash, the knob's grab. Everything semantic lives in
+    /// Coppersynth's own panel inside the device.
+    #[cfg(feature = "gm")]
+    gm_panel: gmpanel::GmPanel,
+    /// The clock the panel's glass is composed against, and the knob's
+    /// last position, kept so the fascia holds it while switched off.
+    #[cfg(feature = "gm")]
+    gm_panel_epoch: std::time::Instant,
+    #[cfg(feature = "gm")]
+    gm_volume: f32,
     /// The on-screen Amiga keyboard: which cap the mouse is holding, which
     /// qualifiers are latched, and which legends the caps wear. Whether the
     /// strip is up at all is `video::keyboard_panel_shown`, because the
@@ -1936,6 +1966,12 @@ impl App {
             rewind_armed,
             #[cfg(feature = "mt32")]
             mt32_panel: mt32panel::Mt32Panel::default(),
+            #[cfg(feature = "gm")]
+            gm_panel: gmpanel::GmPanel::default(),
+            #[cfg(feature = "gm")]
+            gm_panel_epoch: std::time::Instant::now(),
+            #[cfg(feature = "gm")]
+            gm_volume: 1.0,
             kbd_panel: kbdpanel::KbdPanelState::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
@@ -3389,6 +3425,12 @@ impl ApplicationHandler for App {
                         self.drag_mt32_dial(pos);
                     }
                 }
+                #[cfg(feature = "gm")]
+                if self.gm_panel.dial_held() {
+                    if let Some(pos) = pos {
+                        self.drag_gm_dial(pos);
+                    }
+                }
                 if self.mouse_captured {
                     self.cursor_pos = None;
                     self.last_display_cursor_pos = None;
@@ -3423,6 +3465,13 @@ impl ApplicationHandler for App {
                     });
                 #[cfg(not(feature = "mt32"))]
                 let mt32_hover_changed = false;
+                #[cfg(feature = "gm")]
+                let gm_hover_changed =
+                    gmpanel::shown_panel_rect(gm_panel_top()).is_some_and(|panel| {
+                        gmpanel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
+                    });
+                #[cfg(not(feature = "gm"))]
+                let gm_hover_changed = false;
                 // The keycaps light under the pointer the same way.
                 let kbd_hover_changed = kbdpanel::shown_panel_rect(keyboard_panel_top())
                     .is_some_and(|panel| {
@@ -3430,6 +3479,7 @@ impl ApplicationHandler for App {
                     });
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
                     || mt32_hover_changed
+                    || gm_hover_changed
                     || kbd_hover_changed
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
                 {
@@ -3553,6 +3603,12 @@ impl ApplicationHandler for App {
                     self.mt32_panel.release_press();
                     self.request_redraw();
                 }
+                #[cfg(feature = "gm")]
+                if !pressed {
+                    self.gm_panel.release_dial();
+                    self.gm_panel.release_press();
+                    self.request_redraw();
+                }
                 #[cfg(feature = "mt32")]
                 if pressed
                     && !self.mouse_captured
@@ -3566,6 +3622,23 @@ impl ApplicationHandler for App {
                             if let Some(control) = mt32panel::control_at(panel, pos) {
                                 let left = button == MouseButton::Left;
                                 self.press_mt32_control(control, left, pos);
+                            }
+                            return;
+                        }
+                    }
+                }
+                #[cfg(feature = "gm")]
+                if pressed
+                    && !self.mouse_captured
+                    && matches!(button, MouseButton::Left | MouseButton::Right)
+                {
+                    if let (Some(pos), Some(panel)) =
+                        (self.cursor_pos, gmpanel::shown_panel_rect(gm_panel_top()))
+                    {
+                        if panel.contains(pos) {
+                            if let Some(control) = gmpanel::control_at(panel, pos) {
+                                let left = button == MouseButton::Left;
+                                self.press_gm_control(control, left, pos);
                             }
                             return;
                         }
@@ -3730,6 +3803,10 @@ impl ApplicationHandler for App {
                 let mt32_panel = super::mt32_panel_shown()
                     .then(|| self.mt32_panel_view())
                     .flatten();
+                #[cfg(feature = "gm")]
+                let gm_panel = super::gm_panel_shown()
+                    .then(|| self.gm_panel_view())
+                    .flatten();
                 // The Caps Lock lamp is the MCU's, so it is read fresh
                 // every frame rather than mirrored from the clicks.
                 let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
@@ -3828,6 +3905,10 @@ impl ApplicationHandler for App {
                     #[cfg(feature = "mt32")]
                     if let Some(panel) = &mt32_panel {
                         mt32panel::draw(frame, panel, present_height(), r.texture_scale);
+                    }
+                    #[cfg(feature = "gm")]
+                    if let Some(panel) = &gm_panel {
+                        gmpanel::draw(frame, panel, gm_panel_top(), r.texture_scale);
                     }
                     if let Some(panel) = &kbd_panel {
                         kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
@@ -4234,6 +4315,8 @@ impl ApplicationHandler for App {
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
+        #[cfg(feature = "gm")]
+        self.repeat_gm_dial();
         #[cfg(feature = "mt32")]
         {
             self.repeat_mt32_dial();
@@ -5373,6 +5456,16 @@ impl App {
             });
         #[cfg(not(feature = "mt32"))]
         let (mt32_available, mt32_attached, mt32_input) = (false, false, false);
+        // Selected, not powered: the Front Panel row stays reachable while
+        // the unit is switched off at its own fascia.
+        #[cfg(feature = "gm")]
+        let gm_attached = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.gm_selected());
+        #[cfg(not(feature = "gm"))]
+        let gm_attached = false;
 
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
@@ -5412,6 +5505,8 @@ impl App {
             mt32_attached,
             mt32_input,
             mt32_panel: crate::video::mt32_panel_shown(),
+            gm_attached,
+            gm_panel: crate::video::gm_panel_shown(),
             keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
@@ -5644,6 +5739,18 @@ impl App {
             }
             #[cfg(not(feature = "mt32"))]
             A::ToggleMt32Panel => {}
+            #[cfg(feature = "gm")]
+            A::ToggleGmPanel => {
+                let shown = !crate::video::gm_panel_shown();
+                self.set_gm_panel_shown(shown);
+                self.show_osd(if shown {
+                    "General MIDI: front panel shown"
+                } else {
+                    "General MIDI: front panel hidden"
+                });
+            }
+            #[cfg(not(feature = "gm"))]
+            A::ToggleGmPanel => {}
             #[cfg(feature = "mt32")]
             A::SetMt32Lcd(style) => {
                 crate::video::set_mt32_lcd(style);
@@ -5807,6 +5914,25 @@ impl App {
             self.follow_canvas_change(was_canvas_sized, canvas_before);
         } else {
             crate::video::set_mt32_panel_shown(!shown);
+            let _ = self.resync_canvas_height();
+        }
+        self.request_redraw();
+    }
+
+    /// Show or hide the General MIDI panel, resizing the presentation
+    /// exactly as the MT-32's does.
+    #[cfg(feature = "gm")]
+    fn set_gm_panel_shown(&mut self, shown: bool) {
+        if shown == crate::video::gm_panel_shown() {
+            return;
+        }
+        let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
+        crate::video::set_gm_panel_shown(shown);
+        if self.resync_canvas_height() {
+            self.follow_canvas_change(was_canvas_sized, canvas_before);
+        } else {
+            crate::video::set_gm_panel_shown(!shown);
             let _ = self.resync_canvas_height();
         }
         self.request_redraw();
@@ -6039,6 +6165,171 @@ impl App {
         if let Some(fault) = fault {
             self.warn_osd(format!("MT-32: {fault}"));
         }
+    }
+
+    /// A press on the General MIDI panel. The pointer side resolves it
+    /// to a semantic press; the engine's own panel decides what it means.
+    #[cfg(feature = "gm")]
+    fn press_gm_control(&mut self, control: gmpanel::GmControl, left: bool, pos: (i32, i32)) {
+        let Some(rect) = gmpanel::shown_panel_rect(gm_panel_top()) else {
+            return;
+        };
+        let powered = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.gm().is_some());
+        if control == gmpanel::GmControl::Dial {
+            // The knob turns whether or not the unit is on -- it is a
+            // pot -- but with the engine gone there is nothing to hear.
+            let volume = self.gm_volume;
+            if let Some(v) = self.gm_panel.grab_dial(left, pos, rect, volume) {
+                self.set_gm_volume(v);
+            }
+            self.request_redraw();
+            return;
+        }
+        let press = self.gm_panel.press(control, left, powered);
+        self.apply_gm_press(press);
+        self.request_redraw();
+    }
+
+    /// Carry out what a press resolved to.
+    #[cfg(feature = "gm")]
+    fn apply_gm_press(&mut self, press: gmpanel::GmPress) {
+        use gmpanel::GmPress;
+        match press {
+            GmPress::None => {}
+            GmPress::Button(button) => {
+                let request = self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .and_then(crate::midi::MidiSerialSink::gm_mut)
+                    .and_then(|gm| gm.panel_button(button));
+                if request == Some(crate::gm::PanelRequest::Recycle) {
+                    // Init All: off and on again is the factory state,
+                    // because the factory state is the configuration.
+                    self.set_gm_powered(false);
+                    self.set_gm_powered(true);
+                    self.show_osd("General MIDI: initialised");
+                }
+            }
+            GmPress::PowerOn(held) => {
+                self.set_gm_powered(true);
+                let came_up = if let Some(gm) = self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .and_then(crate::midi::MidiSerialSink::gm_mut)
+                {
+                    // What was held on the fascia through the power-on
+                    // reaches the unit the way it reads its own buttons.
+                    gm.panel_power_on_held(&held);
+                    true
+                } else {
+                    false
+                };
+                if came_up {
+                    self.show_osd("General MIDI: power on");
+                } else {
+                    // Asked to switch on and it did not: say why.
+                    self.report_gm();
+                }
+            }
+            GmPress::PowerOff => {
+                self.set_gm_powered(false);
+                self.show_osd("General MIDI: power off");
+            }
+        }
+    }
+
+    /// The switch itself: drop or refit the engine, and ask Paula for
+    /// synth audio again when it changes hands.
+    #[cfg(feature = "gm")]
+    fn set_gm_powered(&mut self, on: bool) {
+        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+            sink.set_gm_power(on);
+        }
+        self.emu.bus_mut().paula.rearm_synth_audio();
+    }
+
+    /// The VOLUME knob's value, applied and remembered: the fascia keeps
+    /// the knob's position even while the unit is switched off.
+    #[cfg(feature = "gm")]
+    fn set_gm_volume(&mut self, volume: f32) {
+        self.gm_volume = volume;
+        if let Some(gm) = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .and_then(crate::midi::MidiSerialSink::gm_mut)
+        {
+            gm.panel_volume(volume);
+        }
+    }
+
+    /// Follow the pointer while a button is held on the knob.
+    #[cfg(feature = "gm")]
+    fn drag_gm_dial(&mut self, pos: (i32, i32)) {
+        let Some(rect) = gmpanel::shown_panel_rect(gm_panel_top()) else {
+            return;
+        };
+        if let Some(v) = self.gm_panel.drag_dial(pos, rect) {
+            self.set_gm_volume(v);
+            self.request_redraw();
+        }
+    }
+
+    /// Step the knob on while a button rests on it.
+    #[cfg(feature = "gm")]
+    fn repeat_gm_dial(&mut self) {
+        if !self.gm_panel.dial_held() {
+            return;
+        }
+        if let Some(v) = self.gm_panel.repeat_dial(self.gm_volume) {
+            self.set_gm_volume(v);
+            self.request_redraw();
+        }
+    }
+
+    /// What the General MIDI panel should show, when it is the output.
+    #[cfg(feature = "gm")]
+    fn gm_panel_view(&mut self) -> Option<gmpanel::GmPanelView> {
+        let now_ms = self.gm_panel_epoch.elapsed().as_millis() as u64;
+        let hover = self
+            .cursor_pos
+            .zip(gmpanel::shown_panel_rect(gm_panel_top()))
+            .and_then(|(pos, panel)| gmpanel::hover_at(panel, pos));
+        let down = self.gm_panel.down();
+        let stored_volume = self.gm_volume;
+        let sink = self.emu.bus_mut().midi_serial_mut()?;
+        if !sink.gm_selected() {
+            return None;
+        }
+        let powered = sink.gm().is_some();
+        // Switched off, the fascia is still there: dark glass, and the
+        // knob standing where the hand left it.
+        let (screen, monitoring, volume) = match sink.gm_mut() {
+            Some(gm) => (
+                gm.panel_screen(now_ms),
+                gm.panel_monitoring(),
+                gm.panel_volume_value(),
+            ),
+            None => (gmpanel::dark_screen(), false, stored_volume),
+        };
+        if powered {
+            self.gm_volume = volume;
+        }
+        Some(gmpanel::GmPanelView {
+            screen,
+            powered,
+            mute_blinks: monitoring,
+            blink_on: (now_ms / 300).is_multiple_of(2),
+            volume,
+            down,
+            hover,
+        })
     }
 
     /// Surface what the General MIDI synth has to say: a fault when it
@@ -13466,6 +13757,8 @@ mod console;
 #[cfg(feature = "control")]
 mod control;
 mod crt_shader;
+#[cfg(feature = "gm")]
+mod gmpanel;
 mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]

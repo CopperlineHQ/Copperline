@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 pub use coppersynth::mt32::translator::Mt32Mode;
+pub use coppersynth::panel::{Button, FrontPanel, PanelRequest, Screen};
 
 /// How many frames the engine is asked for at a time.
 const BLOCK_FRAMES: usize = 256;
@@ -144,6 +145,10 @@ pub struct GmDevice {
     /// through the translation layer, which is how a play-through becomes
     /// a regression corpus. Flushed often enough to survive a force-quit.
     capture: Option<(std::io::BufWriter<std::fs::File>, usize)>,
+    /// The front panel's own state machine, which is Coppersynth's: the
+    /// window draws glass and forwards presses, and every character
+    /// shown is composed by the library.
+    panel: FrontPanel,
 }
 
 impl GmDevice {
@@ -181,6 +186,7 @@ impl GmDevice {
             played: BLOCK_FRAMES,
             translating_logged: mode == Mt32Mode::On,
             capture,
+            panel: FrontPanel::default(),
         })
     }
 
@@ -219,6 +225,49 @@ impl GmDevice {
     /// Display lines the guest wrote to the "MT-32", oldest first.
     pub fn take_display(&mut self) -> Vec<String> {
         self.engine.take_display()
+    }
+
+    // --- the front panel -------------------------------------------------
+
+    /// Buttons held through the power-on, read as the unit reads its
+    /// fascia at start-up.
+    pub fn panel_power_on_held(&mut self, held: &[Button]) {
+        self.panel.power_on_held(held);
+    }
+
+    /// A semantic press from the window's panel.
+    pub fn panel_button(&mut self, button: Button) -> Option<PanelRequest> {
+        self.feed_panel();
+        self.panel.button(&mut self.engine, button)
+    }
+
+    /// The VOLUME knob, 0..=1.
+    pub fn panel_volume(&mut self, value: f32) {
+        self.panel.volume(&mut self.engine, value);
+    }
+
+    /// Where the knob stands, for drawing it.
+    pub fn panel_volume_value(&self) -> f32 {
+        self.engine.output_gain()
+    }
+
+    /// The glass, composed by the library.
+    pub fn panel_screen(&mut self, now_ms: u64) -> Screen {
+        self.feed_panel();
+        self.panel.screen(&self.engine, now_ms)
+    }
+
+    /// Whether the monitor is on, for the blinking MUTE lamp.
+    pub fn panel_monitoring(&self) -> bool {
+        self.engine.monitor() != coppersynth::engine::Monitor::Off
+    }
+
+    /// Letters and pictures the engine took off the wire go to the
+    /// panel before it is asked anything.
+    fn feed_panel(&mut self) {
+        for feed in self.engine.take_panel_feed() {
+            self.panel.feed(feed);
+        }
     }
 }
 

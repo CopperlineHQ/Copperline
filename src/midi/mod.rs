@@ -550,6 +550,32 @@ impl MidiSerialSink {
         self.gm_selected
     }
 
+    /// The attached General MIDI synth, for the front panel.
+    #[cfg(feature = "gm")]
+    pub fn gm(&self) -> Option<&crate::gm::GmDevice> {
+        self.gm.as_ref()
+    }
+
+    #[cfg(feature = "gm")]
+    pub fn gm_mut(&mut self) -> Option<&mut crate::gm::GmDevice> {
+        self.gm.as_mut()
+    }
+
+    /// The panel's power switch, exactly as the MT-32's: off drops the
+    /// engine entirely, on builds a fresh one that comes up greeting.
+    #[cfg(feature = "gm")]
+    pub fn set_gm_power(&mut self, on: bool) {
+        if !self.gm_selected || on == self.gm.is_some() {
+            return;
+        }
+        if on {
+            self.attach_gm();
+        } else {
+            self.gm = None;
+            log::info!("midi: {MIDI_OUT_GM_LABEL} switched off");
+        }
+    }
+
     /// Fit the MT-32, leaving the host output silent: the device on the far
     /// end of the cable is the one here.
     #[cfg(feature = "mt32")]

@@ -68,6 +68,7 @@ pub enum MenuAction {
     SetSamplerInput(String),
     /// Show or hide the MT-32's front panel.
     ToggleMt32Panel,
+    ToggleGmPanel,
     /// How that panel's display is lit.
     SetMt32Lcd(crate::config::Mt32Lcd),
     /// Step the gain by one notch, up (+1) or down (-1).
@@ -451,6 +452,10 @@ pub struct MenuState<'a> {
     pub mt32_input: bool,
     pub mt32_panel: bool,
     pub mt32_lcd: crate::config::Mt32Lcd,
+    /// Whether the General MIDI synth is the selected output, and whether
+    /// its panel is up.
+    pub gm_attached: bool,
+    pub gm_panel: bool,
     pub sampler_input: &'a str,
     pub sampler_inputs: &'a [String],
     pub sampler_gain: f32,
@@ -781,8 +786,22 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
             ],
         ));
     }
+    // The General MIDI synth's own settings, likewise.
+    if s.gm_attached {
+        rows.push(MenuRow::submenu(
+            GM_LABEL,
+            vec![MenuRow::toggle(
+                "Front Panel",
+                MenuAction::ToggleGmPanel,
+                s.gm_panel,
+            )],
+        ));
+    }
     rows
 }
+
+/// What the General MIDI output is called in the menu.
+const GM_LABEL: &str = "General MIDI";
 
 /// What the MT-32 output is called in the menu, and the endpoint name that
 /// selects it.
@@ -1089,6 +1108,8 @@ mod tests {
             mt32_attached: false,
             mt32_input: false,
             mt32_panel: false,
+            gm_attached: false,
+            gm_panel: false,
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: sampler,
