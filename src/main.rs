@@ -1124,11 +1124,6 @@ where
     if explicit_audio_live && audio_stems.is_some() {
         return Err(anyhow!("--audio and --audio-stems are mutually exclusive"));
     }
-    if audio_stems.is_some() && audio_stems_mode.is_none() {
-        return Err(anyhow!(
-            "--audio-stems requires --audio-stems-mode LIST (e.g. \"master,source\")"
-        ));
-    }
     if audio_stems.is_none() && audio_stems_mode.is_some() {
         return Err(anyhow!("--audio-stems-mode requires --audio-stems DIR"));
     }
@@ -1417,8 +1412,9 @@ fn print_help() {
          --net-helper-status            report Linux bridge-helper status\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
          \x20                            instead of live output\n  \
-         --audio-stems DIR              write per-granularity stem WAVs into DIR (needs\n  \
-         \x20                            --audio-stems-mode); instead of live output\n  \
+         --audio-stems DIR              write per-granularity stem WAVs into DIR instead of\n  \
+         \x20                            live output (needs --audio-stems-mode or a\n  \
+         \x20                            [audio] stem_granularity default)\n  \
          --audio-stems-mode LIST        comma-separated stem granularities to write:\n  \
          \x20                            \"master\", \"source\", \"channel\" (combinable)\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
@@ -2310,7 +2306,13 @@ fn main() -> Result<()> {
         let granularities = cli
             .audio_stems_mode
             .as_deref()
-            .expect("--audio-stems requires --audio-stems-mode (checked during CLI parsing)");
+            .or(cfg.audio.stem_granularity.as_deref())
+            .ok_or_else(|| {
+                anyhow!(
+                    "--audio-stems requires --audio-stems-mode LIST (e.g. \"master,source\"), \
+                     or a [audio] stem_granularity default in the config"
+                )
+            })?;
         let sources = configured_audio_stem_sources(&cfg);
         emu.bus_mut()
             .paula
