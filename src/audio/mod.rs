@@ -5,6 +5,8 @@
 //! plus several concrete implementations chosen at startup time based
 //! on CLI flags.
 
+pub mod mux;
+
 #[cfg(feature = "frontend")]
 use crate::timebase::Instant;
 use std::fs::File;
@@ -827,20 +829,27 @@ impl CpalSink {
 // when you want to inspect the mixer output offline.
 // -----------------------------------------------------------------
 
+/// Open a stereo f32 WAV file at [`MIX_SAMPLE_RATE`] -- the one framing
+/// every WAV Copperline writes, whether the mixed-master `--audio-wav`
+/// capture ([`WavSink`]) or a per-source/per-channel stem
+/// ([`crate::audio::mux::AudioMux`]).
+pub(crate) fn open_wav_writer(path: &Path) -> Result<hound::WavWriter<BufWriter<File>>> {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: MIX_SAMPLE_RATE,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    hound::WavWriter::create(path, spec).map_err(|e| anyhow!("create WAV {}: {e}", path.display()))
+}
+
 pub struct WavSink {
     writer: hound::WavWriter<BufWriter<File>>,
 }
 
 impl WavSink {
     pub fn new(path: &Path) -> Result<Self> {
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: MIX_SAMPLE_RATE,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let writer = hound::WavWriter::create(path, spec)
-            .map_err(|e| anyhow!("create WAV {}: {e}", path.display()))?;
+        let writer = open_wav_writer(path)?;
         log::info!(
             "audio: WAV sink writing to {} (stereo f32 @ {} Hz)",
             path.display(),

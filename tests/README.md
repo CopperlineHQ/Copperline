@@ -219,6 +219,14 @@ Unlike the suites above, `probe_golden.rs` (the golden-render suite for
 those probes) needs no external assets: it boots the bundled AROS ROM and
 runs in CI on every push.
 
+`audio_stems_determinism.rs` also needs no external assets (bundled AROS,
+an empty default DF0) -- it is `#[ignore = "runs the emulator"]` rather
+than release-only-gated like `probe_golden.rs`, so run it explicitly:
+
+```sh
+cargo test --release --test audio_stems_determinism -- --ignored
+```
+
 ## vAmigaTS
 
 `vamiga_ts.rs` is a separate ignored suite driven by `COPPERLINE_VAMIGATS_*`

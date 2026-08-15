@@ -3,6 +3,7 @@
 //! Paula-side state: serial UART registers, interrupt enable/request,
 //! and four-channel audio DMA + mixer.
 
+use crate::audio::mux::AudioMux;
 use crate::audio::{AudioRuntimeStatus, AudioSink, MIX_SAMPLE_RATE};
 use crate::drive_sounds::DriveSounds;
 use crate::serial::SerialSink;
@@ -327,8 +328,8 @@ fn null_serial_sink() -> Box<dyn SerialSink> {
     Box::new(crate::serial::NullSerialSink)
 }
 
-fn null_audio_sink() -> Box<dyn AudioSink> {
-    Box::new(crate::audio::NullSink)
+fn null_audio_sink() -> AudioMux {
+    AudioMux::new(Box::new(crate::audio::NullSink))
 }
 
 /// serde default for the skipped `stereo_separation` field: full width, so a
@@ -357,7 +358,7 @@ pub struct Paula {
     #[serde(skip)]
     pub(crate) serial_observer: Option<crate::serial::SerialObserver>,
     #[serde(skip, default = "null_audio_sink")]
-    pub audio: Box<dyn AudioSink>,
+    pub audio: AudioMux,
     pub adkcon: u16,
     pub potgo: u16,
 
@@ -458,7 +459,7 @@ impl Paula {
             intreq: 0,
             serial,
             serial_observer: None,
-            audio,
+            audio: AudioMux::new(audio),
             adkcon: 0,
             potgo: 0,
             chans: [
@@ -1785,11 +1786,22 @@ impl Paula {
         if self.led_filter_enabled {
             (left, right) = filtered;
         }
+        // Pure Paula-sum stem tap: post-LED-filter, pre-drive/CD/MT-32. Real
+        // hardware's LED filter sits after the channel mixer's summation, so
+        // the per-channel taps below are deliberately *not* filtered.
+        self.audio.push_source("paula", left, right);
+        let ch_scaled: [f32; 4] =
+            std::array::from_fn(|i| self.channel_mixed_sample(i) as f32 * scale);
+        self.audio.push_source_channel("paula", "0", ch_scaled[0]);
+        self.audio.push_source_channel("paula", "1", ch_scaled[1]);
+        self.audio.push_source_channel("paula", "2", ch_scaled[2]);
+        self.audio.push_source_channel("paula", "3", ch_scaled[3]);
         // Drive noises join after the LED filter (acoustic, not part of
         // Paula's output path) but under the master volume control.
         let drive = self.drive_sounds.next_sample();
         left += drive;
         right += drive;
+        self.audio.push_source("drivesounds", drive, drive);
         // CD audio (CD32/CDTV) is line-mixed with Paula's output after
         // the LED filter, like the real mixer stage, and also sits under
         // the master volume control.
@@ -1805,18 +1817,26 @@ impl Paula {
         }
         left += cd_left;
         right += cd_right;
+        // Stem tap reflects audible content, so it sits after the mute gate
+        // (unlike the scope tap above, which stays pre-mute for visibility).
+        self.audio.push_source("cdda", cd_left, cd_right);
         // A MIDI device emulated in-process (an MT-32) is line-mixed the same
         // way, so the Amiga's own voices keep playing under it exactly as
         // they would beside a real one on the desk.
+        let mut synth_left = 0.0f32;
+        let mut synth_right = 0.0f32;
         if !self.synth_silent {
             match self.serial.next_audio_frame() {
-                Some((synth_left, synth_right)) => {
-                    left += synth_left;
-                    right += synth_right;
+                Some((sl, sr)) => {
+                    left += sl;
+                    right += sr;
+                    synth_left = sl;
+                    synth_right = sr;
                 }
                 None => self.synth_silent = true,
             }
         }
+        self.audio.push_source("mt32", synth_left, synth_right);
         if let Some(capture) = &mut self.capture {
             capture.push((left, right));
         }
@@ -1836,7 +1856,7 @@ impl Paula {
             out_left = mid + side;
             out_right = mid - side;
         }
-        self.audio.push(out_left, out_right);
+        self.audio.push_master(out_left, out_right);
     }
 
     fn channel_mixed_sample(&self, ch_idx: usize) -> i32 {

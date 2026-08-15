@@ -2266,12 +2266,16 @@ impl App {
         let realtime = crate::priority::requested(self.realtime_priority);
         match crate::audio::open_output_sink(realtime, &self.audio_output) {
             Ok(sink) => {
-                self.emu.bus_mut().paula.audio = sink;
+                self.emu.bus_mut().paula.audio.set_master(sink);
                 self.sync_live_audio_suspension();
             }
             Err(e) => {
                 warn!("audio: could not open the selected device; keeping silence: {e:#}");
-                self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
+                self.emu
+                    .bus_mut()
+                    .paula
+                    .audio
+                    .set_master(Box::new(crate::audio::NullSink));
             }
         }
         self.show_osd(format!("Audio output: {}", self.audio_output.label()));
@@ -5505,12 +5509,16 @@ impl App {
                 let realtime = crate::priority::requested(self.realtime_priority);
                 match crate::audio::open_output_sink(realtime, &self.audio_output) {
                     Ok(sink) => {
-                        self.emu.bus_mut().paula.audio = sink;
+                        self.emu.bus_mut().paula.audio.set_master(sink);
                         self.sync_live_audio_suspension();
                     }
                     Err(e) => {
                         warn!("audio: could not open the selected device; keeping silence: {e:#}");
-                        self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
+                        self.emu
+                            .bus_mut()
+                            .paula
+                            .audio
+                            .set_master(Box::new(crate::audio::NullSink));
                     }
                 }
                 self.show_osd(format!("Audio output: {}", self.audio_output.label()));
@@ -12046,7 +12054,7 @@ impl App {
             &self.audio_output,
         ) {
             Ok(sink) => {
-                self.emu.bus_mut().paula.audio = sink;
+                self.emu.bus_mut().paula.audio.set_master(sink);
                 // Apply the current suspension state to the freshly installed
                 // stream (it should be live now: powered on and not paused).
                 self.sync_live_audio_suspension();
@@ -12077,13 +12085,17 @@ impl App {
         // is the one that went away.
         match CpalSink::new(crate::priority::requested(self.realtime_priority), None) {
             Ok(sink) => {
-                self.emu.bus_mut().paula.audio = Box::new(sink);
+                self.emu.bus_mut().paula.audio.set_master(Box::new(sink));
                 self.sync_live_audio_suspension();
                 self.show_osd("Audio device lost! Switched to Default".to_string());
             }
             Err(e) => {
                 warn!("audio: no fallback output device; continuing without sound: {e:#}");
-                self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
+                self.emu
+                    .bus_mut()
+                    .paula
+                    .audio
+                    .set_master(Box::new(crate::audio::NullSink));
             }
         }
     }

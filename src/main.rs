@@ -136,6 +136,13 @@ pub struct CliArgs {
     /// (32-bit float, 44100 Hz). No live output. Useful for headless
     /// verification of the audio path.
     pub audio_wav: Option<PathBuf>,
+    /// `--audio-stems DIR`: write per-granularity stem WAVs (selected by
+    /// `--audio-stems-mode`) into DIR instead of a single mixed file. No
+    /// live output; mutually exclusive with `--audio-wav`/`--audio`.
+    pub audio_stems: Option<PathBuf>,
+    /// `--audio-stems-mode LIST`: comma-separated granularities to write
+    /// under `--audio-stems` (`master`, `source`, `channel`, combinable).
+    pub audio_stems_mode: Option<Vec<copperline::audio::mux::StemGranularity>>,
     /// `--profile-live-audio SECS`: run a no-window Paula-to-cpal
     /// profile workload for SECS seconds. Use COPPERLINE_AUDIO_PROFILE=1
     /// to emit the live-audio counters while it runs.
@@ -359,6 +366,8 @@ where
     let mut explicit_audio_live = false;
     let mut explicit_noaudio = false;
     let mut audio_wav: Option<PathBuf> = None;
+    let mut audio_stems: Option<PathBuf> = None;
+    let mut audio_stems_mode: Option<Vec<copperline::audio::mux::StemGranularity>> = None;
     let mut live_audio_profile_secs: Option<f32> = None;
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
@@ -1054,6 +1063,22 @@ where
                 audio_wav = Some(PathBuf::from(v));
                 audio_live = false;
             }
+            "--audio-stems" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--audio-stems requires a directory"))?;
+                audio_stems = Some(PathBuf::from(v));
+                audio_live = false;
+            }
+            "--audio-stems-mode" => {
+                let v = args.next().ok_or_else(|| {
+                    anyhow!("--audio-stems-mode requires a list, e.g. \"master,source\"")
+                })?;
+                audio_stems_mode = Some(
+                    copperline::audio::mux::StemGranularity::parse_list(&v)
+                        .map_err(|e| anyhow!("--audio-stems-mode: {e}"))?,
+                );
+            }
             "--profile-live-audio" => {
                 let secs: f32 = next_arg(
                     &mut args,
@@ -1090,6 +1115,17 @@ where
     }
     if explicit_audio_live && audio_wav.is_some() {
         return Err(anyhow!("--audio and --audio-wav are mutually exclusive"));
+    }
+    if audio_stems.is_some() && audio_wav.is_some() {
+        return Err(anyhow!(
+            "--audio-stems and --audio-wav are mutually exclusive"
+        ));
+    }
+    if explicit_audio_live && audio_stems.is_some() {
+        return Err(anyhow!("--audio and --audio-stems are mutually exclusive"));
+    }
+    if audio_stems.is_none() && audio_stems_mode.is_some() {
+        return Err(anyhow!("--audio-stems-mode requires --audio-stems DIR"));
     }
     if live_audio_profile_secs.is_some() && explicit_noaudio {
         return Err(anyhow!(
@@ -1197,6 +1233,8 @@ where
         audio_live,
         audio_live_forced: explicit_audio_live,
         audio_wav,
+        audio_stems,
+        audio_stems_mode,
         live_audio_profile_secs,
         calibrate_gamepad,
         list_midi,
@@ -1374,6 +1412,11 @@ fn print_help() {
          --net-helper-status            report Linux bridge-helper status\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
          \x20                            instead of live output\n  \
+         --audio-stems DIR              write per-granularity stem WAVs into DIR instead of\n  \
+         \x20                            live output (needs --audio-stems-mode or a\n  \
+         \x20                            [audio] stem_granularity default)\n  \
+         --audio-stems-mode LIST        comma-separated stem granularities to write:\n  \
+         \x20                            \"master\", \"source\", \"channel\" (combinable)\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
@@ -1774,6 +1817,79 @@ fn report_benchmark_frame_times(start_frame: u64, frame_times: &[f64]) {
 /// `--audio-wav` still win; those are handled by the caller.
 fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -> bool {
     audio_live && (forced_on || config_enabled)
+}
+
+/// The `--audio-stems` source set for this run: Paula (always present, with
+/// its four physical channels) and drive sounds (always registered --
+/// `[audio] floppy_sounds = false` just means the stem is silent, like a
+/// disabled DriveSounds today), plus CD-DA and MT-32 only when this run's
+/// config plausibly produces them. A source absent here never gets a stem
+/// file at all, even if `--audio-stems-mode` includes `source`/`channel`.
+///
+/// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
+/// make sound" oracle (e.g. a CD swapped into an empty drive mid-run by
+/// `--insert-cd-after` or the control protocol is missed) -- see
+/// docs/internals/audio.md for the exact rule and its limits.
+///
+/// `state_loaded` must be true when this run passes `--load-state`: the
+/// restored machine can describe entirely different hardware than `cfg`
+/// (a state's own descriptor can disagree with the config that started
+/// this process, and the host reconfigures to match it -- see
+/// `Emulator::adopt_loaded_state`), so `cfg` alone cannot say whether the
+/// resumed machine has a CD drive or an MT-32. Rather than risk silently
+/// missing an active source, a state load conservatively registers both
+/// regardless of what `cfg` says.
+fn configured_audio_stem_sources(
+    cfg: &config::Config,
+    state_loaded: bool,
+) -> Vec<copperline::audio::mux::SourceSpec> {
+    use copperline::audio::mux::SourceSpec;
+    let mut sources = vec![
+        SourceSpec {
+            id: "paula",
+            channel_names: &["0", "1", "2", "3"],
+        },
+        SourceSpec {
+            id: "drivesounds",
+            channel_names: &[],
+        },
+    ];
+    // A CD image on an [ide]/[lide]/[scsi] drive slot attaches as an
+    // ATAPI/SCSI CD-ROM (open_ide_target/open_scsi_target apply this same
+    // path test), and its CD-DA feeds the one CdAudioRing like the
+    // CD32/CDTV drive does.
+    let unit_has_cd_image = |drive: &Option<config::DriveImage>| {
+        drive
+            .as_ref()
+            .is_some_and(|d| config::is_cd_image_path(&d.path))
+    };
+    let has_cd = state_loaded
+        || matches!(
+            cfg.machine,
+            Some(config::MachineModel::Cd32) | Some(config::MachineModel::Cdtv)
+        )
+        || cfg.cd_image_path.is_some()
+        || unit_has_cd_image(&cfg.ide.master)
+        || unit_has_cd_image(&cfg.ide.slave)
+        || cfg.lide.drives.iter().any(unit_has_cd_image)
+        || cfg.scsi.units.iter().any(unit_has_cd_image);
+    if has_cd {
+        sources.push(SourceSpec {
+            id: "cdda",
+            channel_names: &[],
+        });
+    }
+    let has_mt32 = state_loaded
+        || (config::midi_out_is_mt32(cfg.serial.midi_out.as_deref())
+            && cfg.serial.mt32_control_rom.is_some()
+            && cfg.serial.mt32_pcm_rom.is_some());
+    if has_mt32 {
+        sources.push(SourceSpec {
+            id: "mt32",
+            channel_names: &[],
+        });
+    }
+    sources
 }
 
 /// Print the host audio output devices for `--list-audio-devices`. These are the
@@ -2223,6 +2339,27 @@ fn main() -> Result<()> {
             emu.bus().emulated_seconds()
         );
     }
+    if let Some(dir) = &cli.audio_stems {
+        let granularities = cli
+            .audio_stems_mode
+            .as_deref()
+            .or(cfg.audio.stem_granularity.as_deref())
+            .ok_or_else(|| {
+                anyhow!(
+                    "--audio-stems requires --audio-stems-mode LIST (e.g. \"master,source\"), \
+                     or a [audio] stem_granularity default in the config"
+                )
+            })?;
+        // After any --load-state: the resumed machine can describe
+        // different hardware than cfg (see configured_audio_stem_sources'
+        // own doc comment), so this reads the config only to *supplement*
+        // a conservative state-loaded registration, never to narrow it.
+        let sources = configured_audio_stem_sources(&cfg, cli.load_state.is_some());
+        emu.bus_mut()
+            .paula
+            .audio
+            .enable_stems(dir, granularities, &sources)?;
+    }
     // Arm reverse debugging (snapshot ring + optional one-shot "last writer"
     // watchpoint) from the COPPERLINE_DBG_RR*/RWATCH environment.
     if let Some(rr) = debugger::reverse_config_from_env() {
@@ -2656,6 +2793,85 @@ mod tests {
         // The configuration screen's host machine must build without any ROM
         // file or audio device (it sits powered off behind the launcher).
         build_placeholder_machine().expect("placeholder machine builds");
+    }
+
+    #[test]
+    fn stem_sources_register_cdda_for_every_static_cd_attachment() {
+        use std::path::PathBuf;
+        let ids = |cfg: &config::Config| -> Vec<&'static str> {
+            configured_audio_stem_sources(cfg, false)
+                .iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        let cd_drive = || {
+            Some(config::DriveImage {
+                path: PathBuf::from("disc.cue"),
+                ..Default::default()
+            })
+        };
+
+        let cfg_with = |edit: fn(&mut config::Config)| {
+            let mut cfg = config::Config::default();
+            edit(&mut cfg);
+            cfg
+        };
+
+        // A bare machine: Paula and drive sounds only, no cdda/mt32.
+        assert_eq!(
+            ids(&config::Config::default()),
+            vec!["paula", "drivesounds"]
+        );
+
+        // Each way a CD drive can be statically configured registers cdda:
+        // the machine's own drive ([cd] image / a CD32-CDTV profile)...
+        let cfg = cfg_with(|c| c.cd_image_path = Some(PathBuf::from("game.iso")));
+        assert!(ids(&cfg).contains(&"cdda"));
+        let cfg = cfg_with(|c| c.machine = Some(config::MachineModel::Cd32));
+        assert!(ids(&cfg).contains(&"cdda"));
+        // ...and a CD image on an [ide]/[lide]/[scsi] drive slot, which
+        // attaches as an ATAPI/SCSI CD-ROM feeding the same CdAudioRing.
+        let mut cfg = cfg_with(|_| {});
+        cfg.ide.slave = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+        let mut cfg = cfg_with(|_| {});
+        cfg.lide.drives[1] = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+        let mut cfg = cfg_with(|_| {});
+        cfg.scsi.units[3] = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+
+        // A hard-disk image on those same slots is not a CD.
+        let mut cfg = cfg_with(|_| {});
+        cfg.ide.master = Some(config::DriveImage {
+            path: PathBuf::from("workbench.hdf"),
+            ..Default::default()
+        });
+        assert!(!ids(&cfg).contains(&"cdda"));
+    }
+
+    #[test]
+    fn stem_sources_are_conservative_after_a_state_load() {
+        // A bare config says no CD/MT-32 -- but a --load-state run can
+        // resume a machine describing entirely different hardware than
+        // this process's own cfg (the host reconfigures to match a
+        // state's descriptor), so state_loaded=true must register both
+        // regardless of what the pre-load config says.
+        let cfg = config::Config::default();
+        let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, true)
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(ids.contains(&"cdda"), "state loads must not skip cdda");
+        assert!(ids.contains(&"mt32"), "state loads must not skip mt32");
+
+        // Without a state load, the same bare config registers neither.
+        let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, false)
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(!ids.contains(&"cdda"));
+        assert!(!ids.contains(&"mt32"));
     }
 
     #[test]

@@ -2093,6 +2093,11 @@ pub struct MachineSetup {
     audio_stereo_separation: u8,
     /// Paula analogue filter override: Auto (guest-driven), On, or Off.
     audio_filter: AudioFilterMode,
+    /// `[audio] stem_granularity`: the headless `--audio-stems-mode` default.
+    /// No launcher row edits it (stem capture is a headless-only flag), but a
+    /// loaded config's value must survive a Save, so it is carried through
+    /// as a passthrough rather than silently dropped by `to_raw`.
+    audio_stem_granularity: Option<Vec<crate::audio::mux::StemGranularity>>,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
     /// How the canvas is scaled into the window ([display] scaling).
@@ -2372,6 +2377,7 @@ impl MachineSetup {
             audio_channel_mode: cfg.audio.channel_mode,
             audio_stereo_separation: cfg.audio.stereo_separation,
             audio_filter: cfg.audio.filter,
+            audio_stem_granularity: cfg.audio.stem_granularity.clone(),
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             scaling: cfg.scaling,
@@ -2987,6 +2993,12 @@ impl MachineSetup {
             .then_some(u16::from(self.audio_stereo_separation));
         raw.audio.audio_filter = (self.audio_filter != AudioFilterMode::Auto)
             .then(|| self.audio_filter.label().to_string());
+        raw.audio.stem_granularity = self.audio_stem_granularity.as_ref().map(|list| {
+            list.iter()
+                .map(|g| g.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
         // Zorro boards: emit the metadata path plus any per-board overrides
         // (typed per the option schema), only when the user changed something.
         raw.zorro = self
@@ -12846,6 +12858,23 @@ mod tests {
         let raw = s.to_raw();
         assert_eq!(raw.audio.output_device.as_deref(), Some("BlackHole"));
         assert_eq!(raw.audio.output_enabled, None);
+    }
+
+    #[test]
+    fn stem_granularity_survives_a_launcher_load_and_save() {
+        // No launcher row edits [audio] stem_granularity (it is a
+        // headless-only default), so a loaded config's value must pass
+        // through to_raw untouched rather than being dropped on Save.
+        let mut raw = RawConfig::default();
+        raw.audio.stem_granularity = Some("master,channel".to_string());
+        let setup = MachineSetup::from_raw(&raw).expect("config loads");
+        assert_eq!(
+            setup.to_raw().audio.stem_granularity.as_deref(),
+            Some("master,channel")
+        );
+        // And a config that never set it keeps not setting it.
+        let bare = MachineSetup::from_raw(&RawConfig::default()).expect("config loads");
+        assert_eq!(bare.to_raw().audio.stem_granularity, None);
     }
 
     #[cfg(feature = "midi")]

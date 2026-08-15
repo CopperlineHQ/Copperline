@@ -1420,6 +1420,11 @@ pub struct AudioConfig {
     pub stereo_separation: u8,
     /// Paula's analogue low-pass filter: guest-driven (`Auto`) or forced.
     pub filter: AudioFilterMode,
+    /// Default `--audio-stems-mode` granularity list, used when
+    /// `--audio-stems` is given without `--audio-stems-mode` on the CLI.
+    /// `None` when unset (a bare `--audio-stems` then requires an explicit
+    /// `--audio-stems-mode`, per the CLI's own validation).
+    pub stem_granularity: Option<Vec<crate::audio::mux::StemGranularity>>,
 }
 
 impl Default for AudioConfig {
@@ -1432,6 +1437,7 @@ impl Default for AudioConfig {
             channel_mode: ChannelMode::Stereo,
             stereo_separation: 100,
             filter: AudioFilterMode::Auto,
+            stem_granularity: None,
         }
     }
 }
@@ -3760,6 +3766,10 @@ pub(crate) struct RawAudio {
     pub(crate) audio_filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stereo_separation: Option<u16>,
+    /// Default `--audio-stems-mode` granularity list (`"master,source"`) for
+    /// `--audio-stems` runs that don't pass `--audio-stems-mode` explicitly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stem_granularity: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -4137,6 +4147,16 @@ impl TryFrom<RawConfig> for Config {
                     Err(e) => {
                         errors.push(e);
                         defaults.audio.filter
+                    }
+                },
+            },
+            stem_granularity: match raw.audio.stem_granularity.as_deref() {
+                None => defaults.audio.stem_granularity.clone(),
+                Some(s) => match crate::audio::mux::StemGranularity::parse_list(s) {
+                    Ok(list) => Some(list),
+                    Err(e) => {
+                        errors.push(anyhow!("[audio] stem_granularity: {e}"));
+                        defaults.audio.stem_granularity.clone()
                     }
                 },
             },
@@ -10371,6 +10391,21 @@ mod tests {
             load_overrides(&overrides)?.audio.filter,
             AudioFilterMode::On
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audio_stem_granularity_defaults_to_none_and_parses() -> Result<()> {
+        use crate::audio::mux::StemGranularity;
+        assert_eq!(parse_config("")?.audio.stem_granularity, None);
+        assert_eq!(
+            parse_config("[audio]\nstem_granularity = \"master,source\"\n")?
+                .audio
+                .stem_granularity,
+            Some(vec![StemGranularity::Master, StemGranularity::Source])
+        );
+        assert!(parse_config("[audio]\nstem_granularity = \"bogus\"\n").is_err());
+        assert!(parse_config("[audio]\nstem_granularity = \"\"\n").is_err());
         Ok(())
     }
 
