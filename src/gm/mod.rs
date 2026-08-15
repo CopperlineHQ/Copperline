@@ -102,6 +102,11 @@ pub struct GmDevice {
     /// Whether translation was reported active, for the one-line log when
     /// auto mode identifies MT-32 traffic.
     translating_logged: bool,
+    /// A raw tap of every byte the guest sends, when
+    /// `COPPERLINE_GM_CAPTURE` names a file: the capture replays offline
+    /// through the translation layer, which is how a play-through becomes
+    /// a regression corpus. Flushed often enough to survive a force-quit.
+    capture: Option<(std::io::BufWriter<std::fs::File>, usize)>,
 }
 
 impl GmDevice {
@@ -122,16 +127,42 @@ impl GmDevice {
                 Mt32Mode::Off => "off",
             }
         );
+        let capture = crate::envcfg::var_os("COPPERLINE_GM_CAPTURE").and_then(|path| {
+            let path = PathBuf::from(path);
+            match std::fs::File::create(&path) {
+                Ok(file) => {
+                    log::info!("midi: capturing GM bytes to {}", path.display());
+                    Some((std::io::BufWriter::new(file), 0))
+                }
+                Err(e) => {
+                    log::warn!("midi: COPPERLINE_GM_CAPTURE {}: {e}", path.display());
+                    None
+                }
+            }
+        });
         Ok(Self {
             engine,
             block: vec![(0.0, 0.0); BLOCK_FRAMES],
             played: BLOCK_FRAMES,
             translating_logged: mode == Mt32Mode::On,
+            capture,
         })
     }
 
     /// Take a byte off the serial line.
     pub fn write_byte(&mut self, b: u8) {
+        if let Some((w, since_flush)) = &mut self.capture {
+            use std::io::Write;
+            let _ = w.write_all(&[b]);
+            *since_flush += 1;
+            // MIDI runs at 31250 baud, so this is at most ~12 flushes a
+            // second and usually far fewer; cheap insurance against a
+            // capture lost to a force-quit.
+            if *since_flush >= 256 {
+                *since_flush = 0;
+                let _ = w.flush();
+            }
+        }
         self.engine.write_byte(b);
         if !self.translating_logged && self.engine.translating() {
             self.translating_logged = true;
