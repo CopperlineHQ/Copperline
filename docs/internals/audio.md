@@ -68,18 +68,21 @@ stem when `[audio] floppy_sounds = false`, the same as a disabled
 `DriveSounds` today); `cdda` and `mt32` register only when this run's
 config plausibly produces them:
 
-- `cdda`: a CD32/CDTV machine profile, or a configured CD image
-  (`[cd] image` / `cd_image_path`).
+- `cdda`: a CD32/CDTV machine profile, a configured CD image (`[cd]
+  image` / `cd_image_path`), or a CD image on any `[ide]`/`[lide]`/
+  `[scsi]` drive slot (the same `is_cd_image_path` test
+  `open_ide_target`/`open_scsi_target` use to attach one as an
+  ATAPI/SCSI CD-ROM).
 - `mt32`: `[serial] midi_out = "mt32"` with both `mt32_control_rom` and
   `mt32_pcm_rom` set.
 
-This is a **heuristic, not an exhaustive detector** -- a SCSI CD-ROM unit
-attached without a preset image, for instance, is missed, and `cdda.wav`
-simply won't be written for that run even though the hardware could in
-principle produce CD audio later via `--insert-cd-after`. Widening this
-check (or replacing it with a query against the actually-built machine)
-is a reasonable follow-up if it turns out to matter in practice; it was
-kept simple for this milestone since getting it exactly right needs
+This is a **heuristic, not an exhaustive detector** -- a CD swapped into
+an initially empty drive mid-run (`--insert-cd-after`, a control-protocol
+`media` command) is missed, and `cdda.wav` simply won't be written for
+that run even though the hardware ends up producing CD audio. Replacing
+the config test with a query against the actually-built machine is a
+reasonable follow-up if it turns out to matter in practice; it was kept
+config-side for this milestone since getting it exactly right needs
 reaching into feature-gated MIDI/MT-32 construction code that doesn't
 otherwise need to be duplicated in `main.rs`.
 

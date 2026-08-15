@@ -1827,9 +1827,9 @@ fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -
 /// file at all, even if `--audio-stems-mode` includes `source`/`channel`.
 ///
 /// The CD/MT-32 checks are a heuristic, not a perfect "will this run ever
-/// make sound" oracle (e.g. a SCSI CD-ROM unit with no image preset here
-/// is missed) -- see docs/internals/audio.md for the exact rule and its
-/// limits.
+/// make sound" oracle (e.g. a CD swapped into an empty drive mid-run by
+/// `--insert-cd-after` or the control protocol is missed) -- see
+/// docs/internals/audio.md for the exact rule and its limits.
 fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio::mux::SourceSpec> {
     use copperline::audio::mux::SourceSpec;
     let mut sources = vec![
@@ -1842,10 +1842,23 @@ fn configured_audio_stem_sources(cfg: &config::Config) -> Vec<copperline::audio:
             channel_names: &[],
         },
     ];
+    // A CD image on an [ide]/[lide]/[scsi] drive slot attaches as an
+    // ATAPI/SCSI CD-ROM (open_ide_target/open_scsi_target apply this same
+    // path test), and its CD-DA feeds the one CdAudioRing like the
+    // CD32/CDTV drive does.
+    let unit_has_cd_image = |drive: &Option<config::DriveImage>| {
+        drive
+            .as_ref()
+            .is_some_and(|d| config::is_cd_image_path(&d.path))
+    };
     let has_cd = matches!(
         cfg.machine,
         Some(config::MachineModel::Cd32) | Some(config::MachineModel::Cdtv)
-    ) || cfg.cd_image_path.is_some();
+    ) || cfg.cd_image_path.is_some()
+        || unit_has_cd_image(&cfg.ide.master)
+        || unit_has_cd_image(&cfg.ide.slave)
+        || cfg.lide.drives.iter().any(unit_has_cd_image)
+        || cfg.scsi.units.iter().any(unit_has_cd_image);
     if has_cd {
         sources.push(SourceSpec {
             id: "cdda",
@@ -2761,6 +2774,61 @@ mod tests {
         // The configuration screen's host machine must build without any ROM
         // file or audio device (it sits powered off behind the launcher).
         build_placeholder_machine().expect("placeholder machine builds");
+    }
+
+    #[test]
+    fn stem_sources_register_cdda_for_every_static_cd_attachment() {
+        use std::path::PathBuf;
+        let ids = |cfg: &config::Config| -> Vec<&'static str> {
+            configured_audio_stem_sources(cfg)
+                .iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        let cd_drive = || {
+            Some(config::DriveImage {
+                path: PathBuf::from("disc.cue"),
+                ..Default::default()
+            })
+        };
+
+        let cfg_with = |edit: fn(&mut config::Config)| {
+            let mut cfg = config::Config::default();
+            edit(&mut cfg);
+            cfg
+        };
+
+        // A bare machine: Paula and drive sounds only, no cdda/mt32.
+        assert_eq!(
+            ids(&config::Config::default()),
+            vec!["paula", "drivesounds"]
+        );
+
+        // Each way a CD drive can be statically configured registers cdda:
+        // the machine's own drive ([cd] image / a CD32-CDTV profile)...
+        let cfg = cfg_with(|c| c.cd_image_path = Some(PathBuf::from("game.iso")));
+        assert!(ids(&cfg).contains(&"cdda"));
+        let cfg = cfg_with(|c| c.machine = Some(config::MachineModel::Cd32));
+        assert!(ids(&cfg).contains(&"cdda"));
+        // ...and a CD image on an [ide]/[lide]/[scsi] drive slot, which
+        // attaches as an ATAPI/SCSI CD-ROM feeding the same CdAudioRing.
+        let mut cfg = cfg_with(|_| {});
+        cfg.ide.slave = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+        let mut cfg = cfg_with(|_| {});
+        cfg.lide.drives[1] = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+        let mut cfg = cfg_with(|_| {});
+        cfg.scsi.units[3] = cd_drive();
+        assert!(ids(&cfg).contains(&"cdda"));
+
+        // A hard-disk image on those same slots is not a CD.
+        let mut cfg = cfg_with(|_| {});
+        cfg.ide.master = Some(config::DriveImage {
+            path: PathBuf::from("workbench.hdf"),
+            ..Default::default()
+        });
+        assert!(!ids(&cfg).contains(&"cdda"));
     }
 
     #[test]
