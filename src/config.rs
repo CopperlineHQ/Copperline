@@ -232,7 +232,7 @@ pub struct Config {
     /// the Zorro chain and presents RTG screens (all pixel formats, core
     /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
     pub rtg: RtgCard,
-    /// Picasso II/II+ display memory. Ignored by other RTG cards.
+    /// Picasso II/II+ and Graffity display memory. Ignored by the Z3660.
     pub rtg_vram_bytes: usize,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
@@ -3511,7 +3511,7 @@ pub(crate) struct RawRtg {
     /// "graffityz3", or "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) card: Option<String>,
-    /// Picasso II/II+ display memory: "1M" or "2M" (default).
+    /// Picasso II/II+ and Graffity display memory: "1M" or "2M" (default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vram: Option<String>,
 }

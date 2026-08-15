@@ -441,14 +441,24 @@ mod tests {
         let mut mem = memory();
         let mut host = DeviceHost::new(&mut mem);
         z2.write(z2_regs(0x8000 | 0x60), 1, 0, &mut host);
+        z2.write(z2_regs(0x3c4), 2, 0x0612, &mut host);
+        z2.write(z2_vram(4), 4, 0xcafe_babe, &mut host);
         let bytes = bincode::serialize(&z2).unwrap();
-        let resumed: GraffityZ2 = bincode::deserialize(&bytes).unwrap();
+        let mut resumed: GraffityZ2 = bincode::deserialize(&bytes).unwrap();
         assert_eq!(resumed.kind(), "graffityz2");
-        assert!(resumed.rtg_active() || !resumed.chip.video_valid());
+        assert!(resumed.show_rtg);
+        assert_eq!(resumed.read(z2_regs(0x3c4), 2, &mut host), 0x0612);
+        assert_eq!(resumed.read(z2_vram(4), 4, &mut host), 0xcafe_babe);
 
-        let z3 = GraffityZ3::new(2 * 1024 * 1024);
+        let mut z3 = GraffityZ3::new(2 * 1024 * 1024);
+        z3.write(SWITCH_BASE | 0x60, 1, 0, &mut host);
+        z3.write(REGS_BASE + 0x3c4, 2, 0x0612, &mut host);
+        z3.write(VRAM_BASE + 4, 4, 0xcafe_babe, &mut host);
         let bytes = bincode::serialize(&z3).unwrap();
-        let resumed: GraffityZ3 = bincode::deserialize(&bytes).unwrap();
+        let mut resumed: GraffityZ3 = bincode::deserialize(&bytes).unwrap();
         assert_eq!(resumed.kind(), "graffityz3");
+        assert!(resumed.show_rtg);
+        assert_eq!(resumed.read(REGS_BASE + 0x3c4, 2, &mut host), 0x0612);
+        assert_eq!(resumed.read(VRAM_BASE + 4, 4, &mut host), 0xcafe_babe);
     }
 }
