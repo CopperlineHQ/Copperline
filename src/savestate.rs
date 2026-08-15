@@ -184,7 +184,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  54: AtaBus's cylinder registers became per-device-slot pairs, so each
 //      slot keeps its own post-reset signature instead of device-select
 //      rewriting a shared pair.
-pub const STATE_VERSION: u32 = 54;
+//  55: BoardDevice gained the Toccata variant (the MacroSystem Toccata
+//      AD1848 sound board, `[toccata]`), appended at the end of the enum.
+pub const STATE_VERSION: u32 = 55;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -218,6 +218,28 @@ impl BoardSpec {
         }
     }
 
+    /// The MacroSystem Toccata sound board: manufacturer 18260 (0x4754),
+    /// product 12, a 64K Zorro II I/O window with no autoboot ROM (the
+    /// board's own `romtype` is `ROMTYPE_NOT` -- it needs no ROM image and
+    /// carries no DiagArea). `slot` is the index of the matching `Toccata`
+    /// device in `Bus::devices`.
+    pub fn toccata(slot: usize) -> Self {
+        Self {
+            name: "Toccata".into(),
+            version: ZorroVersion::II,
+            manufacturer: 18260,
+            product: 12,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
     /// The A2091 SCSI controller board: the DMAC supplies the autoconfig
     /// identity (Commodore West Chester, product 3) with a valid DiagArea
     /// vector pointing at the boot ROM, which appears at $2000 in the
@@ -1731,6 +1753,22 @@ mod tests {
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2A, 1), 0xF0);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2C, 1), 0xF0);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2E, 1), 0x70);
+    }
+
+    #[test]
+    fn toccata_autoconfig_identity_matches_the_reference() {
+        let chain = chain_with(vec![BoardSpec::toccata(0)]);
+        // Zorro II | 64K size code 1, no MEMLIST/chained/DIAGVALID: 0xC0|1 = 0xC1.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xc1));
+        assert_eq!(chain.config_logical_byte(0, 1), Some(12));
+        assert_eq!(chain.config_logical_byte(0, 2), Some(0)); // not memory-space
+                                                              // Manufacturer 18260 (MacroSystem) = 0x4754, big-endian.
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x47));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x54));
+        // No autoboot ROM: InitDiagVec stays zero, and no DIAGVALID bit
+        // above (0xC1 has no 0x10 set).
+        assert_eq!(chain.config_logical_byte(0, 10), Some(0));
+        assert_eq!(chain.config_logical_byte(0, 11), Some(0));
     }
 
     #[test]

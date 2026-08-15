@@ -139,6 +139,14 @@ impl Ad1848 {
         *self = Self::new();
     }
 
+    /// The play FIFO's current byte count, for the board wrapper's own
+    /// address-decode tests (`src/toccata.rs`) -- not otherwise exposed,
+    /// since nothing outside this chip needs to know FIFO occupancy.
+    #[cfg(test)]
+    pub(crate) fn fifo_len_for_test(&self) -> usize {
+        self.fifo.len()
+    }
+
     // -----------------------------------------------------------------
     // AD1848 index/data ports (base+0x6001 / base+0x6801)
     // -----------------------------------------------------------------
