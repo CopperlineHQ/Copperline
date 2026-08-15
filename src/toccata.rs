@@ -21,7 +21,13 @@ use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use ad1848::Ad1848;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+/// A generous safety margin on the pre-resample sample queue between the
+/// codec's own cadence and the mixer's -- the two stay near-lockstep in
+/// steady state (see `advance_codec`'s doc comment), so this is a cap
+/// against a stalled consumer, not a buffering requirement.
+const DECODED_CAPACITY: usize = 4096;
 
 /// One of the four port families the board's 64 KB window decodes to, by
 /// address bit pattern (heavily mirrored -- see `decode_port`).
@@ -62,19 +68,38 @@ fn decode_port(off: u32) -> Option<Port> {
 }
 
 /// The Toccata board: autoconfig glue and register-window decode around
-/// the chip-only [`Ad1848`] core, plus the mixer-rate cadence.
+/// the chip-only [`Ad1848`] core, plus two independent emulated-time
+/// cadences -- see `advance_codec`/`advance_mixer`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Toccata {
     ad1848: Ad1848,
+    /// Codec-rate accumulator, in units of colour-clocks * (the codec's
+    /// own active sample rate). One raw sample is due each time this
+    /// reaches PAULA_CLOCK_HZ -- see `advance_codec`. Genuine machine
+    /// state: it (indirectly, through when `produce_one_sample` gets
+    /// called) determines exactly when the FIFO drains and interrupts
+    /// raise, so it must survive a save-state load unchanged.
+    codec_acc: u64,
+    /// Raw, pre-resample samples `advance_codec` has produced and
+    /// `advance_mixer` hasn't consumed yet. Also genuine machine state,
+    /// for the same reason as `codec_acc` -- see `advance_codec`'s doc
+    /// comment for why this exists at all rather than the mixer pulling
+    /// straight from the chip.
+    decoded: VecDeque<(f32, f32)>,
     /// Mixer-rate accumulator, in units of colour-clocks * MIX_SAMPLE_RATE
     /// -- the exact same accumulator shape `Paula::advance_audio` uses.
     /// One output frame is due each time this reaches PAULA_CLOCK_HZ.
     mixer_acc: u64,
     /// One resampler per codec rate this session has used (at most 14, the
     /// AD1848's legal rate count), so switching back to an already-seen
-    /// rate never rebuilds its kernel table. Purely a host-side cache, not
-    /// machine state -- rebuilt lazily after a savestate load.
-    #[serde(skip)]
+    /// rate never rebuilds its kernel table. After the codec/mixer cadence
+    /// split above, a resampler's phase/history only shape the
+    /// interpolated *waveform*, never FIFO/IRQ timing -- but they are
+    /// still genuine machine state for output-exactness purposes, so this
+    /// serializes (via `Resampler`'s own `Serialize`/`Deserialize`, which
+    /// rebuilds the derived kernel table rather than storing it) instead
+    /// of being `#[serde(skip)]`: a save-state load must reproduce an
+    /// uninterrupted run's output exactly, not just its FIFO/IRQ timing.
     resamplers: HashMap<u32, Resampler>,
 }
 
@@ -82,29 +107,75 @@ impl Toccata {
     pub fn new() -> Self {
         Self {
             ad1848: Ad1848::new(),
+            codec_acc: 0,
+            decoded: VecDeque::new(),
             mixer_acc: 0,
             resamplers: HashMap::new(),
         }
     }
 
+    /// Advance the codec's own native-rate cadence by `cck` colour
+    /// clocks, producing raw (pre-resample) samples into `decoded`. This
+    /// -- not the resampler below -- is what actually drains the FIFO and
+    /// evaluates the half-empty/interrupt condition, paced causally by
+    /// emulated time via its own exact-ratio accumulator (the same shape
+    /// as `Paula::advance_audio`'s, just at the codec's rate instead of
+    /// the mixer's).
+    ///
+    /// This exists as a separate step from `advance_mixer` specifically
+    /// so `produce_one_sample`'s side effects are never invoked from
+    /// inside the resampler's own pull: a windowed-sinc kernel is
+    /// inherently non-causal (it needs taps on *both* sides of the output
+    /// instant, and primes by pulling a full window's worth of input
+    /// before its first output), so if it called `produce_one_sample`
+    /// directly, its first use after startup or a rate change would drain
+    /// dozens of FIFO bytes and raise interrupts all at once, decades
+    /// ahead of when a real codec would reach them. Producing samples
+    /// here first, in true chronological order, and letting the resampler
+    /// only ever pull from the resulting passive queue (or repeat the
+    /// chip's last known sample with no side effects, see
+    /// `advance_mixer`) keeps that lookahead confined to the waveform,
+    /// where it belongs.
+    fn advance_codec(&mut self, cck: u32) {
+        if !self.ad1848.play_active() {
+            return;
+        }
+        let rate = self.ad1848.sample_rate_hz();
+        self.codec_acc += u64::from(cck) * u64::from(rate);
+        while self.codec_acc >= u64::from(PAULA_CLOCK_HZ) {
+            self.codec_acc -= u64::from(PAULA_CLOCK_HZ);
+            let sample = self.ad1848.produce_one_sample();
+            if self.decoded.len() < DECODED_CAPACITY {
+                self.decoded.push_back(sample);
+            }
+        }
+    }
+
     /// Advance the mixer-rate cadence by `cck` colour clocks, resampling
-    /// the codec's own programmed rate onto the mixer grid and pushing
+    /// already-produced codec samples onto the mixer grid and pushing
     /// each produced frame into `ring`. Exact-ratio accumulator, so it
-    /// never drifts against `Paula::advance_audio`'s own.
+    /// never drifts against `Paula::advance_audio`'s own. Pulls only from
+    /// `decoded` (or repeats the chip's last known sample via the
+    /// side-effect-free `peek_last_sample`) -- never calls back into
+    /// `ad1848.produce_one_sample` directly, so the resampler's own
+    /// lookahead/priming can never advance FIFO/IRQ state out of order.
     fn advance_mixer(&mut self, cck: u32, ring: &mut crate::chipset::paula::ToccataAudioRing) {
         self.mixer_acc += u64::from(cck) * u64::from(MIX_SAMPLE_RATE);
         while self.mixer_acc >= u64::from(PAULA_CLOCK_HZ) {
             self.mixer_acc -= u64::from(PAULA_CLOCK_HZ);
-            // Disjoint field borrows: the resampler cache and the chip it
-            // pulls from via the refill closure below.
+            let rate = self.ad1848.sample_rate_hz();
+            let fallback = self.ad1848.peek_last_sample();
+            // Disjoint field borrows: the resampler cache and the passive
+            // decoded-sample queue it pulls from via the refill closure.
             let Self {
-                ad1848, resamplers, ..
+                decoded,
+                resamplers,
+                ..
             } = self;
-            let rate = ad1848.sample_rate_hz();
             let resampler = resamplers
                 .entry(rate)
                 .or_insert_with(|| Resampler::new(rate, MIX_SAMPLE_RATE));
-            let (left, right) = resampler.next(|| ad1848.produce_one_sample());
+            let (left, right) = resampler.next(|| decoded.pop_front().unwrap_or(fallback));
             ring.push_frame(left, right);
         }
     }
@@ -157,6 +228,7 @@ impl ZorroDevice for Toccata {
 
     fn tick(&mut self, cck: u32, host: &mut DeviceHost) {
         self.ad1848.advance_cck(cck);
+        self.advance_codec(cck);
         self.advance_mixer(cck, host.toccata_audio());
     }
 
@@ -166,6 +238,8 @@ impl ZorroDevice for Toccata {
 
     fn reset(&mut self) {
         self.ad1848.reset();
+        self.codec_acc = 0;
+        self.decoded.clear();
         self.mixer_acc = 0;
         // Each cached resampler's own history buffer holds the last ~64
         // pre-reset input frames; leaving it in place would let a few
@@ -284,10 +358,91 @@ mod tests {
         assert_eq!(board.kind(), "toccata");
     }
 
+    #[test]
+    fn savestate_round_trip_reproduces_an_uninterrupted_runs_output() {
+        // The determinism-critical claim: a state saved and reloaded
+        // mid-stream must produce exactly the frames an uninterrupted run
+        // would have -- both the resampler (its phase/history now
+        // genuine serialized state) and codec_acc/decoded (which pace
+        // produce_one_sample()) must round-trip exactly.
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        let mut board = Toccata::new();
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0b, &mut host); // 44100 Hz, mono 8-bit
+        latch_format(&mut board, &mut host);
+        board.write(0x6001, 1, 6, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host);
+        board.write(0x6001, 1, 7, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host);
+        for byte in [0x40, 0x80, 0xc0, 0xff, 0x20] {
+            board.write(0x2000, 1, byte, &mut host);
+        }
+        // Advance partway -- not a whole number of mixer frames, so both
+        // codec_acc and mixer_acc are left with genuine mid-accumulation
+        // remainders, not conveniently zeroed.
+        ZorroDevice::tick(&mut board, 137, &mut host);
+
+        let bytes = bincode::serialize(&board).unwrap();
+        let mut resumed: Toccata = bincode::deserialize(&bytes).unwrap();
+
+        // Continue both from here with identical further input and
+        // compare every produced frame.
+        let mut mem_a = memory();
+        let mut cd_a = crate::chipset::paula::CdAudioRing::default();
+        let mut ring_a = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host_a = DeviceHost::for_slot_with_audio(&mut mem_a, 0, &mut cd_a, &mut ring_a);
+        let mut mem_b = memory();
+        let mut cd_b = crate::chipset::paula::CdAudioRing::default();
+        let mut ring_b = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host_b = DeviceHost::for_slot_with_audio(&mut mem_b, 0, &mut cd_b, &mut ring_b);
+
+        for byte in [0x30, 0x90, 0x10, 0xe0] {
+            board.write(0x2000, 1, byte, &mut host_a);
+            resumed.write(0x2000, 1, byte, &mut host_b);
+        }
+        for _ in 0..500 {
+            ZorroDevice::tick(&mut board, 61, &mut host_a);
+            ZorroDevice::tick(&mut resumed, 61, &mut host_b);
+        }
+
+        // 500 ticks of 61 cck each is ~379 mixer frames at 44.1 kHz;
+        // draining well past that is safe since extra reads past the end
+        // just yield the ring's own matching (0.0, 0.0) "empty" fallback
+        // on both sides.
+        let frames_a: Vec<_> = (0..700).map(|_| ring_a.next_sample()).collect();
+        let frames_b: Vec<_> = (0..700).map(|_| ring_b.next_sample()).collect();
+        assert!(
+            frames_a.iter().any(|&f| f != (0.0, 0.0)),
+            "the setup should have produced audio"
+        );
+        assert_eq!(
+            frames_a, frames_b,
+            "a state resumed mid-stream must reproduce an uninterrupted run's output exactly"
+        );
+    }
+
     /// Colour clocks needed to cross one mixer-rate (44.1 kHz) frame
     /// boundary from a zero accumulator: `ceil(PAULA_CLOCK_HZ / MIX_SAMPLE_RATE)`.
     fn one_mixer_frame_cck() -> u32 {
         PAULA_CLOCK_HZ.div_ceil(MIX_SAMPLE_RATE)
+    }
+
+    /// Latch whatever format/rate is currently programmed in reg 8 by
+    /// driving reg 9 through a clean stopped-to-started transition, the
+    /// way a real driver does: program the format, then enable playback.
+    /// `advance_codec` only runs while the codec is active, and it only
+    /// ever uses the format/rate latched at the last such transition --
+    /// see `Ad1848::codec_start`'s doc comment.
+    fn latch_format(board: &mut Toccata, host: &mut DeviceHost) {
+        board.write(0x6001, 1, 9, host);
+        board.write(0x6801, 1, 0x10, host); // stop (SDC bit only)
+        board.write(0x6801, 1, 0x11, host); // play enable: rising edge
     }
 
     #[test]
@@ -302,6 +457,7 @@ mod tests {
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
         board.write(0x6801, 1, 0x0b, &mut host); // divider idx 5, crystal1 -> 44100 Hz, mono 8-bit
+        latch_format(&mut board, &mut host);
         board.write(0x6001, 1, 6, &mut host);
         board.write(0x6801, 1, 0x00, &mut host); // DAC L unmuted, full scale
         board.write(0x6001, 1, 7, &mut host);
@@ -319,6 +475,72 @@ mod tests {
     }
 
     #[test]
+    fn advance_codec_does_not_drain_the_fifo_before_its_own_cadence_elapses() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0f, &mut host); // divider idx 7, crystal1 -> 6600 Hz, mono 8-bit
+        latch_format(&mut board, &mut host);
+        for _ in 0..10 {
+            board.write(0x2000, 1, 0x80, &mut host);
+        }
+        assert_eq!(board.ad1848.fifo_len_for_test(), 10);
+
+        // One colour clock is nowhere near a 6.6 kHz sample period (about
+        // 537 cck), so the FIFO must be completely untouched -- not
+        // drained by a resampler's ~64-tap priming burst pulling
+        // produce_one_sample() directly and far ahead of emulated time.
+        // (Regression test for the earlier design, where the resampler's
+        // refill closure called produce_one_sample() itself.)
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        assert_eq!(
+            board.ad1848.fifo_len_for_test(),
+            10,
+            "the FIFO must only drain as the codec's own cadence elapses, never all at once"
+        );
+    }
+
+    #[test]
+    fn reprogramming_reg8_while_active_does_not_change_the_active_frame_width() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0b, &mut host); // 44100 Hz, mono 8-bit
+        latch_format(&mut board, &mut host);
+
+        // Reprogram to stereo 16-bit (4 bytes/sample) *without* a
+        // stop/start transition -- the reference only re-runs its own
+        // codec_setup() on that transition, so this must have no effect
+        // on the still-running stream.
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x5b, &mut host); // stereo + 16-bit, same rate bits
+
+        // One byte matches the still-active mono-8-bit frame width (1
+        // byte), not the newly-written-but-unlatched stereo/16-bit width
+        // (4 bytes) -- so it must be consumed as a complete frame.
+        board.write(0x2000, 1, 0xff, &mut host);
+        ZorroDevice::tick(&mut board, one_mixer_frame_cck(), &mut host);
+        assert_eq!(
+            board.ad1848.fifo_len_for_test(),
+            0,
+            "the still-active mono 8-bit format should consume the single byte, \
+             not wait for a 4-byte stereo/16-bit frame the unlatched reg8 write implies"
+        );
+    }
+
+    #[test]
     fn reset_clears_stale_resampler_history_so_silence_follows_immediately() {
         let mut board = Toccata::new();
         let mut mem = memory();
@@ -330,6 +552,7 @@ mod tests {
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
         board.write(0x6801, 1, 0x0b, &mut host); // 44100 Hz, mono 8-bit
+        latch_format(&mut board, &mut host);
         board.write(0x6001, 1, 6, &mut host);
         board.write(0x6801, 1, 0x00, &mut host); // DAC L/R unmuted, full scale
         board.write(0x6001, 1, 7, &mut host);
@@ -351,14 +574,16 @@ mod tests {
 
         board.reset();
 
-        // Reprogram the *same* 44.1 kHz rate reset just cleared, so a
-        // stale cache entry (keyed by rate) would be reused rather than
-        // sidestepped by a rate change. No FIFO write, though: the codec
-        // is otherwise fully disabled, so this tick should produce exact
-        // silence -- not a fading tail of the pre-reset tone leaking
-        // through a resampler whose kernel window still remembers it.
+        // Reprogram the *same* 44.1 kHz rate reset just cleared and
+        // re-latch it, so a stale cache entry (keyed by rate) would be
+        // reused rather than sidestepped by a rate change -- but feed no
+        // FIFO data, so the freshly reset (silent) codec is the only
+        // thing driving output. This tick should produce exact silence --
+        // not a fading tail of the pre-reset tone leaking through a
+        // resampler whose kernel window still remembers it.
         board.write(0x6001, 1, 8, &mut host);
         board.write(0x6801, 1, 0x0b, &mut host);
+        latch_format(&mut board, &mut host);
         ZorroDevice::tick(&mut board, one_mixer_frame_cck(), &mut host);
         let sample = host.toccata_audio().next_sample();
         assert_eq!(

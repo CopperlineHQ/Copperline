@@ -31,7 +31,9 @@ pub struct Resampler {
     m: u32,
     /// Where between input frames the next output falls, in `1/l`ths.
     phase: u32,
-    /// One windowed-sinc kernel per phase, phase-major.
+    /// One windowed-sinc kernel per phase, phase-major. A pure function of
+    /// `l`/`m`, so it is never serialized -- see the manual `Serialize`/
+    /// `Deserialize` impls below, which rebuild it from `l`/`m` instead.
     kernels: Vec<f32>,
     /// The last [`TAPS`] input frames, written twice [`TAPS`] apart so
     /// the window starting at `head` is always one contiguous slice,
@@ -41,34 +43,41 @@ pub struct Resampler {
     primed: bool,
 }
 
+/// One windowed-sinc kernel per output phase, phase-major -- the part of
+/// [`Resampler`] that depends only on the reduced `l`/`m` ratio, shared by
+/// `Resampler::new` and its `Deserialize` impl.
+fn build_kernels(l: u32, m: u32) -> Vec<f32> {
+    // Downsampling, the output's own Nyquist is the ceiling; the kernel is
+    // stretched to cut there instead.
+    let cutoff = CUTOFF_MARGIN * (f64::from(l) / f64::from(m)).min(1.0);
+    let mut kernels = Vec::with_capacity(l as usize * TAPS);
+    for phase in 0..l {
+        // The output instant sits `frac` past the newest-but-HALF input
+        // frame; each tap is the sinc at its distance from it.
+        let frac = f64::from(phase) / f64::from(l);
+        let mut kernel = [0f64; TAPS];
+        let mut sum = 0.0;
+        for (j, tap) in kernel.iter_mut().enumerate() {
+            let x = frac - (j as f64 - (HALF as f64 - 1.0));
+            *tap = cutoff * sinc(cutoff * x) * blackman(x / HALF as f64);
+            sum += *tap;
+        }
+        // Unity gain at DC exactly, so the window's ripple cannot shade
+        // the level from one phase to the next.
+        kernels.extend(kernel.iter().map(|&t| (t / sum) as f32));
+    }
+    kernels
+}
+
 impl Resampler {
     pub fn new(from: u32, to: u32) -> Resampler {
         let g = gcd(from, to);
         let (l, m) = (to / g, from / g);
-        // Downsampling, the output's own Nyquist is the ceiling; the
-        // kernel is stretched to cut there instead.
-        let cutoff = CUTOFF_MARGIN * (f64::from(l) / f64::from(m)).min(1.0);
-        let mut kernels = Vec::with_capacity(l as usize * TAPS);
-        for phase in 0..l {
-            // The output instant sits `frac` past the newest-but-HALF
-            // input frame; each tap is the sinc at its distance from it.
-            let frac = f64::from(phase) / f64::from(l);
-            let mut kernel = [0f64; TAPS];
-            let mut sum = 0.0;
-            for (j, tap) in kernel.iter_mut().enumerate() {
-                let x = frac - (j as f64 - (HALF as f64 - 1.0));
-                *tap = cutoff * sinc(cutoff * x) * blackman(x / HALF as f64);
-                sum += *tap;
-            }
-            // Unity gain at DC exactly, so the window's ripple cannot
-            // shade the level from one phase to the next.
-            kernels.extend(kernel.iter().map(|&t| (t / sum) as f32));
-        }
         Resampler {
             l,
             m,
             phase: 0,
-            kernels,
+            kernels: build_kernels(l, m),
             history: vec![(0.0, 0.0); 2 * TAPS],
             head: 0,
             primed: false,
@@ -109,6 +118,41 @@ impl Resampler {
             self.push(frame);
         }
         (left, right)
+    }
+}
+
+/// `l`/`m`/`phase`/`history`/`head`/`primed` -- everything except the
+/// derived `kernels` table, which `Deserialize` rebuilds from `l`/`m` via
+/// [`build_kernels`] instead of carrying it in the savestate. Needed so a
+/// Toccata savestate reproduces an uninterrupted run's output exactly
+/// (not just its FIFO/IRQ timing): the resampler's phase and tap history
+/// are what shape the interpolated waveform at the instant of a resume.
+impl serde::Serialize for Resampler {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (
+            self.l,
+            self.m,
+            self.phase,
+            &self.history,
+            self.head,
+            self.primed,
+        )
+            .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Resampler {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (l, m, phase, history, head, primed) = serde::Deserialize::deserialize(deserializer)?;
+        Ok(Resampler {
+            l,
+            m,
+            phase,
+            kernels: build_kernels(l, m),
+            history,
+            head,
+            primed,
+        })
     }
 }
 

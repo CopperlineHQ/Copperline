@@ -61,37 +61,52 @@ address decode, and the mixer-rate cadence.
 
 The codec's own programmed rate is independent of Copperline's fixed
 44.1 kHz mixer rate (established by the audio sink service, [](audio)).
-`Toccata::tick` runs its own exact-ratio accumulator -- identical in shape
-to `Paula::advance_audio`'s own -- and on each mixer-rate frame boundary
-pulls one sample through a polyphase windowed-sinc resampler
-(`src/audio/resample.rs`, shared with the MT-32 engine) that converts the
-AD1848's rate to the mixer's.
+`Toccata::tick` runs **two** independent exact-ratio accumulators --
+each the same shape as `Paula::advance_audio`'s own -- rather than one:
+`advance_codec` at the AD1848's own active rate, and `advance_mixer` at
+the mixer's fixed rate. Splitting them is deliberate, not incidental: a
+polyphase windowed-sinc resampler (`src/audio/resample.rs`, shared with
+the MT-32 engine) is inherently non-causal, since it needs taps on both
+sides of the output instant and primes by pulling a full window's worth
+of input before its first output. If the resampler pulled straight from
+the chip (calling `Ad1848::produce_one_sample` directly from inside its
+own `refill` closure), its first use after startup or a rate change
+would drain dozens of FIFO bytes and evaluate the half-empty/interrupt
+condition all at once, decades ahead of when a real codec would reach
+them -- the resampler's own lookahead would leak into hardware-state
+timing correctness.
 
-The resampler's pull API (`next(refill)`) does double duty: `refill()` is
-called exactly once per actual codec-rate sample the resampler needs, so
-it *is* the per-sample unit the reference's own `audio_state_sndboard_toccata`
-callback performs -- draining the FIFO, applying volume, evaluating the
-half-empty/interrupt condition. No separate codec-rate accumulator exists
-in the board's own state; the resampler's phase counter is the cadence.
-Resamplers are cached per codec rate (`Toccata`'s `resamplers` map, at most
-14 entries, the AD1848's legal rate count) so returning to an
-already-programmed rate never rebuilds its kernel table.
+`advance_codec` is what actually drains the FIFO and evaluates the
+half-empty/interrupt condition (the reference's own
+`audio_state_sndboard_toccata` per-sample body, transplanted verbatim),
+paced causally by `cck` at the codec's own rate; each produced sample is
+queued into `decoded`, a plain FIFO of raw pre-resample frames.
+`advance_mixer` pulls from that passive queue through the resampler --
+never from the chip directly -- repeating the chip's last known sample
+(via the side-effect-free `Ad1848::peek_last_sample`) if `decoded` is
+momentarily empty. This keeps the resampler's non-causal lookahead
+confined to shaping the interpolated *waveform*; it can never reorder
+when a FIFO byte drains or an interrupt raises. Resamplers are cached per
+codec rate (`Toccata`'s `resamplers` map, at most 14 entries, the
+AD1848's legal rate count) so returning to an already-programmed rate
+never rebuilds its kernel table.
 
 Produced frames push into `ToccataAudioRing` (`src/chipset/paula.rs`,
 alongside `CdAudioRing`), which `push_mixed_frame` pops one frame from per
 mixer tick -- a plain per-frame pop, not a rate conversion, since the
 board already resampled before pushing. Unlike CD-DA's bursty per-sector
-delivery, the board's own tick cadence matches the mixer's, so the ring
-stays near-empty in steady state; its fixed capacity is a safety margin
-against a stalled consumer, not a buffering requirement.
+delivery, the board's own tick cadence matches the mixer's, so both the
+`decoded` queue and the ring stay near-empty in steady state; their fixed
+capacities are a safety margin against a stalled consumer, not a
+buffering requirement.
 
 A cached resampler's `history` buffer holds the last ~64 input frames it
 convolves over, so `Toccata::reset()` (a guest CPU reset, matching every
 other in-tree board's `ZorroDevice::reset()` -- a full hardware reinit)
-also zeroes the mixer accumulator and clears the whole resampler cache,
-not just `Ad1848`'s own registers/FIFO. Without that, a few dozen
-milliseconds of pre-reset audio would bleed through the stale kernel
-window into what should be post-reset silence -- covered by
+zeroes both accumulators, clears `decoded`, and clears the whole
+resampler cache, not just `Ad1848`'s own registers/FIFO. Without that, a
+few dozen milliseconds of pre-reset audio would bleed through the stale
+kernel window into what should be post-reset silence -- covered by
 `reset_clears_stale_resampler_history_so_silence_follows_immediately` in
 `src/toccata.rs`.
 
@@ -116,6 +131,23 @@ Nothing reads wall-clock time, so a Toccata-fitted machine is warp-safe
 and reproducible exactly like the rest of the emulated audio path (see
 [](audio)'s determinism section) -- two runs of the same scripted
 scenario produce byte-identical `toccata.wav` stem captures.
+
+## Savestates
+
+`Toccata` derives `Serialize`/`Deserialize` directly (`Box`ed as
+`BoardDevice::Toccata`, like `Picasso2`) with no `#[serde(skip)]` fields:
+`codec_acc`/`decoded` are genuine machine state for the reason given
+above, and the `resamplers` cache -- despite only shaping the waveform,
+never FIFO/IRQ timing -- is serialized too, via `Resampler`'s own manual
+`Serialize`/`Deserialize` in `src/audio/resample.rs` (its derived
+`kernels` table is rebuilt from `l`/`m` on load rather than stored, since
+it is a pure function of the reduced rate ratio). This makes a
+save-state load reproduce an uninterrupted run's *output* exactly, not
+just its FIFO/IRQ timing -- a resumed run's `toccata.wav` stem is
+byte-identical to what an uninterrupted run would have produced at the
+same point, covered by
+`savestate_round_trip_reproduces_an_uninterrupted_runs_output` in
+`src/toccata.rs`.
 
 ## What's out of scope for M1-M3
 

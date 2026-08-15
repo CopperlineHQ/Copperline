@@ -94,6 +94,16 @@ pub struct Ad1848 {
     /// whenever they (or any of 2-7) are written.
     left_volume: f32,
     right_volume: f32,
+    /// Format/rate latched at the last `codec_start()` (reg 9's
+    /// stopped-to-started transition) -- not read live from reg 8.
+    /// `produce_one_sample`/`bytes_per_sample`/`sample_rate_hz` all use
+    /// these, matching the reference's own `codec_setup()`-on-transition
+    /// model: a driver that reprograms reg 8 while already playing has no
+    /// effect until the next start, so a rate/format change never splits
+    /// a FIFO frame mid-stream on a different byte boundary.
+    active_channels: usize,
+    active_sixteen_bit: bool,
+    active_rate_hz: u32,
 }
 
 impl Default for Ad1848 {
@@ -110,6 +120,9 @@ impl Default for Ad1848 {
         regs[7] = 0x80;
         regs[9] = 0x10;
         regs[12] = 0x0a;
+        // Never started, so nothing reads these yet -- initialized to
+        // what power-on reg 8 (0x00) would decode to, for a sane default.
+        let (active_channels, active_sixteen_bit, active_rate_hz) = decode_format(regs[8]);
         Self {
             regs,
             index: 0x40,
@@ -124,8 +137,25 @@ impl Default for Ad1848 {
             hsync_acc: 0,
             left_volume: 0.0,
             right_volume: 0.0,
+            active_channels,
+            active_sixteen_bit,
+            active_rate_hz,
         }
     }
+}
+
+/// Decode reg 8 into (channels, 16-bit?, rate Hz) -- the reference's own
+/// `codec_setup()`. Shared by the latch-on-start path and `Ad1848`'s
+/// power-on default (which behaves as if `codec_setup()` ran once against
+/// reg 8's own power-on value, though nothing plays until a real start).
+fn decode_format(reg8: u8) -> (usize, bool, u32) {
+    let channels = if reg8 & 0x10 != 0 { 2 } else { 1 };
+    let sixteen_bit = reg8 & 0x40 != 0;
+    let crystal = CRYSTALS[usize::from(reg8 & 1)];
+    let divider = DIVIDERS[usize::from((reg8 >> 1) & 7)];
+    let freq = crystal / divider;
+    let rate_hz = (freq + 49) / 100 * 100;
+    (channels, sixteen_bit, rate_hz)
 }
 
 impl Ad1848 {
@@ -221,12 +251,38 @@ impl Ad1848 {
     }
 
     fn codec_start(&mut self) {
-        // Format/rate take effect from here; a driver programs reg 8
-        // before enabling the codec via reg 9, matching hardware.
+        // Latch the currently-programmed format/rate; see the doc comment
+        // on the active_* fields for why this happens here and not on
+        // every produced sample.
+        let (channels, sixteen_bit, rate_hz) = decode_format(self.regs[8]);
+        self.active_channels = channels;
+        self.active_sixteen_bit = sixteen_bit;
+        self.active_rate_hz = rate_hz;
     }
 
     fn codec_stop(&mut self) {
         self.active = 0;
+    }
+
+    /// Whether the codec has been started for playback (reg 9 bit 0's
+    /// last stopped-to-started transition). The board wrapper's own
+    /// codec-rate cadence only runs while this is true -- a real codec
+    /// isn't converting anything, and has nothing to latch a format
+    /// from, until it has actually been started.
+    pub fn play_active(&self) -> bool {
+        self.active & STATUS_FIFO_PLAY != 0
+    }
+
+    /// The last decoded output sample, at its current DAC volume, with no
+    /// side effects (does not drain the FIFO, does not touch the
+    /// half-empty latch or the interrupt condition). Used as the
+    /// resampler's fallback when it asks for more input frames than the
+    /// codec's own causally-paced cadence (`Toccata::advance_codec`) has
+    /// produced yet, so a resampler's internal lookahead/priming can
+    /// never pull `produce_one_sample`'s side effects out of order.
+    pub fn peek_last_sample(&self) -> (f32, f32) {
+        let (l, r) = self.last_sample;
+        (l * self.left_volume, r * self.right_volume)
     }
 
     // -----------------------------------------------------------------
@@ -302,32 +358,17 @@ impl Ad1848 {
     // Playback: format, cadence, and one produced sample
     // -----------------------------------------------------------------
 
-    fn channels(&self) -> usize {
-        if self.regs[8] & 0x10 != 0 {
-            2
-        } else {
-            1
-        }
-    }
-
-    fn sixteen_bit(&self) -> bool {
-        self.regs[8] & 0x40 != 0
-    }
-
     fn bytes_per_sample(&self) -> usize {
-        (if self.sixteen_bit() { 2 } else { 1 }) * self.channels()
+        (if self.active_sixteen_bit { 2 } else { 1 }) * self.active_channels
     }
 
-    /// The codec's programmed playback rate, in Hz, rounded to the
-    /// nearest 100 Hz the way the reference does. Two of the sixteen
-    /// crystal/divider combinations (24.576 MHz with divider 448 or 384)
-    /// fall outside a real AD1848's documented rate table but are not
-    /// rejected here, matching the reference's own permissiveness.
+    /// The codec's *active* (latched-at-start) playback rate, in Hz,
+    /// rounded to the nearest 100 Hz the way the reference does. Two of
+    /// the sixteen crystal/divider combinations (24.576 MHz with divider
+    /// 448 or 384) fall outside a real AD1848's documented rate table but
+    /// are not rejected here, matching the reference's own permissiveness.
     pub fn sample_rate_hz(&self) -> u32 {
-        let crystal = CRYSTALS[usize::from(self.regs[8] & 1)];
-        let divider = DIVIDERS[usize::from((self.regs[8] >> 1) & 7)];
-        let freq = crystal / divider;
-        (freq + 49) / 100 * 100
+        self.active_rate_hz
     }
 
     fn recalc_volume(&mut self) {
@@ -393,9 +434,9 @@ impl Ad1848 {
     /// mode this bit would otherwise select is unreachable, see
     /// `write_data`'s reg-8 handling).
     fn decode_sample(&self, bytes: &[u8]) -> (f32, f32) {
-        if self.sixteen_bit() {
+        if self.active_sixteen_bit {
             let l = i16::from_le_bytes([bytes[0], bytes[1]]);
-            let r = if self.channels() == 2 {
+            let r = if self.active_channels == 2 {
                 i16::from_le_bytes([bytes[2], bytes[3]])
             } else {
                 l
@@ -403,7 +444,7 @@ impl Ad1848 {
             (f32::from(l) / 32768.0, f32::from(r) / 32768.0)
         } else {
             let l = (f32::from(bytes[0]) - 128.0) / 128.0;
-            let r = if self.channels() == 2 {
+            let r = if self.active_channels == 2 {
                 (f32::from(bytes[1]) - 128.0) / 128.0
             } else {
                 l
@@ -450,6 +491,18 @@ mod tests {
         chip.write_control(STATUS_ACTIVE | STATUS_FIFO_CODEC | STATUS_FIFO_PLAY);
     }
 
+    /// Latch whatever format/rate is currently in reg 8 by driving reg 9
+    /// through a clean stopped-to-started transition (`codec_start`),
+    /// matching what a real driver does: program the format, then enable
+    /// playback. Always writes a stop first so a second call in the same
+    /// test is a genuine rising edge, not a no-op repeat of an
+    /// already-set bit.
+    fn latch_format(chip: &mut Ad1848) {
+        chip.write_index(9);
+        chip.write_data(0x10); // stop (SDC bit only, no play/record enable)
+        chip.write_data(0x11); // play enable: rising edge -> codec_start()
+    }
+
     #[test]
     fn reset_defaults_mute_dac_and_aux_and_pin_reg12() {
         let chip = Ad1848::new();
@@ -494,9 +547,13 @@ mod tests {
         // v = (divider_index << 1) | crystal_bit, matching write_data's
         // `(regs[8] >> 1) & 7` divider select and `regs[8] & 1` crystal
         // select decode.
+        // Each check writes reg 8 then latches it via a stop/start
+        // transition (see `latch_format`): sample_rate_hz() reports the
+        // *active* rate, which only updates on codec_start().
         let set_reg8 = |chip: &mut Ad1848, divider_index: u8, crystal_bit: u8| {
             chip.write_index(8);
             chip.write_data((divider_index << 1) | crystal_bit);
+            latch_format(chip);
         };
         set_reg8(&mut chip, 0, 0); // crystal0 (24576000) / div 3072
         assert_eq!(chip.sample_rate_hz(), 8000);
@@ -613,6 +670,7 @@ mod tests {
         enable_play(&mut chip);
         chip.write_index(8);
         chip.write_data(0x50); // stereo (0x10) + 16-bit (0x40)
+        latch_format(&mut chip);
         chip.write_index(6);
         chip.write_data(0x00);
         chip.write_index(7);
