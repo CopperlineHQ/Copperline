@@ -1944,9 +1944,9 @@ card = "picasso2"
 vram = "2M"
 ```
 
-`card` is `"picasso2"`, `"picasso2plus"`, `"z3660"`, or `"none"`; a machine
-takes at most one. All three boards give the guest high-resolution,
-high-colour screens through Picasso96.
+`card` is `"picasso2"`, `"picasso2plus"`, `"graffityz2"`, `"graffityz3"`,
+`"z3660"`, or `"none"`; a machine takes at most one. All of these boards give
+the guest high-resolution, high-colour screens through Picasso96.
 
 `"picasso2"` fits a Village Tronic Picasso II with a CL-GD5426 graphics
 controller. `"picasso2plus"` fits the later CL-GD5428 revision, reports its
@@ -1958,12 +1958,22 @@ Install the Picasso96 `PicassoII.card` driver and its monitor file in the
 guest. The board starts on native Amiga pass-through and switches the
 Copperline display to RTG only while the guest enables a valid Picasso screen.
 
+`"graffityz2"` and `"graffityz3"` fit Atéo Concepts' Graffity, which reuses
+the same CL-GD5428 core as Picasso II+ under its own autoconfig identity;
+`vram` selects `"1M"` or `"2M"` for either, same as the Picasso II family.
+`"graffityz2"` is a Zorro II board, so it works on any CPU. `"graffityz3"` is
+a Zorro III board and needs a 32-bit address bus (68020/030/040/060), same
+restriction as `"z3660"`. Install the Picasso96 `Graffity.card` driver and
+its monitor file in the guest -- it ships in the classic Aminet
+`Picasso96Install` package, so no separate download is needed.
+
 `"z3660"` is a Zorro III board. It comes fitted by default on machines whose
 CPU has a 32-bit address bus (the A3000 and A4000) and is unavailable on the
-rest; asking for it there is an error, as it is for Zorro III RAM. It needs the
-open-source Z3660.card driver installed in the guest (with its monitor in
-`DEVS:Monitors`). With that in place, Z3660 screen modes appear in ScreenMode,
-and the window shows the board's output when a screen is opened.
+rest; asking for it there is an error, as it is for Zorro III RAM and
+`"graffityz3"`. It needs the open-source Z3660.card driver installed in the
+guest (with its monitor in `DEVS:Monitors`). With that in place, Z3660 screen
+modes appear in ScreenMode, and the window shows the board's output when a
+screen is opened.
 
 The Z3660 board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
 models the real hardware's separate RTG monitor and never hands the display

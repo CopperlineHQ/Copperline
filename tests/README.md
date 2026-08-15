@@ -153,6 +153,7 @@ baselines to maintain.
 | `picasso2_workbench_opens_640x480x16` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-16.hdf` (same, default 640x480x16 screen) |
 | `picasso2plus_workbench_opens_with_gd5428_revision` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2.hdf` (same installation booted against the Picasso II+ identity) |
 | `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
+| `graffity_z2_workbench_opens_640x480x8` / `graffity_z3_workbench_opens_640x480x8` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-graffity.hdf` (WB + Picasso96 with `Graffity.card`, default 640x480x8 screen) |
 | `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
 | `toccata_ahi_driver_recognizes_the_board` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `toccata-ahi.hdf` (WB3.1 + AHI 4.18 with `toccata.audio` staged into `Devs/AHI` and Unit 0 set to Toccata) |
 
@@ -182,6 +183,20 @@ baselines to maintain.
   its 8-, 16-, and 24-bit mode set and writes `PASS` to
   `P96OUT:p96cts.result`; on failure it leaves the suite's diff images in that
   host-mounted output directory.
+- **The Graffity HDF** (`p96-graffity.hdf`) is the same kind of local
+  Workbench + Picasso96 installation, with `Graffity.card` from the same
+  Aminet Picasso96 archive installed in `Libs/Picasso96/`. Converting an
+  existing PicassoII-configured installation needs three guest-side edits
+  (all patchable from the host with a hex editor or a short script, since
+  the fields are fixed-size NUL-terminated strings): a
+  `Devs/Monitors/Graffity` monitor (copy the generic Picasso96 monitor
+  binary; in its `.info`, change the `BOARDTYPE=PicassoII` tooltype to
+  `BOARDTYPE=Graffity`, fixing up the 4-byte big-endian length prefix
+  before the string), and the `Devs/Picasso96Settings` file's BDNM
+  board-name field plus its `PicassoII:WxH` mode-name strings renamed to
+  `Graffity:...`. Picasso96's own `Picasso96/debug/CheckBoards` is a good
+  smoke check: it reports the claimed board's name, chip, and memory base,
+  and brings the RTG screen to front for about two seconds.
 
 - **Toccata/AHI HDF** (`toccata-ahi.hdf`) is a local Workbench 3.1
   installation with **AHI 4.18** (freeware, from Aminet's

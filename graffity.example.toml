@@ -1,0 +1,22 @@
+# Graffity / Picasso96 Workbench example. Place a licensed A4000 Kickstart
+# 3.1 ROM and a bootable HDF with Picasso96's Graffity.card driver beside
+# this file, or adjust the paths. (The generic A500/A2000 Kickstart 3.1 has
+# no big-box SCSI/IDE driver, so a Zorro-slot machine needs its own ROM.)
+# Headless capture is then deterministic, for example:
+#
+#   copperline --config graffity.example.toml --noaudio \
+#     --screenshot-after 60 /tmp/graffity.png
+
+rom = "Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
+
+[machine]
+profile = "A4000"
+
+[rtg]
+card = "graffityz3"
+# Use "graffityz2" for the Zorro II variant, which works on any CPU
+# (graffityz3 needs a 32-bit-bus 68020+ machine, like this A4000 profile).
+vram = "2M"
+
+[ide]
+master = "p96-graffity.hdf"
