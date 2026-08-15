@@ -64,6 +64,23 @@ impl AudioMux {
     pub fn device_lost(&self) -> bool {
         self.master.device_lost()
     }
+
+    /// Tap a named source's stereo contribution (e.g. "paula", "cdda",
+    /// "mt32", "drivesounds") for stem capture. A no-op until stem writers
+    /// exist -- callers push here unconditionally so wiring a new source
+    /// needs no further change once capture lands.
+    pub fn push_source(&mut self, _source: &'static str, _left: f32, _right: f32) {}
+
+    /// Tap one named sub-channel of a source (e.g. Paula's four physical
+    /// channels) for per-channel stem capture. A no-op until stem writers
+    /// exist, like [`Self::push_source`].
+    pub fn push_source_channel(
+        &mut self,
+        _source: &'static str,
+        _channel: &'static str,
+        _sample: f32,
+    ) {
+    }
 }
 
 #[cfg(test)]
