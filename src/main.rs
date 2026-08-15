@@ -33,6 +33,13 @@ pub struct CliArgs {
     /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
     /// directory) and boot straight into it (src/whdload.rs).
     pub whdload: Option<PathBuf>,
+    /// `--run PROG`: warp launch -- stage a minimal boot volume around an
+    /// ordinary Amiga executable on the host and boot straight into it
+    /// (src/runprog.rs).
+    pub run: Option<PathBuf>,
+    /// `--run-args STRING`: extra guest command-line arguments appended to
+    /// the `--run` program's invocation.
+    pub run_args: Option<String>,
     /// `--screenshot-after SECS PATH`: save the framebuffer after SECS
     /// emulated seconds. Repeatable, like the scheduled-input flags: every
     /// occurrence is captured, and the run ends once the last one has
@@ -320,6 +327,8 @@ where
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
     let mut whdload: Option<PathBuf> = None;
+    let mut run: Option<PathBuf> = None;
+    let mut run_args: Option<String> = None;
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
@@ -448,6 +457,18 @@ where
                     anyhow!("--whdload requires a game package (.lha archive or directory)")
                 })?;
                 whdload = Some(PathBuf::from(v));
+            }
+            "--run" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--run requires the path to an Amiga executable"))?;
+                run = Some(PathBuf::from(v));
+            }
+            "--run-args" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--run-args requires an argument string"))?;
+                run_args = Some(v);
             }
             "--model" => {
                 overrides.model = Some(
@@ -1151,6 +1172,8 @@ where
         config_path,
         rom_path,
         whdload,
+        run,
+        run_args,
         screenshot_after,
         save_state_after,
         load_state,
@@ -1238,6 +1261,10 @@ fn print_help() {
          \x20                            settings\n  \
          --whdload GAME                 boot a WHDLoad game package: an .lha archive or a\n  \
          \x20                            directory holding a .slave (see docs/guide/whdload.md)\n  \
+         --run PROG                     warp launch: boot straight into an Amiga executable on\n  \
+         \x20                            the host, unthrottled until the OS loads it\n  \
+         \x20                            (see docs/guide/run.md)\n  \
+         --run-args STRING              extra guest command-line arguments for --run\n  \
          --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
          \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
@@ -1530,6 +1557,18 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+fn validate_run_args(cli: &CliArgs) -> Result<()> {
+    if cli.run_args.is_some() && cli.run.is_none() {
+        return Err(anyhow!("--run-args needs --run"));
+    }
+    if cli.run.is_some() && cli.whdload.is_some() {
+        return Err(anyhow!(
+            "--run and --whdload are mutually exclusive: each stages its own boot volume"
+        ));
+    }
     Ok(())
 }
 
@@ -1952,6 +1991,7 @@ fn main() -> Result<()> {
 
     let cli = parse_args()?;
     validate_benchmark_args(&cli)?;
+    validate_run_args(&cli)?;
     validate_gdb_args(&cli)?;
     validate_control_args(&cli)?;
     if cli.calibrate_gamepad {
@@ -2021,6 +2061,15 @@ fn main() -> Result<()> {
     // and memory choices (config file or CLI overrides, already merged into
     // the raw config) win over the derivation.
     let (config_game, whdload_options) = copperline::whdload::game_and_options(&raw_cfg);
+    // An explicit --run outranks a game remembered in [whdload]: the two
+    // stage competing boot volumes (--run with --whdload itself is already
+    // a validation error).
+    let config_game = if cli.run.is_some() && config_game.is_some() {
+        info!("run: ignoring the configured [whdload] game for this session");
+        None
+    } else {
+        config_game
+    };
     if let Some(game) = cli.whdload.clone().or(config_game) {
         let prepared = copperline::whdload::prepare(&game, &whdload_options)?;
         // Derive on a clone: the session keeps the user's own raw config
@@ -2038,6 +2087,30 @@ fn main() -> Result<()> {
             game.display(),
             prepared.game_dir.display()
         );
+    }
+    // Warp launch: stage the minimal boot volume around the executable and
+    // mount its directory. Same derive-on-a-clone discipline as WHDLoad so
+    // the launcher never sees (or saves) the two staged mounts; unlike
+    // WHDLoad nothing else is derived -- the machine is whatever the
+    // configuration and CLI flags say.
+    let mut run_prog_name: Option<String> = None;
+    let mut run_warp: Option<copperline::runprog::WarpLaunch> = None;
+    if let Some(program) = &cli.run {
+        let prepared = copperline::runprog::prepare(program, cli.run_args.as_deref(), None)?;
+        let mut derived = raw_cfg.clone();
+        copperline::runprog::apply_to_raw(&mut derived, &prepared);
+        cfg = Config::try_from(derived)?;
+        info!(
+            "run: booting {} ({} mounted as {}:)",
+            prepared.prog_name,
+            prepared.prog_dir.display(),
+            copperline::runprog::PROG_VOLUME
+        );
+        run_warp = Some(copperline::runprog::WarpLaunch::new(
+            prepared.prog_name.clone(),
+            Some(prepared.boot_dir.join(copperline::runprog::DONE_MARKER)),
+        ));
+        run_prog_name = Some(prepared.prog_name);
     }
     if cli.load_state.is_some() {
         // A save state restores the full ROM image, so a Kickstart file is not
@@ -2171,7 +2244,10 @@ fn main() -> Result<()> {
     if let Some(target_secs) = cli.benchmark_until {
         return run_headless_benchmark(emu, target_secs);
     }
-    if let Some(gdb) = cli.gdb {
+    if let Some(mut gdb) = cli.gdb {
+        // --run + --gdb: stop at the program's first instruction, the
+        // moment the guest OS loads it.
+        gdb.stop_on_load = run_prog_name.clone();
         return gdbstub::run(emu, gdb);
     }
     #[cfg(feature = "control")]
@@ -2204,6 +2280,10 @@ fn main() -> Result<()> {
     // interactive session.
     let windowless_capture =
         (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
+    // The warp-launch gate belongs to interactive sessions only: a capture
+    // run is already unpaced end to end and must never be re-paced when the
+    // program loads.
+    let run_warp_target = if headless_capture { None } else { run_warp };
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
@@ -2220,6 +2300,7 @@ fn main() -> Result<()> {
         disk_insert_after,
         cli.cd_insert_after,
         cli.record_input,
+        run_warp_target,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),
@@ -2348,6 +2429,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         None,
+        None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
         config::resolve_overscan(config::Overscan::Tv),
@@ -2394,6 +2476,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
     cli.config_path.is_none()
         && cli.rom_path.is_none()
         && cli.whdload.is_none()
+        && cli.run.is_none()
         && cli.overrides.is_empty()
         && !Path::new("copperline.toml").exists()
         && cli.screenshot_after.is_empty()
@@ -2589,6 +2672,29 @@ mod tests {
             &parse(&["--screenshot-after", "5", "out.png"]).unwrap()
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
+        assert!(!launcher_requested(&parse(&["--run", "hello"]).unwrap()));
+    }
+
+    #[test]
+    fn run_flags_parse_and_validate() {
+        let cli = parse(&["--run", "build/hello", "--run-args", "-level 2"]).unwrap();
+        assert_eq!(cli.run.as_deref(), Some(Path::new("build/hello")));
+        assert_eq!(cli.run_args.as_deref(), Some("-level 2"));
+        assert!(validate_run_args(&cli).is_ok());
+
+        // --run-args without --run is a mistake worth catching.
+        let orphan = parse(&["--run-args", "-level 2"]).unwrap();
+        assert!(validate_run_args(&orphan)
+            .unwrap_err()
+            .to_string()
+            .contains("--run"));
+
+        // --run and --whdload each stage their own boot volume.
+        let both = parse(&["--run", "hello", "--whdload", "game.lha"]).unwrap();
+        assert!(validate_run_args(&both)
+            .unwrap_err()
+            .to_string()
+            .contains("mutually exclusive"));
     }
 
     #[test]

@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.16.0" date="2026-08-15">
+      <description>
+        <p>Direct WHDLoad boot with a launcher game library, a --run flag that warp-boots a host Amiga executable for development work, a Create Image workshop for fresh ADF and HDF images, a built-in lide.device-compatible IDE board with ATAPI CD-ROM support, OFS directory-mounted hard drives, configurable output paths with an opt-in portable mode and a saved default config, Kickstart ROM identification, gzip-compressed hardfiles, an on-screen keyboard and picture centring controls on the desktop, bezel sticker decals and a refined 1084 front on desktop and web, IPF images in the browser build, and AGA, Agnus and chip-bus accuracy fixes driven by real-hardware feedback.</p>
+      </description>
+    </release>
     <release version="0.15.0" date="2026-08-08">
       <description>
         <p>An emulated Roland MT-32 sound module with its working front panel, real host hard disks handed to the machine on Linux, macOS and Windows, physical floppy drives driven by the pure-Rust FluxBridge library, an Amiberry-style host-socket networking board, native IPF disk and CHD CD image support, a redesigned pop-up menu, integer display scaling and a performance overlay, a choice of monitor bezels including an authentic 1084, a bundled open-source A4091 boot ROM, an on-screen keyboard and major performance work in the browser build, and 68020, AGA and HAM accuracy fixes.</p>

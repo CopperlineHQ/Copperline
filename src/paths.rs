@@ -82,6 +82,12 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(name))
 }
 
+/// Where `--run` stages its disposable boot volume (src/runprog.rs).
+/// Regenerated on every launch, so nothing under it is worth keeping.
+pub fn run_stage_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("run"))
+}
+
 /// Where WHDLoad keeps everything of its own: the support archives, the
 /// extracted games and their saves, and the game database.
 ///

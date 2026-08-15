@@ -968,6 +968,13 @@ pub struct App {
     /// (at_emulated_secs, image path).
     auto_cd_inserts: Vec<(f64, PathBuf)>,
     pending_auto_cd_inserts: Vec<(f32, PathBuf)>,
+    /// Warp launch (`--run`): warp from power-on until the guest OS loads
+    /// the target program, then return to real-time pacing. One-shot;
+    /// None once finished or cancelled. Host-side only, never serialized.
+    warp_launch: Option<crate::runprog::WarpLaunch>,
+    /// LoadSeg observer feeding the warp-launch gate. Only meaningful
+    /// while `warp_launch` is Some.
+    warp_launch_tracker: crate::amigaos::LibraryTracker,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -1709,6 +1716,7 @@ impl App {
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
         record_input: Option<PathBuf>,
+        run_warp_target: Option<crate::runprog::WarpLaunch>,
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
         overscan: Overscan,
@@ -1855,6 +1863,8 @@ impl App {
             pending_auto_disk_inserts: disk_insert_after,
             auto_cd_inserts: Vec::new(),
             pending_auto_cd_inserts: cd_insert_after,
+            warp_launch: run_warp_target,
+            warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -3104,6 +3114,7 @@ impl ApplicationHandler for App {
         }
         self.request_redraw();
         self.arm_scheduled_events();
+        self.engage_warp_launch();
     }
 
     fn window_event(
@@ -4172,6 +4183,11 @@ impl ApplicationHandler for App {
                 #[cfg(feature = "control")]
                 self.control_emit_events();
                 frames_done += 1;
+                // The warp-launch gate ends its warp the frame the guest
+                // loads the target program.
+                if self.poll_warp_launch() {
+                    break;
+                }
                 // A breakpoint/watchpoint hit pauses the machine and brings
                 // the debugger window up with the reason; end the burst so the
                 // stop surfaces at the frame where it happened.
@@ -9519,9 +9535,103 @@ impl App {
         }
     }
 
+    /// Start the `--run` warp-launch phase: run unpaced with live audio
+    /// muted until the guest OS loads the target program
+    /// (src/runprog.rs). A machine that refuses to unpace (a bridged
+    /// physical drive) still watches for the program, at normal speed
+    /// with audio live. One-shot per session.
+    fn engage_warp_launch(&mut self) {
+        let engage = match &self.warp_launch {
+            Some(launch) => self.powered_on && !launch.started(),
+            None => false,
+        };
+        if !engage {
+            return;
+        }
+        self.emu.set_paced(false);
+        let unpaced = !self.emu.paced();
+        let now = self.emu.bus().emulated_seconds();
+        let tracker = &mut self.warp_launch_tracker;
+        crate::amigaos::with_bus_memory(self.emu.bus(), |os| tracker.arm(os));
+        let launch = self.warp_launch.as_mut().expect("checked above");
+        launch.engage(now, unpaced);
+        if unpaced {
+            info!(
+                "warp launch: warping until the guest loads {}",
+                launch.target()
+            );
+        } else {
+            info!(
+                "warp launch: physical floppy drive attached; booting {} at normal speed",
+                launch.target()
+            );
+        }
+        self.sync_live_audio_suspension();
+    }
+
+    /// One warp-launch poll, once per retired emulated frame (inside the
+    /// warp burst: at full warp a thousand frames retire per presented
+    /// frame, and the gate must not be a thousand frames late). Returns
+    /// true when the launch phase just ended, so the burst breaks and
+    /// pacing takes effect at this frame.
+    fn poll_warp_launch(&mut self) -> bool {
+        let Some(launch) = &mut self.warp_launch else {
+            return false;
+        };
+        if !launch.started() {
+            return false;
+        }
+        let tracker = &mut self.warp_launch_tracker;
+        let loaded = crate::amigaos::with_bus_memory(self.emu.bus(), |os| {
+            tracker.observe(os).map(|module| module.name.clone())
+        });
+        let now = self.emu.bus().emulated_seconds();
+        let target = launch.target().to_string();
+        match launch.note(now, loaded.as_deref()) {
+            crate::runprog::WarpLaunchOutcome::Waiting => false,
+            crate::runprog::WarpLaunchOutcome::Loaded => {
+                info!("warp launch: {target} loaded; real-time pacing resumes");
+                self.finish_warp_launch();
+                self.show_osd(format!("Warp launch: {target} running"));
+                true
+            }
+            crate::runprog::WarpLaunchOutcome::Finished => {
+                info!("warp launch: {target} already ran to completion; real-time pacing resumes");
+                self.finish_warp_launch();
+                self.show_osd(format!("Warp launch: {target} finished"));
+                true
+            }
+            crate::runprog::WarpLaunchOutcome::TimedOut => {
+                warn!(
+                    "warp launch: {target} was not loaded within {:.0} emulated seconds; \
+                     resuming real-time pacing anyway",
+                    crate::runprog::WARP_LAUNCH_TIMEOUT_SECS
+                );
+                self.finish_warp_launch();
+                self.show_osd(format!("Warp launch: {target} not seen, warp off"));
+                true
+            }
+        }
+    }
+
+    /// End the launch phase: back to real-time pacing (set_paced
+    /// re-anchors the pacing clock) and live audio.
+    fn finish_warp_launch(&mut self) {
+        self.warp_launch = None;
+        self.emu.set_paced(true);
+        self.sync_live_audio_suspension();
+    }
+
     /// Toggle warp speed: emulation runs unpaced (as fast as the host
     /// allows) until switched back, when pacing re-anchors to "now".
     fn toggle_warp(&mut self) {
+        // A manual warp toggle during a warp launch takes the session
+        // back: cancel the launch so one press means normal-speed,
+        // audible emulation, not a fight with the gate.
+        if self.warp_launch.take().is_some() {
+            self.sync_live_audio_suspension();
+            info!("warp launch: cancelled by manual warp toggle");
+        }
         let warp = self.emu.paced();
         self.emu.set_paced(!warp);
         if warp {
@@ -11984,7 +12094,11 @@ impl App {
     }
 
     fn sync_live_audio_suspension(&mut self) {
-        let suspended = !self.powered_on || self.cpu_halted || self.paused;
+        // The warp-launch catch-up is silent: unpaced Paula output is
+        // fast-forward noise, and the machine snaps back to live audio
+        // the moment the launch finishes (or is cancelled).
+        let warp_launching = self.warp_launch.as_ref().is_some_and(|l| l.engaged);
+        let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_launching;
         self.emu.set_live_audio_suspended(suspended);
     }
 
@@ -12848,6 +12962,9 @@ impl App {
             // still holds them, so no permission is asked twice.
             self.attach_configured_host_disks();
             info!("power button: machine powered on (cold boot)");
+            // A --run session that started powered off begins its warp
+            // launch at the first power-on.
+            self.engage_warp_launch();
         }
         self.request_redraw();
     }
@@ -12926,6 +13043,14 @@ impl App {
         // goes, so the cold-boot machine starts with the caps up and
         // nothing latched against the machine that just stopped.
         self.release_keyboard_panel_holds();
+        // A pending warp launch dies with the machine; give the pacing
+        // back so the next power-on runs at normal speed.
+        if let Some(launch) = self.warp_launch.take() {
+            if launch.engaged {
+                self.emu.set_paced(true);
+            }
+            info!("warp launch: cancelled by power off");
+        }
         self.powered_on = false;
         self.paused = false;
         self.sync_live_audio_suspension();

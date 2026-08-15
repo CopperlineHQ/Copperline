@@ -52,6 +52,14 @@ derives the machine from the slave header, and persists saves per game
 `tools/fetch-whdload.sh` and, for real compatibility, Kickstart images via
 `[whdload] kickstarts`; it composes with every headless flag below.
 
+An ordinary Amiga executable boots the same way with no assets at all --
+`--run prog` stages a minimal boot volume and mounts the executable's
+directory live, so a freshly built binary runs directly
+(`docs/guide/run.md`). Windowed sessions warp-boot until the guest loads
+it; with `--gdb` the session stops at the program's first instruction,
+and CCP scripts can wait on `break.add {"kind": "loadseg", "name": ...}`.
+It composes with every headless flag below.
+
 ## Headless verification
 
 All `SECS` timestamps below are absolute *emulated* seconds, not wall-clock.

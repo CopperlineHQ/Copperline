@@ -88,7 +88,7 @@ Every stop event carries a consistent position on the emulated timeline:
 ```
 
 Reasons: `breakpoint`, `watchpoint`, `reg_watch`, `beam_trap`,
-`copper_break`, `catch`, `task_catch`, `step`, `target`, `pause`,
+`copper_break`, `catch`, `task_catch`, `loadseg`, `step`, `target`, `pause`,
 `user_pause`, `double_fault`, `reverse`, `budget` (a bounded step ran
 out of its instruction budget), and `last_writer` (only as the
 `position` field of a `last_writer` reply).
@@ -324,7 +324,8 @@ Breakpoints (shared with the debugger window's live store, so
 GUI-toggled points appear in `break.list`): `break.add {kind: "pc",
 addr, cond?, ignore?}` / `{kind: "watch", addr, class?, pc?}` /
 `{kind: "reg_watch", reg}` / `{kind: "beam", vpos, hpos?}` /
-`{kind: "copper", addr}` / `{kind: "catch", vector}` -> `{id}`;
+`{kind: "copper", addr}` / `{kind: "catch", vector}` /
+`{kind: "loadseg", name?}` -> `{id}`;
 `break.remove {id}`; `break.list`; `break.clear`. A watch's optional
 `class` narrows it to one accessor -- `cpu`, `blitter`, `disk`, `copper`,
 or a DMA channel (`bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`, each
@@ -341,6 +342,15 @@ Conditions are
 or `{"mem": addr}`, and ops `eq|ne|lt|gt|le|ge|and`. A session's own
 breakpoints are removed when it disconnects; GUI-set points are left
 alone.
+
+A `loadseg` catch stops when the guest OS loads a program (a new
+seglist appearing in the scheduled process), before the program's first
+instruction; the stop's detail carries its first hunk's address. The
+optional `name` limits it to a program with that basename,
+case-insensitive -- the natural way for a script to wait for the
+`--run` target (see the user guide's Warp launch chapter). Programs
+already loaded when the catch is set never fire it, and the machine
+holds at most one loadseg catch.
 
 Input (applied now by default, or scheduled with `at_seconds`; `tap`
 presses and schedules the release after `hold_ms`, default 80):
