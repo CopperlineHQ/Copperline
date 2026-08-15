@@ -166,6 +166,14 @@ impl ZorroDevice for Toccata {
 
     fn reset(&mut self) {
         self.ad1848.reset();
+        self.mixer_acc = 0;
+        // Each cached resampler's own history buffer holds the last ~64
+        // pre-reset input frames; leaving it in place would let a few
+        // moments of pre-reset audio bleed into the freshly-reset silence
+        // as the kernel window slides past the reset boundary. Clearing
+        // the whole cache is simpler than adding a per-resampler reset
+        // and costs nothing but a one-time kernel-table rebuild next use.
+        self.resamplers.clear();
     }
 
     fn kind(&self) -> &'static str {
@@ -308,6 +316,56 @@ mod tests {
         // close to the raw decoded sample, not zero and not wildly off.
         assert!(l > 0.9, "left sample too quiet: {l}");
         assert!(r > 0.9, "right sample too quiet: {r}");
+    }
+
+    #[test]
+    fn reset_clears_stale_resampler_history_so_silence_follows_immediately() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut host =
+            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0b, &mut host); // 44100 Hz, mono 8-bit
+        board.write(0x6001, 1, 6, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host); // DAC L/R unmuted, full scale
+        board.write(0x6001, 1, 7, &mut host);
+        board.write(0x6801, 1, 0x00, &mut host);
+
+        // Fill the resampler's ~64-tap history with a loud, constant tone
+        // by feeding one loud sample per output frame for well over a
+        // kernel window's worth of ticks, checking the last one is loud.
+        let mut last = (0.0, 0.0);
+        for _ in 0..100 {
+            board.write(0x2000, 1, 0xff, &mut host);
+            ZorroDevice::tick(&mut board, one_mixer_frame_cck(), &mut host);
+            last = host.toccata_audio().next_sample();
+        }
+        assert!(
+            last.0 > 0.9,
+            "setup didn't actually produce loud audio: {last:?}"
+        );
+
+        board.reset();
+
+        // Reprogram the *same* 44.1 kHz rate reset just cleared, so a
+        // stale cache entry (keyed by rate) would be reused rather than
+        // sidestepped by a rate change. No FIFO write, though: the codec
+        // is otherwise fully disabled, so this tick should produce exact
+        // silence -- not a fading tail of the pre-reset tone leaking
+        // through a resampler whose kernel window still remembers it.
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0b, &mut host);
+        ZorroDevice::tick(&mut board, one_mixer_frame_cck(), &mut host);
+        let sample = host.toccata_audio().next_sample();
+        assert_eq!(
+            sample,
+            (0.0, 0.0),
+            "stale resampler history bled pre-reset audio into post-reset silence"
+        );
     }
 
     #[test]

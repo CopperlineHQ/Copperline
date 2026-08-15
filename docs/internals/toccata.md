@@ -85,6 +85,16 @@ delivery, the board's own tick cadence matches the mixer's, so the ring
 stays near-empty in steady state; its fixed capacity is a safety margin
 against a stalled consumer, not a buffering requirement.
 
+A cached resampler's `history` buffer holds the last ~64 input frames it
+convolves over, so `Toccata::reset()` (a guest CPU reset, matching every
+other in-tree board's `ZorroDevice::reset()` -- a full hardware reinit)
+also zeroes the mixer accumulator and clears the whole resampler cache,
+not just `Ad1848`'s own registers/FIFO. Without that, a few dozen
+milliseconds of pre-reset audio would bleed through the stale kernel
+window into what should be post-reset silence -- covered by
+`reset_clears_stale_resampler_history_so_silence_follows_immediately` in
+`src/toccata.rs`.
+
 ## Interrupt
 
 INT6/EXTER, level-sensitive (`Toccata::int6_line` reads `Ad1848::int6_pending`).
