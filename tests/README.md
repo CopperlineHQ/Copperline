@@ -154,6 +154,7 @@ baselines to maintain.
 | `picasso2plus_workbench_opens_with_gd5428_revision` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2.hdf` (same installation booted against the Picasso II+ identity) |
 | `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
 | `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
+| `toccata_ahi_driver_recognizes_the_board` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `toccata-ahi.hdf` (WB3.1 + AHI 4.18 with `toccata.audio` staged into `Devs/AHI` and Unit 0 set to Toccata) |
 
 ## Obtaining the assets legally
 
@@ -181,6 +182,20 @@ baselines to maintain.
   its 8-, 16-, and 24-bit mode set and writes `PASS` to
   `P96OUT:p96cts.result`; on failure it leaves the suite's diff images in that
   host-mounted output directory.
+
+- **Toccata/AHI HDF** (`toccata-ahi.hdf`) is a local Workbench 3.1
+  installation with **AHI 4.18** (freeware, from Aminet's
+  `mus/misc/AHIUser418.lha`) installed, plus its bundled `toccata.audio`
+  driver (already shipped in that same archive's `AHI/User/Devs/AHI/`
+  directory -- both the 68020+ build and the `.000` 68000 build -- along
+  with the `AHI/User/Devs/AudioModes/TOCCATA` mode descriptor AHI prefs
+  needs). To build one: install AHI onto a WB3.1 HDF as normal, copy
+  `toccata.audio` and `AudioModes/TOCCATA` from the archive into the
+  installed `Devs/AHI` and `Devs/AudioModes`, boot with `[toccata] enabled
+  = true`, open `AHI` in Prefs, select Unit 0 = Toccata, and save so the
+  choice persists in `ENV:Sys/ahi.prefs` (copy forward to `ENVARC:` too).
+  The A4000/motherboard-IDE boot shape matches the Picasso II HDFs above,
+  for the same reason (no big-box IDE driver in the generic `KICK31.ROM`).
 
 The `*.U12` / `*.U13`-style files in the repo root are split EPROM dumps for
 expansion-board ROMs (e.g. the A2091 SCSI boot ROM) used by other ignored
