@@ -157,6 +157,14 @@ impl GmDevice {
         let mode = options.mode()?;
         let soundfont = find_soundfont(options.soundfont.as_deref())?;
         let engine = open_engine(&soundfont, mode)?;
+        let (mended, dropped) = engine.bank_repairs();
+        if mended + dropped > 0 {
+            // The bank arrived bruised; say so once, since it plays on.
+            log::warn!(
+                "midi: {} needed repair: {mended} loops defused, {dropped} regions dropped",
+                soundfont.display()
+            );
+        }
         log::info!(
             "midi: General MIDI attached ({}, {}, MT-32 mode {})",
             coppersynth::version(),
