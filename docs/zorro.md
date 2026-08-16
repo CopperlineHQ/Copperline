@@ -22,7 +22,7 @@ There are two board kinds:
   [WASM plugin boards](#wasm-plugin-boards) below.
 
 Functional boards (the A2091, the A4091, the A2065, the CDTV DMAC, the
-Toccata, and WASM plugins) all implement the `ZorroDevice` trait
+Toccata, the MHI decoder board, and WASM plugins) all implement the `ZorroDevice` trait
 (`src/zorro_device.rs`): the bus drives every board through that one
 boundary for register access, ticking, interrupts, and DMA.
 
@@ -332,6 +332,27 @@ DMA, and its output joins Copperline's own mixer as a named source (the
 directly -- see [](internals/toccata) for the register model and
 [](internals/audio) for the mixer/stem-capture integration.
 
+## Audio: the MHI decoder board
+
+`[mhi]` fits an in-tree virtual MPEG-1/2/2.5 Layer III audio decoder board
+(`src/mhi.rs`) that serves the Amiga MHI API through the ported
+`mhi_copperline.library` (`guest/mhi/`), rather than modelling any real
+physical hardware -- MHI-aware players such as AmigaAMP decode MP3 through
+it exactly as they would through a real MHI decoder board or software MHI
+driver:
+
+```toml
+[mhi]
+enabled = true
+```
+
+No other options exist yet. Omit the section (or `enabled = false`) for no
+board. Like Toccata, its guest interface is register-and-descriptor-queue,
+not bus-mastering DMA, and its decoded output joins Copperline's own mixer
+as a named source (the `mhi` stem in `--audio-stems`) rather than talking
+to a host device directly -- see [](internals/mhi) for the register model
+and [](internals/audio) for the mixer/stem-capture integration.
+
 ## Networking: the bundled HostSocket board
 
 `[hostsocket]` fits the bundled HostSocket board: guest-facing
@@ -549,6 +570,7 @@ makes the real ROMulus flash-ROM board. The product numbers under it are:
 | 4 | Built-in Zorro III RAM (`[memory] z3`) |
 | 5 | Copperline services board (host `[[filesys]]` mounts; `filesys.rs`) |
 | 6 | HostSocket bsdsocket.library board (`[hostsocket]`; `hostsocket.rs`) |
+| 7 | MHI virtual MPEG audio decoder board (`[mhi]`; `mhi.rs`) |
 
 The **identification board** (`BoardSpec::copperline_id`) is always added to
 the chain (unless disabled, below) so guest software can detect that it is

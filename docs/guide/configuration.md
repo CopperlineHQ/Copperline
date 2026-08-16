@@ -1822,6 +1822,33 @@ Copperline-specific setup. No other options exist yet. Omit the section
 the `toccata` source for `--audio-stems` (see [](headless)); see
 [](../zorro) and [](../internals/toccata) for the register model.
 
+## `[mhi]` -- virtual MPEG audio decoder board
+
+```toml
+[mhi]
+enabled = true
+```
+
+Fits a virtual MPEG-1/2/2.5 Layer III audio decoder board on the Zorro
+chain, serving the Amiga MHI API through the ported
+`mhi_copperline.library`, so MHI-aware guest software (e.g. AmigaAMP) gets
+hardware-accelerated MP3 decoding. No other options exist yet. Omit the
+section (or `enabled = false`) for no board. Needs a build with the `mhi`
+feature (on by default; off only for the wasm32 build).
+
+The guest library is not auto-installed: copy the committed artifact,
+`guest/mhi/mhi_copperline.library`, into the guest's `LIBS:mhi/` drawer.
+AmigaAMP (and other MHI clients) find MHI drivers by scanning `LIBS:mhi/`
+for `mhi#?.library`, so the file must sit in that drawer under a matching
+name; check the player's own `MHISupport`/`MHI-Driver` settings if it does
+not pick up the library automatically. The board's decoded output joins
+the mixer as the `mhi` source for `--audio-stems` (see [](headless)); since
+the board consumes each descriptor's bitstream at the decoded audio's own
+emulated-time rate, playback through it stays deterministic and
+reproducible byte-for-byte the same way `--audio-wav` captures of the rest
+of Copperline's audio path are. See [](../zorro) and [](../internals/mhi)
+for the register model.
+
 ## `[hostsocket]` -- bsdsocket.library without a guest TCP/IP stack
 
 ```toml

@@ -462,3 +462,42 @@ wiring, and savestate serialization of in-flight decoder/queue state --
 are Copperline-internal and out of scope for this document; they belong
 in `src/mhi.rs`'s own doc comments and this page's future host-board
 implementation notes once WP3 lands, not in the protocol spec itself.
+
+## Copperline implementation notes
+
+This section summarizes `src/mhi.rs` (`[mhi]`, feature-gated behind the
+default-on `mhi` build feature); it does not change any of the protocol
+content above.
+
+- **Decoder**: [`minimp3-sys`](https://crates.io/crates/minimp3-sys), MIT-
+  licensed bindgen bindings (compiled from source via the `cc` crate, no
+  system minimp3 dependency) around lieff/minimp3.c (CC0), built without
+  `MINIMP3_FLOAT_OUTPUT` so the C library's own synthesis filterbank
+  quantizes to `int16_t` before Rust ever sees a sample -- the same
+  bit-exact, platform-independent "C float path" every other minimp3
+  consumer relies on. Samples convert to `f32` the same way
+  `Ad1848::produce_one_sample` does.
+- **Mixer cadence**: reuses Toccata's causal-producer/non-causal-resampler
+  split ([](toccata)'s "Mixer cadence and resampling") -- a causal
+  producer decodes and evaluates queue/interrupt state at the board's own
+  paced rate into a plain FIFO of raw frames, and a separate non-causal
+  `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls from that
+  FIFO to the mixer's fixed rate, so the resampler's lookahead can never
+  reorder when a descriptor completes or an interrupt raises.
+- **Savestates**: rather than reinterpret `mp3dec_t`'s raw FFI bytes, the
+  board keeps a field-for-field `DecoderSnapshot` shadow struct that
+  `serde` derives normally and copies to/from the live decoder state by
+  value, so an upstream field-layout change fails to compile instead of
+  silently deserializing into the wrong offsets. The board also retains
+  every not-yet-decoded byte of every queued descriptor and the in-flight
+  frame's un-played sample tail, so a save/restore cycle reproduces an
+  uninterrupted run's decoded output exactly -- the savestate approach is
+  re-decode of the retained, not-yet-completed bitstream, not a snapshot
+  of decoded PCM.
+- **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
+  `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**.
+- **Launcher**: the machine-configuration launcher has no MHI row yet
+  (same gap as Toccata, see [](toccata)'s "What's out of scope" section):
+  `[mhi] enabled = true` in a config file loaded directly (`--config`)
+  works, but loading that config into the launcher and saving from there
+  drops the setting until a GUI row is added.
