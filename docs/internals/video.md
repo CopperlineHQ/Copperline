@@ -161,6 +161,21 @@ transition ticks directly; a changed line replays all 454 ticks. A randomized
 equivalence test compares both paths across counter starts, wrap behaviour,
 window bounds and carried flip-flop state.
 
+The flip-flop's carried state also decides where the playfield painter
+starts. A row whose DIWSTRT comparator match produced no open transition --
+the flip-flop was already open, carried from the previous line or held by a
+DIWSTOP beyond the counter's $1C7 wrap that never matches -- is not gated on
+the left by the window at all: the match is a no-op on hardware, and data
+fetched left of the DIWSTRT position is visible at its fetch-derived beam
+position (vAmigaTS Agnus/DIW/OLDDIW diw10 A500 photos prove the carried
+flip-flop; `timing-test/ddfprobe-diw1` is the golden render probe).
+Chambers of Shaolin's Grandslam intro relies on this: DIWSTRT H $C0 with
+DIWSTOP H $1D8 (unreachable) leaves the flip-flop permanently open, and the
+logo fetched from the standard DDF $38 window shows in full left of the $C0
+anchor. Rows whose comparator actually fires keep the anchor as the paint
+start, so ordinary windows clip exactly as before. (Sprites still clip by
+the register-derived window rather than the flip-flop -- a remaining gap.)
+
 BPLCON0 is itself split across two of those timelines. The plane count and
 the resolution bits gate the fetch/serialiser side and stay in the generic
 register domain, but the HAM select does not reach the shifter at all: it

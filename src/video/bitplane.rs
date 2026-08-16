@@ -3140,13 +3140,27 @@ fn merge_display_window_anchor(
     }
 }
 
+/// One row's playfield paint span, from [`line_display_window_bounds`].
+struct LineDisplayWindowBounds {
+    x_start: usize,
+    x_stop: usize,
+    /// Native samples of fetched data restored left of the DIWSTRT anchor on
+    /// a carried-open row: the horizontal DIW flip-flop was already open when
+    /// the DIWSTRT comparator matched (carried in from the previous line, or
+    /// a DIWSTOP the beam counter never reaches), so the match is a no-op and
+    /// the window does not hide the data fetched left of the anchor. The
+    /// painter subtracts this from `native_x_offset` so the picture keeps its
+    /// fetch-derived beam position across the extended span.
+    carried_open_ext_native: usize,
+}
+
 fn line_display_window_bounds(
     base_control: ControlState,
     control_segments: &[ControlSegment],
     line: usize,
     visible_line0: i32,
     h_row: &HWindowRow,
-) -> Option<(usize, usize)> {
+) -> Option<LineDisplayWindowBounds> {
     // Horizontal reach from the comparator flip-flop model: a window that
     // never closes reaches the framebuffer edge; one that opened on an
     // earlier line starts at 0. Interior closed gaps are handled by the
@@ -3190,16 +3204,43 @@ fn line_display_window_bounds(
         run_start,
         FB_WIDTH,
     );
-    // A carried-open row whose comparator never fired inside the frame
-    // keeps the base control's DIWSTRT anchor so the picture stays at its
-    // fetch-derived position.
-    let x_start = match (h_row.comparator_anchor, anchor) {
-        (Some(a), Some(b)) => a.min(b),
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
-        (None, None) => base_control.display_window_x().0,
+    let (x_start, carried_open_ext_native) = match (h_row.comparator_anchor, anchor) {
+        (Some(a), Some(b)) => (a.min(b), 0),
+        (Some(a), None) => (a, 0),
+        // The DIWSTRT comparator matched at `b`, but the row recorded no
+        // open transition: the flip-flop was already open when the match
+        // arrived. On hardware, setting an already-set flip-flop does
+        // nothing, so the window does not gate the left side of this row
+        // and the playfield shows from its fetch-derived origin (Chambers
+        // of Shaolin's Grandslam intro: DIWSTRT $C0 with DIWSTOP $1D8,
+        // which the beam counter never reaches, leaves the flip-flop open
+        // permanently -- the picture fetched from the standard DDF $38
+        // window shows in full left of the $C0 anchor). Extend the paint
+        // start over the data the anchor would otherwise hide; the
+        // flip-flop's open runs still gate per-pixel visibility.
+        (None, Some(b)) => {
+            let mut control = base_control;
+            for segment in control_segments {
+                if segment.x <= b {
+                    control = segment.control;
+                }
+            }
+            let pixel_repeat = control.framebuffer_pixel_repeat();
+            let hidden_native = control.native_x_offset(control.diw_h_start(), pixel_repeat);
+            let hidden_fb =
+                hidden_native * pixel_repeat / control.native_samples_per_framebuffer_pixel();
+            let x_start = b.saturating_sub(hidden_fb).max(env_start);
+            let ext_native =
+                (b - x_start) / pixel_repeat * control.native_samples_per_framebuffer_pixel();
+            (x_start, ext_native)
+        }
+        (None, None) => (base_control.display_window_x().0, 0),
     };
-    (x_start < env_stop).then_some((x_start, env_stop))
+    (x_start < env_stop).then_some(LineDisplayWindowBounds {
+        x_start,
+        x_stop: env_stop,
+        carried_open_ext_native,
+    })
 }
 
 fn line_max_display_planes(
@@ -4859,13 +4900,18 @@ fn render_from_input_with_scratch(
         let mut indexed_output_cache = IndexedOutputCache::default();
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
-            let Some((x_start, x_stop)) = line_display_window_bounds(
+            let Some(LineDisplayWindowBounds {
+                x_start,
+                x_stop,
+                carried_open_ext_native,
+            }) = line_display_window_bounds(
                 base_controls[y],
                 row_control_segments,
                 y,
                 visible_line0,
                 &h_window_rows[y],
-            ) else {
+            )
+            else {
                 continue;
             };
             render_timing.playfield_pixels = render_timing
@@ -5162,6 +5208,7 @@ fn render_from_input_with_scratch(
                 base_controls[y].bplcon0,
                 block_start,
                 bpl_output_start_x,
+                carried_open_ext_native,
                 &h_window_rows[y],
                 visible_line0,
                 input.emulated_seconds,
@@ -5606,6 +5653,7 @@ fn render_planned_playfield_line(
     base_ham_bplcon0: u16,
     suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
+    carried_open_ext_native: usize,
     h_row: &HWindowRow,
     visible_line0: i32,
     emulated_seconds: f64,
@@ -5630,6 +5678,7 @@ fn render_planned_playfield_line(
         base_ham_bplcon0,
         suppress_prefetch_scroll_fill,
         bpl_output_start_x,
+        carried_open_ext_native,
         h_row,
         visible_line0,
         emulated_seconds,
@@ -5658,6 +5707,7 @@ fn render_planned_playfield_line_scalar(
     base_ham_bplcon0: u16,
     suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
+    carried_open_ext_native: usize,
     h_row: &HWindowRow,
     visible_line0: i32,
     emulated_seconds: f64,
@@ -5682,6 +5732,7 @@ fn render_planned_playfield_line_scalar(
         base_ham_bplcon0,
         suppress_prefetch_scroll_fill,
         bpl_output_start_x,
+        carried_open_ext_native,
         h_row,
         visible_line0,
         emulated_seconds,
@@ -5708,6 +5759,7 @@ fn render_planned_playfield_line_impl(
     base_ham_bplcon0: u16,
     suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
+    carried_open_ext_native: usize,
     h_row: &HWindowRow,
     visible_line0: i32,
     emulated_seconds: f64,
@@ -5812,7 +5864,13 @@ fn render_planned_playfield_line_impl(
         let pixel_diw_h_start = pixel_control.diw_h_start();
         let pixel_fetch_start_native_x =
             pixel_control.fetch_start_native_x(pixel_diw_h_start, pixel_repeat);
-        let native_x_offset = pixel_control.native_x_offset(pixel_diw_h_start, pixel_repeat);
+        // On a carried-open row the paint span was extended left over the
+        // data the DIWSTRT anchor would hide (`LineDisplayWindowBounds`);
+        // drop the same amount from the window's hidden-sample offset so the
+        // fetched picture keeps its beam position across the extension.
+        let native_x_offset = pixel_control
+            .native_x_offset(pixel_diw_h_start, pixel_repeat)
+            .saturating_sub(carried_open_ext_native);
         // BPLCON1 scroll fills the window's left edge from Denise's current
         // scanline shifter state. At the first line of a bitplane-DMA block,
         // no earlier playfield stream was active before the window opened, so

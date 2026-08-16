@@ -1,8 +1,15 @@
 ; Stable single-DIWSTRT clip test (red border for contrast).
 ; Copper reloads BPL1PT and all display regs every frame. Content solid white,
-; DDFSTRT $30 (fetch origin ~$71). DIWSTRT H=$C8: if the DIW clips, the left ~1/4
-; of the screen is RED (COLOR00) and the rest white; if it does not clip, the
-; screen is white edge to edge. Compare Copperline / vAmiga / FS-UAE.
+; DDFSTRT $30 (fetch origin ~$71). DIWSTRT H=$C8 with DIWSTOP H=$E8: the
+; decoded HSTOP $1E8 lies beyond the $1C7 wrap of Denise's horizontal
+; counter, so the window flip-flop never clears once set and carries open
+; across every line. The DIWSTRT match on the already-open flip-flop is a
+; no-op, so the picture shows from its fetch origin: white from ~x30 to the
+; right edge, red only over the pre-fetch columns (vAmiga-verified; FS-UAE
+; agrees). A renderer that treats DIW as a start/stop range instead of the
+; comparator flip-flop clips the left ~1/4 of the screen to red. This is the
+; golden probe for the carried-open window (Chambers of Shaolin's Grandslam
+; intro, DIWSTRT $C0 / DIWSTOP $1D8, hides its logo's left edge otherwise).
 CUST   equ $dff000
 SCREEN equ $40000
 FILLW  equ 14336
