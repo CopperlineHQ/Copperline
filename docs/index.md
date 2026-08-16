@@ -66,6 +66,8 @@ running in Copperline.
 - [](internals/audio) -- the audio mixer/sink service and stem capture.
 - [](internals/toccata) -- the MacroSystem Toccata AD1848 sound board model.
 - [](internals/graffity) -- the Graffity [Zorro II]/[Zorro III] RTG model.
+- [](internals/mhi) -- the virtual MHI MPEG audio decoder board's
+  bus-agnostic mailbox register protocol.
 
 ## Design principles
 
