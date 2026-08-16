@@ -254,7 +254,7 @@ fn mt32_panel_height() -> usize {
     0
 }
 
-/// The General MIDI panel's height, or 0 while it is not shown.
+/// Coppersynth's panel height, or 0 while it is not shown.
 fn gm_panel_height() -> usize {
     #[cfg(feature = "gm")]
     if super::gm_panel_shown() {
@@ -263,7 +263,7 @@ fn gm_panel_height() -> usize {
     0
 }
 
-/// Where the General MIDI panel starts: under the display, below the
+/// Where Coppersynth's panel starts: under the display, below the
 /// MT-32's strip when that one is up as well.
 fn gm_panel_top() -> usize {
     present_height() + mt32_panel_height()
@@ -1223,7 +1223,7 @@ pub struct App {
     /// hardware this is firmware -- so it is kept here.
     #[cfg(feature = "mt32")]
     mt32_panel: mt32panel::Mt32Panel,
-    /// The General MIDI panel's pointer mechanics: latched buttons, the
+    /// Coppersynth's panel pointer mechanics: latched buttons, the
     /// momentary flash, the knob's grab. Everything semantic lives in
     /// Coppersynth's own panel inside the device.
     #[cfg(feature = "gm")]
@@ -4342,7 +4342,7 @@ impl ApplicationHandler for App {
                 self.report_mt32_fault();
             }
         }
-        // The General MIDI synth's faults and display lines ride the same
+        // Coppersynth's faults and display lines ride the same
         // frame poll; the display only ever has lines while a game writes
         // them, so this is a cheap drain of an empty Vec almost always.
         #[cfg(feature = "gm")]
@@ -6000,7 +6000,7 @@ impl App {
         self.request_redraw();
     }
 
-    /// Show or hide the General MIDI panel, resizing the presentation
+    /// Show or hide Coppersynth's panel, resizing the presentation
     /// exactly as the MT-32's does.
     #[cfg(feature = "gm")]
     fn set_gm_panel_shown(&mut self, shown: bool) {
@@ -6248,7 +6248,7 @@ impl App {
         }
     }
 
-    /// A press on the General MIDI panel. The pointer side resolves it
+    /// A press on Coppersynth's panel. The pointer side resolves it
     /// to a semantic press; the engine's own panel decides what it means.
     #[cfg(feature = "gm")]
     fn press_gm_control(&mut self, control: gmpanel::GmControl, left: bool, pos: (i32, i32)) {
@@ -6475,7 +6475,7 @@ impl App {
         }
     }
 
-    /// What the General MIDI panel should show, when it is the output.
+    /// What Coppersynth's panel should show, when it is the output.
     #[cfg(feature = "gm")]
     fn gm_panel_view(&mut self) -> Option<gmpanel::GmPanelView> {
         let now_ms = self.gm_panel_epoch.elapsed().as_millis() as u64;
@@ -6514,10 +6514,9 @@ impl App {
         })
     }
 
-    /// Surface what the General MIDI synth has to say: a fault when it
-    /// could not be fitted, and the display lines a game wrote to what it
-    /// believes is an MT-32 -- the "Insert disk 2" class of message,
-    /// which without a front panel lands on the OSD.
+    /// Surface a fault -- the synth could not be fitted -- on the OSD,
+    /// and drain any display lines to the debug log; the front panel's
+    /// glass is where those are really shown.
     #[cfg(feature = "gm")]
     fn report_gm(&mut self) {
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {

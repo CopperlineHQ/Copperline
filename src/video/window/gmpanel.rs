@@ -347,17 +347,57 @@ pub fn draw(frame: &mut [u8], view: &GmPanelView, top: usize, scale: usize) {
     draw_lcd(frame, panel, view, scale);
     draw_rounds(frame, panel, view, scale);
     draw_pairs(frame, panel, view, scale);
-    // The marque, printed on the fascia where the unit signs itself.
+    // The marque, printed on the fascia where the unit signs itself --
+    // set by each letter's ink rather than the font's cells, so the
+    // word spaces evenly.
     let lcd = lcd_rect(panel);
-    text(
+    text_kerned(
         frame,
         panel.x + PAD,
         (lcd.y + lcd.h).saturating_sub(LCD_BEZEL + font::GLYPH_H),
         "Coppersynth",
         CAPTION,
-        1,
         scale,
     );
+}
+
+/// Text advanced by each glyph's own ink width plus a fixed gap: the
+/// cell font reads unevenly for a word set large on the fascia, and
+/// this is the marque's answer.
+fn text_kerned(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: usize) {
+    let mut pen = x;
+    for ch in s.chars() {
+        let glyph = font::glyph(ch);
+        let mut lo = font::GLYPH_W;
+        let mut hi = 0;
+        for bits in glyph.iter() {
+            for col in 0..font::GLYPH_W {
+                if bits & (1 << col) != 0 {
+                    lo = lo.min(col);
+                    hi = hi.max(col + 1);
+                }
+            }
+        }
+        if lo >= hi {
+            pen += 3;
+            continue;
+        }
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in lo..hi {
+                if bits & (1 << col) == 0 {
+                    continue;
+                }
+                let dot = Rect {
+                    x: pen + col - lo,
+                    y: y + row,
+                    w: 1,
+                    h: 1,
+                };
+                fill_rect(frame, scaled(dot, scale), color, scale);
+            }
+        }
+        pen += hi - lo + 1;
+    }
 }
 
 fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
@@ -378,23 +418,19 @@ fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     draw_led_dot(frame, power_led_rect(panel), view.powered, scale);
 }
 
-/// A plain round LED: a flat disc of its colour and nothing else.
+/// A plain round LED: a flat disc of its colour, drawn as mirrored
+/// rows about an integer centre so neither side sheds pixels.
 fn draw_led_dot(frame: &mut [u8], rect: Rect, lit: bool, scale: usize) {
     let colour = if lit { LED_LIT } else { LED_OFF };
-    let (cx, radius) = (
-        rect.x as f32 + rect.w as f32 / 2.0,
-        rect.w.min(rect.h) as f32 / 2.0,
-    );
-    for y in 0..rect.h {
-        let dy = y as f32 + 0.5 - rect.h as f32 / 2.0;
-        let half = (radius * radius - dy * dy).max(0.0).sqrt();
-        if half < 0.5 {
-            continue;
-        }
+    let d = rect.w.min(rect.h);
+    let r = (d as f32 - 1.0) / 2.0;
+    for y in 0..d {
+        let dy = y as f32 - r;
+        let half = (r * r - dy * dy).max(0.0).sqrt().round() as usize;
         let row = Rect {
-            x: (cx - half).round() as usize,
+            x: rect.x + (d - 1) / 2 - half,
             y: rect.y + y,
-            w: (half * 2.0).round() as usize,
+            w: 2 * half + 1,
             h: 1,
         };
         fill_rect(frame, scaled(row, scale), colour, scale);

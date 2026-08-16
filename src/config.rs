@@ -929,11 +929,11 @@ pub fn midi_out_is_mt32(midi_out: Option<&str>) -> bool {
     midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_MT32))
 }
 
-/// `midi_out = "gm"` selects the built-in General MIDI synthesizer rather
+/// `midi_out = "gm"` selects the built-in Coppersynth synthesizer rather
 /// than a host endpoint. Matched like [`MIDI_OUT_MT32`].
 pub const MIDI_OUT_GM: &str = "gm";
 
-/// Whether a `midi_out` value asks for the built-in General MIDI synth.
+/// Whether a `midi_out` value asks for the built-in Coppersynth synth.
 pub fn midi_out_is_gm(midi_out: Option<&str>) -> bool {
     midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_GM))
 }
@@ -3246,7 +3246,7 @@ pub(crate) struct RawSerial {
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
-/// `[gm]`: the built-in General MIDI synthesizer, selected with
+/// `[gm]`: the built-in Coppersynth synthesizer, selected with
 /// `[serial] midi_out = "gm"`. No ROMs: a soundfont supplies the sounds,
 /// and the bundled GeneralUser GS is found without configuration.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

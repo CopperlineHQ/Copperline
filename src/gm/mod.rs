@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The General MIDI synthesizer as one of the devices Paula's MIDI output
+//! Coppersynth as one of the devices Paula's MIDI output
 //! can be pointed at.
 //!
 //! Everything that makes sound lives in the Coppersynth engine (a
@@ -22,8 +22,9 @@ const BLOCK_FRAMES: usize = 256;
 /// The soundfont's canonical filename, for the search path and messages.
 pub const SOUNDFONT_NAME: &str = "GeneralUser-GS.sf2";
 
-/// The zipped spelling release packages bundle (32 MB -> 29 MB), read
-/// with the archive support Copperline already carries for WHDLoad.
+/// The zipped spelling of a beside-the-executable override, read with
+/// the archive support Copperline already carries. The default bank
+/// needs no file at all: Coppersynth embeds its own.
 pub const SOUNDFONT_ZIP_NAME: &str = "GeneralUser-GS.zip";
 
 /// The `[gm]` settings the device is fitted with.
@@ -129,7 +130,7 @@ fn open_engine(path: &std::path::Path, mode: Mt32Mode) -> Result<coppersynth::en
         .map_err(|e| anyhow!("{e}"))
 }
 
-/// A General MIDI synthesizer attached to the MIDI output.
+/// Coppersynth attached to the MIDI output.
 pub struct GmDevice {
     engine: coppersynth::engine::GmEngine,
     /// The block last rendered, and how much of it the mixer has taken.

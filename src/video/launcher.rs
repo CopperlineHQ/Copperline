@@ -611,7 +611,7 @@ pub enum LauncherField {
     Mt32Lcd,
     #[cfg(feature = "midi")]
     MidiIn,
-    /// The General MIDI synth's soundfont (.sf2); unset means the bundled
+    /// Coppersynth's soundfont (.sf2); unset means the bundled
     /// default's search path.
     #[cfg(feature = "gm")]
     GmSoundfont,
@@ -1104,7 +1104,7 @@ const SERIAL_ROWS_MT32: [Row; 7] = [
     row(F::Mt32Panel, "  Front panel", Cycle),
     row(F::Mt32Lcd, "  Display", Cycle),
 ];
-// The General MIDI synth needs no ROMs: its rows are the soundfont it
+// Coppersynth needs no ROMs: its rows are the soundfont it
 // plays and whether the MT-32 translation layer sits in front of it.
 #[cfg(all(feature = "midi", feature = "gm"))]
 const SERIAL_ROWS_GM: [Row; 6] = [
@@ -2159,7 +2159,7 @@ pub struct MachineSetup {
     mt32_pcm_rom: Option<PathBuf>,
     mt32_panel: bool,
     mt32_lcd: Mt32Lcd,
-    /// The General MIDI synth's soundfont and translation mode ([gm]).
+    /// Coppersynth's soundfont and translation mode ([gm]).
     gm_soundfont: Option<PathBuf>,
     gm_mt32_mode: Option<String>,
     gm_panel: bool,
@@ -4549,7 +4549,7 @@ impl MachineSetup {
             F::MidiOut => {
                 // The built-in synths ride at the end of the output
                 // list: always there to be chosen, whatever the host
-                // offers -- the MT-32 first, then General MIDI.
+                // offers -- the MT-32 first, then Coppersynth.
                 let names: Vec<String> = self
                     .midi_endpoints
                     .outputs

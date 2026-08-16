@@ -8287,16 +8287,10 @@ fn draw_launcher_row(
                 // than being emptied -- the Paths page, and the
                 // soundfont row. Everywhere else the button really does
                 // clear a path, and says so.
-                let resets = r.field.is_paths_field()
-                    || launcher_path_inherits(setup, r.field)
-                    || !launcher_clear_enabled(setup, r.field)
-                    || {
-                        #[cfg(feature = "gm")]
-                        let gm = r.field == LauncherField::GmSoundfont;
-                        #[cfg(not(feature = "gm"))]
-                        let gm = false;
-                        gm
-                    };
+                #[cfg(feature = "gm")]
+                let resets = r.field.is_paths_field() || r.field == LauncherField::GmSoundfont;
+                #[cfg(not(feature = "gm"))]
+                let resets = r.field.is_paths_field();
                 let label = if resets { "Reset" } else { "Clear" };
                 let enabled = launcher_clear_enabled(setup, r.field);
                 draw_text_button(
