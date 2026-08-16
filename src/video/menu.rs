@@ -69,6 +69,8 @@ pub enum MenuAction {
     /// Show or hide the MT-32's front panel.
     ToggleMt32Panel,
     ToggleGmPanel,
+    LoadGmSoundfont,
+    SetGmMt32Mode(&'static str),
     /// How that panel's display is lit.
     SetMt32Lcd(crate::config::Mt32Lcd),
     /// Step the gain by one notch, up (+1) or down (-1).
@@ -452,10 +454,13 @@ pub struct MenuState<'a> {
     pub mt32_input: bool,
     pub mt32_panel: bool,
     pub mt32_lcd: crate::config::Mt32Lcd,
-    /// Whether the General MIDI synth is the selected output, and whether
-    /// its panel is up.
+    /// Whether Coppersynth is compiled in at all, whether it is the
+    /// selected output, whether its panel is up, and which MT-32 mode
+    /// its options name.
+    pub gm_available: bool,
     pub gm_attached: bool,
     pub gm_panel: bool,
+    pub gm_mt32_mode: &'a str,
     pub sampler_input: &'a str,
     pub sampler_inputs: &'a [String],
     pub sampler_gain: f32,
@@ -514,7 +519,8 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
     // A port with nothing on it has nothing to set, so it contributes no
     // category rather than one that opens onto an empty list. The MT-32
     // counts: a machine with no host MIDI devices can still play to it.
-    if !s.midi_inputs.is_empty() || !s.midi_outputs.is_empty() || s.mt32_available {
+    if !s.midi_inputs.is_empty() || !s.midi_outputs.is_empty() || s.mt32_available || s.gm_available
+    {
         rows.push(MenuRow::submenu("Serial Port", serial_rows(s)));
     }
     if !s.sampler_inputs.is_empty() {
@@ -747,7 +753,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
     // The MT-32 is one of the outputs, always offered once its ROMs are
     // configured -- a machine with no host MIDI devices at all can still
     // play to it.
-    if !s.midi_outputs.is_empty() || s.mt32_available {
+    if !s.midi_outputs.is_empty() || s.mt32_available || s.gm_available {
         let mut outputs = vec![MenuRow::choice(
             "None",
             MenuAction::SetMidiOutput(None),
@@ -765,6 +771,15 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
                 MT32_LABEL,
                 MenuAction::SetMidiOutput(Some(MT32_ENDPOINT.to_string())),
                 s.mt32_attached,
+            ));
+        }
+        // Coppersynth needs no hardware and no configuration, so it is
+        // always on offer.
+        if s.gm_available {
+            outputs.push(MenuRow::choice(
+                GM_LABEL,
+                MenuAction::SetMidiOutput(Some(crate::config::MIDI_OUT_GM.to_string())),
+                s.gm_attached,
             ));
         }
         rows.push(MenuRow::submenu("MIDI Out", outputs));
@@ -786,22 +801,36 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
             ],
         ));
     }
-    // The General MIDI synth's own settings, likewise.
+    // Coppersynth's own settings, likewise: the main functions for
+    // anyone who does not want the front panel up.
     if s.gm_attached {
+        let modes = ["Auto", "On", "Off"]
+            .iter()
+            .map(|label| {
+                let value = label.to_ascii_lowercase();
+                let selected = s.gm_mt32_mode.eq_ignore_ascii_case(&value);
+                let value: &'static str = match *label {
+                    "On" => "on",
+                    "Off" => "off",
+                    _ => "auto",
+                };
+                MenuRow::choice(label, MenuAction::SetGmMt32Mode(value), selected)
+            })
+            .collect();
         rows.push(MenuRow::submenu(
             GM_LABEL,
-            vec![MenuRow::toggle(
-                "Front Panel",
-                MenuAction::ToggleGmPanel,
-                s.gm_panel,
-            )],
+            vec![
+                MenuRow::toggle("Front Panel", MenuAction::ToggleGmPanel, s.gm_panel),
+                MenuRow::action("Load Soundfont...", MenuAction::LoadGmSoundfont),
+                MenuRow::submenu("MT-32 Mode", modes),
+            ],
         ));
     }
     rows
 }
 
-/// What the General MIDI output is called in the menu.
-const GM_LABEL: &str = "General MIDI";
+/// What the synth is called in the menu.
+const GM_LABEL: &str = "Coppersynth";
 
 /// What the MT-32 output is called in the menu, and the endpoint name that
 /// selects it.
@@ -1108,8 +1137,10 @@ mod tests {
             mt32_attached: false,
             mt32_input: false,
             mt32_panel: false,
+            gm_available: false,
             gm_attached: false,
             gm_panel: false,
+            gm_mt32_mode: "auto",
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: sampler,

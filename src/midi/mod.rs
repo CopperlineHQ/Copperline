@@ -184,7 +184,7 @@ pub const MIDI_OUT_MT32_LABEL: &str = "MT-32";
 pub use crate::config::MIDI_OUT_GM;
 
 /// What the General MIDI output is called anywhere a person reads it.
-pub const MIDI_OUT_GM_LABEL: &str = "General MIDI";
+pub const MIDI_OUT_GM_LABEL: &str = "Coppersynth";
 
 /// MIDI Active Sensing status byte.
 pub(crate) const ACTIVE_SENSE: u8 = 0xFE;
@@ -566,6 +566,12 @@ impl MidiSerialSink {
     #[cfg(feature = "gm")]
     pub fn set_gm_mt32_mode(&mut self, mode: &str) {
         self.gm_options.mt32_mode = Some(mode.to_string());
+    }
+
+    /// The MT-32 mode the options name, for the menu's checkmark.
+    #[cfg(feature = "gm")]
+    pub fn gm_mt32_mode(&self) -> &str {
+        self.gm_options.mt32_mode.as_deref().unwrap_or("auto")
     }
 
     /// Both INSTRUMENT halves through a power-on: whatever was loaded,

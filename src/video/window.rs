@@ -5481,6 +5481,15 @@ impl App {
             .is_some_and(|sink| sink.gm_selected());
         #[cfg(not(feature = "gm"))]
         let gm_attached = false;
+        #[cfg(feature = "gm")]
+        let gm_mt32_mode = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .map(|sink| sink.gm_mt32_mode().to_string())
+            .unwrap_or_default();
+        #[cfg(not(feature = "gm"))]
+        let gm_mt32_mode = String::new();
 
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
@@ -5520,8 +5529,10 @@ impl App {
             mt32_attached,
             mt32_input,
             mt32_panel: crate::video::mt32_panel_shown(),
+            gm_available: cfg!(feature = "gm"),
             gm_attached,
             gm_panel: crate::video::gm_panel_shown(),
+            gm_mt32_mode: &gm_mt32_mode,
             keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
@@ -5759,13 +5770,40 @@ impl App {
                 let shown = !crate::video::gm_panel_shown();
                 self.set_gm_panel_shown(shown);
                 self.show_osd(if shown {
-                    "General MIDI: front panel shown"
+                    "Coppersynth: front panel shown"
                 } else {
-                    "General MIDI: front panel hidden"
+                    "Coppersynth: front panel hidden"
                 });
             }
             #[cfg(not(feature = "gm"))]
             A::ToggleGmPanel => {}
+            #[cfg(feature = "gm")]
+            A::LoadGmSoundfont => self.load_gm_soundfont(),
+            #[cfg(not(feature = "gm"))]
+            A::LoadGmSoundfont => {}
+            #[cfg(feature = "gm")]
+            A::SetGmMt32Mode(mode) => {
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    sink.set_gm_mt32_mode(mode);
+                }
+                let parsed = match mode {
+                    "on" => crate::gm::Mt32Mode::On,
+                    "off" => crate::gm::Mt32Mode::Off,
+                    _ => crate::gm::Mt32Mode::Auto,
+                };
+                if let Some(gm) = self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .and_then(crate::midi::MidiSerialSink::gm_mut)
+                {
+                    gm.set_mt32_mode(parsed);
+                }
+                self.show_osd(format!("Coppersynth: MT-32 mode {mode}"));
+                self.request_redraw();
+            }
+            #[cfg(not(feature = "gm"))]
+            A::SetGmMt32Mode(_) => {}
             #[cfg(feature = "mt32")]
             A::SetMt32Lcd(style) => {
                 crate::video::set_mt32_lcd(style);
@@ -6262,9 +6300,9 @@ impl App {
                 };
                 if came_up {
                     self.show_osd(if reset_font {
-                        "General MIDI: default soundfont"
+                        "Coppersynth: default soundfont"
                     } else {
-                        "General MIDI: power on"
+                        "Coppersynth: power on"
                     });
                 } else {
                     // Asked to switch on and it did not: say why.
@@ -6273,36 +6311,41 @@ impl App {
             }
             GmPress::PowerOff => {
                 self.set_gm_powered(false);
-                self.show_osd("General MIDI: power off");
+                self.show_osd("Coppersynth: power off");
             }
-            GmPress::Load => {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Choose a soundfont")
-                    .add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
-                    .pick_file();
-                let Some(path) = picked else {
-                    return;
-                };
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_gm_soundfont(path);
-                }
-                self.emu.bus_mut().paula.rearm_synth_audio();
-                let fitted = self
-                    .emu
-                    .bus_mut()
-                    .midi_serial_mut()
-                    .is_some_and(|sink| sink.gm().is_some());
-                if fitted {
-                    self.show_osd(format!("General MIDI: {name}"));
-                } else {
-                    // The file would not load; the fault says why.
-                    self.report_gm();
-                }
-            }
+            GmPress::Load => self.load_gm_soundfont(),
+        }
+    }
+
+    /// The soundfont picker, reached from the fascia's LOAD button and
+    /// the menu alike: pick a file, refit the synth around it.
+    #[cfg(feature = "gm")]
+    fn load_gm_soundfont(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Choose a soundfont")
+            .add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+            sink.set_gm_soundfont(path);
+        }
+        self.emu.bus_mut().paula.rearm_synth_audio();
+        let fitted = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.gm().is_some());
+        if fitted {
+            self.show_osd(format!("Coppersynth: {name}"));
+        } else {
+            // The file would not load; the fault says why.
+            self.report_gm();
         }
     }
 
@@ -6460,7 +6503,7 @@ impl App {
             log::debug!("gm display: {line}");
         }
         if let Some(fault) = fault {
-            self.warn_osd(format!("General MIDI: {fault}"));
+            self.warn_osd(format!("Coppersynth: {fault}"));
         }
     }
 

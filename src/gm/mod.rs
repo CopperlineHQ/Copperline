@@ -262,6 +262,13 @@ impl GmDevice {
         self.engine.monitor() != coppersynth::engine::Monitor::Off
     }
 
+    /// Switch MT-32 mode live -- the menu's route to what the fascia's
+    /// own prompt does. The panel reads the engine, so it follows.
+    pub fn set_mt32_mode(&mut self, mode: Mt32Mode) {
+        self.engine.set_mt32_mode(mode);
+        self.translating_logged = mode == Mt32Mode::On;
+    }
+
     /// Letters and pictures the engine took off the wire go to the
     /// panel before it is asked anything.
     fn feed_panel(&mut self) {

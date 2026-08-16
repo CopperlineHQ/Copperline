@@ -2074,7 +2074,7 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             // nothing to wire back as an input.
             if wants_gm && crate::config::midi_out_is_gm(cfg.serial.midi_in.as_deref()) {
                 log::warn!(
-                    "[serial] midi_in = \"gm\": the General MIDI synth has no MIDI \
+                    "[serial] midi_in = \"gm\": Coppersynth has no MIDI \
                      output to read back; the MIDI input is unset"
                 );
             }
