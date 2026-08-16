@@ -2593,6 +2593,21 @@ pub fn build_machine(
         info!("toccata: AD1848 sound board on the Zorro chain (slot {slot})");
         devices.push(crate::zorro_device::BoardDevice::Toccata(Box::default()));
     }
+    // MHI virtual MPEG audio decoder board (`[mhi] enabled`): decodes MP3
+    // bitstream descriptors handed over via doorbell, its output joins the
+    // mixer as the "mhi" audio source (see crate::mhi and
+    // docs/internals/mhi.md).
+    #[cfg(feature = "mhi")]
+    if cfg.mhi {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::mhi(slot))?;
+        info!("mhi: MPEG audio decoder board on the Zorro chain (slot {slot})");
+        devices.push(crate::zorro_device::BoardDevice::Mhi(Box::default()));
+    }
+    #[cfg(not(feature = "mhi"))]
+    if cfg.mhi {
+        log::warn!("[mhi] enabled = true needs a build with --features mhi; no board is fitted");
+    }
     // RTG board (`[rtg] card`): the Z3660.card P96 driver drives RTG screens
     // through its register file and framebuffer; see crate::z3660.
     if cfg.rtg == crate::config::RtgCard::Z3660 {

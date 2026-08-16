@@ -158,7 +158,7 @@ same point, covered by
   gain feeding the board's own analog mixer) is not modelled: Copperline's
   Paula and CD-DA already reach the master mix directly, so replicating
   the board's own internal mixing would add no user-visible capability.
-- The launcher's machine-configuration screen does not yet have a Toccata
-  row; `[toccata] enabled = true` in a config file loaded directly (`--config`)
-  works, but loading that config into the launcher and saving from there
-  drops the setting until a GUI row is added.
+- The launcher's **I/O Ports** tab (Sound section) has a plain fit/don't-fit
+  toggle for the board; host-side audio capture/backend options
+  (`--audio-wav`, `--audio-stems`, device selection) are not exposed there
+  and stay command-line/config-file only.

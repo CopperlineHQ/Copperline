@@ -331,6 +331,26 @@ slow = "512K"
 # dns_server = "10.0.2.3" # only used when resolver = "dns"
 
 
+# Toccata: the MacroSystem Zorro II sound board (AD1848 codec), driven in
+# the guest by the stock open-source toccata.audio AHI driver, so AHI-aware
+# software gets 16-bit sound with no Copperline-specific driver work. No
+# other options exist yet. Its output joins the mixer as the "toccata"
+# source for --audio-stems.
+# [toccata]
+# enabled = true
+
+
+# MHI: a virtual MPEG-1/2/2.5 Layer III audio decoder board, serving the
+# Amiga MHI API through the ported mhi_copperline.library (guest/mhi/) so
+# MHI-aware guest software (e.g. AmigaAMP) gets MP3 decoding. No other
+# options exist yet. Copy the committed guest/mhi/mhi_copperline.library
+# artifact into the guest's LIBS:mhi/ drawer -- AmigaAMP and other MHI
+# clients find drivers by scanning LIBS:mhi/ for mhi#?.library. Decoded
+# output joins the mixer as the "mhi" source for --audio-stems.
+# [mhi]
+# enabled = true
+
+
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.
 # Z3660 is fitted by default on any machine whose CPU has a 32-bit address bus
 # (stock A3000/A4000, or any profile given a 68020+ full-bus CPU). Picasso II,
