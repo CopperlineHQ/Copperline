@@ -48,6 +48,8 @@ running in Copperline.
   in place of an image, with its own RDB and partitions intact.
 - [](guide/mt32) -- configuring the built-in MT-32 synthesiser and its front
   panel.
+- [](guide/coppersynth) -- Coppersynth, the built-in General MIDI
+  synthesiser: soundfonts, MT-32 translation, and its front panel.
 - [](guide/headless) -- scripted, deterministic runs: screenshots, frame
   dumps, scripted input, and WAV capture.
 - [](guide/browser) -- the same core compiled to WebAssembly, hosted at
