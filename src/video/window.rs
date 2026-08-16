@@ -4319,6 +4319,18 @@ impl ApplicationHandler for App {
         {
             self.repeat_gm_dial();
             self.repeat_gm_buttons();
+            // The glass is alive -- meters, the boot line, letters --
+            // so while the panel is up it draws every frame, the way
+            // the display does. Hidden, this costs one flag read.
+            if crate::video::gm_panel_shown()
+                && self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .is_some_and(|sink| sink.gm_selected())
+            {
+                self.request_redraw();
+            }
         }
         #[cfg(feature = "mt32")]
         {
