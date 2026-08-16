@@ -331,6 +331,15 @@ slow = "512K"
 # dns_server = "10.0.2.3" # only used when resolver = "dns"
 
 
+# Toccata: the MacroSystem Zorro II sound board (AD1848 codec), driven in
+# the guest by the stock open-source toccata.audio AHI driver, so AHI-aware
+# software gets 16-bit sound with no Copperline-specific driver work. No
+# other options exist yet. Its output joins the mixer as the "toccata"
+# source for --audio-stems.
+# [toccata]
+# enabled = true
+
+
 # MHI: a virtual MPEG-1/2/2.5 Layer III audio decoder board, serving the
 # Amiga MHI API through the ported mhi_copperline.library (guest/mhi/) so
 # MHI-aware guest software (e.g. AmigaAMP) gets MP3 decoding. No other
