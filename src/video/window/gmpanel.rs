@@ -513,7 +513,9 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     let glass = if view.powered { GLASS_LIT } else { GLASS_DARK };
     sunken_display(frame, lcd, glass, scale);
     let screen = &view.screen;
-    let inner_x = lcd.x + LCD_BEZEL + 4;
+    // A shade closer to the edge than it was, which is what buys the
+    // name band its twenty characters.
+    let inner_x = lcd.x + LCD_BEZEL + 1;
     let inner_y = lcd.y + LCD_BEZEL + 3;
     // The legends, the meter numbers and the scale are ink printed on
     // the glass overlay, not driven segments: they keep their weight
@@ -529,7 +531,7 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     let inner_h = lcd.h - 2 * LCD_BEZEL - 6;
     let cell_h = 16;
     let pitch = (inner_h - cell_h) / 3;
-    let col2_x = inner_x + 36;
+    let col2_x = inner_x + 33;
     let ghost = if view.powered {
         mix(INK, glass, 1.0 - CELL_GRAIN)
     } else {
@@ -629,9 +631,10 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     }
 
     // The name, taller than everything, centred in the band between
-    // the label columns and the bars with a character's gap each side.
-    let band_lo = col2_x + 36 + font::GLYPH_W;
-    let band_hi = matrix_x.saturating_sub(font::GLYPH_W);
+    // the label columns and the bars: twenty characters' worth, a full
+    // SF2 preset name.
+    let band_lo = col2_x + 34;
+    let band_hi = matrix_x.saturating_sub(5);
     let name_w = screen.name.chars().count().min(NAME_COLS) * TALL_PITCH;
     let name_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(name_w)) / 2;
     if view.powered {
@@ -1383,7 +1386,7 @@ mod tests {
         let mut screen = dark_screen();
         screen.part = "01".to_string();
         screen.instrument = "001".to_string();
-        screen.name = "Grand Piano".to_string();
+        screen.name = "Bright Grand Piano X".to_string();
         screen.level = "100".to_string();
         screen.pan = "0".to_string();
         screen.reverb = "40".to_string();
