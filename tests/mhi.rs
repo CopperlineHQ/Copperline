@@ -282,6 +282,21 @@ fn write_m2_config(cfg_path: &Path, mount: &Path) {
         cfg_path,
         format!(
             "rom = \"<bundled-aros>\"\n\n\
+             [machine]\n\
+             # Pin the battery clock: left at its default (real host wall-clock
+             # time at boot, docs/guide/configuration.md's `[machine] rtc_time`),
+             # AROS's boot/Startup-Sequence path reads it at least once (a
+             # DateStamp() during Echo's file write among other things), which
+             # measurably perturbs guest-visible timing by a handful of CPU
+             # cycles from one process launch to the next -- observed as the
+             # M2 tests' small non-reproducibility before this was pinned (see
+             # `mhi_m2_playback_is_byte_identical_across_runs`'s and this
+             # config's other user's own long comments for the investigation).
+             # Freezing it removes that one confirmed source of run-to-run
+             # jitter entirely; two uninterrupted runs of this config are
+             # byte-for-byte identical `--audio-wav` captures.\n\
+             rtc_time = \"2005-03-18 01:58:29\"\n\
+             rtc_frozen = true\n\n\
              [mhi]\n\
              enabled = true\n\n\
              [[filesys]]\n\
@@ -521,62 +536,32 @@ fn mhi_m2_playback_is_byte_identical_across_runs() {
     assert_eq!(ch0, ch1, "the two runs captured a different channel count");
     assert_eq!(sr0, sr1, "the two runs captured a different sample rate");
 
-    // Ideally this is `samples0 == samples1` outright (true byte-for-byte
-    // determinism -- what audio_stems_determinism.rs already proves for
-    // the synthetic Paula/drivesounds sources). WP5 found MHIplay's
-    // playback of a real MP3, read from a `[[filesys]]` hostfs mount, does
-    // NOT quite hold to that: the capture length (and content) can land on
-    // either of two lengths a small, constant number of frames apart
-    // across otherwise-identical runs. That is consistent with the same
-    // small offset `mhi_m2_savestate_resume_matches_the_uninterrupted_tail`
-    // found (see its own long comment) rather than a new phenomenon --
-    // both point at real (not simulated) host filesystem I/O latency for
-    // the hostfs-served MP3 read introducing a little genuine jitter into
-    // exactly when a frame's worth of bitstream becomes available to
-    // decode, upstream of the deterministic emulated core itself. Report
-    // this precisely with the same aligned-match approach rather than
-    // silently accepting any offset.
-    let ch = *ch0 as usize;
-    let compare_len =
-        (samples0.len().min(samples1.len())).saturating_sub(MAX_RESUME_SHIFT_FRAMES * ch);
-    assert!(
-        compare_len > *sr0 as usize,
-        "not enough overlap to compare (run 0: {}, run 1: {})",
+    // This *is* `samples0 == samples1` outright -- true byte-for-byte
+    // determinism, exactly like audio_stems_determinism.rs already proves
+    // for the synthetic Paula/drivesounds sources. WP5 originally found
+    // MHIplay's playback of a real MP3 landing on one of two lengths a
+    // small, constant number of frames apart across otherwise-identical
+    // runs, and suspected real hostfs I/O latency. Root-caused instead (WP6):
+    // `write_m2_config` did not pin `[machine] rtc_time`, so the guest booted
+    // against the *real* host wall clock (`SystemTime::now()`, the config's
+    // documented default with no `rtc_time` set) -- AROS's boot path reads
+    // it at least once (a DateStamp() during the Startup-Sequence's `Echo`
+    // write, among other things), which perturbed guest-visible timing by a
+    // handful of CPU cycles from one process launch to the next. Freezing
+    // the clock (now done above) reproduced a byte-identical capture across
+    // repeated runs on this host every time it was tried; hostfs I/O itself
+    // was not the source. If this ever starts failing again on some other
+    // host/filesystem, that would point at a *new* source of jitter, not a
+    // reversion to the old one -- worth a fresh investigation, not
+    // reinstating the aligned-match tolerance below by reflex.
+    assert_eq!(
+        samples0,
+        samples1,
+        "the two runs' captures differ (run 0: {} samples, run 1: {} samples) -- with \
+         [machine] rtc_time/rtc_frozen pinned in write_m2_config this is expected to be \
+         exact; see this test's comment for the investigation that established that",
         samples0.len(),
         samples1.len()
-    );
-    let mut best_shift_frames = None;
-    let mut best_mse = f64::INFINITY;
-    for shift_frames in -(MAX_RESUME_SHIFT_FRAMES as isize)..=(MAX_RESUME_SHIFT_FRAMES as isize) {
-        let shift = shift_frames * ch as isize;
-        if shift < 0 || (shift as usize) + compare_len > samples1.len() {
-            continue;
-        }
-        let a = &samples0[..compare_len];
-        let b = &samples1[shift as usize..shift as usize + compare_len];
-        let mse = a
-            .iter()
-            .zip(b)
-            .map(|(&x, &y)| {
-                let d = (x - y) as f64;
-                d * d
-            })
-            .sum::<f64>()
-            / compare_len as f64;
-        if mse < best_mse {
-            best_mse = mse;
-            best_shift_frames = Some(shift_frames);
-        }
-    }
-    let best_shift_frames = best_shift_frames.expect("no candidate shift stayed in bounds");
-    eprintln!(
-        "mhi_m2_playback_is_byte_identical_across_runs: best alignment shift = {best_shift_frames} frames, mse = {best_mse:e}"
-    );
-    assert!(
-        best_mse < 5e-4,
-        "the two runs' captures do not match even after searching a \
-         +/-{MAX_RESUME_SHIFT_FRAMES}-frame alignment window (best mse {best_mse:e} at shift \
-         {best_shift_frames}) -- this is a real playback difference, not just hostfs I/O jitter"
     );
 
     let _ = std::fs::remove_dir_all(&mount);
@@ -694,22 +679,70 @@ fn mhi_m2_savestate_resume_matches_the_uninterrupted_tail() {
     );
 
     // Exact equality at zero shift is the ideal (a genuinely byte-identical
-    // resume); WP5 found that in practice the captured tail is offset by a
-    // small, constant, boot-configuration-dependent number of frames (a
-    // handful of samples, well under a millisecond) even though
-    // `src/mhi.rs`'s own unit test (`savestate_round_trip_reproduces_an_
-    // uninterrupted_runs_output`) already proves the *board's* internal
-    // state -- decoder reservoir, descriptor queue, `sample_acc`/
-    // `mixer_acc`, and the resampler history in `Mhi::resamplers` --
-    // round-trips through a savestate bit-for-bit. That isolates the gap to
-    // something in the audio-mixer/`--audio-wav` capture path outside the
-    // `Mhi` struct itself (not proven byte-identical here) rather than the
-    // board's own savestate handling. Report this precisely rather than
-    // silently accepting any offset: search a small window for the shift
-    // that makes the two signals coincide, require one to exist within
-    // `MAX_RESUME_SHIFT_FRAMES`, and require the aligned signals to match
-    // near-exactly (not just "similar") -- so a genuine desync (wrong
-    // frequency, dropped samples, corrupted decode) still fails loudly.
+    // resume); it does not currently hold, for two separable reasons dug up
+    // across WP5 and a follow-up investigation (WP6):
+    //
+    // 1. `skip_frames` above is a *naive* estimate of which captured sample
+    //    corresponds to the exact instant `--save-state-after SAVE_AT`
+    //    fired: `SAVE_AT` is an integer count of emulated seconds, but the
+    //    savestate itself lands on whatever CPU/DMA cycle the scheduler was
+    //    at when that boundary was crossed, which is essentially never
+    //    exactly on a 44.1 kHz sample edge. Paula's `host_sample_acc` (the
+    //    fractional mixer-clock accumulator) *does* serialize and *does*
+    //    resume mid-period correctly -- but that just means the resumed
+    //    capture's very first sample is due at whatever true sub-sample
+    //    offset was live at save time, not at the `skip_frames` boundary the
+    //    test computes from wall-clock arithmetic. A small, run-independent
+    //    constant shift between the naive index and the true one is
+    //    therefore expected, not a bug; searching a small window for it
+    //    (rather than asserting zero shift) is the correct way to locate the
+    //    true correspondence point.
+    // 2. Once aligned on that best shift, the two signals are an excellent
+    //    but not bit-exact match: `src/mhi.rs`'s own unit test
+    //    (`savestate_round_trip_reproduces_an_uninterrupted_runs_output`)
+    //    already proves the *board's* internal state -- decoder
+    //    reservoir/filterbank memory, descriptor queue, `sample_acc`/
+    //    `mixer_acc`, and the resampler history in `Mhi::resamplers` --
+    //    round-trips through a savestate bit-for-bit in-process, and WP6
+    //    confirmed the *entire* pipeline is bit-exact end to end too: a
+    //    resumed run of a machine that is otherwise idle at save time (no
+    //    MHI playback in flight) reproduces its uninterrupted counterpart's
+    //    tail exactly, zero shift, zero residual. So the residual here is
+    //    real but specific to resuming *mid-decode*: WP6 traced the
+    //    non-exact samples to brief (roughly one-millisecond) clusters
+    //    coinciding with MHIplay's periodic re-fill reads of its input
+    //    buffer, recurring every couple of seconds through the tail --
+    //    steady-tone samples between those clusters match exactly at the
+    //    aligned shift. That localizes the remaining gap to some small
+    //    difference in exactly how the CPU/DMA scheduler re-enters its
+    //    interleaving across the save/load process boundary specifically
+    //    around a hostfs read, not to a missing/incorrectly-restored field
+    //    in `Mhi` or `Paula` (every audio-relevant field in both was
+    //    checked: none of the audio-path `#[serde(skip)]` fields in
+    //    `src/chipset/paula.rs` -- the serial/audio host sinks, debug taps,
+    //    and host mix preferences (LED-filter mode override, mono/stereo-
+    //    separation) -- are genuine machine state, and the ones that are
+    //    (`host_sample_acc`, `led_filter_guest_on`, the LED filter's own IIR
+    //    memory, `mhi_audio`/`toccata_audio`/`cd_audio`, `drive_sounds`) all
+    //    serialize normally). Root-causing that last mile further (the exact
+    //    CPU-cycle-level mechanism at a hostfs read boundary) was out of
+    //    scope for this pass; report it precisely rather than silently
+    //    accepting any offset: search a small window for the shift that
+    //    makes the two signals coincide, require one to exist within
+    //    `MAX_RESUME_SHIFT_FRAMES`, and require the aligned signals to match
+    //    near-exactly (not just "similar") -- so a genuine desync (wrong
+    //    frequency, dropped samples, corrupted decode) still fails loudly.
+    //
+    // (WP6 also found and fixed an unrelated, larger source of run-to-run
+    // jitter: `write_m2_config` did not pin `[machine] rtc_time`, so every
+    // M2 run booted against the real host wall clock. That is now pinned --
+    // see `write_m2_config`'s own comment -- and made
+    // `mhi_m2_playback_is_byte_identical_across_runs` (no save/load at all)
+    // exactly byte-identical. It was tried here too on the theory that it
+    // might explain this test's residual as well; it did not -- freezing
+    // the clock left the mid-decode-resume residual described above
+    // unchanged, which is what points at the save/resume path itself rather
+    // than at boot-time RTC jitter.)
     let ch = full_ch as usize;
     let mut best_shift_frames = None;
     let mut best_mse = f64::INFINITY;
@@ -740,14 +773,16 @@ fn mhi_m2_savestate_resume_matches_the_uninterrupted_tail() {
     eprintln!(
         "mhi_m2_savestate_resume: best alignment shift = {best_shift_frames} frames, mse = {best_mse:e}"
     );
-    // The threshold is generous on purpose: WP5 found the aligned tail is
-    // an excellent but not exact match (per-second-block MSE alternates
-    // between ~1e-7 -- genuinely exact -- and ~1e-4 in blocks that carry
-    // real tone energy, landing the whole-tail average around 3e-5; blocks
-    // that are silent in both captures contribute exactly 0). 5e-4 is well
-    // above the observed worst block yet would still catch real corruption
-    // (a wrong tone, dropped samples, or silence where the fixture has
-    // audio would land orders of magnitude higher).
+    // The threshold is generous on purpose: the aligned tail is an
+    // excellent but not exact match (per-second-block MSE alternates
+    // between ~1e-7 -- genuinely exact -- and ~1e-4 in the brief
+    // MHIplay-buffer-refill clusters described above, landing the whole-tail
+    // average around 3e-5, e.g. `best alignment shift = 16 frames, mse =
+    // 3.2e-5` on this host; blocks that are silent in both captures
+    // contribute exactly 0). 5e-4 is well above the observed worst block yet
+    // would still catch real corruption (a wrong tone, dropped samples, or
+    // silence where the fixture has audio would land orders of magnitude
+    // higher).
     assert!(
         best_mse < 5e-4,
         "resumed playback does not match the uninterrupted run's tail even after searching \
@@ -755,11 +790,11 @@ fn mhi_m2_savestate_resume_matches_the_uninterrupted_tail() {
          {best_shift_frames}) -- this is a real desync, not just a small capture-path latency"
     );
     // Zero shift (true sample-for-sample byte-identity) is NOT asserted
-    // here on purpose: as found during WP5, it does not currently hold --
-    // see the long comment above and the WP5 report for the precise,
-    // reproducible offset this run landed on. This assertion still catches
-    // real regressions (wrong tone, dropped/garbled audio, a shift outside
-    // the small bound), which is what a savestate bug in decode/queue state
+    // here on purpose: it does not currently hold, for the two reasons
+    // (correspondence-point estimation plus a genuine small mid-decode-
+    // resume residual) traced above. This assertion still catches real
+    // regressions (wrong tone, dropped/garbled audio, a shift outside the
+    // small bound), which is what a savestate bug in decode/queue state
     // would actually look like; it does not launder the outstanding gap.
 
     let _ = std::fs::remove_dir_all(&mount);

@@ -493,7 +493,18 @@ content above.
   frame's un-played sample tail, so a save/restore cycle reproduces an
   uninterrupted run's decoded output exactly -- the savestate approach is
   re-decode of the retained, not-yet-completed bitstream, not a snapshot
-  of decoded PCM.
+  of decoded PCM. This is proven bit-for-bit at the struct level
+  in-process (`savestate_round_trip_reproduces_an_uninterrupted_runs_output`
+  in `src/mhi.rs`'s own tests). `tests/mhi.rs`'s end-to-end equivalent
+  (`mhi_m2_savestate_resume_matches_the_uninterrupted_tail`, a real
+  save-to-disk and reload across separate `copperline` process
+  invocations) finds the same holds to an excellent approximation but not
+  quite bit-exactly when the save lands mid-decode: a small, constant
+  correspondence-point offset (inherent to estimating which captured
+  sample lines up with the save instant from wall-clock arithmetic, not a
+  bug) plus a tiny residual around the guest's periodic re-reads of its
+  MP3 input buffer, not yet root-caused to a specific missing field --
+  see that test's long comment for the investigation.
 - **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
   `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**.
 - **Launcher**: the machine-configuration launcher has no MHI row yet
