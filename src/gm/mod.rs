@@ -49,14 +49,15 @@ impl GmOptions {
     }
 }
 
-/// Where the soundfont is looked for when `[gm] soundfont` does not say:
-/// `COPPERLINE_GM_SOUNDFONT`, then beside the executable, then the
-/// `share/copperline` layout an installed package uses -- the same shape
-/// the bundled AROS ROM resolves by.
-pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
+/// Which soundfont overrides the bundled bank, if any: `[gm] soundfont`
+/// first, then `COPPERLINE_GM_SOUNDFONT`, then a file placed beside the
+/// executable or in the `share/copperline` layout an installed package
+/// uses. `None` means Coppersynth's own bundled GeneralUser GS -- there
+/// is always a bank to play.
+pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<Option<PathBuf>> {
     if let Some(path) = explicit {
         if path.is_file() {
-            return Ok(path.to_path_buf());
+            return Ok(Some(path.to_path_buf()));
         }
         return Err(anyhow!("[gm] soundfont {} does not exist", path.display()));
     }
@@ -69,7 +70,7 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
             p
         };
         if p.is_file() {
-            return Ok(p);
+            return Ok(Some(p));
         }
         return Err(anyhow!(
             "COPPERLINE_GM_SOUNDFONT names {}, which does not exist",
@@ -78,8 +79,8 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // The zipped bank ships smaller and is preferred when both
-            // are present; either spelling works in every location.
+            // The zipped spelling wins when both are present; either
+            // works in every location.
             for dir in [
                 dir.to_path_buf(),
                 dir.join("share").join("copperline"),
@@ -88,16 +89,13 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
                 for name in [SOUNDFONT_ZIP_NAME, SOUNDFONT_NAME] {
                     let candidate = dir.join(name);
                     if candidate.is_file() {
-                        return Ok(candidate);
+                        return Ok(Some(candidate));
                     }
                 }
             }
         }
     }
-    Err(anyhow!(
-        "no {SOUNDFONT_NAME} found: set [gm] soundfont, COPPERLINE_GM_SOUNDFONT, \
-         or put the file beside the executable (tools/fetch-gm-soundfont.sh)"
-    ))
+    Ok(None)
 }
 
 /// Build the engine from a soundfont file, unpacking a zipped one on the
@@ -156,19 +154,28 @@ impl GmDevice {
     pub fn open(options: &GmOptions) -> Result<Self> {
         let mode = options.mode()?;
         let soundfont = find_soundfont(options.soundfont.as_deref())?;
-        let engine = open_engine(&soundfont, mode)?;
+        let engine = match &soundfont {
+            Some(path) => open_engine(path, mode)?,
+            // Nothing configured: the bank Coppersynth carries itself.
+            None => {
+                coppersynth::engine::GmEngine::open_bundled(crate::audio::MIX_SAMPLE_RATE, mode)
+                    .map_err(|e| anyhow!("{e}"))?
+            }
+        };
         let (mended, dropped) = engine.bank_repairs();
+        let source = soundfont
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("bundled {}", engine.bank_name()));
         if mended + dropped > 0 {
             // The bank arrived bruised; say so once, since it plays on.
             log::warn!(
-                "midi: {} needed repair: {mended} loops defused, {dropped} regions dropped",
-                soundfont.display()
+                "midi: {source} needed repair: {mended} loops defused, {dropped} regions dropped"
             );
         }
         log::info!(
-            "midi: General MIDI attached ({}, {}, MT-32 mode {})",
+            "midi: Coppersynth attached ({}, {source}, MT-32 mode {})",
             coppersynth::version(),
-            soundfont.display(),
             match mode {
                 Mt32Mode::Auto => "auto",
                 Mt32Mode::On => "on",

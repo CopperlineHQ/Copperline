@@ -41,7 +41,7 @@ const HOVER_LIFT: f32 = 16.0;
 /// backlight with dark characters printed over it, and nothing at all
 /// when the light goes out.
 const GLASS_LIT: u32 = rgba(233, 158, 48);
-const GLASS_DARK: u32 = rgba(159, 169, 168);
+const GLASS_DARK: u32 = rgba(150, 160, 159);
 const INK: u32 = rgba(43, 22, 8);
 /// Captions printed on the glass sit lighter than the values written
 /// under them, as printed things do against driven ones.
@@ -632,7 +632,7 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     // the label columns and the bars with a character's gap each side.
     let band_lo = col2_x + 36 + font::GLYPH_W;
     let band_hi = matrix_x.saturating_sub(font::GLYPH_W);
-    let name_w = screen.name.chars().count().min(NAME_COLS) * font::GLYPH_W;
+    let name_w = screen.name.chars().count().min(NAME_COLS) * TALL_PITCH;
     let name_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(name_w)) / 2;
     if view.powered {
         if screen.subtitle.is_empty() {
@@ -646,9 +646,11 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
             text_tall(frame, name_x, name_y, &screen.name, INK, scale);
             let sub_w = screen.subtitle.chars().count() * font::GLYPH_W;
             let sub_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(sub_w)) / 2;
+            // A long line eases left rather than running into the bars.
+            let sub_x = sub_x.min((matrix_x - 2).saturating_sub(sub_w));
             text(
                 frame,
-                sub_x.max(band_lo.saturating_sub(font::GLYPH_W)),
+                sub_x,
                 name_y + 16 + 4,
                 &screen.subtitle,
                 INK,
@@ -659,8 +661,12 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     }
 }
 
-/// Text at double height: the name row's characters, taller than the
-/// labels but no wider, so sixteen still fit beside the bars.
+/// The name row's pitch: a column tighter than the font's own cell,
+/// which is what lets sixteen characters sit in the band.
+const TALL_PITCH: usize = 7;
+
+/// Text at double height on the tightened pitch: taller than the
+/// labels, and sixteen of it fits beside the bars.
 fn text_tall(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: usize) {
     for (cell, ch) in s.chars().enumerate() {
         let glyph = font::glyph(ch);
@@ -670,7 +676,7 @@ fn text_tall(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: u
                     continue;
                 }
                 let dot = Rect {
-                    x: x + cell * font::GLYPH_W + col,
+                    x: x + cell * TALL_PITCH + col,
                     y: y + row * 2,
                     w: 1,
                     h: 2,
@@ -1390,7 +1396,22 @@ mod tests {
             *bar = ((1u32 << height) - 1) as u16 | 1 << (height + 2).min(15);
         }
         screen.mute_led = false;
-        let shots: [(&str, GmPanelView); 2] = [
+        let mut splash = dark_screen();
+        splash.name = "COPPERSYNTH".to_string();
+        splash.subtitle = "v0.1.0 2026-08-16".to_string();
+        let shots: [(&str, GmPanelView); 3] = [
+            (
+                "gmpanel-splash.png",
+                GmPanelView {
+                    screen: splash,
+                    powered: true,
+                    mute_blinks: false,
+                    blink_on: false,
+                    volume: 0.8,
+                    down: Vec::new(),
+                    hover: None,
+                },
+            ),
             (
                 "gmpanel-preview.png",
                 GmPanelView {
