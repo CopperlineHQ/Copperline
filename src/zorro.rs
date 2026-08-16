@@ -66,6 +66,11 @@ const PRODUCT_SERVICES: u8 = 0x05;
 /// The bundled HostSocket board (`bsdsocket.library` backed by a host-side
 /// TCP/IP stack; see `crate::hostsocket`).
 const PRODUCT_HOSTSOCKET: u8 = 0x06;
+/// The MHI virtual MPEG audio decoder board (`crate::mhi`, `[mhi]`); see
+/// `docs/internals/mhi.md`. Gated like its only consumer,
+/// [`BoardDescriptor::mhi`], so a no-`mhi` build stays warning-free.
+#[cfg(feature = "mhi")]
+const PRODUCT_MHI: u8 = 0x07;
 
 /// Village Tronic's registered expansion manufacturer ID.
 pub const PICASSO2_MANUFACTURER_ID: u16 = 2167;
@@ -244,6 +249,30 @@ impl BoardSpec {
             version: ZorroVersion::II,
             manufacturer: 18260,
             product: 12,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
+    /// The MHI virtual MPEG audio decoder board (`[mhi]`): manufacturer
+    /// [`COPPERLINE_MANUFACTURER_ID`], product [`PRODUCT_MHI`] (7, the next
+    /// free number after HostSocket), a 64K Zorro II I/O window with no
+    /// autoboot ROM -- the guest library (`guest/mhi/`) finds it via
+    /// `FindConfigDev`, exactly like HostSocket. `slot` is the index of the
+    /// matching `Mhi` device in `Bus::devices`. See `docs/internals/mhi.md`.
+    #[cfg(feature = "mhi")]
+    pub fn mhi(slot: usize) -> Self {
+        Self {
+            name: "MHI MPEG audio decoder".into(),
+            version: ZorroVersion::II,
+            manufacturer: COPPERLINE_MANUFACTURER_ID,
+            product: PRODUCT_MHI,
             serial: 0,
             size_bytes: 0x1_0000,
             backing: BoardBacking::Device(slot),
@@ -1906,6 +1935,22 @@ mod tests {
         assert_eq!(chain.config_logical_byte(0, 5), Some(0x54));
         // No autoboot ROM: InitDiagVec stays zero, and no DIAGVALID bit
         // above (0xC1 has no 0x10 set).
+        assert_eq!(chain.config_logical_byte(0, 10), Some(0));
+        assert_eq!(chain.config_logical_byte(0, 11), Some(0));
+    }
+
+    #[test]
+    #[cfg(feature = "mhi")]
+    fn mhi_autoconfig_identity_matches_the_spec() {
+        let chain = chain_with(vec![BoardSpec::mhi(0)]);
+        // Zorro II | 64K size code 1, no MEMLIST/chained/DIAGVALID: 0xC0|1 = 0xC1.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xc1));
+        assert_eq!(chain.config_logical_byte(0, 1), Some(7)); // product 7
+        assert_eq!(chain.config_logical_byte(0, 2), Some(0)); // not memory-space
+                                                              // Manufacturer 5192 (0x1448), big-endian.
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x14));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x48));
+        // No autoboot ROM.
         assert_eq!(chain.config_logical_byte(0, 10), Some(0));
         assert_eq!(chain.config_logical_byte(0, 11), Some(0));
     }

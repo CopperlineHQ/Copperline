@@ -538,11 +538,22 @@ fn horizontal_class_calls_true_overscan_fetch_overscan() {
 #[test]
 fn horizontal_class_keeps_narrow_late_fetch_in_beam_position() {
     // A normal DIW can be used around a tiny one-word late-DDF object. The
-    // fetched object must stay in beam position; presentation centring must
-    // not copy its right edge into the deep-left overscan border.
+    // display window stays within standard bounds and uses the standard
+    // presentation centering shift.
     assert_eq!(
         horizontal_content_class(&ocs_snapshot(0x3481, 0x24D1, 0x0050, 0x0058)),
-        HorizontalContentClass::Standard { shift: 0 }
+        HorizontalContentClass::Standard { shift: 24 }
+    );
+}
+
+#[test]
+fn horizontal_class_centres_grandslam_intro_window() {
+    // Issue #465: Chambers of Shaolin Grandslam intro sets DIW $30C0/$F8D8
+    // around standard DDF $38..$D0 fetch. The effective visible area stays
+    // within standard bounds and must use the standard raster centering shift.
+    assert_eq!(
+        horizontal_content_class(&ocs_snapshot(0x30C0, 0xF8D8, 0x0038, 0x00D0)),
+        HorizontalContentClass::Standard { shift: 24 }
     );
 }
 
@@ -1042,10 +1053,97 @@ fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
         std::slice::from_ref(&segments.to_vec()),
         PAL_VISIBLE_LINE0,
     );
-    assert_eq!(
-        line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, &h_rows[0]),
-        Some(narrowed.display_window_x())
-    );
+    let bounds = line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, &h_rows[0])
+        .expect("window open");
+    assert_eq!((bounds.x_start, bounds.x_stop), narrowed.display_window_x());
+    assert_eq!(bounds.carried_open_ext_fb, 0);
+}
+
+#[test]
+fn carried_open_h_window_extends_paint_to_fetch_origin() {
+    // Chambers of Shaolin's Grandslam intro: DIWSTRT H=$C0 with DIWSTOP
+    // H=$D8 (decoded $1D8, a position the beam counter never reaches), so
+    // the horizontal DIW flip-flop never clears and carries open across
+    // every line. The DIWSTRT match is then a no-op on hardware and the
+    // standard DDF $38 picture shows in full from its fetch origin
+    // (FS-UAE/vAmiga-verified; ddfprobe-diw1 is the golden render probe).
+    let control = ControlState {
+        diwstrt: 0x30C0,
+        diwstop: 0xF8D8,
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        bplcon0: 0x4200,
+        dmacon: 0x0380,
+        ..ControlState::default()
+    };
+    // Row 0 sits at beam line 48, the first line inside the vertical
+    // window ($30..$F8).
+    let h_rows = compute_h_window_rows(&[control], &[Vec::new()], 48);
+    // Flip-flop never clears: the whole line is one open run.
+    assert_eq!(h_rows[0].open_runs(), &[(0, FB_WIDTH)]);
+    assert_eq!(h_rows[0].comparator_anchor, None);
+    let bounds = line_display_window_bounds(control, &[], 0, 48, &h_rows[0]).expect("window open");
+    // Paint extends left of the $C0 anchor to the fetch-derived origin
+    // (the standard display left edge), restoring the hidden samples.
+    assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
+    assert_eq!(bounds.x_stop, FB_WIDTH);
+    let anchor_x = control.display_window_x().0;
+    assert_eq!(bounds.carried_open_ext_fb, anchor_x - STANDARD_VISIBLE_X0);
+}
+
+#[test]
+fn carried_open_row_that_closes_and_reopens_still_reveals_the_left_data() {
+    // ECS DIWHIGH can place HSTOP left of HSTART ($91 < $C0): the
+    // flip-flop opens at $C0, survives the line wrap, and closes at $91 on
+    // the next line, so every row enters the framebuffer open, closes
+    // early, and reopens at the anchor. The carried-in run still reveals
+    // the fetched data left of the reopen anchor on hardware; only the
+    // closed gap between HSTOP and HSTART is border.
+    let control = ControlState {
+        diwstrt: 0x30C0,
+        diwstop: 0xF891,
+        diwhigh: DiwHigh::ecs_explicit(0x0100),
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        bplcon0: 0x4200,
+        dmacon: 0x0380,
+        ..ControlState::default()
+    };
+    let anchor_x = control.display_window_x().0;
+    let close_x = (0x91 - 0x62) * 2;
+    let h_rows = compute_h_window_rows(&[control, control], &[Vec::new(), Vec::new()], 48);
+    // Row 1 entered open (carried), closed at $91, reopened at $C0.
+    assert_eq!(h_rows[1].open_runs(), &[(0, close_x), (anchor_x, FB_WIDTH)]);
+    assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
+    let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
+    // Paint still starts at the fetch origin; the per-pixel window gate
+    // and the closed-interval border mask hide the closed gap.
+    assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
+    assert_eq!(bounds.carried_open_ext_fb, anchor_x - STANDARD_VISIBLE_X0);
+}
+
+#[test]
+fn reachable_diwstop_keeps_the_window_clip() {
+    // The same $C0 window with a reachable DIWSTOP ($1C1) closes every
+    // line, so the next line's DIWSTRT match is a real open transition and
+    // the window clips the playfield at the anchor, exactly as before.
+    let control = ControlState {
+        diwstrt: 0x30C0,
+        diwstop: 0xF8C1,
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        bplcon0: 0x4200,
+        dmacon: 0x0380,
+        ..ControlState::default()
+    };
+    let h_rows = compute_h_window_rows(&[control, control], &[Vec::new(), Vec::new()], 48);
+    let anchor_x = control.display_window_x().0;
+    // Row 1 (a line whose predecessor closed the flip-flop) opens at the
+    // comparator anchor.
+    assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
+    let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
+    assert_eq!(bounds.x_start, anchor_x);
+    assert_eq!(bounds.carried_open_ext_fb, 0);
 }
 
 #[test]
@@ -1739,6 +1837,7 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         control.bplcon1,
         control.bplcon0,
         false,
+        0,
         0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
@@ -6358,6 +6457,7 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         control.bplcon0,
         false,
         0,
+        0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
@@ -6408,6 +6508,7 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         control.bplcon1,
         control.bplcon0,
         false,
+        0,
         0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
@@ -6471,6 +6572,7 @@ fn planned_ham_dma_carries_early_ddf_history_across_diw_open() {
         control.bplcon0,
         false,
         0,
+        0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
@@ -6527,6 +6629,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         control.bplcon1,
         control.bplcon0,
         false,
+        0,
         0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
@@ -6595,6 +6698,7 @@ fn ham_select_lands_in_the_colour_write_domain() {
         control.bplcon0,
         false,
         0,
+        0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
@@ -6639,6 +6743,7 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         control.bplcon0,
         false,
         0,
+        0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
@@ -6680,6 +6785,7 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         control.bplcon1,
         control.bplcon0,
         false,
+        0,
         0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
@@ -6723,6 +6829,7 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         control.bplcon0,
         false,
         0,
+        0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
@@ -6760,6 +6867,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         control.bplcon1,
         control.bplcon0,
         false,
+        0,
         0,
         &h_row_for(control),
         PAL_VISIBLE_LINE0,
@@ -8381,6 +8489,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
         }
         let suppress = r & 0x4000_0000_0000_0000 != 0;
         let bpl_output_start_x = x0 + [0usize, 6, 34][((r >> 58) as usize) % 3];
+        let carried_open_ext_fb = [0usize, 8, 48][((r >> 56) as usize) % 3];
 
         let plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
             0,
@@ -8419,6 +8528,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
                 control.bplcon0,
                 suppress,
                 bpl_output_start_x,
+                carried_open_ext_fb,
                 &h_row_for(control),
                 PAL_VISIBLE_LINE0,
                 0.0,

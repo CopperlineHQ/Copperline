@@ -2697,6 +2697,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/minimp3-sys/minimp3-sys-0.3.2.crate",
+        "sha256": "e21c73734c69dc95696c9ed8926a2b393171d98b3f5f5935686a26a487ab9b90",
+        "dest": "cargo/vendor/minimp3-sys-0.3.2"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"e21c73734c69dc95696c9ed8926a2b393171d98b3f5f5935686a26a487ab9b90\", \"files\": {}}",
+        "dest": "cargo/vendor/minimp3-sys-0.3.2",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/miniz_oxide/miniz_oxide-0.8.9.crate",
         "sha256": "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316",
         "dest": "cargo/vendor/miniz_oxide-0.8.9"

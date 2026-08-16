@@ -189,7 +189,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      the enum.
 //  56: BoardDevice gained the Toccata variant (the MacroSystem Toccata
 //      AD1848 sound board, `[toccata]`), appended at the end of the enum.
-pub const STATE_VERSION: u32 = 56;
+//  57: Paula gained the MHI-board audio ring (mhi_audio, `MhiAudioRing`) and
+//      BoardDevice gained the Mhi variant (the virtual MPEG audio decoder
+//      board, `[mhi]`, feature-gated behind `mhi`), appended at the end of
+//      the enum.
+pub const STATE_VERSION: u32 = 57;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

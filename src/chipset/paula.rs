@@ -348,6 +348,38 @@ impl ToccataAudioRing {
     }
 }
 
+/// MHI board audio stream: the board's own mixer-rate cadence
+/// (`Mhi::advance_mixer`, `docs/internals/mhi.md`'s "Determinism and
+/// timing") already resamples decoded MPEG PCM onto the mixer grid, so this
+/// is a plain per-frame pop like [`ToccataAudioRing`], not a rate
+/// conversion -- see that ring's doc comment for why a small fixed capacity
+/// is a safety margin here too, not a buffering requirement.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct MhiAudioRing {
+    samples: std::collections::VecDeque<(f32, f32)>,
+}
+
+/// Mirrors [`TOCCATA_AUDIO_RING_LIMIT`]'s rationale.
+const MHI_AUDIO_RING_LIMIT: usize = 4096;
+
+impl MhiAudioRing {
+    pub fn push_frame(&mut self, left: f32, right: f32) -> bool {
+        if self.samples.len() >= MHI_AUDIO_RING_LIMIT {
+            return false;
+        }
+        self.samples.push_back((left, right));
+        true
+    }
+
+    pub fn next_sample(&mut self) -> (f32, f32) {
+        self.samples.pop_front().unwrap_or((0.0, 0.0))
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
 /// Push one sample into a debugger oscilloscope ring, evicting the oldest
 /// once the ring is full so it always holds the most recent AUDIO_SCOPE_LEN.
 fn scope_push(ring: &mut std::collections::VecDeque<i8>, sample: i8) {
@@ -454,6 +486,10 @@ pub struct Paula {
     // board's own tick before it reaches this ring -- see
     // `ToccataAudioRing`'s doc comment.
     toccata_audio: ToccataAudioRing,
+    // MHI board audio, already resampled to the mixer rate by the board's
+    // own tick before it reaches this ring -- see `MhiAudioRing`'s doc
+    // comment.
+    mhi_audio: MhiAudioRing,
     // Set once the device on the serial port has said it makes no sound
     // here, which is the usual answer: a machine with nothing on its MIDI
     // port then costs one predictable branch a sample and nothing else.
@@ -532,6 +568,7 @@ impl Paula {
             stereo_separation: 1.0,
             cd_audio: CdAudioRing::default(),
             toccata_audio: ToccataAudioRing::default(),
+            mhi_audio: MhiAudioRing::default(),
             synth_silent: false,
             drive_sounds: DriveSounds::new(),
             dma_addr_mask: 0x001F_FFFF,
@@ -778,11 +815,22 @@ impl Paula {
         &mut self.toccata_audio
     }
 
-    /// Both rings together, as disjoint field borrows -- the bus's generic
-    /// Zorro-board tick host needs both at once (`DeviceHost::for_slot_with_audio`),
-    /// which two separate `&mut self` accessor calls cannot express.
-    pub fn audio_rings_mut(&mut self) -> (&mut CdAudioRing, &mut ToccataAudioRing) {
-        (&mut self.cd_audio, &mut self.toccata_audio)
+    pub fn mhi_audio_mut(&mut self) -> &mut MhiAudioRing {
+        &mut self.mhi_audio
+    }
+
+    /// All three rings together, as disjoint field borrows -- the bus's
+    /// generic Zorro-board tick host needs all of them at once
+    /// (`DeviceHost::for_slot_with_audio`), which separate `&mut self`
+    /// accessor calls cannot express.
+    pub fn audio_rings_mut(
+        &mut self,
+    ) -> (&mut CdAudioRing, &mut ToccataAudioRing, &mut MhiAudioRing) {
+        (
+            &mut self.cd_audio,
+            &mut self.toccata_audio,
+            &mut self.mhi_audio,
+        )
     }
 
     pub fn output_volume_percent(&self) -> u8 {
@@ -1895,6 +1943,12 @@ impl Paula {
         right += toccata_right;
         self.audio
             .push_source("toccata", toccata_left, toccata_right);
+        // Likewise, an MHI board resamples its own decoded-MPEG-rate output
+        // to the mixer rate before pushing here (see `Mhi::advance_mixer`).
+        let (mhi_left, mhi_right) = self.mhi_audio.next_sample();
+        left += mhi_left;
+        right += mhi_right;
+        self.audio.push_source("mhi", mhi_left, mhi_right);
         if let Some(capture) = &mut self.capture {
             capture.push((left, right));
         }

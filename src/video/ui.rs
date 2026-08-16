@@ -4300,7 +4300,10 @@ fn draw_heat_census(
 // ---------------------------------------------------------------------------
 
 const LAUNCHER_W: usize = 700;
-const LAUNCHER_H: usize = 520;
+// Tall enough for the I/O Ports tab's worst case: Serial (MT-32, 7 rows),
+// Parallel (Sampler, 3 rows), Ethernet (4 rows), and Sound (2 rows), each
+// under its own heading -- see `every_launcher_tab_row_fits_inside_the_panel`.
+const LAUNCHER_H: usize = 600;
 const LAUNCH_MARGIN: usize = 8;
 const LAUNCH_MODEL_H: usize = 22;
 const LAUNCH_MODEL_GAP: usize = 4;

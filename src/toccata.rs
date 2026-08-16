@@ -368,8 +368,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         let mut board = Toccata::new();
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
@@ -396,11 +402,15 @@ mod tests {
         let mut mem_a = memory();
         let mut cd_a = crate::chipset::paula::CdAudioRing::default();
         let mut ring_a = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host_a = DeviceHost::for_slot_with_audio(&mut mem_a, 0, &mut cd_a, &mut ring_a);
+        let mut mhi_a = crate::chipset::paula::MhiAudioRing::default();
+        let mut host_a =
+            DeviceHost::for_slot_with_audio(&mut mem_a, 0, &mut cd_a, &mut ring_a, &mut mhi_a);
         let mut mem_b = memory();
         let mut cd_b = crate::chipset::paula::CdAudioRing::default();
         let mut ring_b = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host_b = DeviceHost::for_slot_with_audio(&mut mem_b, 0, &mut cd_b, &mut ring_b);
+        let mut mhi_b = crate::chipset::paula::MhiAudioRing::default();
+        let mut host_b =
+            DeviceHost::for_slot_with_audio(&mut mem_b, 0, &mut cd_b, &mut ring_b, &mut mhi_b);
 
         for byte in [0x30, 0x90, 0x10, 0xe0] {
             board.write(0x2000, 1, byte, &mut host_a);
@@ -451,8 +461,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
@@ -480,8 +496,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
@@ -512,8 +534,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
@@ -546,8 +574,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
         board.write(0x6001, 1, 8, &mut host);
@@ -599,8 +633,14 @@ mod tests {
         let mut mem = memory();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
         let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
-        let mut host =
-            DeviceHost::for_slot_with_audio(&mut mem, 0, &mut cd_audio, &mut toccata_audio);
+        let mut mhi_audio = crate::chipset::paula::MhiAudioRing::default();
+        let mut host = DeviceHost::for_slot_with_audio(
+            &mut mem,
+            0,
+            &mut cd_audio,
+            &mut toccata_audio,
+            &mut mhi_audio,
+        );
 
         board.write(0x6001, 1, 9, &mut host);
         board.write(0x6801, 1, 0x08, &mut host); // request calibration only

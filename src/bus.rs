@@ -5841,12 +5841,13 @@ impl Bus {
                 ..
             } = self;
             for (slot, dev) in devices.iter_mut().enumerate() {
-                let (cd_audio, toccata_audio) = paula.audio_rings_mut();
+                let (cd_audio, toccata_audio, mhi_audio) = paula.audio_rings_mut();
                 let mut host = crate::zorro_device::DeviceHost::for_slot_with_audio(
                     &mut *mem,
                     slot,
                     cd_audio,
                     toccata_audio,
+                    mhi_audio,
                 );
                 crate::zorro_device::ZorroDevice::tick(dev, cck, &mut host);
                 if crate::zorro_device::ZorroDevice::int2_line(dev) {
