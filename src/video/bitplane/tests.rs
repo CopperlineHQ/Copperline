@@ -538,11 +538,22 @@ fn horizontal_class_calls_true_overscan_fetch_overscan() {
 #[test]
 fn horizontal_class_keeps_narrow_late_fetch_in_beam_position() {
     // A normal DIW can be used around a tiny one-word late-DDF object. The
-    // fetched object must stay in beam position; presentation centring must
-    // not copy its right edge into the deep-left overscan border.
+    // display window stays within standard bounds and uses the standard
+    // presentation centering shift.
     assert_eq!(
         horizontal_content_class(&ocs_snapshot(0x3481, 0x24D1, 0x0050, 0x0058)),
-        HorizontalContentClass::Standard { shift: 0 }
+        HorizontalContentClass::Standard { shift: 24 }
+    );
+}
+
+#[test]
+fn horizontal_class_centres_grandslam_intro_window() {
+    // Issue #465: Chambers of Shaolin Grandslam intro sets DIW $30C0/$F8D8
+    // around standard DDF $38..$D0 fetch. The effective visible area stays
+    // within standard bounds and must use the standard raster centering shift.
+    assert_eq!(
+        horizontal_content_class(&ocs_snapshot(0x30C0, 0xF8D8, 0x0038, 0x00D0)),
+        HorizontalContentClass::Standard { shift: 24 }
     );
 }
 

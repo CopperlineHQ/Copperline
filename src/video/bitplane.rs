@@ -243,19 +243,20 @@ pub fn present_h_shift(diw_h_start: u16, diw_h_stop: u16) -> usize {
     let h_start = diw_h_start as i32;
     let h_stop = diw_h_stop as i32;
     if h_start < STANDARD_DIW_HSTART || h_stop > STANDARD_DIW_HSTOP {
-        return 0;
+        0
+    } else {
+        standard_present_h_shift()
     }
-    let left_border = ((h_start - DIW_HSTART_FB0).max(0) * 2) as usize;
-    let right_x = ((h_stop - DIW_HSTART_FB0).max(0) * 2) as usize;
-    let right_border = FB_WIDTH.saturating_sub(right_x);
-    left_border.saturating_sub(right_border) / 2
 }
 
 /// The recentring shift of the stock full-width display: the power-on
 /// default carried by `PresentationLatch`, so border-only frames before the
 /// first playfield present like the standard display they precede.
 pub(crate) fn standard_present_h_shift() -> usize {
-    present_h_shift(STANDARD_DIW_HSTART as u16, STANDARD_DIW_HSTOP as u16)
+    let left_border = ((STANDARD_DIW_HSTART - DIW_HSTART_FB0).max(0) * 2) as usize;
+    let right_x = ((STANDARD_DIW_HSTOP - DIW_HSTART_FB0).max(0) * 2) as usize;
+    let right_border = FB_WIDTH.saturating_sub(right_x);
+    left_border.saturating_sub(right_border) / 2
 }
 
 /// How one frame's playfield relates horizontally to the standard display
@@ -308,7 +309,7 @@ pub(crate) fn horizontal_content_class(
     // does, and stock and sub-standard displays centre on the window.
     if diw_start >= STANDARD_DIW_HSTART && diw_stop <= STANDARD_DIW_HSTOP {
         return HorizontalContentClass::Standard {
-            shift: present_h_shift(diw_start as u16, diw_stop as u16),
+            shift: standard_present_h_shift(),
         };
     }
     // DIW reaches into the overscan: judge by the fetched content clamped
@@ -324,7 +325,7 @@ pub(crate) fn horizontal_content_class(
     }
     if eff_start >= STANDARD_DIW_HSTART && eff_stop <= STANDARD_DIW_HSTOP {
         HorizontalContentClass::Standard {
-            shift: present_h_shift(eff_start as u16, eff_stop as u16),
+            shift: standard_present_h_shift(),
         }
     } else {
         HorizontalContentClass::Overscan
