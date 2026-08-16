@@ -1449,7 +1449,7 @@ mod tests {
         screen.mute_led = false;
         let mut splash = dark_screen();
         splash.name = "COPPERSYNTH".to_string();
-        splash.subtitle = "v0.1.0 2026-08-16".to_string();
+        splash.subtitle = "v0.9.0 2026-08-16".to_string();
         let shots: [(&str, CsynthPanelView); 3] = [
             (
                 "csynthpanel-splash.png",
