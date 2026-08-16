@@ -123,7 +123,7 @@ mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a
 # LOCAL TESTING PIN: Coppersynth lives beside this checkout while it is
 # developed; it moves to a CopperlineHQ git pin (like mt32-rs above)
 # before this branch is ever proposed upstream.
-coppersynth = { path = "../repos/coppersynth/coppersynth", optional = true }
+coppersynth = { path = "../repos/coppersynth", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"
