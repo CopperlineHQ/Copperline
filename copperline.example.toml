@@ -763,6 +763,7 @@ floppy_sounds_volume = 100
 # soundfont = "/path/to/GeneralUser-GS.sf2"  # override the bundled default
 # mt32_mode = "auto"          # auto (translate once MT-32 sysex is seen),
 #                             # on, or off
+# panel = true                # start with the front panel shown
 
 [parallel]
 # device = "printer"

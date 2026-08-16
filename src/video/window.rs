@@ -5490,6 +5490,14 @@ impl App {
             .unwrap_or_default();
         #[cfg(not(feature = "gm"))]
         let gm_mt32_mode = String::new();
+        #[cfg(feature = "gm")]
+        let gm_custom_font = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.gm_custom_soundfont());
+        #[cfg(not(feature = "gm"))]
+        let gm_custom_font = false;
 
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
@@ -5533,6 +5541,7 @@ impl App {
             gm_attached,
             gm_panel: crate::video::gm_panel_shown(),
             gm_mt32_mode: &gm_mt32_mode,
+            gm_custom_font,
             keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
@@ -5781,6 +5790,25 @@ impl App {
             A::LoadGmSoundfont => self.load_gm_soundfont(),
             #[cfg(not(feature = "gm"))]
             A::LoadGmSoundfont => {}
+            #[cfg(feature = "gm")]
+            A::ResetGmSoundfont => {
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    sink.reset_gm_soundfont();
+                }
+                self.emu.bus_mut().paula.rearm_synth_audio();
+                let fitted = self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .is_some_and(|sink| sink.gm().is_some());
+                if fitted {
+                    self.show_osd("Coppersynth: GeneralUser-GS");
+                } else {
+                    self.report_gm();
+                }
+            }
+            #[cfg(not(feature = "gm"))]
+            A::ResetGmSoundfont => {}
             #[cfg(feature = "gm")]
             A::SetGmMt32Mode(mode) => {
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {

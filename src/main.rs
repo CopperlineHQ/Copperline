@@ -2414,6 +2414,8 @@ fn main() -> Result<()> {
     video::set_display_scaling(cfg.scaling);
     video::set_menu_scale(cfg.menu_scale);
     video::set_mt32_panel_shown(cfg.serial.mt32_panel);
+    #[cfg(feature = "gm")]
+    video::set_gm_panel_shown(cfg.gm.panel);
     video::set_mt32_lcd(cfg.serial.mt32_lcd);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's

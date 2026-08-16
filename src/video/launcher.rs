@@ -615,6 +615,7 @@ pub enum LauncherField {
     /// default's search path.
     #[cfg(feature = "gm")]
     GmSoundfont,
+    GmPanel,
     /// The MT-32 mode of the GM synth: Auto / On / Off.
     #[cfg(feature = "gm")]
     GmMt32Mode,
@@ -1100,17 +1101,18 @@ const SERIAL_ROWS_MT32: [Row; 7] = [
     row(F::MidiOut, "  MIDI output", Cycle),
     row(F::Mt32ControlRom, "  Control ROM", PathRow),
     row(F::Mt32PcmRom, "  PCM ROM", PathRow),
-    row(F::Mt32Panel, "  Front panel", Toggle),
+    row(F::Mt32Panel, "  Front panel", Cycle),
     row(F::Mt32Lcd, "  Display", Cycle),
 ];
 // The General MIDI synth needs no ROMs: its rows are the soundfont it
 // plays and whether the MT-32 translation layer sits in front of it.
 #[cfg(all(feature = "midi", feature = "gm"))]
-const SERIAL_ROWS_GM: [Row; 5] = [
+const SERIAL_ROWS_GM: [Row; 6] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
     row(F::GmSoundfont, "  Soundfont", PathRow),
+    row(F::GmPanel, "  Front panel", Cycle),
     row(F::GmMt32Mode, "  MT-32 mode", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
@@ -2160,6 +2162,7 @@ pub struct MachineSetup {
     /// The General MIDI synth's soundfont and translation mode ([gm]).
     gm_soundfont: Option<PathBuf>,
     gm_mt32_mode: Option<String>,
+    gm_panel: bool,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -2429,6 +2432,7 @@ impl MachineSetup {
             mt32_lcd: cfg.serial.mt32_lcd,
             gm_soundfont: cfg.gm.soundfont.clone(),
             gm_mt32_mode: cfg.gm.mt32_mode.clone(),
+            gm_panel: cfg.gm.panel,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2910,6 +2914,9 @@ impl MachineSetup {
         if self.gm_mt32_mode != base.gm.mt32_mode {
             raw.gm.mt32_mode = self.gm_mt32_mode.clone();
         }
+        if self.gm_panel != base.gm.panel {
+            raw.gm.panel = Some(self.gm_panel);
+        }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
@@ -3193,6 +3200,7 @@ impl MachineSetup {
         self.mt32_lcd = base.serial.mt32_lcd;
         self.gm_soundfont = base.gm.soundfont.clone();
         self.gm_mt32_mode = base.gm.mt32_mode.clone();
+        self.gm_panel = base.gm.panel;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -3973,6 +3981,9 @@ impl MachineSetup {
     }
 
     pub fn value_label(&self, field: LauncherField) -> String {
+        fn enabled_label(on: bool) -> String {
+            if on { "Enabled" } else { "Disabled" }.to_string()
+        }
         match field {
             F::WhdloadMachine => match self.whdload_machine {
                 crate::config::WhdloadMachine::Auto => "Auto".to_string(),
@@ -4031,6 +4042,9 @@ impl MachineSetup {
             F::Bezel => self.bezel.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
+            F::Mt32Panel => enabled_label(self.mt32_panel),
+            #[cfg(feature = "gm")]
+            F::GmPanel => enabled_label(self.gm_panel),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -4460,6 +4474,10 @@ impl MachineSetup {
             F::Mt32Lcd => {
                 self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);
             }
+            // Two states cycle the same either way round.
+            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
+            #[cfg(feature = "gm")]
+            F::GmPanel => self.gm_panel = !self.gm_panel,
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -4775,7 +4793,6 @@ impl MachineSetup {
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
-            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
@@ -10507,8 +10524,14 @@ mod tests {
             LauncherField::Mt32PcmRom,
             std::path::PathBuf::from("MT32_PCM.ROM"),
         );
-        s.toggle(LauncherField::Mt32Panel);
+        // The panel row cycles its two states now, arrows rather than
+        // a checkbox.
+        s.cycle(LauncherField::Mt32Panel, true);
         assert!(s.toggle_value(LauncherField::Mt32Panel));
+        assert_eq!(s.value_label(LauncherField::Mt32Panel), "Enabled");
+        s.cycle(LauncherField::Mt32Panel, false);
+        assert_eq!(s.value_label(LauncherField::Mt32Panel), "Disabled");
+        s.cycle(LauncherField::Mt32Panel, true);
 
         let raw = s.to_raw();
         assert_eq!(

@@ -70,6 +70,7 @@ pub enum MenuAction {
     ToggleMt32Panel,
     ToggleGmPanel,
     LoadGmSoundfont,
+    ResetGmSoundfont,
     SetGmMt32Mode(&'static str),
     /// How that panel's display is lit.
     SetMt32Lcd(crate::config::Mt32Lcd),
@@ -461,6 +462,9 @@ pub struct MenuState<'a> {
     pub gm_attached: bool,
     pub gm_panel: bool,
     pub gm_mt32_mode: &'a str,
+    /// Whether a soundfont other than the bundled default is loaded,
+    /// which is what Reset has to undo.
+    pub gm_custom_font: bool,
     pub sampler_input: &'a str,
     pub sampler_inputs: &'a [String],
     pub sampler_gain: f32,
@@ -821,7 +825,15 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
             GM_LABEL,
             vec![
                 MenuRow::toggle("Front Panel", MenuAction::ToggleGmPanel, s.gm_panel),
-                MenuRow::action("Load Soundfont...", MenuAction::LoadGmSoundfont),
+                MenuRow::submenu(
+                    "Soundfont",
+                    vec![
+                        MenuRow::action("Load...", MenuAction::LoadGmSoundfont),
+                        // Nothing to undo while the default is in force.
+                        MenuRow::action("Reset", MenuAction::ResetGmSoundfont)
+                            .available(s.gm_custom_font),
+                    ],
+                ),
                 MenuRow::submenu("MT-32 Mode", modes),
             ],
         ));
@@ -1141,6 +1153,7 @@ mod tests {
             gm_attached: false,
             gm_panel: false,
             gm_mt32_mode: "auto",
+            gm_custom_font: false,
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: sampler,

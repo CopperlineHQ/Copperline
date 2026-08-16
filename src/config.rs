@@ -3260,6 +3260,9 @@ pub(crate) struct RawGm {
     /// seen), "on", or "off".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mt32_mode: Option<String>,
+    /// Whether the front panel is up when a session starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) panel: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -4968,6 +4971,7 @@ impl TryFrom<RawConfig> for Config {
 pub struct GmConfig {
     pub soundfont: Option<PathBuf>,
     pub mt32_mode: Option<String>,
+    pub panel: bool,
 }
 
 fn resolve_gm(raw: RawGm) -> Result<GmConfig> {
@@ -4983,6 +4987,7 @@ fn resolve_gm(raw: RawGm) -> Result<GmConfig> {
     Ok(GmConfig {
         soundfont: raw.soundfont.map(PathBuf::from),
         mt32_mode: raw.mt32_mode,
+        panel: raw.panel.unwrap_or(false),
     })
 }
 

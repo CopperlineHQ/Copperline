@@ -574,11 +574,22 @@ impl MidiSerialSink {
         self.gm_options.mt32_mode.as_deref().unwrap_or("auto")
     }
 
-    /// Both INSTRUMENT halves through a power-on: whatever was loaded,
-    /// the default soundfont comes back.
+    /// Back to the bundled default soundfont, refitting in place when
+    /// the synth is running: the menu's Reset, and both INSTRUMENT
+    /// halves held through a power-on.
     #[cfg(feature = "gm")]
     pub fn reset_gm_soundfont(&mut self) {
         self.gm_options.soundfont = None;
+        if self.gm_selected && self.gm.is_some() {
+            self.gm = None;
+            self.attach_gm();
+        }
+    }
+
+    /// Whether a soundfont other than the bundled default is loaded.
+    #[cfg(feature = "gm")]
+    pub fn gm_custom_soundfont(&self) -> bool {
+        self.gm_options.soundfont.is_some()
     }
 
     /// The panel's LOAD button: point the synth at another soundfont
