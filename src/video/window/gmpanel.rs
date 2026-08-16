@@ -16,15 +16,11 @@
 //! and the unit's two-button gestures are made by latching one and
 //! clicking the other -- through a power-on, for the start-up screens.
 
-use coppersynth::panel::{Button, Dir, Pair, Screen};
+use coppersynth::panel::{Button, Dir, Pair, Screen, NAME_COLS};
 
-use super::statusbar::draw_power_glyph_sized;
 use super::statusbar::{draw_rect_bevel, fill_rect};
 use super::Rect;
-use super::{
-    texture_height, texture_width, LED_BEZEL_DARK, LED_BEZEL_LIGHT, POWER_GLYPH_OFF,
-    POWER_GLYPH_ON, STATUS_BOTTOM,
-};
+use super::{texture_height, texture_width, LED_BEZEL_DARK, LED_BEZEL_LIGHT, STATUS_BOTTOM};
 use crate::video::font;
 
 /// How tall the panel is: exactly double the status bar, which is what
@@ -55,11 +51,10 @@ const CELL_GRAIN: f32 = 0.12;
 /// The gloss surround the glass is set into.
 const LCD_SURROUND: u32 = rgba(24, 24, 24);
 const LCD_SURROUND_SHEEN: u32 = rgba(52, 52, 52);
-/// An LED's face, dark and lit. Green for power, amber for ALL and MUTE,
-/// as the unit wears them.
-const LED_DARK: u32 = rgba(20, 16, 9);
-const LED_POWER: u32 = rgba(96, 220, 120);
-const LED_AMBER: u32 = rgba(240, 170, 60);
+/// The LED buttons (ALL, MUTE, LOAD) and the power lamp: a misted
+/// clear lens when off, and the backlight's own orange when lit.
+const LED_OFF: u32 = rgba(104, 98, 88);
+const LED_LIT: u32 = GLASS_LIT;
 
 // --- geometry ------------------------------------------------------------
 //
@@ -69,15 +64,15 @@ const LED_AMBER: u32 = rgba(240, 170, 60);
 
 const PAD: usize = 8;
 const LCD_BEZEL: usize = 2;
-const LCD_W: usize = 400;
+const LCD_W: usize = 380;
 const LCD_H: usize = 80;
 /// The knob, drawn with the same dome and rim as the MT-32's dial.
-const DIAL_D: usize = 34;
+const DIAL_D: usize = 36;
 const DIAL_CAPTION: &str = "VOLUME";
-const POWER_W: usize = 16;
-const POWER_H: usize = 12;
-const LED_W: usize = 10;
-const LED_H: usize = 6;
+/// The power switch wears a pair-half's moulding, with its lamp beside.
+const POWER_W: usize = 31;
+const POWER_H: usize = 11;
+const POWER_LED_D: usize = 7;
 /// A pair: one moulding split into its two halves.
 const PAIR_W: usize = 64;
 const PAIR_H: usize = 11;
@@ -86,8 +81,6 @@ const PAIR_SPLIT: usize = 2;
 const ROUND_D: usize = 12;
 const CAPTION_H: usize = 9;
 const ROW_PITCH: usize = 21;
-const COL_GAP: usize = 14;
-const GROUP_GAP: usize = 12;
 
 /// The eight pairs in fascia order: left column top to bottom, then the
 /// right column, as the unit prints them.
@@ -107,6 +100,8 @@ const PAIR_GRID: [(Pair, &str, usize, usize); 8] = [
 pub enum GmControl {
     All,
     Mute,
+    /// The soundfont picker: the one button with no hardware ancestor.
+    Load,
     Arrow(Pair, Dir),
     /// The VOLUME knob.
     Dial,
@@ -161,6 +156,8 @@ pub enum GmPress {
     /// Switch on, with these buttons held through the power-on.
     PowerOn(Vec<Button>),
     PowerOff,
+    /// Open the soundfont picker.
+    Load,
 }
 
 /// The panel's rect when it is actually up, and `None` when it is not.
@@ -181,7 +178,7 @@ pub fn panel_rect(top: usize) -> Rect {
 fn power_rect(panel: Rect) -> Rect {
     Rect {
         x: panel.x + PAD,
-        y: panel.y + 10,
+        y: panel.y + 18,
         w: POWER_W,
         h: POWER_H,
     }
@@ -190,18 +187,19 @@ fn power_rect(panel: Rect) -> Rect {
 fn power_led_rect(panel: Rect) -> Rect {
     let power = power_rect(panel);
     Rect {
-        x: power.x + power.w + 5,
-        y: power.y + (power.h - LED_H) / 2,
-        w: LED_W,
-        h: LED_H,
+        x: power.x + power.w + 8,
+        y: power.y + 2,
+        w: POWER_LED_D,
+        h: POWER_LED_D,
     }
 }
 
 fn dial_rect(panel: Rect) -> Rect {
+    // Its top on the power switch's top, as the two sit on the shelf.
     let power = power_rect(panel);
     Rect {
-        x: panel.x + PAD + 2,
-        y: power.y + power.h + 16,
+        x: panel.x + PAD + 50,
+        y: power.y,
         w: DIAL_D,
         h: DIAL_D,
     }
@@ -210,27 +208,40 @@ fn dial_rect(panel: Rect) -> Rect {
 fn lcd_rect(panel: Rect) -> Rect {
     let dial = dial_rect(panel);
     Rect {
-        x: dial.x + DIAL_D + PAD + GROUP_GAP,
+        x: dial.x + DIAL_D + 10,
         y: panel.y + (panel.h - LCD_H) / 2,
         w: LCD_W,
         h: LCD_H,
     }
 }
 
-/// The origin of the pair grid, anchored against the right edge so the
-/// glass takes whatever width the buttons leave.
-fn pairs_origin(panel: Rect) -> (usize, usize) {
-    let grid_w = 2 * PAIR_W + COL_GAP;
-    (panel.x + panel.w - PAD - grid_w, panel.y + 2)
+/// The three button columns right of the glass -- the LED lenses and
+/// the two pair columns -- spaced evenly across what the glass leaves.
+fn right_columns(panel: Rect) -> (usize, usize, usize) {
+    let lcd = lcd_rect(panel);
+    let lo = lcd.x + lcd.w;
+    let hi = panel.x + panel.w - PAD;
+    // The lens column's caption hangs to the left of its lenses.
+    let rounds_w = 21 + ROUND_D;
+    let fixed = rounds_w + 2 * PAIR_W;
+    let gap = hi.saturating_sub(lo).saturating_sub(fixed) / 3;
+    let rounds_x = lo + gap + 21;
+    let pairs1 = lo + gap + rounds_w + gap;
+    let pairs2 = pairs1 + PAIR_W + gap;
+    (rounds_x, pairs1, pairs2)
 }
 
-/// ALL and MUTE, on their own strip between the glass and the pairs.
-fn round_rect(panel: Rect, second: bool) -> Rect {
-    let x = pairs_origin(panel).0 - GROUP_GAP - ROUND_D - 10;
-    let y = panel.y + if second { 52 } else { 22 };
+/// The pair grid's top edge.
+fn pairs_origin(panel: Rect) -> (usize, usize) {
+    (right_columns(panel).1, panel.y + 2)
+}
+
+/// The LED-button column between the glass and the pairs: ALL, MUTE
+/// and LOAD, top to bottom.
+fn round_rect(panel: Rect, slot: usize) -> Rect {
     Rect {
-        x,
-        y,
+        x: right_columns(panel).0,
+        y: panel.y + 13 + slot * 26,
         w: ROUND_D,
         h: ROUND_D,
     }
@@ -239,13 +250,14 @@ fn round_rect(panel: Rect, second: bool) -> Rect {
 /// One half of a pair. The PART pair wears round halves, the rest the
 /// wide split moulding, as on the unit.
 fn arrow_rect(panel: Rect, pair: Pair, dir: Dir) -> Rect {
-    let (x0, y0) = pairs_origin(panel);
+    let (_, pairs1, pairs2) = right_columns(panel);
+    let y0 = panel.y + 2;
     let (_, _, col, row) = PAIR_GRID
         .iter()
         .find(|(p, ..)| *p == pair)
         .copied()
         .unwrap_or(PAIR_GRID[0]);
-    let x = x0 + col * (PAIR_W + COL_GAP);
+    let x = if col == 0 { pairs1 } else { pairs2 };
     let y = y0 + row * ROW_PITCH + CAPTION_H;
     if pair == Pair::Part {
         // Two round buttons centred where the moulding would be.
@@ -281,11 +293,14 @@ pub fn control_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
     if dial_rect(panel).contains(pos) {
         return Some(GmControl::Dial);
     }
-    if round_rect(panel, false).contains(pos) {
+    if round_rect(panel, 0).contains(pos) {
         return Some(GmControl::All);
     }
-    if round_rect(panel, true).contains(pos) {
+    if round_rect(panel, 1).contains(pos) {
         return Some(GmControl::Mute);
+    }
+    if round_rect(panel, 2).contains(pos) {
+        return Some(GmControl::Load);
     }
     for (pair, ..) in PAIR_GRID {
         for dir in [Dir::Left, Dir::Right] {
@@ -329,38 +344,32 @@ pub fn draw(frame: &mut [u8], view: &GmPanelView, top: usize, scale: usize) {
     draw_lcd(frame, panel, view, scale);
     draw_rounds(frame, panel, view, scale);
     draw_pairs(frame, panel, view, scale);
-}
-
-fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
-    let rect = power_rect(panel);
+    // The marque, printed on the fascia where the unit signs itself.
+    let lcd = lcd_rect(panel);
     text(
         frame,
-        rect.x,
-        rect.y.saturating_sub(9),
-        "POWER",
+        panel.x + PAD,
+        (lcd.y + lcd.h).saturating_sub(LCD_BEZEL + font::GLYPH_H),
+        "Coppersynth",
         CAPTION,
         1,
         scale,
     );
-    draw_button(frame, rect, view.powered, false, scale);
-    draw_power_glyph_sized(
+}
+
+fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
+    let rect = power_rect(panel);
+    text_small(
         frame,
-        (rect.x + rect.w / 2) * scale,
-        (rect.y + rect.h / 2) * scale - scale,
-        3.5,
-        if view.powered {
-            POWER_GLYPH_ON
-        } else {
-            POWER_GLYPH_OFF
-        },
+        rect.x + POWER_W.saturating_sub(text_small_w("POWER")) / 2,
+        panel.y + 7,
+        "POWER",
+        CAPTION,
         scale,
     );
-    raised_display(
-        frame,
-        power_led_rect(panel),
-        if view.powered { LED_POWER } else { LED_DARK },
-        scale,
-    );
+    draw_button(frame, rect, view.powered, false, scale, true, true);
+    // The lamp beside the switch: lit only while the unit is on.
+    draw_led_disc(frame, power_led_rect(panel), view.powered, false, scale);
 }
 
 /// The VOLUME knob: the MT-32 dial's face and rim, full travel meaning
@@ -419,13 +428,12 @@ fn draw_dial(frame: &mut [u8], panel: Rect, value: f32, scale: usize) {
         fill_rect(frame, scaled(dot, scale), rgba(230, 230, 226), scale);
         r += 0.5;
     }
-    text(
+    text_small(
         frame,
-        (dial.x + dial.w / 2).saturating_sub(text_w(DIAL_CAPTION, 1) / 2),
-        dial.y + dial.h + 4,
+        (dial.x + dial.w / 2).saturating_sub(text_small_w(DIAL_CAPTION) / 2),
+        panel.y + 7,
         DIAL_CAPTION,
         CAPTION,
-        1,
         scale,
     );
 }
@@ -485,63 +493,56 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
 
     // The text block: four rows of caption-over-value, the top row
     // carrying part, instrument and name.
-    let row_y = |row: usize| inner_y + row * 18;
-    text(frame, inner_x, row_y(0), "PART", print, 1, scale);
-    text(frame, inner_x + 40, row_y(0), "INSTRUMENT", print, 1, scale);
-    let value_y = |row: usize| row_y(row) + 8;
-    text(frame, inner_x, value_y(0), &screen.part, INK, 1, scale);
-    text(
-        frame,
-        inner_x + 40,
-        value_y(0),
-        &screen.instrument,
-        INK,
-        1,
-        scale,
-    );
-    text(frame, inner_x + 76, value_y(0), &screen.name, INK, 1, scale);
-
-    let labels = [
-        ("LEVEL", "PAN"),
-        ("REVERB", "CHORUS"),
-        ("K SHIFT", "MIDI CH"),
+    // Two label columns, their four rows spread evenly down the glass:
+    // PART, LEVEL, REVERB and K SHIFT, then INST, PAN, CHORUS and
+    // MIDI CH beside them.
+    let inner_h = lcd.h - 2 * LCD_BEZEL - 6;
+    let cell_h = 16;
+    let pitch = (inner_h - cell_h) / 3;
+    let col2_x = inner_x + 36;
+    let ghost = mix(INK, glass, 1.0 - CELL_GRAIN);
+    let left = [
+        ("PART", &screen.part),
+        ("LEVEL", &screen.level),
+        ("REVERB", &screen.reverb),
+        ("K SHIFT", &screen.key_shift),
     ];
-    let values = [
-        (&screen.level, &screen.pan),
-        (&screen.reverb, &screen.chorus),
-        (&screen.key_shift, &screen.midi_ch),
+    let right = [
+        ("INST", &screen.instrument),
+        ("PAN", &screen.pan),
+        ("CHORUS", &screen.chorus),
+        ("MIDI CH", &screen.midi_ch),
     ];
-    for row in 0..3 {
-        let (left_label, right_label) = labels[row];
-        let (left_value, right_value) = values[row];
-        text(frame, inner_x, row_y(row + 1), left_label, print, 1, scale);
-        text(
-            frame,
-            inner_x + 76,
-            row_y(row + 1),
-            right_label,
-            print,
-            1,
-            scale,
-        );
-        text(frame, inner_x, value_y(row + 1), left_value, INK, 1, scale);
-        text(
-            frame,
-            inner_x + 76,
-            value_y(row + 1),
-            right_value,
-            INK,
-            1,
-            scale,
-        );
+    for (row, ((l_label, l_value), (r_label, r_value))) in left.iter().zip(right.iter()).enumerate()
+    {
+        let y = inner_y + row * pitch;
+        for (x, label, value) in [(inner_x, l_label, l_value), (col2_x, r_label, r_value)] {
+            // The three-cell ghost lines up down its column, the label
+            // centred over it and the value filling it from the right,
+            // as a display's digits do.
+            let field_x = x + 6;
+            let field_w = 3 * font::GLYPH_W - 1;
+            let label_x = field_x + field_w.saturating_sub(text_small_w(label)) / 2;
+            text_small(frame, label_x, y, label, print, scale);
+            for cell in 0..3 {
+                let block = Rect {
+                    x: field_x + cell * font::GLYPH_W,
+                    y: y + 8,
+                    w: font::GLYPH_W - 1,
+                    h: 8,
+                };
+                fill_rect(frame, scaled(block, scale), ghost, scale);
+            }
+            let shown: String = value.chars().take(3).collect();
+            let text_x = field_x + 3 * font::GLYPH_W - text_w(&shown, 1);
+            text(frame, text_x, y + 8, &shown, INK, 1, scale);
+        }
     }
 
-    // The bar matrix, right-anchored in the glass: sixteen columns of
-    // sixteen dots. Numbers go under every fourth column and the last
-    // -- all sixteen have no room at this size, and these are enough
-    // to count by.
+    // The bar matrix, right-anchored, its pitch loose enough for all
+    // sixteen numbers to sit evenly under their columns.
     const DOT: usize = 3;
-    const PITCH_X: usize = 9;
+    const PITCH_X: usize = 10;
     const PITCH_Y: usize = 4;
     let matrix_x = lcd.x + lcd.w - LCD_BEZEL - 4 - (15 * PITCH_X + DOT + 3);
     let matrix_y = inner_y + 1;
@@ -563,82 +564,214 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
                 scale,
             );
         }
-        if column % 4 == 0 || column == 15 {
-            let label = (column + 1).to_string();
-            text(
-                frame,
-                matrix_x + column * PITCH_X + 1,
-                matrix_y + 16 * PITCH_Y + 2,
-                &label,
-                print,
-                1,
-                scale,
-            );
+        let label = (column + 1).to_string();
+        let w = text_small_w(&label);
+        text_small(
+            frame,
+            matrix_x + column * PITCH_X + (PITCH_X - w) / 2 - 1,
+            matrix_y + 16 * PITCH_Y + 2,
+            &label,
+            print,
+            scale,
+        );
+    }
+
+    // The name, taller than everything, centred in the band between
+    // the label columns and the bars with a character's gap each side.
+    let band_lo = col2_x + 36 + font::GLYPH_W;
+    let band_hi = matrix_x.saturating_sub(font::GLYPH_W);
+    let name_w = screen.name.chars().count().min(NAME_COLS) * font::GLYPH_W;
+    let name_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(name_w)) / 2;
+    let name_y = inner_y + (inner_h.saturating_sub(16)) / 2;
+    text_tall(frame, name_x, name_y, &screen.name, INK, scale);
+}
+
+/// Text at double height: the name row's characters, taller than the
+/// labels but no wider, so sixteen still fit beside the bars.
+fn text_tall(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: usize) {
+    for (cell, ch) in s.chars().enumerate() {
+        let glyph = font::glyph(ch);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..font::GLYPH_W {
+                if bits & (1 << col) == 0 {
+                    continue;
+                }
+                let dot = Rect {
+                    x: x + cell * font::GLYPH_W + col,
+                    y: y + row * 2,
+                    w: 1,
+                    h: 2,
+                };
+                fill_rect(frame, scaled(dot, scale), color, scale);
+            }
         }
     }
 }
 
-/// ALL and MUTE: round buttons with their lamps beside them.
+/// The label font: three by five, for the glass's helper text and the
+/// bar numbers, clearly smaller than the values.
+const SMALL_W: usize = 4;
+
+fn text_small(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: usize) {
+    for (cell, ch) in s.chars().enumerate() {
+        let glyph = small_glyph(ch);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (1 << (2 - col)) == 0 {
+                    continue;
+                }
+                let dot = Rect {
+                    x: x + cell * SMALL_W + col,
+                    y: y + row,
+                    w: 1,
+                    h: 1,
+                };
+                fill_rect(frame, scaled(dot, scale), color, scale);
+            }
+        }
+    }
+}
+
+fn text_small_w(s: &str) -> usize {
+    s.chars().count() * SMALL_W - 1
+}
+
+#[rustfmt::skip]
+fn small_glyph(ch: char) -> [u8; 5] {
+    match ch.to_ascii_uppercase() {
+        'A' => [0b111, 0b101, 0b111, 0b101, 0b101],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+        'C' => [0b111, 0b100, 0b100, 0b100, 0b111],
+        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
+        'E' => [0b111, 0b100, 0b111, 0b100, 0b111],
+        'F' => [0b111, 0b100, 0b111, 0b100, 0b100],
+        'G' => [0b111, 0b100, 0b101, 0b101, 0b111],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+        'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+        'J' => [0b001, 0b001, 0b001, 0b101, 0b111],
+        'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
+        'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
+        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
+        'N' => [0b111, 0b101, 0b101, 0b101, 0b101],
+        'O' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        'P' => [0b111, 0b101, 0b111, 0b100, 0b100],
+        'Q' => [0b111, 0b101, 0b101, 0b111, 0b001],
+        'R' => [0b111, 0b101, 0b110, 0b101, 0b101],
+        'S' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+        'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
+        'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
+        'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
+        'Z' => [0b111, 0b001, 0b010, 0b100, 0b111],
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b001, 0b001, 0b001],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        _ => [0b000; 5],
+    }
+}
+
+/// ALL, MUTE and LOAD: the buttons are LEDs themselves -- a misted
+/// clear lens when off, the backlight's orange when their state is on.
 fn draw_rounds(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
-    for (control, label, second, lamp_lit) in [
+    let mute_lit = if view.mute_blinks {
+        view.blink_on
+    } else {
+        view.screen.mute_led
+    };
+    for (control, label, slot, lit) in [
         (
             GmControl::All,
             "ALL",
-            false,
+            0,
             view.powered && view.screen.all_led,
         ),
-        (
-            GmControl::Mute,
-            "MUTE",
-            true,
-            view.powered
-                && if view.mute_blinks {
-                    view.blink_on
-                } else {
-                    view.screen.mute_led
-                },
-        ),
+        (GmControl::Mute, "MUTE", 1, view.powered && mute_lit),
+        (GmControl::Load, "LOAD", 2, false),
     ] {
-        let rect = round_rect(panel, second);
-        text(
+        let rect = round_rect(panel, slot);
+        text_small(
             frame,
-            rect.x.saturating_sub(text_w(label, 1) + 6),
-            rect.y + 2,
+            rect.x.saturating_sub(text_small_w(label) + 6),
+            rect.y + 4,
             label,
             CAPTION,
-            1,
             scale,
         );
         let down = view.down.contains(&control);
         let hovered = view.hover == Some(control);
-        draw_round_button(frame, rect, down, hovered, scale);
-        raised_display(
-            frame,
-            Rect {
-                x: rect.x + 1,
-                y: rect.y + rect.h + 4,
-                w: LED_W,
-                h: LED_H,
-            },
-            if lamp_lit { LED_AMBER } else { LED_DARK },
-            scale,
-        );
+        draw_led_disc(frame, rect, lit, down || hovered, scale);
+    }
+}
+
+/// A round LED lens: frosted and unlit, or driven the backlight's
+/// orange. `pressed` darkens it the way a finger on a lens does.
+fn draw_led_disc(frame: &mut [u8], rect: Rect, lit: bool, pressed: bool, scale: usize) {
+    let (cx, cy) = (
+        rect.x as f32 + rect.w as f32 / 2.0,
+        rect.y as f32 + rect.h as f32 / 2.0,
+    );
+    let radius = rect.w.min(rect.h) as f32 / 2.0;
+    let face = match (lit, pressed) {
+        (true, false) => shade(LED_LIT, 10.0),
+        (true, true) => shade(LED_LIT, -18.0),
+        (false, false) => LED_OFF,
+        (false, true) => shade(LED_OFF, -18.0),
+    };
+    for y in 0..rect.h {
+        let dy = y as f32 + 0.5 - rect.h as f32 / 2.0;
+        let half = (radius * radius - dy * dy).max(0.0).sqrt();
+        if half < 0.5 {
+            continue;
+        }
+        // The lens is domed: brighter above centre, falling below.
+        let dome = shade(face, -dy / radius * 14.0);
+        let row = Rect {
+            x: (cx - half) as usize,
+            y: rect.y + y,
+            w: (half * 2.0) as usize,
+            h: 1,
+        };
+        fill_rect(frame, scaled(row, scale), dome, scale);
+    }
+    // A dark seat ring holds the lens in the fascia.
+    const RIM_STEPS: usize = 48;
+    for i in 0..RIM_STEPS {
+        let angle = i as f32 / RIM_STEPS as f32 * std::f32::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        let dot = Rect {
+            x: (cx + cos * (radius - 0.5)) as usize,
+            y: (cy + sin * (radius - 0.5)) as usize,
+            w: 1,
+            h: 1,
+        };
+        fill_rect(frame, scaled(dot, scale), PANEL_EDGE_DARK, scale);
     }
 }
 
 /// The pair grid, each with its caption printed above.
 fn draw_pairs(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
-    let (x0, y0) = pairs_origin(panel);
+    let (_, pairs1, pairs2) = right_columns(panel);
+    let y0 = pairs_origin(panel).1;
     for (pair, label, col, row) in PAIR_GRID {
-        let x = x0 + col * (PAIR_W + COL_GAP);
+        let x = if col == 0 { pairs1 } else { pairs2 };
         let y = y0 + row * ROW_PITCH;
-        text(
+        text_small(
             frame,
-            x + PAIR_W / 2 - text_w(label, 1) / 2,
-            y,
+            x + PAIR_W / 2 - text_small_w(label) / 2,
+            y + 2,
             label,
             CAPTION,
-            1,
             scale,
         );
         for dir in [Dir::Left, Dir::Right] {
@@ -649,7 +782,13 @@ fn draw_pairs(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
             if pair == Pair::Part {
                 draw_round_button(frame, rect, down, hovered, scale);
             } else {
-                draw_button(frame, rect, down, hovered, scale);
+                // Rounded where the moulding meets the fascia, square
+                // where the two halves meet each other.
+                let (round_l, round_r) = match dir {
+                    Dir::Left => (true, false),
+                    Dir::Right => (false, true),
+                };
+                draw_button(frame, rect, down, hovered, scale, round_l, round_r);
             }
             // The moulding wears its arrow.
             let glyph = match dir {
@@ -663,8 +802,18 @@ fn draw_pairs(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     }
 }
 
-fn draw_button(frame: &mut [u8], rect: Rect, pressed: bool, hovered: bool, scale: usize) {
-    let rect = scaled(rect, scale);
+/// A button moulding with softened corners: the corner pixels are cut
+/// where `round_l`/`round_r` say, and left square where two halves of
+/// a pair join.
+fn draw_button(
+    frame: &mut [u8],
+    rect: Rect,
+    pressed: bool,
+    hovered: bool,
+    scale: usize,
+    round_l: bool,
+    round_r: bool,
+) {
     let (face, near, far) = if pressed {
         (BUTTON_FACE_PRESSED, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT)
     } else {
@@ -675,8 +824,62 @@ fn draw_button(frame: &mut [u8], rect: Rect, pressed: bool, hovered: bool, scale
     } else {
         face
     };
-    fill_rect(frame, rect, face, scale);
-    draw_rect_bevel(frame, rect, near, far, scale);
+    let cut_l = usize::from(round_l);
+    let cut_r = usize::from(round_r);
+    // The face, its cut corners left to the fascia.
+    fill_rect(
+        frame,
+        scaled(
+            Rect {
+                x: rect.x + cut_l,
+                y: rect.y,
+                w: rect.w - cut_l - cut_r,
+                h: rect.h,
+            },
+            scale,
+        ),
+        face,
+        scale,
+    );
+    for (x, cut) in [(rect.x, cut_l), (rect.x + rect.w - 1, cut_r)] {
+        fill_rect(
+            frame,
+            scaled(
+                Rect {
+                    x,
+                    y: rect.y + cut,
+                    w: 1,
+                    h: rect.h - 2 * cut,
+                },
+                scale,
+            ),
+            face,
+            scale,
+        );
+    }
+    // The bevel: light along top and left, dark along bottom and right,
+    // each stopping short of a cut corner.
+    let lines = [
+        (rect.x + cut_l, rect.y, rect.w - cut_l - cut_r, 1, near),
+        (
+            rect.x + cut_l,
+            rect.y + rect.h - 1,
+            rect.w - cut_l - cut_r,
+            1,
+            far,
+        ),
+        (rect.x, rect.y + cut_l, 1, rect.h - 2 * cut_l, near),
+        (
+            rect.x + rect.w - 1,
+            rect.y + cut_r,
+            1,
+            rect.h - 2 * cut_r,
+            far,
+        ),
+    ];
+    for (x, y, w, h, colour) in lines {
+        fill_rect(frame, scaled(Rect { x, y, w, h }, scale), colour, scale);
+    }
 }
 
 /// A round button: the moulding turned on a lathe rather than cut
@@ -811,8 +1014,18 @@ const DIAL_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(
 const DIAL_REPEAT_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
 /// One click of the knob.
 const DIAL_STEP: f32 = 1.0 / 32.0;
-/// The most buttons a combination wants latched at once.
-const HOLD_LIMIT: usize = 3;
+/// The most buttons a combination wants latched at once: two pairs
+/// held whole take all four.
+const HOLD_LIMIT: usize = 4;
+
+/// An arrow button held down, repeating and gathering speed.
+#[derive(Debug)]
+struct ArrowHold {
+    button: Button,
+    pressed_at: std::time::Instant,
+    last: std::time::Instant,
+    steps: u32,
+}
 
 /// The pointer side of the panel: latching, the momentary flash, and
 /// the knob's grab. The semantic state lives in the engine's own panel.
@@ -823,6 +1036,7 @@ pub struct GmPanel {
     /// The button a plain click is lighting until the mouse comes up.
     flash: Option<GmControl>,
     dial: Option<DialGrab>,
+    hold: Option<ArrowHold>,
 }
 
 impl GmPanel {
@@ -840,6 +1054,12 @@ impl GmPanel {
         if control == GmControl::Dial {
             // The knob is not a button; the window steps or drags it.
             return GmPress::None;
+        }
+        if control == GmControl::Load {
+            // Momentary and outside the unit's combinations: it asks
+            // the host for its file picker.
+            self.flash = left.then_some(control);
+            return if left { GmPress::Load } else { GmPress::None };
         }
         if control == GmControl::Power {
             // The switch takes whatever is latched with it.
@@ -868,6 +1088,16 @@ impl GmPanel {
         let latched = std::mem::take(&mut self.holding);
         let button = resolve(control, &latched);
         if powered {
+            // A plain arrow held down repeats, gathering speed.
+            if let (Button::Arrow(..), true) = (button, latched.is_empty()) {
+                let now = std::time::Instant::now();
+                self.hold = Some(ArrowHold {
+                    button,
+                    pressed_at: now,
+                    last: now,
+                    steps: 0,
+                });
+            }
             GmPress::Button(button)
         } else {
             GmPress::None
@@ -877,6 +1107,27 @@ impl GmPanel {
     /// Let a plain click's button back out.
     pub fn release_press(&mut self) {
         self.flash = None;
+        self.hold = None;
+    }
+
+    /// The next repeat of a held arrow, once it has been held a moment
+    /// -- faster the longer it is held.
+    pub fn repeat_button(&mut self) -> Option<Button> {
+        let hold = self.hold.as_mut()?;
+        if hold.pressed_at.elapsed() < std::time::Duration::from_millis(400) {
+            return None;
+        }
+        let interval = match hold.steps {
+            0..=11 => 140,
+            12..=39 => 55,
+            _ => 25,
+        };
+        if hold.last.elapsed() < std::time::Duration::from_millis(interval) {
+            return None;
+        }
+        hold.last = std::time::Instant::now();
+        hold.steps += 1;
+        Some(hold.button)
     }
 
     fn latch(&mut self, control: GmControl) {
@@ -906,27 +1157,29 @@ impl GmPanel {
         }
     }
 
-    /// What the latched set means held through a power-on.
+    /// What the latched set means held through a power-on: halves of a
+    /// pair latched together collapse to the pair held whole, and the
+    /// rest map one for one.
     fn held_buttons(&self) -> Vec<Button> {
-        // Both halves of one pair collapse to the pair held whole.
-        for (i, &a) in self.holding.iter().enumerate() {
-            for &b in &self.holding[i + 1..] {
-                if let (GmControl::Arrow(p1, d1), GmControl::Arrow(p2, d2)) = (a, b) {
-                    if p1 == p2 && d1 != d2 && self.holding.len() == 2 {
-                        return vec![Button::Both(p1)];
-                    }
-                }
+        let mut arrows: Vec<(Pair, Dir)> = Vec::new();
+        let mut out = Vec::new();
+        for &control in &self.holding {
+            match control {
+                GmControl::All => out.push(Button::All),
+                GmControl::Mute => out.push(Button::Mute),
+                GmControl::Arrow(pair, dir) => arrows.push((pair, dir)),
+                GmControl::Load | GmControl::Dial | GmControl::Power => {}
             }
         }
-        self.holding
-            .iter()
-            .filter_map(|&control| match control {
-                GmControl::All => Some(Button::All),
-                GmControl::Mute => Some(Button::Mute),
-                GmControl::Arrow(pair, dir) => Some(Button::Arrow(pair, dir)),
-                GmControl::Dial | GmControl::Power => None,
-            })
-            .collect()
+        while let Some((pair, dir)) = arrows.pop() {
+            if let Some(i) = arrows.iter().position(|&(p, d)| p == pair && d != dir) {
+                arrows.remove(i);
+                out.push(Button::Both(pair));
+            } else {
+                out.push(Button::Arrow(pair, dir));
+            }
+        }
+        out
     }
 
     // --- the knob --------------------------------------------------------
@@ -1012,7 +1265,7 @@ fn resolve(control: GmControl, latched: &[GmControl]) -> Button {
         GmControl::Mute => Button::Mute,
         GmControl::Arrow(pair, dir) => Button::Arrow(pair, dir),
         // Unreachable by construction; a harmless answer regardless.
-        GmControl::Dial | GmControl::Power => Button::All,
+        GmControl::Load | GmControl::Dial | GmControl::Power => Button::All,
     }
 }
 
@@ -1113,8 +1366,9 @@ mod tests {
         let mut all = vec![
             (GmControl::Power, power_rect(panel)),
             (GmControl::Dial, dial_rect(panel)),
-            (GmControl::All, round_rect(panel, false)),
-            (GmControl::Mute, round_rect(panel, true)),
+            (GmControl::All, round_rect(panel, 0)),
+            (GmControl::Mute, round_rect(panel, 1)),
+            (GmControl::Load, round_rect(panel, 2)),
         ];
         for (pair, ..) in PAIR_GRID {
             for dir in [Dir::Left, Dir::Right] {

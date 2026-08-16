@@ -4316,7 +4316,10 @@ impl ApplicationHandler for App {
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
         #[cfg(feature = "gm")]
-        self.repeat_gm_dial();
+        {
+            self.repeat_gm_dial();
+            self.repeat_gm_buttons();
+        }
         #[cfg(feature = "mt32")]
         {
             self.repeat_mt32_dial();
@@ -6207,15 +6210,28 @@ impl App {
                     .midi_serial_mut()
                     .and_then(crate::midi::MidiSerialSink::gm_mut)
                     .and_then(|gm| gm.panel_button(button));
-                if request == Some(crate::gm::PanelRequest::Recycle) {
-                    // Init All: off and on again is the factory state,
-                    // because the factory state is the configuration.
-                    self.set_gm_powered(false);
-                    self.set_gm_powered(true);
-                    self.show_osd("General MIDI: initialised");
+                if let Some(crate::gm::PanelRequest::Mt32Mode(mode)) = request {
+                    // The engine already switched; mirror the choice into
+                    // the session's options so a power cycle keeps it.
+                    let value = match mode {
+                        crate::gm::Mt32Mode::On => "on",
+                        crate::gm::Mt32Mode::Off => "off",
+                        crate::gm::Mt32Mode::Auto => "auto",
+                    };
+                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                        sink.set_gm_mt32_mode(value);
+                    }
                 }
             }
             GmPress::PowerOn(held) => {
+                // Both INSTRUMENT halves held through the power-on put
+                // the default soundfont back before the unit comes up.
+                let reset_font = held == [crate::gm::Button::Both(crate::gm::Pair::Instrument)];
+                if reset_font {
+                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                        sink.reset_gm_soundfont();
+                    }
+                }
                 self.set_gm_powered(true);
                 let came_up = if let Some(gm) = self
                     .emu
@@ -6225,13 +6241,19 @@ impl App {
                 {
                     // What was held on the fascia through the power-on
                     // reaches the unit the way it reads its own buttons.
-                    gm.panel_power_on_held(&held);
+                    if !reset_font {
+                        gm.panel_power_on_held(&held);
+                    }
                     true
                 } else {
                     false
                 };
                 if came_up {
-                    self.show_osd("General MIDI: power on");
+                    self.show_osd(if reset_font {
+                        "General MIDI: default soundfont"
+                    } else {
+                        "General MIDI: power on"
+                    });
                 } else {
                     // Asked to switch on and it did not: say why.
                     self.report_gm();
@@ -6240,6 +6262,34 @@ impl App {
             GmPress::PowerOff => {
                 self.set_gm_powered(false);
                 self.show_osd("General MIDI: power off");
+            }
+            GmPress::Load => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Choose a soundfont")
+                    .add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
+                    .pick_file();
+                let Some(path) = picked else {
+                    return;
+                };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    sink.set_gm_soundfont(path);
+                }
+                self.emu.bus_mut().paula.rearm_synth_audio();
+                let fitted = self
+                    .emu
+                    .bus_mut()
+                    .midi_serial_mut()
+                    .is_some_and(|sink| sink.gm().is_some());
+                if fitted {
+                    self.show_osd(format!("General MIDI: {name}"));
+                } else {
+                    // The file would not load; the fault says why.
+                    self.report_gm();
+                }
             }
         }
     }
@@ -6277,6 +6327,15 @@ impl App {
         };
         if let Some(v) = self.gm_panel.drag_dial(pos, rect) {
             self.set_gm_volume(v);
+            self.request_redraw();
+        }
+    }
+
+    /// Repeat a held arrow button, gathering speed.
+    #[cfg(feature = "gm")]
+    fn repeat_gm_buttons(&mut self) {
+        if let Some(button) = self.gm_panel.repeat_button() {
+            self.apply_gm_press(gmpanel::GmPress::Button(button));
             self.request_redraw();
         }
     }

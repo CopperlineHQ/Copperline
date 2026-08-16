@@ -561,6 +561,31 @@ impl MidiSerialSink {
         self.gm.as_mut()
     }
 
+    /// The fascia switched MT-32 mode; keep the choice for the session
+    /// so a power cycle comes back in it.
+    #[cfg(feature = "gm")]
+    pub fn set_gm_mt32_mode(&mut self, mode: &str) {
+        self.gm_options.mt32_mode = Some(mode.to_string());
+    }
+
+    /// Both INSTRUMENT halves through a power-on: whatever was loaded,
+    /// the default soundfont comes back.
+    #[cfg(feature = "gm")]
+    pub fn reset_gm_soundfont(&mut self) {
+        self.gm_options.soundfont = None;
+    }
+
+    /// The panel's LOAD button: point the synth at another soundfont
+    /// and refit it, greeting and all.
+    #[cfg(feature = "gm")]
+    pub fn set_gm_soundfont(&mut self, path: std::path::PathBuf) {
+        self.gm_options.soundfont = Some(path);
+        if self.gm_selected {
+            self.gm = None;
+            self.attach_gm();
+        }
+    }
+
     /// The panel's power switch, exactly as the MT-32's: off drops the
     /// engine entirely, on builds a fresh one that comes up greeting.
     #[cfg(feature = "gm")]

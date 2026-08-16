@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 pub use coppersynth::mt32::translator::Mt32Mode;
-pub use coppersynth::panel::{Button, FrontPanel, PanelRequest, Screen};
+pub use coppersynth::panel::{Button, FrontPanel, Pair, PanelRequest, Screen};
 
 /// How many frames the engine is asked for at a time.
 const BLOCK_FRAMES: usize = 256;
