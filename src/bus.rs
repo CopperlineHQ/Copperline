@@ -3891,7 +3891,7 @@ impl Bus {
             fdd_track: self.floppy.selected_track(),
             hdd_led: (self.gayle.is_some()
                 || self.ide_a4000.is_some()
-                || self.has_scsi_device()
+                || self.has_hard_disk_controller()
                 || self.has_filesys_mount())
             .then_some(self.emulated_cck < self.hdd_led_until_cck),
             cd_led: self
@@ -4179,13 +4179,14 @@ impl Bus {
 
     /// Whether the machine has a hard-disk controller, which is what gives it
     /// an HDD LED: a Zorro board, or the A3000's motherboard SCSI.
-    fn has_scsi_device(&self) -> bool {
+    fn has_hard_disk_controller(&self) -> bool {
         self.sdmac.is_some()
             || self.devices.iter().any(|d| {
                 matches!(
                     d,
                     crate::zorro_device::BoardDevice::A2091(_)
                         | crate::zorro_device::BoardDevice::A4091(_)
+                        | crate::zorro_device::BoardDevice::IdeZorro(_)
                 )
             })
     }
