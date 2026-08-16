@@ -213,14 +213,14 @@ pub fn keyboard_panel_shown() -> bool {
 /// like [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
 static MT32_PANEL_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn set_gm_panel_shown(shown: bool) {
+pub fn set_csynth_panel_shown(shown: bool) {
     #[cfg(test)]
     GM_PANEL_SHOWN_LOCAL.with(|flag| flag.set(Some(shown)));
     #[cfg(not(test))]
     GM_PANEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub fn gm_panel_shown() -> bool {
+pub fn csynth_panel_shown() -> bool {
     #[cfg(test)]
     if let Some(shown) = GM_PANEL_SHOWN_LOCAL.with(std::cell::Cell::get) {
         return shown;

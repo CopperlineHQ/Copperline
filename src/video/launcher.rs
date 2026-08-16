@@ -613,12 +613,12 @@ pub enum LauncherField {
     MidiIn,
     /// Coppersynth's soundfont (.sf2); unset means the bundled
     /// default's search path.
-    #[cfg(feature = "gm")]
-    GmSoundfont,
-    GmPanel,
-    /// The MT-32 mode of the GM synth: Auto / On / Off.
-    #[cfg(feature = "gm")]
-    GmMt32Mode,
+    #[cfg(feature = "coppersynth")]
+    CsynthSoundfont,
+    CsynthPanel,
+    /// The MT-32 mode of Coppersynth: Auto / On / Off.
+    #[cfg(feature = "coppersynth")]
+    CsynthMt32Mode,
     // Parallel
     ParallelDevice,
     ParallelOutput,
@@ -1114,14 +1114,14 @@ const SERIAL_ROWS_MT32: [Row; 7] = [
 ];
 // Coppersynth needs no ROMs: its rows are the soundfont it
 // plays and whether the MT-32 translation layer sits in front of it.
-#[cfg(all(feature = "midi", feature = "gm"))]
-const SERIAL_ROWS_GM: [Row; 6] = [
+#[cfg(all(feature = "midi", feature = "coppersynth"))]
+const SERIAL_ROWS_CSYNTH: [Row; 6] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
-    row(F::GmSoundfont, "  Soundfont", PathRow),
-    row(F::GmPanel, "  Front panel", Cycle),
-    row(F::GmMt32Mode, "  MT-32 mode", Cycle),
+    row(F::CsynthSoundfont, "  Soundfont", PathRow),
+    row(F::CsynthPanel, "  Front panel", Cycle),
+    row(F::CsynthMt32Mode, "  MT-32 mode", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
@@ -1283,7 +1283,7 @@ pub fn rows(
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
-    midi_out_is_gm: bool,
+    midi_out_is_csynth: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
         LauncherTab::CreateFloppy => Cow::Borrowed(&NEW_FLOPPY_ROWS),
@@ -1323,7 +1323,7 @@ pub fn rows(
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
             serial_mode,
             midi_out_is_mt32,
-            midi_out_is_gm,
+            midi_out_is_csynth,
             parallel_device,
         )),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
@@ -1344,11 +1344,11 @@ pub fn rows(
 fn io_ports_rows(
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
-    midi_out_is_gm: bool,
+    midi_out_is_csynth: bool,
     parallel_device: ParallelDevice,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    let serial = serial_rows(serial_mode, midi_out_is_mt32, midi_out_is_gm);
+    let serial = serial_rows(serial_mode, midi_out_is_mt32, midi_out_is_csynth);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
@@ -1367,7 +1367,7 @@ fn io_ports_rows(
 fn serial_rows(
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
-    midi_out_is_gm: bool,
+    midi_out_is_csynth: bool,
 ) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
@@ -1382,16 +1382,16 @@ fn serial_rows(
         if midi_out_is_mt32 {
             return &SERIAL_ROWS_MT32;
         }
-        #[cfg(feature = "gm")]
-        if midi_out_is_gm {
-            return &SERIAL_ROWS_GM;
+        #[cfg(feature = "coppersynth")]
+        if midi_out_is_csynth {
+            return &SERIAL_ROWS_CSYNTH;
         }
-        let _ = (midi_out_is_mt32, midi_out_is_gm);
+        let _ = (midi_out_is_mt32, midi_out_is_csynth);
         &SERIAL_ROWS_MIDI
     }
     #[cfg(not(feature = "midi"))]
     {
-        let _ = (serial_mode, midi_out_is_mt32, midi_out_is_gm);
+        let _ = (serial_mode, midi_out_is_mt32, midi_out_is_csynth);
         &[]
     }
 }
@@ -2190,10 +2190,10 @@ pub struct MachineSetup {
     mt32_pcm_rom: Option<PathBuf>,
     mt32_panel: bool,
     mt32_lcd: Mt32Lcd,
-    /// Coppersynth's soundfont and translation mode ([gm]).
-    gm_soundfont: Option<PathBuf>,
-    gm_mt32_mode: Option<String>,
-    gm_panel: bool,
+    /// Coppersynth's soundfont and translation mode ([coppersynth]).
+    csynth_soundfont: Option<PathBuf>,
+    csynth_mt32_mode: Option<String>,
+    csynth_panel: bool,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -2463,9 +2463,9 @@ impl MachineSetup {
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
             mt32_panel: cfg.serial.mt32_panel,
             mt32_lcd: cfg.serial.mt32_lcd,
-            gm_soundfont: cfg.gm.soundfont.clone(),
-            gm_mt32_mode: cfg.gm.mt32_mode.clone(),
-            gm_panel: cfg.gm.panel,
+            csynth_soundfont: cfg.csynth.soundfont.clone(),
+            csynth_mt32_mode: cfg.csynth.mt32_mode.clone(),
+            csynth_panel: cfg.csynth.panel,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2533,8 +2533,8 @@ impl MachineSetup {
         crate::config::midi_out_is_mt32(self.midi_out.as_deref())
     }
 
-    pub fn midi_out_is_gm(&self) -> bool {
-        crate::config::midi_out_is_gm(self.midi_out.as_deref())
+    pub fn midi_out_is_csynth(&self) -> bool {
+        crate::config::midi_out_is_csynth(self.midi_out.as_deref())
     }
 
     pub fn serial_mode(&self) -> SerialMode {
@@ -2941,14 +2941,17 @@ impl MachineSetup {
         if self.mt32_lcd != base.serial.mt32_lcd {
             raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
         }
-        if self.gm_soundfont != base.gm.soundfont {
-            raw.gm.soundfont = self.gm_soundfont.as_ref().map(|p| p.display().to_string());
+        if self.csynth_soundfont != base.csynth.soundfont {
+            raw.csynth.soundfont = self
+                .csynth_soundfont
+                .as_ref()
+                .map(|p| p.display().to_string());
         }
-        if self.gm_mt32_mode != base.gm.mt32_mode {
-            raw.gm.mt32_mode = self.gm_mt32_mode.clone();
+        if self.csynth_mt32_mode != base.csynth.mt32_mode {
+            raw.csynth.mt32_mode = self.csynth_mt32_mode.clone();
         }
-        if self.gm_panel != base.gm.panel {
-            raw.gm.panel = Some(self.gm_panel);
+        if self.csynth_panel != base.csynth.panel {
+            raw.csynth.panel = Some(self.csynth_panel);
         }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
@@ -3238,9 +3241,9 @@ impl MachineSetup {
         self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
         self.mt32_panel = base.serial.mt32_panel;
         self.mt32_lcd = base.serial.mt32_lcd;
-        self.gm_soundfont = base.gm.soundfont.clone();
-        self.gm_mt32_mode = base.gm.mt32_mode.clone();
-        self.gm_panel = base.gm.panel;
+        self.csynth_soundfont = base.csynth.soundfont.clone();
+        self.csynth_mt32_mode = base.csynth.mt32_mode.clone();
+        self.csynth_panel = base.csynth.panel;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -3597,8 +3600,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom.as_deref(),
             F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
-            #[cfg(feature = "gm")]
-            F::GmSoundfont => self.gm_soundfont.as_deref(),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont.as_deref(),
             F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
@@ -4086,8 +4089,8 @@ impl MachineSetup {
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Mt32Panel => enabled_label(self.mt32_panel),
-            #[cfg(feature = "gm")]
-            F::GmPanel => enabled_label(self.gm_panel),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthPanel => enabled_label(self.csynth_panel),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -4190,8 +4193,8 @@ impl MachineSetup {
                 if self.midi_out_is_mt32() {
                     return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
                 }
-                if self.midi_out_is_gm() {
-                    return crate::midi::MIDI_OUT_GM_LABEL.to_string();
+                if self.midi_out_is_csynth() {
+                    return crate::midi::MIDI_OUT_CSYNTH_LABEL.to_string();
                 }
                 self.midi_out.clone().unwrap_or_else(|| "None".to_string())
             }
@@ -4203,14 +4206,14 @@ impl MachineSetup {
                 }
                 self.midi_in.clone().unwrap_or_else(|| "None".to_string())
             }
-            #[cfg(feature = "gm")]
-            F::GmSoundfont if self.gm_soundfont.is_none() => {
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont if self.csynth_soundfont.is_none() => {
                 // The bundled bank, named rather than blank: an unset row
                 // is not an empty setting, it is the default in force.
                 "GeneralUser-GS".to_string()
             }
-            #[cfg(feature = "gm")]
-            F::GmMt32Mode => match self.gm_mt32_mode.as_deref() {
+            #[cfg(feature = "coppersynth")]
+            F::CsynthMt32Mode => match self.csynth_mt32_mode.as_deref() {
                 None => "Auto".to_string(),
                 Some(m) if m.eq_ignore_ascii_case("on") => "On".to_string(),
                 Some(m) if m.eq_ignore_ascii_case("off") => "Off".to_string(),
@@ -4519,8 +4522,8 @@ impl MachineSetup {
             }
             // Two states cycle the same either way round.
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
-            #[cfg(feature = "gm")]
-            F::GmPanel => self.gm_panel = !self.gm_panel,
+            #[cfg(feature = "coppersynth")]
+            F::CsynthPanel => self.csynth_panel = !self.csynth_panel,
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -4599,7 +4602,7 @@ impl MachineSetup {
                     .iter()
                     .map(|e| e.name.clone())
                     .chain(mt32_endpoint(true))
-                    .chain(gm_endpoint(true))
+                    .chain(csynth_endpoint(true))
                     .collect();
                 self.midi_out =
                     crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
@@ -4627,11 +4630,11 @@ impl MachineSetup {
                     .collect();
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
             }
-            #[cfg(feature = "gm")]
-            F::GmMt32Mode => {
+            #[cfg(feature = "coppersynth")]
+            F::CsynthMt32Mode => {
                 // Auto -> On -> Off, stored as the config spells it, with
                 // Auto stored as unset so an untouched row emits nothing.
-                let next = match self.gm_mt32_mode.as_deref() {
+                let next = match self.csynth_mt32_mode.as_deref() {
                     None => Some("on"),
                     Some(m) if m.eq_ignore_ascii_case("on") => Some("off"),
                     Some(m) if m.eq_ignore_ascii_case("off") => None,
@@ -4641,14 +4644,14 @@ impl MachineSetup {
                     next
                 } else {
                     // The same ring walked the other way.
-                    match self.gm_mt32_mode.as_deref() {
+                    match self.csynth_mt32_mode.as_deref() {
                         None => Some("off"),
                         Some(m) if m.eq_ignore_ascii_case("off") => Some("on"),
                         Some(m) if m.eq_ignore_ascii_case("on") => None,
                         Some(_) => None,
                     }
                 };
-                self.gm_mt32_mode = next.map(str::to_string);
+                self.csynth_mt32_mode = next.map(str::to_string);
             }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its
@@ -4866,8 +4869,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = Some(path),
             F::Mt32ControlRom => self.mt32_control_rom = Some(path),
-            #[cfg(feature = "gm")]
-            F::GmSoundfont => self.gm_soundfont = Some(path),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
@@ -4936,8 +4939,8 @@ impl MachineSetup {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
             F::Mt32ControlRom => self.mt32_control_rom = None,
-            #[cfg(feature = "gm")]
-            F::GmSoundfont => self.gm_soundfont = None,
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont = None,
             F::Mt32PcmRom => self.mt32_pcm_rom = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
@@ -8129,15 +8132,15 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
 /// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    #[cfg(all(feature = "midi", feature = "mt32", feature = "gm"))]
+    #[cfg(all(feature = "midi", feature = "mt32", feature = "coppersynth"))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_MT32,
-        &SERIAL_ROWS_GM,
+        &SERIAL_ROWS_CSYNTH,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
     ];
-    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "gm")))]
+    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_MT32,
@@ -8357,8 +8360,8 @@ fn mt32_endpoint(wanted: bool) -> Option<String> {
     (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
 }
 
-fn gm_endpoint(wanted: bool) -> Option<String> {
-    (wanted && cfg!(feature = "gm")).then(|| crate::config::MIDI_OUT_GM.to_string())
+fn csynth_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "coppersynth")).then(|| crate::config::MIDI_OUT_CSYNTH.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {

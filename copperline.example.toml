@@ -776,11 +776,11 @@ floppy_sounds_volume = 100
 # --parallel DEVICE overrides this per run; --sampler-audio-input /
 # --sampler-input-gain imply "sampler".
 # # Coppersynth, the built-in General MIDI synthesizer, selected with
-# midi_out = "gm" under [serial]. No files needed: the GeneralUser GS
-# bank is inside the executable. `soundfont` (or COPPERLINE_GM_SOUNDFONT,
+# midi_out = "coppersynth" under [serial]. No files needed: the GeneralUser GS
+# bank is inside the executable. `soundfont` (or COPPERLINE_SOUNDFONT,
 # or an .sf2 beside the executable) plays a different bank. MT-32 games
 # work through a translation layer.
-# [gm]
+# [coppersynth]
 # soundfont = "/path/to/GeneralUser-GS.sf2"  # override the bundled default
 # mt32_mode = "auto"          # auto (translate once MT-32 sysex is seen),
 #                             # on, or off

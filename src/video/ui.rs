@@ -5516,8 +5516,8 @@ fn launcher_bridge_configure_rect(rect: Rect, row_y: usize) -> Rect {
 fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -> (bool, bool) {
     // The soundfont row keeps both buttons on show; Reset greys out
     // while the bundled GeneralUser GS is already the bank in force.
-    #[cfg(feature = "gm")]
-    if field == LauncherField::GmSoundfont {
+    #[cfg(feature = "coppersynth")]
+    if field == LauncherField::CsynthSoundfont {
         return (true, true);
     }
     if !field.is_paths_field() {
@@ -5542,8 +5542,8 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
     // The soundfont row reads the same way: unset means the bundled
     // bank, centred and dimmed as a default rather than left-aligned
     // as if it were a chosen path.
-    #[cfg(feature = "gm")]
-    if field == LauncherField::GmSoundfont {
+    #[cfg(feature = "coppersynth")]
+    if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_none();
     }
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
@@ -5553,8 +5553,8 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
 /// default already in force is shown but greyed, so the pair of buttons
 /// keeps its shape while saying there is nothing to undo.
 fn launcher_clear_enabled(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
-    #[cfg(feature = "gm")]
-    if field == LauncherField::GmSoundfont {
+    #[cfg(feature = "coppersynth")]
+    if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_some();
     }
     let _ = (setup, field);
@@ -6111,7 +6111,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
-            state.setup.midi_out_is_gm(),
+            state.setup.midi_out_is_csynth(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -8290,9 +8290,9 @@ fn draw_launcher_row(
                 // than being emptied -- the Paths page, and the
                 // soundfont row. Everywhere else the button really does
                 // clear a path, and says so.
-                #[cfg(feature = "gm")]
-                let resets = r.field.is_paths_field() || r.field == LauncherField::GmSoundfont;
-                #[cfg(not(feature = "gm"))]
+                #[cfg(feature = "coppersynth")]
+                let resets = r.field.is_paths_field() || r.field == LauncherField::CsynthSoundfont;
+                #[cfg(not(feature = "coppersynth"))]
                 let resets = r.field.is_paths_field();
                 let label = if resets { "Reset" } else { "Clear" };
                 let enabled = launcher_clear_enabled(setup, r.field);
@@ -8759,7 +8759,7 @@ fn draw_launcher(
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
-            state.setup.midi_out_is_gm(),
+            state.setup.midi_out_is_csynth(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -8814,7 +8814,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
-                state.setup.midi_out_is_gm(),
+                state.setup.midi_out_is_csynth(),
             )
             .len()
                 + 1,
@@ -8851,7 +8851,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
-                state.setup.midi_out_is_gm(),
+                state.setup.midi_out_is_csynth(),
             )
             .len()
                 + 1,
@@ -8892,7 +8892,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
-                state.setup.midi_out_is_gm(),
+                state.setup.midi_out_is_csynth(),
             )
             .len()
                 + 1,
@@ -8936,7 +8936,7 @@ fn draw_launcher(
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
-                state.setup.midi_out_is_gm(),
+                state.setup.midi_out_is_csynth(),
             )
             .len()
                 + 1,
@@ -10696,7 +10696,7 @@ mod tests {
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
-            state.setup.midi_out_is_gm(),
+            state.setup.midi_out_is_csynth(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -10732,7 +10732,7 @@ mod tests {
             state.setup.parallel_device(),
             state.setup.serial_mode(),
             state.setup.midi_out_is_mt32(),
-            state.setup.midi_out_is_gm(),
+            state.setup.midi_out_is_csynth(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -12617,11 +12617,11 @@ mod tests {
             mt32_panel: false,
             mt32_control_rom: None,
             mt32_pcm_rom: None,
-            gm_available: false,
-            gm_attached: false,
-            gm_panel: false,
-            gm_mt32_mode: "auto",
-            gm_custom_font: false,
+            csynth_available: false,
+            csynth_attached: false,
+            csynth_panel: false,
+            csynth_mt32_mode: "auto",
+            csynth_custom_font: false,
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: &none,

@@ -156,19 +156,19 @@ pub struct MidiSerialSink {
     #[cfg(feature = "mt32")]
     mt32_reply: std::collections::VecDeque<u8>,
     /// The `[gm]` settings the General MIDI synth would be fitted with.
-    #[cfg(feature = "gm")]
-    gm_options: crate::gm::GmOptions,
+    #[cfg(feature = "coppersynth")]
+    csynth_options: crate::csynth::CsynthOptions,
     /// The fitted General MIDI synth. Absent costs nothing, exactly as
     /// the MT-32 above; the two are never fitted together, because the
     /// output points at one device at a time.
-    #[cfg(feature = "gm")]
-    gm: Option<crate::gm::GmDevice>,
+    #[cfg(feature = "coppersynth")]
+    csynth: Option<crate::csynth::CsynthDevice>,
     /// Whether the General MIDI synth is the chosen output.
-    #[cfg(feature = "gm")]
-    gm_selected: bool,
+    #[cfg(feature = "coppersynth")]
+    csynth_selected: bool,
     /// Why it could not be fitted when it was last asked for.
-    #[cfg(feature = "gm")]
-    gm_fault: Option<String>,
+    #[cfg(feature = "coppersynth")]
+    csynth_fault: Option<String>,
 }
 
 /// The output-device name that means the built-in MT-32 rather than a host
@@ -180,11 +180,11 @@ pub use crate::config::MIDI_OUT_MT32;
 pub const MIDI_OUT_MT32_LABEL: &str = "MT-32";
 
 /// The output-device name that means the built-in General MIDI synth.
-#[cfg(feature = "gm")]
-pub use crate::config::MIDI_OUT_GM;
+#[cfg(feature = "coppersynth")]
+pub use crate::config::MIDI_OUT_CSYNTH;
 
 /// What the General MIDI output is called anywhere a person reads it.
-pub const MIDI_OUT_GM_LABEL: &str = "Coppersynth";
+pub const MIDI_OUT_CSYNTH_LABEL: &str = "Coppersynth";
 
 /// MIDI Active Sensing status byte.
 pub(crate) const ACTIVE_SENSE: u8 = 0xFE;
@@ -413,14 +413,14 @@ impl MidiSerialSink {
             mt32_input: false,
             #[cfg(feature = "mt32")]
             mt32_reply: std::collections::VecDeque::new(),
-            #[cfg(feature = "gm")]
-            gm_options: crate::gm::GmOptions::default(),
-            #[cfg(feature = "gm")]
-            gm: None,
-            #[cfg(feature = "gm")]
-            gm_selected: false,
-            #[cfg(feature = "gm")]
-            gm_fault: None,
+            #[cfg(feature = "coppersynth")]
+            csynth_options: crate::csynth::CsynthOptions::default(),
+            #[cfg(feature = "coppersynth")]
+            csynth: None,
+            #[cfg(feature = "coppersynth")]
+            csynth_selected: false,
+            #[cfg(feature = "coppersynth")]
+            csynth_fault: None,
         })
     }
 
@@ -464,20 +464,20 @@ impl MidiSerialSink {
     pub fn set_output_endpoint(&mut self, endpoint: Option<&str>) {
         #[cfg(feature = "mt32")]
         if crate::config::midi_out_is_mt32(endpoint) {
-            #[cfg(feature = "gm")]
-            self.drop_gm();
+            #[cfg(feature = "coppersynth")]
+            self.drop_csynth();
             self.attach_mt32();
             return;
         }
-        #[cfg(feature = "gm")]
-        if crate::config::midi_out_is_gm(endpoint) {
+        #[cfg(feature = "coppersynth")]
+        if crate::config::midi_out_is_csynth(endpoint) {
             #[cfg(feature = "mt32")]
             self.drop_mt32();
-            self.attach_gm();
+            self.attach_csynth();
             return;
         }
-        #[cfg(feature = "gm")]
-        self.drop_gm();
+        #[cfg(feature = "coppersynth")]
+        self.drop_csynth();
         #[cfg(feature = "mt32")]
         self.drop_mt32();
         self.backend.set_output(endpoint);
@@ -496,125 +496,125 @@ impl MidiSerialSink {
     }
 
     /// Unfit the General MIDI synth entirely.
-    #[cfg(feature = "gm")]
-    fn drop_gm(&mut self) {
-        self.gm = None;
-        self.gm_selected = false;
+    #[cfg(feature = "coppersynth")]
+    fn drop_csynth(&mut self) {
+        self.csynth = None;
+        self.csynth_selected = false;
     }
 
-    /// The `[gm]` settings the synth is fitted with when selected.
-    #[cfg(feature = "gm")]
-    pub fn set_gm_options(&mut self, options: crate::gm::GmOptions) {
-        self.gm_options = options;
+    /// The `[coppersynth]` settings the synth is fitted with when selected.
+    #[cfg(feature = "coppersynth")]
+    pub fn set_csynth_options(&mut self, options: crate::csynth::CsynthOptions) {
+        self.csynth_options = options;
     }
 
     /// Fit the General MIDI synth, leaving the host output silent: the
     /// device on the far end of the cable is the one here.
-    #[cfg(feature = "gm")]
-    fn attach_gm(&mut self) {
-        if self.gm.is_some() {
+    #[cfg(feature = "coppersynth")]
+    fn attach_csynth(&mut self) {
+        if self.csynth.is_some() {
             return;
         }
-        self.gm_selected = true;
-        self.gm_fault = None;
-        match crate::gm::GmDevice::open(&self.gm_options) {
+        self.csynth_selected = true;
+        self.csynth_fault = None;
+        match crate::csynth::CsynthDevice::open(&self.csynth_options) {
             Ok(device) => {
                 self.backend.set_output(None);
-                self.gm = Some(device);
+                self.csynth = Some(device);
             }
             Err(e) => {
-                log::warn!("midi: {MIDI_OUT_GM_LABEL} could not be fitted: {e:#}");
-                self.gm_fault = Some(format!("{e:#}"));
+                log::warn!("midi: {MIDI_OUT_CSYNTH_LABEL} could not be fitted: {e:#}");
+                self.csynth_fault = Some(format!("{e:#}"));
             }
         }
     }
 
     /// Why the General MIDI synth could not be fitted, if it could not.
-    #[cfg(feature = "gm")]
-    pub fn take_gm_fault(&mut self) -> Option<String> {
-        self.gm_fault.take()
+    #[cfg(feature = "coppersynth")]
+    pub fn take_csynth_fault(&mut self) -> Option<String> {
+        self.csynth_fault.take()
     }
 
     /// Display lines the guest wrote through the translation layer.
-    #[cfg(feature = "gm")]
-    pub fn take_gm_display(&mut self) -> Vec<String> {
-        self.gm
+    #[cfg(feature = "coppersynth")]
+    pub fn take_csynth_display(&mut self) -> Vec<String> {
+        self.csynth
             .as_mut()
-            .map(crate::gm::GmDevice::take_display)
+            .map(crate::csynth::CsynthDevice::take_display)
             .unwrap_or_default()
     }
 
     /// Whether the General MIDI synth is the chosen output.
-    #[cfg(feature = "gm")]
-    pub fn gm_selected(&self) -> bool {
-        self.gm_selected
+    #[cfg(feature = "coppersynth")]
+    pub fn csynth_selected(&self) -> bool {
+        self.csynth_selected
     }
 
     /// The attached General MIDI synth, for the front panel.
-    #[cfg(feature = "gm")]
-    pub fn gm(&self) -> Option<&crate::gm::GmDevice> {
-        self.gm.as_ref()
+    #[cfg(feature = "coppersynth")]
+    pub fn csynth(&self) -> Option<&crate::csynth::CsynthDevice> {
+        self.csynth.as_ref()
     }
 
-    #[cfg(feature = "gm")]
-    pub fn gm_mut(&mut self) -> Option<&mut crate::gm::GmDevice> {
-        self.gm.as_mut()
+    #[cfg(feature = "coppersynth")]
+    pub fn csynth_mut(&mut self) -> Option<&mut crate::csynth::CsynthDevice> {
+        self.csynth.as_mut()
     }
 
     /// The fascia switched MT-32 mode; keep the choice for the session
     /// so a power cycle comes back in it.
-    #[cfg(feature = "gm")]
-    pub fn set_gm_mt32_mode(&mut self, mode: &str) {
-        self.gm_options.mt32_mode = Some(mode.to_string());
+    #[cfg(feature = "coppersynth")]
+    pub fn set_csynth_mt32_mode(&mut self, mode: &str) {
+        self.csynth_options.mt32_mode = Some(mode.to_string());
     }
 
     /// The MT-32 mode the options name, for the menu's checkmark.
-    #[cfg(feature = "gm")]
-    pub fn gm_mt32_mode(&self) -> &str {
-        self.gm_options.mt32_mode.as_deref().unwrap_or("auto")
+    #[cfg(feature = "coppersynth")]
+    pub fn csynth_mt32_mode(&self) -> &str {
+        self.csynth_options.mt32_mode.as_deref().unwrap_or("auto")
     }
 
     /// Back to the bundled default soundfont, refitting in place when
     /// the synth is running: the menu's Reset, and both INSTRUMENT
     /// halves held through a power-on.
-    #[cfg(feature = "gm")]
-    pub fn reset_gm_soundfont(&mut self) {
-        self.gm_options.soundfont = None;
-        if self.gm_selected && self.gm.is_some() {
-            self.gm = None;
-            self.attach_gm();
+    #[cfg(feature = "coppersynth")]
+    pub fn reset_csynth_soundfont(&mut self) {
+        self.csynth_options.soundfont = None;
+        if self.csynth_selected && self.csynth.is_some() {
+            self.csynth = None;
+            self.attach_csynth();
         }
     }
 
     /// Whether a soundfont other than the bundled default is loaded.
-    #[cfg(feature = "gm")]
-    pub fn gm_custom_soundfont(&self) -> bool {
-        self.gm_options.soundfont.is_some()
+    #[cfg(feature = "coppersynth")]
+    pub fn csynth_custom_soundfont(&self) -> bool {
+        self.csynth_options.soundfont.is_some()
     }
 
     /// The panel's LOAD button: point the synth at another soundfont
     /// and refit it, greeting and all.
-    #[cfg(feature = "gm")]
-    pub fn set_gm_soundfont(&mut self, path: std::path::PathBuf) {
-        self.gm_options.soundfont = Some(path);
-        if self.gm_selected {
-            self.gm = None;
-            self.attach_gm();
+    #[cfg(feature = "coppersynth")]
+    pub fn set_csynth_soundfont(&mut self, path: std::path::PathBuf) {
+        self.csynth_options.soundfont = Some(path);
+        if self.csynth_selected {
+            self.csynth = None;
+            self.attach_csynth();
         }
     }
 
     /// The panel's power switch, exactly as the MT-32's: off drops the
     /// engine entirely, on builds a fresh one that comes up greeting.
-    #[cfg(feature = "gm")]
-    pub fn set_gm_power(&mut self, on: bool) {
-        if !self.gm_selected || on == self.gm.is_some() {
+    #[cfg(feature = "coppersynth")]
+    pub fn set_csynth_power(&mut self, on: bool) {
+        if !self.csynth_selected || on == self.csynth.is_some() {
             return;
         }
         if on {
-            self.attach_gm();
+            self.attach_csynth();
         } else {
-            self.gm = None;
-            log::info!("midi: {MIDI_OUT_GM_LABEL} switched off");
+            self.csynth = None;
+            log::info!("midi: {MIDI_OUT_CSYNTH_LABEL} switched off");
         }
     }
 
@@ -829,9 +829,9 @@ impl MidiSerialSink {
         if self.mt32_selected {
             return MIDI_OUT_MT32_LABEL.to_string();
         }
-        #[cfg(feature = "gm")]
-        if self.gm_selected {
-            return MIDI_OUT_GM_LABEL.to_string();
+        #[cfg(feature = "coppersynth")]
+        if self.csynth_selected {
+            return MIDI_OUT_CSYNTH_LABEL.to_string();
         }
         self.backend
             .current_output()
@@ -852,17 +852,17 @@ impl MidiSerialSink {
 
 impl SerialSink for MidiSerialSink {
     fn synth_source_name(&self) -> &'static str {
-        #[cfg(feature = "gm")]
-        if self.gm.is_some() {
-            return "gm";
+        #[cfg(feature = "coppersynth")]
+        if self.csynth.is_some() {
+            return "coppersynth";
         }
         "mt32"
     }
 
     fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
-        #[cfg(feature = "gm")]
-        if let Some(gm) = &mut self.gm {
-            return Some(gm.next_frame());
+        #[cfg(feature = "coppersynth")]
+        if let Some(synth) = &mut self.csynth {
+            return Some(synth.next_frame());
         }
         #[cfg(feature = "mt32")]
         if let Some(mt32) = &mut self.mt32 {
@@ -898,12 +898,12 @@ impl SerialSink for MidiSerialSink {
         }
         // The General MIDI synth is the same shape of thing: in-process,
         // answering in emulated time, no scheduling.
-        #[cfg(feature = "gm")]
-        if let Some(gm) = &mut self.gm {
+        #[cfg(feature = "coppersynth")]
+        if let Some(synth) = &mut self.csynth {
             if let Some(dbg) = &mut self.debug {
                 dbg.tx_bytes += 1;
             }
-            gm.write_byte(b);
+            synth.write_byte(b);
             return;
         }
         // Map the emit clock onto host time so the byte is scheduled rather
@@ -1055,14 +1055,14 @@ mod tests {
             mt32_input: false,
             #[cfg(feature = "mt32")]
             mt32_reply: std::collections::VecDeque::new(),
-            #[cfg(feature = "gm")]
-            gm_options: crate::gm::GmOptions::default(),
-            #[cfg(feature = "gm")]
-            gm: None,
-            #[cfg(feature = "gm")]
-            gm_selected: false,
-            #[cfg(feature = "gm")]
-            gm_fault: None,
+            #[cfg(feature = "coppersynth")]
+            csynth_options: crate::csynth::CsynthOptions::default(),
+            #[cfg(feature = "coppersynth")]
+            csynth: None,
+            #[cfg(feature = "coppersynth")]
+            csynth_selected: false,
+            #[cfg(feature = "coppersynth")]
+            csynth_fault: None,
         }
     }
 

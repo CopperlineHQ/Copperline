@@ -187,7 +187,7 @@ const STATUS_BAR_HEIGHT: usize = 44;
 fn window_present_height() -> usize {
     present_height()
         + mt32_panel_height()
-        + gm_panel_height()
+        + csynth_panel_height()
         + keyboard_panel_height()
         + status_bar_height()
 }
@@ -255,24 +255,24 @@ fn mt32_panel_height() -> usize {
 }
 
 /// Coppersynth's panel height, or 0 while it is not shown.
-fn gm_panel_height() -> usize {
-    #[cfg(feature = "gm")]
-    if super::gm_panel_shown() {
-        return gmpanel::GM_PANEL_HEIGHT;
+fn csynth_panel_height() -> usize {
+    #[cfg(feature = "coppersynth")]
+    if super::csynth_panel_shown() {
+        return csynthpanel::CSYNTH_PANEL_HEIGHT;
     }
     0
 }
 
 /// Where Coppersynth's panel starts: under the display, below the
 /// MT-32's strip when that one is up as well.
-fn gm_panel_top() -> usize {
+fn csynth_panel_top() -> usize {
     present_height() + mt32_panel_height()
 }
 
 /// Where the on-screen keyboard starts: under the display and under the
 /// synth panels, the way a keyboard sits below whatever is on the desk.
 fn keyboard_panel_top() -> usize {
-    gm_panel_top() + gm_panel_height()
+    csynth_panel_top() + csynth_panel_height()
 }
 
 /// The on-screen keyboard's height, or 0 while it is not shown.
@@ -1226,21 +1226,21 @@ pub struct App {
     /// Coppersynth's panel pointer mechanics: latched buttons, the
     /// momentary flash, the knob's grab. Everything semantic lives in
     /// Coppersynth's own panel inside the device.
-    #[cfg(feature = "gm")]
-    gm_panel: gmpanel::GmPanel,
+    #[cfg(feature = "coppersynth")]
+    csynth_panel: csynthpanel::CsynthPanel,
     /// The clock the panel's glass is composed against, and the knob's
     /// last position, kept so the fascia holds it while switched off.
-    #[cfg(feature = "gm")]
-    gm_panel_epoch: std::time::Instant,
-    #[cfg(feature = "gm")]
-    gm_volume: f32,
+    #[cfg(feature = "coppersynth")]
+    csynth_panel_epoch: std::time::Instant,
+    #[cfg(feature = "coppersynth")]
+    csynth_volume: f32,
     /// What the glass last drew, and when, so the panel redraws only
     /// when its pixels would differ -- and never fast enough to crowd
     /// the audio.
-    #[cfg(feature = "gm")]
-    gm_panel_drawn: Option<(Option<crate::gm::Screen>, bool, bool)>,
-    #[cfg(feature = "gm")]
-    gm_panel_redraw_at: std::time::Instant,
+    #[cfg(feature = "coppersynth")]
+    csynth_panel_drawn: Option<(Option<crate::csynth::Screen>, bool, bool)>,
+    #[cfg(feature = "coppersynth")]
+    csynth_panel_redraw_at: std::time::Instant,
     /// The on-screen Amiga keyboard: which cap the mouse is holding, which
     /// qualifiers are latched, and which legends the caps wear. Whether the
     /// strip is up at all is `video::keyboard_panel_shown`, because the
@@ -1973,16 +1973,16 @@ impl App {
             rewind_armed,
             #[cfg(feature = "mt32")]
             mt32_panel: mt32panel::Mt32Panel::default(),
-            #[cfg(feature = "gm")]
-            gm_panel: gmpanel::GmPanel::default(),
-            #[cfg(feature = "gm")]
-            gm_panel_epoch: std::time::Instant::now(),
-            #[cfg(feature = "gm")]
-            gm_volume: 1.0,
-            #[cfg(feature = "gm")]
-            gm_panel_drawn: None,
-            #[cfg(feature = "gm")]
-            gm_panel_redraw_at: std::time::Instant::now(),
+            #[cfg(feature = "coppersynth")]
+            csynth_panel: csynthpanel::CsynthPanel::default(),
+            #[cfg(feature = "coppersynth")]
+            csynth_panel_epoch: std::time::Instant::now(),
+            #[cfg(feature = "coppersynth")]
+            csynth_volume: 1.0,
+            #[cfg(feature = "coppersynth")]
+            csynth_panel_drawn: None,
+            #[cfg(feature = "coppersynth")]
+            csynth_panel_redraw_at: std::time::Instant::now(),
             kbd_panel: kbdpanel::KbdPanelState::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
@@ -3436,10 +3436,10 @@ impl ApplicationHandler for App {
                         self.drag_mt32_dial(pos);
                     }
                 }
-                #[cfg(feature = "gm")]
-                if self.gm_panel.dial_held() {
+                #[cfg(feature = "coppersynth")]
+                if self.csynth_panel.dial_held() {
                     if let Some(pos) = pos {
-                        self.drag_gm_dial(pos);
+                        self.drag_csynth_dial(pos);
                     }
                 }
                 if self.mouse_captured {
@@ -3476,13 +3476,13 @@ impl ApplicationHandler for App {
                     });
                 #[cfg(not(feature = "mt32"))]
                 let mt32_hover_changed = false;
-                #[cfg(feature = "gm")]
-                let gm_hover_changed =
-                    gmpanel::shown_panel_rect(gm_panel_top()).is_some_and(|panel| {
-                        gmpanel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
+                #[cfg(feature = "coppersynth")]
+                let csynth_hover_changed = csynthpanel::shown_panel_rect(csynth_panel_top())
+                    .is_some_and(|panel| {
+                        csynthpanel::hover_changed(panel, previous_cursor_pos, self.cursor_pos)
                     });
-                #[cfg(not(feature = "gm"))]
-                let gm_hover_changed = false;
+                #[cfg(not(feature = "coppersynth"))]
+                let csynth_hover_changed = false;
                 // The keycaps light under the pointer the same way.
                 let kbd_hover_changed = kbdpanel::shown_panel_rect(keyboard_panel_top())
                     .is_some_and(|panel| {
@@ -3490,7 +3490,7 @@ impl ApplicationHandler for App {
                     });
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
                     || mt32_hover_changed
-                    || gm_hover_changed
+                    || csynth_hover_changed
                     || kbd_hover_changed
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
                 {
@@ -3614,10 +3614,10 @@ impl ApplicationHandler for App {
                     self.mt32_panel.release_press();
                     self.request_redraw();
                 }
-                #[cfg(feature = "gm")]
+                #[cfg(feature = "coppersynth")]
                 if !pressed {
-                    self.gm_panel.release_dial();
-                    self.gm_panel.release_press();
+                    self.csynth_panel.release_dial();
+                    self.csynth_panel.release_press();
                     self.request_redraw();
                 }
                 #[cfg(feature = "mt32")]
@@ -3638,18 +3638,19 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                #[cfg(feature = "gm")]
+                #[cfg(feature = "coppersynth")]
                 if pressed
                     && !self.mouse_captured
                     && matches!(button, MouseButton::Left | MouseButton::Right)
                 {
-                    if let (Some(pos), Some(panel)) =
-                        (self.cursor_pos, gmpanel::shown_panel_rect(gm_panel_top()))
-                    {
+                    if let (Some(pos), Some(panel)) = (
+                        self.cursor_pos,
+                        csynthpanel::shown_panel_rect(csynth_panel_top()),
+                    ) {
                         if panel.contains(pos) {
-                            if let Some(control) = gmpanel::control_at(panel, pos) {
+                            if let Some(control) = csynthpanel::control_at(panel, pos) {
                                 let left = button == MouseButton::Left;
-                                self.press_gm_control(control, left, pos);
+                                self.press_csynth_control(control, left, pos);
                             }
                             return;
                         }
@@ -3814,9 +3815,9 @@ impl ApplicationHandler for App {
                 let mt32_panel = super::mt32_panel_shown()
                     .then(|| self.mt32_panel_view())
                     .flatten();
-                #[cfg(feature = "gm")]
-                let gm_panel = super::gm_panel_shown()
-                    .then(|| self.gm_panel_view())
+                #[cfg(feature = "coppersynth")]
+                let csynth_panel = super::csynth_panel_shown()
+                    .then(|| self.csynth_panel_view())
                     .flatten();
                 // The Caps Lock lamp is the MCU's, so it is read fresh
                 // every frame rather than mirrored from the clicks.
@@ -3917,9 +3918,9 @@ impl ApplicationHandler for App {
                     if let Some(panel) = &mt32_panel {
                         mt32panel::draw(frame, panel, present_height(), r.texture_scale);
                     }
-                    #[cfg(feature = "gm")]
-                    if let Some(panel) = &gm_panel {
-                        gmpanel::draw(frame, panel, gm_panel_top(), r.texture_scale);
+                    #[cfg(feature = "coppersynth")]
+                    if let Some(panel) = &csynth_panel {
+                        csynthpanel::draw(frame, panel, csynth_panel_top(), r.texture_scale);
                     }
                     if let Some(panel) = &kbd_panel {
                         kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
@@ -4326,11 +4327,11 @@ impl ApplicationHandler for App {
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
-        #[cfg(feature = "gm")]
+        #[cfg(feature = "coppersynth")]
         {
-            self.repeat_gm_dial();
-            self.repeat_gm_buttons();
-            self.animate_gm_panel();
+            self.repeat_csynth_dial();
+            self.repeat_csynth_buttons();
+            self.animate_csynth_panel();
         }
         #[cfg(feature = "mt32")]
         {
@@ -4345,9 +4346,9 @@ impl ApplicationHandler for App {
         // Coppersynth's faults and display lines ride the same
         // frame poll; the display only ever has lines while a game writes
         // them, so this is a cheap drain of an empty Vec almost always.
-        #[cfg(feature = "gm")]
+        #[cfg(feature = "coppersynth")]
         if self.serial_is_midi {
-            self.report_gm();
+            self.report_csynth();
         }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
@@ -5484,31 +5485,31 @@ impl App {
             (false, false, false, None::<String>, None::<String>);
         // Selected, not powered: the Front Panel row stays reachable while
         // the unit is switched off at its own fascia.
-        #[cfg(feature = "gm")]
-        let gm_attached = self
+        #[cfg(feature = "coppersynth")]
+        let csynth_attached = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .is_some_and(|sink| sink.gm_selected());
-        #[cfg(not(feature = "gm"))]
-        let gm_attached = false;
-        #[cfg(feature = "gm")]
-        let gm_mt32_mode = self
+            .is_some_and(|sink| sink.csynth_selected());
+        #[cfg(not(feature = "coppersynth"))]
+        let csynth_attached = false;
+        #[cfg(feature = "coppersynth")]
+        let csynth_mt32_mode = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .map(|sink| sink.gm_mt32_mode().to_string())
+            .map(|sink| sink.csynth_mt32_mode().to_string())
             .unwrap_or_default();
-        #[cfg(not(feature = "gm"))]
-        let gm_mt32_mode = String::new();
-        #[cfg(feature = "gm")]
-        let gm_custom_font = self
+        #[cfg(not(feature = "coppersynth"))]
+        let csynth_mt32_mode = String::new();
+        #[cfg(feature = "coppersynth")]
+        let csynth_custom_font = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .is_some_and(|sink| sink.gm_custom_soundfont());
-        #[cfg(not(feature = "gm"))]
-        let gm_custom_font = false;
+            .is_some_and(|sink| sink.csynth_custom_soundfont());
+        #[cfg(not(feature = "coppersynth"))]
+        let csynth_custom_font = false;
 
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
@@ -5551,11 +5552,11 @@ impl App {
             mt32_control_rom,
             mt32_pcm_rom,
             mt32_panel: crate::video::mt32_panel_shown(),
-            gm_available: cfg!(feature = "gm"),
-            gm_attached,
-            gm_panel: crate::video::gm_panel_shown(),
-            gm_mt32_mode: &gm_mt32_mode,
-            gm_custom_font,
+            csynth_available: cfg!(feature = "coppersynth"),
+            csynth_attached,
+            csynth_panel: crate::video::csynth_panel_shown(),
+            csynth_mt32_mode: &csynth_mt32_mode,
+            csynth_custom_font,
             keyboard_panel: crate::video::keyboard_panel_shown(),
             mt32_lcd: crate::video::mt32_lcd(),
             sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
@@ -5772,8 +5773,8 @@ impl App {
                     self.sync_mt32_panel();
                     self.report_mt32_fault();
                 }
-                #[cfg(feature = "gm")]
-                self.sync_gm_panel();
+                #[cfg(feature = "coppersynth")]
+                self.sync_csynth_panel();
                 self.show_osd(format!("MIDI output: {shown}"));
             }
             #[cfg(not(feature = "midi"))]
@@ -5790,70 +5791,70 @@ impl App {
             }
             #[cfg(not(feature = "mt32"))]
             A::ToggleMt32Panel => {}
-            #[cfg(feature = "gm")]
-            A::ToggleGmPanel => {
-                let shown = !crate::video::gm_panel_shown();
-                self.set_gm_panel_shown(shown);
+            #[cfg(feature = "coppersynth")]
+            A::ToggleCsynthPanel => {
+                let shown = !crate::video::csynth_panel_shown();
+                self.set_csynth_panel_shown(shown);
                 self.show_osd(if shown {
                     "Coppersynth: front panel shown"
                 } else {
                     "Coppersynth: front panel hidden"
                 });
             }
-            #[cfg(not(feature = "gm"))]
-            A::ToggleGmPanel => {}
-            #[cfg(feature = "gm")]
-            A::LoadGmSoundfont => self.load_gm_soundfont(),
-            #[cfg(not(feature = "gm"))]
-            A::LoadGmSoundfont => {}
+            #[cfg(not(feature = "coppersynth"))]
+            A::ToggleCsynthPanel => {}
+            #[cfg(feature = "coppersynth")]
+            A::LoadCsynthSoundfont => self.load_csynth_soundfont(),
+            #[cfg(not(feature = "coppersynth"))]
+            A::LoadCsynthSoundfont => {}
             #[cfg(feature = "mt32")]
             A::LoadMt32ControlRom => self.load_mt32_rom(true),
             #[cfg(feature = "mt32")]
             A::LoadMt32PcmRom => self.load_mt32_rom(false),
             #[cfg(not(feature = "mt32"))]
             A::LoadMt32ControlRom | A::LoadMt32PcmRom => {}
-            #[cfg(feature = "gm")]
-            A::ResetGmSoundfont => {
+            #[cfg(feature = "coppersynth")]
+            A::ResetCsynthSoundfont => {
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.reset_gm_soundfont();
+                    sink.reset_csynth_soundfont();
                 }
                 self.emu.bus_mut().paula.rearm_synth_audio();
                 let fitted = self
                     .emu
                     .bus_mut()
                     .midi_serial_mut()
-                    .is_some_and(|sink| sink.gm().is_some());
+                    .is_some_and(|sink| sink.csynth().is_some());
                 if fitted {
                     self.show_osd("Coppersynth: GeneralUser-GS");
                 } else {
-                    self.report_gm();
+                    self.report_csynth();
                 }
             }
-            #[cfg(not(feature = "gm"))]
-            A::ResetGmSoundfont => {}
-            #[cfg(feature = "gm")]
-            A::SetGmMt32Mode(mode) => {
+            #[cfg(not(feature = "coppersynth"))]
+            A::ResetCsynthSoundfont => {}
+            #[cfg(feature = "coppersynth")]
+            A::SetCsynthMt32Mode(mode) => {
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_gm_mt32_mode(mode);
+                    sink.set_csynth_mt32_mode(mode);
                 }
                 let parsed = match mode {
-                    "on" => crate::gm::Mt32Mode::On,
-                    "off" => crate::gm::Mt32Mode::Off,
-                    _ => crate::gm::Mt32Mode::Auto,
+                    "on" => crate::csynth::Mt32Mode::On,
+                    "off" => crate::csynth::Mt32Mode::Off,
+                    _ => crate::csynth::Mt32Mode::Auto,
                 };
-                if let Some(gm) = self
+                if let Some(synth) = self
                     .emu
                     .bus_mut()
                     .midi_serial_mut()
-                    .and_then(crate::midi::MidiSerialSink::gm_mut)
+                    .and_then(crate::midi::MidiSerialSink::csynth_mut)
                 {
-                    gm.set_mt32_mode(parsed);
+                    synth.set_mt32_mode(parsed);
                 }
                 self.show_osd(format!("Coppersynth: MT-32 mode {mode}"));
                 self.request_redraw();
             }
-            #[cfg(not(feature = "gm"))]
-            A::SetGmMt32Mode(_) => {}
+            #[cfg(not(feature = "coppersynth"))]
+            A::SetCsynthMt32Mode(_) => {}
             #[cfg(feature = "mt32")]
             A::SetMt32Lcd(style) => {
                 crate::video::set_mt32_lcd(style);
@@ -6024,18 +6025,18 @@ impl App {
 
     /// Show or hide Coppersynth's panel, resizing the presentation
     /// exactly as the MT-32's does.
-    #[cfg(feature = "gm")]
-    fn set_gm_panel_shown(&mut self, shown: bool) {
-        if shown == crate::video::gm_panel_shown() {
+    #[cfg(feature = "coppersynth")]
+    fn set_csynth_panel_shown(&mut self, shown: bool) {
+        if shown == crate::video::csynth_panel_shown() {
             return;
         }
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
-        crate::video::set_gm_panel_shown(shown);
+        crate::video::set_csynth_panel_shown(shown);
         if self.resync_canvas_height() {
             self.follow_canvas_change(was_canvas_sized, canvas_before);
         } else {
-            crate::video::set_gm_panel_shown(!shown);
+            crate::video::set_csynth_panel_shown(!shown);
             let _ = self.resync_canvas_height();
         }
         self.request_redraw();
@@ -6272,77 +6273,83 @@ impl App {
 
     /// A press on Coppersynth's panel. The pointer side resolves it
     /// to a semantic press; the engine's own panel decides what it means.
-    #[cfg(feature = "gm")]
-    fn press_gm_control(&mut self, control: gmpanel::GmControl, left: bool, pos: (i32, i32)) {
-        let Some(rect) = gmpanel::shown_panel_rect(gm_panel_top()) else {
+    #[cfg(feature = "coppersynth")]
+    fn press_csynth_control(
+        &mut self,
+        control: csynthpanel::CsynthControl,
+        left: bool,
+        pos: (i32, i32),
+    ) {
+        let Some(rect) = csynthpanel::shown_panel_rect(csynth_panel_top()) else {
             return;
         };
         let powered = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .is_some_and(|sink| sink.gm().is_some());
-        if control == gmpanel::GmControl::Dial {
+            .is_some_and(|sink| sink.csynth().is_some());
+        if control == csynthpanel::CsynthControl::Dial {
             // The knob turns whether or not the unit is on -- it is a
             // pot -- but with the engine gone there is nothing to hear.
-            let volume = self.gm_volume;
-            if let Some(v) = self.gm_panel.grab_dial(left, pos, rect, volume) {
-                self.set_gm_volume(v);
+            let volume = self.csynth_volume;
+            if let Some(v) = self.csynth_panel.grab_dial(left, pos, rect, volume) {
+                self.set_csynth_volume(v);
             }
             self.request_redraw();
             return;
         }
-        let press = self.gm_panel.press(control, left, powered);
-        self.apply_gm_press(press);
+        let press = self.csynth_panel.press(control, left, powered);
+        self.apply_csynth_press(press);
         self.request_redraw();
     }
 
     /// Carry out what a press resolved to.
-    #[cfg(feature = "gm")]
-    fn apply_gm_press(&mut self, press: gmpanel::GmPress) {
-        use gmpanel::GmPress;
+    #[cfg(feature = "coppersynth")]
+    fn apply_csynth_press(&mut self, press: csynthpanel::CsynthPress) {
+        use csynthpanel::CsynthPress;
         match press {
-            GmPress::None => {}
-            GmPress::Button(button) => {
+            CsynthPress::None => {}
+            CsynthPress::Button(button) => {
                 let request = self
                     .emu
                     .bus_mut()
                     .midi_serial_mut()
-                    .and_then(crate::midi::MidiSerialSink::gm_mut)
-                    .and_then(|gm| gm.panel_button(button));
-                if let Some(crate::gm::PanelRequest::Mt32Mode(mode)) = request {
+                    .and_then(crate::midi::MidiSerialSink::csynth_mut)
+                    .and_then(|synth| synth.panel_button(button));
+                if let Some(crate::csynth::PanelRequest::Mt32Mode(mode)) = request {
                     // The engine already switched; mirror the choice into
                     // the session's options so a power cycle keeps it.
                     let value = match mode {
-                        crate::gm::Mt32Mode::On => "on",
-                        crate::gm::Mt32Mode::Off => "off",
-                        crate::gm::Mt32Mode::Auto => "auto",
+                        crate::csynth::Mt32Mode::On => "on",
+                        crate::csynth::Mt32Mode::Off => "off",
+                        crate::csynth::Mt32Mode::Auto => "auto",
                     };
                     if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.set_gm_mt32_mode(value);
+                        sink.set_csynth_mt32_mode(value);
                     }
                 }
             }
-            GmPress::PowerOn(held) => {
+            CsynthPress::PowerOn(held) => {
                 // Both INSTRUMENT halves held through the power-on put
                 // the default soundfont back before the unit comes up.
-                let reset_font = held == [crate::gm::Button::Both(crate::gm::Pair::Instrument)];
+                let reset_font =
+                    held == [crate::csynth::Button::Both(crate::csynth::Pair::Instrument)];
                 if reset_font {
                     if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.reset_gm_soundfont();
+                        sink.reset_csynth_soundfont();
                     }
                 }
-                self.set_gm_powered(true);
-                let came_up = if let Some(gm) = self
+                self.set_csynth_powered(true);
+                let came_up = if let Some(synth) = self
                     .emu
                     .bus_mut()
                     .midi_serial_mut()
-                    .and_then(crate::midi::MidiSerialSink::gm_mut)
+                    .and_then(crate::midi::MidiSerialSink::csynth_mut)
                 {
                     // What was held on the fascia through the power-on
                     // reaches the unit the way it reads its own buttons.
                     if !reset_font {
-                        gm.panel_power_on_held(&held);
+                        synth.panel_power_on_held(&held);
                     }
                     true
                 } else {
@@ -6356,21 +6363,21 @@ impl App {
                     });
                 } else {
                     // Asked to switch on and it did not: say why.
-                    self.report_gm();
+                    self.report_csynth();
                 }
             }
-            GmPress::PowerOff => {
-                self.set_gm_powered(false);
+            CsynthPress::PowerOff => {
+                self.set_csynth_powered(false);
                 self.show_osd("Coppersynth: power off");
             }
-            GmPress::Load => self.load_gm_soundfont(),
+            CsynthPress::Load => self.load_csynth_soundfont(),
         }
     }
 
     /// The soundfont picker, reached from the fascia's LOAD button and
     /// the menu alike: pick a file, refit the synth around it.
-    #[cfg(feature = "gm")]
-    fn load_gm_soundfont(&mut self) {
+    #[cfg(feature = "coppersynth")]
+    fn load_csynth_soundfont(&mut self) {
         let picked = rfd::FileDialog::new()
             .set_title("Choose a soundfont")
             .add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
@@ -6383,19 +6390,19 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-            sink.set_gm_soundfont(path);
+            sink.set_csynth_soundfont(path);
         }
         self.emu.bus_mut().paula.rearm_synth_audio();
         let fitted = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .is_some_and(|sink| sink.gm().is_some());
+            .is_some_and(|sink| sink.csynth().is_some());
         if fitted {
             self.show_osd(format!("Coppersynth: {name}"));
         } else {
             // The file would not load; the fault says why.
-            self.report_gm();
+            self.report_csynth();
         }
     }
 
@@ -6461,37 +6468,37 @@ impl App {
 
     /// The switch itself: drop or refit the engine, and ask Paula for
     /// synth audio again when it changes hands.
-    #[cfg(feature = "gm")]
-    fn set_gm_powered(&mut self, on: bool) {
+    #[cfg(feature = "coppersynth")]
+    fn set_csynth_powered(&mut self, on: bool) {
         if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-            sink.set_gm_power(on);
+            sink.set_csynth_power(on);
         }
         self.emu.bus_mut().paula.rearm_synth_audio();
     }
 
     /// The VOLUME knob's value, applied and remembered: the fascia keeps
     /// the knob's position even while the unit is switched off.
-    #[cfg(feature = "gm")]
-    fn set_gm_volume(&mut self, volume: f32) {
-        self.gm_volume = volume;
-        if let Some(gm) = self
+    #[cfg(feature = "coppersynth")]
+    fn set_csynth_volume(&mut self, volume: f32) {
+        self.csynth_volume = volume;
+        if let Some(synth) = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .and_then(crate::midi::MidiSerialSink::gm_mut)
+            .and_then(crate::midi::MidiSerialSink::csynth_mut)
         {
-            gm.panel_volume(volume);
+            synth.panel_volume(volume);
         }
     }
 
     /// Follow the pointer while a button is held on the knob.
-    #[cfg(feature = "gm")]
-    fn drag_gm_dial(&mut self, pos: (i32, i32)) {
-        let Some(rect) = gmpanel::shown_panel_rect(gm_panel_top()) else {
+    #[cfg(feature = "coppersynth")]
+    fn drag_csynth_dial(&mut self, pos: (i32, i32)) {
+        let Some(rect) = csynthpanel::shown_panel_rect(csynth_panel_top()) else {
             return;
         };
-        if let Some(v) = self.gm_panel.drag_dial(pos, rect) {
-            self.set_gm_volume(v);
+        if let Some(v) = self.csynth_panel.drag_dial(pos, rect) {
+            self.set_csynth_volume(v);
             self.request_redraw();
         }
     }
@@ -6502,90 +6509,90 @@ impl App {
     /// at most twenty times a second. The audio owns the machine; the
     /// LCD takes what is left. Hidden, the whole check is one flag
     /// read.
-    #[cfg(feature = "gm")]
-    fn animate_gm_panel(&mut self) {
-        if !crate::video::gm_panel_shown() {
+    #[cfg(feature = "coppersynth")]
+    fn animate_csynth_panel(&mut self) {
+        if !crate::video::csynth_panel_shown() {
             return;
         }
-        let now_ms = self.gm_panel_epoch.elapsed().as_millis() as u64;
+        let now_ms = self.csynth_panel_epoch.elapsed().as_millis() as u64;
         let blink_on = (now_ms / 300).is_multiple_of(2);
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
             return;
         };
-        if !sink.gm_selected() {
+        if !sink.csynth_selected() {
             return;
         }
-        let key = match sink.gm_mut() {
-            Some(gm) => (
-                Some(gm.panel_screen(now_ms)),
+        let key = match sink.csynth_mut() {
+            Some(synth) => (
+                Some(synth.panel_screen(now_ms)),
                 true,
-                gm.panel_monitoring() && blink_on,
+                synth.panel_monitoring() && blink_on,
             ),
             None => (None, false, false),
         };
-        if self.gm_panel_drawn.as_ref() == Some(&key) {
+        if self.csynth_panel_drawn.as_ref() == Some(&key) {
             return;
         }
         // A changed glass redraws when the cap allows; until then the
         // change stays pending, so nothing is ever lost.
-        if self.gm_panel_redraw_at.elapsed() < std::time::Duration::from_millis(50) {
+        if self.csynth_panel_redraw_at.elapsed() < std::time::Duration::from_millis(50) {
             return;
         }
-        self.gm_panel_redraw_at = std::time::Instant::now();
-        self.gm_panel_drawn = Some(key);
+        self.csynth_panel_redraw_at = std::time::Instant::now();
+        self.csynth_panel_drawn = Some(key);
         self.request_redraw();
     }
 
     /// Repeat a held arrow button, gathering speed.
-    #[cfg(feature = "gm")]
-    fn repeat_gm_buttons(&mut self) {
-        if let Some(button) = self.gm_panel.repeat_button() {
-            self.apply_gm_press(gmpanel::GmPress::Button(button));
+    #[cfg(feature = "coppersynth")]
+    fn repeat_csynth_buttons(&mut self) {
+        if let Some(button) = self.csynth_panel.repeat_button() {
+            self.apply_csynth_press(csynthpanel::CsynthPress::Button(button));
             self.request_redraw();
         }
     }
 
     /// Step the knob on while a button rests on it.
-    #[cfg(feature = "gm")]
-    fn repeat_gm_dial(&mut self) {
-        if !self.gm_panel.dial_held() {
+    #[cfg(feature = "coppersynth")]
+    fn repeat_csynth_dial(&mut self) {
+        if !self.csynth_panel.dial_held() {
             return;
         }
-        if let Some(v) = self.gm_panel.repeat_dial(self.gm_volume) {
-            self.set_gm_volume(v);
+        if let Some(v) = self.csynth_panel.repeat_dial(self.csynth_volume) {
+            self.set_csynth_volume(v);
             self.request_redraw();
         }
     }
 
     /// What Coppersynth's panel should show, when it is the output.
-    #[cfg(feature = "gm")]
-    fn gm_panel_view(&mut self) -> Option<gmpanel::GmPanelView> {
-        let now_ms = self.gm_panel_epoch.elapsed().as_millis() as u64;
+    #[cfg(feature = "coppersynth")]
+    fn csynth_panel_view(&mut self) -> Option<csynthpanel::CsynthPanelView> {
+        let now_ms = self.csynth_panel_epoch.elapsed().as_millis() as u64;
         let hover = self
             .cursor_pos
-            .zip(gmpanel::shown_panel_rect(gm_panel_top()))
-            .and_then(|(pos, panel)| gmpanel::hover_at(panel, pos));
-        let down = self.gm_panel.down();
-        let stored_volume = self.gm_volume;
+            .zip(csynthpanel::shown_panel_rect(csynth_panel_top()))
+            .and_then(|(pos, panel)| csynthpanel::hover_at(panel, pos));
+        let down = self.csynth_panel.down();
+        let stored_volume = self.csynth_volume;
         let sink = self.emu.bus_mut().midi_serial_mut()?;
-        if !sink.gm_selected() {
+        if !sink.csynth_selected() {
             return None;
         }
-        let powered = sink.gm().is_some();
+        let powered = sink.csynth().is_some();
         // Switched off, the fascia is still there: dark glass, and the
         // knob standing where the hand left it.
-        let (screen, monitoring, volume) = match sink.gm_mut() {
-            Some(gm) => (
-                gm.panel_screen(now_ms),
-                gm.panel_monitoring(),
-                gm.panel_volume_value(),
+        let (screen, monitoring, volume) = match sink.csynth_mut() {
+            Some(synth) => (
+                synth.panel_screen(now_ms),
+                synth.panel_monitoring(),
+                synth.panel_volume_value(),
             ),
-            None => (gmpanel::dark_screen(), false, stored_volume),
+            None => (csynthpanel::dark_screen(), false, stored_volume),
         };
         if powered {
-            self.gm_volume = volume;
+            self.csynth_volume = volume;
         }
-        Some(gmpanel::GmPanelView {
+        Some(csynthpanel::CsynthPanelView {
             screen,
             powered,
             mute_blinks: monitoring,
@@ -6599,17 +6606,17 @@ impl App {
     /// Surface a fault -- the synth could not be fitted -- on the OSD,
     /// and drain any display lines to the debug log; the front panel's
     /// glass is where those are really shown.
-    #[cfg(feature = "gm")]
-    fn report_gm(&mut self) {
+    #[cfg(feature = "coppersynth")]
+    fn report_csynth(&mut self) {
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
             return;
         };
-        let fault = sink.take_gm_fault();
+        let fault = sink.take_csynth_fault();
         // Display lines are drained but no longer shown: the front panel's
         // LCD is where they belong, and it is on its way. (Surfacing them
         // on the OSD as an option may return; the tap in the sink stays.)
-        for line in sink.take_gm_display() {
-            log::debug!("gm display: {line}");
+        for line in sink.take_csynth_display() {
+            log::debug!("coppersynth display: {line}");
         }
         if let Some(fault) = fault {
             self.warn_osd(format!("Coppersynth: {fault}"));
@@ -6640,15 +6647,15 @@ impl App {
 
     /// The same for the Coppersynth fascia: deselecting the synth takes
     /// its panel down rather than leaving a blank strip.
-    #[cfg(feature = "gm")]
-    fn sync_gm_panel(&mut self) {
+    #[cfg(feature = "coppersynth")]
+    fn sync_csynth_panel(&mut self) {
         let selected = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .is_some_and(|sink| sink.gm_selected());
+            .is_some_and(|sink| sink.csynth_selected());
         if !selected {
-            self.set_gm_panel_shown(false);
+            self.set_csynth_panel_shown(false);
         }
     }
 
@@ -8715,8 +8722,8 @@ impl App {
                 ],
             ),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
-            #[cfg(feature = "gm")]
-            LauncherField::GmSoundfont => {
+            #[cfg(feature = "coppersynth")]
+            LauncherField::CsynthSoundfont => {
                 dialog.add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
             }
             // SCSI, IDE, and lide drive slots all take hard disks or CD
@@ -10021,7 +10028,7 @@ impl App {
             self.tell_panel_the_rom_version();
             self.report_mt32_fault();
         }
-        #[cfg(feature = "gm")]
+        #[cfg(feature = "coppersynth")]
         {
             // Coppersynth's fascia follows the same rule as the MT-32's:
             // no synth on the new machine, no strip under its display.
@@ -10029,8 +10036,8 @@ impl App {
                 .emu
                 .bus_mut()
                 .midi_serial_mut()
-                .is_some_and(|sink| sink.gm_selected());
-            self.set_gm_panel_shown(fitted && cfg.gm.panel);
+                .is_some_and(|sink| sink.csynth_selected());
+            self.set_csynth_panel_shown(fitted && cfg.csynth.panel);
         }
         self.ui.menu_open = false;
         self.ui.panel = None;
@@ -13478,7 +13485,7 @@ impl App {
 
     /// Say something that did not go as asked, in amber. Otherwise as
     /// [`Self::show_osd`].
-    #[cfg(any(feature = "mt32", feature = "gm"))]
+    #[cfg(any(feature = "mt32", feature = "coppersynth"))]
     fn warn_osd(&mut self, text: impl Into<String>) {
         self.osd = Some(Osd {
             text: text.into(),
@@ -14045,8 +14052,8 @@ mod console;
 #[cfg(feature = "control")]
 mod control;
 mod crt_shader;
-#[cfg(feature = "gm")]
-mod gmpanel;
+#[cfg(feature = "coppersynth")]
+mod csynthpanel;
 mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]

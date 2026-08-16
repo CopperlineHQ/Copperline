@@ -18,16 +18,16 @@ the launcher, that is the **I/O Ports** tab, Serial section: set
 Choosing it reveals the rest of the rows: the soundfont, the front panel,
 and MT-32 mode. In a running session the same choice is under the menu's
 **MIDI Out**, where Coppersynth is always offered. On the command line,
-`--midi-out gm` selects it and implies MIDI mode.
+`--midi-out coppersynth` selects it and implies MIDI mode.
 
 In the configuration file:
 
 ```toml
 [serial]
 mode = "midi"
-midi_out = "gm"
+midi_out = "coppersynth"
 
-[gm]
+[coppersynth]
 # soundfont = "/path/to/bank.sf2"   # override the built-in bank
 # mt32_mode = "auto"                # auto, on, or off
 # panel = true                      # start with the front panel shown
@@ -38,7 +38,7 @@ midi_out = "gm"
 Coppersynth carries its own bank -- **GeneralUser GS** by S. Christian
 Collins, an instrument library in its own right with the complete General
 MIDI sound set, SFX bank and drum kits included, at a very reasonable
-size -- and needs no files. To play a different one, set `[gm] soundfont`,
+size -- and needs no files. To play a different one, set `[coppersynth] soundfont`,
 use the launcher's **Browse**, or press the panel's **LOAD** button in a
 running session; `.sf2` files and `.zip` archives containing one both
 load, and **Reset** puts the built-in bank back. A bank with defects
@@ -60,7 +60,7 @@ CM-64/32L drum kit, MT-32 rhythm selects it automatically.
 
 ## The front panel
 
-**Front panel** in the launcher row, the menu toggle, or `[gm] panel`
+**Front panel** in the launcher row, the menu toggle, or `[coppersynth] panel`
 puts the module's fascia under the display: the backlit LCD with the part
 values, the sixteen-part level meters, and the sound's name -- a game's
 MT-32 instrument uploads show under their own names. Buttons press with a
@@ -86,6 +86,21 @@ Two start-up gestures, made by latching buttons on a switched-off unit
 and pressing **POWER**: both **INSTRUMENT** halves restore the built-in
 soundfont; **INSTRUMENT ►** asks `MT-32, Sure?` -- **ALL** turns MT-32
 mode on, **MUTE** turns it off.
+
+## Building without it
+
+The `coppersynth` Cargo feature, on by default, compiles the synth in.
+To build without it:
+
+```sh
+cargo build --release --no-default-features \
+  --features "midi,frontend,wasm-boards,control,ctl-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi"
+```
+
+This is the normal desktop feature set with only `coppersynth` omitted.
+The launcher rows and the MIDI Out entry disappear, and a configuration
+naming `midi_out = "coppersynth"` is refused with a warning that says
+what to rebuild with.
 
 ## Coppersynth and the MT-32
 

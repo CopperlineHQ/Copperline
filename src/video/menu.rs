@@ -68,12 +68,12 @@ pub enum MenuAction {
     SetSamplerInput(String),
     /// Show or hide the MT-32's front panel.
     ToggleMt32Panel,
-    ToggleGmPanel,
-    LoadGmSoundfont,
-    ResetGmSoundfont,
+    ToggleCsynthPanel,
+    LoadCsynthSoundfont,
+    ResetCsynthSoundfont,
     LoadMt32ControlRom,
     LoadMt32PcmRom,
-    SetGmMt32Mode(&'static str),
+    SetCsynthMt32Mode(&'static str),
     /// How that panel's display is lit.
     SetMt32Lcd(crate::config::Mt32Lcd),
     /// Step the gain by one notch, up (+1) or down (-1).
@@ -465,13 +465,13 @@ pub struct MenuState<'a> {
     /// Whether Coppersynth is compiled in at all, whether it is the
     /// selected output, whether its panel is up, and which MT-32 mode
     /// its options name.
-    pub gm_available: bool,
-    pub gm_attached: bool,
-    pub gm_panel: bool,
-    pub gm_mt32_mode: &'a str,
+    pub csynth_available: bool,
+    pub csynth_attached: bool,
+    pub csynth_panel: bool,
+    pub csynth_mt32_mode: &'a str,
     /// Whether a soundfont other than the bundled default is loaded,
     /// which is what Reset has to undo.
-    pub gm_custom_font: bool,
+    pub csynth_custom_font: bool,
     pub sampler_input: &'a str,
     pub sampler_inputs: &'a [String],
     pub sampler_gain: f32,
@@ -530,7 +530,10 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
     // A port with nothing on it has nothing to set, so it contributes no
     // category rather than one that opens onto an empty list. The MT-32
     // counts: a machine with no host MIDI devices can still play to it.
-    if !s.midi_inputs.is_empty() || !s.midi_outputs.is_empty() || s.mt32_available || s.gm_available
+    if !s.midi_inputs.is_empty()
+        || !s.midi_outputs.is_empty()
+        || s.mt32_available
+        || s.csynth_available
     {
         rows.push(MenuRow::submenu("Serial Port", serial_rows(s)));
     }
@@ -764,7 +767,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
     // The MT-32 is one of the outputs whenever it is compiled in -- a
     // machine with no host MIDI devices and no ROMs yet can still choose
     // it, and the submenu below is where the ROMs then come from.
-    if !s.midi_outputs.is_empty() || s.mt32_available || s.gm_available {
+    if !s.midi_outputs.is_empty() || s.mt32_available || s.csynth_available {
         let mut outputs = vec![MenuRow::choice(
             "None",
             MenuAction::SetMidiOutput(None),
@@ -786,11 +789,11 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
         }
         // Coppersynth needs no hardware and no configuration, so it is
         // always on offer.
-        if s.gm_available {
+        if s.csynth_available {
             outputs.push(MenuRow::choice(
-                GM_LABEL,
-                MenuAction::SetMidiOutput(Some(crate::config::MIDI_OUT_GM.to_string())),
-                s.gm_attached,
+                CSYNTH_LABEL,
+                MenuAction::SetMidiOutput(Some(crate::config::MIDI_OUT_CSYNTH.to_string())),
+                s.csynth_attached,
             ));
         }
         rows.push(MenuRow::submenu("MIDI Out", outputs));
@@ -833,31 +836,31 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
     }
     // Coppersynth's own settings, likewise: the main functions for
     // anyone who does not want the front panel up.
-    if s.gm_attached {
+    if s.csynth_attached {
         let modes = ["Auto", "On", "Off"]
             .iter()
             .map(|label| {
                 let value = label.to_ascii_lowercase();
-                let selected = s.gm_mt32_mode.eq_ignore_ascii_case(&value);
+                let selected = s.csynth_mt32_mode.eq_ignore_ascii_case(&value);
                 let value: &'static str = match *label {
                     "On" => "on",
                     "Off" => "off",
                     _ => "auto",
                 };
-                MenuRow::choice(label, MenuAction::SetGmMt32Mode(value), selected)
+                MenuRow::choice(label, MenuAction::SetCsynthMt32Mode(value), selected)
             })
             .collect();
         rows.push(MenuRow::submenu(
-            GM_LABEL,
+            CSYNTH_LABEL,
             vec![
-                MenuRow::toggle("Front Panel", MenuAction::ToggleGmPanel, s.gm_panel),
+                MenuRow::toggle("Front Panel", MenuAction::ToggleCsynthPanel, s.csynth_panel),
                 MenuRow::submenu(
                     "Soundfont",
                     vec![
-                        MenuRow::action("Load...", MenuAction::LoadGmSoundfont),
+                        MenuRow::action("Load...", MenuAction::LoadCsynthSoundfont),
                         // Nothing to undo while the default is in force.
-                        MenuRow::action("Reset", MenuAction::ResetGmSoundfont)
-                            .available(s.gm_custom_font),
+                        MenuRow::action("Reset", MenuAction::ResetCsynthSoundfont)
+                            .available(s.csynth_custom_font),
                     ],
                 ),
                 MenuRow::submenu("MT-32 Mode", modes),
@@ -868,7 +871,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 /// What the synth is called in the menu.
-const GM_LABEL: &str = "Coppersynth";
+const CSYNTH_LABEL: &str = "Coppersynth";
 
 /// What the MT-32 output is called in the menu, and the endpoint name that
 /// selects it.
@@ -1178,11 +1181,11 @@ mod tests {
             mt32_panel: false,
             mt32_control_rom: None,
             mt32_pcm_rom: None,
-            gm_available: false,
-            gm_attached: false,
-            gm_panel: false,
-            gm_mt32_mode: "auto",
-            gm_custom_font: false,
+            csynth_available: false,
+            csynth_attached: false,
+            csynth_panel: false,
+            csynth_mt32_mode: "auto",
+            csynth_custom_font: false,
             mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: sampler,

@@ -1256,26 +1256,26 @@ fn print_help() {
     // in every build, and it names midi as a mode. The MT-32 and Coppersynth
     // ride with them when their features are in, both reached through
     // `--midi-out`.
-    #[cfg(all(feature = "midi", feature = "mt32", feature = "gm"))]
-    let midi = "--midi-out NAME                host MIDI destination, or mt32/gm (implies --serial midi)\n  \
+    #[cfg(all(feature = "midi", feature = "mt32", feature = "coppersynth"))]
+    let midi = "--midi-out NAME                host MIDI destination, or mt32/coppersynth (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  \
                 --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
                 --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
                 --mt32-panel                   show the MT-32's front panel under the display\n  ";
-    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "gm")))]
+    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let midi = "--midi-out NAME                host MIDI destination, or mt32 (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  \
                 --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
                 --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
                 --mt32-panel                   show the MT-32's front panel under the display\n  ";
-    #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "gm"))]
+    #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
     let midi =
-        "--midi-out NAME                host MIDI destination, or gm (implies --serial midi)\n  \
+        "--midi-out NAME                host MIDI destination, or coppersynth (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  ";
-    #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "gm")))]
+    #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let midi = "--midi-out NAME                host MIDI destination (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  ";
@@ -1912,6 +1912,17 @@ fn configured_audio_stem_sources(
             channel_names: &[],
         });
     }
+    // Coppersynth's frames arrive under their own name, so its stem
+    // registers on the same terms -- it just needs no ROMs to count.
+    let has_coppersynth = state_loaded
+        || (cfg!(feature = "coppersynth")
+            && config::midi_out_is_csynth(cfg.serial.midi_out.as_deref()));
+    if has_coppersynth {
+        sources.push(SourceSpec {
+            id: "coppersynth",
+            channel_names: &[],
+        });
+    }
     if state_loaded || cfg.toccata {
         sources.push(SourceSpec {
             id: "toccata",
@@ -2450,9 +2461,11 @@ fn main() -> Result<()> {
             && serial_midi
             && config::midi_out_is_mt32(cfg.serial.midi_out.as_deref()),
     );
-    #[cfg(feature = "gm")]
-    video::set_gm_panel_shown(
-        cfg.gm.panel && serial_midi && config::midi_out_is_gm(cfg.serial.midi_out.as_deref()),
+    #[cfg(feature = "coppersynth")]
+    video::set_csynth_panel_shown(
+        cfg.csynth.panel
+            && serial_midi
+            && config::midi_out_is_csynth(cfg.serial.midi_out.as_deref()),
     );
     video::set_mt32_lcd(cfg.serial.mt32_lcd);
     // Capture runs (--screenshot-after / --dump-frames) never present a
@@ -2916,6 +2929,11 @@ mod tests {
             "state loads must not skip toccata"
         );
         assert!(ids.contains(&"mhi"), "state loads must not skip mhi");
+        #[cfg(feature = "coppersynth")]
+        assert!(
+            ids.contains(&"coppersynth"),
+            "state loads must not skip coppersynth"
+        );
 
         // Without a state load, the same bare config registers none of them.
         let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, false)
@@ -2924,6 +2942,7 @@ mod tests {
             .collect();
         assert!(!ids.contains(&"cdda"));
         assert!(!ids.contains(&"mt32"));
+        assert!(!ids.contains(&"coppersynth"));
         assert!(!ids.contains(&"toccata"));
         assert!(!ids.contains(&"mhi"));
     }

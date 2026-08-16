@@ -601,7 +601,7 @@ dependencies = [
 [[package]]
 name = "coppersynth"
 version = "0.1.0"
-source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=859c83772a7326ca13aa7303dbf0a049f05c0578#859c83772a7326ca13aa7303dbf0a049f05c0578"
+source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=bf20a2b119ee9ef4cb1c820d51c1ed1c03292a0e#bf20a2b119ee9ef4cb1c820d51c1ed1c03292a0e"
 dependencies = [
  "zip",
 ]
@@ -3714,7 +3714,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

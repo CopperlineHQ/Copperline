@@ -25,7 +25,7 @@ use crate::video::font;
 
 /// How tall the panel is: exactly double the status bar, which is what
 /// four rows of buttons and the taller glass want.
-pub const GM_PANEL_HEIGHT: usize = 88;
+pub const CSYNTH_PANEL_HEIGHT: usize = 88;
 
 // The fascia and its buttons are the status bar's, so the strips read as
 // one piece of chrome.
@@ -97,7 +97,7 @@ const PAIR_GRID: [(Pair, &str, usize, usize); 8] = [
 
 /// Something on the panel the pointer can be over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GmControl {
+pub enum CsynthControl {
     All,
     Mute,
     /// The soundfont picker: the one button with no hardware ancestor.
@@ -111,7 +111,7 @@ pub enum GmControl {
 
 /// What the panel needs to draw itself.
 #[derive(Debug, Clone)]
-pub struct GmPanelView {
+pub struct CsynthPanelView {
     /// The glass, exactly as the engine's panel composed it.
     pub screen: Screen,
     pub powered: bool,
@@ -123,8 +123,8 @@ pub struct GmPanelView {
     /// Where the VOLUME knob stands, 0..=1.
     pub volume: f32,
     /// Buttons standing in: latched down, or lit under a click.
-    pub down: Vec<GmControl>,
-    pub hover: Option<GmControl>,
+    pub down: Vec<CsynthControl>,
+    pub hover: Option<CsynthControl>,
 }
 
 /// The glass with its light out: what the view carries while the unit
@@ -150,7 +150,7 @@ pub fn dark_screen() -> Screen {
 
 /// A press resolved against what is latched: what the window should do.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GmPress {
+pub enum CsynthPress {
     None,
     /// Hand this to the engine's panel.
     Button(Button),
@@ -163,7 +163,7 @@ pub enum GmPress {
 
 /// The panel's rect when it is actually up, and `None` when it is not.
 pub fn shown_panel_rect(top: usize) -> Option<Rect> {
-    crate::video::gm_panel_shown().then(|| panel_rect(top))
+    crate::video::csynth_panel_shown().then(|| panel_rect(top))
 }
 
 /// The panel's rect, its top edge at `top`.
@@ -172,7 +172,7 @@ pub fn panel_rect(top: usize) -> Rect {
         x: 0,
         y: top,
         w: crate::video::FB_WIDTH,
-        h: GM_PANEL_HEIGHT,
+        h: CSYNTH_PANEL_HEIGHT,
     }
 }
 
@@ -287,26 +287,26 @@ fn arrow_rect(panel: Rect, pair: Pair, dir: Dir) -> Rect {
 }
 
 /// Which control the pointer is over, if any.
-pub fn control_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
+pub fn control_at(panel: Rect, pos: (i32, i32)) -> Option<CsynthControl> {
     if power_rect(panel).contains(pos) {
-        return Some(GmControl::Power);
+        return Some(CsynthControl::Power);
     }
     if dial_rect(panel).contains(pos) {
-        return Some(GmControl::Dial);
+        return Some(CsynthControl::Dial);
     }
     if round_rect(panel, 0).contains(pos) {
-        return Some(GmControl::All);
+        return Some(CsynthControl::All);
     }
     if round_rect(panel, 1).contains(pos) {
-        return Some(GmControl::Mute);
+        return Some(CsynthControl::Mute);
     }
     if round_rect(panel, 2).contains(pos) {
-        return Some(GmControl::Load);
+        return Some(CsynthControl::Load);
     }
     for (pair, ..) in PAIR_GRID {
         for dir in [Dir::Left, Dir::Right] {
             if arrow_rect(panel, pair, dir).contains(pos) {
-                return Some(GmControl::Arrow(pair, dir));
+                return Some(CsynthControl::Arrow(pair, dir));
             }
         }
     }
@@ -316,8 +316,8 @@ pub fn control_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
 /// What answers to being hovered: buttons -- the switch included now
 /// that it presses like one -- but not the knob, which follows the
 /// hand already.
-pub fn hover_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
-    control_at(panel, pos).filter(|c| !matches!(c, GmControl::Dial))
+pub fn hover_at(panel: Rect, pos: (i32, i32)) -> Option<CsynthControl> {
+    control_at(panel, pos).filter(|c| !matches!(c, CsynthControl::Dial))
 }
 
 /// Whether a pointer move changed which button lights under it.
@@ -332,7 +332,7 @@ pub fn hover_changed(
 // --- drawing -------------------------------------------------------------
 
 /// Draw the panel.
-pub fn draw(frame: &mut [u8], view: &GmPanelView, top: usize, scale: usize) {
+pub fn draw(frame: &mut [u8], view: &CsynthPanelView, top: usize, scale: usize) {
     let panel = panel_rect(top);
     fill_rect(frame, scaled(panel, scale), PANEL_FACE, scale);
     draw_rect_bevel(
@@ -400,7 +400,7 @@ fn text_kerned(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale:
     }
 }
 
-fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
+fn draw_power(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
     let rect = power_rect(panel);
     text_small(
         frame,
@@ -412,8 +412,8 @@ fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     );
     // Momentary, like every button on the fascia: it pops in under the
     // pointer and back out. The lamp is what says the unit is on.
-    let pressed = view.down.contains(&GmControl::Power);
-    let hovered = view.hover == Some(GmControl::Power);
+    let pressed = view.down.contains(&CsynthControl::Power);
+    let hovered = view.hover == Some(CsynthControl::Power);
     draw_button(frame, rect, pressed, hovered, scale, true, true);
     draw_led_dot(frame, power_led_rect(panel), view.powered, scale);
 }
@@ -522,7 +522,7 @@ fn dial_value_at(panel: Rect, pos: (i32, i32)) -> Option<f32> {
 }
 
 /// The glass and everything on it.
-fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
+fn draw_lcd(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
     let lcd = lcd_rect(panel);
     // The gloss surround, then the recessed glass.
     let surround = Rect {
@@ -805,7 +805,7 @@ fn small_glyph(ch: char) -> [u8; 5] {
 
 /// ALL, MUTE and LOAD: the buttons are LEDs themselves -- a misted
 /// clear lens when off, the backlight's orange when their state is on.
-fn draw_rounds(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
+fn draw_rounds(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
     let mute_lit = if view.mute_blinks {
         view.blink_on
     } else {
@@ -813,13 +813,13 @@ fn draw_rounds(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) 
     };
     for (control, label, slot, lit) in [
         (
-            GmControl::All,
+            CsynthControl::All,
             "ALL",
             0,
             view.powered && view.screen.all_led,
         ),
-        (GmControl::Mute, "MUTE", 1, view.powered && mute_lit),
-        (GmControl::Load, "LOAD", 2, false),
+        (CsynthControl::Mute, "MUTE", 1, view.powered && mute_lit),
+        (CsynthControl::Load, "LOAD", 2, false),
     ] {
         let rect = round_rect(panel, slot);
         text_small(
@@ -882,7 +882,7 @@ fn draw_led_disc(frame: &mut [u8], rect: Rect, lit: bool, pressed: bool, scale: 
 }
 
 /// The pair grid, each with its caption printed above.
-fn draw_pairs(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
+fn draw_pairs(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
     let (_, pairs1, pairs2) = right_columns(panel);
     let y0 = pairs_origin(panel).1;
     for (pair, label, col, row) in PAIR_GRID {
@@ -898,7 +898,7 @@ fn draw_pairs(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
         );
         for dir in [Dir::Left, Dir::Right] {
             let rect = arrow_rect(panel, pair, dir);
-            let control = GmControl::Arrow(pair, dir);
+            let control = CsynthControl::Arrow(pair, dir);
             let down = view.down.contains(&control);
             let hovered = view.hover == Some(control);
             if pair == Pair::Part {
@@ -1153,18 +1153,18 @@ struct ArrowHold {
 /// The pointer side of the panel: latching, the momentary flash, and
 /// the knob's grab. The semantic state lives in the engine's own panel.
 #[derive(Debug, Default)]
-pub struct GmPanel {
+pub struct CsynthPanel {
     /// Buttons latched down by right-clicking them.
-    holding: Vec<GmControl>,
+    holding: Vec<CsynthControl>,
     /// The button a plain click is lighting until the mouse comes up.
-    flash: Option<GmControl>,
+    flash: Option<CsynthControl>,
     dial: Option<DialGrab>,
     hold: Option<ArrowHold>,
 }
 
-impl GmPanel {
+impl CsynthPanel {
     /// Everything standing in, for the view.
-    pub fn down(&self) -> Vec<GmControl> {
+    pub fn down(&self) -> Vec<CsynthControl> {
         self.holding
             .iter()
             .chain(self.flash.iter())
@@ -1173,18 +1173,22 @@ impl GmPanel {
     }
 
     /// A press on `control`. The window carries out what comes back.
-    pub fn press(&mut self, control: GmControl, left: bool, powered: bool) -> GmPress {
-        if control == GmControl::Dial {
+    pub fn press(&mut self, control: CsynthControl, left: bool, powered: bool) -> CsynthPress {
+        if control == CsynthControl::Dial {
             // The knob is not a button; the window steps or drags it.
-            return GmPress::None;
+            return CsynthPress::None;
         }
-        if control == GmControl::Load {
+        if control == CsynthControl::Load {
             // Momentary and outside the unit's combinations: it asks
             // the host for its file picker.
             self.flash = left.then_some(control);
-            return if left { GmPress::Load } else { GmPress::None };
+            return if left {
+                CsynthPress::Load
+            } else {
+                CsynthPress::None
+            };
         }
-        if control == GmControl::Power {
+        if control == CsynthControl::Power {
             // The switch takes whatever is latched with it, and pops
             // in under the click like every other button -- the lamp,
             // not the moulding, says whether the unit is on.
@@ -1192,9 +1196,9 @@ impl GmPanel {
             let held = self.held_buttons();
             self.holding.clear();
             return if powered {
-                GmPress::PowerOff
+                CsynthPress::PowerOff
             } else {
-                GmPress::PowerOn(held)
+                CsynthPress::PowerOn(held)
             };
         }
         // Right-clicking latches a button down; that is how two-button
@@ -1205,7 +1209,7 @@ impl GmPanel {
             if powered {
                 if let Some(button) = self.latched_gesture() {
                     self.holding.clear();
-                    return GmPress::Button(button);
+                    return CsynthPress::Button(button);
                 }
             } else {
                 // The splash combination switches the unit on itself:
@@ -1216,10 +1220,10 @@ impl GmPanel {
                     && held.contains(&Button::Both(Pair::Instrument))
                 {
                     self.holding.clear();
-                    return GmPress::PowerOn(held);
+                    return CsynthPress::PowerOn(held);
                 }
             }
-            return GmPress::None;
+            return CsynthPress::None;
         }
         self.flash = Some(control);
         let latched = std::mem::take(&mut self.holding);
@@ -1235,9 +1239,9 @@ impl GmPanel {
                     steps: 0,
                 });
             }
-            GmPress::Button(button)
+            CsynthPress::Button(button)
         } else {
-            GmPress::None
+            CsynthPress::None
         }
     }
 
@@ -1267,7 +1271,7 @@ impl GmPanel {
         Some(hold.button)
     }
 
-    fn latch(&mut self, control: GmControl) {
+    fn latch(&mut self, control: CsynthControl) {
         if let Some(i) = self.holding.iter().position(|&h| h == control) {
             self.holding.remove(i);
         } else if self.holding.len() >= HOLD_LIMIT {
@@ -1284,12 +1288,13 @@ impl GmPanel {
             return None;
         };
         match (a, b) {
-            (GmControl::Arrow(p1, d1), GmControl::Arrow(p2, d2)) if p1 == p2 && d1 != d2 => {
+            (CsynthControl::Arrow(p1, d1), CsynthControl::Arrow(p2, d2))
+                if p1 == p2 && d1 != d2 =>
+            {
                 Some(Button::Both(p1))
             }
-            (GmControl::All, GmControl::Mute) | (GmControl::Mute, GmControl::All) => {
-                Some(Button::Monitor)
-            }
+            (CsynthControl::All, CsynthControl::Mute)
+            | (CsynthControl::Mute, CsynthControl::All) => Some(Button::Monitor),
             _ => None,
         }
     }
@@ -1302,10 +1307,10 @@ impl GmPanel {
         let mut out = Vec::new();
         for &control in &self.holding {
             match control {
-                GmControl::All => out.push(Button::All),
-                GmControl::Mute => out.push(Button::Mute),
-                GmControl::Arrow(pair, dir) => arrows.push((pair, dir)),
-                GmControl::Load | GmControl::Dial | GmControl::Power => {}
+                CsynthControl::All => out.push(Button::All),
+                CsynthControl::Mute => out.push(Button::Mute),
+                CsynthControl::Arrow(pair, dir) => arrows.push((pair, dir)),
+                CsynthControl::Load | CsynthControl::Dial | CsynthControl::Power => {}
             }
         }
         while let Some((pair, dir)) = arrows.pop() {
@@ -1385,24 +1390,27 @@ impl GmPanel {
 }
 
 /// A plain click against what was latched: the semantic press.
-fn resolve(control: GmControl, latched: &[GmControl]) -> Button {
+fn resolve(control: CsynthControl, latched: &[CsynthControl]) -> Button {
     if let [one] = latched[..] {
         match (one, control) {
-            (GmControl::Arrow(p1, d1), GmControl::Arrow(p2, d2)) if p1 == p2 && d1 != d2 => {
+            (CsynthControl::Arrow(p1, d1), CsynthControl::Arrow(p2, d2))
+                if p1 == p2 && d1 != d2 =>
+            {
                 return Button::Both(p1);
             }
-            (GmControl::All, GmControl::Mute) | (GmControl::Mute, GmControl::All) => {
+            (CsynthControl::All, CsynthControl::Mute)
+            | (CsynthControl::Mute, CsynthControl::All) => {
                 return Button::Monitor;
             }
             _ => {}
         }
     }
     match control {
-        GmControl::All => Button::All,
-        GmControl::Mute => Button::Mute,
-        GmControl::Arrow(pair, dir) => Button::Arrow(pair, dir),
+        CsynthControl::All => Button::All,
+        CsynthControl::Mute => Button::Mute,
+        CsynthControl::Arrow(pair, dir) => Button::Arrow(pair, dir),
         // Unreachable by construction; a harmless answer regardless.
-        GmControl::Load | GmControl::Dial | GmControl::Power => Button::All,
+        CsynthControl::Load | CsynthControl::Dial | CsynthControl::Power => Button::All,
     }
 }
 
@@ -1416,7 +1424,7 @@ mod tests {
     /// stayed inside the panel's strip.
     #[test]
     fn preview_renders_for_the_eye() {
-        crate::video::set_gm_panel_shown(true);
+        crate::video::set_csynth_panel_shown(true);
         let scale = 2;
         let top = super::super::present_height();
         let (w, h) = (
@@ -1442,10 +1450,10 @@ mod tests {
         let mut splash = dark_screen();
         splash.name = "COPPERSYNTH".to_string();
         splash.subtitle = "v0.1.0 2026-08-16".to_string();
-        let shots: [(&str, GmPanelView); 3] = [
+        let shots: [(&str, CsynthPanelView); 3] = [
             (
-                "gmpanel-splash.png",
-                GmPanelView {
+                "csynthpanel-splash.png",
+                CsynthPanelView {
                     screen: splash,
                     powered: true,
                     mute_blinks: false,
@@ -1456,20 +1464,20 @@ mod tests {
                 },
             ),
             (
-                "gmpanel-preview.png",
-                GmPanelView {
+                "csynthpanel-preview.png",
+                CsynthPanelView {
                     screen,
                     powered: true,
                     mute_blinks: false,
                     blink_on: false,
                     volume: 0.8,
-                    down: vec![GmControl::Arrow(Pair::Level, Dir::Right)],
-                    hover: Some(GmControl::Arrow(Pair::Pan, Dir::Left)),
+                    down: vec![CsynthControl::Arrow(Pair::Level, Dir::Right)],
+                    hover: Some(CsynthControl::Arrow(Pair::Pan, Dir::Left)),
                 },
             ),
             (
-                "gmpanel-dark.png",
-                GmPanelView {
+                "csynthpanel-dark.png",
+                CsynthPanelView {
                     screen: dark_screen(),
                     powered: false,
                     mute_blinks: false,
@@ -1493,7 +1501,7 @@ mod tests {
                 .join("target")
                 .join(name);
             let file = std::fs::File::create(&out).expect("png file");
-            let panel_h = GM_PANEL_HEIGHT * scale;
+            let panel_h = CSYNTH_PANEL_HEIGHT * scale;
             let mut enc = png::Encoder::new(file, w as u32, panel_h as u32);
             enc.set_color(png::ColorType::Rgba);
             enc.set_depth(png::BitDepth::Eight);
@@ -1516,15 +1524,18 @@ mod tests {
     fn controls_answer_at_their_rects() {
         let panel = panel_rect(400);
         let mut all = vec![
-            (GmControl::Power, power_rect(panel)),
-            (GmControl::Dial, dial_rect(panel)),
-            (GmControl::All, round_rect(panel, 0)),
-            (GmControl::Mute, round_rect(panel, 1)),
-            (GmControl::Load, round_rect(panel, 2)),
+            (CsynthControl::Power, power_rect(panel)),
+            (CsynthControl::Dial, dial_rect(panel)),
+            (CsynthControl::All, round_rect(panel, 0)),
+            (CsynthControl::Mute, round_rect(panel, 1)),
+            (CsynthControl::Load, round_rect(panel, 2)),
         ];
         for (pair, ..) in PAIR_GRID {
             for dir in [Dir::Left, Dir::Right] {
-                all.push((GmControl::Arrow(pair, dir), arrow_rect(panel, pair, dir)));
+                all.push((
+                    CsynthControl::Arrow(pair, dir),
+                    arrow_rect(panel, pair, dir),
+                ));
             }
         }
         for (control, rect) in &all {
@@ -1554,60 +1565,82 @@ mod tests {
     /// rides through a power-on.
     #[test]
     fn latching_makes_the_gestures() {
-        let mut panel = GmPanel::default();
+        let mut panel = CsynthPanel::default();
         // Latch LEVEL <, click LEVEL >.
         assert_eq!(
-            panel.press(GmControl::Arrow(Pair::Level, Dir::Left), false, true),
-            GmPress::None
+            panel.press(CsynthControl::Arrow(Pair::Level, Dir::Left), false, true),
+            CsynthPress::None
         );
         assert_eq!(
-            panel.press(GmControl::Arrow(Pair::Level, Dir::Right), true, true),
-            GmPress::Button(Button::Both(Pair::Level))
+            panel.press(CsynthControl::Arrow(Pair::Level, Dir::Right), true, true),
+            CsynthPress::Button(Button::Both(Pair::Level))
         );
         // Latch ALL, then latch MUTE: the gesture resolves at once.
-        assert_eq!(panel.press(GmControl::All, false, true), GmPress::None);
         assert_eq!(
-            panel.press(GmControl::Mute, false, true),
-            GmPress::Button(Button::Monitor)
+            panel.press(CsynthControl::All, false, true),
+            CsynthPress::None
+        );
+        assert_eq!(
+            panel.press(CsynthControl::Mute, false, true),
+            CsynthPress::Button(Button::Monitor)
         );
         // Both INSTRUMENT halves latched through a power-on: the
         // default-font combination arrives as the pair held whole.
-        panel.press(GmControl::Arrow(Pair::Instrument, Dir::Left), false, false);
-        panel.press(GmControl::Arrow(Pair::Instrument, Dir::Right), false, false);
+        panel.press(
+            CsynthControl::Arrow(Pair::Instrument, Dir::Left),
+            false,
+            false,
+        );
+        panel.press(
+            CsynthControl::Arrow(Pair::Instrument, Dir::Right),
+            false,
+            false,
+        );
         assert_eq!(
-            panel.press(GmControl::Power, true, false),
-            GmPress::PowerOn(vec![Button::Both(Pair::Instrument)])
+            panel.press(CsynthControl::Power, true, false),
+            CsynthPress::PowerOn(vec![Button::Both(Pair::Instrument)])
         );
         // The splash combination needs no power press at all: the
         // fourth latch switches the unit on itself.
-        panel.press(GmControl::Arrow(Pair::MidiCh, Dir::Left), false, false);
-        panel.press(GmControl::Arrow(Pair::MidiCh, Dir::Right), false, false);
-        panel.press(GmControl::Arrow(Pair::Instrument, Dir::Left), false, false);
-        let fired = panel.press(GmControl::Arrow(Pair::Instrument, Dir::Right), false, false);
-        let GmPress::PowerOn(held) = fired else {
+        panel.press(CsynthControl::Arrow(Pair::MidiCh, Dir::Left), false, false);
+        panel.press(CsynthControl::Arrow(Pair::MidiCh, Dir::Right), false, false);
+        panel.press(
+            CsynthControl::Arrow(Pair::Instrument, Dir::Left),
+            false,
+            false,
+        );
+        let fired = panel.press(
+            CsynthControl::Arrow(Pair::Instrument, Dir::Right),
+            false,
+            false,
+        );
+        let CsynthPress::PowerOn(held) = fired else {
             panic!("the fourth latch must power the unit: {fired:?}");
         };
         assert!(held.contains(&Button::Both(Pair::MidiCh)));
         assert!(held.contains(&Button::Both(Pair::Instrument)));
         // ALL and MUTE latched through a power-on: the version screen's.
-        panel.press(GmControl::All, false, false);
-        panel.press(GmControl::Mute, false, false);
+        panel.press(CsynthControl::All, false, false);
+        panel.press(CsynthControl::Mute, false, false);
         assert_eq!(
-            panel.press(GmControl::Power, true, false),
-            GmPress::PowerOn(vec![Button::All, Button::Mute])
+            panel.press(CsynthControl::Power, true, false),
+            CsynthPress::PowerOn(vec![Button::All, Button::Mute])
         );
         // Switched on with nothing latched, the switch turns it off.
-        assert_eq!(panel.press(GmControl::Power, true, true), GmPress::PowerOff);
+        assert_eq!(
+            panel.press(CsynthControl::Power, true, true),
+            CsynthPress::PowerOff
+        );
     }
 
     /// A powered-off unit takes no button presses, but still reads what
     /// is held on it.
     #[test]
     fn dark_buttons_do_nothing() {
-        let mut panel = GmPanel::default();
+        let mut panel = CsynthPanel::default();
         assert_eq!(
-            panel.press(GmControl::Arrow(Pair::Part, Dir::Right), true, false),
-            GmPress::None
+            panel.press(CsynthControl::Arrow(Pair::Part, Dir::Right), true, false),
+            CsynthPress::None
         );
     }
 }

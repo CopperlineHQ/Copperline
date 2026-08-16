@@ -25,7 +25,7 @@ default = [
     "net-bridge",
     "fluxbridge",
     "mt32",
-    "gm",
+    "coppersynth",
     "cpu-jit",
     "profile-stats",
     "game-library",
@@ -35,9 +35,9 @@ default = [
 # target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
 # Coppersynth, the built-in General MIDI synthesizer (soundfont player
-# with an MT-32 translation layer), reachable as the "gm" MIDI-Out
+# with an MT-32 translation layer), reachable as the "coppersynth" MIDI-Out
 # device. No ROMs needed; the soundfont is fetched or bundled separately.
-gm = ["dep:coppersynth"]
+coppersynth = ["dep:coppersynth"]
 # The WHDLoad game library: the launcher's Library page, the local game
 # database it reads, and the OpenRetro sync that fills it.
 #
@@ -129,7 +129,7 @@ m68k = { version = "0.10", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
-coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "859c83772a7326ca13aa7303dbf0a049f05c0578", optional = true }
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "bf20a2b119ee9ef4cb1c820d51c1ed1c03292a0e", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

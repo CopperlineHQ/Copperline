@@ -359,9 +359,9 @@ pub struct Config {
     /// electrically disconnected, so CIA-A strobes receive no FLAG acknowledge
     /// and port-B reads see the CIA's own pin state.
     pub parallel: ParallelConfig,
-    /// The `[gm]` section, resolved: soundfont path (still optional --
+    /// The `[coppersynth]` section, resolved: soundfont path (still optional --
     /// the search path answers at attach time) and translation mode.
-    pub gm: GmConfig,
+    pub csynth: CsynthConfig,
 }
 
 /// How much of the overscan field the window presents. The
@@ -936,13 +936,13 @@ pub fn midi_out_is_mt32(midi_out: Option<&str>) -> bool {
     midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_MT32))
 }
 
-/// `midi_out = "gm"` selects the built-in Coppersynth synthesizer rather
+/// `midi_out = "coppersynth"` selects the built-in Coppersynth synthesizer rather
 /// than a host endpoint. Matched like [`MIDI_OUT_MT32`].
-pub const MIDI_OUT_GM: &str = "gm";
+pub const MIDI_OUT_CSYNTH: &str = "coppersynth";
 
 /// Whether a `midi_out` value asks for the built-in Coppersynth synth.
-pub fn midi_out_is_gm(midi_out: Option<&str>) -> bool {
-    midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_GM))
+pub fn midi_out_is_csynth(midi_out: Option<&str>) -> bool {
+    midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_CSYNTH))
 }
 
 /// Which peripheral is plugged into the Amiga's Centronics parallel port. The
@@ -2276,7 +2276,7 @@ impl Default for Config {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
-            gm: GmConfig::default(),
+            csynth: CsynthConfig::default(),
             paths: crate::pathconf::Paths::default(),
         }
     }
@@ -2908,8 +2908,16 @@ pub struct RawConfig {
     pub(crate) serial: RawSerial,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) parallel: RawParallel,
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub(crate) gm: RawGm,
+    // The section is named for the synth; the field keeps the crate's
+    // internal shorthand, and the alias forgives configs saved before
+    // the section earned its name.
+    #[serde(
+        default,
+        rename = "coppersynth",
+        alias = "gm",
+        skip_serializing_if = "is_default"
+    )]
+    pub(crate) csynth: RawCsynth,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) whdload: RawWhdload,
     /// `[[filesys]]` host-directory mount entries, in file order.
@@ -3256,14 +3264,14 @@ pub(crate) struct RawSerial {
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
-/// `[gm]`: the built-in Coppersynth synthesizer, selected with
-/// `[serial] midi_out = "gm"`. No ROMs: a soundfont supplies the sounds,
+/// `[coppersynth]`: the built-in Coppersynth synthesizer, selected with
+/// `[serial] midi_out = "coppersynth"`. No ROMs: a soundfont supplies the sounds,
 /// and the bundled GeneralUser GS is found without configuration.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawGm {
+pub(crate) struct RawCsynth {
     /// Soundfont (.sf2) path; unset means the bundled default's search
-    /// path (COPPERLINE_GM_SOUNDFONT, beside the executable, share/).
+    /// path (COPPERLINE_SOUNDFONT, beside the executable, share/).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) soundfont: Option<String>,
     /// MT-32 mode: "auto" (default; translates once MT-32 sysex is
@@ -4974,7 +4982,7 @@ impl TryFrom<RawConfig> for Config {
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
-            gm: resolve_gm(raw.gm)?,
+            csynth: resolve_csynth(raw.csynth)?,
             paths: raw.paths,
         })
     }
@@ -4985,27 +4993,27 @@ impl TryFrom<RawConfig> for Config {
 /// (back-compat with the original `[parallel] output = "..."`) and otherwise the
 /// port is empty. Rejects a printer with no capture path and an out-of-range
 /// sampler gain.
-/// The `[gm]` section, validated. The soundfont stays a path option --
+/// The `[coppersynth]` section, validated. The soundfont stays a path option --
 /// the search path is consulted when the device is attached, not here,
 /// so a config that never selects the synth never demands the file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GmConfig {
+pub struct CsynthConfig {
     pub soundfont: Option<PathBuf>,
     pub mt32_mode: Option<String>,
     pub panel: bool,
 }
 
-fn resolve_gm(raw: RawGm) -> Result<GmConfig> {
+fn resolve_csynth(raw: RawCsynth) -> Result<CsynthConfig> {
     if let Some(mode) = raw.mt32_mode.as_deref() {
         let m = mode.trim();
         if !(m.eq_ignore_ascii_case("auto")
             || m.eq_ignore_ascii_case("on")
             || m.eq_ignore_ascii_case("off"))
         {
-            bail!("[gm] mt32_mode must be \"auto\", \"on\", or \"off\", got {mode:?}");
+            bail!("[coppersynth] mt32_mode must be \"auto\", \"on\", or \"off\", got {mode:?}");
         }
     }
-    Ok(GmConfig {
+    Ok(CsynthConfig {
         soundfont: raw.soundfont.map(PathBuf::from),
         mt32_mode: raw.mt32_mode,
         panel: raw.panel.unwrap_or(false),

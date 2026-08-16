@@ -28,17 +28,18 @@ the same way CD-DA and MT-32 do; the MHI virtual MPEG decoder board
 
 ## The taps
 
-`push_mixed_frame` pushes six named sources, each at the point in the
+`push_mixed_frame` pushes seven named sources, each at the point in the
 signal chain described below (not necessarily the point that ends up in
 the master mix -- see each entry):
 
 | Source | Tap point | Notes |
 |---|---|---|
-| `paula` | Post-LED-filter, pre-drive/CD/MT-32/Toccata/MHI | The pure Paula-channel sum |
+| `paula` | Post-LED-filter, pre-drive/CD/MT-32/Coppersynth/Toccata/MHI | The pure Paula-channel sum |
 | `paula` sub-channels `0`..`3` | `channel_mixed_sample(i)`, scaled | **Not** LED-filtered -- real hardware's filter sits after the channel mixer's summation, so a per-channel stem naturally excludes it |
 | `drivesounds` | The synthesized drive-noise sample | Mono; written to a stem as `(sample, sample)` |
 | `cdda` | Post `cd_muted` gate | Reflects audible content -- unlike the debugger's CD scope tap, which stays pre-mute for visibility |
 | `mt32` | The in-process MT-32 synth frame | Silence (`0.0, 0.0`) once the serial sink has latched `synth_silent` |
+| `coppersynth` | The in-process Coppersynth frame | Same tap and `synth_silent` latch as `mt32` -- the serial sink carries one synth at a time, and the stem is named for whichever it is |
 | `toccata` | One frame popped from `ToccataAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](toccata) |
 | `mhi` | One frame popped from `MhiAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](mhi) |
 
@@ -68,8 +69,8 @@ for whichever files the selected `StemGranularity` values and registered
 not inferred from whether a source stays silent during the run. `paula`
 and `drivesounds` always register (`drivesounds` simply produces a silent
 stem when `[audio] floppy_sounds = false`, the same as a disabled
-`DriveSounds` today); `cdda` and `mt32` register only when this run's
-config plausibly produces them:
+`DriveSounds` today); `cdda`, `mt32` and `coppersynth` register only when this
+run's config plausibly produces them:
 
 - `cdda`: a CD32/CDTV machine profile, a configured CD image (`[cd]
   image` / `cd_image_path`), or a CD image on any `[ide]`/`[lide]`/
@@ -78,6 +79,8 @@ config plausibly produces them:
   ATAPI/SCSI CD-ROM).
 - `mt32`: `[serial] midi_out = "mt32"` with both `mt32_control_rom` and
   `mt32_pcm_rom` set.
+- `coppersynth`: `[serial] midi_out = "coppersynth"` in a build carrying
+  the `coppersynth` feature -- it needs no files, so naming it is enough.
 
 This is a **heuristic, not an exhaustive detector** -- a CD swapped into
 an initially empty drive mid-run (`--insert-cd-after`, a control-protocol
