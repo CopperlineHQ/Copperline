@@ -270,7 +270,7 @@ impl GmDevice {
     /// The glass, composed by the library.
     pub fn panel_screen(&mut self, now_ms: u64) -> Screen {
         self.feed_panel();
-        self.panel.screen(&self.engine, now_ms)
+        self.panel.screen(&mut self.engine, now_ms)
     }
 
     /// Whether the monitor is on, for the blinking MUTE lamp.
