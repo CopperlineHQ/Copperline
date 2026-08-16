@@ -1234,6 +1234,13 @@ pub struct App {
     gm_panel_epoch: std::time::Instant,
     #[cfg(feature = "gm")]
     gm_volume: f32,
+    /// What the glass last drew, and when, so the panel redraws only
+    /// when its pixels would differ -- and never fast enough to crowd
+    /// the audio.
+    #[cfg(feature = "gm")]
+    gm_panel_drawn: Option<(Option<crate::gm::Screen>, bool, bool)>,
+    #[cfg(feature = "gm")]
+    gm_panel_redraw_at: std::time::Instant,
     /// The on-screen Amiga keyboard: which cap the mouse is holding, which
     /// qualifiers are latched, and which legends the caps wear. Whether the
     /// strip is up at all is `video::keyboard_panel_shown`, because the
@@ -1972,6 +1979,10 @@ impl App {
             gm_panel_epoch: std::time::Instant::now(),
             #[cfg(feature = "gm")]
             gm_volume: 1.0,
+            #[cfg(feature = "gm")]
+            gm_panel_drawn: None,
+            #[cfg(feature = "gm")]
+            gm_panel_redraw_at: std::time::Instant::now(),
             kbd_panel: kbdpanel::KbdPanelState::default(),
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
@@ -4319,18 +4330,7 @@ impl ApplicationHandler for App {
         {
             self.repeat_gm_dial();
             self.repeat_gm_buttons();
-            // The glass is alive -- meters, the boot line, letters --
-            // so while the panel is up it draws every frame, the way
-            // the display does. Hidden, this costs one flag read.
-            if crate::video::gm_panel_shown()
-                && self
-                    .emu
-                    .bus_mut()
-                    .midi_serial_mut()
-                    .is_some_and(|sink| sink.gm_selected())
-            {
-                self.request_redraw();
-            }
+            self.animate_gm_panel();
         }
         #[cfg(feature = "mt32")]
         {
@@ -6341,6 +6341,46 @@ impl App {
             self.set_gm_volume(v);
             self.request_redraw();
         }
+    }
+
+    /// The glass earns its redraws: while the panel is up, its screen
+    /// is composed each frame -- strings and bar masks, no pixels --
+    /// and a redraw is asked for only when something visible changed,
+    /// at most twenty times a second. The audio owns the machine; the
+    /// LCD takes what is left. Hidden, the whole check is one flag
+    /// read.
+    #[cfg(feature = "gm")]
+    fn animate_gm_panel(&mut self) {
+        if !crate::video::gm_panel_shown() {
+            return;
+        }
+        let now_ms = self.gm_panel_epoch.elapsed().as_millis() as u64;
+        let blink_on = (now_ms / 300).is_multiple_of(2);
+        let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
+            return;
+        };
+        if !sink.gm_selected() {
+            return;
+        }
+        let key = match sink.gm_mut() {
+            Some(gm) => (
+                Some(gm.panel_screen(now_ms)),
+                true,
+                gm.panel_monitoring() && blink_on,
+            ),
+            None => (None, false, false),
+        };
+        if self.gm_panel_drawn.as_ref() == Some(&key) {
+            return;
+        }
+        // A changed glass redraws when the cap allows; until then the
+        // change stays pending, so nothing is ever lost.
+        if self.gm_panel_redraw_at.elapsed() < std::time::Duration::from_millis(50) {
+            return;
+        }
+        self.gm_panel_redraw_at = std::time::Instant::now();
+        self.gm_panel_drawn = Some(key);
+        self.request_redraw();
     }
 
     /// Repeat a held arrow button, gathering speed.
