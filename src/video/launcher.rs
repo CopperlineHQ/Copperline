@@ -2095,9 +2095,11 @@ pub struct MachineSetup {
     /// Sound section (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
     /// The MHI virtual MPEG audio decoder board, edited in the same Sound
-    /// section (`[mhi] enabled`). No other options exist yet. Present only
-    /// in an `mhi` build, the only build that can fit the board.
-    #[cfg(feature = "mhi")]
+    /// section (`[mhi] enabled`) in an `mhi` build, the only build that can
+    /// fit the board. Kept as an unconditional passthrough field even in a
+    /// non-`mhi` build so loading and re-saving a config does not silently
+    /// drop a `[mhi] enabled` set by some other build -- only the launcher
+    /// row/toggle that edits it is feature-gated.
     mhi: bool,
     /// Currently visible host bridge adapters: stable identifier + label.
     bridge_interfaces: Vec<(String, String)>,
@@ -2391,7 +2393,6 @@ impl MachineSetup {
             hostsocket_gateway: raw.hostsocket.gateway.clone(),
             hostsocket_resolver: raw.hostsocket.resolver.clone(),
             toccata: cfg.toccata,
-            #[cfg(feature = "mhi")]
             mhi: cfg.mhi,
             bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
@@ -3016,7 +3017,6 @@ impl MachineSetup {
         if self.toccata != base.toccata {
             raw.toccata.enabled = Some(self.toccata);
         }
-        #[cfg(feature = "mhi")]
         if self.mhi != base.mhi {
             raw.mhi.enabled = Some(self.mhi);
         }

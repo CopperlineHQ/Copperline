@@ -401,6 +401,21 @@ guest-visible contract changes -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
 still only ever advance in whole-descriptor, whole-frame steps -- only the
 emulated wall-clock-adjacent pacing of how many ticks that takes.
 
+**An incomplete trailing frame** (the queued bytes end mid-frame -- too few
+bytes for the decoder to tell whether they are even a valid sync, let alone
+decode them) is different from undecodable content: it is not junk to skip,
+it is a real frame waiting on the rest of its bytes, which a subsequent
+`DOORBELL` may yet supply (the guest's next descriptor can complete a frame
+split across a buffer boundary, and this is expected to happen routinely --
+see "Determinism and timing" below). The board therefore holds those bytes
+and does not touch `QUEUE_COUNT`/`STATUS` while it waits. If no further
+`DOORBELL` ever completes the frame, though, an implementation must not
+wait forever: `QUEUE_COUNT`/`STATUS` need to recover in bounded time so a
+guest polling for completion is not wedged by a stream that simply ended
+mid-frame. The exact bound is an implementation choice, not part of this
+protocol's guest-visible contract -- Copperline's is documented in its own
+implementation notes below.
+
 ## Determinism and timing
 
 The board consumes a descriptor's bitstream at the **decoded audio's own
@@ -433,7 +448,7 @@ protocol, and the split is intentional, not an oversight:
 | `MHIQ_IS_HARDWARE`/`_IS_68K`/`_IS_PPC` | Guest library -- static answers (this is a real register-mailbox device the library talks to over the Zorro bus, so `MHIQ_IS_HARDWARE` answers true; it runs no 68k/PPC code of its own, so both processor queries answer false) |
 | MPEG version/layer/bitrate-mode support (`MHIQ_MPEG1`/`_MPEG2`/`_MPEG25`, `MHIQ_LAYER3`, `MHIQ_VARIABLE_BITRATE`) | `CAPS` register (`0x02`) -- genuinely board-reported, since a future board revision's decoder could differ |
 | `MHIQ_JOINT_STEREO` | Guest library -- fixed `MHIF_SUPPORTED`; decoding joint-stereo Layer III is inherent to any conforming decoder, not a distinct board capability worth its own `CAPS` bit |
-| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- fixed `MHIF_SUPPORTED` for the params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor), `MHIF_UNSUPPORTED` for ones it does not yet (the 5/10-band EQ, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+) |
+| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- `MHIF_UNSUPPORTED` in this M1-M2 scope for every one of these, including the seven params this board's [param latch](#param-latches) table already defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): the latches exist and round-trip, but nothing yet applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not. **M4** connects the latches to the PCM path (see above); only then does this answer flip to `MHIF_SUPPORTED` for those seven. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
 | Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely a host-side (Amiga-side) bookkeeping concept; the board has no notion of "a handle" and, in this M1-M2 scope, serves exactly one client at a time |
 | Transport (`MHIPlay`/`MHIStop`/`MHIPause`), status (`MHIGetStatus`), queueing (`MHIQueueBuffer`/`MHIGetEmpty`), params (`MHISetParam`) | Guest library translates 1:1 to/from this board's `CONTROL`/`STATUS`/descriptor-queue/`PARAM_*` registers |
 
@@ -541,3 +556,17 @@ content above.
   (Sound section) has a plain fit/don't-fit toggle for the board (same as
   Toccata, see [](toccata)'s "What's out of scope" section); host-side
   audio capture/backend options stay command-line/config-file only.
+- **Large-descriptor DMA copy**: `DESC_LEN` genuinely does not truncate --
+  `Mhi` copies a descriptor's full length into its bitstream buffer in
+  bounded chunks (`MAX_DESCRIPTOR_BYTES`, 1 MiB) so a single oversized
+  `DOORBELL` write cannot force one huge host-side allocation, but every
+  byte still lands regardless of how many chunks that takes.
+- **Incomplete-trailing-frame reclaim** ("An incomplete trailing frame"
+  above): `Mhi` gives a stalled trailing frame up to `MAX_STALL_TICKS`
+  (1/10 s of emulated Paula-clock time -- comfortably longer than any real
+  `DOORBELL` round-trip, short enough not to visibly stall playback) to be
+  completed by a subsequent doorbell before discarding the leftover bytes
+  and reclaiming every descriptor they belong to, the same "skip and
+  complete" treatment undecodable content gets. Reset on `RESET`/`STOP`
+  and whenever a frame decodes or the bitstream reaches empty, so it never
+  carries stale state across sessions.

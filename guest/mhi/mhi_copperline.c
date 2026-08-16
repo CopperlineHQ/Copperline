@@ -336,9 +336,14 @@ ULONG i_MHIQuery(ULONG query __asm("d1"), struct MHICopperlineBase *base __asm("
         case MHIQ_JOINT_STEREO:
             return MHIF_SUPPORTED;
 
-        /* The seven params this board's PARAM_SELECT table defines
-         * (mhi.md "Param latches") -- see translate_param() above for the
-         * exact same list. */
+        /* The seven params this board's PARAM_SELECT table defines (mhi.md
+         * "Param latches") are only stored, never applied to PCM -- that's
+         * M4 work (docs/internals/mhi.md, PR notes). Reporting these as
+         * MHIF_SUPPORTED here would tell a client its `MHISetParam` calls
+         * are audible, which they are not; report unsupported until PCM
+         * behavior lands, at which point this should return MHIF_SUPPORTED
+         * again (translate_param() above keeps the same seven-entry list
+         * either way, since the board still needs to store the latch). */
         case MHIQ_VOLUME_CONTROL:
         case MHIQ_PANNING_CONTROL:
         case MHIQ_BASS_CONTROL:
@@ -346,7 +351,7 @@ ULONG i_MHIQuery(ULONG query __asm("d1"), struct MHICopperlineBase *base __asm("
         case MHIQ_TREBLE_CONTROL:
         case MHIQ_CROSSMIXING:
         case MHIQ_PREFACTOR_CONTROL:
-            return MHIF_SUPPORTED;
+            return MHIF_UNSUPPORTED;
 
         /* Reserved param-index territory (mhi.md: indices 7-65535,
          * "unimplemented in this version") -- no 5/10-band EQ yet. */

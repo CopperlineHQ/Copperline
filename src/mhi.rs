@@ -112,6 +112,16 @@ const PARAM_DEFAULTS: [u16; PARAM_COUNT] = [100, 50, 50, 50, 50, 0, 50];
 /// doorbell write's host-side allocation.
 const MAX_DESCRIPTOR_BYTES: u32 = 1024 * 1024;
 
+/// Bound on how long (in Paula-clock ticks, ~0.1 s of emulated time) decode
+/// may sit stalled on an incomplete trailing frame -- `consumed == 0`, not
+/// enough buffered bytes to tell even a resync boundary -- with no further
+/// bytes arriving to complete it, before giving up. Comfortably longer than
+/// any real doorbell round-trip (the guest queueing the frame's remaining
+/// bytes in its next descriptor), short enough not to visibly stall
+/// playback when nothing more is ever coming (stream truly ended mid-frame,
+/// or a deliberate underrun). See `reclaim_stalled_descriptor`.
+const MAX_STALL_TICKS: u64 = (PAULA_CLOCK_HZ / 10) as u64;
+
 /// A generous safety margin on the pre-resample sample queue -- see
 /// `Toccata`'s identically-named constant; the native producer and mixer
 /// consumer stay in near-lockstep in steady state, so this is a cap against
@@ -357,6 +367,16 @@ pub struct Mhi {
     decoded: VecDeque<(f32, f32)>,
     mixer_acc: u64,
     resamplers: HashMap<u32, Resampler>,
+    /// Whether the most recent `decode_next_frame` call returned `None`
+    /// because of an incomplete trailing frame (`consumed == 0`) rather
+    /// than a genuinely empty bitstream or an exhausted resync budget --
+    /// only that case should accumulate `stall_ticks`. Transient, not
+    /// meaningful except immediately after a `decode_next_frame` call.
+    #[serde(skip)]
+    last_decode_stalled: bool,
+    /// Emulated Paula-clock ticks accumulated while stalled this way; see
+    /// `MAX_STALL_TICKS`.
+    stall_ticks: u64,
 }
 
 impl Mhi {
@@ -382,6 +402,8 @@ impl Mhi {
             decoded: VecDeque::new(),
             mixer_acc: 0,
             resamplers: HashMap::new(),
+            last_decode_stalled: false,
+            stall_ticks: 0,
         }
     }
 
@@ -523,6 +545,8 @@ impl Mhi {
         // stopped stream's tail into whatever plays next at the same
         // native rate.
         self.resamplers.clear();
+        self.last_decode_stalled = false;
+        self.stall_ticks = 0;
     }
 
     fn handle_doorbell(&mut self, host: &mut DeviceHost) {
@@ -531,8 +555,11 @@ impl Mhi {
             return;
         }
         let addr = (u32::from(self.desc_addr_hi) << 16) | u32::from(self.desc_addr_lo);
-        let len = ((u32::from(self.desc_len_hi) << 16) | u32::from(self.desc_len_lo))
-            .min(MAX_DESCRIPTOR_BYTES);
+        // `DESC_LEN_*` is a full 32-bit byte count with no protocol-level
+        // cap ("does not truncate") -- `MAX_DESCRIPTOR_BYTES` bounds only a
+        // single DMA-read call's host-side allocation below, never the
+        // descriptor's own length or how many bytes actually get copied.
+        let len = (u32::from(self.desc_len_hi) << 16) | u32::from(self.desc_len_lo);
         if len == 0 {
             // A zero-byte descriptor has no bytes to decode and no audio to
             // play out, so there is no frame boundary left to hang its
@@ -546,10 +573,22 @@ impl Mhi {
             self.completed_count = self.completed_count.wrapping_add(1);
             self.intreq |= INT_BUFFER_DONE;
         } else {
-            let mut buf = vec![0u8; len as usize];
-            host.dma_read(addr, &mut buf);
             self.desc_lengths.push_back(len);
-            self.bitstream.extend(buf);
+            // Copy the full descriptor in bounded chunks -- never more than
+            // `MAX_DESCRIPTOR_BYTES` allocated for any single `dma_read`
+            // call -- so an oversized `DESC_LEN` still lands every byte in
+            // `bitstream` rather than silently dropping the tail past a
+            // truncation cap.
+            let mut remaining = len;
+            let mut chunk_addr = addr;
+            while remaining > 0 {
+                let chunk_len = remaining.min(MAX_DESCRIPTOR_BYTES);
+                let mut buf = vec![0u8; chunk_len as usize];
+                host.dma_read(chunk_addr, &mut buf);
+                self.bitstream.extend(buf);
+                chunk_addr = chunk_addr.wrapping_add(chunk_len);
+                remaining -= chunk_len;
+            }
             if self.status == Status::OutOfData {
                 // "The board resumes playback automatically... with no
                 // CONTROL=PLAY required" -- this is specifically the
@@ -598,8 +637,12 @@ impl Mhi {
     /// (`MAX_RESYNC_ATTEMPTS_PER_TICK`) ran out while still hunting for the
     /// next real frame -- the caller (`acquire_next_frame`, from
     /// `advance_native`) tries again next tick, continuing from exactly the
-    /// bitstream position this call left behind.
+    /// bitstream position this call left behind. Sets `last_decode_stalled`
+    /// so the caller can tell the "buffered bytes can't make progress"
+    /// case apart from the other two, which is the only one
+    /// `reclaim_stalled_descriptor` should ever fire for.
     fn decode_next_frame(&mut self) -> Option<CurrentFrame> {
+        self.last_decode_stalled = false;
         for _ in 0..MAX_RESYNC_ATTEMPTS_PER_TICK {
             if self.bitstream.is_empty() {
                 return None;
@@ -611,6 +654,7 @@ impl Mhi {
             }
             let (consumed, frame) = self.decoder.decode_frame(&buf[..take]);
             if consumed == 0 {
+                self.last_decode_stalled = true;
                 return None;
             }
             self.pending_completes += self.consume_bytes(consumed);
@@ -633,6 +677,20 @@ impl Mhi {
         // already reflect every byte scanned so far, so nothing is lost or
         // rescanned when the caller comes back next tick.
         None
+    }
+
+    /// Gives up on an incomplete trailing frame that has sat unconsumable
+    /// for `MAX_STALL_TICKS` with no doorbell ever completing it: discards
+    /// the leftover bytes and completes/reclaims every descriptor they
+    /// belong to, the same "skip and complete" treatment "Undecodable
+    /// bitstream content" gives bytes that are outright undecodable rather
+    /// than merely incomplete. Keeps a permanently truncated tail (stream
+    /// genuinely ended mid-frame, or a deliberate underrun) from wedging
+    /// `STATUS`/`QUEUE_COUNT` forever.
+    fn reclaim_stalled_descriptor(&mut self) {
+        let leftover = self.bitstream.len() as u32;
+        self.pending_completes += self.consume_bytes(leftover);
+        self.handle_out_of_data();
     }
 
     fn finish_frame(&mut self, frame: &CurrentFrame) {
@@ -698,8 +756,20 @@ impl Mhi {
         if self.status != Status::Playing {
             return;
         }
-        if self.current_frame.is_none() && !self.acquire_next_frame() {
-            return;
+        if self.current_frame.is_none() {
+            if !self.acquire_next_frame() {
+                if self.last_decode_stalled {
+                    self.stall_ticks += u64::from(cck);
+                    if self.stall_ticks >= MAX_STALL_TICKS {
+                        self.stall_ticks = 0;
+                        self.reclaim_stalled_descriptor();
+                    }
+                } else {
+                    self.stall_ticks = 0;
+                }
+                return;
+            }
+            self.stall_ticks = 0;
         }
         let rate = self.current_frame.as_ref().unwrap().rate;
         self.sample_acc += u64::from(cck) * u64::from(rate);
@@ -715,11 +785,20 @@ impl Mhi {
     /// comment for why that separation matters. While not playing (or
     /// simply starved), `decoded` is empty and the refill closure below
     /// returns exact silence, never a held-over last sample -- see
-    /// "Out-of-data semantics"' "no repeat-last-sample holdover".
+    /// "Out-of-data semantics"' "no repeat-last-sample holdover". While
+    /// `PAUSED`, "halts ... audio output" means exactly that -- emit
+    /// silence without touching `decoded` or advancing any `Resampler`, so
+    /// whatever backlog was already decoded stays queued (not dropped) and
+    /// the resampler's convolution history stays exactly where playback
+    /// left it, ready for a gapless `PLAY` resume.
     fn advance_mixer(&mut self, cck: u32, ring: &mut MhiAudioRing) {
         self.mixer_acc += u64::from(cck) * u64::from(MIX_SAMPLE_RATE);
         while self.mixer_acc >= u64::from(PAULA_CLOCK_HZ) {
             self.mixer_acc -= u64::from(PAULA_CLOCK_HZ);
+            if self.status == Status::Paused {
+                ring.push_frame(0.0, 0.0);
+                continue;
+            }
             let rate = self.native_rate;
             let Self {
                 decoded,
@@ -812,6 +891,8 @@ impl ZorroDevice for Mhi {
         // buffer would otherwise bleed a few pre-reset frames into the
         // freshly reset silence.
         self.resamplers.clear();
+        self.last_decode_stalled = false;
+        self.stall_ticks = 0;
     }
 
     fn kind(&self) -> &'static str {
@@ -1402,6 +1483,126 @@ mod tests {
             completed_second,
             "a valid frame following a corrupted region must still decode and complete"
         );
+    }
+
+    /// Regression test for the "PAUSE keeps draining audio" bug: `PAUSE`
+    /// must halt audio output immediately, not merely halt decode while
+    /// still draining whatever was already sitting in the pre-resample
+    /// `decoded` backlog out to the mixer ring.
+    #[test]
+    fn pause_leaves_the_decoded_backlog_untouched_and_emits_silence() {
+        let mut board = Mhi::new();
+        let mut mem = memory(0x400);
+        let payload = mp3_frame(128, 0x44);
+        mem.chip_ram[0..payload.len()].copy_from_slice(&payload);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let backlog = {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, &payload);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+
+            // Drive the native producer directly, bypassing the mixer, to
+            // build up a guaranteed nonzero pre-resample backlog in
+            // `decoded` -- stopping well short of the full frame so the
+            // descriptor is not yet exhausted and STATUS stays PLAYING
+            // (not OUT_OF_DATA, which this test is not about).
+            let frame_cck = (1152u64 * u64::from(PAULA_CLOCK_HZ)) / 44_100;
+            board.advance_native((frame_cck / 2) as u32);
+            assert_eq!(board.read(OFF_STATUS, 2, &mut host), 1); // still PLAYING
+            let backlog = board.decoded.len();
+            assert!(backlog > 0, "test setup needs a nonzero decoded backlog");
+
+            board.write(OFF_CONTROL, 2, CMD_PAUSE as u32, &mut host);
+            for _ in 0..200 {
+                ZorroDevice::tick(&mut board, 64, &mut host);
+            }
+            backlog
+        };
+        assert_eq!(
+            board.decoded.len(),
+            backlog,
+            "PAUSE must not drain the decoded backlog"
+        );
+        // Every sample the mixer pushed (or the ring's own empty-queue
+        // default) while paused must be silence.
+        for _ in 0..300 {
+            assert_eq!(
+                mhi_audio.next_sample(),
+                (0.0, 0.0),
+                "PAUSE must halt audio output immediately"
+            );
+        }
+    }
+
+    /// Regression test for the "DESC_LEN silently truncates" bug: a
+    /// descriptor longer than the DMA chunk cap (`MAX_DESCRIPTOR_BYTES`)
+    /// must still land every byte in `bitstream`, not just the first
+    /// chunk's worth -- the register contract says `DESC_LEN` "does not
+    /// truncate".
+    #[test]
+    fn doorbell_copies_a_descriptor_larger_than_the_dma_chunk_cap_without_truncating() {
+        let mut board = Mhi::new();
+        let total_len = MAX_DESCRIPTOR_BYTES as usize + 4096;
+        let mut payload = vec![0u8; total_len];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let mut mem = memory(total_len);
+        mem.chip_ram.copy_from_slice(&payload);
+        let mut host = DeviceHost::new(&mut mem);
+        stage_and_ring(&mut board, &mut host, 0, &payload);
+        assert_eq!(
+            board.bitstream.len(),
+            total_len,
+            "a descriptor past MAX_DESCRIPTOR_BYTES must not be truncated"
+        );
+        assert_eq!(board.bitstream.iter().copied().collect::<Vec<_>>(), payload);
+        assert_eq!(board.desc_lengths.front().copied(), Some(total_len as u32));
+    }
+
+    /// Regression test for the "stalled trailing frame never reclaimed"
+    /// bug: a final queued descriptor whose tail is a truncated MP3 frame
+    /// (fewer bytes than minimp3 needs to make any decode progress, so
+    /// `decode_frame` reports `consumed == 0` on every attempt) must not
+    /// wedge `STATUS == PLAYING`/`QUEUE_COUNT == 1` forever when no further
+    /// doorbell ever arrives to complete it.
+    #[test]
+    fn a_frame_split_at_the_last_queued_buffer_eventually_reclaims_the_descriptor() {
+        let mut board = Mhi::new();
+        let mut mem = memory(0x200);
+        let full = mp3_frame(128, 0x55);
+        let truncated = &full[..full.len() / 2];
+        mem.chip_ram[0..truncated.len()].copy_from_slice(truncated);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let mut host = host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+        stage_and_ring(&mut board, &mut host, 0, truncated);
+        board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+        assert_eq!(board.read(OFF_STATUS, 2, &mut host), 1); // PLAYING
+
+        // Comfortably more emulated time than MAX_STALL_TICKS, with no
+        // further doorbell ever completing the truncated frame.
+        let ticks = (MAX_STALL_TICKS / 64) as usize + 100;
+        let mut reached_out_of_data = false;
+        for _ in 0..ticks {
+            ZorroDevice::tick(&mut board, 64, &mut host);
+            if board.read(OFF_STATUS, 2, &mut host) == 3 {
+                reached_out_of_data = true;
+                break;
+            }
+        }
+        assert!(
+            reached_out_of_data,
+            "an unconsumable trailing frame must eventually be reclaimed rather than \
+             wedging STATUS/QUEUE_COUNT forever"
+        );
+        assert_eq!(board.read(OFF_QUEUE_COUNT, 2, &mut host), 0);
+        assert_eq!(board.completed_count, 1);
+        assert_ne!(board.intreq & INT_OUT_OF_DATA, 0);
     }
 
     #[test]
