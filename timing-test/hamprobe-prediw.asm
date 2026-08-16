@@ -38,11 +38,18 @@
 ; Sprites stay disabled: the $30 fetch start overlaps the sprite 6/7 DMA
 ; slots, as in the Lemmings 2 screen (SPREN off).
 ;
-; Cross-checked against vAmiga (tools/vamiga-ref.sh): band colours and the
-; playfield-open column agree. vAmiga is not a reference for the hidden span
-; itself: it paints $71..$79 with the held playfield colour, while the real
-; window edge stays border until DIW HSTART (the vAmigaTS Agnus/DIW/OLDDIW
-; diw1 A500 photos place the edge flush with the standard-DDF picture).
+; Note on the "hidden" span: this probe's DIWSTOP low byte $C9 decodes to
+; HSTOP $1C9, one position beyond the $1C7 wrap of Denise's horizontal
+; counter, so the window flip-flop never clears once set and carries open
+; across lines (the vAmigaTS Agnus/DIW/OLDDIW diw10 A500 photos prove the
+; carried flip-flop). The pre-DIW span is therefore VISIBLE on hardware --
+; solid red (top band) / green (bottom band), the held colour with blue 0 --
+; and the probe render shows it from the $30 fetch origin. Cross-checked
+; against vAmiga (tools/vamiga-ref.sh): the pre-DIW span, band colours and
+; the $79 playfield-open column all agree. The HAM-accumulation point is
+; unchanged: the visible field's R and G still come from the seed pixel
+; alone, so a renderer that truncates HAM history to the DIW span decodes
+; both bands as identical blue.
 CUST   equ $dff000
 ROWX   equ $40000               ; $80FF,$FFFF*21: set-pal bit at sample 0
 ROWY   equ $40100               ; $00FF,$FFFF*21: no sample-0 bit
