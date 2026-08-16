@@ -105,6 +105,35 @@ static void put(struct Library *_dosbase, const char *msg)
     Write(Output(), (APTR)msg, strlen_local(msg));
 }
 
+/* Unsigned divide-by-10 with remainder, done with shifts/compares/
+ * subtracts only -- no `/` or `%` operator on a ULONG. This target has no
+ * hardware 32-bit divide (68000 floor), so the compiler would otherwise
+ * lower `value / 10` / `value % 10` to calls into libnix's __udivsi3/
+ * __umodsi3 (pulled in via -noixemul, see this test's Makefile); under
+ * this program's -nostartfiles build (no crt0, board.c's own header
+ * comment) those calls jump through an uninitialized library-base cell
+ * and crash with an address error before ever returning -- verified by
+ * bisection down to this exact call during WP5 (see MHI-PLAN.md's WP5
+ * section / the integration test's own comments). Binary long division
+ * sidesteps the call entirely: 32 shift-compare-subtract steps, using
+ * only ops the compiler emits inline. */
+static ULONG udiv10(ULONG value, ULONG *remainder_out)
+{
+    ULONG quotient = 0;
+    ULONG remainder = 0;
+    int bit;
+
+    for (bit = 31; bit >= 0; bit--) {
+        remainder = (remainder << 1) | ((value >> bit) & 1UL);
+        if (remainder >= 10) {
+            remainder -= 10;
+            quotient |= (1UL << bit);
+        }
+    }
+    *remainder_out = remainder;
+    return quotient;
+}
+
 /* Minimal unsigned-decimal formatter -- no stdio linked in (see this
  * file's own header comment). `buf` must be at least 11 bytes (max 32-bit
  * value "4294967295" + NUL). */
@@ -120,8 +149,10 @@ static char *format_ulong(ULONG value, char *buf)
         return buf;
     }
     while (value > 0 && i < 10) {
-        tmp[i++] = (char)('0' + (value % 10));
-        value /= 10;
+        ULONG remainder;
+        ULONG quotient = udiv10(value, &remainder);
+        tmp[i++] = (char)('0' + remainder);
+        value = quotient;
     }
     while (i > 0) {
         buf[j++] = tmp[--i];

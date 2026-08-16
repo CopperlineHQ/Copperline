@@ -839,14 +839,14 @@ mod tests {
         };
         let b0 = 0xFFu8;
         let b1 = 0xFBu8; // 1111 1011: version 11, layer 01, protection 1
-        let b2 = ((bitrate_index as u8) << 4) | 0b0000_0000; // sr idx 00, no pad
-                                                             // Byte 3's low bit is half of the emphasis field -- a playback
-                                                             // hint the decoder itself ignores, so it is genuinely don't-care to
-                                                             // decode validity. Folding the seed in here (rather than into the
-                                                             // side info/main data body, which must stay all-zero to keep
-                                                             // decoding validly -- see the doc comment above) is enough to make
-                                                             // otherwise-identical frames distinguishable byte-for-byte in the
-                                                             // bitstream queue, keeping mode = stereo (bits 7-6 = 0) intact.
+        let b2 = (bitrate_index as u8) << 4; // sr idx 00, no pad (both 0, folded into the shift)
+                                             // Byte 3's low bit is half of the emphasis field -- a playback
+                                             // hint the decoder itself ignores, so it is genuinely don't-care to
+                                             // decode validity. Folding the seed in here (rather than into the
+                                             // side info/main data body, which must stay all-zero to keep
+                                             // decoding validly -- see the doc comment above) is enough to make
+                                             // otherwise-identical frames distinguishable byte-for-byte in the
+                                             // bitstream queue, keeping mode = stereo (bits 7-6 = 0) intact.
         let b3 = payload_seed & 0x01;
         let frame_len = (144 * (bitrate_kbps * 1000)) / 44100;
         let frame_len = frame_len.max(24) as usize;
