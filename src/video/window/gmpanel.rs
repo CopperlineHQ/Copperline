@@ -41,7 +41,7 @@ const HOVER_LIFT: f32 = 16.0;
 /// backlight with dark characters printed over it, and nothing at all
 /// when the light goes out.
 const GLASS_LIT: u32 = rgba(233, 158, 48);
-const GLASS_DARK: u32 = rgba(58, 40, 22);
+const GLASS_DARK: u32 = rgba(159, 169, 168);
 const INK: u32 = rgba(43, 22, 8);
 /// Captions printed on the glass sit lighter than the values written
 /// under them, as printed things do against driven ones.
@@ -134,6 +134,7 @@ pub fn dark_screen() -> Screen {
         part: String::new(),
         instrument: String::new(),
         name: String::new(),
+        subtitle: String::new(),
         level: String::new(),
         pan: String::new(),
         reverb: String::new(),
@@ -312,9 +313,11 @@ pub fn control_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
     None
 }
 
-/// What answers to being hovered: buttons, not the knob or the switch.
+/// What answers to being hovered: buttons -- the switch included now
+/// that it presses like one -- but not the knob, which follows the
+/// hand already.
 pub fn hover_at(panel: Rect, pos: (i32, i32)) -> Option<GmControl> {
-    control_at(panel, pos).filter(|c| !matches!(c, GmControl::Dial | GmControl::Power))
+    control_at(panel, pos).filter(|c| !matches!(c, GmControl::Dial))
 }
 
 /// Whether a pointer move changed which button lights under it.
@@ -367,9 +370,35 @@ fn draw_power(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
         CAPTION,
         scale,
     );
-    draw_button(frame, rect, view.powered, false, scale, true, true);
-    // The lamp beside the switch: lit only while the unit is on.
-    draw_led_disc(frame, power_led_rect(panel), view.powered, false, scale);
+    // Momentary, like every button on the fascia: it pops in under the
+    // pointer and back out. The lamp is what says the unit is on.
+    let pressed = view.down.contains(&GmControl::Power);
+    let hovered = view.hover == Some(GmControl::Power);
+    draw_button(frame, rect, pressed, hovered, scale, true, true);
+    draw_led_dot(frame, power_led_rect(panel), view.powered, scale);
+}
+
+/// A plain round LED: a flat disc of its colour and nothing else.
+fn draw_led_dot(frame: &mut [u8], rect: Rect, lit: bool, scale: usize) {
+    let colour = if lit { LED_LIT } else { LED_OFF };
+    let (cx, radius) = (
+        rect.x as f32 + rect.w as f32 / 2.0,
+        rect.w.min(rect.h) as f32 / 2.0,
+    );
+    for y in 0..rect.h {
+        let dy = y as f32 + 0.5 - rect.h as f32 / 2.0;
+        let half = (radius * radius - dy * dy).max(0.0).sqrt();
+        if half < 0.5 {
+            continue;
+        }
+        let row = Rect {
+            x: (cx - half).round() as usize,
+            y: rect.y + y,
+            w: (half * 2.0).round() as usize,
+            h: 1,
+        };
+        fill_rect(frame, scaled(row, scale), colour, scale);
+    }
 }
 
 /// The VOLUME knob: the MT-32 dial's face and rim, full travel meaning
@@ -482,13 +511,14 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
         scale,
     );
     let glass = if view.powered { GLASS_LIT } else { GLASS_DARK };
-    raised_display(frame, lcd, glass, scale);
-    if !view.powered {
-        return;
-    }
+    sunken_display(frame, lcd, glass, scale);
     let screen = &view.screen;
     let inner_x = lcd.x + LCD_BEZEL + 4;
     let inner_y = lcd.y + LCD_BEZEL + 3;
+    // The legends, the meter numbers and the scale are ink printed on
+    // the glass overlay, not driven segments: they keep their weight
+    // with the light out, exactly as the unit's do. Only the driven
+    // things -- values, name, bars -- need the power.
     let print = mix(INK, glass, GLASS_PRINT);
 
     // The text block: four rows of caption-over-value, the top row
@@ -500,7 +530,11 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     let cell_h = 16;
     let pitch = (inner_h - cell_h) / 3;
     let col2_x = inner_x + 36;
-    let ghost = mix(INK, glass, 1.0 - CELL_GRAIN);
+    let ghost = if view.powered {
+        mix(INK, glass, 1.0 - CELL_GRAIN)
+    } else {
+        shade(glass, -7.0)
+    };
     let left = [
         ("PART", &screen.part),
         ("LEVEL", &screen.level),
@@ -533,9 +567,11 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
                 };
                 fill_rect(frame, scaled(block, scale), ghost, scale);
             }
-            let shown: String = value.chars().take(3).collect();
-            let text_x = field_x + 3 * font::GLYPH_W - text_w(&shown, 1);
-            text(frame, text_x, y + 8, &shown, INK, 1, scale);
+            if view.powered {
+                let shown: String = value.chars().take(3).collect();
+                let text_x = field_x + 3 * font::GLYPH_W - text_w(&shown, 1);
+                text(frame, text_x, y + 8, &shown, INK, 1, scale);
+            }
         }
     }
 
@@ -546,11 +582,27 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     const PITCH_Y: usize = 4;
     let matrix_x = lcd.x + lcd.w - LCD_BEZEL - 4 - (15 * PITCH_X + DOT + 3);
     let matrix_y = inner_y + 1;
-    let cell = mix(INK, glass, 1.0 - CELL_GRAIN);
+    let cell = ghost;
+    // The scale up the left edge: ten dots, the first, fifth and
+    // tenth a size larger, printed on the glass whether the light is
+    // on or not.
+    for i in 0..10u32 {
+        let big = i == 0 || i == 4 || i == 9;
+        let span = 15 * PITCH_Y + DOT;
+        let y = matrix_y + span - 1 - (i as usize * (span - 2)) / 9;
+        let size = if big { 2 } else { 1 };
+        let dot = Rect {
+            x: matrix_x - 4 - size + 1,
+            y: y.saturating_sub(size / 2),
+            w: size,
+            h: size,
+        };
+        fill_rect(frame, scaled(dot, scale), print, scale);
+    }
     for column in 0..16 {
         let bar = screen.bars[column];
         for row in 0..16 {
-            let lit = bar & (1 << row) != 0;
+            let lit = view.powered && bar & (1 << row) != 0;
             let dot = Rect {
                 x: matrix_x + column * PITCH_X,
                 y: matrix_y + (15 - row) * PITCH_Y,
@@ -582,8 +634,29 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &GmPanelView, scale: usize) {
     let band_hi = matrix_x.saturating_sub(font::GLYPH_W);
     let name_w = screen.name.chars().count().min(NAME_COLS) * font::GLYPH_W;
     let name_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(name_w)) / 2;
-    let name_y = inner_y + (inner_h.saturating_sub(16)) / 2;
-    text_tall(frame, name_x, name_y, &screen.name, INK, scale);
+    if view.powered {
+        if screen.subtitle.is_empty() {
+            let name_y = inner_y + (inner_h.saturating_sub(16)) / 2;
+            text_tall(frame, name_x, name_y, &screen.name, INK, scale);
+        } else {
+            // Two lines share the band: the name above, the smaller
+            // subtitle centred under it.
+            let block_h = 16 + 4 + font::GLYPH_H;
+            let name_y = inner_y + (inner_h.saturating_sub(block_h)) / 2;
+            text_tall(frame, name_x, name_y, &screen.name, INK, scale);
+            let sub_w = screen.subtitle.chars().count() * font::GLYPH_W;
+            let sub_x = band_lo + (band_hi.saturating_sub(band_lo).saturating_sub(sub_w)) / 2;
+            text(
+                frame,
+                sub_x.max(band_lo.saturating_sub(font::GLYPH_W)),
+                name_y + 16 + 4,
+                &screen.subtitle,
+                INK,
+                1,
+                scale,
+            );
+        }
+    }
 }
 
 /// Text at double height: the name row's characters, taller than the
@@ -824,8 +897,8 @@ fn draw_button(
     } else {
         face
     };
-    let cut_l = usize::from(round_l);
-    let cut_r = usize::from(round_r);
+    let cut_l = if round_l { 2 } else { 0 };
+    let cut_r = if round_r { 2 } else { 0 };
     // The face, its cut corners left to the fascia.
     fill_rect(
         frame,
@@ -932,12 +1005,13 @@ fn draw_round_button(frame: &mut [u8], rect: Rect, pressed: bool, hovered: bool,
     }
 }
 
-/// A recessed-bezel display with `face` behind the glass, as the status
-/// bar's counters use.
-fn raised_display(frame: &mut [u8], rect: Rect, face: u32, scale: usize) {
+/// The glass set into the fascia rather than standing off it: the
+/// bevel's light falls on the bottom and right, the way a recess
+/// catches it, with the same depth the raised treatment had.
+fn sunken_display(frame: &mut [u8], rect: Rect, face: u32, scale: usize) {
     let outer = scaled(rect, scale);
     fill_rect(frame, outer, LED_BEZEL_DARK, scale);
-    draw_rect_bevel(frame, outer, LED_BEZEL_LIGHT, STATUS_BOTTOM, scale);
+    draw_rect_bevel(frame, outer, STATUS_BOTTOM, LED_BEZEL_LIGHT, scale);
     let inset = LCD_BEZEL * scale;
     fill_rect(
         frame,
@@ -1062,7 +1136,10 @@ impl GmPanel {
             return if left { GmPress::Load } else { GmPress::None };
         }
         if control == GmControl::Power {
-            // The switch takes whatever is latched with it.
+            // The switch takes whatever is latched with it, and pops
+            // in under the click like every other button -- the lamp,
+            // not the moulding, says whether the unit is on.
+            self.flash = left.then_some(control);
             let held = self.held_buttons();
             self.holding.clear();
             return if powered {
@@ -1080,6 +1157,17 @@ impl GmPanel {
                 if let Some(button) = self.latched_gesture() {
                     self.holding.clear();
                     return GmPress::Button(button);
+                }
+            } else {
+                // The splash combination switches the unit on itself:
+                // completing the fourth latch is the power press.
+                let held = self.held_buttons();
+                if held.len() == 2
+                    && held.contains(&Button::Both(Pair::MidiCh))
+                    && held.contains(&Button::Both(Pair::Instrument))
+                {
+                    self.holding.clear();
+                    return GmPress::PowerOn(held);
                 }
             }
             return GmPress::None;
@@ -1418,14 +1506,25 @@ mod tests {
             panel.press(GmControl::Mute, false, true),
             GmPress::Button(Button::Monitor)
         );
-        // Both INSTRUMENT halves latched through a power-on: Init All's
-        // combination arrives as the pair held whole.
+        // Both INSTRUMENT halves latched through a power-on: the
+        // default-font combination arrives as the pair held whole.
         panel.press(GmControl::Arrow(Pair::Instrument, Dir::Left), false, false);
         panel.press(GmControl::Arrow(Pair::Instrument, Dir::Right), false, false);
         assert_eq!(
             panel.press(GmControl::Power, true, false),
             GmPress::PowerOn(vec![Button::Both(Pair::Instrument)])
         );
+        // The splash combination needs no power press at all: the
+        // fourth latch switches the unit on itself.
+        panel.press(GmControl::Arrow(Pair::MidiCh, Dir::Left), false, false);
+        panel.press(GmControl::Arrow(Pair::MidiCh, Dir::Right), false, false);
+        panel.press(GmControl::Arrow(Pair::Instrument, Dir::Left), false, false);
+        let fired = panel.press(GmControl::Arrow(Pair::Instrument, Dir::Right), false, false);
+        let GmPress::PowerOn(held) = fired else {
+            panic!("the fourth latch must power the unit: {fired:?}");
+        };
+        assert!(held.contains(&Button::Both(Pair::MidiCh)));
+        assert!(held.contains(&Button::Both(Pair::Instrument)));
         // ALL and MUTE latched through a power-on: the version screen's.
         panel.press(GmControl::All, false, false);
         panel.press(GmControl::Mute, false, false);
