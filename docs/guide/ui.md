@@ -540,8 +540,9 @@ The layout is:
   that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
-  *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
-  **Parallel:** / **Ethernet:** headings, with each port's options indented
+  *I/O Ports* (the serial, parallel, Ethernet, and sound boards under
+  **Serial:** / **Parallel:** / **Ethernet:** / **Sound:** headings, with
+  each port's options indented
   beneath it: serial mode and MIDI endpoints, with the emulated MT-32's ROM
   images, front panel and display style when it is the chosen output (see
   [The MT-32](mt32.md)), and, for the two TCP modes, the address box that
@@ -553,7 +554,11 @@ The layout is:
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --
   None, Isolated, Loopback, NAT, or Bridged; Bridged adds a host-adapter
   row. NAT and Bridged show a warning because host-clocked traffic makes
-  input recordings and save-state replays non-reproducible while it flows),
+  input recordings and save-state replays non-reproducible while it flows;
+  and the Toccata and MHI sound boards, each a plain fit/don't-fit toggle
+  with no other options -- host-side audio capture and backend settings
+  such as `--audio-wav`, `--audio-stems`, and device selection stay
+  command-line/config-file only and have no row here),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
   *WHDLoad* (your game collection, and the settings games boot with -- see

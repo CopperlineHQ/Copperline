@@ -1818,9 +1818,13 @@ Fits a MacroSystem Toccata sound board (an AD1848 codec) on the Zorro
 chain. Its stock, open-source AHI driver (`toccata.audio`) works unmodified,
 so any AHI-aware guest application gets 16-bit sound with no
 Copperline-specific setup. No other options exist yet. Omit the section
-(or `enabled = false`) for no board. The board's output joins the mixer as
-the `toccata` source for `--audio-stems` (see [](headless)); see
-[](../zorro) and [](../internals/toccata) for the register model.
+(or `enabled = false`) for no board. The launcher's **I/O Ports** tab
+(Sound section) has the matching fit/don't-fit toggle; host-side audio
+capture and backend settings (`--audio-wav`, `--audio-stems`, device
+selection) stay command-line/config-file only and have no launcher row.
+The board's output joins the mixer as the `toccata` source for
+`--audio-stems` (see [](headless)); see [](../zorro) and
+[](../internals/toccata) for the register model.
 
 ## `[mhi]` -- virtual MPEG audio decoder board
 
@@ -1834,7 +1838,11 @@ chain, serving the Amiga MHI API through the ported
 `mhi_copperline.library`, so MHI-aware guest software (e.g. AmigaAMP) gets
 hardware-accelerated MP3 decoding. No other options exist yet. Omit the
 section (or `enabled = false`) for no board. Needs a build with the `mhi`
-feature (on by default; off only for the wasm32 build).
+feature (on by default; off only for the wasm32 build). The launcher's
+**I/O Ports** tab (Sound section) has the matching fit/don't-fit toggle;
+host-side audio capture and backend settings (`--audio-wav`,
+`--audio-stems`, device selection) stay command-line/config-file only and
+have no launcher row.
 
 The guest library is not auto-installed: copy the committed artifact,
 `guest/mhi/mhi_copperline.library`, into the guest's `LIBS:mhi/` drawer.

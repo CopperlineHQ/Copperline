@@ -507,8 +507,7 @@ content above.
   see that test's long comment for the investigation.
 - **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
   `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**.
-- **Launcher**: the machine-configuration launcher has no MHI row yet
-  (same gap as Toccata, see [](toccata)'s "What's out of scope" section):
-  `[mhi] enabled = true` in a config file loaded directly (`--config`)
-  works, but loading that config into the launcher and saving from there
-  drops the setting until a GUI row is added.
+- **Launcher**: the machine-configuration launcher's **I/O Ports** tab
+  (Sound section) has a plain fit/don't-fit toggle for the board (same as
+  Toccata, see [](toccata)'s "What's out of scope" section); host-side
+  audio capture/backend options stay command-line/config-file only.
