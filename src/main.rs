@@ -1253,16 +1253,29 @@ fn print_help() {
     let shortcut = HOST_SHORTCUT_MODIFIER_LABEL;
     // The MIDI endpoint options only do anything in a `midi`-feature build, so
     // list them only there. `--serial` itself is always shown: off/stdout work
-    // in every build, and it names midi as a mode. The MT-32 rides with them
-    // when its own feature is in, being reached through `--midi-out`.
-    #[cfg(all(feature = "midi", feature = "mt32"))]
+    // in every build, and it names midi as a mode. The MT-32 and Coppersynth
+    // ride with them when their features are in, both reached through
+    // `--midi-out`.
+    #[cfg(all(feature = "midi", feature = "mt32", feature = "gm"))]
+    let midi = "--midi-out NAME                host MIDI destination, or mt32/gm (implies --serial midi)\n  \
+                --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
+                --list-midi                    list host MIDI endpoints and exit\n  \
+                --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
+                --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
+                --mt32-panel                   show the MT-32's front panel under the display\n  ";
+    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "gm")))]
     let midi = "--midi-out NAME                host MIDI destination, or mt32 (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  \
                 --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
                 --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
                 --mt32-panel                   show the MT-32's front panel under the display\n  ";
-    #[cfg(all(feature = "midi", not(feature = "mt32")))]
+    #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "gm"))]
+    let midi =
+        "--midi-out NAME                host MIDI destination, or gm (implies --serial midi)\n  \
+                --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
+                --list-midi                    list host MIDI endpoints and exit\n  ";
+    #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "gm")))]
     let midi = "--midi-out NAME                host MIDI destination (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  ";
@@ -1880,10 +1893,19 @@ fn configured_audio_stem_sources(
             channel_names: &[],
         });
     }
+    // ROMs loaded from the menu outlive their session, so they count as
+    // configured here too.
+    #[cfg(feature = "mt32")]
+    let mt32_roms_present = {
+        let (control, pcm) = copperline::mt32::rom_overrides();
+        (control.is_some() || cfg.serial.mt32_control_rom.is_some())
+            && (pcm.is_some() || cfg.serial.mt32_pcm_rom.is_some())
+    };
+    #[cfg(not(feature = "mt32"))]
+    let mt32_roms_present =
+        cfg.serial.mt32_control_rom.is_some() && cfg.serial.mt32_pcm_rom.is_some();
     let has_mt32 = state_loaded
-        || (config::midi_out_is_mt32(cfg.serial.midi_out.as_deref())
-            && cfg.serial.mt32_control_rom.is_some()
-            && cfg.serial.mt32_pcm_rom.is_some());
+        || (config::midi_out_is_mt32(cfg.serial.midi_out.as_deref()) && mt32_roms_present);
     if has_mt32 {
         sources.push(SourceSpec {
             id: "mt32",
@@ -2413,9 +2435,19 @@ fn main() -> Result<()> {
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     video::set_display_scaling(cfg.scaling);
     video::set_menu_scale(cfg.menu_scale);
-    video::set_mt32_panel_shown(cfg.serial.mt32_panel);
+    // A fascia belongs to a machine that carries the instrument: with the
+    // serial port out of MIDI mode, or another device chosen, the strip
+    // would be blank glass, so the flag follows the configuration.
+    let serial_midi = cfg.serial.mode == config::SerialMode::Midi;
+    video::set_mt32_panel_shown(
+        cfg.serial.mt32_panel
+            && serial_midi
+            && config::midi_out_is_mt32(cfg.serial.midi_out.as_deref()),
+    );
     #[cfg(feature = "gm")]
-    video::set_gm_panel_shown(cfg.gm.panel);
+    video::set_gm_panel_shown(
+        cfg.gm.panel && serial_midi && config::midi_out_is_gm(cfg.serial.midi_out.as_deref()),
+    );
     video::set_mt32_lcd(cfg.serial.mt32_lcd);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's

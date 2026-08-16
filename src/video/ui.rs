@@ -5554,7 +5554,7 @@ fn launcher_clear_enabled(setup: &launcher::MachineSetup, field: LauncherField) 
     if field == LauncherField::GmSoundfont {
         return setup.path(field).is_some();
     }
-    let _ = setup;
+    let _ = (setup, field);
     true
 }
 
@@ -12608,9 +12608,12 @@ mod tests {
             midi_inputs: &none,
             midi_outputs: &none,
             mt32_available: false,
+            mt32_selected: false,
             mt32_attached: false,
             mt32_input: false,
             mt32_panel: false,
+            mt32_control_rom: None,
+            mt32_pcm_rom: None,
             gm_available: false,
             gm_attached: false,
             gm_panel: false,

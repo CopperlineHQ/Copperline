@@ -630,7 +630,8 @@ impl MidiSerialSink {
         let Some((control, pcm)) = self.mt32_roms.pair() else {
             log::warn!(
                 "midi: {MIDI_OUT_MT32_LABEL} needs both ROM images; \
-                 set [serial] mt32_control_rom and mt32_pcm_rom"
+                 load them from the MT-32 menu or set [serial] \
+                 mt32_control_rom and mt32_pcm_rom"
             );
             self.mt32_fault = Some("missing ROM(s)".to_string());
             return;
@@ -695,7 +696,9 @@ impl MidiSerialSink {
         self.mt32_selected
     }
 
-    /// Whether an MT-32 could be selected at all.
+    /// Whether the ROM pair is configured -- what fitting needs. Selection
+    /// itself is always offered; a unit picked without this stays a fault
+    /// until the menu loads the images.
     #[cfg(feature = "mt32")]
     pub fn mt32_available(&self) -> bool {
         self.mt32_roms.configured()
@@ -710,6 +713,23 @@ impl MidiSerialSink {
     #[cfg(feature = "mt32")]
     pub fn mt32_mut(&mut self) -> Option<&mut crate::mt32::Mt32Device> {
         self.mt32.as_mut()
+    }
+
+    /// The ROM pair as currently held, for the menu's read-out.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_roms(&self) -> &crate::mt32::Mt32Roms {
+        &self.mt32_roms
+    }
+
+    /// Point one slot of the pair at a freshly loaded image.
+    #[cfg(feature = "mt32")]
+    pub fn set_mt32_control_rom(&mut self, path: std::path::PathBuf) {
+        self.mt32_roms.control = Some(path);
+    }
+
+    #[cfg(feature = "mt32")]
+    pub fn set_mt32_pcm_rom(&mut self, path: std::path::PathBuf) {
+        self.mt32_roms.pcm = Some(path);
     }
 
     /// Where the ROMs are. Set once from the configuration; the picker and

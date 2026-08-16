@@ -5455,22 +5455,33 @@ impl App {
             crate::audio::AudioOutput::Default => AudioOutputChoice::Default,
         };
 
-        // Whether an MT-32 can be picked, whether it is the one playing, and
-        // whether its own MIDI OUT is wired back to the machine.
+        // Whether the MT-32 is the chosen output, whether the unit is
+        // actually running, whether its own MIDI OUT is wired back to the
+        // machine, and which ROM images it holds.
         #[cfg(feature = "mt32")]
-        let (mt32_available, mt32_attached, mt32_input) = self
+        let (mt32_selected, mt32_attached, mt32_input, mt32_control_rom, mt32_pcm_rom) = self
             .emu
             .bus_mut()
             .midi_serial_mut()
-            .map_or((false, false, false), |sink| {
+            .map_or((false, false, false, None, None), |sink| {
+                let rom_name = |p: &Option<std::path::PathBuf>| {
+                    p.as_deref()
+                        .and_then(std::path::Path::file_name)
+                        .map(|n| n.to_string_lossy().into_owned())
+                };
+                let roms = sink.mt32_roms();
+                let (control, pcm) = (rom_name(&roms.control), rom_name(&roms.pcm));
                 (
-                    sink.mt32_available(),
+                    sink.mt32_selected(),
                     sink.mt32().is_some(),
                     sink.mt32_input(),
+                    control,
+                    pcm,
                 )
             });
         #[cfg(not(feature = "mt32"))]
-        let (mt32_available, mt32_attached, mt32_input) = (false, false, false);
+        let (mt32_selected, mt32_attached, mt32_input, mt32_control_rom, mt32_pcm_rom) =
+            (false, false, false, None::<String>, None::<String>);
         // Selected, not powered: the Front Panel row stays reachable while
         // the unit is switched off at its own fascia.
         #[cfg(feature = "gm")]
@@ -5533,9 +5544,12 @@ impl App {
             midi_out: &midi_out,
             midi_inputs: &midi_inputs,
             midi_outputs: &midi_outputs,
-            mt32_available,
+            mt32_available: cfg!(feature = "mt32"),
+            mt32_selected,
             mt32_attached,
             mt32_input,
+            mt32_control_rom,
+            mt32_pcm_rom,
             mt32_panel: crate::video::mt32_panel_shown(),
             gm_available: cfg!(feature = "gm"),
             gm_attached,
@@ -5758,6 +5772,8 @@ impl App {
                     self.sync_mt32_panel();
                     self.report_mt32_fault();
                 }
+                #[cfg(feature = "gm")]
+                self.sync_gm_panel();
                 self.show_osd(format!("MIDI output: {shown}"));
             }
             #[cfg(not(feature = "midi"))]
@@ -5790,6 +5806,12 @@ impl App {
             A::LoadGmSoundfont => self.load_gm_soundfont(),
             #[cfg(not(feature = "gm"))]
             A::LoadGmSoundfont => {}
+            #[cfg(feature = "mt32")]
+            A::LoadMt32ControlRom => self.load_mt32_rom(true),
+            #[cfg(feature = "mt32")]
+            A::LoadMt32PcmRom => self.load_mt32_rom(false),
+            #[cfg(not(feature = "mt32"))]
+            A::LoadMt32ControlRom | A::LoadMt32PcmRom => {}
             #[cfg(feature = "gm")]
             A::ResetGmSoundfont => {
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
@@ -6377,6 +6399,66 @@ impl App {
         }
     }
 
+    /// Ask for one half of the MT-32's firmware and fit it. The choice
+    /// outlives the session: stopping and starting emulation keeps it, so
+    /// ROMs picked once stay picked.
+    #[cfg(feature = "mt32")]
+    fn load_mt32_rom(&mut self, control: bool) {
+        let title = if control {
+            "Choose an MT-32 control ROM"
+        } else {
+            "Choose an MT-32 PCM ROM"
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if control {
+            crate::mt32::set_control_rom_override(path.clone());
+        } else {
+            crate::mt32::set_pcm_rom_override(path.clone());
+        }
+        let mut selected = false;
+        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+            if control {
+                sink.set_mt32_control_rom(path);
+            } else {
+                sink.set_mt32_pcm_rom(path);
+            }
+            selected = sink.mt32_selected();
+            if selected {
+                // Refit around the new image: power-cycling brings the
+                // unit up on it, greeting and all.
+                sink.set_mt32_power(false);
+                sink.set_mt32_power(true);
+            }
+        }
+        if selected {
+            self.emu.bus_mut().paula.rearm_synth_audio();
+            self.sync_mt32_panel();
+            let fitted = self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.mt32().is_some());
+            if fitted {
+                self.show_osd(format!("MT-32: {name}"));
+            } else {
+                // Half a pair, or a file the engine rejected.
+                self.report_mt32_fault();
+            }
+        } else {
+            self.show_osd(format!("MT-32: {name}"));
+        }
+    }
+
     /// The switch itself: drop or refit the engine, and ask Paula for
     /// synth audio again when it changes hands.
     #[cfg(feature = "gm")]
@@ -6553,6 +6635,20 @@ impl App {
         self.tell_panel_the_rom_version();
         if !selected {
             self.set_mt32_panel_shown(false);
+        }
+    }
+
+    /// The same for the Coppersynth fascia: deselecting the synth takes
+    /// its panel down rather than leaving a blank strip.
+    #[cfg(feature = "gm")]
+    fn sync_gm_panel(&mut self) {
+        let selected = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.gm_selected());
+        if !selected {
+            self.set_gm_panel_shown(false);
         }
     }
 
@@ -9924,6 +10020,17 @@ impl App {
             self.mt32_panel.reset();
             self.tell_panel_the_rom_version();
             self.report_mt32_fault();
+        }
+        #[cfg(feature = "gm")]
+        {
+            // Coppersynth's fascia follows the same rule as the MT-32's:
+            // no synth on the new machine, no strip under its display.
+            let fitted = self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.gm_selected());
+            self.set_gm_panel_shown(fitted && cfg.gm.panel);
         }
         self.ui.menu_open = false;
         self.ui.panel = None;
@@ -13371,7 +13478,7 @@ impl App {
 
     /// Say something that did not go as asked, in amber. Otherwise as
     /// [`Self::show_osd`].
-    #[cfg(feature = "mt32")]
+    #[cfg(any(feature = "mt32", feature = "gm"))]
     fn warn_osd(&mut self, text: impl Into<String>) {
         self.osd = Some(Osd {
             text: text.into(),

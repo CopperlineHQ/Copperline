@@ -707,8 +707,12 @@ const TALL_PITCH: usize = 7;
 /// Text at double height on the tightened pitch: taller than the
 /// labels, and sixteen of it fits beside the bars.
 fn text_tall(frame: &mut [u8], x: usize, y: usize, s: &str, color: u32, scale: usize) {
+    // The shared font's asterisk fills all eight columns, which the
+    // tightened pitch would run straight into the next cell -- the
+    // drum-kit marker gets a five-column star that keeps the gap.
+    const STAR: [u8; 8] = [0, 0x15, 0x0E, 0x1F, 0x0E, 0x15, 0, 0];
     for (cell, ch) in s.chars().enumerate() {
-        let glyph = font::glyph(ch);
+        let glyph = if ch == '*' { &STAR } else { font::glyph(ch) };
         for (row, bits) in glyph.iter().enumerate() {
             for col in 0..font::GLYPH_W {
                 if bits & (1 << col) == 0 {

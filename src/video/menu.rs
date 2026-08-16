@@ -71,6 +71,8 @@ pub enum MenuAction {
     ToggleGmPanel,
     LoadGmSoundfont,
     ResetGmSoundfont,
+    LoadMt32ControlRom,
+    LoadMt32PcmRom,
     SetGmMt32Mode(&'static str),
     /// How that panel's display is lit.
     SetMt32Lcd(crate::config::Mt32Lcd),
@@ -447,14 +449,19 @@ pub struct MenuState<'a> {
     pub midi_inputs: &'a [String],
     pub midi_outputs: &'a [String],
     /// Sampler, empty unless one is on the parallel port.
-    /// Whether an MT-32 could be selected (its ROM pair is configured),
-    /// whether it is the device being played, whether its own MIDI OUT is
-    /// wired back to the machine, and whether its panel is up.
+    /// Whether an MT-32 is compiled in at all, whether it is the chosen
+    /// output, whether the unit is actually running (chosen and its ROM
+    /// pair loaded), whether its own MIDI OUT is wired back to the
+    /// machine, and whether its panel is up.
     pub mt32_available: bool,
+    pub mt32_selected: bool,
     pub mt32_attached: bool,
     pub mt32_input: bool,
     pub mt32_panel: bool,
     pub mt32_lcd: crate::config::Mt32Lcd,
+    /// The ROM images by file name, for the firmware read-out rows.
+    pub mt32_control_rom: Option<String>,
+    pub mt32_pcm_rom: Option<String>,
     /// Whether Coppersynth is compiled in at all, whether it is the
     /// selected output, whether its panel is up, and which MT-32 mode
     /// its options name.
@@ -754,9 +761,9 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
         }
         rows.push(MenuRow::submenu("MIDI In", inputs));
     }
-    // The MT-32 is one of the outputs, always offered once its ROMs are
-    // configured -- a machine with no host MIDI devices at all can still
-    // play to it.
+    // The MT-32 is one of the outputs whenever it is compiled in -- a
+    // machine with no host MIDI devices and no ROMs yet can still choose
+    // it, and the submenu below is where the ROMs then come from.
     if !s.midi_outputs.is_empty() || s.mt32_available || s.gm_available {
         let mut outputs = vec![MenuRow::choice(
             "None",
@@ -774,7 +781,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
             outputs.push(MenuRow::choice(
                 MT32_LABEL,
                 MenuAction::SetMidiOutput(Some(MT32_ENDPOINT.to_string())),
-                s.mt32_attached,
+                s.mt32_selected,
             ));
         }
         // Coppersynth needs no hardware and no configuration, so it is
@@ -788,12 +795,23 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
         }
         rows.push(MenuRow::submenu("MIDI Out", outputs));
     }
-    // The synth's own settings, once it is the device being played.
-    if s.mt32_attached {
+    // The synth's own settings, once it is the device chosen -- chosen
+    // rather than running, because the firmware rows below are how a
+    // unit with no ROMs yet becomes one that runs.
+    if s.mt32_selected {
         let displays = crate::config::Mt32Lcd::MENU_ORDER
             .iter()
             .map(|d| MenuRow::choice(d.menu_label(), MenuAction::SetMt32Lcd(*d), s.mt32_lcd == *d))
             .collect();
+        // A firmware slot: what is loaded (or a dimmed None), then the
+        // way to load something else.
+        let rom_rows = |name: &Option<String>, load: MenuAction| {
+            let named = match name {
+                Some(n) => MenuRow::caption(n),
+                None => MenuRow::action("None", load.clone()).available(false),
+            };
+            vec![named, MenuRow::action("Load...", load)]
+        };
         rows.push(MenuRow::submenu(
             MT32_LABEL,
             vec![
@@ -802,6 +820,14 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
                 // No value on the row: the list it opens marks the one in
                 // force, which is the same answer said once.
                 MenuRow::submenu("Display", displays).available(s.mt32_panel),
+                MenuRow::submenu(
+                    "Control ROM",
+                    rom_rows(&s.mt32_control_rom, MenuAction::LoadMt32ControlRom),
+                ),
+                MenuRow::submenu(
+                    "PCM ROM",
+                    rom_rows(&s.mt32_pcm_rom, MenuAction::LoadMt32PcmRom),
+                ),
             ],
         ));
     }
@@ -1146,9 +1172,12 @@ mod tests {
             midi_inputs: midi_in,
             midi_outputs: midi_out,
             mt32_available: false,
+            mt32_selected: false,
             mt32_attached: false,
             mt32_input: false,
             mt32_panel: false,
+            mt32_control_rom: None,
+            mt32_pcm_rom: None,
             gm_available: false,
             gm_attached: false,
             gm_panel: false,

@@ -2042,9 +2042,10 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             let mut sink = crate::midi::MidiSerialSink::open(host_out, host_in)?;
             #[cfg(feature = "mt32")]
             {
+                let (control_override, pcm_override) = crate::mt32::rom_overrides();
                 sink.set_mt32_roms(crate::mt32::Mt32Roms {
-                    control: cfg.serial.mt32_control_rom.clone(),
-                    pcm: cfg.serial.mt32_pcm_rom.clone(),
+                    control: control_override.or_else(|| cfg.serial.mt32_control_rom.clone()),
+                    pcm: pcm_override.or_else(|| cfg.serial.mt32_pcm_rom.clone()),
                 });
                 if wants_mt32 {
                     sink.set_output_endpoint(Some(crate::config::MIDI_OUT_MT32));
