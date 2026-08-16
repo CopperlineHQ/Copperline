@@ -1056,7 +1056,7 @@ fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
     let bounds = line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, &h_rows[0])
         .expect("window open");
     assert_eq!((bounds.x_start, bounds.x_stop), narrowed.display_window_x());
-    assert_eq!(bounds.carried_open_ext_native, 0);
+    assert_eq!(bounds.carried_open_ext_fb, 0);
 }
 
 #[test]
@@ -1088,10 +1088,38 @@ fn carried_open_h_window_extends_paint_to_fetch_origin() {
     assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
     assert_eq!(bounds.x_stop, FB_WIDTH);
     let anchor_x = control.display_window_x().0;
-    assert_eq!(
-        bounds.carried_open_ext_native,
-        (anchor_x - STANDARD_VISIBLE_X0) / 2
-    );
+    assert_eq!(bounds.carried_open_ext_fb, anchor_x - STANDARD_VISIBLE_X0);
+}
+
+#[test]
+fn carried_open_row_that_closes_and_reopens_still_reveals_the_left_data() {
+    // ECS DIWHIGH can place HSTOP left of HSTART ($91 < $C0): the
+    // flip-flop opens at $C0, survives the line wrap, and closes at $91 on
+    // the next line, so every row enters the framebuffer open, closes
+    // early, and reopens at the anchor. The carried-in run still reveals
+    // the fetched data left of the reopen anchor on hardware; only the
+    // closed gap between HSTOP and HSTART is border.
+    let control = ControlState {
+        diwstrt: 0x30C0,
+        diwstop: 0xF891,
+        diwhigh: DiwHigh::ecs_explicit(0x0100),
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        bplcon0: 0x4200,
+        dmacon: 0x0380,
+        ..ControlState::default()
+    };
+    let anchor_x = control.display_window_x().0;
+    let close_x = (0x91 - 0x62) * 2;
+    let h_rows = compute_h_window_rows(&[control, control], &[Vec::new(), Vec::new()], 48);
+    // Row 1 entered open (carried), closed at $91, reopened at $C0.
+    assert_eq!(h_rows[1].open_runs(), &[(0, close_x), (anchor_x, FB_WIDTH)]);
+    assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
+    let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
+    // Paint still starts at the fetch origin; the per-pixel window gate
+    // and the closed-interval border mask hide the closed gap.
+    assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
+    assert_eq!(bounds.carried_open_ext_fb, anchor_x - STANDARD_VISIBLE_X0);
 }
 
 #[test]
@@ -1115,7 +1143,7 @@ fn reachable_diwstop_keeps_the_window_clip() {
     assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
     let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
     assert_eq!(bounds.x_start, anchor_x);
-    assert_eq!(bounds.carried_open_ext_native, 0);
+    assert_eq!(bounds.carried_open_ext_fb, 0);
 }
 
 #[test]
@@ -8461,7 +8489,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
         }
         let suppress = r & 0x4000_0000_0000_0000 != 0;
         let bpl_output_start_x = x0 + [0usize, 6, 34][((r >> 58) as usize) % 3];
-        let carried_open_ext_native = [0usize, 4, 24][((r >> 56) as usize) % 3];
+        let carried_open_ext_fb = [0usize, 8, 48][((r >> 56) as usize) % 3];
 
         let plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
             0,
@@ -8500,7 +8528,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
                 control.bplcon0,
                 suppress,
                 bpl_output_start_x,
-                carried_open_ext_native,
+                carried_open_ext_fb,
                 &h_row_for(control),
                 PAL_VISIBLE_LINE0,
                 0.0,
