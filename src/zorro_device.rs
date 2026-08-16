@@ -17,7 +17,7 @@
 //! open-coded. Zorro II masters only drive the low 24 bits; a Zorro III master
 //! like the A4091 reaches the 32-bit motherboard and accelerator banks too.
 
-use crate::chipset::paula::{CdAudioRing, ToccataAudioRing};
+use crate::chipset::paula::{CdAudioRing, MhiAudioRing, ToccataAudioRing};
 use crate::memory::{Memory, ACCEL_RAM_BASE, SLOW_RAM_BASE};
 
 /// DMA bus-master word read: the chip / slow / motherboard / accelerator /
@@ -158,6 +158,9 @@ pub struct DeviceHost<'a> {
     /// Paula's Toccata-board audio ring, available only on the bus's
     /// generic Zorro-board tick host (see `for_slot_with_audio`).
     toccata_audio: Option<&'a mut ToccataAudioRing>,
+    /// Paula's MHI-board audio ring, available only on the bus's generic
+    /// Zorro-board tick host (see `for_slot_with_audio`).
+    mhi_audio: Option<&'a mut MhiAudioRing>,
     /// The device slot this host was built for, so a bus-mastering board
     /// can recognize DMA addresses inside its own configured window (the
     /// A4091 self-test DMAs its own registers) without re-entering itself.
@@ -175,6 +178,7 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: None,
             toccata_audio: None,
+            mhi_audio: None,
             self_slot: None,
             touched_memory: false,
         }
@@ -186,6 +190,7 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: None,
             toccata_audio: None,
+            mhi_audio: None,
             self_slot: Some(slot),
             touched_memory: false,
         }
@@ -209,15 +214,16 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: Some(cd_audio),
             toccata_audio: None,
+            mhi_audio: None,
             self_slot: None,
             touched_memory: false,
         }
     }
 
-    /// A slot-aware host that also exposes Paula's CD-audio and Toccata
-    /// rings: the bus's generic Zorro-board tick loop, where a SCSI board's
-    /// CD-ROM target streams CD-DA and a fitted Toccata streams its own
-    /// resampled output. Either ring is `None` for a run without that
+    /// A slot-aware host that also exposes Paula's CD-audio, Toccata, and
+    /// MHI rings: the bus's generic Zorro-board tick loop, where a SCSI
+    /// board's CD-ROM target streams CD-DA and a fitted Toccata/MHI streams
+    /// its own resampled output. Each ring is `None` for a run without that
     /// hardware; a board that never asks for a ring it wasn't given never
     /// notices the difference.
     pub fn for_slot_with_audio(
@@ -225,11 +231,13 @@ impl<'a> DeviceHost<'a> {
         slot: usize,
         cd_audio: &'a mut CdAudioRing,
         toccata_audio: &'a mut ToccataAudioRing,
+        mhi_audio: &'a mut MhiAudioRing,
     ) -> Self {
         Self {
             mem,
             cd_audio: Some(cd_audio),
             toccata_audio: Some(toccata_audio),
+            mhi_audio: Some(mhi_audio),
             self_slot: Some(slot),
             touched_memory: false,
         }
@@ -270,6 +278,15 @@ impl<'a> DeviceHost<'a> {
         self.toccata_audio
             .as_deref_mut()
             .expect("DeviceHost::toccata_audio requested without a Toccata-audio ring")
+    }
+
+    /// Paula's MHI-audio ring. Only present on a host built via
+    /// [`DeviceHost::for_slot_with_audio`] (the bus tick loop); requesting
+    /// it elsewhere is a wiring bug.
+    pub fn mhi_audio(&mut self) -> &mut MhiAudioRing {
+        self.mhi_audio
+            .as_deref_mut()
+            .expect("DeviceHost::mhi_audio requested without an MHI-audio ring")
     }
 
     // These wrap the shared decode for boards that hold a `DeviceHost` rather
@@ -406,6 +423,8 @@ pub enum BoardDevice {
     GraffityZ2(Box<crate::graffity::GraffityZ2>),
     GraffityZ3(Box<crate::graffity::GraffityZ3>),
     Toccata(Box<crate::toccata::Toccata>),
+    #[cfg(feature = "mhi")]
+    Mhi(Box<crate::mhi::Mhi>),
 }
 
 impl ZorroDevice for BoardDevice {
@@ -423,6 +442,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::read(d.as_mut(), off, size, host),
             BoardDevice::GraffityZ3(d) => ZorroDevice::read(d.as_mut(), off, size, host),
             BoardDevice::Toccata(d) => ZorroDevice::read(d.as_mut(), off, size, host),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::read(d.as_mut(), off, size, host),
         }
     }
 
@@ -440,6 +461,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
             BoardDevice::GraffityZ3(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
             BoardDevice::Toccata(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
         }
     }
 
@@ -457,6 +480,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::peek_word(d.as_ref(), off),
             BoardDevice::GraffityZ3(d) => ZorroDevice::peek_word(d.as_ref(), off),
             BoardDevice::Toccata(d) => ZorroDevice::peek_word(d.as_ref(), off),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::peek_word(d.as_ref(), off),
         }
     }
 
@@ -474,6 +499,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::tick(d.as_mut(), cck, host),
             BoardDevice::GraffityZ3(d) => ZorroDevice::tick(d.as_mut(), cck, host),
             BoardDevice::Toccata(d) => ZorroDevice::tick(d.as_mut(), cck, host),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::tick(d.as_mut(), cck, host),
         }
     }
 
@@ -491,6 +518,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::int2_line(d.as_ref()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::int2_line(d.as_ref()),
             BoardDevice::Toccata(d) => ZorroDevice::int2_line(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::int2_line(d.as_ref()),
         }
     }
 
@@ -508,6 +537,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::int6_line(d.as_ref()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::int6_line(d.as_ref()),
             BoardDevice::Toccata(d) => ZorroDevice::int6_line(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::int6_line(d.as_ref()),
         }
     }
 
@@ -525,6 +556,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::is_idle(d.as_ref()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::is_idle(d.as_ref()),
             BoardDevice::Toccata(d) => ZorroDevice::is_idle(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::is_idle(d.as_ref()),
         }
     }
 
@@ -542,6 +575,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::next_event_cck(d.as_ref()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::next_event_cck(d.as_ref()),
             BoardDevice::Toccata(d) => ZorroDevice::next_event_cck(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::next_event_cck(d.as_ref()),
         }
     }
 
@@ -559,6 +594,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::take_activity(d.as_mut()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::take_activity(d.as_mut()),
             BoardDevice::Toccata(d) => ZorroDevice::take_activity(d.as_mut()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::take_activity(d.as_mut()),
         }
     }
 
@@ -576,6 +613,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::reset(d.as_mut()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::reset(d.as_mut()),
             BoardDevice::Toccata(d) => ZorroDevice::reset(d.as_mut()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::reset(d.as_mut()),
         }
     }
 
@@ -593,6 +632,8 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::GraffityZ2(d) => ZorroDevice::kind(d.as_ref()),
             BoardDevice::GraffityZ3(d) => ZorroDevice::kind(d.as_ref()),
             BoardDevice::Toccata(d) => ZorroDevice::kind(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::kind(d.as_ref()),
         }
     }
 }

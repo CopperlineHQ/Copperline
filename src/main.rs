@@ -1822,12 +1822,12 @@ fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -
 /// The `--audio-stems` source set for this run: Paula (always present, with
 /// its four physical channels) and drive sounds (always registered --
 /// `[audio] floppy_sounds = false` just means the stem is silent, like a
-/// disabled DriveSounds today), plus CD-DA, MT-32, and Toccata only when
-/// this run's config plausibly produces them. A source absent here never
-/// gets a stem file at all, even if `--audio-stems-mode` includes
+/// disabled DriveSounds today), plus CD-DA, MT-32, Toccata, and MHI only
+/// when this run's config plausibly produces them. A source absent here
+/// never gets a stem file at all, even if `--audio-stems-mode` includes
 /// `source`/`channel`.
 ///
-/// The CD/MT-32/Toccata checks are a heuristic, not a perfect "will this
+/// The CD/MT-32/Toccata/MHI checks are a heuristic, not a perfect "will this
 /// run ever make sound" oracle (e.g. a CD swapped into an empty drive
 /// mid-run by `--insert-cd-after` or the control protocol is missed) --
 /// see docs/internals/audio.md for the exact rule and its limits.
@@ -1893,6 +1893,12 @@ fn configured_audio_stem_sources(
     if state_loaded || cfg.toccata {
         sources.push(SourceSpec {
             id: "toccata",
+            channel_names: &[],
+        });
+    }
+    if state_loaded || cfg.mhi {
+        sources.push(SourceSpec {
+            id: "mhi",
             channel_names: &[],
         });
     }
@@ -2875,6 +2881,7 @@ mod tests {
             ids.contains(&"toccata"),
             "state loads must not skip toccata"
         );
+        assert!(ids.contains(&"mhi"), "state loads must not skip mhi");
 
         // Without a state load, the same bare config registers none of them.
         let ids: Vec<&'static str> = configured_audio_stem_sources(&cfg, false)
@@ -2884,6 +2891,7 @@ mod tests {
         assert!(!ids.contains(&"cdda"));
         assert!(!ids.contains(&"mt32"));
         assert!(!ids.contains(&"toccata"));
+        assert!(!ids.contains(&"mhi"));
     }
 
     #[test]

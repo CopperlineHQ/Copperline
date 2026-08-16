@@ -76,6 +76,8 @@ pub mod ipf;
 pub mod keymap;
 pub mod lha;
 pub mod memory;
+#[cfg(feature = "mhi")]
+pub mod mhi;
 #[cfg(feature = "midi")]
 pub mod midi;
 #[cfg(feature = "mt32")]

@@ -216,6 +216,13 @@ pub struct Config {
     /// joins the mixer as the `toccata` audio source. No other options
     /// exist yet (see docs/internals/toccata.md).
     pub toccata: bool,
+    /// The MHI virtual MPEG audio decoder board (`[mhi] enabled = true`):
+    /// when true, an MHI board autoconfigs on the Zorro chain and its
+    /// decoded-MP3 output joins the mixer as the `mhi` audio source. No
+    /// other options exist yet (see docs/internals/mhi.md). Needs a build
+    /// with the `mhi` feature (on by default; off only for the wasm32
+    /// browser core, which builds `default-features = false`).
+    pub mhi: bool,
     /// HostSocket board backend (`[hostsocket] net`): when set, the bundled
     /// bsdsocket.library plugin board is fitted with this backend. The board
     /// itself travels in [`Config::wasm_boards`]; this field records the
@@ -2227,6 +2234,7 @@ impl Default for Config {
             lide: LideConfig::default(),
             a2065_net: None,
             toccata: false,
+            mhi: false,
             hostsocket_net: None,
             hostsocket_transport: None,
             rtg: RtgCard::None,
@@ -2872,6 +2880,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) toccata: RawToccata,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) mhi: RawMhi,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) rtg: RawRtg,
@@ -3466,6 +3476,15 @@ pub(crate) struct RawA2065 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawToccata {
     /// Fit the board. Absent/false means no Toccata is on the chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+}
+
+/// `[mhi]` MHI virtual MPEG audio decoder board.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawMhi {
+    /// Fit the board. Absent/false means no MHI board is on the chain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
 }
@@ -4521,6 +4540,7 @@ impl TryFrom<RawConfig> for Config {
         };
 
         let toccata = raw.toccata.enabled.unwrap_or(defaults.toccata);
+        let mhi = raw.mhi.enabled.unwrap_or(defaults.mhi);
 
         // `[hostsocket]` expands to the bundled WASM plugin board (see
         // crate::hostsocket), appended after any [[zorro]] metadata boards.
@@ -4890,6 +4910,7 @@ impl TryFrom<RawConfig> for Config {
             lide,
             a2065_net,
             toccata,
+            mhi,
             hostsocket_net,
             hostsocket_transport,
             rtg,
@@ -9640,6 +9661,14 @@ mod tests {
         assert!(!parse_config("")?.toccata);
         let cfg = parse_config("[toccata]\nenabled = true\n")?;
         assert!(cfg.toccata);
+        Ok(())
+    }
+
+    #[test]
+    fn mhi_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
+        assert!(!parse_config("")?.mhi);
+        let cfg = parse_config("[mhi]\nenabled = true\n")?;
+        assert!(cfg.mhi);
         Ok(())
     }
 
