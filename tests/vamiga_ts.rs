@@ -182,14 +182,15 @@ fn run_case(
     }
 
     // A screenshot of any other size means the presentation path changed
-    // shape: 716x540 is the TV-glass picture (the captured aperture
-    // resampled onto the 4:3 glass), and COPPERLINE_SHOT_RAW saves the
-    // woven native framebuffer instead (716x570 = the vAmiga regression
-    // cutout with line doubling).
+    // shape: 716x537 is the 4:3 glass (PRESENT_HEIGHT_TV = FB_WIDTH * 3/4,
+    // the woven scanlines resampled onto the TV-aspect canvas), and
+    // COPPERLINE_SHOT_RAW saves the woven native framebuffer instead
+    // (716x570 = the vAmiga regression cutout with line doubling, the
+    // format tools/vamigats-compare.py consumes -- sweeps set it).
     if envcfg::flag("COPPERLINE_SHOT_RAW") {
         assert_png_dimensions(&png_path, 716, 570)?;
     } else {
-        assert_png_dimensions(&png_path, 716, 540)?;
+        assert_png_dimensions(&png_path, 716, 537)?;
     }
     if let Some(baseline_root) = baseline_root {
         let mut expected = baseline_root.join(&case.rel_path);
