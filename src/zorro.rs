@@ -67,7 +67,9 @@ const PRODUCT_SERVICES: u8 = 0x05;
 /// TCP/IP stack; see `crate::hostsocket`).
 const PRODUCT_HOSTSOCKET: u8 = 0x06;
 /// The MHI virtual MPEG audio decoder board (`crate::mhi`, `[mhi]`); see
-/// `docs/internals/mhi.md`.
+/// `docs/internals/mhi.md`. Gated like its only consumer,
+/// [`BoardDescriptor::mhi`], so a no-`mhi` build stays warning-free.
+#[cfg(feature = "mhi")]
 const PRODUCT_MHI: u8 = 0x07;
 
 /// Village Tronic's registered expansion manufacturer ID.

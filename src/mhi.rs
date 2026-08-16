@@ -124,6 +124,23 @@ const DECODED_CAPACITY: usize = 4096;
 /// call once its bytes are queued.
 const MAX_FRAME_INPUT: usize = 4096;
 
+/// Bound on how many resync attempts (calls into `mp3dec_decode_frame` that
+/// find no valid frame -- junk/ID3 bytes, or a fake sync header that passes
+/// minimp3's header check but fails Layer III decode) a single
+/// `decode_next_frame` call performs before yielding back to its caller.
+/// Real decoder firmware does not spend an unbounded slice of one
+/// scheduling tick hunting for the next sync word either; it budgets a
+/// bounded amount of resync work per tick and picks the search back up next
+/// tick from wherever it left off. Because bytes scanned so far are already
+/// popped from `bitstream` (and any descriptors they completed are already
+/// latched in `pending_completes`) before this bound is checked, resuming
+/// next tick is a continuation, not a rescan-from-scratch -- this is what
+/// bounds a single tick's cost against a guest handing the board megabytes
+/// of undecodable garbage while still letting genuine resync across a
+/// corrupted frame boundary (a handful of skipped junk/ID3 bytes) complete
+/// within one tick, exactly as it always has.
+const MAX_RESYNC_ATTEMPTS_PER_TICK: u32 = 64;
+
 /// `MINIMP3_MAX_SAMPLES_PER_FRAME`: 1152 samples * 2 channels, interleaved.
 const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
 
@@ -501,6 +518,11 @@ impl Mhi {
         // fresh decoder, not one still carrying the discarded stream's
         // bit reservoir into whatever plays next.
         self.decoder = Decoder::new();
+        // Same reasoning as `reset`'s identical clear: a cached per-rate
+        // `Resampler`'s convolution history would otherwise bleed the
+        // stopped stream's tail into whatever plays next at the same
+        // native rate.
+        self.resamplers.clear();
     }
 
     fn handle_doorbell(&mut self, host: &mut DeviceHost) {
@@ -518,7 +540,9 @@ impl Mhi {
             // rather than lingering in `desc_lengths` forever (nothing
             // would ever visit it: `decode_next_frame` only walks
             // `desc_lengths` while consuming bytes out of a non-empty
-            // `bitstream`).
+            // `bitstream`). It never touches `desc_lengths`/`bitstream`, so
+            // `QUEUE_COUNT` does not move -- see the doorbell's status
+            // handling below.
             self.completed_count = self.completed_count.wrapping_add(1);
             self.intreq |= INT_BUFFER_DONE;
         } else {
@@ -526,11 +550,19 @@ impl Mhi {
             host.dma_read(addr, &mut buf);
             self.desc_lengths.push_back(len);
             self.bitstream.extend(buf);
-        }
-        if self.status == Status::OutOfData {
-            // "The board resumes playback automatically... with no
-            // CONTROL=PLAY required" -- no INTREQ bit for this direction.
-            self.status = Status::Playing;
+            if self.status == Status::OutOfData {
+                // "The board resumes playback automatically... with no
+                // CONTROL=PLAY required" -- this is specifically the
+                // `QUEUE_COUNT` 0->1 transition (see "Out-of-data
+                // semantics"), so it applies only when this doorbell
+                // actually enqueued a descriptor; a zero-length doorbell
+                // (the `if` branch above) leaves `QUEUE_COUNT` at 0 and
+                // must not flip `STATUS` back to `PLAYING` with nothing
+                // queued to play -- that would both misreport a
+                // `PLAYING` readback and raise a second, spurious
+                // `OUT_OF_DATA` on the very next tick.
+                self.status = Status::Playing;
+            }
         }
     }
 
@@ -559,12 +591,16 @@ impl Mhi {
     }
 
     /// Decode at most one real audio frame, skipping any junk minimp3
-    /// walks past first. `None` means no frame is available right now
-    /// (either the bitstream is empty, or what's buffered isn't enough for
-    /// minimp3 to make progress -- the latter should not arise with
-    /// whole-buffer CBR descriptors, the M1-M2 target).
+    /// walks past first. `None` means no frame is available right now --
+    /// either the bitstream is empty, what's buffered isn't enough for
+    /// minimp3 to make progress (should not arise with whole-buffer CBR
+    /// descriptors, the M1-M2 target), or this call's bounded resync budget
+    /// (`MAX_RESYNC_ATTEMPTS_PER_TICK`) ran out while still hunting for the
+    /// next real frame -- the caller (`acquire_next_frame`, from
+    /// `advance_native`) tries again next tick, continuing from exactly the
+    /// bitstream position this call left behind.
     fn decode_next_frame(&mut self) -> Option<CurrentFrame> {
-        loop {
+        for _ in 0..MAX_RESYNC_ATTEMPTS_PER_TICK {
             if self.bitstream.is_empty() {
                 return None;
             }
@@ -589,8 +625,14 @@ impl Mhi {
                     completes,
                 });
             }
-            // Junk/ID3 bytes: loop to try again with what remains.
+            // Junk/ID3 bytes, or a fake-sync-but-undecodable frame: loop to
+            // try again with what remains, within this call's bound.
         }
+        // Resync budget exhausted for this tick: yield back rather than
+        // keep scanning. `pending_completes` and `bitstream`/`desc_lengths`
+        // already reflect every byte scanned so far, so nothing is lost or
+        // rescanned when the caller comes back next tick.
+        None
     }
 
     fn finish_frame(&mut self, frame: &CurrentFrame) {
@@ -856,6 +898,36 @@ mod tests {
         frame[2] = b2;
         frame[3] = b3;
         frame
+    }
+
+    /// A `mp3_frame`-shaped header (so minimp3's header check passes and it
+    /// commits to decoding a whole frame's worth of bytes) with a
+    /// pseudo-random, non-zero body -- per `mp3_frame`'s own doc comment,
+    /// arbitrary main data almost always desyncs the Huffman decode, so
+    /// minimp3 reports the frame as unusable junk (`samples == 0`) while
+    /// still consuming the header-declared frame length. This is exactly
+    /// the "fake sync header that passes minimp3's header checks but fails
+    /// Layer III decode" shape the resync-budget bug describes.
+    fn corrupt_frame(bitrate_kbps: u32, seed: u8) -> Vec<u8> {
+        let mut frame = mp3_frame(bitrate_kbps, seed);
+        let mut s = seed;
+        for b in frame.iter_mut().skip(4) {
+            s = s.wrapping_mul(37).wrapping_add(11);
+            *b = s | 1; // never all-zero (all-zero body decodes as valid silence)
+        }
+        frame
+    }
+
+    /// A run of back-to-back `corrupt_frame`s, at least `min_bytes` long --
+    /// a bitstream with no decodable frame anywhere in it.
+    fn garbage_stream(min_bytes: usize, seed: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(min_bytes + 512);
+        let mut s = seed;
+        while out.len() < min_bytes {
+            out.extend_from_slice(&corrupt_frame(128, s));
+            s = s.wrapping_add(1);
+        }
+        out
     }
 
     fn stage_and_ring(board: &mut Mhi, host: &mut DeviceHost, addr: u32, bytes: &[u8]) {
@@ -1131,6 +1203,205 @@ mod tests {
         assert!(board.resamplers.is_empty());
         ZorroDevice::tick(&mut board, 64, &mut host);
         assert_eq!(mhi_audio.next_sample(), (0.0, 0.0));
+    }
+
+    /// Regression test for the "STOP doesn't clear resamplers" bug: `STOP`
+    /// must clear cached `Resampler`s exactly like `reset()` does, or a
+    /// fresh stream at the same native rate reuses the stopped stream's
+    /// resampler and leaks its convolution history into the new audio.
+    #[test]
+    fn stop_clears_stale_resampler_history_like_reset_does() {
+        let mut board = Mhi::new();
+        let mut mem = memory(0x100);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let mut host = host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+
+        // Feed a loud, non-silent native-rate "signal" directly into the
+        // pre-resample queue and pump it through the mixer cadence so the
+        // cached 44100 Hz resampler accumulates genuine convolution
+        // history. (Bypassing decode here, rather than staging a decodable
+        // "loud" MP3 frame, is deliberate -- see `mp3_frame`'s doc comment
+        // on why arbitrary non-silent payloads are not decodable; this test
+        // is about the resampler cache, not about decode.)
+        board.native_rate = 44_100;
+        for _ in 0..512 {
+            board.decoded.push_back((0.9, -0.9));
+        }
+        for _ in 0..2000 {
+            ZorroDevice::tick(&mut board, 64, &mut host);
+        }
+        assert!(
+            board.resamplers.contains_key(&44_100),
+            "setup should have primed a cached resampler with history"
+        );
+        host.mhi_audio().clear(); // drain the pre-stop signal so it can't be mistaken for residue below
+
+        board.cmd_stop();
+        assert!(
+            board.resamplers.is_empty(),
+            "STOP must clear cached resamplers exactly like reset() does"
+        );
+
+        // Silence-onset material at the same native rate: with a fresh
+        // resampler this must be exact digital silence from the first
+        // sample, not a decaying tail of the pre-stop signal.
+        board.native_rate = 44_100;
+        for _ in 0..512 {
+            board.decoded.push_back((0.0, 0.0));
+        }
+        ZorroDevice::tick(&mut board, 64, &mut host);
+        let (l, r) = host.mhi_audio().next_sample();
+        assert_eq!(
+            (l, r),
+            (0.0, 0.0),
+            "post-STOP silence must not carry residue from the pre-stop signal"
+        );
+    }
+
+    /// Regression test for the "zero-length doorbell status blip" bug: a
+    /// zero-length descriptor enqueues nothing (`QUEUE_COUNT` never moves),
+    /// so it must not resurrect `STATUS` from `OUT_OF_DATA` to `PLAYING`,
+    /// and must not cause a duplicate `OUT_OF_DATA` on the next tick.
+    #[test]
+    fn zero_length_doorbell_completes_immediately_without_a_status_blip() {
+        let mut board = Mhi::new();
+        let mut mem = memory(0x400);
+        let mut host = DeviceHost::new(&mut mem);
+
+        board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+        assert_eq!(board.read(OFF_STATUS, 2, &mut host), 3); // OUT_OF_DATA, empty queue
+        board.write(OFF_INTREQ, 2, u32::from(INT_OUT_OF_DATA), &mut host); // ack
+
+        // A zero-length descriptor: completes immediately (COMPLETED_COUNT
+        // advances, BUFFER_DONE fires) but enqueues nothing.
+        stage_and_ring(&mut board, &mut host, 0, &[]);
+        assert_eq!(board.read(OFF_COMPLETED_COUNT, 2, &mut host), 1);
+        assert_ne!(
+            board.read(OFF_INTREQ, 2, &mut host) & u32::from(INT_BUFFER_DONE),
+            0
+        );
+        assert_eq!(board.read(OFF_QUEUE_COUNT, 2, &mut host), 0);
+        assert_eq!(
+            board.read(OFF_STATUS, 2, &mut host),
+            3,
+            "a zero-length descriptor enqueues nothing, so STATUS must stay OUT_OF_DATA"
+        );
+
+        // The next tick must not re-raise OUT_OF_DATA: STATUS was already
+        // OUT_OF_DATA and never left it, so this would be a duplicate.
+        board.write(OFF_INTREQ, 2, u32::from(INT_BUFFER_DONE), &mut host); // ack
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let mut host2 =
+            host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+        ZorroDevice::tick(&mut board, 64, &mut host2);
+        assert_eq!(
+            board.read(OFF_INTREQ, 2, &mut host2) & u32::from(INT_OUT_OF_DATA),
+            0,
+            "no new OUT_OF_DATA transition should fire for a status that never left OUT_OF_DATA"
+        );
+
+        // A real descriptor still auto-resumes exactly as before.
+        let payload = mp3_frame(128, 0x22);
+        mem.chip_ram[0..payload.len()].copy_from_slice(&payload);
+        let mut host3 =
+            host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+        stage_and_ring(&mut board, &mut host3, 0, &payload);
+        assert_eq!(board.read(OFF_STATUS, 2, &mut host3), 1); // PLAYING again
+    }
+
+    /// Regression test for the "unbounded resync wedge" bug: a descriptor
+    /// made entirely of fake-sync-header garbage (valid MP3 headers whose
+    /// bodies fail Layer III decode) must not let `decode_next_frame` spin
+    /// through the whole descriptor in a single tick -- the resync budget
+    /// bounds each tick's work -- yet the descriptor must still complete
+    /// (and STATUS must still reach OUT_OF_DATA) within a bounded number of
+    /// further ticks. A valid frame staged right after a corrupted region
+    /// must still resync and decode correctly.
+    #[test]
+    fn garbage_descriptor_drains_over_bounded_ticks_and_resync_still_finds_a_real_frame() {
+        let mut board = Mhi::new();
+        let mut mem = memory(0x20000);
+        // Comfortably more than MAX_RESYNC_ATTEMPTS_PER_TICK frames' worth
+        // of undecodable bytes, so a single tick's bounded resync budget
+        // cannot possibly walk through all of it in one `decode_next_frame`
+        // call.
+        let garbage = garbage_stream(64 * 1024, 0x55);
+        mem.chip_ram[0..garbage.len()].copy_from_slice(&garbage);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, &garbage);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+            assert_eq!(board.read(OFF_STATUS, 2, &mut host), 1); // PLAYING
+
+            ZorroDevice::tick(&mut board, 10, &mut host);
+            assert_eq!(
+                board.read(OFF_STATUS, 2, &mut host),
+                1,
+                "a single tick's bounded resync budget must not resolve the whole \
+                 garbage descriptor in one call"
+            );
+            assert!(
+                board.queue_count() > 0,
+                "the garbage descriptor must not fully drain in a single tick"
+            );
+
+            // Enough further ticks for the bounded resync to work all the
+            // way through the garbage descriptor.
+            let mut reached_out_of_data = false;
+            for _ in 0..5000 {
+                ZorroDevice::tick(&mut board, 10, &mut host);
+                if board.read(OFF_STATUS, 2, &mut host) == 3 {
+                    reached_out_of_data = true;
+                    break;
+                }
+            }
+            assert!(
+                reached_out_of_data,
+                "an all-garbage descriptor must still complete and reach OUT_OF_DATA \
+                 within a bounded number of ticks"
+            );
+            assert_eq!(board.queue_count(), 0);
+            assert_eq!(board.completed_count, 1);
+            assert_ne!(board.intreq & INT_BUFFER_DONE, 0);
+            assert_ne!(board.intreq & INT_OUT_OF_DATA, 0);
+        }
+
+        // A valid frame staged right after a corrupted region must still be
+        // found by resync and decoded (this must not regress: corrupt-
+        // frame resync is a documented, still-supported case).
+        let mut mixed = garbage_stream(2048, 0xAA);
+        mixed.extend_from_slice(&mp3_frame(128, 0x99));
+        mem.chip_ram[0..mixed.len()].copy_from_slice(&mixed);
+        let mut host = host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+        stage_and_ring(&mut board, &mut host, 0, &mixed);
+        assert_eq!(board.read(OFF_STATUS, 2, &mut host), 1); // auto-resumed to PLAYING
+
+        // Resync itself (finding the real frame past the garbage) takes at
+        // most a handful of ticks; playing that frame's 1152 samples out at
+        // 44100 Hz (so its descriptor genuinely completes) takes far more
+        // emulated time, so give this loop the same generous cck-per-tick
+        // budget `playing_a_known_frame_paces_completion_over_the_right_
+        // number_of_ccks` uses.
+        let mut completed_second = false;
+        for _ in 0..2000 {
+            ZorroDevice::tick(&mut board, 64, &mut host);
+            if board.completed_count == 2 {
+                completed_second = true;
+                break;
+            }
+        }
+        assert!(
+            completed_second,
+            "a valid frame following a corrupted region must still decode and complete"
+        );
     }
 
     #[test]

@@ -222,6 +222,17 @@ guest library is expected to poll room before calling it via
 buffers. `QUEUE_OVERFLOW` exists as a diagnostic for a guest bug (racing
 the check), not as a code path production drivers should hit.
 
+A **zero-length descriptor** (`DESC_LEN_HI:DESC_LEN_LO == 0` at the
+`DOORBELL` write) is accepted, not dropped, but **completes immediately**:
+it has no bytes to decode and no audio to play out, so it is never
+appended to the queue -- `QUEUE_COUNT` does not move -- and instead
+`COMPLETED_COUNT` advances and `INTREQ.BUFFER_DONE` is set on the spot.
+Because it never touches `QUEUE_COUNT`, it specifically does **not** count
+as the `0`-to-`1` transition [Out-of-data semantics](#out-of-data-semantics)
+describes: a zero-length `DOORBELL` write while `STATUS == OUT_OF_DATA`
+completes (and raises `BUFFER_DONE`) without moving `STATUS` back to
+`PLAYING`.
+
 - **`QUEUE_DEPTH`** (`0x0C`, RO) -- the constant `16`. Read once; it never
   changes at runtime, but is a register (not baked into the spec as a
   bare number) so a future board revision could legally offer a deeper
@@ -370,6 +381,25 @@ know a track has finished once no more data is coming).
 
 `CONTROL=STOP` from `OUT_OF_DATA` behaves exactly as from any other
 state: transition to `STOPPED` (a no-op on the already-empty queue).
+
+**Undecodable bitstream content** (bytes that are not a valid Layer III
+frame at all, or that carry a sync-valid-looking header but fail to decode
+-- corrupt encodes, or a hostile/buggy guest handing the board arbitrary
+bytes) is skipped exactly as any real decoder resyncs across junk: the
+board hunts forward for the next decodable frame, consuming and completing
+descriptors as their bytes are skipped past, the same as if those bytes
+had decoded into audio. That resync work is budgeted per tick rather than
+run to completion in one step, so a descriptor consisting entirely of
+undecodable bytes does not stall the emulation; it still completes and
+reaches `OUT_OF_DATA` once the queue genuinely empties out -- the resync
+merely spreads across a handful of ticks instead of resolving within one.
+(Skipped bytes are not paced at the decoded audio's sample rate the way
+played-out bytes are -- there is no audio to pace them by -- so an
+all-garbage descriptor drains in far less emulated time than the same
+bytes of genuine audio would take to play out.) Nothing about the
+guest-visible contract changes -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
+still only ever advance in whole-descriptor, whole-frame steps -- only the
+emulated wall-clock-adjacent pacing of how many ticks that takes.
 
 ## Determinism and timing
 

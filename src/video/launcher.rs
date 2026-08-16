@@ -630,7 +630,9 @@ pub enum LauncherField {
     /// enabled`). No other options exist (see docs/internals/toccata.md).
     Toccata,
     /// The MHI virtual MPEG audio decoder board: fitted or not (`[mhi]
-    /// enabled`). No other options exist (see docs/internals/mhi.md).
+    /// enabled`). No other options exist (see docs/internals/mhi.md). Present
+    /// only in an `mhi` build, the only build that can fit the board.
+    #[cfg(feature = "mhi")]
     Mhi,
     /// Inert field for a non-interactive [`RowKind::SectionHeader`] row.
     SectionHeader,
@@ -1125,10 +1127,13 @@ const ETHERNET_ROWS: [Row; 4] = [
 // options (see docs/internals/toccata.md and docs/internals/mhi.md). Host
 // audio capture/backend settings (wav capture, stems, device selection)
 // intentionally stay command-line/config-file only and have no row here.
+#[cfg(feature = "mhi")]
 const SOUND_ROWS: [Row; 2] = [
     row(F::Toccata, "  Toccata board", Toggle),
     row(F::Mhi, "  MHI decoder board", Toggle),
 ];
+#[cfg(not(feature = "mhi"))]
+const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata board", Toggle)];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
 const VIDEO_ROWS: [Row; 13] = [
@@ -2090,7 +2095,9 @@ pub struct MachineSetup {
     /// Sound section (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
     /// The MHI virtual MPEG audio decoder board, edited in the same Sound
-    /// section (`[mhi] enabled`). No other options exist yet.
+    /// section (`[mhi] enabled`). No other options exist yet. Present only
+    /// in an `mhi` build, the only build that can fit the board.
+    #[cfg(feature = "mhi")]
     mhi: bool,
     /// Currently visible host bridge adapters: stable identifier + label.
     bridge_interfaces: Vec<(String, String)>,
@@ -2384,6 +2391,7 @@ impl MachineSetup {
             hostsocket_gateway: raw.hostsocket.gateway.clone(),
             hostsocket_resolver: raw.hostsocket.resolver.clone(),
             toccata: cfg.toccata,
+            #[cfg(feature = "mhi")]
             mhi: cfg.mhi,
             bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
@@ -3008,6 +3016,7 @@ impl MachineSetup {
         if self.toccata != base.toccata {
             raw.toccata.enabled = Some(self.toccata);
         }
+        #[cfg(feature = "mhi")]
         if self.mhi != base.mhi {
             raw.mhi.enabled = Some(self.mhi);
         }
@@ -3524,6 +3533,7 @@ impl MachineSetup {
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             F::Toccata => self.toccata,
+            #[cfg(feature = "mhi")]
             F::Mhi => self.mhi,
             _ => false,
         }
@@ -4724,6 +4734,7 @@ impl MachineSetup {
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             F::Toccata => self.toccata = !self.toccata,
+            #[cfg(feature = "mhi")]
             F::Mhi => self.mhi = !self.mhi,
             _ => {}
         }
@@ -12170,8 +12181,10 @@ mod tests {
         assert!(r.iter().any(|x| x.field == LauncherField::ParallelDevice));
         // Ethernet section: the A2065 board selector.
         assert!(r.iter().any(|x| x.field == LauncherField::Ethernet));
-        // Sound section: the Toccata and MHI board toggles.
+        // Sound section: the Toccata board toggle, and (in an `mhi` build)
+        // the MHI board toggle alongside it.
         assert!(r.iter().any(|x| x.field == LauncherField::Toccata));
+        #[cfg(feature = "mhi")]
         assert!(r.iter().any(|x| x.field == LauncherField::Mhi));
     }
 
@@ -12267,30 +12280,40 @@ mod tests {
         let mut s = MachineSetup::default();
         // Off is the baseline for both, so nothing is written until fitted.
         assert!(!s.toggle_value(LauncherField::Toccata));
+        #[cfg(feature = "mhi")]
         assert!(!s.toggle_value(LauncherField::Mhi));
         assert_eq!(s.to_raw().toccata.enabled, None);
+        #[cfg(feature = "mhi")]
         assert_eq!(s.to_raw().mhi.enabled, None);
 
         s.toggle(LauncherField::Toccata);
+        #[cfg(feature = "mhi")]
         s.toggle(LauncherField::Mhi);
         assert!(s.toggle_value(LauncherField::Toccata));
+        #[cfg(feature = "mhi")]
         assert!(s.toggle_value(LauncherField::Mhi));
         assert_eq!(s.to_raw().toccata.enabled, Some(true));
+        #[cfg(feature = "mhi")]
         assert_eq!(s.to_raw().mhi.enabled, Some(true));
 
         // The written config has to load back into the same settings.
         let cfg = s.build_config().expect("valid config");
         assert!(cfg.toccata);
+        #[cfg(feature = "mhi")]
         assert!(cfg.mhi);
         let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
         assert!(reloaded.toggle_value(LauncherField::Toccata));
+        #[cfg(feature = "mhi")]
         assert!(reloaded.toggle_value(LauncherField::Mhi));
 
         s.toggle(LauncherField::Toccata);
+        #[cfg(feature = "mhi")]
         s.toggle(LauncherField::Mhi);
         assert!(!s.toggle_value(LauncherField::Toccata));
+        #[cfg(feature = "mhi")]
         assert!(!s.toggle_value(LauncherField::Mhi));
         assert_eq!(s.to_raw().toccata.enabled, None);
+        #[cfg(feature = "mhi")]
         assert_eq!(s.to_raw().mhi.enabled, None);
     }
 
