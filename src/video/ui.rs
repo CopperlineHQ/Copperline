@@ -6138,10 +6138,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
-                RowKind::SectionHeader
-                | RowKind::BootpriHeader
-                | RowKind::Note
-                | RowKind::RomInfo => {}
+                RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
                 RowKind::Text => {
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
@@ -7718,25 +7715,6 @@ fn draw_launcher_row(
         );
         return;
     }
-    // The ROM tab's identification line: what the image on the row above
-    // checksums to, greyed and indented under it. Nothing is drawn for an
-    // image no checksum names, or for an empty row.
-    if r.kind == RowKind::Note {
-        if let Some(note) = state.rom_note(r.field) {
-            let x = launcher_pane_x(rect) + 8;
-            let avail = (rect.x + rect.w).saturating_sub(x + LAUNCH_MARGIN);
-            draw_panel_text(
-                frame,
-                x,
-                row_y + 4,
-                &truncate_to_width(note, avail),
-                PANEL_TEXT_DIM,
-                1,
-                scale,
-            );
-        }
-        return;
-    }
     // The greyed column titles above the Boot Priority rows.
     if r.kind == RowKind::BootpriHeader {
         for (x, title) in [
@@ -7805,20 +7783,13 @@ fn draw_launcher_row(
             Some(GreyedAs::DimmedValue | GreyedAs::DimmedReason)
         ) {
             if greyed_as != Some(GreyedAs::Blank) {
-                // Centred across the stepper span, where the value the
-                // row cannot have would sit -- but the reasons vary in
-                // length, and a long one truly centred starts left of its
-                // shorter neighbours, which reads as a ragged margin
-                // rather than a centred column. So no reason starts
-                // further left than the commonest one would.
-                let (prev, _, next) = launcher_cycle_rects(rect, row_y);
-                let span = (next.x + next.w).saturating_sub(prev.x);
-                let floor_w = "needs 68020+".chars().count() * font::GLYPH_W;
-                let min_x = prev.x + span.saturating_sub(floor_w) / 2;
-                let text_w = reason.chars().count() * font::GLYPH_W;
+                // Where the value the row cannot have would sit: flush
+                // against the right edge of the stepper's left arrow, so
+                // every reason shares one margin whatever its length.
+                let (prev, _, _) = launcher_cycle_rects(rect, row_y);
                 draw_panel_text(
                     frame,
-                    (prev.x + span.saturating_sub(text_w) / 2).max(min_x),
+                    prev.x + prev.w,
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
@@ -7831,7 +7802,7 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note | RowKind::RomInfo => {}
+        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
@@ -10037,20 +10008,18 @@ mod tests {
         );
     }
 
-    /// The ROM tab's identification line is drawn under its path row, in the
-    /// greyed note colour, and only once there is something to say: an image
-    /// no checksum names leaves the value line blank -- while the table's
-    /// column headers stand either way.
+    /// The ROM tab's identification lines sit under the path row: the
+    /// greyed Name/Version/Revision prefixes stand either way, and an
+    /// image no checksum names leaves the values after them blank.
     #[test]
     fn the_rom_tab_draws_its_identification_line_under_the_path_row() {
         use super::super::window::{texture_height, texture_width};
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        // Pixels painted in the info-line ink on a given ROM-tab row:
-        // the Name line is index 2, under the section heading and the
-        // path row.
-        // The headers draw dimmed, the values in full text colour; both
-        // count as the table's ink.
+        // Pixels painted in the info-line ink on a given ROM-tab row
+        // (the Name line is index 2, under the section heading and the
+        // path row). The prefixes draw dimmed, the values in full text
+        // colour; both count.
         let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
             let row_y = launcher_row_y(rect, row);
             let mut lit = 0;

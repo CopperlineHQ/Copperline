@@ -506,9 +506,10 @@ The layout is:
   16-bit word -- plus chip/fast/slow/motherboard/accelerator/Zorro III RAM),
   *ROM*
   (Kickstart and
-  extended ROM, each with a greyed line under it naming what the chosen
-  image is -- `Kickstart 3.1 (40.68) A1200` -- identified by checksum rather
-  than by file name, and left blank for an image Copperline does not know;
+  extended ROM; the Kickstart row carries **Name**, **Version** and
+  **Revision** lines naming what the chosen image is, identified by
+  checksum rather than by file name -- blank for an image Copperline does
+  not know, and read from the image itself for the bundled AROS;
   see [](configuration)),
   *Floppy* (drive count and speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;

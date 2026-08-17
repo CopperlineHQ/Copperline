@@ -717,10 +717,10 @@ pub enum RowKind {
     /// A hard-drive image: a path with Browse/Clear, plus an editable
     /// volume-name field (used when the image is a host directory).
     Drive,
-    /// One greyed line of a ROM row's identification -- the row's label
-    /// says which fact it carries (Name, Version, Revision), and the
-    /// value follows it. Blank after the prefix when the image is
-    /// unrecognised.
+    /// One line of a ROM row's identification -- the row's label says
+    /// which fact it carries (Name, Version, Revision) and draws as a
+    /// greyed prefix, with the value in full text colour after it.
+    /// Blank after the prefix when the image is unrecognised.
     RomInfo,
     /// A non-interactive greyed heading that groups the rows beneath it
     /// (e.g. the `Serial:` / `Parallel:` sections of the I/O Ports tab). Its
@@ -729,12 +729,6 @@ pub enum RowKind {
     /// The greyed `Drive` / `Priority` / `Status` column titles above the Boot
     /// Priority rows. Non-interactive; its `field` is inert.
     BootpriHeader,
-    /// A greyed, non-interactive line under the row it belongs to, carrying
-    /// something looked up rather than set: the ROM tab's identification of
-    /// the chosen image (see [`crate::romdb`]). Its `field` is the row it
-    /// annotates, so it is hidden and greyed along with it, and it draws
-    /// nothing when there is nothing to say.
-    Note,
     /// A floppy drive's media row: an image path with Browse/Clear, or the
     /// real interface in use with a Configure button once bridged.
     FloppyMedia,
@@ -956,16 +950,15 @@ const MEMORY_ROWS: [Row; 8] = [
     row(F::AccelRam, "Accelerator RAM", Cycle),
     row(F::Z3Ram, "Zorro III RAM", Cycle),
 ];
-// Each ROM row is followed by a greyed table naming what the chosen
-// image checksums to, split into Name / Version / Revision columns
+// The Kickstart row carries its identification beneath it -- what the
+// chosen image checksums to, split into Name / Version / Revision lines
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
-// its dumper called it. The table stands whether or not an image is
-// loaded; empty cells mean an empty (or unrecognised) slot.
+// its dumper called it. The lines stand whether or not an image is
+// loaded; a blank value means an empty (or unrecognised) slot.
 const ROM_ROWS: [Row; 7] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
-    // What the chosen image is, one greyed line per fact, indented
-    // under its row. The label picks which fact the line carries.
+    // The label picks which fact the line carries.
     row(F::Rom, "Name", RowKind::RomInfo),
     row(F::Rom, "Version", RowKind::RomInfo),
     row(F::Rom, "Revision", RowKind::RomInfo),
@@ -3447,7 +3440,6 @@ impl MachineSetup {
                 !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010),
                 "needs 68020+",
             ),
-
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
@@ -6561,9 +6553,9 @@ struct RomNote {
     /// Whether the slot has been synced at all: the bundled default
     /// (path None) must still seed its cells once.
     seeded: bool,
-    /// The identification split for the tab's table: Name, Version and
-    /// Revision cells, computed when the path changes rather than per
-    /// draw (the bundled AROS reads its numbers off the image file).
+    /// The identification split into its Name, Version and Revision
+    /// facts, computed when the path changes rather than per draw (the
+    /// bundled AROS reads its numbers off the image file).
     cells: (String, String, String),
 }
 
@@ -7862,26 +7854,22 @@ impl LauncherState {
                 continue;
             }
             self.rom_notes[slot].text = path.as_deref().and_then(crate::config::rom_identification);
-            self.rom_notes[slot].cells = Self::rom_cells_for(
-                slot,
-                path.as_deref(),
-                self.rom_notes[slot].text.as_deref(),
-                self.setup.path(F::Rom).is_none(),
-            );
+            // Only the Kickstart row draws identification lines; the
+            // extended slot keeps just its raw text.
+            if slot == 0 {
+                self.rom_notes[slot].cells =
+                    Self::rom_cells_for(path.as_deref(), self.rom_notes[slot].text.as_deref());
+            }
             self.rom_notes[slot].path = path;
             self.rom_notes[slot].seeded = true;
         }
     }
 
-    /// The table cells for one slot: a checksum-named image splits its
-    /// label; an AROS image -- chosen or bundled -- reads its numbers off
-    /// the file itself, so they follow the bundled ROM between releases.
-    fn rom_cells_for(
-        slot: usize,
-        path: Option<&Path>,
-        text: Option<&str>,
-        main_is_bundled: bool,
-    ) -> (String, String, String) {
+    /// The Kickstart row's identification facts: a checksum-named image
+    /// splits its label; an AROS image -- chosen or bundled -- reads its
+    /// numbers off the file itself, so they follow the bundled ROM
+    /// between releases.
+    fn rom_cells_for(path: Option<&Path>, text: Option<&str>) -> (String, String, String) {
         let aros_cells = |file: &Path| {
             let (version, revision) = crate::romdb::rom_self_versions(file).unwrap_or_default();
             ("AROS".to_string(), version, revision)
@@ -7890,39 +7878,29 @@ impl LauncherState {
             (Some(p), Some("bundled AROS")) => aros_cells(p),
             (_, Some(note)) => Self::split_identification(note),
             (Some(_), None) => (String::new(), String::new(), String::new()),
-            (None, _) => {
-                // An empty slot runs the bundled AROS -- the extended
-                // half only alongside the bundled main.
-                if slot == 1 && !main_is_bundled {
-                    return (String::new(), String::new(), String::new());
-                }
-                let Some(bundle) = crate::romsearch::find_bundled_aros() else {
-                    return (String::new(), String::new(), String::new());
-                };
-                aros_cells(if slot == 0 {
-                    &bundle.main
-                } else {
-                    &bundle.extended
-                })
-            }
+            // An empty slot boots the bundled AROS.
+            (None, _) => match crate::romsearch::find_bundled_aros() {
+                Some(bundle) => aros_cells(&bundle.main),
+                None => (String::new(), String::new(), String::new()),
+            },
         }
     }
 
-    /// The identification for the ROM tab's table: Name, Version and
-    /// Revision cells, from the cache [`Self::sync_rom_notes`] keeps.
+    /// The identification lines' facts -- Name, Version and Revision --
+    /// from the cache [`Self::sync_rom_notes`] keeps. Only the Kickstart
+    /// row has them.
     pub fn rom_note_cells(&self, field: LauncherField) -> (String, String, String) {
-        let slot = match field {
-            F::Rom => 0,
-            F::ExtendedRom => 1,
-            _ => return (String::new(), String::new(), String::new()),
-        };
-        self.rom_notes[slot].cells.clone()
+        if field == F::Rom {
+            self.rom_notes[0].cells.clone()
+        } else {
+            (String::new(), String::new(), String::new())
+        }
     }
 
-    /// Split a checksum label into the table's columns. The labels read
+    /// Split a checksum label into its three facts. The labels read
     /// "Kickstart 3.1 (40.68) A1200": name words first, a marketing
     /// version, the ROM's own revision in parentheses, then the models
-    /// -- which have no column, and are dropped.
+    /// -- which have no line of their own, and are dropped.
     fn split_identification(note: &str) -> (String, String, String) {
         let mut name_words: Vec<&str> = Vec::new();
         let mut version = String::new();
@@ -7940,7 +7918,7 @@ impl LauncherState {
                     revision = word[1..word.len() - 1].to_string();
                 }
                 // Everything after the version that is not the revision
-                // is the model list, which has no column.
+                // is the model list, which is not shown.
                 continue;
             }
             name_words.push(word);
@@ -7948,8 +7926,9 @@ impl LauncherState {
         (name_words.join(" "), version, revision)
     }
 
-    /// What the image on a ROM row was identified as, for its [`RowKind::Note`]
-    /// line. `None` for an image no checksum names, and for every other field.
+    /// What the image on a ROM row was identified as: the raw checksum
+    /// label the identification lines split from. `None` for an image no
+    /// checksum names, and for every other field.
     pub fn rom_note(&self, field: LauncherField) -> Option<&str> {
         let slot = match field {
             F::Rom => 0,
@@ -9974,8 +9953,8 @@ mod tests {
             ]
         );
 
-        // The identification splits into the table's three columns; the
-        // models after the revision have no column and are dropped.
+        // The identification splits into its three facts; the models
+        // after the revision are dropped.
         let mut probe = LauncherState::new(MachineSetup::default());
         probe.set_rom_note_for_test(F::Rom, "Kickstart 3.1 (40.68) A1200");
         assert_eq!(
@@ -9986,8 +9965,8 @@ mod tests {
                 "40.68".to_string()
             )
         );
-        // The bundled AROS pair fills both slots' tables with numbers
-        // read off the images themselves, so they follow releases.
+        // The bundled AROS carries numbers read off the image itself,
+        // so they follow releases.
         let bundled = LauncherState::new(MachineSetup::default());
         let (name, version, revision) = bundled.rom_note_cells(F::Rom);
         assert_eq!(name, "AROS");
@@ -9995,7 +9974,7 @@ mod tests {
             !version.is_empty() && !revision.is_empty(),
             "the AROS image carries its own numbers"
         );
-        // An unrecognised image is an empty table, not a missing one.
+        // An unrecognised image leaves the values blank.
         let mut setup = MachineSetup::default();
         setup.set_path(F::Rom, std::path::PathBuf::from("mystery-dump.rom"));
         let unknown = LauncherState::new(setup);

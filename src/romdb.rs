@@ -126,7 +126,7 @@ pub fn describe_file(path: &Path) -> Option<Identified> {
 /// in a Kickstart-shaped ROM). Either half may be missing; a file that
 /// cannot be read yields nothing. This is how the bundled AROS -- which
 /// no checksum table names, and which moves between releases -- gets
-/// its numbers into the launcher's identification table.
+/// its numbers into the launcher's identification lines.
 pub fn rom_self_versions(path: &Path) -> Option<(String, String)> {
     let len = std::fs::metadata(path).ok()?.len();
     if len == 0 || len > MAX_ROM_FILE_BYTES {

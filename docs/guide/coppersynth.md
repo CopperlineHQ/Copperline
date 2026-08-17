@@ -15,7 +15,7 @@ plays MIDI music and Amiga sound effects gets both.
 The serial port has to be in MIDI mode with Coppersynth as its output. In
 the launcher, that is the **I/O Ports** tab (its Serial Port page): set
 **Device / Mode** to `MIDI`, then **MIDI output** to `Coppersynth`.
-Choosing it reveals the rest of the rows: the soundfont, the front panel,
+Choosing it reveals the rest of the rows: the SoundFont, the front panel,
 and MT-32 mode. In a running session the same choice is under the menu's
 **MIDI Out**, where Coppersynth is always offered. On the command line,
 `--midi-out coppersynth` selects it and implies MIDI mode.
@@ -49,7 +49,8 @@ size -- and needs no files. To play a different one, set
 `[serial] coppersynth_soundfont`,
 use the launcher's **Browse**, or press the panel's **LOAD** button in a
 running session; `.sf2` files and `.zip` archives containing one both
-load, and **Reset** puts the built-in bank back. A bank with defects
+load, and the launcher's **Clear** (the menu's **Reset**) puts the
+built-in bank back. A bank with defects
 (loop points past its data are common in rips) is repaired at load rather
 than refused, and the log says what the mending cost. A bank that does
 not fill all 128 programs keeps honest numbering: an unfilled slot shows
