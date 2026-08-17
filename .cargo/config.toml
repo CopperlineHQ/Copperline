@@ -1,6 +1,9 @@
-# Static-link the MSVC C runtime on Windows so the release binary and the
-# packaged zip (packaging/windows/build-zip.ps1) run without the Visual C++
-# Redistributable installed. Scoped to the MSVC target, so the macOS and Linux
-# builds are unaffected.
+# Static-link the MSVC C runtime on Windows so the release binaries and the
+# packaged zips (packaging/windows/build-zip.ps1) run without the Visual C++
+# Redistributable installed. Scoped to the MSVC targets (x86-64 and ARM64),
+# so the macOS and Linux builds are unaffected.
 [target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

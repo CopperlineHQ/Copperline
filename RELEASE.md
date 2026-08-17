@@ -167,16 +167,20 @@ build one by hand on a Linux host:
 
 ## Windows
 
-Windows distribution is a portable zip (`packaging/windows/`). The `Windows`
-workflow builds it on `windows-latest` and, on a `v*` tag, attaches
-`Copperline-X.Y.Z-win-x64.zip` to the GitHub Release automatically. The same
-workflow runs the full release build on pull requests that touch the code, so
-it doubles as the Windows build check (the main CI runs on macOS only).
+Windows distribution is a portable zip per architecture
+(`packaging/windows/`). The `Windows` workflow builds them natively on
+`windows-latest` (x86-64) and `windows-11-arm` (ARM64) and, on a `v*` tag,
+attaches `Copperline-X.Y.Z-win-x64.zip` and
+`Copperline-X.Y.Z-win-arm64.zip` to the GitHub Release automatically. The
+same workflow runs the full release build on pull requests that touch the
+code, so it doubles as the Windows build check for both architectures (the
+main CI runs on macOS only).
 
-The zip is self-contained: the MSVC C runtime is linked statically (see
-`.cargo/config.toml`) so it needs no Visual C++ Redistributable, and the
+The zips are self-contained: the MSVC C runtime is linked statically (see
+`.cargo/config.toml`) so they need no Visual C++ Redistributable, and the
 bundled AROS ROM sits in a sibling `aros\` folder that `romsearch.rs` probes
-first. To build one by hand on a Windows host:
+first. To build one by hand on a Windows host (add
+`-Target aarch64-pc-windows-msvc` for the ARM64 zip):
 
 ```pwsh
 packaging/windows/build-zip.ps1

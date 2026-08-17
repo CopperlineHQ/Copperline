@@ -1,16 +1,20 @@
 name: Windows
 
-# Two parallel builder jobs produce the portable Windows zip and the prebuilt
-# test executables (both are full release compiles and roughly equally
-# expensive, so splitting them halves the critical path), then the checks fan
-# out in parallel against those artifacts, mirroring ci.yml: the packaged zip
-# is booted from a clean directory, and the unit suites plus the probe golden
+# Everything here runs as a two-leg matrix: x86-64 on windows-latest and
+# ARM64 on the windows-11-arm runner, each leg building natively for its own
+# architecture (no cross-compiling). Per architecture, two parallel builder
+# jobs produce the portable Windows zip and the prebuilt test executables
+# (both are full release compiles and roughly equally expensive, so
+# splitting them halves the critical path), then the checks fan out in
+# parallel against those artifacts, mirroring ci.yml: the packaged zip is
+# booted from a clean directory, and the unit suites plus the probe golden
 # renders (pixel-exact deterministic boots on the bundled AROS ROM) run
 # against the same release binaries. This is also the only Windows coverage
 # (the main CI runs on macOS and Linux), so the code-path triggers below run
 # the full release build on pull requests too. On a v* tag push (or a manual
-# run with release_tag) the zip is attached to the GitHub Release by the
-# release job, which runs only after every check passes.
+# run with release_tag) both zips are attached to the GitHub Release by the
+# release job, which runs only after every check on both architectures has
+# passed.
 on:
   push:
     branches: [main]
@@ -34,15 +38,15 @@ on:
       - ".cargo/**"
       - "packaging/windows/**"
       - ".github/workflows/windows.yml"
-  # Manual rebuild. Use this to attach a zip to a release whose tag predates
+  # Manual rebuild. Use this to attach zips to a release whose tag predates
   # this workflow (the v* tag tree has no windows.yml, so a tag push cannot
   # trigger it): run it against a branch that has the source parity you want
   # (for v0.2.0, main is identical to the tag bar the Homebrew bump) and set
-  # release_tag to push the built zip onto that existing release.
+  # release_tag to push the built zips onto that existing release.
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to attach the zip to (e.g. v0.2.0). Leave blank to only upload a workflow artifact."
+        description: "Existing release tag to attach the zips to (e.g. v0.2.0). Leave blank to only upload workflow artifacts."
         required: false
         default: ""
 
@@ -52,11 +56,21 @@ concurrency:
 
 jobs:
   build:
-    name: Build Windows zip
+    name: Build Windows zip (${{ matrix.arch }})
     # Compiles the release binary and packages the portable zip; the sibling
     # test-bins job compiles the test executables in parallel on its own
     # runner.
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - name: Force LF checkout
         # The runner's git converts detected-text files to CRLF on checkout
@@ -65,18 +79,30 @@ jobs:
         # keep the working tree identical to the macOS/Linux jobs.
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+      - name: Ensure rustup
+        # windows-latest ships rustup preinstalled; the windows-11-arm image
+        # may not. Install the native rustup when it is absent so the
+        # toolchain action below works identically on both runners.
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe" -OutFile rustup-init.exe
+            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            Remove-Item rustup-init.exe
+            "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release zip
         shell: pwsh
-        run: packaging/windows/build-zip.ps1
+        run: packaging/windows/build-zip.ps1 -Target ${{ matrix.target }}
       - name: Locate artifact
         id: artifact
         shell: pwsh
         run: |
-          $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
+          $zip = Get-ChildItem Copperline-*-win-${{ matrix.arch }}.zip | Select-Object -First 1
           "path=$($zip.Name)" >> $env:GITHUB_OUTPUT
       - name: Upload zip
         # Consumed by the zip-smoke and release jobs, and kept as the
@@ -85,12 +111,12 @@ jobs:
         # debugging.
         uses: actions/upload-artifact@v7
         with:
-          name: copperline-windows
+          name: copperline-windows-${{ matrix.arch }}
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
 
   test-bins:
-    name: Build test binaries
+    name: Build test binaries (${{ matrix.arch }})
     # Compiles the #[test] targets once and hands the finished executables
     # to the test jobs below (needs: test-bins) as a workflow artifact.
     # Binaries, not a shared cargo cache: the test executables are plain
@@ -99,17 +125,38 @@ jobs:
     # compile-time CARGO_BIN_EXE_copperline path), so the staged
     # copperline.exe pairs with the probe_golden harness compiled alongside
     # it and this job needs nothing from the zip build. Swatinem/rust-cache
-    # keys per job, so each builder keeps its own warm cache.
-    runs-on: windows-latest
+    # keys per job and per toolchain, so each builder keeps its own warm
+    # cache.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - name: Force LF checkout
         # Keep committed fixture bytes identical to the build job (see the
         # comment there).
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+      - name: Ensure rustup
+        # See the build job's identical step.
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe" -OutFile rustup-init.exe
+            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            Remove-Item rustup-init.exe
+            "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Compile test binaries
         shell: pwsh
@@ -120,10 +167,10 @@ jobs:
         # excluded from the build).
         run: |
           $ErrorActionPreference = "Stop"
-          cargo test --release --locked --target x86_64-pc-windows-msvc --no-run --message-format=json > cargo-test-build.json
+          cargo test --release --locked --target ${{ matrix.target }} --no-run --message-format=json > cargo-test-build.json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run exited with $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path ci-bins | Out-Null
-          Copy-Item target\x86_64-pc-windows-msvc\release\copperline.exe ci-bins\
+          Copy-Item target\${{ matrix.target }}\release\copperline.exe ci-bins\
           Get-Content cargo-test-build.json | ForEach-Object {
             $msg = $_ | ConvertFrom-Json
             if ($msg.reason -eq "compiler-artifact" -and $msg.profile.test -and $msg.executable) {
@@ -139,19 +186,27 @@ jobs:
       - name: Upload binaries for the test jobs
         uses: actions/upload-artifact@v7
         with:
-          name: windows-test-bins
+          name: windows-test-bins-${{ matrix.arch }}
           path: ci-bins/
 
   zip-smoke:
-    name: Packaged zip boot smoke
+    name: Packaged zip boot smoke (${{ matrix.arch }})
     needs: build
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
     # No checkout: the zip must stand on its own, which is the point of the
     # test.
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: copperline-windows
+          name: copperline-windows-${{ matrix.arch }}
       - name: Smoke test the packaged zip
         shell: pwsh
         # Expand the freshly built zip outside the workspace and boot it from
@@ -164,7 +219,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
-          $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
+          $zip = Get-ChildItem Copperline-*-win-${{ matrix.arch }}.zip | Select-Object -First 1
           $stage = Join-Path $env:RUNNER_TEMP "zip-smoke"
           Expand-Archive -Path $zip.FullName -DestinationPath $stage
           $exe = Get-ChildItem -Path $stage -Recurse -Filter copperline.exe | Select-Object -First 1
@@ -174,9 +229,17 @@ jobs:
           if ((Get-Item smoke.png).Length -eq 0) { throw "screenshot is empty" }
 
   unit-tests:
-    name: Unit tests
+    name: Unit tests (${{ matrix.arch }})
     needs: test-bins
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
     steps:
       - name: Force LF checkout
         # Keep committed fixture bytes identical to the build job (see the
@@ -185,7 +248,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: windows-test-bins
+          name: windows-test-bins-${{ matrix.arch }}
           path: ci-bins
       - name: Unit tests
         shell: pwsh
@@ -203,9 +266,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "unit-bin-copperline-ctl exited with $LASTEXITCODE" }
 
   probe-golden:
-    name: Probe golden renders
+    name: Probe golden renders (${{ matrix.arch }})
     needs: test-bins
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - name: Force LF checkout
         # Keep committed fixture bytes identical to the build job (see the
@@ -214,7 +287,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: windows-test-bins
+          name: windows-test-bins-${{ matrix.arch }}
           path: ci-bins
       - name: Probe golden renders
         shell: pwsh
@@ -233,8 +306,8 @@ jobs:
         # --target build directory before running.
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path target\x86_64-pc-windows-msvc\release | Out-Null
-          Copy-Item ci-bins\copperline.exe target\x86_64-pc-windows-msvc\release\copperline.exe
+          New-Item -ItemType Directory -Force -Path target\${{ matrix.target }}\release | Out-Null
+          Copy-Item ci-bins\copperline.exe target\${{ matrix.target }}\release\copperline.exe
           ./ci-bins/probe_golden.exe
           if ($LASTEXITCODE -ne 0) { throw "probe_golden exited with $LASTEXITCODE" }
       - name: Upload probe render diffs
@@ -243,15 +316,16 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: probe-golden-diffs-windows
+          name: probe-golden-diffs-windows-${{ matrix.arch }}
           path: target/probe-golden/
           if-no-files-found: ignore
 
   release:
-    name: Attach zip to release
-    # Runs only once every Windows check has passed, preserving the old
-    # single-job ordering where the tests gated the release attach. Plain
-    # ubuntu: this job only moves the already-built artifact.
+    name: Attach zips to release
+    # Runs only once every Windows check on both architectures has passed,
+    # preserving the old single-job ordering where the tests gated the
+    # release attach. Plain ubuntu: this job only moves the already-built
+    # artifacts.
     needs: [zip-smoke, unit-tests, probe-golden]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     runs-on: ubuntu-latest
@@ -260,28 +334,35 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: copperline-windows
-      - name: Locate artifact
-        id: artifact
-        # Fail fast if the downloaded zip is not where this job expects it;
-        # an unmatched glob would otherwise pass the literal pattern to the
-        # upload steps below.
+          pattern: copperline-windows-*
+          merge-multiple: true
+      - name: Locate artifacts
+        id: artifacts
+        # Fail fast if the downloaded zips are not where this job expects
+        # them; an unmatched glob would otherwise pass the literal pattern
+        # to the upload steps below. Both architectures must be present --
+        # a release with only one of the two zips is a packaging bug.
         run: |
-          zip=(Copperline-*-win-x64.zip)
-          if [ ! -f "${zip[0]}" ]; then
-            echo "no Copperline-*-win-x64.zip in $PWD" >&2
-            exit 1
-          fi
-          echo "path=${zip[0]}" >> "$GITHUB_OUTPUT"
+          for arch in x64 arm64; do
+            zip=(Copperline-*-win-"$arch".zip)
+            if [ ! -f "${zip[0]}" ]; then
+              echo "no Copperline-*-win-$arch.zip in $PWD" >&2
+              exit 1
+            fi
+          done
+          echo "paths=$(ls Copperline-*-win-*.zip | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.artifact.outputs.path }}
+          files: Copperline-*-win-*.zip
       - name: Attach to existing release (manual run)
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        # --clobber so a re-run replaces the asset instead of failing on a
+        # --clobber so a re-run replaces the assets instead of failing on a
         # name clash; --repo because this job runs without a checkout.
-        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.artifact.outputs.path }}" --clobber --repo "${{ github.repository }}"
+        run: |
+          for zip in ${{ steps.artifacts.outputs.paths }}; do
+            gh release upload "${{ inputs.release_tag }}" "$zip" --clobber --repo "${{ github.repository }}"
+          done
