@@ -9,47 +9,66 @@
 //!
 //! ## Decoder choice
 //!
-//! Decoding uses [`minimp3-sys`](https://crates.io/crates/minimp3-sys), MIT-
-//! licensed bindgen bindings (`build.rs` compiles the bundled C through the
-//! `cc` crate -- clean on macOS/Linux/Windows, no vendored dependency and no
-//! system minimp3) around lieff/minimp3.c itself (CC0). This module talks to
-//! the raw `mp3dec_init`/`mp3dec_decode_frame` FFI directly (see
-//! [`Decoder`]) rather than going through a higher-level wrapper crate: the
-//! board needs to feed the decoder byte-queue-at-a-time from a doorbell-fed
-//! bitstream and snapshot its cross-frame state for savestates, neither of
-//! which a `Read`-based wrapper's ownership model fits.
+//! Decoding uses [Symphonia](https://crates.io/crates/symphonia-bundle-mp3)'s
+//! MPEG audio decoder (`MpaDecoder`, MPL-2.0), with only its Layer III
+//! feature enabled to match the board's `CAPS` register. Pure Rust matters
+//! here: the previous decoder (`minimp3-sys`) compiled a vendored C copy of
+//! minimp3 whose SIMD detection broke the whole default build on MSVC ARM64
+//! hosts (issue #474), and it was the last C compile in the default feature
+//! set.
 //!
-//! `mp3dec_t` is built here **without** `MINIMP3_FLOAT_OUTPUT`, i.e.
-//! `mp3d_sample_t` is `int16_t`: the synthesis filterbank's own math is
-//! still IEEE-754 float internally (there is no fully fixed-point mode in
-//! upstream minimp3), but the *output* is quantized to int16 inside the C
-//! library before this module ever sees it, exactly the "C float path"
-//! every other minimp3 consumer relies on for platform-independent, bit-
-//! exact decode -- ordinary `+`/`-`/`*`/`/` on `f32`/`f64` is IEEE-754-exact
-//! on every target this project builds for (no x87, no fast-math), and
-//! minimp3 uses no transcendental libm calls in its hot decode path (its
-//! DCT/window tables are compile-time constants). This module then converts
-//! the resulting `i16` PCM to `f32` the same way `Ad1848::produce_one_sample`
-//! does (`f32::from(sample) / 32768.0`), so the board's own downstream
-//! mixing/resampling stays in the project's usual float domain without
-//! reintroducing any platform-dependent step.
+//! `MpaDecoder` is packet-based -- each call decodes exactly one whole MPEG
+//! frame handed to it as a `Packet` -- but the board is fed an arbitrary
+//! byte queue by doorbell-committed descriptors, so [`Decoder`] carries its
+//! own packetizer: it hunts for a Layer III frame header, computes the
+//! frame's exact byte length from the header fields (the same ISO 11172-3
+//! slot arithmetic Symphonia's own header parser applies, so a frame this
+//! module cuts is never rejected for its length), and feeds one frame per
+//! decode call. Bytes before a frame candidate, headers whose declared
+//! frame then fails to decode (fake syncs inside junk, corrupt encodes),
+//! free-format frames (bitrate index 0 -- not a CAPS-declared capability,
+//! and unsupported by Symphonia), and non-Layer-III frames are all consumed
+//! as junk, the resync-across-garbage behaviour a real decoder exhibits and
+//! `docs/internals/mhi.md`'s "Undecodable bitstream content" specifies.
+//!
+//! Determinism: everything register-visible -- descriptor pacing,
+//! completion counts, interrupts, `STATUS` -- derives from integer header
+//! parsing (frame length, sample rate, sample count) and from decode
+//! success/failure, which Symphonia decides in pure bitstream/integer
+//! logic; none of it depends on decoded sample values. Emulated-machine
+//! behaviour therefore stays reproducible byte-for-byte across platforms.
+//! The decoded PCM itself is deterministic run-to-run on any one platform,
+//! but a few of Symphonia's precomputed tables call `powf`, whose last-ulp
+//! rounding may differ between platform libm implementations, so
+//! `--audio-wav` captures of MHI audio are guaranteed identical per
+//! platform rather than across operating systems (decoded samples feed
+//! only the audio mix, never register state or timing).
 //!
 //! ## Savestates
 //!
-//! The decoder's cross-frame state (`mp3dec_t`'s MDCT overlap, QMF state,
-//! and 511-byte bit reservoir) is genuine machine state -- restoring
-//! mid-stream without it would audibly glitch the next frame or two. Rather
-//! than reinterpret the raw FFI struct's bytes (a `size_of` canary can catch
-//! a layout change but not silently-compatible-looking corruption), this
-//! module keeps a field-for-field [`DecoderSnapshot`] shadow struct that
-//! `serde` derives normally (via `serde-big-array` for the two oversized
-//! float arrays) and copies to/from the live `mp3dec_t` by value -- a
-//! genuine upstream field change fails to *compile* here instead of
-//! deserializing into the wrong offsets. The board additionally keeps every
-//! not-yet-decoded byte of every queued descriptor (`bitstream`/
-//! `desc_lengths`) and the in-flight decoded frame's un-played sample tail
-//! (`current_frame`), so a save/restore cycle reproduces an uninterrupted
-//! run's output exactly -- proved by
+//! The decoder's cross-frame state (Layer III bit reservoir, IMDCT overlap,
+//! and the polyphase-synthesis delay line) is genuine machine state --
+//! restoring mid-stream without it would audibly glitch the next frame or
+//! two. Symphonia keeps that state private, so rather than serializing
+//! decoder internals, [`Decoder`] retains the raw bytes of the most
+//! recently submitted frames (`history`, a few KiB) and a restore
+//! re-decodes them into a fresh decoder, discarding the output
+//! ([`DecoderSnapshot`]). That reproduces the live decoder's state exactly
+//! because every piece of cross-frame state is a function of the trailing
+//! few frames alone: the bit reservoir holds at most the trailing 2048
+//! bytes of main data (a frame's `main_data_begin` can reach back at most
+//! 511 of them), the IMDCT overlap is fully rewritten by each decoded
+//! frame, and the synthesis filterbank's 16-block delay line is shallower
+//! than one frame's 36 blocks -- and the history is kept deep enough to
+//! cover all of it: byte/frame floors for the reservoir span, plus a hold
+//! on the last two *decoded* frames so a run of rejected header-shaped
+//! junk (which touches only reservoir state) cannot evict the frames the
+//! overlap/synthesis state actually came from (`WARMUP_HISTORY_*`,
+//! `Decoder::trim_history`). The board
+//! additionally keeps every not-yet-decoded byte of every queued descriptor
+//! (`bitstream`/`desc_lengths`) and the in-flight decoded frame's un-played
+//! sample tail (`current_frame`), so a save/restore cycle reproduces an
+//! uninterrupted run's output exactly -- proved by
 //! `tests::savestate_round_trip_reproduces_an_uninterrupted_runs_output`.
 
 use crate::audio::resample::Resampler;
@@ -57,6 +76,12 @@ use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::{MhiAudioRing, PAULA_CLOCK_HZ};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use std::collections::{HashMap, VecDeque};
+use symphonia_bundle_mp3::MpaDecoder;
+use symphonia_core::audio::{Audio, GenericAudioBufferRef};
+use symphonia_core::codecs::audio::well_known::CODEC_ID_MP3;
+use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
+use symphonia_core::packet::Packet;
+use symphonia_core::units::{Duration, Timestamp};
 
 // Register offsets (word-aligned, within the board's 64K window). See
 // docs/internals/mhi.md's "Register map".
@@ -128,15 +153,15 @@ const MAX_STALL_TICKS: u64 = (PAULA_CLOCK_HZ / 10) as u64;
 /// a stalled consumer, not a buffering requirement.
 const DECODED_CAPACITY: usize = 4096;
 
-/// Bytes offered to `mp3dec_decode_frame` per call: comfortably more than
-/// the largest legal Layer III frame (1440 bytes at 320 kbps/32 kHz; MPEG-2
-/// LSF frames are smaller still), so a full frame is always visible in one
-/// call once its bytes are queued.
+/// Bytes offered to `Decoder::decode_frame` per call: comfortably more than
+/// the largest legal Layer III frame (1441 bytes at 320 kbps/32 kHz padded;
+/// MPEG-2 LSF frames are smaller still), so a full frame is always visible
+/// in one call once its bytes are queued.
 const MAX_FRAME_INPUT: usize = 4096;
 
-/// Bound on how many resync attempts (calls into `mp3dec_decode_frame` that
+/// Bound on how many resync attempts (`Decoder::decode_frame` calls that
 /// find no valid frame -- junk/ID3 bytes, or a fake sync header that passes
-/// minimp3's header check but fails Layer III decode) a single
+/// the header check but fails Layer III decode) a single
 /// `decode_next_frame` call performs before yielding back to its caller.
 /// Real decoder firmware does not spend an unbounded slice of one
 /// scheduling tick hunting for the next sync word either; it budgets a
@@ -151,12 +176,35 @@ const MAX_FRAME_INPUT: usize = 4096;
 /// within one tick, exactly as it always has.
 const MAX_RESYNC_ATTEMPTS_PER_TICK: u32 = 64;
 
-/// `MINIMP3_MAX_SAMPLES_PER_FRAME`: 1152 samples * 2 channels, interleaved.
-const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
+/// The byte length of an MPEG audio frame header.
+const MPEG_HEADER_LEN: usize = 4;
 
-const MDCT_OVERLAP_LEN: usize = 2 * 9 * 32;
-const QMF_STATE_LEN: usize = 15 * 2 * 32;
-const RESERV_BUF_LEN: usize = 511;
+/// Savestate warmup-history bounds (see the module doc comment's
+/// "Savestates" and `Decoder::trim_history`).
+///
+/// `MIN_BYTES`/`MIN_FRAMES`: enough raw frame bytes to cover Symphonia's
+/// whole 2048-byte bit-reservoir buffer with margin for the header/
+/// side-info overhead raw frames carry over main data, and enough whole
+/// frames for re-decode context.
+///
+/// `MIN_DECODED`: the two most recent *successfully decoded* frames are
+/// the only ones whose spectral output still shapes the IMDCT-overlap/
+/// synthesis state (a rejected frame leaves both untouched -- its only
+/// state effect is on the bit reservoir), so trimming never drops a
+/// decoded frame unless at least this many newer decoded frames remain --
+/// otherwise a run of undecodable header-shaped junk would evict exactly
+/// the state the restore replay exists to rebuild.
+///
+/// `MAX_BYTES`/`MAX_FRAMES`: hard caps that override that hold, so a
+/// hostile guest feeding unbounded undecodable junk after real audio
+/// cannot grow the history without limit. When they bite, a savestate
+/// taken mid-flood loses only the pre-junk overlap tail of the next
+/// decoded frame's PCM; register-visible state never depends on it.
+const WARMUP_HISTORY_MIN_BYTES: usize = 4096;
+const WARMUP_HISTORY_MIN_FRAMES: usize = 4;
+const WARMUP_HISTORY_MIN_DECODED: usize = 2;
+const WARMUP_HISTORY_MAX_BYTES: usize = 16 * 1024;
+const WARMUP_HISTORY_MAX_FRAMES: usize = 256;
 
 /// The board's transport state (`STATUS`, `0x04`). Deliberately its own
 /// numbering -- see the register map's note on why this does not match
@@ -180,105 +228,271 @@ impl Status {
     }
 }
 
-/// Field-for-field shadow of `minimp3_sys::mp3dec_t`, serde-derivable so a
-/// savestate carries the decoder's cross-frame reservoir/filterbank state
-/// without reinterpreting raw FFI bytes. See the module doc comment.
+/// Serializable stand-in for the decoder's private cross-frame state: the
+/// raw bytes of the frames most recently fed to it, which a restore
+/// re-decodes (output discarded) to rebuild that state exactly. See the
+/// module doc comment's "Savestates" for why this replay is exact. Only
+/// the bytes are carried; each entry's decode outcome is recomputed by
+/// the replay itself.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct DecoderSnapshot {
-    #[serde(with = "serde_big_array::BigArray")]
-    mdct_overlap: [f32; MDCT_OVERLAP_LEN],
-    #[serde(with = "serde_big_array::BigArray")]
-    qmf_state: [f32; QMF_STATE_LEN],
-    reserv: i32,
-    free_format_bytes: i32,
-    header: [u8; 4],
-    #[serde(with = "serde_big_array::BigArray")]
-    reserv_buf: [u8; RESERV_BUF_LEN],
+    history: Vec<Vec<u8>>,
 }
 
-/// Thin safe wrapper around the raw `mp3dec_t`/`mp3dec_decode_frame` FFI
-/// (see the module doc comment for why this talks to the raw bindings
-/// rather than a higher-level decoder crate).
-struct Decoder(minimp3_sys::mp3dec_t);
+fn new_mpa_decoder() -> MpaDecoder {
+    let mut params = AudioCodecParameters::new();
+    params.for_codec(CODEC_ID_MP3);
+    // Cannot fail: MP3 support is compiled into symphonia-bundle-mp3 by
+    // this crate's dependency declaration, and `try_new` checks nothing
+    // beyond the codec ID.
+    MpaDecoder::try_new(&params, &AudioDecoderOptions::default())
+        .expect("symphonia-bundle-mp3 is built with its mp3 feature")
+}
+
+/// Pre-parse of a possible Layer III frame header: the frame's total byte
+/// length (header included), sample rate, and whether it is mono. `None`
+/// for anything the board treats as plain junk bytes -- no sync word, an
+/// MPEG version/layer outside `CAPS` (Layer III only), free format
+/// (bitrate index 0), or reserved bitrate/sample-rate indices. The length
+/// arithmetic mirrors Symphonia's own header parser (ISO 11172-3 section
+/// 2.4.3.1: 144 bitrate/sample-rate slots for MPEG-1, 72 for the MPEG-2/2.5
+/// half-rate frames, 1-byte slots for Layer III), so a frame cut to this
+/// length is never rejected by the decoder's own packet-length check.
+fn parse_frame_candidate(hdr: [u8; 4]) -> Option<(usize, u32, bool)> {
+    let h = u32::from_be_bytes(hdr);
+    if h & 0xFFE0_0000 != 0xFFE0_0000 {
+        return None;
+    }
+    let version = (h >> 19) & 0x3; // 00 = MPEG-2.5, 10 = MPEG-2, 11 = MPEG-1
+    let layer = (h >> 17) & 0x3; // 01 = Layer III
+    let bitrate_idx = ((h >> 12) & 0xF) as usize;
+    let sr_idx = ((h >> 10) & 0x3) as usize;
+    if version == 0b01 || layer != 0b01 || bitrate_idx == 0 || bitrate_idx == 0xF || sr_idx == 3 {
+        return None;
+    }
+    // Bit rates in kbit/s, indexed by the header's bitrate field.
+    const KBPS_MPEG1_L3: [u32; 15] = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    const KBPS_MPEG2_L3: [u32; 15] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+    const RATES: [[u32; 3]; 4] = [
+        [11_025, 12_000, 8_000],  // 00: MPEG-2.5
+        [0, 0, 0],                // 01: reserved (rejected above)
+        [22_050, 24_000, 16_000], // 10: MPEG-2
+        [44_100, 48_000, 32_000], // 11: MPEG-1
+    ];
+    let mpeg1 = version == 0b11;
+    let kbps = if mpeg1 {
+        KBPS_MPEG1_L3[bitrate_idx]
+    } else {
+        KBPS_MPEG2_L3[bitrate_idx]
+    };
+    let rate = RATES[version as usize][sr_idx];
+    let padding = (h >> 9) & 1;
+    let factor: u32 = if mpeg1 { 144 } else { 72 };
+    let total = (factor * (kbps * 1000) / rate + padding) as usize;
+    let mono = (h >> 6) & 0x3 == 0b11;
+    Some((total, rate, mono))
+}
+
+/// Byte-queue front end around Symphonia's packet-based [`MpaDecoder`]:
+/// packetizes the board's doorbell-fed bitstream into whole Layer III
+/// frames (see the module doc comment's "Decoder choice") and keeps the
+/// savestate warmup history.
+struct Decoder {
+    mpa: MpaDecoder,
+    /// The (sample rate, mono) signal spec `mpa`'s output buffer locked to
+    /// at its first decode. [`MpaDecoder`] rejects a mid-stream spec
+    /// change, so a genuinely respec'd stream gets a fresh decoder -- see
+    /// `submit_frame`.
+    spec: Option<(u32, bool)>,
+    /// The most recent frames fed to `mpa` (decoded and rejected alike --
+    /// a post-side-info rejection still advances reservoir state), oldest
+    /// first, trimmed by `trim_history`.
+    history: VecDeque<HistoryFrame>,
+    history_bytes: usize,
+    /// How many `history` entries have `decoded` set -- kept alongside so
+    /// `trim_history` need not rescan the deque.
+    history_decoded: usize,
+}
+
+/// One warmup-history entry: an exactly-cut frame previously fed to the
+/// decoder, and whether it decoded. Rejected frames matter to the restore
+/// replay too (reservoir state), but only decoded frames refresh the
+/// overlap/synthesis state the trim policy must preserve -- see
+/// `WARMUP_HISTORY_MIN_DECODED`.
+struct HistoryFrame {
+    bytes: Vec<u8>,
+    decoded: bool,
+}
+
+/// One decoded frame's stereo samples and native sample rate.
+type DecodedFrame = (Vec<(f32, f32)>, u32);
 
 impl Decoder {
     fn new() -> Self {
-        // SAFETY: `mp3dec_t` is a plain-old-data struct (float/int/byte
-        // arrays, no pointers); zero is a valid bit pattern for every
-        // field, and `mp3dec_init` only ever sets `header[0] = 0` (already
-        // true after zeroing) -- see minimp3.c's own `mp3dec_init`.
-        let mut raw: minimp3_sys::mp3dec_t = unsafe { std::mem::zeroed() };
-        unsafe { minimp3_sys::mp3dec_init(&mut raw) };
-        Decoder(raw)
+        Decoder {
+            mpa: new_mpa_decoder(),
+            spec: None,
+            history: VecDeque::new(),
+            history_bytes: 0,
+            history_decoded: 0,
+        }
     }
 
-    /// Decode at most one frame (skipping any leading junk/sync-search
-    /// bytes minimp3 itself walks past) from `input`. Returns the number of
-    /// bytes minimp3 advanced past (0 means "not enough data buffered to
-    /// make progress -- wait for more") and, when a real audio frame was
-    /// decoded (as opposed to skipped junk), its channel-interleaved i16
-    /// samples, sample rate, and channel count.
-    fn decode_frame(&mut self, input: &[u8]) -> (u32, Option<(Vec<i16>, u32, usize)>) {
-        let mut pcm = [0i16; MAX_SAMPLES_PER_FRAME];
-        let mut info: minimp3_sys::mp3dec_frame_info_t = unsafe { std::mem::zeroed() };
-        // SAFETY: `input` outlives the call, `pcm` is sized for the
-        // documented maximum, and `info` is a plain-old-data out-param.
-        let samples = unsafe {
-            minimp3_sys::mp3dec_decode_frame(
-                &mut self.0,
-                input.as_ptr(),
-                input.len() as std::os::raw::c_int,
-                pcm.as_mut_ptr(),
-                &mut info,
-            )
-        };
-        let consumed = info.frame_bytes.max(0) as u32;
-        if samples <= 0 {
-            return (consumed, None);
+    /// Decode at most one frame's worth of progress from `input` (the
+    /// front of the board's bitstream queue). Returns how many bytes the
+    /// board should consume (0 means "not enough data buffered to make
+    /// progress -- wait for more") and, when a real audio frame was decoded
+    /// (as opposed to skipped junk), its stereo samples and sample rate.
+    fn decode_frame(&mut self, input: &[u8]) -> (u32, Option<DecodedFrame>) {
+        if input.len() < MPEG_HEADER_LEN {
+            // Too short to even hold a header: wait (a later doorbell may
+            // extend it; the caller's stall reclaim bounds how long when
+            // the stream truly ended here).
+            return (0, None);
         }
-        let channels = info.channels.max(1) as usize;
-        let count = samples as usize * channels;
-        (
-            consumed,
-            Some((pcm[..count].to_vec(), info.hz.max(0) as u32, channels)),
-        )
+        for i in 0..=(input.len() - MPEG_HEADER_LEN) {
+            let hdr = [input[i], input[i + 1], input[i + 2], input[i + 3]];
+            let Some((frame_len, rate, mono)) = parse_frame_candidate(hdr) else {
+                continue;
+            };
+            if i > 0 {
+                // Junk ahead of the candidate: consume just that, and let
+                // the caller's resync loop revisit the candidate once it
+                // sits at the queue front.
+                return (i as u32, None);
+            }
+            if input.len() < frame_len {
+                // A candidate frame not all of whose bytes are buffered
+                // yet: a genuine incomplete trailing frame, or a fake sync
+                // whose declared length overshoots the queued bytes --
+                // either way, wait (bounded by the caller's stall reclaim).
+                return (0, None);
+            }
+            let frame = self.submit_frame(&input[..frame_len], rate, mono);
+            if frame.is_none() {
+                // The candidate carried a header-shaped word but its
+                // declared frame failed to decode -- a fake sync inside
+                // junk, or a corrupt encode. Its declared length cannot be
+                // trusted to delimit anything: consuming it wholesale
+                // could swallow a real frame whose header sits inside that
+                // span. Resume the sync hunt at the next header candidate
+                // within the span when one exists; only when nothing
+                // header-shaped hides inside it is the whole span skipped.
+                // (The failed attempt still advanced decoder state, which
+                // the warmup history has recorded.)
+                let scan_end = frame_len.min(input.len() - MPEG_HEADER_LEN + 1);
+                for j in 1..scan_end {
+                    let hdr = [input[j], input[j + 1], input[j + 2], input[j + 3]];
+                    if parse_frame_candidate(hdr).is_some() {
+                        return (j as u32, None);
+                    }
+                }
+                return (frame_len as u32, None);
+            }
+            return (frame_len as u32, frame);
+        }
+        // No candidate anywhere: everything up to the last possible header
+        // prefix is junk (a real header may straddle into bytes a later
+        // doorbell supplies, so the trailing 3 bytes stay queued).
+        ((input.len() - (MPEG_HEADER_LEN - 1)) as u32, None)
+    }
+
+    /// Feed one exactly-cut frame to the decoder, recording the attempt
+    /// (and its outcome) in the warmup history. A decode failure here is
+    /// the "fake sync header that passes the header check but fails Layer
+    /// III decode" case: the caller consumes a single byte and rehunts
+    /// (see `decode_frame`); the attempt still lands in the history
+    /// because a post-side-info rejection advances reservoir state.
+    fn submit_frame(&mut self, frame: &[u8], rate: u32, mono: bool) -> Option<DecodedFrame> {
+        if self.spec.is_some_and(|spec| spec != (rate, mono)) {
+            // A mid-stream sample-rate/channel change is a new stream:
+            // cross-frame state cannot meaningfully carry across it, so
+            // start over with a fresh decoder (and a fresh history -- the
+            // old stream's frames must not be replayed into it on restore).
+            *self = Decoder::new();
+        }
+        self.spec = Some((rate, mono));
+        let packet = Packet::new(0, Timestamp::ZERO, Duration::ZERO, frame);
+        let result = match self.mpa.decode_ref(&packet.as_packet_ref()) {
+            Ok(GenericAudioBufferRef::F32(buf)) => {
+                let samples: Option<Vec<(f32, f32)>> = if mono {
+                    buf.plane(0).map(|p| p.iter().map(|&v| (v, v)).collect())
+                } else {
+                    buf.plane_pair(0, 1)
+                        .map(|(l, r)| l.iter().zip(r).map(|(&l, &r)| (l, r)).collect())
+                };
+                samples.filter(|s| !s.is_empty()).map(|s| (s, rate))
+            }
+            // MpaDecoder only ever produces f32 buffers.
+            Ok(_) => None,
+            Err(_) => None,
+        };
+        self.history.push_back(HistoryFrame {
+            bytes: frame.to_vec(),
+            decoded: result.is_some(),
+        });
+        self.history_bytes += frame.len();
+        self.history_decoded += usize::from(result.is_some());
+        self.trim_history();
+        result
+    }
+
+    /// Trim the warmup history to its bounds. A rejected front entry goes
+    /// as soon as the byte/frame floors stay covered; a *decoded* front
+    /// entry is additionally held until at least
+    /// `WARMUP_HISTORY_MIN_DECODED` newer decoded frames exist, so a run
+    /// of rejected header-shaped junk can never evict the successes whose
+    /// overlap/synthesis state the restore replay rebuilds. The hard caps
+    /// override that hold -- see the `WARMUP_HISTORY_*` doc comment for
+    /// what is (and is not) lost when they bite.
+    fn trim_history(&mut self) {
+        while self.history.len() > WARMUP_HISTORY_MIN_FRAMES {
+            let front = self.history.front().expect("len checked above");
+            if self.history_bytes - front.bytes.len() < WARMUP_HISTORY_MIN_BYTES {
+                break;
+            }
+            let over_cap = self.history.len() > WARMUP_HISTORY_MAX_FRAMES
+                || self.history_bytes > WARMUP_HISTORY_MAX_BYTES;
+            if front.decoded && self.history_decoded <= WARMUP_HISTORY_MIN_DECODED && !over_cap {
+                break;
+            }
+            let front = self.history.pop_front().expect("len checked above");
+            self.history_bytes -= front.bytes.len();
+            self.history_decoded -= usize::from(front.decoded);
+        }
     }
 
     fn snapshot(&self) -> DecoderSnapshot {
         DecoderSnapshot {
-            mdct_overlap: flatten_mdct(&self.0.mdct_overlap),
-            qmf_state: self.0.qmf_state,
-            reserv: self.0.reserv,
-            free_format_bytes: self.0.free_format_bytes,
-            header: self.0.header,
-            reserv_buf: self.0.reserv_buf,
+            history: self.history.iter().map(|f| f.bytes.clone()).collect(),
         }
     }
 
     fn restore(snapshot: &DecoderSnapshot) -> Self {
-        Decoder(minimp3_sys::mp3dec_t {
-            mdct_overlap: unflatten_mdct(&snapshot.mdct_overlap),
-            qmf_state: snapshot.qmf_state,
-            reserv: snapshot.reserv,
-            free_format_bytes: snapshot.free_format_bytes,
-            header: snapshot.header,
-            reserv_buf: snapshot.reserv_buf,
-        })
+        let mut decoder = Decoder::new();
+        for frame in &snapshot.history {
+            // Replay through the exact live-decode path (spec-change reset
+            // included), discarding the PCM: only the decoder state
+            // matters. Decode is deterministic, so each entry's `decoded`
+            // flag (which the snapshot does not carry) rebuilds itself to
+            // the value the live decoder recorded. The guards cannot fail
+            // for a history this module wrote itself; they keep a
+            // hand-corrupted savestate from panicking.
+            if frame.len() < MPEG_HEADER_LEN {
+                continue;
+            }
+            if let Some((len, rate, mono)) =
+                parse_frame_candidate([frame[0], frame[1], frame[2], frame[3]])
+            {
+                if len == frame.len() {
+                    let _ = decoder.submit_frame(frame, rate, mono);
+                }
+            }
+        }
+        decoder
     }
-}
-
-fn flatten_mdct(a: &[[f32; 288]; 2]) -> [f32; MDCT_OVERLAP_LEN] {
-    let mut out = [0f32; MDCT_OVERLAP_LEN];
-    out[..288].copy_from_slice(&a[0]);
-    out[288..].copy_from_slice(&a[1]);
-    out
-}
-
-fn unflatten_mdct(a: &[f32; MDCT_OVERLAP_LEN]) -> [[f32; 288]; 2] {
-    let mut out = [[0f32; 288]; 2];
-    out[0].copy_from_slice(&a[..288]);
-    out[1].copy_from_slice(&a[288..]);
-    out
 }
 
 impl serde::Serialize for Decoder {
@@ -629,10 +843,10 @@ impl Mhi {
         completed
     }
 
-    /// Decode at most one real audio frame, skipping any junk minimp3
+    /// Decode at most one real audio frame, skipping any junk the decoder
     /// walks past first. `None` means no frame is available right now --
-    /// either the bitstream is empty, what's buffered isn't enough for
-    /// minimp3 to make progress (should not arise with whole-buffer CBR
+    /// either the bitstream is empty, what's buffered isn't enough for the
+    /// decoder to make progress (should not arise with whole-buffer CBR
     /// descriptors, the M1-M2 target), or this call's bounded resync budget
     /// (`MAX_RESYNC_ATTEMPTS_PER_TICK`) ran out while still hunting for the
     /// next real frame -- the caller (`acquire_next_frame`, from
@@ -658,8 +872,7 @@ impl Mhi {
                 return None;
             }
             self.pending_completes += self.consume_bytes(consumed);
-            if let Some((samples_i16, rate, channels)) = frame {
-                let samples = to_stereo_f32(&samples_i16, channels);
+            if let Some((samples, rate)) = frame {
                 self.native_rate = rate;
                 let completes = std::mem::take(&mut self.pending_completes);
                 return Some(CurrentFrame {
@@ -814,23 +1027,6 @@ impl Mhi {
     }
 }
 
-fn to_stereo_f32(samples: &[i16], channels: usize) -> Vec<(f32, f32)> {
-    if channels <= 1 {
-        samples
-            .iter()
-            .map(|&s| {
-                let v = f32::from(s) / 32768.0;
-                (v, v)
-            })
-            .collect()
-    } else {
-        samples
-            .chunks_exact(2)
-            .map(|pair| (f32::from(pair[0]) / 32768.0, f32::from(pair[1]) / 32768.0))
-            .collect()
-    }
-}
-
 impl Default for Mhi {
     fn default() -> Self {
         Self::new()
@@ -934,21 +1130,19 @@ mod tests {
     /// hand-assembling a minimal valid frame header and an all-zero side-
     /// info/main-data body. An all-zero body is not a corner-cutting
     /// shortcut: it is the only way to hand-author a *guaranteed-valid*
-    /// Layer III frame without a real encoder (arbitrary/pseudo-random main
-    /// data almost always desyncs the Huffman decode -- confirmed
-    /// empirically against minimp3 itself -- and minimp3 then reports it as
-    /// unusable junk, `samples == 0`, rather than as a completed frame).
-    /// All-zero side info decodes to `big_values == 0`/`part2_3_length ==
-    /// 0`, i.e. a frame with no spectral lines at all -- digital silence,
-    /// but a genuinely *decoded* one (`samples == 1152`, a real
-    /// `frame_bytes` consumed from the bitstream, the QMF/MDCT overlap
-    /// state genuinely advanced) rather than skipped junk. That is exactly
-    /// what these tests need: real frame boundaries, real byte consumption,
-    /// real pacing -- payload *audibility* is not part of any claim they
-    /// make (the payload seed only nudges header/reserved bits that don't
-    /// change decode validity, so consecutive frames stay distinguishable
-    /// at the register/bitstream level without one of them landing on an
-    /// invalid encoding).
+    /// Layer III frame without a real encoder (arbitrary main data risks
+    /// desyncing the Huffman decode, which the decoder then reports as
+    /// unusable junk rather than as a completed frame). All-zero side info
+    /// decodes to `big_values == 0`/`part2_3_length == 0`, i.e. a frame
+    /// with no spectral lines at all -- digital silence, but a genuinely
+    /// *decoded* one (1152 samples, a real frame length consumed from the
+    /// bitstream, the reservoir/overlap/synthesis state genuinely advanced)
+    /// rather than skipped junk. That is exactly what these tests need:
+    /// real frame boundaries, real byte consumption, real pacing -- payload
+    /// *audibility* is not part of any claim they make (the payload seed
+    /// only nudges header/reserved bits that don't change decode validity,
+    /// so consecutive frames stay distinguishable at the register/bitstream
+    /// level without one of them landing on an invalid encoding).
     fn mp3_frame(bitrate_kbps: u32, payload_seed: u8) -> Vec<u8> {
         // MPEG-1 Layer III header: sync (11) | version=11 (MPEG1) | layer=01
         // (Layer III) | protection=1 (no CRC) | bitrate index | sample-rate
@@ -981,20 +1175,26 @@ mod tests {
         frame
     }
 
-    /// A `mp3_frame`-shaped header (so minimp3's header check passes and it
-    /// commits to decoding a whole frame's worth of bytes) with a
-    /// pseudo-random, non-zero body -- per `mp3_frame`'s own doc comment,
-    /// arbitrary main data almost always desyncs the Huffman decode, so
-    /// minimp3 reports the frame as unusable junk (`samples == 0`) while
-    /// still consuming the header-declared frame length. This is exactly
-    /// the "fake sync header that passes minimp3's header checks but fails
-    /// Layer III decode" shape the resync-budget bug describes.
+    /// A `mp3_frame`-shaped header (so the packetizer's header check passes
+    /// and the decoder commits to a whole frame's worth of bytes) with an
+    /// all-ones body: all-ones side info declares `big_values` = 511 per
+    /// granule, past the 576/2 = 288 spectral-pair maximum the Layer III
+    /// format itself allows, so any conforming decoder must reject the
+    /// frame -- a *deterministically* undecodable body (an integer-domain
+    /// side-info check, not a probabilistic Huffman desync) that the
+    /// packetizer then skips in one resync attempt, whole-span, since
+    /// nothing header-shaped hides inside it (see `decode_frame`'s
+    /// rejected-candidate scan). This is exactly the "fake sync header
+    /// that passes the header check but fails Layer III decode" shape the
+    /// resync-budget bug describes. The seed keeps frames distinguishable
+    /// via the same header don't-care bit `mp3_frame` uses; 0xFF body
+    /// bytes never alias a Layer III frame header (0xFF 0xFF parses as
+    /// Layer I with an invalid bitrate index), so the junk between real
+    /// headers contains no nested candidates.
     fn corrupt_frame(bitrate_kbps: u32, seed: u8) -> Vec<u8> {
         let mut frame = mp3_frame(bitrate_kbps, seed);
-        let mut s = seed;
         for b in frame.iter_mut().skip(4) {
-            s = s.wrapping_mul(37).wrapping_add(11);
-            *b = s | 1; // never all-zero (all-zero body decodes as valid silence)
+            *b = 0xFF;
         }
         frame
     }
@@ -1485,6 +1685,82 @@ mod tests {
         );
     }
 
+    /// Feed `bytes` through `Decoder::decode_frame` the way the board's
+    /// resync loop does -- consuming whatever each call reports, stopping
+    /// on "wait for more" -- and return the first decoded frame, if any.
+    fn drive_decoder(decoder: &mut Decoder, bytes: &[u8]) -> Option<DecodedFrame> {
+        let mut pos = 0usize;
+        let mut guard = 0u32;
+        while pos < bytes.len() {
+            let (consumed, frame) = decoder.decode_frame(&bytes[pos..]);
+            if frame.is_some() {
+                return frame;
+            }
+            if consumed == 0 {
+                return None;
+            }
+            pos += consumed as usize;
+            guard += 1;
+            assert!(guard < 10_000, "resync must make byte progress");
+        }
+        None
+    }
+
+    /// Regression test for a PR #479 review finding: a fake sync whose
+    /// declared frame length spans the start of a real frame must not
+    /// swallow it. On decode failure the packetizer steps a single byte
+    /// and resyncs (a fake header's declared span is not trusted to
+    /// delimit anything), so the real frame is still found and decoded.
+    #[test]
+    fn a_real_frame_starting_inside_a_fake_frames_declared_span_is_still_found() {
+        let mut decoder = Decoder::new();
+        // The first 30 bytes of a corrupt frame -- a valid 128 kbps header
+        // declaring a 417-byte frame, all-ones body -- then a complete
+        // real frame: the fake header's declared span covers the real
+        // frame's start, so consuming the declared length would skip it.
+        let mut stream = corrupt_frame(128, 1)[..30].to_vec();
+        stream.extend_from_slice(&mp3_frame(128, 2));
+        let (samples, rate) =
+            drive_decoder(&mut decoder, &stream).expect("the real frame must still be found");
+        assert_eq!(rate, 44_100);
+        assert_eq!(samples.len(), 1152);
+    }
+
+    /// Regression test for a PR #479 review finding: a long run of
+    /// undecodable header-shaped frames must not evict the last
+    /// successfully decoded frames from the savestate warmup history --
+    /// rejected frames only advance reservoir state, while the live
+    /// decoder's overlap/synthesis state still comes from those last
+    /// successes, so only a replay that includes them can rebuild it. A
+    /// stream of nothing but junk must meanwhile stay hard-bounded
+    /// instead of growing the history forever.
+    #[test]
+    fn warmup_history_keeps_the_last_decoded_frames_across_a_junk_flood_and_stays_bounded() {
+        let mut decoder = Decoder::new();
+        for seed in 0..3 {
+            drive_decoder(&mut decoder, &mp3_frame(128, seed)).expect("setup frame must decode");
+        }
+        assert!(decoder.history_decoded >= WARMUP_HISTORY_MIN_DECODED);
+
+        // Far more junk than WARMUP_HISTORY_MIN_BYTES of failed attempts:
+        // under byte/frame floors alone this evicted the decoded frames.
+        drive_decoder(&mut decoder, &garbage_stream(8 * 1024, 0x5A));
+        assert!(
+            decoder.history_decoded >= WARMUP_HISTORY_MIN_DECODED,
+            "rejected frames must not evict the last decoded frames from the warmup history"
+        );
+
+        // A truly unbounded junk flood saturates at the hard caps rather
+        // than growing without limit (here it also finally releases the
+        // decoded frames -- the documented, bounded trade-off).
+        drive_decoder(&mut decoder, &garbage_stream(64 * 1024, 0xA5));
+        assert!(
+            decoder.history_bytes <= WARMUP_HISTORY_MAX_BYTES + MAX_FRAME_INPUT,
+            "history bytes must stay hard-bounded under a junk flood"
+        );
+        assert!(decoder.history.len() <= WARMUP_HISTORY_MAX_FRAMES + 1);
+    }
+
     /// Regression test for the "PAUSE keeps draining audio" bug: `PAUSE`
     /// must halt audio output immediately, not merely halt decode while
     /// still draining whatever was already sitting in the pre-resample
@@ -1565,10 +1841,10 @@ mod tests {
 
     /// Regression test for the "stalled trailing frame never reclaimed"
     /// bug: a final queued descriptor whose tail is a truncated MP3 frame
-    /// (fewer bytes than minimp3 needs to make any decode progress, so
-    /// `decode_frame` reports `consumed == 0` on every attempt) must not
-    /// wedge `STATUS == PLAYING`/`QUEUE_COUNT == 1` forever when no further
-    /// doorbell ever arrives to complete it.
+    /// (a valid header whose declared frame length exceeds the queued
+    /// bytes, so `decode_frame` reports `consumed == 0` on every attempt)
+    /// must not wedge `STATUS == PLAYING`/`QUEUE_COUNT == 1` forever when
+    /// no further doorbell ever arrives to complete it.
     #[test]
     fn a_frame_split_at_the_last_queued_buffer_eventually_reclaims_the_descriptor() {
         let mut board = Mhi::new();
