@@ -82,10 +82,24 @@ monitor (solo) the shown part.
   games' sysex display messages appear on the LCD and stay until a button
   is pressed.
 
-Two start-up gestures, made by latching buttons on a switched-off unit
-and pressing **POWER**: both **INSTRUMENT** halves restore the built-in
-soundfont; **INSTRUMENT ►** asks `MT-32, Sure?` -- **ALL** turns MT-32
-mode on, **MUTE** turns it off.
+## Bonus Features
+
+The front panel has a few extra features similar to an SC-55.
+Latch/hold buttons with a right click on a switched-off unit, then
+press **POWER**.
+
+- Both **INSTRUMENT** buttons "reset" the unit and reload the builtin
+  SoundFont.
+- **INSTRUMENT ►** asks `MT-32, Sure?` with the ALL and MUTE lamps
+  flashing: **ALL** forces MT-32 mode on, **MUTE** forces it off, and
+  the choice lands in the configuration like the menu's.
+- Both **PART** buttons start demo mode: the part box reads `S-1` and
+  the unit plays its two bundled songs through its own engine. **ALL**
+  plays, **MUTE** stops, the **PART** arrows change song. Power off to
+  leave.
+- Both **MIDI CH** and both **INSTRUMENT** buttons show the Coppersynth
+  version and build date on the way up -- the fourth latch switches the
+  unit on by itself.
 
 ## Building without it
 
