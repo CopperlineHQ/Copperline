@@ -871,6 +871,12 @@ mod tests {
         // which way it falls.
         std::fs::create_dir_all(dir.join("c/Cabal")).unwrap();
         std::fs::write(dir.join("c/Cabal/Cabal.slave"), b"x").unwrap();
+        // A genre level over a single letter: the sole branch must not
+        // read as a wrapper when what it wraps is a shelf.
+        std::fs::create_dir_all(dir.join("shooter/d/Datastorm")).unwrap();
+        std::fs::write(dir.join("shooter/d/Datastorm/Datastorm.slave"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("shooter/d/Disposable")).unwrap();
+        std::fs::write(dir.join("shooter/d/Disposable/Disposable.slave"), b"x").unwrap();
 
         let mut found = packages(&dir);
         found.sort();
@@ -882,7 +888,9 @@ mod tests {
                 "a/AnotherWorld",
                 "b/Barbarian",
                 "b/Benefactor_v1.0.lha",
-                "c"
+                "c",
+                "shooter/d/Datastorm",
+                "shooter/d/Disposable"
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);

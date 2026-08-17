@@ -235,15 +235,30 @@ pub fn read_first(path: &Path, want: impl Fn(&Path) -> bool) -> Result<Option<Ve
 /// it a game outright -- the shape an unpacked game has, and what stops a
 /// game's own data directories being games of their own. Without one, it
 /// is a game only as a *wrapper*: exactly one subdirectory with a slave
-/// under it and no packages of its own, which is what an unpacked `.lha`
-/// looks like -- `Aladdin_v1/Aladdin/Aladdin.Slave` beside an icon.
-/// Anything else -- several slave-holding subdirectories, or packages
-/// mixed in beside them -- is a shelf, and the scan walks into it.
+/// under it, no packages of its own, and that subdirectory itself one
+/// game, which is what an unpacked `.lha` looks like --
+/// `Aladdin_v1/Aladdin/Aladdin.Slave` beside an icon. Anything else --
+/// several slave-holding subdirectories, packages mixed in beside them,
+/// or a sole subdirectory that is itself a shelf, as a genre folder over
+/// one letter is -- is a shelf, and the scan walks into it.
 ///
 /// A shelf holding a single game is genuinely indistinguishable from a
 /// wrapper and is taken for one; it still lists and still boots, under the
 /// shelf's name.
 pub fn one_game(dir: &Path) -> bool {
+    one_game_within(dir, 0)
+}
+
+/// How many wrappers may sit around a game before the search calls the
+/// whole stack a shelf and walks in instead. Real packages wrap once;
+/// walking in is the safe answer for anything stranger, since the walk is
+/// bounded and lists whatever games it reaches.
+const WRAPPER_DEPTH: usize = 3;
+
+fn one_game_within(dir: &Path, depth: usize) -> bool {
+    if depth > WRAPPER_DEPTH {
+        return false;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
@@ -274,16 +289,23 @@ pub fn one_game(dir: &Path) -> bool {
     if packages {
         return false;
     }
-    let mut holding = 0;
-    for sub in &subdirs {
-        if holds_a_slave(sub) {
-            holding += 1;
-            if holding > 1 {
+    let mut sole = None;
+    for sub in subdirs {
+        if holds_a_slave(&sub) {
+            if sole.is_some() {
                 return false;
             }
+            sole = Some(sub);
         }
     }
-    holding == 1
+    // A sole slave-holding subdirectory makes a wrapper only if it is
+    // itself one game. Reduced to "has a slave somewhere", a genre folder
+    // over a single letter of games would be a wrapper too, and the shelf
+    // under it would be swallowed whole.
+    match sole {
+        Some(sub) => one_game_within(&sub, depth + 1),
+        None => false,
+    }
 }
 
 /// Whether a `.slave` sits anywhere within `dir`, within a few levels.
@@ -585,6 +607,16 @@ mod tests {
         std::fs::write(dir.join("b/Barbarian/Barbarian.slave"), b"x").unwrap();
         std::fs::write(dir.join("b/Benefactor_v1.0.lha"), b"x").unwrap();
         assert!(!one_game(&dir.join("b")));
+
+        // A genre folder over a single letter of games has one
+        // slave-holding subdirectory, like a wrapper -- but that
+        // subdirectory is a shelf, so the genre folder is one too.
+        std::fs::create_dir_all(dir.join("Action/A/Agony")).unwrap();
+        std::fs::write(dir.join("Action/A/Agony/Agony.slave"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("Action/A/AlienBreed2")).unwrap();
+        std::fs::write(dir.join("Action/A/AlienBreed2/AlienBreed2.slave"), b"x").unwrap();
+        assert!(!one_game(&dir.join("Action")));
+        assert!(!one_game(&dir.join("Action/A")));
 
         // A folder with no slave anywhere under it is nothing at all.
         std::fs::create_dir_all(dir.join("Screenshots")).unwrap();
