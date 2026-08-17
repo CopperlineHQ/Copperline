@@ -77,11 +77,13 @@ fn scratch_dir(name: &str) -> PathBuf {
 }
 
 /// Every check line up to (and including) the final summary, as
-/// `(kind, rest)` where `kind` is `PASS`/`FAIL`/`INFO`/`SUMMARY`.
-fn parse_mhitest_lines(output: &str) -> Vec<(String, String)> {
+/// `(kind, rest)` where `kind` is `PASS`/`FAIL`/`INFO`/`SUMMARY`. `prefix`
+/// is the guest probe's own line prefix (`"MHITEST: "` for `mhitest.c`,
+/// `"MHISEEK: "` for `mhiseek.c`).
+fn parse_probe_lines(output: &str, prefix: &str) -> Vec<(String, String)> {
     output
         .lines()
-        .filter_map(|line| line.strip_prefix("MHITEST: "))
+        .filter_map(|line| line.strip_prefix(prefix))
         .filter_map(|rest| {
             let mut parts = rest.splitn(2, ' ');
             let kind = parts.next()?.to_string();
@@ -194,7 +196,7 @@ fn mhi_m1_open_query_alloc_doorbell_interrupt_round_trip() {
                 .collect::<Vec<_>>())
         )
     });
-    let lines = parse_mhitest_lines(&raw);
+    let lines = parse_probe_lines(&raw, "MHITEST: ");
     assert!(
         !lines.is_empty(),
         "no MHITEST: lines captured; raw output:\n{raw}"
@@ -805,4 +807,233 @@ fn mhi_m2_savestate_resume_matches_the_uninterrupted_tail() {
     let _ = std::fs::remove_file(&save_shot);
     let _ = std::fs::remove_file(&tail_wav);
     let _ = std::fs::remove_file(&tail_shot);
+}
+
+// ---------------------------------------------------------------------
+// M3: a real seek (MHIStop -> reposition -> MHIQueueBuffer) end to end.
+// ---------------------------------------------------------------------
+
+/// MHI has no seek call of its own (`guest/mhi/test/mhiseek.c`'s own header
+/// comment, `docs/internals/mhi.md`'s "Seek-entry hardening"), so this
+/// harness proves the actual seek sequence a real player performs: play one
+/// small fixture to completion, `MHIStop`, then queue and play a
+/// *different* fixture -- from the board's perspective indistinguishable
+/// from seeking within one file, since it only ever sees `STOP` followed by
+/// fresh descriptors either way. Two distinct committed tones (rather than
+/// one file with a seek point in the middle) let this test verify the
+/// post-STOP decode is real, correct audio via a frequency check, without
+/// needing a large multi-tone fixture or local `test-assets/`.
+const MHI_SEEK_TONE_A: &str = "tests/data/mhi/golden_tone_cbr64_mono.mp3"; // 440 Hz
+const MHI_SEEK_TONE_B: &str = "tests/data/mhi/golden_tone2_880hz_cbr64_mono.mp3"; // 880 Hz
+
+/// Stage a boot volume that runs `mhiseek` (`guest/mhi/test/mhiseek.c`)
+/// against the two committed tone fixtures, mirroring `stage_m1_mount`'s
+/// `LIBS:`/`SYS:` layout.
+fn stage_seek_mount(mount: &Path) {
+    let _ = std::fs::remove_dir_all(mount);
+    std::fs::create_dir_all(mount.join("S")).expect("create S/");
+    std::fs::create_dir_all(mount.join("Libs")).expect("create Libs/");
+    std::fs::copy(
+        repo_root().join("guest/mhi/mhi_copperline.library"),
+        mount.join("Libs").join("mhi_copperline.library"),
+    )
+    .expect("stage mhi_copperline.library");
+    std::fs::copy(
+        repo_root().join("guest/mhi/test/mhiseek"),
+        mount.join("mhiseek"),
+    )
+    .expect("stage mhiseek");
+    std::fs::copy(repo_root().join(MHI_SEEK_TONE_A), mount.join("tone_a.mp3"))
+        .expect("stage tone A fixture");
+    std::fs::copy(repo_root().join(MHI_SEEK_TONE_B), mount.join("tone_b.mp3"))
+        .expect("stage tone B fixture");
+    std::fs::write(
+        mount.join("S").join("Startup-Sequence"),
+        "FailAt 21\n\
+         SYS:mhiseek SYS:tone_a.mp3 SYS:tone_b.mp3 >SYS:mhiseek.out\n\
+         Echo >\"SYS:done\" \"done\"\n",
+    )
+    .expect("write Startup-Sequence");
+}
+
+fn write_seek_config(cfg_path: &Path, mount: &Path) {
+    std::fs::write(
+        cfg_path,
+        format!(
+            "rom = \"<bundled-aros>\"\n\n\
+             [machine]\n\
+             # Pinned for the same reason write_m2_config pins it: removes\n\
+             # boot-time RTC-read jitter as a source of run-to-run timing\n\
+             # noise in the capture.\n\
+             rtc_time = \"2005-03-18 01:58:29\"\n\
+             rtc_frozen = true\n\n\
+             [mhi]\n\
+             enabled = true\n\n\
+             [[filesys]]\n\
+             path = '{}'\n\
+             volume = \"MHISEEK\"\n\
+             bootpri = 6\n",
+            mount.display()
+        ),
+    )
+    .expect("write test config");
+}
+
+/// Generous margin over the ~3s of actual fixture audio (two 1.5s tones):
+/// boot-to-Startup-Sequence plus two Open/Read/MHIQueueBuffer/MHIPlay
+/// cycles is comfortably under 20s emulated by the same
+/// order-of-magnitude reasoning as `M2_RUN_SECS`'s own comment (that
+/// budget covers a single 10s fixture in under 20s).
+const SEEK_RUN_SECS: &str = "30";
+
+/// Sliding-window (0.2s step, 0.3s width) search for the first/last window
+/// whose RMS clears `threshold` -- brackets the capture's audible region
+/// without hardcoding boot-timing-dependent offsets.
+fn loud_region(channels: u16, sample_rate: u32, samples: &[f32], threshold: f64) -> (f64, f64) {
+    let step = 0.2;
+    let width = 0.3;
+    let total_secs = (samples.len() / channels.max(1) as usize) as f64 / sample_rate as f64;
+    let mut first = None;
+    let mut last = None;
+    let mut t = 0.0;
+    while t + width <= total_secs {
+        let window = left_channel_window(channels, sample_rate, samples, t, width);
+        if !window.is_empty() {
+            let rms = (window.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()
+                / window.len() as f64)
+                .sqrt();
+            if rms > threshold {
+                if first.is_none() {
+                    first = Some(t);
+                }
+                last = Some(t);
+            }
+        }
+        t += step;
+    }
+    (
+        first.expect("no window ever cleared the RMS threshold"),
+        last.expect("no window ever cleared the RMS threshold"),
+    )
+}
+
+/// End-to-end proof of MHI-PLAN-M3-M4.md WP3.3: `mhiseek` plays
+/// `tone_a.mp3` (440 Hz) to completion, issues the real `MHIStop` ->
+/// reposition -> `MHIQueueBuffer` sequence a seeking player performs (here,
+/// switching to a different file rather than a different offset in the
+/// same one -- indistinguishable from the board's side, see this module's
+/// own comment), and plays `tone_b.mp3` (880 Hz) to completion. Proves the
+/// capture carries both tones, 440 Hz dominant early in the audible region
+/// and 880 Hz dominant late, i.e. a real, correctly-decoded frequency
+/// transition happened exactly where a working seek would put one -- not
+/// silence, garbage, or the pre-seek tone bleeding through past the STOP
+/// (which `src/mhi.rs`'s `stop_resets_decoder_state_so_a_reseek_matches_a_
+/// fresh_decode` already proves in-process; this test is the same claim
+/// proven through the real board, guest library, and mixer end to end).
+#[test]
+#[ignore = "runs the emulator"]
+fn mhi_m3_seek_switches_from_tone_a_to_tone_b_across_a_stop() {
+    let _guard = lock_emulator_tests();
+    let mount = scratch_dir("m3-seek-mount");
+    stage_seek_mount(&mount);
+    let cfg_path = scratch_dir("m3-seek-cfg").with_extension("toml");
+    write_seek_config(&cfg_path, &mount);
+    let wav_path = scratch_dir("m3-seek").with_extension("wav");
+    let shot = scratch_dir("m3-seek-shot").with_extension("png");
+
+    let out = run_copperline(&[
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--noaudio",
+        "--audio-wav",
+        wav_path.to_str().unwrap(),
+        "--screenshot-after",
+        SEEK_RUN_SECS,
+        shot.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "emulator run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        mount.join("done").is_file(),
+        "Startup-Sequence never reached its completion marker under {}",
+        mount.display()
+    );
+
+    let raw = std::fs::read_to_string(mount.join("mhiseek.out"))
+        .unwrap_or_else(|e| panic!("reading mhiseek.out under {}: {e}", mount.display()));
+    let lines = parse_probe_lines(&raw, "MHISEEK: ");
+    assert!(
+        !lines.is_empty(),
+        "no MHISEEK: lines captured; raw output:\n{raw}"
+    );
+    let fails: Vec<&(String, String)> = lines.iter().filter(|(k, _)| k == "FAIL").collect();
+    assert!(
+        fails.is_empty(),
+        "mhiseek reported failing checks: {fails:?}\nfull output:\n{raw}"
+    );
+    let (last_kind, last_rest) = lines.last().expect("no MHISEEK: lines captured");
+    assert_eq!(
+        (last_kind.as_str(), last_rest.as_str()),
+        ("SUMMARY", "PASS"),
+        "mhiseek did not end with a PASS summary; full output:\n{raw}"
+    );
+    for check in [
+        "play file A to completion",
+        "play file B to completion after seek",
+    ] {
+        assert!(
+            lines.iter().any(|(k, rest)| k == "PASS" && rest == check),
+            "expected a PASS line for {check:?}; full output:\n{raw}"
+        );
+    }
+
+    let (channels, sample_rate, samples) = read_wav_f32(&wav_path);
+    assert_eq!(channels, 2, "expected stereo capture");
+    assert_eq!(sample_rate, 44100, "expected 44.1 kHz capture");
+
+    // 0.03, not the M2 tone test's 0.01: this scenario's ~26s of otherwise-
+    // silent boot/idle time carries small periodic non-MHI background
+    // audio blips (observed empirically, RMS ~0.01-0.015 -- host-side
+    // artifacts of drive-activity/polling sound sources unrelated to MHI,
+    // recurring every couple of seconds for the whole capture, well
+    // outside the actual tone windows). The genuine decoded tones sit far
+    // above that at RMS ~0.06-0.085, so 0.03 cleanly separates real
+    // playback from that background floor without needing to silence it.
+    let (loud_start, loud_end) = loud_region(channels, sample_rate, &samples, 0.03);
+    assert!(
+        loud_end - loud_start > 1.0,
+        "expected well over 1s of combined audible playback (two ~1.5s tones), got \
+         {loud_start}..{loud_end}"
+    );
+
+    // Early in the audible region: still tone A (440 Hz). 0.1s in from the
+    // detected onset clears any onset transient from the RMS-threshold
+    // search itself.
+    let early = left_channel_window(channels, sample_rate, &samples, loud_start + 0.1, 0.3);
+    let early_440 = goertzel_power(&early, 440.0, sample_rate);
+    let early_880 = goertzel_power(&early, 880.0, sample_rate);
+    assert!(
+        early_440 > early_880 * 10.0,
+        "expected 440 Hz dominant early in the capture (before the seek), got 440={early_440} \
+         880={early_880}"
+    );
+
+    // Late in the audible region: tone B (880 Hz) by now -- the seek must
+    // have already happened, since only ~3s of total audio exist.
+    let late = left_channel_window(channels, sample_rate, &samples, loud_end - 0.4, 0.3);
+    let late_440 = goertzel_power(&late, 440.0, sample_rate);
+    let late_880 = goertzel_power(&late, 880.0, sample_rate);
+    assert!(
+        late_880 > late_440 * 10.0,
+        "expected 880 Hz dominant late in the capture (after the seek), got 440={late_440} \
+         880={late_880}"
+    );
+
+    let _ = std::fs::remove_dir_all(&mount);
+    let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_file(&wav_path);
+    let _ = std::fs::remove_file(&shot);
 }
