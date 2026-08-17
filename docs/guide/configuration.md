@@ -1178,7 +1178,7 @@ button.
 ```toml
 [serial]
 mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
-# midi_out = "FluidSynth"  # midi mode: host destination, or "mt32"
+# midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
@@ -1196,7 +1196,10 @@ Paula's serial in/out is connected:
   port). `--list-midi` prints the host endpoints. Either may instead be
   `"mt32"`, which is Copperline's own emulated MT-32 rather than anything
   on the host, and brings its own `mt32_*` keys with it; see
-  [the MT-32 chapter](mt32.md).
+  [the MT-32 chapter](mt32.md). `midi_out` may also be `"coppersynth"` --
+  Coppersynth, the built-in General MIDI synthesizer, which needs no
+  ROMs at all; see [the Coppersynth chapter](coppersynth.md) and the
+  `[coppersynth]` section below.
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
   device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
@@ -1228,6 +1231,26 @@ takes a `host:port`, with an IPv6 literal in brackets
 
 The browser build has its own serial transport (the page bridges the port
 to a WebSocket); see [the browser chapter](browser.md).
+
+## `[coppersynth]` -- Coppersynth
+
+```toml
+[coppersynth]
+# soundfont = "/path/to/bank.sf2"   # override the built-in bank
+# mt32_mode = "auto"                # auto, on, or off
+# panel = true                      # start with the front panel shown
+```
+
+Coppersynth's own keys, in force when `[serial] midi_out = "coppersynth"`. The
+built-in bank (GeneralUser GS) is inside the executable, so none of them
+is required: `soundfont` plays a different bank (`.sf2`, or a `.zip`
+holding one; the `COPPERLINE_SOUNDFONT` environment variable and an
+`.sf2` beside the executable are also honoured), `mt32_mode` sets how
+MT-32 games are translated, and `panel` starts the session with the
+front panel under the display. All three are on the launcher's
+**I/O Ports** tab once Coppersynth is the MIDI output, and in the
+menu's **Coppersynth** category while it plays; see
+[the Coppersynth chapter](coppersynth.md).
 
 ## `[parallel]` -- Centronics parallel port
 

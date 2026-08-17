@@ -35,6 +35,7 @@ project:
         - file: guide/fluxbridge.md
         - file: guide/host-disks.md
         - file: guide/mt32.md
+        - file: guide/coppersynth.md
         - file: guide/headless.md
         - file: guide/browser.md
     - title: Extending
@@ -74,6 +75,7 @@ project:
         - guide/fluxbridge.md
         - guide/host-disks.md
         - guide/mt32.md
+        - guide/coppersynth.md
         - guide/headless.md
         - guide/browser.md
         - zorro.md

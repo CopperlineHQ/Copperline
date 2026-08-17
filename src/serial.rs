@@ -145,6 +145,13 @@ pub trait SerialSink: Send {
         None
     }
 
+    /// What the in-process synth's line is called in stem captures.
+    /// Meaningful only while [`next_audio_frame`](Self::next_audio_frame)
+    /// answers; the default names the MT-32, the historical occupant.
+    fn synth_source_name(&self) -> &'static str {
+        "mt32"
+    }
+
     fn flush(&mut self);
 }
 

@@ -36,6 +36,24 @@ pub const ACTIVE_PART: char = '\u{1}';
 /// How wide the emulated LCD is, in characters. The panel is drawn to this.
 pub const LCD_WIDTH: usize = mt32_rs::LCD_WIDTH;
 
+/// ROM paths loaded from the menu, outliving the session that loaded
+/// them: stopping and starting emulation keeps what was picked, and a
+/// menu choice wins over the configuration it corrects.
+static ROM_OVERRIDES: std::sync::Mutex<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)> =
+    std::sync::Mutex::new((None, None));
+
+pub fn set_control_rom_override(path: std::path::PathBuf) {
+    ROM_OVERRIDES.lock().unwrap().0 = Some(path);
+}
+
+pub fn set_pcm_rom_override(path: std::path::PathBuf) {
+    ROM_OVERRIDES.lock().unwrap().1 = Some(path);
+}
+
+pub fn rom_overrides() -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    ROM_OVERRIDES.lock().unwrap().clone()
+}
+
 /// How many native frames the engine is asked for at a time on the way
 /// into the resampler: a millisecond, so queued guest traffic lands
 /// within that of the frame the mixer is pulling.

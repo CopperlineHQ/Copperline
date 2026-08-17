@@ -1933,7 +1933,8 @@ impl Paula {
                 None => self.synth_silent = true,
             }
         }
-        self.audio.push_source("mt32", synth_left, synth_right);
+        self.audio
+            .push_source(self.serial.synth_source_name(), synth_left, synth_right);
         // A Toccata board resamples its own codec-rate output to the mixer
         // rate before pushing here (see `Toccata::tick`), so this is a
         // plain per-frame pop like CD-DA, not a rate conversion.
