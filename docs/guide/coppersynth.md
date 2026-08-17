@@ -13,7 +13,7 @@ plays MIDI music and Amiga sound effects gets both.
 ## Turning it on
 
 The serial port has to be in MIDI mode with Coppersynth as its output. In
-the launcher, that is the **I/O Ports** tab, Serial section: set
+the launcher, that is the **I/O Ports** tab (its Serial Port page): set
 **Device / Mode** to `MIDI`, then **MIDI output** to `Coppersynth`.
 Choosing it reveals the rest of the rows: the soundfont, the front panel,
 and MT-32 mode. In a running session the same choice is under the menu's

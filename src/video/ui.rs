@@ -963,7 +963,12 @@ fn panel_dims(panel: &Panel) -> (usize, usize) {
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
         Panel::Console(_) => (700, 460),
-        Panel::Launcher(_) => (LAUNCHER_W, LAUNCHER_H),
+        // Clamped to the display area so the status bar below stays a
+        // status bar whatever the height grows to: a taller launcher
+        // gives up height rather than pixels, because its bottom row is
+        // its buttons, and buttons drawn off the canvas cannot be
+        // clicked.
+        Panel::Launcher(_) => (LAUNCHER_W, LAUNCHER_H.min(present_height())),
         Panel::DropChooser(state) => (
             460,
             TITLE_H
@@ -4299,11 +4304,10 @@ fn draw_heat_census(
 // Machine-configuration (launcher) panel
 // ---------------------------------------------------------------------------
 
-const LAUNCHER_W: usize = 700;
-// Tall enough for the I/O Ports tab's worst case: Serial (MT-32, 7 rows),
-// Parallel (Sampler, 3 rows), Ethernet (4 rows), and Sound (2 rows), each
-// under its own heading -- see `every_launcher_tab_row_fits_inside_the_panel`.
-const LAUNCHER_H: usize = 600;
+// Full canvas width: the panel's edges line up with the status bar
+// below it rather than leaving gutters of display either side.
+const LAUNCHER_W: usize = FB_WIDTH;
+const LAUNCHER_H: usize = 520;
 const LAUNCH_MARGIN: usize = 8;
 const LAUNCH_MODEL_H: usize = 22;
 const LAUNCH_MODEL_GAP: usize = 4;
@@ -8928,11 +8932,11 @@ fn draw_launcher(
     // NAT and bridged backends deliver inbound traffic on the host's schedule,
     // so warn that runs stop being reproducible the moment packets flow
     // (loopback and an isolated NIC stay deterministic).
-    if state.tab == LauncherTab::IoPorts && setup.ethernet_breaks_determinism() {
+    if state.tab == LauncherTab::IoNetworking && setup.ethernet_breaks_determinism() {
         let note_top = launcher_row_y(
             rect,
             launcher::rows(
-                LauncherTab::IoPorts,
+                LauncherTab::IoNetworking,
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),
@@ -10036,6 +10040,9 @@ mod tests {
         // The strip tabs, plus the sub-pages and A/V categories reached from a
         // nav row rather than the strip.
         let off_strip = [
+            LauncherTab::IoParallel,
+            LauncherTab::IoNetworking,
+            LauncherTab::IoAudio,
             LauncherTab::Cd,
             LauncherTab::HostFs,
             LauncherTab::Whdload,
@@ -10702,7 +10709,9 @@ mod tests {
         .filter(|r| !state.setup.row_hidden(r.field))
         .position(|r| r.field == LauncherField::SerialConnect)
         .expect("no Connect row in tcp-connect mode");
-        let row_y = launcher_row_y(rect, index);
+        // The serial page sits under the I/O Ports nav row, so its rows
+        // start a nav block lower.
+        let row_y = launcher_row_y(rect, index) + LAUNCH_NAV_BLOCK_H;
         let box_rect = launcher_text_rect(rect, row_y, LauncherField::SerialConnect);
         assert_eq!(
             ui.control_at((box_rect.x as i32 + 4, box_rect.y as i32 + 4)),

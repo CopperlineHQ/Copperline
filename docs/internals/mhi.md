@@ -553,7 +553,7 @@ content above.
 - **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
   `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**.
 - **Launcher**: the machine-configuration launcher's **I/O Ports** tab
-  (Sound section) has a plain fit/don't-fit toggle for the board (same as
+  (Audio page) has a plain fit/don't-fit toggle for the board (same as
   Toccata, see [](toccata)'s "What's out of scope" section); host-side
   audio capture/backend options stay command-line/config-file only.
 - **Large-descriptor DMA copy**: `DESC_LEN` genuinely does not truncate --
