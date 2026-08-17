@@ -717,6 +717,11 @@ pub enum RowKind {
     /// A hard-drive image: a path with Browse/Clear, plus an editable
     /// volume-name field (used when the image is a host directory).
     Drive,
+    /// The greyed column headers of a ROM row's identification table.
+    RomInfoHeader,
+    /// The identification itself: Name / Version / Revision cells, blank
+    /// when the slot is empty or the image is unrecognised.
+    RomInfoValue,
     /// A non-interactive greyed heading that groups the rows beneath it
     /// (e.g. the `Serial:` / `Parallel:` sections of the I/O Ports tab). Its
     /// `field` is inert.
@@ -927,36 +932,44 @@ const SYSTEM_ROWS: [Row; 7] = [
     row(F::Agnus, "Agnus", Cycle),
     row(F::Denise, "Denise", Cycle),
     row(F::Video, "Video", Cycle),
-    row(F::Rtc, "Real-time clock", Toggle),
-    row(F::Identify, "Identify board", Toggle),
+    row(F::Rtc, "Real-time clock", Cycle),
+    row(F::Identify, "Identify board", Cycle),
     row(F::Rtg, "RTG card", Cycle),
 ];
 const CPU_ROWS: [Row; 6] = [
     row(F::Cpu, "CPU", Cycle),
-    row(F::Fpu, "FPU (68881/2)", Toggle),
+    row(F::Fpu, "FPU (68881/2)", Cycle),
     row(F::Clock, "Clock", Cycle),
-    row(F::Icache, "Instruction cache", Toggle),
-    row(F::Dcache, "Data cache", Toggle),
-    row(F::Jit, "JIT accelerator", Toggle),
+    row(F::Icache, "Instruction cache", Cycle),
+    row(F::Dcache, "Data cache", Cycle),
+    row(F::Jit, "JIT accelerator", Cycle),
 ];
 const MEMORY_ROWS: [Row; 8] = [
-    row(F::RamInit, "Power-on fill", Cycle),
-    row(F::RamPattern, "Fill pattern", RowKind::Text),
     row(F::ChipRam, "Chip RAM", Cycle),
     row(F::FastRam, "Fast RAM", Cycle),
     row(F::SlowRam, "Slow RAM", Cycle),
+    // Below the sizes most people came for: what the bits hold at
+    // power-on, and (only while the fill is Fixed) the word they hold.
+    row(F::RamInit, "Power-on fill", Cycle),
+    row(F::RamPattern, "Fill pattern", RowKind::Text),
     row(F::MbRam, "Motherboard RAM", Cycle),
     row(F::AccelRam, "Accelerator RAM", Cycle),
     row(F::Z3Ram, "Zorro III RAM", Cycle),
 ];
-// Each ROM row is followed by a greyed line naming what the chosen image
-// checksums to ("Kickstart 3.1 (40.68) A1200"), since a ROM file's name says
-// only what its dumper called it.
-const ROM_ROWS: [Row; 4] = [
+// Each ROM row is followed by a greyed table naming what the chosen
+// image checksums to, split into Name / Version / Revision columns
+// ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
+// its dumper called it. The table stands whether or not an image is
+// loaded; empty cells mean an empty (or unrecognised) slot.
+const ROM_ROWS: [Row; 8] = [
+    section_header("Primary ROM:"),
     row(F::Rom, "Kickstart ROM", PathRow),
-    row(F::Rom, "", RowKind::Note),
+    row(F::Rom, "", RowKind::RomInfoHeader),
+    row(F::Rom, "", RowKind::RomInfoValue),
+    section_header("Extended ROM:"),
     row(F::ExtendedRom, "Extended ROM", PathRow),
-    row(F::ExtendedRom, "", RowKind::Note),
+    row(F::ExtendedRom, "", RowKind::RomInfoHeader),
+    row(F::ExtendedRom, "", RowKind::RomInfoValue),
 ];
 // Each drive is a greyed "DFn:" heading with its settings indented under it. The
 // heading is keyed on the drive's image field so `row_hidden` drops it along
@@ -1144,7 +1157,7 @@ const SERIAL_ROWS_CSYNTH: [Row; 6] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::MidiIn, "  MIDI input", Cycle),
     row(F::MidiOut, "  MIDI output", Cycle),
-    row(F::CsynthSoundfont, "  Soundfont", PathRow),
+    row(F::CsynthSoundfont, "  SoundFont", PathRow),
     row(F::CsynthPanel, "  Front panel", Cycle),
     row(F::CsynthMt32Mode, "  MT-32 mode", Cycle),
 ];
@@ -1162,9 +1175,9 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerGain, "  Input gain", Cycle),
 ];
 const ETHERNET_ROWS: [Row; 4] = [
-    row(F::Ethernet, "  A2065 board", Cycle),
+    row(F::Ethernet, "  A2065", Cycle),
     row(F::EthernetInterface, "  Host adapter", Cycle),
-    row(F::HostSocket, "  HostSocket board", Cycle),
+    row(F::HostSocket, "  HostSocket", Cycle),
     row(F::HostSocketInterface, "  Host adapter", Cycle),
 ];
 // Both boards are a single fit/don't-fit toggle -- no host backend, no other
@@ -1173,23 +1186,23 @@ const ETHERNET_ROWS: [Row; 4] = [
 // intentionally stay command-line/config-file only and have no row here.
 #[cfg(feature = "mhi")]
 const SOUND_ROWS: [Row; 2] = [
-    row(F::Toccata, "  Toccata board", Toggle),
-    row(F::Mhi, "  MHI decoder board", Toggle),
+    row(F::Toccata, "  Toccata", Cycle),
+    row(F::Mhi, "  MHI decoder", Cycle),
 ];
 #[cfg(not(feature = "mhi"))]
-const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata board", Toggle)];
+const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
 const VIDEO_ROWS: [Row; 13] = [
-    row(F::StartFullscreen, "Start fullscreen", Toggle),
-    row(F::ShowStatusBar, "Status bar", Toggle),
+    row(F::StartFullscreen, "Start fullscreen", Cycle),
+    row(F::ShowStatusBar, "Status bar", Cycle),
     row(F::Bezel, "Monitor bezel", Cycle),
-    row(F::PerfOverlay, "Perf overlay", Toggle),
+    row(F::PerfOverlay, "Perf overlay", Cycle),
     row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Scaling, "Scaling", Cycle),
-    row(F::Deinterlace, "Deinterlace", Toggle),
+    row(F::Deinterlace, "Deinterlace", Cycle),
     row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
@@ -1200,20 +1213,20 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
     row(F::AudioFilter, "Audio filter", Cycle),
-    row(F::FloppySounds, "Floppy sounds", Toggle),
+    row(F::FloppySounds, "Floppy sounds", Cycle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 #[cfg(not(feature = "game-library"))]
 const EMULATION_ROWS: [Row; 4] = [
-    row(F::PowerOn, "Power on startup", Toggle),
-    row(F::RealtimePriority, "Realtime priority", Toggle),
+    row(F::PowerOn, "Power on startup", Cycle),
+    row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
 ];
 #[cfg(feature = "game-library")]
 const EMULATION_ROWS: [Row; 5] = [
-    row(F::PowerOn, "Power on startup", Toggle),
-    row(F::RealtimePriority, "Realtime priority", Toggle),
+    row(F::PowerOn, "Power on startup", Cycle),
+    row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
     // Off, the strip loses its WHDLoad entry and the pages behind it stop
@@ -1395,7 +1408,7 @@ fn io_networking_rows() -> Vec<Row> {
 }
 
 fn io_audio_rows() -> Vec<Row> {
-    let mut rows = vec![section_header("Audio:")];
+    let mut rows = vec![section_header("Sound Card:")];
     rows.extend_from_slice(&SOUND_ROWS);
     rows
 }
@@ -3362,6 +3375,10 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => self.floppy_drives < 2,
             F::Df2Image | F::Df2WriteProtect => self.floppy_drives < 3,
             F::Df3Image | F::Df3WriteProtect => self.floppy_drives < 4,
+            // The word only exists while the fill is Fixed; the other
+            // fills have nothing to edit, so the row goes rather than
+            // sitting greyed under a setting most people never touch.
+            F::RamPattern => !matches!(self.ram_init, RamInit::Pattern { .. }),
             F::EthernetInterface => {
                 !matches!(self.a2065_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
@@ -3429,10 +3446,7 @@ impl MachineSetup {
                 !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010),
                 "needs 68020+",
             ),
-            F::RamPattern => reason(
-                matches!(self.ram_init, RamInit::Pattern { .. }),
-                "select Fixed fill",
-            ),
+
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
@@ -3631,6 +3645,12 @@ impl MachineSetup {
             F::Mhi => self.mhi,
             _ => false,
         }
+    }
+
+    /// Whether the SCSI controller is the A4091, whose boot ROM has a
+    /// bundled default the row reads as one.
+    pub fn scsi_controller_is_a4091(&self) -> bool {
+        matches!(self.scsi_controller, Some(ScsiController::A4091))
     }
 
     /// The current path of a path field, if any.
@@ -4127,6 +4147,22 @@ impl MachineSetup {
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Mt32Panel => enabled_label(self.mt32_panel),
+            F::Rtc => enabled_label(self.rtc),
+            F::Identify => enabled_label(self.identify),
+            F::Fpu => enabled_label(self.fpu),
+            F::Icache => enabled_label(self.icache),
+            F::Dcache => enabled_label(self.dcache),
+            F::Jit => enabled_label(self.jit),
+            F::StartFullscreen => enabled_label(self.start_fullscreen),
+            F::ShowStatusBar => enabled_label(self.show_status_bar),
+            F::PerfOverlay => enabled_label(self.perf_overlay),
+            F::Deinterlace => enabled_label(self.deinterlace),
+            F::FloppySounds => enabled_label(self.floppy_sounds),
+            F::PowerOn => enabled_label(self.power_on),
+            F::RealtimePriority => enabled_label(self.realtime_priority),
+            F::Toccata => enabled_label(self.toccata),
+            #[cfg(feature = "mhi")]
+            F::Mhi => enabled_label(self.mhi),
             #[cfg(feature = "coppersynth")]
             F::CsynthPanel => enabled_label(self.csynth_panel),
             F::Phosphor => {
@@ -4374,6 +4410,11 @@ impl MachineSetup {
             F::WhdloadWhdPackage | F::WhdloadSkickPackage => self.path_label(field, "(none)"),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
+            // The A4091 autoboots from a bundled open-source ROM when no
+            // image names one; the other controllers have no such default.
+            F::ScsiRom if self.scsi_controller_is_a4091() => {
+                self.path_label(field, "(bundled A4091 ROM)")
+            }
             _ if rows_contains_kind(field, RowKind::Path)
                 || rows_contains_kind(field, RowKind::Drive)
                 || rows_contains_kind(field, RowKind::FloppyMedia) =>
@@ -4560,6 +4601,22 @@ impl MachineSetup {
             }
             // Two states cycle the same either way round.
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
+            F::Rtc => self.rtc = !self.rtc,
+            F::Identify => self.identify = !self.identify,
+            F::Fpu => self.fpu = !self.fpu,
+            F::Icache => self.icache = !self.icache,
+            F::Dcache => self.dcache = !self.dcache,
+            F::Jit => self.jit = !self.jit,
+            F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
+            F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
+            F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
+            F::Deinterlace => self.deinterlace = !self.deinterlace,
+            F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
+            F::PowerOn => self.power_on = !self.power_on,
+            F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
+            F::Toccata => self.toccata = !self.toccata,
+            #[cfg(feature = "mhi")]
+            F::Mhi => self.mhi = !self.mhi,
             #[cfg(feature = "coppersynth")]
             F::CsynthPanel => self.csynth_panel = !self.csynth_panel,
             F::PixelAspect => {
@@ -4853,12 +4910,6 @@ impl MachineSetup {
     /// Flip a toggle field (no-op if the field is not a toggle).
     pub fn toggle(&mut self, field: LauncherField) {
         match field {
-            F::Rtc => self.rtc = !self.rtc,
-            F::Identify => self.identify = !self.identify,
-            F::Fpu => self.fpu = !self.fpu,
-            F::Icache => self.icache = !self.icache,
-            F::Dcache => self.dcache = !self.dcache,
-            F::Jit => self.jit = !self.jit,
             F::Df0WriteProtect | F::Df1WriteProtect | F::Df2WriteProtect | F::Df3WriteProtect
                 if Self::drive_protect_bay(field).is_some() =>
             {
@@ -4872,16 +4923,6 @@ impl MachineSetup {
             F::Df1WriteProtect => self.df_write_protected[1] = !self.df_write_protected[1],
             F::Df2WriteProtect => self.df_write_protected[2] = !self.df_write_protected[2],
             F::Df3WriteProtect => self.df_write_protected[3] = !self.df_write_protected[3],
-            F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
-            F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
-            F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
-            F::Deinterlace => self.deinterlace = !self.deinterlace,
-            F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
-            F::PowerOn => self.power_on = !self.power_on,
-            F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
-            F::Toccata => self.toccata = !self.toccata,
-            #[cfg(feature = "mhi")]
-            F::Mhi => self.mhi = !self.mhi,
             _ => {}
         }
     }
@@ -7817,6 +7858,42 @@ impl LauncherState {
         }
     }
 
+    /// The identification split for the ROM tab's table: Name, Version
+    /// and Revision cells. Empty strings when the slot is empty or the
+    /// image is unrecognised.
+    ///
+    /// The identification labels read "Kickstart 3.1 (40.68) A1200":
+    /// name words first, a marketing version, the ROM's own revision in
+    /// parentheses, then the models -- which have no column, and are
+    /// dropped. A label with no version ("bundled AROS") is all name.
+    pub fn rom_note_cells(&self, field: LauncherField) -> (String, String, String) {
+        let Some(note) = self.rom_note(field) else {
+            return (String::new(), String::new(), String::new());
+        };
+        let mut name_words: Vec<&str> = Vec::new();
+        let mut version = String::new();
+        let mut revision = String::new();
+        for word in note.split_whitespace() {
+            if version.is_empty()
+                && word.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && word.contains('.')
+            {
+                version = word.to_string();
+                continue;
+            }
+            if !version.is_empty() {
+                if revision.is_empty() && word.starts_with('(') && word.ends_with(')') {
+                    revision = word[1..word.len() - 1].to_string();
+                }
+                // Everything after the version that is not the revision
+                // is the model list, which has no column.
+                continue;
+            }
+            name_words.push(word);
+        }
+        (name_words.join(" "), version, revision)
+    }
+
     /// What the image on a ROM row was identified as, for its [`RowKind::Note`]
     /// line. `None` for an image no checksum names, and for every other field.
     pub fn rom_note(&self, field: LauncherField) -> Option<&str> {
@@ -8778,8 +8855,11 @@ mod tests {
 
         setup.cycle(F::RamInit, true);
         assert_eq!(setup.value_label(F::RamInit), "Zero");
-        assert!(!setup.applies(F::RamPattern));
+        // The pattern row disappears rather than greying: it only
+        // exists while the fill is Fixed.
+        assert!(setup.row_hidden(F::RamPattern));
         setup.cycle(F::RamInit, false);
+        assert!(!setup.row_hidden(F::RamPattern));
         assert_eq!(setup.value_label(F::RamPattern), "0xDEAD");
 
         setup.cycle(F::RamInit, false);
@@ -9828,11 +9908,38 @@ mod tests {
         assert_eq!(
             shape,
             [
+                ("Primary ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("Kickstart ROM", RowKind::Path, F::Rom),
-                ("", RowKind::Note, F::Rom),
+                ("", RowKind::RomInfoHeader, F::Rom),
+                ("", RowKind::RomInfoValue, F::Rom),
+                ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("Extended ROM", RowKind::Path, F::ExtendedRom),
-                ("", RowKind::Note, F::ExtendedRom),
+                ("", RowKind::RomInfoHeader, F::ExtendedRom),
+                ("", RowKind::RomInfoValue, F::ExtendedRom),
             ]
+        );
+
+        // The identification splits into the table's three columns; the
+        // models after the revision have no column and are dropped.
+        let mut probe = LauncherState::new(MachineSetup::default());
+        probe.set_rom_note_for_test(F::Rom, "Kickstart 3.1 (40.68) A1200");
+        assert_eq!(
+            probe.rom_note_cells(F::Rom),
+            (
+                "Kickstart".to_string(),
+                "3.1".to_string(),
+                "40.68".to_string()
+            )
+        );
+        probe.set_rom_note_for_test(F::Rom, "bundled AROS");
+        assert_eq!(
+            probe.rom_note_cells(F::Rom),
+            ("bundled AROS".to_string(), String::new(), String::new())
+        );
+        // An empty slot is an empty table, not a missing one.
+        assert_eq!(
+            probe.rom_note_cells(F::ExtendedRom),
+            (String::new(), String::new(), String::new())
         );
 
         let mut state = LauncherState::new(MachineSetup::default());
@@ -10728,7 +10835,7 @@ mod tests {
         assert!(s.toggle_value(LauncherField::Deinterlace));
         assert_eq!(s.to_raw().display.deinterlace, None);
 
-        s.toggle(LauncherField::Deinterlace);
+        s.cycle(LauncherField::Deinterlace, true);
         assert!(!s.toggle_value(LauncherField::Deinterlace));
         assert_eq!(s.to_raw().display.deinterlace, Some(false));
 
@@ -12424,7 +12531,7 @@ mod tests {
         assert!(r.iter().any(|x| x.field == LauncherField::Ethernet));
         // Audio page: the Toccata board toggle, and (in an `mhi` build)
         // the MHI board toggle alongside it.
-        assert_eq!(header(LauncherTab::IoAudio), ["Audio:"]);
+        assert_eq!(header(LauncherTab::IoAudio), ["Sound Card:"]);
         let r = rows(
             LauncherTab::IoAudio,
             ParallelDevice::None,
@@ -12555,9 +12662,9 @@ mod tests {
         #[cfg(feature = "mhi")]
         assert_eq!(s.to_raw().mhi.enabled, None);
 
-        s.toggle(LauncherField::Toccata);
+        s.cycle(LauncherField::Toccata, true);
         #[cfg(feature = "mhi")]
-        s.toggle(LauncherField::Mhi);
+        s.cycle(LauncherField::Mhi, true);
         assert!(s.toggle_value(LauncherField::Toccata));
         #[cfg(feature = "mhi")]
         assert!(s.toggle_value(LauncherField::Mhi));
@@ -12575,9 +12682,9 @@ mod tests {
         #[cfg(feature = "mhi")]
         assert!(reloaded.toggle_value(LauncherField::Mhi));
 
-        s.toggle(LauncherField::Toccata);
+        s.cycle(LauncherField::Toccata, false);
         #[cfg(feature = "mhi")]
-        s.toggle(LauncherField::Mhi);
+        s.cycle(LauncherField::Mhi, false);
         assert!(!s.toggle_value(LauncherField::Toccata));
         #[cfg(feature = "mhi")]
         assert!(!s.toggle_value(LauncherField::Mhi));
@@ -13184,8 +13291,8 @@ mod tests {
         assert!(s.toggle_value(LauncherField::ShowStatusBar));
 
         // Flip both; the non-default values now persist to [display].
-        s.toggle(LauncherField::StartFullscreen);
-        s.toggle(LauncherField::ShowStatusBar);
+        s.cycle(LauncherField::StartFullscreen, true);
+        s.cycle(LauncherField::ShowStatusBar, true);
         let raw = s.to_raw();
         assert_eq!(raw.display.full_screen, Some(true));
         assert_eq!(raw.display.status_bar, Some(false));

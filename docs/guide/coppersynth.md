@@ -40,7 +40,7 @@ midi_out = "coppersynth"
 | `coppersynth_mt32_mode` | `"auto"`, `"on"`, `"off"` | How MT-32 traffic is translated (default `"auto"`) |
 | `coppersynth_panel` | `true`/`false` | Show the front panel (default `false`) |
 
-## Soundfonts
+## SoundFonts
 
 Coppersynth carries its own bank -- **GeneralUser GS** by S. Christian
 Collins, an instrument library in its own right with the complete General

@@ -853,9 +853,10 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
         rows.push(MenuRow::submenu(
             CSYNTH_LABEL,
             vec![
+                MenuRow::submenu("MT-32 Mode", modes),
                 MenuRow::toggle("Front Panel", MenuAction::ToggleCsynthPanel, s.csynth_panel),
                 MenuRow::submenu(
-                    "Soundfont",
+                    "SoundFont",
                     vec![
                         MenuRow::action("Load...", MenuAction::LoadCsynthSoundfont),
                         // Nothing to undo while the default is in force.
@@ -863,7 +864,6 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
                             .available(s.csynth_custom_font),
                     ],
                 ),
-                MenuRow::submenu("MT-32 Mode", modes),
             ],
         ));
     }

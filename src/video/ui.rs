@@ -4310,6 +4310,10 @@ fn draw_heat_census(
 const LAUNCHER_W: usize = FB_WIDTH;
 const LAUNCHER_H: usize = 520;
 const LAUNCH_MARGIN: usize = 8;
+/// The ROM identification table's Name column; Version and Revision
+/// split what remains of the pane.
+const ROM_INFO_NAME_W: usize = 200;
+const ROM_INFO_VERSION_W: usize = 92;
 const LAUNCH_MODEL_H: usize = 22;
 const LAUNCH_MODEL_GAP: usize = 4;
 /// Machines per row in the selector grid before it wraps; the grid rebalances
@@ -5551,6 +5555,14 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
     if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_none();
     }
+    // The ROMs with bundled defaults read the same way: unset means the
+    // bundled image, dimmed as Copperline's answer.
+    if field == LauncherField::Rom {
+        return setup.path(field).is_none();
+    }
+    if field == LauncherField::ScsiRom {
+        return setup.scsi_controller_is_a4091() && setup.path(field).is_none();
+    }
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }
 
@@ -6128,7 +6140,11 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
-                RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
+                RowKind::SectionHeader
+                | RowKind::BootpriHeader
+                | RowKind::Note
+                | RowKind::RomInfoHeader
+                | RowKind::RomInfoValue => {}
                 RowKind::Text => {
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
@@ -7679,6 +7695,39 @@ fn draw_launcher_row(
         );
         return;
     }
+    // The ROM tab's identification table: three greyed columns under the
+    // path row, headers first, then whatever the image on the row above
+    // checksums to. The table stands whether or not an image is loaded.
+    if matches!(r.kind, RowKind::RomInfoHeader | RowKind::RomInfoValue) {
+        let x = launcher_pane_x(rect) + 8;
+        let cols = [
+            (x, ROM_INFO_NAME_W),
+            (x + ROM_INFO_NAME_W, ROM_INFO_VERSION_W),
+            (x + ROM_INFO_NAME_W + ROM_INFO_VERSION_W, ROM_INFO_VERSION_W),
+        ];
+        let cells: [String; 3] = if r.kind == RowKind::RomInfoHeader {
+            [
+                "Name".to_string(),
+                "Version".to_string(),
+                "Revision".to_string(),
+            ]
+        } else {
+            let (name, version, revision) = state.rom_note_cells(r.field);
+            [name, version, revision]
+        };
+        for ((cx, cw), cell) in cols.iter().zip(cells.iter()) {
+            draw_panel_text(
+                frame,
+                *cx,
+                row_y + 4,
+                &truncate_to_width(cell, cw.saturating_sub(8)),
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
+        return;
+    }
     // The ROM tab's identification line: what the image on the row above
     // checksums to, greyed and indented under it. Nothing is drawn for an
     // image no checksum names, or for an empty row.
@@ -7716,7 +7765,21 @@ fn draw_launcher_row(
     } else {
         setup.disabled_reason(r.field)
     };
-    let label_color = if reason.is_none() && !launcher_path_inherits(setup, r.field) {
+    // The SoundFont row's label stays lit even while the value shows
+    // the bundled default -- the setting is present either way; only
+    // the value is Copperline's answer rather than the person's.
+    let label_keeps_colour = matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom) || {
+        #[cfg(feature = "coppersynth")]
+        {
+            r.field == LauncherField::CsynthSoundfont
+        }
+        #[cfg(not(feature = "coppersynth"))]
+        {
+            false
+        }
+    };
+    let label_inherits = !label_keeps_colour && launcher_path_inherits(setup, r.field);
+    let label_color = if reason.is_none() && !label_inherits {
         PANEL_TEXT
     } else {
         PANEL_TEXT_DIM
@@ -7767,7 +7830,11 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
+        RowKind::SectionHeader
+        | RowKind::BootpriHeader
+        | RowKind::Note
+        | RowKind::RomInfoHeader
+        | RowKind::RomInfoValue => {}
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
@@ -8274,6 +8341,18 @@ fn draw_launcher_row(
             let inherits = launcher_path_inherits(setup, r.field);
             let (value_color, text_x) = if inherits {
                 let text_w = text.chars().count() * font::GLYPH_W;
+                // The SoundFont default sits in line with the cycle
+                // value column, centred under the arrows of the rows
+                // around it rather than adrift in the wider path box.
+                #[cfg(feature = "coppersynth")]
+                if r.field == LauncherField::CsynthSoundfont {
+                    let (_, value_box, _) = launcher_cycle_rects(rect, row_y);
+                    let x = value_box.x + value_box.w.saturating_sub(text_w) / 2;
+                    (PANEL_TEXT_DIM, x)
+                } else {
+                    (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+                }
+                #[cfg(not(feature = "coppersynth"))]
                 (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
             } else {
                 (PANEL_TEXT, value_x)
@@ -8997,14 +9076,20 @@ fn draw_launcher(
             scale,
         );
     }
-    // Action bar.
+    // Action bar. While the Save dialog is up, every position outside
+    // its three buttons answers as the Save control (a stray click puts
+    // the dialog away), so pointer-lighting the button under it would
+    // flash on every hover in the dialog -- the button stays unlit until
+    // the dialog is gone.
     for (control, button_rect) in launcher_action_rects(rect) {
+        let lit =
+            hover == Some(control) && !(control == UiControl::LauncherSave && state.save_dialog);
         draw_text_button(
             frame,
             button_rect,
             launcher_action_label(control),
             true,
-            hover == Some(control),
+            lit,
             scale,
         );
     }
@@ -9953,16 +10038,18 @@ mod tests {
 
     /// The ROM tab's identification line is drawn under its path row, in the
     /// greyed note colour, and only once there is something to say: an image
-    /// no checksum names leaves the line blank rather than an empty box.
+    /// no checksum names leaves the value line blank -- while the table's
+    /// column headers stand either way.
     #[test]
     fn the_rom_tab_draws_its_identification_line_under_the_path_row() {
         use super::super::window::{texture_height, texture_width};
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        // Pixels painted in the note colour on the note row (row 1, under
-        // the Kickstart ROM path row).
-        let note_row_pixels = |frame: &[u8], rect: Rect| {
-            let row_y = launcher_row_y(rect, 1);
+        // Pixels painted in the table colour on a given ROM-tab row: the
+        // header row is index 2 and the value row index 3 (under the
+        // section heading and the Kickstart ROM path row).
+        let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
+            let row_y = launcher_row_y(rect, row);
             let mut lit = 0;
             for y in row_y..row_y + LAUNCH_ROW_H {
                 for x in launcher_pane_x(rect)..rect.x + rect.w - LAUNCH_MARGIN {
@@ -9974,6 +10061,7 @@ mod tests {
             }
             lit
         };
+        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 3);
         let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
 
         let mut setup = launcher::MachineSetup::default();
@@ -9997,7 +10085,11 @@ mod tests {
         assert_eq!(
             note_row_pixels(&blank_frame, rect),
             0,
-            "an unidentified image must leave the note line empty"
+            "an unidentified image must leave the value line empty"
+        );
+        assert!(
+            row_pixels(&blank_frame, rect, 2) > 0,
+            "the table's column headers stand even over an empty slot"
         );
 
         let mut frame = vec![0u8; w * h * 4];
