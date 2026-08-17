@@ -963,11 +963,11 @@ const MEMORY_ROWS: [Row; 8] = [
 // loaded; empty cells mean an empty (or unrecognised) slot.
 const ROM_ROWS: [Row; 8] = [
     section_header("Primary ROM:"),
-    row(F::Rom, "Kickstart ROM", PathRow),
+    row(F::Rom, "  Kickstart ROM", PathRow),
     row(F::Rom, "", RowKind::RomInfoHeader),
     row(F::Rom, "", RowKind::RomInfoValue),
     section_header("Extended ROM:"),
-    row(F::ExtendedRom, "Extended ROM", PathRow),
+    row(F::ExtendedRom, "  Extended ROM", PathRow),
     row(F::ExtendedRom, "", RowKind::RomInfoHeader),
     row(F::ExtendedRom, "", RowKind::RomInfoValue),
 ];
@@ -6557,6 +6557,13 @@ impl FsFamily {
 struct RomNote {
     path: Option<PathBuf>,
     text: Option<String>,
+    /// Whether the slot has been synced at all: the bundled default
+    /// (path None) must still seed its cells once.
+    seeded: bool,
+    /// The identification split for the tab's table: Name, Version and
+    /// Revision cells, computed when the path changes rather than per
+    /// draw (the bundled AROS reads its numbers off the image file).
+    cells: (String, String, String),
 }
 
 /// The full interactive state of the open configuration panel.
@@ -7850,26 +7857,72 @@ impl LauncherState {
     pub fn sync_rom_notes(&mut self) {
         for (slot, field) in [(0, F::Rom), (1, F::ExtendedRom)] {
             let path = self.setup.path(field).map(Path::to_path_buf);
-            if self.rom_notes[slot].path == path {
+            if self.rom_notes[slot].seeded && self.rom_notes[slot].path == path {
                 continue;
             }
             self.rom_notes[slot].text = path.as_deref().and_then(crate::config::rom_identification);
+            self.rom_notes[slot].cells = Self::rom_cells_for(
+                slot,
+                path.as_deref(),
+                self.rom_notes[slot].text.as_deref(),
+                self.setup.path(F::Rom).is_none(),
+            );
             self.rom_notes[slot].path = path;
+            self.rom_notes[slot].seeded = true;
         }
     }
 
-    /// The identification split for the ROM tab's table: Name, Version
-    /// and Revision cells. Empty strings when the slot is empty or the
-    /// image is unrecognised.
-    ///
-    /// The identification labels read "Kickstart 3.1 (40.68) A1200":
-    /// name words first, a marketing version, the ROM's own revision in
-    /// parentheses, then the models -- which have no column, and are
-    /// dropped. A label with no version ("bundled AROS") is all name.
-    pub fn rom_note_cells(&self, field: LauncherField) -> (String, String, String) {
-        let Some(note) = self.rom_note(field) else {
-            return (String::new(), String::new(), String::new());
+    /// The table cells for one slot: a checksum-named image splits its
+    /// label; an AROS image -- chosen or bundled -- reads its numbers off
+    /// the file itself, so they follow the bundled ROM between releases.
+    fn rom_cells_for(
+        slot: usize,
+        path: Option<&Path>,
+        text: Option<&str>,
+        main_is_bundled: bool,
+    ) -> (String, String, String) {
+        let aros_cells = |file: &Path| {
+            let (version, revision) = crate::romdb::rom_self_versions(file).unwrap_or_default();
+            ("AROS".to_string(), version, revision)
         };
+        match (path, text) {
+            (Some(p), Some("bundled AROS")) => aros_cells(p),
+            (_, Some(note)) => Self::split_identification(note),
+            (Some(_), None) => (String::new(), String::new(), String::new()),
+            (None, _) => {
+                // An empty slot runs the bundled AROS -- the extended
+                // half only alongside the bundled main.
+                if slot == 1 && !main_is_bundled {
+                    return (String::new(), String::new(), String::new());
+                }
+                let Some(bundle) = crate::romsearch::find_bundled_aros() else {
+                    return (String::new(), String::new(), String::new());
+                };
+                aros_cells(if slot == 0 {
+                    &bundle.main
+                } else {
+                    &bundle.extended
+                })
+            }
+        }
+    }
+
+    /// The identification for the ROM tab's table: Name, Version and
+    /// Revision cells, from the cache [`Self::sync_rom_notes`] keeps.
+    pub fn rom_note_cells(&self, field: LauncherField) -> (String, String, String) {
+        let slot = match field {
+            F::Rom => 0,
+            F::ExtendedRom => 1,
+            _ => return (String::new(), String::new(), String::new()),
+        };
+        self.rom_notes[slot].cells.clone()
+    }
+
+    /// Split a checksum label into the table's columns. The labels read
+    /// "Kickstart 3.1 (40.68) A1200": name words first, a marketing
+    /// version, the ROM's own revision in parentheses, then the models
+    /// -- which have no column, and are dropped.
+    fn split_identification(note: &str) -> (String, String, String) {
         let mut name_words: Vec<&str> = Vec::new();
         let mut version = String::new();
         let mut revision = String::new();
@@ -7915,6 +7968,8 @@ impl LauncherState {
         };
         self.rom_notes[slot].path = self.setup.path(field).map(Path::to_path_buf);
         self.rom_notes[slot].text = Some(text.to_string());
+        self.rom_notes[slot].cells = Self::split_identification(text);
+        self.rom_notes[slot].seeded = true;
     }
 
     /// The text field currently being edited, if any.
@@ -9909,11 +9964,11 @@ mod tests {
             shape,
             [
                 ("Primary ROM:", RowKind::SectionHeader, F::SectionHeader),
-                ("Kickstart ROM", RowKind::Path, F::Rom),
+                ("  Kickstart ROM", RowKind::Path, F::Rom),
                 ("", RowKind::RomInfoHeader, F::Rom),
                 ("", RowKind::RomInfoValue, F::Rom),
                 ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
-                ("Extended ROM", RowKind::Path, F::ExtendedRom),
+                ("  Extended ROM", RowKind::Path, F::ExtendedRom),
                 ("", RowKind::RomInfoHeader, F::ExtendedRom),
                 ("", RowKind::RomInfoValue, F::ExtendedRom),
             ]
@@ -9931,14 +9986,23 @@ mod tests {
                 "40.68".to_string()
             )
         );
-        probe.set_rom_note_for_test(F::Rom, "bundled AROS");
+        // The bundled AROS pair fills both slots' tables with numbers
+        // read off the images themselves, so they follow releases.
+        let bundled = LauncherState::new(MachineSetup::default());
+        for field in [F::Rom, F::ExtendedRom] {
+            let (name, version, revision) = bundled.rom_note_cells(field);
+            assert_eq!(name, "AROS");
+            assert!(
+                !version.is_empty() && !revision.is_empty(),
+                "the AROS image carries its own numbers"
+            );
+        }
+        // An unrecognised image is an empty table, not a missing one.
+        let mut setup = MachineSetup::default();
+        setup.set_path(F::Rom, std::path::PathBuf::from("mystery-dump.rom"));
+        let unknown = LauncherState::new(setup);
         assert_eq!(
-            probe.rom_note_cells(F::Rom),
-            ("bundled AROS".to_string(), String::new(), String::new())
-        );
-        // An empty slot is an empty table, not a missing one.
-        assert_eq!(
-            probe.rom_note_cells(F::ExtendedRom),
+            unknown.rom_note_cells(F::Rom),
             (String::new(), String::new(), String::new())
         );
 

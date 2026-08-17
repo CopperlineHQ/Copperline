@@ -4310,10 +4310,6 @@ fn draw_heat_census(
 const LAUNCHER_W: usize = FB_WIDTH;
 const LAUNCHER_H: usize = 520;
 const LAUNCH_MARGIN: usize = 8;
-/// The ROM identification table's Name column; Version and Revision
-/// split what remains of the pane.
-const ROM_INFO_NAME_W: usize = 200;
-const ROM_INFO_VERSION_W: usize = 92;
 const LAUNCH_MODEL_H: usize = 22;
 const LAUNCH_MODEL_GAP: usize = 4;
 /// Machines per row in the selector grid before it wraps; the grid rebalances
@@ -7699,32 +7695,82 @@ fn draw_launcher_row(
     // path row, headers first, then whatever the image on the row above
     // checksums to. The table stands whether or not an image is loaded.
     if matches!(r.kind, RowKind::RomInfoHeader | RowKind::RomInfoValue) {
-        let x = launcher_pane_x(rect) + 8;
-        let cols = [
-            (x, ROM_INFO_NAME_W),
-            (x + ROM_INFO_NAME_W, ROM_INFO_VERSION_W),
-            (x + ROM_INFO_NAME_W + ROM_INFO_VERSION_W, ROM_INFO_VERSION_W),
-        ];
-        let cells: [String; 3] = if r.kind == RowKind::RomInfoHeader {
-            [
-                "Name".to_string(),
-                "Version".to_string(),
-                "Revision".to_string(),
-            ]
-        } else {
-            let (name, version, revision) = state.rom_note_cells(r.field);
-            [name, version, revision]
+        // The host-disk table's style exactly -- dark fill, bordered box,
+        // headings over a rule -- minus the clickability, plus a divider
+        // between the columns. Its right edge lines up with the Clear
+        // button above it, and every cell reads from the left.
+        let (_, clear) = launcher_path_rects(rect, row_y);
+        let table = Rect {
+            x: launcher_pane_x(rect) + 8,
+            y: row_y,
+            w: (clear.x + clear.w).saturating_sub(launcher_pane_x(rect) + 8),
+            h: 2 * LAUNCH_ROW_H - 4,
         };
-        for ((cx, cw), cell) in cols.iter().zip(cells.iter()) {
-            draw_panel_text(
+        let col_w = table.w / 3;
+        let cell_at = |cell: &str, col: usize| {
+            (
+                table.x + col * col_w + 6,
+                truncate_to_width(cell, col_w.saturating_sub(12)),
+            )
+        };
+        if r.kind == RowKind::RomInfoHeader {
+            // The box spans this row and the value row below.
+            fill_rect(frame, scale_rect(table, scale), BUTTON_EDGE_DARK, scale);
+            fill_rect(
                 frame,
-                *cx,
-                row_y + 4,
-                &truncate_to_width(cell, cw.saturating_sub(8)),
-                PANEL_TEXT_DIM,
-                1,
+                scale_rect(
+                    Rect {
+                        x: table.x + 1,
+                        y: table.y + 1,
+                        w: table.w.saturating_sub(2),
+                        h: table.h.saturating_sub(2),
+                    },
+                    scale,
+                ),
+                ENTRY_BG,
                 scale,
             );
+            for (col, title) in ["Name", "Version", "Revision"].iter().enumerate() {
+                let (cx, text) = cell_at(title, col);
+                draw_panel_text(frame, cx, table.y + 5, &text, PANEL_TEXT_DIM, 1, scale);
+            }
+            // The rule under the headings, and a divider between columns.
+            fill_rect(
+                frame,
+                scale_rect(
+                    Rect {
+                        x: table.x + 2,
+                        y: table.y + LAUNCH_ROW_H - 4,
+                        w: table.w.saturating_sub(4),
+                        h: 1,
+                    },
+                    scale,
+                ),
+                BUTTON_EDGE_DARK,
+                scale,
+            );
+            for col in 1..3 {
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: table.x + col * col_w,
+                            y: table.y + 2,
+                            w: 1,
+                            h: table.h.saturating_sub(4),
+                        },
+                        scale,
+                    ),
+                    BUTTON_EDGE_DARK,
+                    scale,
+                );
+            }
+            return;
+        }
+        let (name, version, revision) = state.rom_note_cells(r.field);
+        for (col, cell) in [name, version, revision].iter().enumerate() {
+            let (cx, text) = cell_at(cell, col);
+            draw_panel_text(frame, cx, row_y + 2, &text, PANEL_TEXT_DIM, 1, scale);
         }
         return;
     }
