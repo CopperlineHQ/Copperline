@@ -4582,12 +4582,16 @@ fn debugger_views_reflect_machine_state() {
                 assert!(view.lines.iter().any(|l| l.text.starts_with("AUD0")));
                 assert!(view.lines.iter().any(|l| l.text.starts_with("AUD3")));
                 // The structured view drives the graphical layout: four
-                // Paula channels plus a CD row.
+                // Paula channels plus the line-mixed source rows. The
+                // test machine has no synth, Toccata, or MHI fitted, so
+                // CD-DA is the only extra row.
                 let audio = view.audio.as_ref().expect("audio scope view");
                 assert!(audio.header.starts_with("DMACON"));
                 assert_eq!(audio.channels.len(), 4);
                 assert!(audio.channels[0].text[0].text.starts_with("AUD0"));
-                assert!(audio.cd.text[0].text.contains("CD-DA"));
+                assert_eq!(audio.extras.len(), 1);
+                assert_eq!(audio.extras[0].kind, super::ui::AudioExtraKind::Cd);
+                assert!(audio.extras[0].row.text[0].text.contains("CD-DA"));
             }
             super::ui::DebugTab::Memory => {
                 // The hex dump shows the NOP sled at the PC's ROM page.
@@ -4665,10 +4669,57 @@ fn audio_tab_mute_buttons_toggle_paula_mutes() {
     assert!(app.emu.bus().paula.channel_muted(1));
     app.activate_ui_control(super::ui::UiControl::DebugAudioMute(1));
     assert!(!app.emu.bus().paula.channel_muted(1));
-    // Index 4 is the CD-DA mute.
+    // Index 4 is the CD-DA mute (the first line-mixed source row).
     assert!(!app.emu.bus().paula.cd_muted());
     app.activate_ui_control(super::ui::UiControl::DebugAudioMute(4));
     assert!(app.emu.bus().paula.cd_muted());
+    // With no synth, Toccata, or MHI fitted there is no row 5: the click
+    // lands on dead space and toggles nothing.
+    app.activate_ui_control(super::ui::UiControl::DebugAudioMute(5));
+    assert!(!app.emu.bus().paula.synth_muted());
+    assert!(!app.emu.bus().paula.toccata_muted());
+    assert!(!app.emu.bus().paula.mhi_muted());
+}
+
+#[test]
+fn audio_tab_lists_and_mutes_fitted_board_rows() {
+    let mut app = test_app();
+    // Fit a Toccata and (feature permitting) an MHI board; the Audio tab
+    // grows one row per board, in CD -> Toccata -> MHI order, and the
+    // mute clicks map through the same order.
+    let mut devices = vec![crate::zorro_device::BoardDevice::Toccata(Box::default())];
+    #[cfg(feature = "mhi")]
+    devices.push(crate::zorro_device::BoardDevice::Mhi(Box::default()));
+    app.emu.bus_mut().attach_devices(devices);
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Audio;
+    }
+    if let Some(panel) = app.debugger_panel.as_ref() {
+        let view = app.build_debugger_view(panel);
+        let audio = view.audio.as_ref().expect("audio scope view");
+        assert_eq!(audio.extras[0].kind, super::ui::AudioExtraKind::Cd);
+        assert_eq!(audio.extras[1].kind, super::ui::AudioExtraKind::Toccata);
+        assert!(audio.extras[1].row.text[0].text.contains("Toccata"));
+        assert!(audio.extras[1].row.text[1].text.contains("FIFO"));
+        #[cfg(feature = "mhi")]
+        {
+            assert_eq!(audio.extras[2].kind, super::ui::AudioExtraKind::Mhi);
+            assert!(audio.extras[2].row.text[0].text.contains("MHI"));
+            assert!(audio.extras[2].row.text[0].text.contains("stopped"));
+        }
+    }
+    // Row 5 is the Toccata row here.
+    assert!(!app.emu.bus().paula.toccata_muted());
+    app.activate_ui_control(super::ui::UiControl::DebugAudioMute(5));
+    assert!(app.emu.bus().paula.toccata_muted());
+    assert!(!app.emu.bus().paula.cd_muted());
+    #[cfg(feature = "mhi")]
+    {
+        assert!(!app.emu.bus().paula.mhi_muted());
+        app.activate_ui_control(super::ui::UiControl::DebugAudioMute(6));
+        assert!(app.emu.bus().paula.mhi_muted());
+    }
 }
 
 #[test]

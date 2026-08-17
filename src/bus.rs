@@ -4177,6 +4177,25 @@ impl Bus {
             .and_then(crate::scsi::ScsiCdRom::playback_line)
     }
 
+    /// The Toccata sound board, when one is configured, for the debugger's
+    /// audio tab.
+    pub fn toccata_board(&self) -> Option<&crate::toccata::Toccata> {
+        self.devices.iter().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::Toccata(board) => Some(board.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// The MHI MPEG decoder board, when one is configured, for the
+    /// debugger's audio tab.
+    #[cfg(feature = "mhi")]
+    pub fn mhi_board(&self) -> Option<&crate::mhi::Mhi> {
+        self.devices.iter().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::Mhi(board) => Some(board.as_ref()),
+            _ => None,
+        })
+    }
+
     /// Whether the machine has a hard-disk controller, which is what gives it
     /// an HDD LED: a Zorro board, or the A3000's motherboard SCSI.
     fn has_hard_disk_controller(&self) -> bool {

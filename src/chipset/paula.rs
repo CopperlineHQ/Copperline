@@ -389,6 +389,12 @@ fn scope_push(ring: &mut std::collections::VecDeque<i8>, sample: i8) {
     }
 }
 
+/// Fold one line-mixed source's stereo frame down to the -128..127 mono
+/// level its debugger oscilloscope traces.
+fn scope_level(left: f32, right: f32) -> i8 {
+    (((left + right) * 0.5).clamp(-1.0, 1.0) * 127.0) as i8
+}
+
 fn null_serial_sink() -> Box<dyn SerialSink> {
     Box::new(crate::serial::NullSerialSink)
 }
@@ -506,22 +512,37 @@ pub struct Paula {
     // recordings stay full scale regardless of the volume slider) for
     // the window's video recorder to drain once per emulated frame.
     capture: Option<Vec<(f32, f32)>>,
-    // Developer mute switches (debugger audio tab). Muting a channel or the
-    // CD-DA stream silences its contribution to the host output only; the
+    // Developer mute switches (debugger audio tab). Muting a channel or a
+    // line-mixed source (CD-DA, the in-process MIDI synth, a Toccata board,
+    // an MHI board) silences its contribution to the host output only; the
     // Paula state machine, counters and interrupts keep running exactly as
     // before, so this is not emulated state and never touches a save state.
     #[serde(skip)]
     channel_muted: [bool; 4],
     #[serde(skip)]
     cd_muted: bool,
-    // Rolling per-channel and CD output-level scopes for the debugger's
-    // oscilloscope meters. Each holds the most recent AUDIO_SCOPE_LEN host
-    // output samples (output level = DAC sample * volume, -128..127). Purely
-    // a debug tap, so it is skipped by the save state.
+    #[serde(skip)]
+    synth_muted: bool,
+    #[serde(skip)]
+    toccata_muted: bool,
+    #[serde(skip)]
+    mhi_muted: bool,
+    // Rolling output-level scopes for the debugger's oscilloscope meters:
+    // one per Paula channel plus one per line-mixed source (CD-DA, the
+    // in-process MIDI synth, a Toccata board, an MHI board). Each holds the
+    // most recent AUDIO_SCOPE_LEN host output samples (output level = DAC
+    // sample * volume for a channel, mixed stereo level for a source,
+    // -128..127). Purely a debug tap, so it is skipped by the save state.
     #[serde(skip)]
     channel_scope: [std::collections::VecDeque<i8>; 4],
     #[serde(skip)]
     cd_scope: std::collections::VecDeque<i8>,
+    #[serde(skip)]
+    synth_scope: std::collections::VecDeque<i8>,
+    #[serde(skip)]
+    toccata_scope: std::collections::VecDeque<i8>,
+    #[serde(skip)]
+    mhi_scope: std::collections::VecDeque<i8>,
 }
 
 impl Paula {
@@ -575,10 +596,16 @@ impl Paula {
             capture: None,
             channel_muted: [false; 4],
             cd_muted: false,
+            synth_muted: false,
+            toccata_muted: false,
+            mhi_muted: false,
             channel_scope: std::array::from_fn(|_| {
                 std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1)
             }),
             cd_scope: std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1),
+            synth_scope: std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1),
+            toccata_scope: std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1),
+            mhi_scope: std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1),
         }
     }
 
@@ -633,6 +660,33 @@ impl Paula {
         self.cd_muted
     }
 
+    /// Developer mute for the in-process MIDI synth (MT-32/Coppersynth).
+    pub fn toggle_synth_muted(&mut self) {
+        self.synth_muted = !self.synth_muted;
+    }
+
+    pub fn synth_muted(&self) -> bool {
+        self.synth_muted
+    }
+
+    /// Developer mute for a Toccata board's line-mixed output.
+    pub fn toggle_toccata_muted(&mut self) {
+        self.toccata_muted = !self.toccata_muted;
+    }
+
+    pub fn toccata_muted(&self) -> bool {
+        self.toccata_muted
+    }
+
+    /// Developer mute for an MHI board's line-mixed output.
+    pub fn toggle_mhi_muted(&mut self) {
+        self.mhi_muted = !self.mhi_muted;
+    }
+
+    pub fn mhi_muted(&self) -> bool {
+        self.mhi_muted
+    }
+
     /// Snapshot of a channel's oscilloscope ring (oldest..newest output
     /// levels, up to AUDIO_SCOPE_LEN samples) for the debugger meter.
     pub fn audio_scope_samples(&self, ch_idx: usize) -> Vec<i8> {
@@ -645,6 +699,22 @@ impl Paula {
     /// Snapshot of the CD-DA oscilloscope ring (oldest..newest).
     pub fn cd_scope_samples(&self) -> Vec<i8> {
         self.cd_scope.iter().copied().collect()
+    }
+
+    /// Snapshot of the in-process MIDI synth's oscilloscope ring
+    /// (oldest..newest).
+    pub fn synth_scope_samples(&self) -> Vec<i8> {
+        self.synth_scope.iter().copied().collect()
+    }
+
+    /// Snapshot of the Toccata board's oscilloscope ring (oldest..newest).
+    pub fn toccata_scope_samples(&self) -> Vec<i8> {
+        self.toccata_scope.iter().copied().collect()
+    }
+
+    /// Snapshot of the MHI board's oscilloscope ring (oldest..newest).
+    pub fn mhi_scope_samples(&self) -> Vec<i8> {
+        self.mhi_scope.iter().copied().collect()
     }
 
     pub fn set_dma_addr_mask(&mut self, mask: u32) {
@@ -1906,8 +1976,7 @@ impl Paula {
         // Record the pre-mute CD level for the debugger scope, then apply
         // the developer CD mute so the trace still shows activity while the
         // stream is silenced in the mix.
-        let cd_level = (((cd_left + cd_right) * 0.5).clamp(-1.0, 1.0) * 127.0) as i8;
-        scope_push(&mut self.cd_scope, cd_level);
+        scope_push(&mut self.cd_scope, scope_level(cd_left, cd_right));
         if self.cd_muted {
             cd_left = 0.0;
             cd_right = 0.0;
@@ -1919,33 +1988,52 @@ impl Paula {
         self.audio.push_source("cdda", cd_left, cd_right);
         // A MIDI device emulated in-process (an MT-32) is line-mixed the same
         // way, so the Amiga's own voices keep playing under it exactly as
-        // they would beside a real one on the desk.
+        // they would beside a real one on the desk. Scope pre-mute, stem and
+        // mix post-mute, exactly like CD-DA above.
         let mut synth_left = 0.0f32;
         let mut synth_right = 0.0f32;
         if !self.synth_silent {
             match self.serial.next_audio_frame() {
                 Some((sl, sr)) => {
-                    left += sl;
-                    right += sr;
                     synth_left = sl;
                     synth_right = sr;
                 }
                 None => self.synth_silent = true,
             }
         }
+        scope_push(&mut self.synth_scope, scope_level(synth_left, synth_right));
+        if self.synth_muted {
+            synth_left = 0.0;
+            synth_right = 0.0;
+        }
+        left += synth_left;
+        right += synth_right;
         self.audio
             .push_source(self.serial.synth_source_name(), synth_left, synth_right);
         // A Toccata board resamples its own codec-rate output to the mixer
         // rate before pushing here (see `Toccata::tick`), so this is a
         // plain per-frame pop like CD-DA, not a rate conversion.
-        let (toccata_left, toccata_right) = self.toccata_audio.next_sample();
+        let (mut toccata_left, mut toccata_right) = self.toccata_audio.next_sample();
+        scope_push(
+            &mut self.toccata_scope,
+            scope_level(toccata_left, toccata_right),
+        );
+        if self.toccata_muted {
+            toccata_left = 0.0;
+            toccata_right = 0.0;
+        }
         left += toccata_left;
         right += toccata_right;
         self.audio
             .push_source("toccata", toccata_left, toccata_right);
         // Likewise, an MHI board resamples its own decoded-MPEG-rate output
         // to the mixer rate before pushing here (see `Mhi::advance_mixer`).
-        let (mhi_left, mhi_right) = self.mhi_audio.next_sample();
+        let (mut mhi_left, mut mhi_right) = self.mhi_audio.next_sample();
+        scope_push(&mut self.mhi_scope, scope_level(mhi_left, mhi_right));
+        if self.mhi_muted {
+            mhi_left = 0.0;
+            mhi_right = 0.0;
+        }
         left += mhi_left;
         right += mhi_right;
         self.audio.push_source("mhi", mhi_left, mhi_right);
@@ -2955,6 +3043,100 @@ mod tests {
             "muted CD must be silent"
         );
         assert!(paula.cd_scope_samples().iter().any(|&s| s != 0));
+    }
+
+    #[test]
+    fn toccata_and_mhi_mutes_zero_contribution_but_scopes_keep_tracing() {
+        let (mut paula, frames) = paula_with_collect_sink();
+        paula.set_led_filter_guest(false);
+        let ram = vec![0u8; 64];
+        // No Paula channel audio, so the sink output is board-only. The
+        // boards' rings carry already-resampled mixer-rate frames.
+        let dmacon = DMACON_DMAEN;
+        for _ in 0..1024 {
+            paula.toccata_audio_mut().push_frame(0.25, 0.25);
+            paula.mhi_audio_mut().push_frame(-0.125, -0.125);
+        }
+        paula.tick_audio(4000, dmacon, &ram);
+        assert!(
+            frames
+                .borrow()
+                .iter()
+                .any(|&(l, r)| l.abs() > 1e-3 || r.abs() > 1e-3),
+            "board audio should reach the sink"
+        );
+        assert!(paula.toccata_scope_samples().iter().any(|&s| s != 0));
+        assert!(paula.mhi_scope_samples().iter().any(|&s| s != 0));
+
+        // Muted: both boards fall silent in the mix, but the scopes still
+        // record the pre-mute levels.
+        frames.borrow_mut().clear();
+        paula.toggle_toccata_muted();
+        paula.toggle_mhi_muted();
+        assert!(paula.toccata_muted());
+        assert!(paula.mhi_muted());
+        for _ in 0..1024 {
+            paula.toccata_audio_mut().push_frame(0.25, 0.25);
+            paula.mhi_audio_mut().push_frame(-0.125, -0.125);
+        }
+        paula.tick_audio(4000, dmacon, &ram);
+        assert!(
+            frames
+                .borrow()
+                .iter()
+                .all(|&(l, r)| l.abs() < 1e-6 && r.abs() < 1e-6),
+            "muted boards must be silent"
+        );
+        assert!(paula.toccata_scope_samples().iter().any(|&s| s != 0));
+        assert!(paula.mhi_scope_samples().iter().any(|&s| s != 0));
+    }
+
+    /// A serial sink standing in for an in-process synth: every mixer pull
+    /// answers with a constant non-zero frame.
+    struct ToneSynthSerial;
+
+    impl SerialSink for ToneSynthSerial {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn next_audio_frame(&mut self) -> Option<(f32, f32)> {
+            Some((0.2, 0.2))
+        }
+    }
+
+    #[test]
+    fn synth_mute_zeroes_contribution_but_scope_keeps_tracing() {
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let audio = CollectSink {
+            frames: Rc::clone(&frames),
+        };
+        let mut paula = Paula::new(Box::new(ToneSynthSerial), Box::new(audio));
+        paula.set_led_filter_guest(false);
+        let ram = vec![0u8; 64];
+        let dmacon = DMACON_DMAEN;
+        paula.tick_audio(4000, dmacon, &ram);
+        assert!(
+            frames
+                .borrow()
+                .iter()
+                .any(|&(l, r)| l.abs() > 1e-3 || r.abs() > 1e-3),
+            "synth audio should reach the sink"
+        );
+        assert!(paula.synth_scope_samples().iter().any(|&s| s != 0));
+
+        // Muted: the synth is silent in the mix, but the scope still
+        // records the pre-mute level.
+        frames.borrow_mut().clear();
+        paula.toggle_synth_muted();
+        assert!(paula.synth_muted());
+        paula.tick_audio(4000, dmacon, &ram);
+        assert!(
+            frames
+                .borrow()
+                .iter()
+                .all(|&(l, r)| l.abs() < 1e-6 && r.abs() < 1e-6),
+            "muted synth must be silent"
+        );
+        assert!(paula.synth_scope_samples().iter().any(|&s| s != 0));
     }
 
     #[test]

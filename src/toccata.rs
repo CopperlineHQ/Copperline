@@ -103,6 +103,19 @@ pub struct Toccata {
     resamplers: HashMap<u32, Resampler>,
 }
 
+/// Snapshot of the board's codec state for the debugger's Audio tab: the
+/// playback state, the format and rate latched at the last codec start, and
+/// the board FIFO's fill level.
+#[derive(Debug, Clone, Copy)]
+pub struct ToccataDebug {
+    pub playing: bool,
+    pub rate_hz: u32,
+    pub channels: usize,
+    pub sixteen_bit: bool,
+    pub fifo_len: usize,
+    pub fifo_capacity: usize,
+}
+
 impl Toccata {
     pub fn new() -> Self {
         Self {
@@ -111,6 +124,19 @@ impl Toccata {
             decoded: VecDeque::new(),
             mixer_acc: 0,
             resamplers: HashMap::new(),
+        }
+    }
+
+    /// Codec-state snapshot for the debugger's Audio tab.
+    pub fn debug_status(&self) -> ToccataDebug {
+        let (channels, sixteen_bit) = self.ad1848.active_format();
+        ToccataDebug {
+            playing: self.ad1848.play_active(),
+            rate_hz: self.ad1848.sample_rate_hz(),
+            channels,
+            sixteen_bit,
+            fifo_len: self.ad1848.fifo_len(),
+            fifo_capacity: self.ad1848.fifo_capacity(),
         }
     }
 
