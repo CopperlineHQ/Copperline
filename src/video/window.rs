@@ -3509,6 +3509,7 @@ impl ApplicationHandler for App {
                 self.last_display_cursor_pos = None;
                 self.volume_dragging = false;
                 self.analyzer_dragging = false;
+                self.menu_hover_arm = None;
                 let layout = bar_layout(&self.media_bar());
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos) {
                     self.request_redraw();
@@ -5927,6 +5928,8 @@ impl App {
         };
         let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
         let Some((depth, row)) = ui::menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos) else {
+            // Off every row: a submenu arming for its dwell stands down.
+            self.menu_hover_arm = None;
             return false;
         };
         // The pointer is resting on the row this level is already open to.
@@ -6391,10 +6394,22 @@ impl App {
                         }
                     }
                     Some(crate::csynth::PanelRequest::ResetSoundfont) => {
-                        // Confirmed at the fascia; the unit holds its
-                        // Initializing... screen while the bank swaps.
+                        // Confirmed at the fascia. The swap rebuilds the
+                        // whole unit around the built-in bank, so the
+                        // panel that asked -- holding the Initializing...
+                        // screen -- is gone with it; the fresh panel
+                        // opens on the same hold, serves its second, and
+                        // boots.
                         if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
                             sink.reset_csynth_soundfont();
+                        }
+                        if let Some(synth) = self
+                            .emu
+                            .bus_mut()
+                            .midi_serial_mut()
+                            .and_then(crate::midi::MidiSerialSink::csynth_mut)
+                        {
+                            synth.panel_begin_initializing();
                         }
                     }
                     None => {}

@@ -103,7 +103,7 @@ press **POWER**.
   off, and the choice lands in the configuration like the menu's.
 - **INSTRUMENT ►** asks `Init SoundFont,Sure?` the same way: **ALL**
   holds the screen at `Initializing...` for a moment, reloads the
-  builtin SoundFont and boots; **MUTE** carries on with the loaded
+  built-in SoundFont and boots; **MUTE** carries on with the loaded
   one.
 - Both **PART** buttons start demo mode: the part box reads `S-1` and
   the unit plays its two bundled songs through its own engine. **ALL**

@@ -7914,8 +7914,14 @@ impl LauncherState {
                 continue;
             }
             if !version.is_empty() {
+                // Only a numeric token is the revision: the parentheses
+                // also carry variants ("Kickstart 1.0 A1000 (NTSC)"),
+                // which are not one.
                 if revision.is_empty() && word.starts_with('(') && word.ends_with(')') {
-                    revision = word[1..word.len() - 1].to_string();
+                    let inner = &word[1..word.len() - 1];
+                    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                        revision = inner.to_string();
+                    }
                 }
                 // Everything after the version that is not the revision
                 // is the model list, which is not shown.
@@ -9964,6 +9970,12 @@ mod tests {
                 "3.1".to_string(),
                 "40.68".to_string()
             )
+        );
+        // A parenthesized variant is not a revision.
+        probe.set_rom_note_for_test(F::Rom, "Kickstart 1.0 A1000 (NTSC)");
+        assert_eq!(
+            probe.rom_note_cells(F::Rom),
+            ("Kickstart".to_string(), "1.0".to_string(), String::new())
         );
         // The bundled AROS carries numbers read off the image itself,
         // so they follow releases.
