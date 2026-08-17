@@ -56,6 +56,9 @@
 #define MHI_CAPS_LAYER3 (1U << 3)
 #define MHI_CAPS_CBR    (1U << 4)
 #define MHI_CAPS_VBR    (1U << 5)
+/* M4, VERSION 2: param latches (PARAM_SELECT/PARAM_VALUE) are applied to
+ * decoded PCM, not just latched and read back inert. */
+#define MHI_CAPS_PARAMS_APPLIED (1U << 6)
 
 /* STATUS values (mhi.md "Status and control") -- the board's OWN state
  * codes, deliberately numbered differently from MHIF_* (see mhi.md's own

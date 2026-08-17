@@ -1,7 +1,8 @@
-# Builds mhitest, the WP5 M1 harness's guest-side probe for
+# Builds mhitest (WP5 M1 harness probe) and mhiparam (WP5 M4 harness
+# probe, MHI-PLAN-M3-M4.md WP4.5), the guest-side test clients for
 # mhi_copperline.library, with the dockerized m68k-amigaos cross-GCC (see
-# ../../toolchain.mk). Same shape as guest/hostfs-test/Makefile: a normal
-# relocatable hunk executable (LoadSeg relocates it), not a ROM, so no
+# ../../toolchain.mk). Same shape as guest/hostfs-test/Makefile: normal
+# relocatable hunk executables (LoadSeg relocates them), not ROMs, so no
 # -mpcrel/relocation checks apply here.
 
 include ../../toolchain.mk
@@ -20,7 +21,7 @@ CFLAGS  = -Os -m68000 -fomit-frame-pointer -Wall -Wextra \
           -noixemul -nostartfiles
 
 .PHONY: all clean
-all: mhitest
+all: mhitest mhiparam
 
 # The docker mount (see ../../toolchain.mk's DOCKER) only covers this
 # directory, so mhi_abi.h -- otherwise shared read-only from .. -- is
@@ -34,5 +35,8 @@ mhi_abi.h: ../mhi_abi.h
 mhitest: start.s mhitest.c mhi_abi.h
 	$(CC) $(CFLAGS) start.s mhitest.c -o $@
 
+mhiparam: start.s mhiparam.c mhi_abi.h
+	$(CC) $(CFLAGS) start.s mhiparam.c -o $@
+
 clean:
-	rm -f mhitest mhi_abi.h
+	rm -f mhitest mhiparam mhi_abi.h

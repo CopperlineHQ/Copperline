@@ -19,10 +19,14 @@
 # program, so no C runtime startup is linked in at all.
 
 LIB     = mhi_copperline.library
-VERSION_STR = 1.0
-DATE_STR    = 2026-08-16
+# 1.1: M4 -- MHIQuery's tone/volume/output flags now key off the board's
+# CAPS bit 6 instead of a hardcoded MHIF_UNSUPPORTED (docs/internals/
+# mhi.md's "M4: the DSP chain"), a real behavior change against an M4
+# board while staying compatible with M1-M3 boards.
+VERSION_STR = 1.1
+DATE_STR    = 2026-08-17
 LIB_VERSION = 1
-LIB_REVISION = 0
+LIB_REVISION = 1
 
 include ../toolchain.mk
 
