@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  *
- * mhiparam: the WP5 M4 harness client for mhi_copperline.library
- * (MHI-PLAN-M3-M4.md WP4.5). Plays one small fixture, waits a fixed
+ * mhiparam: the M4 harness client for mhi_copperline.library. Plays
+ * one small fixture, waits a fixed
  * emulated interval, then issues MHISetParam mid-playback for two params
  * at once (a hard volume drop and a hard pan-right) -- proving a live
  * MHISetParam call actually reaches the board's DSP chain

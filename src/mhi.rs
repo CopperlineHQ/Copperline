@@ -2234,7 +2234,7 @@ mod tests {
         );
     }
 
-    // ---- M3: seek-entry hardening (MHI-PLAN-M3-M4.md WP3.1/WP3.2) ----
+    // ---- M3: seek-entry hardening ----
 
     /// The tiny CBR fixture WP3.4's golden-CI test also decodes -- committed
     /// (not fetched) so these tests need no local `test-assets/`. Generated
@@ -2480,7 +2480,7 @@ mod tests {
         );
     }
 
-    // ---- M3: golden CI (MHI-PLAN-M3-M4.md WP3.4) ----
+    // ---- M3: golden CI ----
 
     /// A committed-fixture regression test: decodes `GOLDEN_TONE_MP3`
     /// through the real board/decoder path (no emulator boot -- board-level,
@@ -2515,7 +2515,7 @@ mod tests {
         );
     }
 
-    // ---- M4: the param-latch DSP chain (MHI-PLAN-M3-M4.md WP4.5) ----
+    // ---- M4: the param-latch DSP chain ----
 
     #[test]
     fn dsp_helper_functions_produce_exact_expected_gains() {

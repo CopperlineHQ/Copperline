@@ -917,7 +917,7 @@ fn loud_region(channels: u16, sample_rate: u32, samples: &[f32], threshold: f64)
     )
 }
 
-/// End-to-end proof of MHI-PLAN-M3-M4.md WP3.3: `mhiseek` plays
+/// End-to-end proof for M3: `mhiseek` plays
 /// `tone_a.mp3` (440 Hz) to completion, issues the real `MHIStop` ->
 /// reposition -> `MHIQueueBuffer` sequence a seeking player performs (here,
 /// switching to a different file rather than a different offset in the
@@ -1094,7 +1094,7 @@ fn write_param_config(cfg_path: &Path, mount: &Path) {
 /// order-of-magnitude reasoning as `M2_RUN_SECS`.
 const PARAM_RUN_SECS: &str = "30";
 
-/// End-to-end proof of MHI-PLAN-M3-M4.md WP4.5: `mhiparam` plays
+/// End-to-end proof for M4: `mhiparam` plays
 /// `tone.mp3` (440 Hz, 3s), and ~1s in issues a live `MHISetParam` volume
 /// drop (100 -> 20) and hard pan-right (50 -> 100) together, mid-playback.
 /// Proves the capture shows both effects at the expected emulated moment:

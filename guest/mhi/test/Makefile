@@ -1,6 +1,5 @@
-# Builds mhitest (WP5 M1 harness probe), mhiseek (WP5 M3 harness probe,
-# MHI-PLAN-M3-M4.md WP3.3), and mhiparam (WP5 M4 harness probe,
-# MHI-PLAN-M3-M4.md WP4.5), the guest-side test clients for
+# Builds mhitest (M1 harness probe), mhiseek (M3 harness probe), and
+# mhiparam (M4 harness probe), the guest-side test clients for
 # mhi_copperline.library, with the dockerized m68k-amigaos cross-GCC (see
 # ../../toolchain.mk). Same shape as guest/hostfs-test/Makefile: normal
 # relocatable hunk executables (LoadSeg relocates them), not ROMs, so no

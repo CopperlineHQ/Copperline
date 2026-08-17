@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  *
- * mhiseek: the WP5 M3 harness client for mhi_copperline.library
- * (MHI-PLAN-M3-M4.md WP3.3). MHI has no seek call of its own -- seeking is
+ * mhiseek: the M3 harness client for mhi_copperline.library.
+ * MHI has no seek call of its own -- seeking is
  * entirely the player's job (MHIStop, reposition the player's own file
  * read, MHIQueueBuffer from the new position; see docs/internals/mhi.md's
  * "Seek-entry hardening"). This client proves that sequence end to end
