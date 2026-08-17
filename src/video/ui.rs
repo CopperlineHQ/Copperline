@@ -8898,11 +8898,11 @@ fn draw_launcher(
     // NAT and bridged backends deliver inbound traffic on the host's schedule,
     // so warn that runs stop being reproducible the moment packets flow
     // (loopback and an isolated NIC stay deterministic).
-    if state.tab == LauncherTab::IoPorts && setup.ethernet_breaks_determinism() {
+    if state.tab == LauncherTab::IoNetworking && setup.ethernet_breaks_determinism() {
         let note_top = launcher_row_y(
             rect,
             launcher::rows(
-                LauncherTab::IoPorts,
+                LauncherTab::IoNetworking,
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
                 state.setup.midi_out_is_mt32(),

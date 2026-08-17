@@ -2126,8 +2126,8 @@ pub struct MachineSetup {
     /// The MacroSystem Toccata sound board, edited in the I/O Ports tab's
     /// Audio page (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
-    /// The MHI virtual MPEG audio decoder board, edited in the same Sound
-    /// section (`[mhi] enabled`) in an `mhi` build, the only build that can
+    /// The MHI virtual MPEG audio decoder board, edited on the same Audio
+    /// page (`[mhi] enabled`) in an `mhi` build, the only build that can
     /// fit the board. Kept as an unconditional passthrough field even in a
     /// non-`mhi` build so loading and re-saving a config does not silently
     /// drop a `[mhi] enabled` set by some other build -- only the launcher
