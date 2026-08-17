@@ -5545,14 +5545,16 @@ impl App {
             midi_out: &midi_out,
             midi_inputs: &midi_inputs,
             midi_outputs: &midi_outputs,
-            mt32_available: cfg!(feature = "mt32"),
+            // Offered while the serial port is in MIDI mode at all --
+            // the same gate as the host endpoint lists above.
+            mt32_available: cfg!(feature = "mt32") && midi_active,
             mt32_selected,
             mt32_attached,
             mt32_input,
             mt32_control_rom,
             mt32_pcm_rom,
             mt32_panel: crate::video::mt32_panel_shown(),
-            csynth_available: cfg!(feature = "coppersynth"),
+            csynth_available: cfg!(feature = "coppersynth") && midi_active,
             csynth_attached,
             csynth_panel: crate::video::csynth_panel_shown(),
             csynth_mt32_mode: &csynth_mt32_mode,

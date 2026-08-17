@@ -1521,6 +1521,9 @@ mod tests {
             }
             writer.write_image_data(&data).expect("png rows");
         }
+        // Hand the flag back: worker threads are shared, and a later
+        // test must not inherit the strip.
+        crate::video::set_csynth_panel_shown(false);
     }
 
     /// The geometry answers where it says it does: every control's rect

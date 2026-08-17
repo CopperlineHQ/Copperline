@@ -517,9 +517,11 @@ impl MidiSerialSink {
         }
         self.csynth_selected = true;
         self.csynth_fault = None;
+        // As with the MT-32: chosen means the host endpoint is gone,
+        // whether or not the engine then fits.
+        self.backend.set_output(None);
         match crate::csynth::CsynthDevice::open(&self.csynth_options) {
             Ok(device) => {
-                self.backend.set_output(None);
                 self.csynth = Some(device);
             }
             Err(e) => {
@@ -627,6 +629,11 @@ impl MidiSerialSink {
         }
         self.mt32_selected = true;
         self.mt32_fault = None;
+        // The built-in being chosen means no host endpoint, fitted or
+        // not: otherwise a missing ROM pair would leave the guest
+        // playing to the previously selected host device while the
+        // menu says MT-32.
+        self.backend.set_output(None);
         let Some((control, pcm)) = self.mt32_roms.pair() else {
             log::warn!(
                 "midi: {MIDI_OUT_MT32_LABEL} needs both ROM images; \
@@ -638,7 +645,6 @@ impl MidiSerialSink {
         };
         match crate::mt32::Mt32Device::open(control, pcm) {
             Ok(device) => {
-                self.backend.set_output(None);
                 self.mt32 = Some(device);
             }
             Err(e) => {
@@ -725,6 +731,9 @@ impl MidiSerialSink {
     #[cfg(feature = "mt32")]
     pub fn set_mt32_control_rom(&mut self, path: std::path::PathBuf) {
         self.mt32_roms.control = Some(path);
+        // The version screen reads a cache; a new image means a new
+        // answer (and a broken one means none).
+        self.refresh_mt32_version();
     }
 
     #[cfg(feature = "mt32")]
@@ -736,12 +745,18 @@ impl MidiSerialSink {
     /// the runtime switch both read it.
     #[cfg(feature = "mt32")]
     pub fn set_mt32_roms(&mut self, roms: crate::mt32::Mt32Roms) {
-        self.mt32_version = roms
+        self.mt32_roms = roms;
+        self.refresh_mt32_version();
+    }
+
+    #[cfg(feature = "mt32")]
+    fn refresh_mt32_version(&mut self) {
+        self.mt32_version = self
+            .mt32_roms
             .control
             .as_deref()
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|image| crate::mt32::rom::version_line(&image));
-        self.mt32_roms = roms;
     }
 
     /// What the control ROM calls itself, for the panel's version screen.

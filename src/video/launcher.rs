@@ -8147,7 +8147,14 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
     ];
-    #[cfg(all(feature = "midi", not(feature = "mt32")))]
+    #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_CSYNTH,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
+    #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_TCP_CONNECT,
