@@ -2490,6 +2490,16 @@ mod tests {
     /// runs on every plain `cargo test`, catching decoder-dependency drift,
     /// resampler regressions, or pacing changes immediately.
     ///
+    /// Compared with a tolerance, not byte-for-byte: Symphonia's own
+    /// precomputed tables call `powf`, whose last-ulp rounding can differ
+    /// across platforms/optimization levels (`docs/internals/mhi.md`'s
+    /// "Decoder" note -- confirmed in practice: the fixture generated on
+    /// one host failed this test byte-exact on others in CI). A max-per-
+    /// sample-absolute-difference bound catches a real regression (wrong
+    /// tone, dropped/garbled audio, decoder swap) -- which would land
+    /// orders of magnitude above the threshold -- while tolerating that
+    /// noise floor.
+    ///
     /// To regenerate `golden_tone_cbr64_mono.pcm` after an intentional
     /// decode-path change (e.g. a Symphonia version bump): temporarily
     /// change this test to `std::fs::write` the freshly decoded bytes to
@@ -2500,18 +2510,34 @@ mod tests {
         let samples = decode_all(GOLDEN_TONE_MP3);
         assert!(!samples.is_empty(), "the fixture must decode to some audio");
 
-        let mut bytes = Vec::with_capacity(samples.len() * 8);
-        for (l, r) in &samples {
-            bytes.extend_from_slice(&l.to_le_bytes());
-            bytes.extend_from_slice(&r.to_le_bytes());
-        }
-
         let golden: &[u8] = include_bytes!("../tests/data/mhi/golden_tone_cbr64_mono.pcm");
+        let golden_samples: Vec<(f32, f32)> = golden
+            .chunks_exact(8)
+            .map(|c| {
+                let l = f32::from_le_bytes(c[0..4].try_into().unwrap());
+                let r = f32::from_le_bytes(c[4..8].try_into().unwrap());
+                (l, r)
+            })
+            .collect();
         assert_eq!(
-            bytes, golden,
-            "decoded PCM drifted from the committed golden capture -- if this is an \
-             intentional decode-path change, regenerate the fixture (see this test's \
-             doc comment); otherwise this is a real regression"
+            samples.len(),
+            golden_samples.len(),
+            "decoded sample count drifted from the committed golden capture -- a real \
+             regression (pacing, resync, or a dropped/extra frame), not decoder rounding \
+             noise, would change this"
+        );
+
+        let max_abs_diff = samples
+            .iter()
+            .zip(&golden_samples)
+            .flat_map(|(&(l, r), &(gl, gr))| [(l - gl).abs(), (r - gr).abs()])
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-4,
+            "decoded PCM drifted from the committed golden capture by {max_abs_diff} (max \
+             per-sample abs diff, threshold 1e-4) -- if this is an intentional decode-path \
+             change, regenerate the fixture (see this test's doc comment); otherwise this is \
+             a real regression"
         );
     }
 

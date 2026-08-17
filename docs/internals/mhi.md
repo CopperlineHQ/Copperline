@@ -812,7 +812,10 @@ content above.
   rule does not apply. `src/mhi.rs`'s `golden_tone_decodes_to_a_stable_pcm_capture`
   decodes the CBR fixture through the real board/decoder path and compares
   against a committed golden PCM capture
-  (`golden_tone_cbr64_mono.pcm`) on every plain `cargo test` -- unlike
+  (`golden_tone_cbr64_mono.pcm`, within a small per-sample tolerance --
+  Symphonia's own precomputed tables call `powf`, whose last-ulp rounding
+  differs across platforms/optimization levels, confirmed in practice
+  across CI's Linux/Windows/macOS legs) on every plain `cargo test` -- unlike
   every `#[ignore]`d integration test in `tests/mhi.rs`, this needs no
   fetched `test-assets/`, so it catches decoder-dependency drift or
   resampler/pacing regressions immediately rather than only when a
