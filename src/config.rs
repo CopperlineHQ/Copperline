@@ -359,9 +359,6 @@ pub struct Config {
     /// electrically disconnected, so CIA-A strobes receive no FLAG acknowledge
     /// and port-B reads see the CIA's own pin state.
     pub parallel: ParallelConfig,
-    /// The `[coppersynth]` section, resolved: soundfont path (still optional --
-    /// the search path answers at attach time) and translation mode.
-    pub csynth: CsynthConfig,
 }
 
 /// How much of the overscan field the window presents. The
@@ -845,6 +842,15 @@ pub struct SerialConfig {
     pub mt32_panel: bool,
     /// How that panel's display is lit.
     pub mt32_lcd: Mt32Lcd,
+    /// Coppersynth's soundfont (.sf2, or a .zip holding one). A path
+    /// option like the ROMs above: the bundled default's search path is
+    /// consulted when the device is attached, not here, so a config that
+    /// never selects the synth never demands the file.
+    pub coppersynth_soundfont: Option<PathBuf>,
+    /// Coppersynth's MT-32 mode: "auto" (default), "on", or "off".
+    pub coppersynth_mt32_mode: Option<String>,
+    /// Show Coppersynth's front panel under the status bar (default false).
+    pub coppersynth_panel: bool,
     /// TCP listen address for [`SerialMode::Tcp`]; `None` means
     /// [`SERIAL_TCP_DEFAULT_LISTEN`].
     pub listen: Option<String>,
@@ -2276,7 +2282,6 @@ impl Default for Config {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
-            csynth: CsynthConfig::default(),
             paths: crate::pathconf::Paths::default(),
         }
     }
@@ -2908,16 +2913,6 @@ pub struct RawConfig {
     pub(crate) serial: RawSerial,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) parallel: RawParallel,
-    // The section is named for the synth; the field keeps the crate's
-    // internal shorthand, and the alias forgives configs saved before
-    // the section earned its name.
-    #[serde(
-        default,
-        rename = "coppersynth",
-        alias = "gm",
-        skip_serializing_if = "is_default"
-    )]
-    pub(crate) csynth: RawCsynth,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) whdload: RawWhdload,
     /// `[[filesys]]` host-directory mount entries, in file order.
@@ -3255,6 +3250,18 @@ pub(crate) struct RawSerial {
     /// Its display: "mt32" (default), "superjv", "sseries", or "oled".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mt32_lcd: Option<String>,
+    /// Coppersynth's soundfont (.sf2, or a .zip holding one); unset means
+    /// the bundled default's search path (COPPERLINE_SOUNDFONT, beside
+    /// the executable, share/).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) coppersynth_soundfont: Option<String>,
+    /// Coppersynth's MT-32 mode: "auto" (default; translates once MT-32
+    /// sysex is seen), "on", or "off".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) coppersynth_mt32_mode: Option<String>,
+    /// Show Coppersynth's front panel under the status bar (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) coppersynth_panel: Option<bool>,
     /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) listen: Option<String>,
@@ -3264,25 +3271,6 @@ pub(crate) struct RawSerial {
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
-/// `[coppersynth]`: the built-in Coppersynth synthesizer, selected with
-/// `[serial] midi_out = "coppersynth"`. No ROMs: a soundfont supplies the sounds,
-/// and the bundled GeneralUser GS is found without configuration.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawCsynth {
-    /// Soundfont (.sf2) path; unset means the bundled default's search
-    /// path (COPPERLINE_SOUNDFONT, beside the executable, share/).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) soundfont: Option<String>,
-    /// MT-32 mode: "auto" (default; translates once MT-32 sysex is
-    /// seen), "on", or "off".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) mt32_mode: Option<String>,
-    /// Whether the front panel is up when a session starts.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) panel: Option<bool>,
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawParallel {
@@ -4383,9 +4371,27 @@ impl TryFrom<RawConfig> for Config {
             },
             mt32_pcm_rom: raw.serial.mt32_pcm_rom.as_ref().map(PathBuf::from),
             mt32_panel: raw.serial.mt32_panel.unwrap_or(defaults.serial.mt32_panel),
+            coppersynth_soundfont: raw.serial.coppersynth_soundfont.as_ref().map(PathBuf::from),
+            coppersynth_mt32_mode: raw.serial.coppersynth_mt32_mode.clone(),
+            coppersynth_panel: raw
+                .serial
+                .coppersynth_panel
+                .unwrap_or(defaults.serial.coppersynth_panel),
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
         };
+        if let Some(mode) = serial.coppersynth_mt32_mode.as_deref() {
+            let m = mode.trim();
+            if !(m.eq_ignore_ascii_case("auto")
+                || m.eq_ignore_ascii_case("on")
+                || m.eq_ignore_ascii_case("off"))
+            {
+                bail!(
+                    "[serial] coppersynth_mt32_mode must be \"auto\", \"on\", or \"off\", \
+                     got {mode:?}"
+                );
+            }
+        }
 
         let ide = IdeConfig {
             master: raw.ide.master.map(drive_image).transpose()?,
@@ -4982,7 +4988,6 @@ impl TryFrom<RawConfig> for Config {
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
-            csynth: resolve_csynth(raw.csynth)?,
             paths: raw.paths,
         })
     }
@@ -4993,33 +4998,6 @@ impl TryFrom<RawConfig> for Config {
 /// (back-compat with the original `[parallel] output = "..."`) and otherwise the
 /// port is empty. Rejects a printer with no capture path and an out-of-range
 /// sampler gain.
-/// The `[coppersynth]` section, validated. The soundfont stays a path option --
-/// the search path is consulted when the device is attached, not here,
-/// so a config that never selects the synth never demands the file.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CsynthConfig {
-    pub soundfont: Option<PathBuf>,
-    pub mt32_mode: Option<String>,
-    pub panel: bool,
-}
-
-fn resolve_csynth(raw: RawCsynth) -> Result<CsynthConfig> {
-    if let Some(mode) = raw.mt32_mode.as_deref() {
-        let m = mode.trim();
-        if !(m.eq_ignore_ascii_case("auto")
-            || m.eq_ignore_ascii_case("on")
-            || m.eq_ignore_ascii_case("off"))
-        {
-            bail!("[coppersynth] mt32_mode must be \"auto\", \"on\", or \"off\", got {mode:?}");
-        }
-    }
-    Ok(CsynthConfig {
-        soundfont: raw.soundfont.map(PathBuf::from),
-        mt32_mode: raw.mt32_mode,
-        panel: raw.panel.unwrap_or(false),
-    })
-}
-
 fn resolve_parallel(raw: RawParallel) -> Result<ParallelConfig> {
     let device = match raw.device.as_deref() {
         Some(s) => parse_parallel_device(s)?,
@@ -10308,6 +10286,41 @@ mod tests {
 
         let err = parse_config("[serial]\nmode = \"rs232\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown [serial] mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn serial_section_carries_the_coppersynth_keys() -> Result<()> {
+        // All three keys parse under [serial], like the MT-32's.
+        let text = "[serial]\nmode = \"midi\"\nmidi_out = \"coppersynth\"\n\
+                    coppersynth_soundfont = \"bank.sf2\"\n\
+                    coppersynth_mt32_mode = \"on\"\ncoppersynth_panel = true\n";
+        let cfg = parse_config(text)?;
+        assert_eq!(
+            cfg.serial.coppersynth_soundfont.as_deref(),
+            Some(std::path::Path::new("bank.sf2"))
+        );
+        assert_eq!(cfg.serial.coppersynth_mt32_mode.as_deref(), Some("on"));
+        assert!(cfg.serial.coppersynth_panel);
+
+        // They serialize back under [serial] and survive the round trip
+        // -- the text a launcher Save writes must load again.
+        let raw: RawConfig = toml::from_str(text)?;
+        let written = raw.to_toml_string()?;
+        for key in [
+            "coppersynth_soundfont",
+            "coppersynth_mt32_mode",
+            "coppersynth_panel",
+        ] {
+            assert!(written.contains(key), "{key} missing from:\n{written}");
+        }
+        let reloaded = parse_config(&written)?;
+        assert_eq!(reloaded.serial.coppersynth_mt32_mode.as_deref(), Some("on"));
+
+        // The rejection names the key exactly as [serial] spells it, so
+        // a launcher-saved config that goes stale says where to look.
+        let err = parse_config("[serial]\ncoppersynth_mt32_mode = \"maybe\"\n").unwrap_err();
+        assert!(err.to_string().contains("coppersynth_mt32_mode"), "{err:#}");
         Ok(())
     }
 

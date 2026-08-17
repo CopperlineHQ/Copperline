@@ -754,6 +754,16 @@ floppy_sounds_volume = 100
 # mt32_pcm_rom = "~/Amiga/MT32_PCM.ROM"
 # mt32_panel = true          # the module's front panel, under the display
 # mt32_lcd = "mt32"          # mt32 (default), superjv, sseries, or oled
+#
+# Coppersynth, the built-in General MIDI synthesizer
+# (docs/guide/coppersynth.md). midi_out = "coppersynth" plays to it; no
+# files needed, the GeneralUser GS bank is inside the executable. MT-32
+# games work through a translation layer.
+# midi_out = "coppersynth"
+# coppersynth_soundfont = "/path/to/bank.sf2"  # override the bundled bank
+# coppersynth_mt32_mode = "auto"  # auto (translate once MT-32 sysex is
+#                                 # seen), on, or off
+# coppersynth_panel = true        # the front panel, under the display
 
 
 # Parallel (Centronics) port peripheral. With no section the connector is
@@ -775,16 +785,6 @@ floppy_sounds_volume = 100
 #              with the `frontend` feature (it uses cpal, like live audio output).
 # --parallel DEVICE overrides this per run; --sampler-audio-input /
 # --sampler-input-gain imply "sampler".
-# # Coppersynth, the built-in General MIDI synthesizer, selected with
-# midi_out = "coppersynth" under [serial]. No files needed: the GeneralUser GS
-# bank is inside the executable. `soundfont` (or COPPERLINE_SOUNDFONT,
-# or an .sf2 beside the executable) plays a different bank. MT-32 games
-# work through a translation layer.
-# [coppersynth]
-# soundfont = "/path/to/GeneralUser-GS.sf2"  # override the bundled default
-# mt32_mode = "auto"          # auto (translate once MT-32 sysex is seen),
-#                             # on, or off
-# panel = true                # start with the front panel shown
 
 [parallel]
 # device = "printer"

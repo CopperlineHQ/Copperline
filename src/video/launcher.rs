@@ -2228,7 +2228,7 @@ pub struct MachineSetup {
     mt32_pcm_rom: Option<PathBuf>,
     mt32_panel: bool,
     mt32_lcd: Mt32Lcd,
-    /// Coppersynth's soundfont and translation mode ([coppersynth]).
+    /// Coppersynth's soundfont and translation mode ([serial] coppersynth_*).
     csynth_soundfont: Option<PathBuf>,
     csynth_mt32_mode: Option<String>,
     csynth_panel: bool,
@@ -2501,9 +2501,9 @@ impl MachineSetup {
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
             mt32_panel: cfg.serial.mt32_panel,
             mt32_lcd: cfg.serial.mt32_lcd,
-            csynth_soundfont: cfg.csynth.soundfont.clone(),
-            csynth_mt32_mode: cfg.csynth.mt32_mode.clone(),
-            csynth_panel: cfg.csynth.panel,
+            csynth_soundfont: cfg.serial.coppersynth_soundfont.clone(),
+            csynth_mt32_mode: cfg.serial.coppersynth_mt32_mode.clone(),
+            csynth_panel: cfg.serial.coppersynth_panel,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2979,17 +2979,17 @@ impl MachineSetup {
         if self.mt32_lcd != base.serial.mt32_lcd {
             raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
         }
-        if self.csynth_soundfont != base.csynth.soundfont {
-            raw.csynth.soundfont = self
+        if self.csynth_soundfont != base.serial.coppersynth_soundfont {
+            raw.serial.coppersynth_soundfont = self
                 .csynth_soundfont
                 .as_ref()
                 .map(|p| p.display().to_string());
         }
-        if self.csynth_mt32_mode != base.csynth.mt32_mode {
-            raw.csynth.mt32_mode = self.csynth_mt32_mode.clone();
+        if self.csynth_mt32_mode != base.serial.coppersynth_mt32_mode {
+            raw.serial.coppersynth_mt32_mode = self.csynth_mt32_mode.clone();
         }
-        if self.csynth_panel != base.csynth.panel {
-            raw.csynth.panel = Some(self.csynth_panel);
+        if self.csynth_panel != base.serial.coppersynth_panel {
+            raw.serial.coppersynth_panel = Some(self.csynth_panel);
         }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
@@ -3279,9 +3279,9 @@ impl MachineSetup {
         self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
         self.mt32_panel = base.serial.mt32_panel;
         self.mt32_lcd = base.serial.mt32_lcd;
-        self.csynth_soundfont = base.csynth.soundfont.clone();
-        self.csynth_mt32_mode = base.csynth.mt32_mode.clone();
-        self.csynth_panel = base.csynth.panel;
+        self.csynth_soundfont = base.serial.coppersynth_soundfont.clone();
+        self.csynth_mt32_mode = base.serial.coppersynth_mt32_mode.clone();
+        self.csynth_panel = base.serial.coppersynth_panel;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;

@@ -2463,7 +2463,7 @@ fn main() -> Result<()> {
     );
     #[cfg(feature = "coppersynth")]
     video::set_csynth_panel_shown(
-        cfg.csynth.panel
+        cfg.serial.coppersynth_panel
             && serial_midi
             && config::midi_out_is_csynth(cfg.serial.midi_out.as_deref()),
     );
