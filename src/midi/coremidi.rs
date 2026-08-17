@@ -335,7 +335,7 @@ pub struct CoreMidiBackend {
     // scheduled host time, to isolate a scheduling problem from a routing one.
     immediate: bool,
     // Kept alive so the read-callback refCon stays valid; dropped after the
-    // client is disposed (see Drop).
+    // ports are disposed (see Drop) -- the client outlives them all.
     _input_state: Box<InputState>,
 }
 
@@ -553,11 +553,12 @@ mod tests {
     use ringbuf::HeapRb;
     use std::time::Duration;
 
-    /// Backends share the process's one client: open, drop, open again.
-    /// Under the old per-backend client this same sequence let the
-    /// MIDIServer exit beneath the process once the drop's dispose was
-    /// the system-wide last -- after which no client could ever be
-    /// created again.
+    /// The new lifecycle's teardown holds up: a drop disposes only the
+    /// machine's ports, and the next open builds fresh ones on the
+    /// process's one client. (This passes immediately by design; the
+    /// test that discriminates the old lifecycle from the new is the
+    /// enumerate-linger-open one below, which must span the daemon's
+    /// idle exit and is ignored for its sleep.)
     #[test]
     fn backends_reopen_after_drop() {
         let (p1, _c1) = HeapRb::<u8>::new(8).split();
