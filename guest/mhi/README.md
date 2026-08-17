@@ -55,9 +55,11 @@ fetched (WP1).
   `Open`/`Close`/`Expunge`). Refuses to open if no MHI board is found (or
   its `VERSION` is older than this driver understands), mirroring
   mhiuae.c's own "no host resource, no library" gate.
-- `test/` -- `mhitest`, a small CLI probe for WP5's M1 integration harness
-  (see its own header comment for the exact "MHITEST: ..." output lines the
-  harness greps for).
+- `test/` -- three small CLI probes, one per integration harness (each has
+  its own header comment documenting the exact output lines its harness
+  greps for): `mhitest` (M1, "MHITEST: ..."), `mhiseek` (M3's real
+  `MHIStop`-then-reseek sequence, "MHISEEK: ..."), and `mhiparam` (M4's
+  live mid-playback `MHISetParam`, "MHIPARAM: ...").
 
 ## Building
 
@@ -67,13 +69,14 @@ Needs Docker (the same image every guest build under `guest/` uses -- see
 ```sh
 make          # -> mhi_copperline.library
 make check    # objdump sanity check
-make -C test  # -> test/mhitest
+make -C test  # -> test/mhitest, test/mhiseek, test/mhiparam
 ```
 
-`mhi_copperline.library` (and `test/mhitest`) are committed artifacts,
-rebuilt by hand when the source changes -- referenced directly by path from
-`tests/mhi.rs` (WP5), the same convention `guest/hostfs-test/mkfile` already
-uses (`tests/image_regression.rs`). There is no `assets/mhi/` counterpart:
+`mhi_copperline.library` and the three `test/` probes are committed
+artifacts, rebuilt by hand when the source changes -- referenced directly
+by path from `tests/mhi.rs` (WP5), the same convention `guest/hostfs-test/
+mkfile` already uses (`tests/image_regression.rs`). There is no
+`assets/mhi/` counterpart:
 unlike `guest/hostsocket`'s ROM or `guest/services`'s handler, nothing in
 `src/` embeds this library via `include_bytes!` -- it is guest software a
 test harness stages onto a boot volume, not something the host board itself

@@ -1234,10 +1234,16 @@ fn mhi_m4_live_setparam_changes_volume_and_balance_mid_playback() {
         .sum::<f64>()
         / after_r.len() as f64)
         .sqrt();
+    // The volume drop, isolated: the hard pan-right alone already drives
+    // gain_left to exactly 0 (pan_gains(100) == (0.0, 1.0)), so a left-
+    // channel-only check can't tell a real volume-latch effect apart from
+    // pan doing all the work. The right channel is untouched by pan at
+    // this setting, so its reduction isolates the volume effect.
     assert!(
-        rms_after_l < rms_before_l * 0.3,
-        "expected the volume drop to sharply reduce the left channel, got before={rms_before_l} \
-         after={rms_after_l}"
+        rms_after_r < rms_before_r * 0.3,
+        "expected the volume drop to sharply reduce the right channel (pan leaves it \
+         enabled, so this isolates the volume effect from the pan effect), got \
+         before={rms_before_r} after={rms_after_r}"
     );
     assert!(
         rms_after_l < rms_after_r * 0.3,

@@ -109,7 +109,9 @@ const OFF_PARAM_VALUE: u32 = 0x1E;
 /// v1->v2 example.
 const VERSION: u16 = 2;
 
-/// MPEG-1/2/2.5, Layer III, CBR, VBR-as-input (no seek), and (M4) param
+/// MPEG-1/2/2.5, Layer III, CBR, VBR accepted as input (including
+/// re-entry at an arbitrary byte offset -- MHI itself has no seek call;
+/// see docs/internals/mhi.md's "Seek-entry hardening"), and (M4) param
 /// latches applied to decoded PCM -- bits 0-6; see the `CAPS` table. Bits
 /// 7-15 (Layer I/II, the 5/10-band EQ, a future capability) stay 0.
 const CAPS: u16 = 0b0111_1111;
@@ -2759,11 +2761,16 @@ mod tests {
     /// identical output afterward.
     #[test]
     fn savestate_round_trip_preserves_hot_param_and_filter_state() {
-        let mut mem = memory(0x1000);
-        let f1 = mp3_frame(128, 0x10);
-        let f2 = mp3_frame(128, 0x40);
-        mem.chip_ram[0..f1.len()].copy_from_slice(&f1);
-        mem.chip_ram[f1.len()..f1.len() + f2.len()].copy_from_slice(&f2);
+        // A real encoded fixture, not `mp3_frame` (whose all-zero body
+        // decodes to digital silence -- running silence through a biquad
+        // forever leaves z1/z2 at exactly 0.0 regardless of whether
+        // savestate serialization works at all, so a test built on it
+        // can't actually distinguish "filter memory round-tripped" from
+        // "filter memory was silently dropped and reinitialized to its
+        // own zero default"). Real audio content gives the boosted bass
+        // band genuine non-zero memory to lose.
+        let mut mem = memory(0x4000);
+        mem.chip_ram[0..GOLDEN_TONE_MP3.len()].copy_from_slice(GOLDEN_TONE_MP3);
 
         let mut board = Mhi::new();
         let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
@@ -2772,20 +2779,24 @@ mod tests {
         {
             let mut host =
                 host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
-            stage_and_ring(&mut board, &mut host, 0, &f1);
-            stage_and_ring(&mut board, &mut host, f1.len() as u32, &f2);
+            stage_and_ring(&mut board, &mut host, 0, GOLDEN_TONE_MP3);
             board.write(OFF_PARAM_SELECT, 2, 2, &mut host); // select bass
             board.write(OFF_PARAM_VALUE, 2, 100, &mut host); // full boost
             board.write(OFF_PARAM_SELECT, 2, 0, &mut host); // select volume
             board.write(OFF_PARAM_VALUE, 2, 70, &mut host);
             board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
-            // Partway into the first frame -- the bass filter's z1/z2
-            // memory is genuinely hot by now (mp3_frame's silent payload
-            // still runs every sample through the boosted bass biquad,
-            // building up real filter state even though the audible
-            // content is zero).
-            ZorroDevice::tick(&mut board, 137, &mut host);
+            // Well past LAME's leading encoder-delay silence (the first
+            // real frame or so of a LAME-encoded stream is priming
+            // silence, not audible content) -- the bass filter's z1/z2
+            // memory is genuinely hot by now, primed by real decoded
+            // audio through the boosted bass biquad.
+            ZorroDevice::tick(&mut board, 200_000, &mut host);
         }
+        assert!(
+            board.tone_filters.bass_l.z1 != 0.0 || board.tone_filters.bass_l.z2 != 0.0,
+            "test setup must leave genuine non-zero filter memory before serializing, or \
+             this test cannot tell a real savestate bug apart from a passing default"
+        );
 
         let bytes = bincode::serialize(&board).unwrap();
         let mut resumed: Mhi = bincode::deserialize(&bytes).unwrap();
