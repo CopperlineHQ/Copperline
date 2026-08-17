@@ -7699,11 +7699,14 @@ fn draw_launcher_row(
         // headings over a rule -- minus the clickability, plus a divider
         // between the columns. Its right edge lines up with the Clear
         // button above it, and every cell reads from the left.
-        let (_, clear) = launcher_path_rects(rect, row_y);
+        let (browse, _) = launcher_path_rects(rect, row_y);
+        // Left edge on the section heading's own x, right edge on the
+        // Browse button's left, so the table sits squarely in the column
+        // the rows above it use.
         let table = Rect {
-            x: launcher_pane_x(rect) + 8,
+            x: launcher_pane_x(rect),
             y: row_y,
-            w: (clear.x + clear.w).saturating_sub(launcher_pane_x(rect) + 8),
+            w: browse.x.saturating_sub(launcher_pane_x(rect)),
             h: 2 * LAUNCH_ROW_H - 4,
         };
         let col_w = table.w / 3;
@@ -7738,19 +7741,21 @@ fn draw_launcher_row(
                 let (cx, text) = cell_at(title, col);
                 draw_panel_text(frame, cx, table.y + 5, &text, PANEL_TEXT_DIM, 1, scale);
             }
-            // The rule under the headings, and a divider between columns.
+            // The grid: the rule under the headings and the column
+            // dividers run edge to edge, meeting the border, so every
+            // cell reads as a closed box.
             fill_rect(
                 frame,
                 scale_rect(
                     Rect {
-                        x: table.x + 2,
+                        x: table.x + 1,
                         y: table.y + LAUNCH_ROW_H - 4,
-                        w: table.w.saturating_sub(4),
+                        w: table.w.saturating_sub(2),
                         h: 1,
                     },
                     scale,
                 ),
-                BUTTON_EDGE_DARK,
+                BUTTON_EDGE_LIGHT,
                 scale,
             );
             for col in 1..3 {
@@ -7759,13 +7764,13 @@ fn draw_launcher_row(
                     scale_rect(
                         Rect {
                             x: table.x + col * col_w,
-                            y: table.y + 2,
+                            y: table.y + 1,
                             w: 1,
-                            h: table.h.saturating_sub(4),
+                            h: table.h.saturating_sub(2),
                         },
                         scale,
                     ),
-                    BUTTON_EDGE_DARK,
+                    BUTTON_EDGE_LIGHT,
                     scale,
                 );
             }
@@ -8391,19 +8396,25 @@ fn draw_launcher_row(
             let inherits = launcher_path_inherits(setup, r.field);
             let (value_color, text_x) = if inherits {
                 let text_w = text.chars().count() * font::GLYPH_W;
-                // The SoundFont default sits in line with the cycle
-                // value column, centred under the arrows of the rows
-                // around it rather than adrift in the wider path box.
-                #[cfg(feature = "coppersynth")]
-                if r.field == LauncherField::CsynthSoundfont {
-                    let (_, value_box, _) = launcher_cycle_rects(rect, row_y);
-                    let x = value_box.x + value_box.w.saturating_sub(text_w) / 2;
-                    (PANEL_TEXT_DIM, x)
+                // The bundled-ROM defaults read from the left like a
+                // chosen path would, just dimmed; the SoundFont default
+                // sits in line with the cycle value column, centred
+                // under the arrows of the rows around it; the Paths
+                // page's inherited rows keep their centred `(default)`.
+                if matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom) {
+                    (PANEL_TEXT_DIM, value_x)
                 } else {
+                    #[cfg(feature = "coppersynth")]
+                    if r.field == LauncherField::CsynthSoundfont {
+                        let (_, value_box, _) = launcher_cycle_rects(rect, row_y);
+                        let x = value_box.x + value_box.w.saturating_sub(text_w) / 2;
+                        (PANEL_TEXT_DIM, x)
+                    } else {
+                        (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+                    }
+                    #[cfg(not(feature = "coppersynth"))]
                     (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
                 }
-                #[cfg(not(feature = "coppersynth"))]
-                (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
             } else {
                 (PANEL_TEXT, value_x)
             };
