@@ -4077,7 +4077,10 @@ fn launcher_panel_edits_machine_setup() {
     // control dispatch the mouse uses.
     app.activate_ui_control(UiControl::LauncherModel(MachineModel::A1200));
     app.activate_ui_control(UiControl::LauncherTab(LauncherTab::Cpu));
-    app.activate_ui_control(UiControl::LauncherToggle(LauncherField::Fpu));
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: LauncherField::Fpu,
+        forward: true,
+    });
 
     let state = match &app.ui.panel {
         Some(Panel::Launcher(state)) => state,

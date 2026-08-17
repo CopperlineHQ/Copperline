@@ -255,6 +255,13 @@ impl CsynthDevice {
         self.panel.power_on_held(held);
     }
 
+    /// Open this freshly attached panel on the Initializing... hold:
+    /// the unit was rebuilt mid-reset, and the hold serves its second
+    /// before the ordinary boot, as if the panel had survived.
+    pub fn panel_begin_initializing(&mut self) {
+        self.panel.begin_initializing();
+    }
+
     /// A semantic press from the window's panel.
     pub fn panel_button(&mut self, button: Button) -> Option<PanelRequest> {
         self.feed_panel();

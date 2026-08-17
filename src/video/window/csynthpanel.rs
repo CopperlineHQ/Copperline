@@ -1592,8 +1592,8 @@ mod tests {
             panel.press(CsynthControl::Mute, false, true),
             CsynthPress::Button(Button::Monitor)
         );
-        // Both INSTRUMENT halves latched through a power-on: the
-        // default-font combination arrives as the pair held whole.
+        // Both INSTRUMENT halves latched through a power-on arrive as
+        // the pair held whole.
         panel.press(
             CsynthControl::Arrow(Pair::Instrument, Dir::Left),
             false,
@@ -1627,7 +1627,8 @@ mod tests {
         };
         assert!(held.contains(&Button::Both(Pair::MidiCh)));
         assert!(held.contains(&Button::Both(Pair::Instrument)));
-        // ALL and MUTE latched through a power-on: the version screen's.
+        // ALL and MUTE latched through a power-on arrive as themselves
+        // (the unit ignores the set; the resolution must still carry it).
         panel.press(CsynthControl::All, false, false);
         panel.press(CsynthControl::Mute, false, false);
         assert_eq!(

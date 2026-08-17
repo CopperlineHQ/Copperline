@@ -4390,7 +4390,7 @@ const LAUNCH_TOGGLE_W: usize = 64;
 const LAUNCH_ACTION_W: usize = 84;
 const LAUNCH_ACTION_H: usize = 22;
 const LAUNCH_BROWSE_W: usize = 66;
-const LAUNCH_CLEAR_W: usize = 54;
+const LAUNCH_CLEAR_W: usize = LAUNCH_BROWSE_W;
 /// Width of the path-preview text column before a path row's Browse/Clear
 /// buttons. The buttons sit just after it (near the other control widgets)
 /// rather than out at the panel's right edge; a long value is clipped to fit.
@@ -5607,19 +5607,27 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
     if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_none();
     }
+    // The ROMs with bundled defaults read the same way: unset means the
+    // bundled image, dimmed as Copperline's answer.
+    if field == LauncherField::Rom {
+        return setup.path(field).is_none();
+    }
+    if field == LauncherField::ScsiRom {
+        return setup.scsi_controller_is_a4091() && setup.path(field).is_none();
+    }
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }
 
-/// Whether the row's second button has anything to do: a Reset with the
-/// default already in force is shown but greyed, so the pair of buttons
-/// keeps its shape while saying there is nothing to undo.
+/// Whether the row's second button has anything to do: a Clear with
+/// nothing behind it is shown but greyed, so the pair of buttons keeps
+/// its shape while saying there is nothing to take away. The Paths page
+/// keeps its own arrangement -- its Reset only appears once something
+/// is set, so it is always live.
 fn launcher_clear_enabled(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
-    #[cfg(feature = "coppersynth")]
-    if field == LauncherField::CsynthSoundfont {
-        return setup.path(field).is_some();
+    if field.is_paths_field() {
+        return true;
     }
-    let _ = (setup, field);
-    true
+    setup.path(field).is_some()
 }
 
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
@@ -6145,7 +6153,9 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                             if browse.contains(pos) {
                                 return Some(UiControl::LauncherBoardBrowse { board, opt });
                             }
-                            if clear.contains(pos) {
+                            if !state.setup.zorro_boards()[board].value(opt).is_empty()
+                                && clear.contains(pos)
+                            {
                                 return Some(UiControl::LauncherBoardClear { board, opt });
                             }
                         }
@@ -6184,7 +6194,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
-                RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
+                RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
                 RowKind::Text => {
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
@@ -6370,7 +6380,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if browse.contains(pos) {
                         return Some(UiControl::LauncherBrowse(r.field));
                     }
-                    if clear.contains(pos) {
+                    if launcher_clear_enabled(&state.setup, r.field) && clear.contains(pos) {
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
@@ -6407,7 +6417,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         if browse.contains(pos) {
                             return Some(UiControl::LauncherBrowse(r.field));
                         }
-                        if clear.contains(pos) {
+                        if launcher_clear_enabled(&state.setup, r.field) && clear.contains(pos) {
                             return Some(UiControl::LauncherClear(r.field));
                         }
                         // A support archive with nothing chosen can fetch
@@ -7735,23 +7745,30 @@ fn draw_launcher_row(
         );
         return;
     }
-    // The ROM tab's identification line: what the image on the row above
-    // checksums to, greyed and indented under it. Nothing is drawn for an
-    // image no checksum names, or for an empty row.
-    if r.kind == RowKind::Note {
-        if let Some(note) = state.rom_note(r.field) {
-            let x = launcher_pane_x(rect) + 8;
-            let avail = (rect.x + rect.w).saturating_sub(x + LAUNCH_MARGIN);
-            draw_panel_text(
-                frame,
-                x,
-                row_y + 4,
-                &truncate_to_width(note, avail),
-                PANEL_TEXT_DIM,
-                1,
-                scale,
-            );
-        }
+    // The ROM tab's identification lines: one greyed fact per row --
+    // Name, Version, Revision -- indented two spaces under the indented
+    // path row, the value following its label. The prefix stands even
+    // when an unrecognised image leaves the value blank.
+    if r.kind == RowKind::RomInfo {
+        let (name, version, revision) = state.rom_note_cells(r.field);
+        let value = match r.label {
+            "Version" => version,
+            "Revision" => revision,
+            _ => name,
+        };
+        // The prefix in grey, the fact itself in full text colour.
+        let x = launcher_pane_x(rect) + 4 * font::GLYPH_W;
+        let prefix = format!("{}: ", r.label);
+        draw_panel_text(frame, x, row_y + 4, &prefix, PANEL_TEXT_DIM, 1, scale);
+        draw_panel_text(
+            frame,
+            x + prefix.chars().count() * font::GLYPH_W,
+            row_y + 4,
+            &value,
+            PANEL_TEXT,
+            1,
+            scale,
+        );
         return;
     }
     // The greyed column titles above the Boot Priority rows.
@@ -7772,7 +7789,21 @@ fn draw_launcher_row(
     } else {
         setup.disabled_reason(r.field)
     };
-    let label_color = if reason.is_none() && !launcher_path_inherits(setup, r.field) {
+    // The SoundFont row's label stays lit even while the value shows
+    // the bundled default -- the setting is present either way; only
+    // the value is Copperline's answer rather than the person's.
+    let label_keeps_colour = matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom) || {
+        #[cfg(feature = "coppersynth")]
+        {
+            r.field == LauncherField::CsynthSoundfont
+        }
+        #[cfg(not(feature = "coppersynth"))]
+        {
+            false
+        }
+    };
+    let label_inherits = !label_keeps_colour && launcher_path_inherits(setup, r.field);
+    let label_color = if reason.is_none() && !label_inherits {
         PANEL_TEXT
     } else {
         PANEL_TEXT_DIM
@@ -7808,9 +7839,13 @@ fn draw_launcher_row(
             Some(GreyedAs::DimmedValue | GreyedAs::DimmedReason)
         ) {
             if greyed_as != Some(GreyedAs::Blank) {
+                // Where the value the row cannot have would sit: flush
+                // against the right edge of the stepper's left arrow, so
+                // every reason shares one margin whatever its length.
+                let (prev, _, _) = launcher_cycle_rects(rect, row_y);
                 draw_panel_text(
                     frame,
-                    launcher_control_x(rect),
+                    prev.x + prev.w,
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
@@ -7823,7 +7858,7 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note => {}
+        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
@@ -8212,7 +8247,7 @@ fn draw_launcher_row(
                     frame,
                     clear,
                     "Clear",
-                    true,
+                    launcher_clear_enabled(setup, r.field),
                     hover == Some(UiControl::LauncherClear(r.field)),
                     scale,
                 );
@@ -8330,7 +8365,25 @@ fn draw_launcher_row(
             let inherits = launcher_path_inherits(setup, r.field);
             let (value_color, text_x) = if inherits {
                 let text_w = text.chars().count() * font::GLYPH_W;
-                (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+                // The bundled-ROM defaults read from the left like a
+                // chosen path would, just dimmed; the SoundFont default
+                // sits in line with the cycle value column, centred
+                // under the arrows of the rows around it; the Paths
+                // page's inherited rows keep their centred `(default)`.
+                if matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom) {
+                    (PANEL_TEXT_DIM, value_x)
+                } else {
+                    #[cfg(feature = "coppersynth")]
+                    if r.field == LauncherField::CsynthSoundfont {
+                        let (_, value_box, _) = launcher_cycle_rects(rect, row_y);
+                        let x = value_box.x + value_box.w.saturating_sub(text_w) / 2;
+                        (PANEL_TEXT_DIM, x)
+                    } else {
+                        (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+                    }
+                    #[cfg(not(feature = "coppersynth"))]
+                    (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
+                }
             } else {
                 (PANEL_TEXT, value_x)
             };
@@ -8348,12 +8401,10 @@ fn draw_launcher_row(
             }
             if has_clear {
                 // "Reset" where the row goes back to a default rather
-                // than being emptied -- the Paths page, and the
-                // soundfont row. Everywhere else the button really does
-                // clear a path, and says so.
-                #[cfg(feature = "coppersynth")]
-                let resets = r.field.is_paths_field() || r.field == LauncherField::CsynthSoundfont;
-                #[cfg(not(feature = "coppersynth"))]
+                // than being emptied -- the Paths page. Everywhere else
+                // the button clears, and says so (the SoundFont row's
+                // clear also lands on the bundled default, but it wears
+                // the same word as its neighbours).
                 let resets = r.field.is_paths_field();
                 let label = if resets { "Reset" } else { "Clear" };
                 let enabled = launcher_clear_enabled(setup, r.field);
@@ -8522,7 +8573,7 @@ fn draw_launcher_row(
                 frame,
                 clear,
                 "Clear",
-                true,
+                launcher_clear_enabled(setup, r.field),
                 hover == Some(UiControl::LauncherClear(r.field)),
                 scale,
             );
@@ -8706,7 +8757,7 @@ fn draw_launcher_board_option(
                 frame,
                 clear,
                 "Clear",
-                true,
+                !value.is_empty(),
                 hover == Some(UiControl::LauncherBoardClear { board, opt }),
                 scale,
             );
@@ -9053,14 +9104,20 @@ fn draw_launcher(
             scale,
         );
     }
-    // Action bar.
+    // Action bar. While the Save dialog is up, every position outside
+    // its three buttons answers as the Save control (a stray click puts
+    // the dialog away), so pointer-lighting the button under it would
+    // flash on every hover in the dialog -- the button stays unlit until
+    // the dialog is gone.
     for (control, button_rect) in launcher_action_rects(rect) {
+        let lit =
+            hover == Some(control) && !(control == UiControl::LauncherSave && state.save_dialog);
         draw_text_button(
             frame,
             button_rect,
             launcher_action_label(control),
             true,
-            hover == Some(control),
+            lit,
             scale,
         );
     }
@@ -10007,29 +10064,34 @@ mod tests {
         );
     }
 
-    /// The ROM tab's identification line is drawn under its path row, in the
-    /// greyed note colour, and only once there is something to say: an image
-    /// no checksum names leaves the line blank rather than an empty box.
+    /// The ROM tab's identification lines sit under the path row: the
+    /// greyed Name/Version/Revision prefixes stand either way, and an
+    /// image no checksum names leaves the values after them blank.
     #[test]
     fn the_rom_tab_draws_its_identification_line_under_the_path_row() {
         use super::super::window::{texture_height, texture_width};
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        // Pixels painted in the note colour on the note row (row 1, under
-        // the Kickstart ROM path row).
-        let note_row_pixels = |frame: &[u8], rect: Rect| {
-            let row_y = launcher_row_y(rect, 1);
+        // Pixels painted in the info-line ink on a given ROM-tab row
+        // (the Name line is index 2, under the section heading and the
+        // path row). The prefixes draw dimmed, the values in full text
+        // colour; both count.
+        let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
+            let row_y = launcher_row_y(rect, row);
             let mut lit = 0;
             for y in row_y..row_y + LAUNCH_ROW_H {
                 for x in launcher_pane_x(rect)..rect.x + rect.w - LAUNCH_MARGIN {
                     let p = (y * w + x) * 4;
-                    if frame[p..p + 4] == PANEL_TEXT_DIM.to_le_bytes() {
+                    if frame[p..p + 4] == PANEL_TEXT_DIM.to_le_bytes()
+                        || frame[p..p + 4] == PANEL_TEXT.to_le_bytes()
+                    {
                         lit += 1;
                     }
                 }
             }
             lit
         };
+        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 2);
         let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
 
         let mut setup = launcher::MachineSetup::default();
@@ -10050,10 +10112,10 @@ mod tests {
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         draw(&mut blank_frame, scale, &ui, None, None);
-        assert_eq!(
-            note_row_pixels(&blank_frame, rect),
-            0,
-            "an unidentified image must leave the note line empty"
+        let blank_ink = note_row_pixels(&blank_frame, rect);
+        assert!(
+            blank_ink > 0,
+            "the Name: prefix stands even over an unrecognised image"
         );
 
         let mut frame = vec![0u8; w * h * 4];
@@ -10063,8 +10125,8 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         assert!(
-            note_row_pixels(&frame, rect) > 0,
-            "the identification is drawn under the ROM path row"
+            note_row_pixels(&frame, rect) > blank_ink,
+            "the identification's value adds ink beyond the prefix"
         );
     }
 
@@ -13004,6 +13066,62 @@ mod tests {
             // The base swaps them.
             assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
             assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
+        }
+
+        // A Clear with nothing behind it takes no clicks. The drive rows
+        // and the floppy rows draw their own buttons rather than going
+        // through the Path arm, so each stands trial here: empty, the
+        // button is greyed and dead; with an image chosen, it answers.
+        {
+            let probe = |set: bool, tab: LauncherTab, field: LauncherField, kind: RowKind| {
+                let mut setup = launcher::MachineSetup::default();
+                // A machine that has all the rows: the default model
+                // carries no IDE port, and a row that does not apply
+                // takes no clicks whatever its buttons say.
+                setup.select_model(Some(MachineModel::A1200));
+                if set {
+                    setup.set_path(field, std::path::PathBuf::from("/probe/disk.img"));
+                }
+                let idx = launcher::rows(tab, Default::default(), Default::default(), false, false)
+                    .iter()
+                    .filter(|r| !setup.row_hidden(r.field))
+                    .position(|r| r.field == field && r.kind == kind)
+                    .expect("the field has a visible row");
+                let mut state = LauncherState::new(setup);
+                state.tab = tab;
+                let panel = Panel::Launcher(Box::new(state));
+                let rect = panel_rect(&panel);
+                let nav = if tab.has_top_nav() {
+                    launcher_nav_block_h(tab)
+                } else {
+                    0
+                };
+                let row_y = launcher_row_y(rect, idx) + nav;
+                let (_, clear) = launcher_path_rects(rect, row_y);
+                let got = panel_control_at(
+                    &panel,
+                    (
+                        (clear.x + clear.w / 2) as i32,
+                        (clear.y + clear.h / 2) as i32,
+                    ),
+                );
+                got == Some(UiControl::LauncherClear(field))
+            };
+            for (tab, field, kind) in [
+                (
+                    LauncherTab::Floppy,
+                    LauncherField::Df0Image,
+                    RowKind::FloppyMedia,
+                ),
+                (
+                    LauncherTab::Storage,
+                    LauncherField::IdeMaster,
+                    RowKind::Drive,
+                ),
+            ] {
+                assert!(!probe(false, tab, field, kind), "{field:?} empty must grey");
+                assert!(probe(true, tab, field, kind), "{field:?} set must answer");
+            }
         }
 
         // The confirm over Reset default answers every click on the panel:

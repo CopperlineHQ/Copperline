@@ -1339,13 +1339,16 @@ pub(super) fn draw_pause_button(
         },
         texture_scale,
     );
-    draw_rect_bevel(
-        frame,
-        rect,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    // Paused, the moulding turns over -- the MT-32 panel's pressed
+    // effect: the light that caught its top and left falls onto the
+    // bottom and right instead, so the button reads as held down for
+    // as long as the machine is.
+    let (near, far) = if paused {
+        (BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT)
+    } else {
+        (BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK)
+    };
+    draw_rect_bevel(frame, rect, near, far, texture_scale);
     let cx = rect.x + rect.w / 2;
     let cy = rect.y + rect.h / 2;
     // Show the action the button performs: a play triangle while paused

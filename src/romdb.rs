@@ -120,6 +120,45 @@ pub fn describe_file(path: &Path) -> Option<Identified> {
     describe(&std::fs::read(path).ok()?)
 }
 
+/// The version pair a ROM image says for itself, read from the image
+/// rather than the checksum table: the ROM header's version.revision
+/// words, and the first `$VER:` cookie's own number (exec.library's,
+/// in a Kickstart-shaped ROM). Either half may be missing; a file that
+/// cannot be read yields nothing. This is how the bundled AROS -- which
+/// no checksum table names, and which moves between releases -- gets
+/// its numbers into the launcher's identification lines.
+pub fn rom_self_versions(path: &Path) -> Option<(String, String)> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len == 0 || len > MAX_ROM_FILE_BYTES {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let header = if data.len() >= 16 {
+        let ver = u16::from_be_bytes([data[12], data[13]]);
+        let rev = u16::from_be_bytes([data[14], data[15]]);
+        format!("{ver}.{rev}")
+    } else {
+        String::new()
+    };
+    let cookie = data
+        .windows(6)
+        .position(|w| w == b"$VER: ")
+        .map(|i| {
+            let tail = &data[i + 6..(i + 128).min(data.len())];
+            let line: String = tail
+                .iter()
+                .take_while(|&&b| b != 0 && b != b'\r' && b != b'\n')
+                .map(|&b| b as char)
+                .collect();
+            line.split_whitespace()
+                .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.contains('.'))
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap_or_default();
+    Some((header, cookie))
+}
+
 /// The raw table lookup: an exact (CRC-32, length) match, with no
 /// normalisation of its own.
 pub fn identify_crc(crc: u32, len: usize) -> Option<&'static RomEntry> {

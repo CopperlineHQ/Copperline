@@ -181,6 +181,8 @@ const MAX_TEXTURE_SCALE: usize = 2;
 /// the fit integer.
 const MAX_INTEGER_TEXTURE_SCALE: usize = 4;
 const STATUS_BAR_HEIGHT: usize = 44;
+/// How long the pointer rests on a menu category before it opens.
+const MENU_SUBMENU_DWELL: std::time::Duration = std::time::Duration::from_millis(500);
 /// Logical window height: the presentation canvas for the active pixel aspect,
 /// plus the status bar below it unless it is hidden (in which case the display
 /// scales to fill the whole window).
@@ -1260,6 +1262,9 @@ pub struct App {
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
     ui: UiState,
+    /// A submenu the pointer is resting on, waiting out the dwell before
+    /// it opens: `(depth, row, since)`. Hovering elsewhere disarms it.
+    menu_hover_arm: Option<(usize, usize, Instant)>,
     /// Emulated-machine summary lines for the About window.
     about_machine_lines: Vec<String>,
     /// Raw config of the running (or last-applied) machine, so the "Machine
@@ -1988,6 +1993,7 @@ impl App {
             keymap: keymap::KeyMap::load(),
             autofire_hz,
             ui: UiState::default(),
+            menu_hover_arm: None,
             about_machine_lines,
             machine_config,
             paused_before_debugger: false,
@@ -3503,6 +3509,7 @@ impl ApplicationHandler for App {
                 self.last_display_cursor_pos = None;
                 self.volume_dragging = false;
                 self.analyzer_dragging = false;
+                self.menu_hover_arm = None;
                 let layout = bar_layout(&self.media_bar());
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos) {
                     self.request_redraw();
@@ -4327,6 +4334,7 @@ impl ApplicationHandler for App {
         // Resample the performance overlay after the step so its revision
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
+        self.poll_menu_hover_arm();
         #[cfg(feature = "coppersynth")]
         {
             self.repeat_csynth_dial();
@@ -5920,6 +5928,8 @@ impl App {
         };
         let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
         let Some((depth, row)) = ui::menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos) else {
+            // Off every row: a submenu arming for its dwell stands down.
+            self.menu_hover_arm = None;
             return false;
         };
         // The pointer is resting on the row this level is already open to.
@@ -5933,21 +5943,72 @@ impl App {
             return false;
         }
         let mut path = self.menu_path_to(depth);
-        // A category opens as the pointer reaches it, so submenus are walked
-        // into rather than clicked into. The cursor stays off the level that
+        // A category opens as the pointer rests on it, so submenus are
+        // walked into rather than clicked into -- after a brief dwell, so
+        // a pointer passing through on its way somewhere else does not
+        // pull levels open behind it. The cursor stays off the level that
         // opens until the pointer is actually over one of its rows; the
         // category itself stays lit as the way back.
         let opens = self
             .menu_row_at(depth, row)
             .is_some_and(|r| r.enabled && r.is_submenu());
         let cursor = if opens {
+            let now = Instant::now();
+            match self.menu_hover_arm {
+                Some((d, r, since)) if (d, r) == (depth, row) => {
+                    if now.duration_since(since) < MENU_SUBMENU_DWELL {
+                        // Still waiting: light the row, open nothing yet.
+                        self.ui.menu_nav.open_path(path, Some(row));
+                        return true;
+                    }
+                    self.menu_hover_arm = None;
+                }
+                _ => {
+                    self.menu_hover_arm = Some((depth, row, now));
+                    self.ui.menu_nav.open_path(path, Some(row));
+                    self.request_redraw();
+                    return true;
+                }
+            }
             path.push(row);
             None
         } else {
+            self.menu_hover_arm = None;
             Some(row)
         };
         self.ui.menu_nav.open_path(path, cursor);
         true
+    }
+
+    /// Open an armed submenu whose dwell has elapsed while the pointer
+    /// rests still -- resting produces no cursor events, so the frame
+    /// poll asks.
+    fn poll_menu_hover_arm(&mut self) {
+        let Some((depth, row, since)) = self.menu_hover_arm else {
+            return;
+        };
+        if !self.ui.menu_open {
+            self.menu_hover_arm = None;
+            return;
+        }
+        if since.elapsed() < MENU_SUBMENU_DWELL {
+            self.request_redraw();
+            return;
+        }
+        // Only if the pointer is still on the armed row.
+        let still_there = self
+            .cursor_pos
+            .map(|p| (p.0.max(0) as usize, p.1.max(0) as usize))
+            .and_then(|pos| ui::menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos))
+            == Some((depth, row));
+        self.menu_hover_arm = None;
+        if !still_there {
+            return;
+        }
+        let mut path = self.menu_path_to(depth);
+        path.push(row);
+        self.ui.menu_nav.open_path(path, None);
+        self.request_redraw();
     }
 
     /// The open path down to `depth`, for a pointer that has landed on a level
@@ -6318,29 +6379,43 @@ impl App {
                     .midi_serial_mut()
                     .and_then(crate::midi::MidiSerialSink::csynth_mut)
                     .and_then(|synth| synth.panel_button(button));
-                if let Some(crate::csynth::PanelRequest::Mt32Mode(mode)) = request {
-                    // The engine already switched; mirror the choice into
-                    // the session's options so a power cycle keeps it.
-                    let value = match mode {
-                        crate::csynth::Mt32Mode::On => "on",
-                        crate::csynth::Mt32Mode::Off => "off",
-                        crate::csynth::Mt32Mode::Auto => "auto",
-                    };
-                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.set_csynth_mt32_mode(value);
+                match request {
+                    Some(crate::csynth::PanelRequest::Mt32Mode(mode)) => {
+                        // The engine already switched; mirror the choice
+                        // into the session's options so a power cycle
+                        // keeps it.
+                        let value = match mode {
+                            crate::csynth::Mt32Mode::On => "on",
+                            crate::csynth::Mt32Mode::Off => "off",
+                            crate::csynth::Mt32Mode::Auto => "auto",
+                        };
+                        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                            sink.set_csynth_mt32_mode(value);
+                        }
                     }
+                    Some(crate::csynth::PanelRequest::ResetSoundfont) => {
+                        // Confirmed at the fascia. The swap rebuilds the
+                        // whole unit around the built-in bank, so the
+                        // panel that asked -- holding the Initializing...
+                        // screen -- is gone with it; the fresh panel
+                        // opens on the same hold, serves its second, and
+                        // boots.
+                        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                            sink.reset_csynth_soundfont();
+                        }
+                        if let Some(synth) = self
+                            .emu
+                            .bus_mut()
+                            .midi_serial_mut()
+                            .and_then(crate::midi::MidiSerialSink::csynth_mut)
+                        {
+                            synth.panel_begin_initializing();
+                        }
+                    }
+                    None => {}
                 }
             }
             CsynthPress::PowerOn(held) => {
-                // Both INSTRUMENT halves held through the power-on put
-                // the default soundfont back before the unit comes up.
-                let reset_font =
-                    held == [crate::csynth::Button::Both(crate::csynth::Pair::Instrument)];
-                if reset_font {
-                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.reset_csynth_soundfont();
-                    }
-                }
                 self.set_csynth_powered(true);
                 let came_up = if let Some(synth) = self
                     .emu
@@ -6349,20 +6424,15 @@ impl App {
                     .and_then(crate::midi::MidiSerialSink::csynth_mut)
                 {
                     // What was held on the fascia through the power-on
-                    // reaches the unit the way it reads its own buttons.
-                    if !reset_font {
-                        synth.panel_power_on_held(&held);
-                    }
+                    // reaches the unit the way it reads its own buttons
+                    // -- the factory questions included.
+                    synth.panel_power_on_held(&held);
                     true
                 } else {
                     false
                 };
                 if came_up {
-                    self.show_osd(if reset_font {
-                        "Coppersynth: default soundfont"
-                    } else {
-                        "Coppersynth: power on"
-                    });
+                    self.show_osd("Coppersynth: power on");
                 } else {
                     // Asked to switch on and it did not: say why.
                     self.report_csynth();
@@ -6381,8 +6451,8 @@ impl App {
     #[cfg(feature = "coppersynth")]
     fn load_csynth_soundfont(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Choose a soundfont")
-            .add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
+            .set_title("Choose a SoundFont")
+            .add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
             .pick_file();
         let Some(path) = picked else {
             return;
@@ -6775,6 +6845,7 @@ impl App {
 
     /// Close the menu and forget where it was open to.
     fn close_menu(&mut self) {
+        self.menu_hover_arm = None;
         self.ui.menu_open = false;
         self.ui.menu_rows = Vec::new();
         self.ui.menu_nav.reset();
@@ -8753,7 +8824,7 @@ impl App {
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
             #[cfg(feature = "coppersynth")]
             LauncherField::CsynthSoundfont => {
-                dialog.add_filter("Soundfonts", &["sf2", "SF2", "zip", "ZIP"])
+                dialog.add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
             }
             // SCSI, IDE, and lide drive slots all take hard disks or CD
             // images (a cue/iso/chd attaches a CD-ROM drive at that slot,

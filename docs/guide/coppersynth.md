@@ -15,7 +15,7 @@ plays MIDI music and Amiga sound effects gets both.
 The serial port has to be in MIDI mode with Coppersynth as its output. In
 the launcher, that is the **I/O Ports** tab (its Serial Port page): set
 **Device / Mode** to `MIDI`, then **MIDI output** to `Coppersynth`.
-Choosing it reveals the rest of the rows: the soundfont, the front panel,
+Choosing it reveals the rest of the rows: the SoundFont, the front panel,
 and MT-32 mode. In a running session the same choice is under the menu's
 **MIDI Out**, where Coppersynth is always offered. On the command line,
 `--midi-out coppersynth` selects it and implies MIDI mode.
@@ -40,7 +40,7 @@ midi_out = "coppersynth"
 | `coppersynth_mt32_mode` | `"auto"`, `"on"`, `"off"` | How MT-32 traffic is translated (default `"auto"`) |
 | `coppersynth_panel` | `true`/`false` | Show the front panel (default `false`) |
 
-## Soundfonts
+## SoundFonts
 
 Coppersynth carries its own bank -- **GeneralUser GS** by S. Christian
 Collins, an instrument library in its own right with the complete General
@@ -49,7 +49,8 @@ size -- and needs no files. To play a different one, set
 `[serial] coppersynth_soundfont`,
 use the launcher's **Browse**, or press the panel's **LOAD** button in a
 running session; `.sf2` files and `.zip` archives containing one both
-load, and **Reset** puts the built-in bank back. A bank with defects
+load, and the launcher's **Clear** (the menu's **Reset**) puts the
+built-in bank back. A bank with defects
 (loop points past its data are common in rips) is repaired at load rather
 than refused, and the log says what the mending cost. A bank that does
 not fill all 128 programs keeps honest numbering: an unfilled slot shows
@@ -97,18 +98,20 @@ The front panel has a few extra features similar to an SC-55.
 Latch/hold buttons with a right click on a switched-off unit, then
 press **POWER**.
 
-- Both **INSTRUMENT** buttons "reset" the unit and reload the builtin
-  SoundFont.
-- **INSTRUMENT ►** asks `MT-32, Sure?` with the ALL and MUTE lamps
-  flashing: **ALL** forces MT-32 mode on, **MUTE** forces it off, and
-  the choice lands in the configuration like the menu's.
+- **INSTRUMENT ◄** asks `Init MT-32, Sure?` with the ALL and MUTE
+  lamps flashing: **ALL** forces MT-32 mode on, **MUTE** forces it
+  off, and the choice lands in the configuration like the menu's.
+- **INSTRUMENT ►** asks `Init SoundFont,Sure?` the same way: **ALL**
+  holds the screen at `Initializing...` for a moment, reloads the
+  built-in SoundFont and boots; **MUTE** carries on with the loaded
+  one.
 - Both **PART** buttons start demo mode: the part box reads `S-1` and
   the unit plays its two bundled songs through its own engine. **ALL**
   plays, **MUTE** stops, the **PART** arrows change song. Power off to
   leave.
 - Both **MIDI CH** and both **INSTRUMENT** buttons show the Coppersynth
-  version and build date on the way up -- the fourth latch switches the
-  unit on by itself.
+  version and build date on the way up (**ALL** or **MUTE** carries on
+  the boot) -- the fourth latch switches the unit on by itself.
 
 ## Building without it
 
