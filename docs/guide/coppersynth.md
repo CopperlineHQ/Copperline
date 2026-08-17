@@ -26,19 +26,27 @@ In the configuration file:
 [serial]
 mode = "midi"
 midi_out = "coppersynth"
-
-[coppersynth]
-# soundfont = "/path/to/bank.sf2"   # override the built-in bank
-# mt32_mode = "auto"                # auto, on, or off
-# panel = true                      # start with the front panel shown
+# coppersynth_soundfont = "/path/to/bank.sf2"  # override the built-in bank
+# coppersynth_mt32_mode = "auto"               # auto, on, or off
+# coppersynth_panel = true                     # start with the front panel shown
 ```
+
+## `[serial]` keys
+
+| Key | Values | Meaning |
+|---|---|---|
+| `midi_out` | `"coppersynth"` | Play to the built-in synthesizer instead of a host endpoint |
+| `coppersynth_soundfont` | path | A bank to play instead of the built-in one (`.sf2`, or a `.zip` holding one) |
+| `coppersynth_mt32_mode` | `"auto"`, `"on"`, `"off"` | How MT-32 traffic is translated (default `"auto"`) |
+| `coppersynth_panel` | `true`/`false` | Show the front panel (default `false`) |
 
 ## Soundfonts
 
 Coppersynth carries its own bank -- **GeneralUser GS** by S. Christian
 Collins, an instrument library in its own right with the complete General
 MIDI sound set, SFX bank and drum kits included, at a very reasonable
-size -- and needs no files. To play a different one, set `[coppersynth] soundfont`,
+size -- and needs no files. To play a different one, set
+`[serial] coppersynth_soundfont`,
 use the launcher's **Browse**, or press the panel's **LOAD** button in a
 running session; `.sf2` files and `.zip` archives containing one both
 load, and **Reset** puts the built-in bank back. A bank with defects
@@ -60,7 +68,8 @@ CM-64/32L drum kit, MT-32 rhythm selects it automatically.
 
 ## The front panel
 
-**Front panel** in the launcher row, the menu toggle, or `[coppersynth] panel`
+**Front panel** in the launcher row, the menu toggle, or
+`[serial] coppersynth_panel`
 puts the module's fascia under the display: the backlit LCD with the part
 values, the sixteen-part level meters, and the sound's name -- a game's
 MT-32 instrument uploads show under their own names. Buttons press with a

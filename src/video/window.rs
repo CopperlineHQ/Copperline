@@ -10039,7 +10039,7 @@ impl App {
                 .bus_mut()
                 .midi_serial_mut()
                 .is_some_and(|sink| sink.csynth_selected());
-            self.set_csynth_panel_shown(fitted && cfg.csynth.panel);
+            self.set_csynth_panel_shown(fitted && cfg.serial.coppersynth_panel);
         }
         self.ui.menu_open = false;
         self.ui.panel = None;

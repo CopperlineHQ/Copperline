@@ -2057,8 +2057,8 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             #[cfg(feature = "coppersynth")]
             {
                 sink.set_csynth_options(crate::csynth::CsynthOptions {
-                    soundfont: cfg.csynth.soundfont.clone(),
-                    mt32_mode: cfg.csynth.mt32_mode.clone(),
+                    soundfont: cfg.serial.coppersynth_soundfont.clone(),
+                    mt32_mode: cfg.serial.coppersynth_mt32_mode.clone(),
                 });
                 if wants_csynth {
                     sink.set_output_endpoint(Some(crate::config::MIDI_OUT_CSYNTH));

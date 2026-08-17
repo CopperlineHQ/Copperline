@@ -27,7 +27,7 @@ pub const SOUNDFONT_NAME: &str = "GeneralUser-GS.sf2";
 /// needs no file at all: Coppersynth embeds its own.
 pub const SOUNDFONT_ZIP_NAME: &str = "GeneralUser-GS.zip";
 
-/// The `[coppersynth]` settings the device is fitted with.
+/// The `[serial] coppersynth_*` settings the device is fitted with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CsynthOptions {
     /// An explicit soundfont; unset means the search path below.
@@ -44,13 +44,13 @@ impl CsynthOptions {
             Some(s) if s.eq_ignore_ascii_case("on") => Ok(Mt32Mode::On),
             Some(s) if s.eq_ignore_ascii_case("off") => Ok(Mt32Mode::Off),
             Some(other) => Err(anyhow!(
-                "[coppersynth] mt32_mode must be \"auto\", \"on\", or \"off\", got {other:?}"
+                "[serial] coppersynth_mt32_mode must be \"auto\", \"on\", or \"off\", got {other:?}"
             )),
         }
     }
 }
 
-/// Which soundfont overrides the bundled bank, if any: `[coppersynth] soundfont`
+/// Which soundfont overrides the bundled bank, if any: `[serial] coppersynth_soundfont`
 /// first, then `COPPERLINE_SOUNDFONT`, then a file placed beside the
 /// executable or in the `share/copperline` layout an installed package
 /// uses. `None` means Coppersynth's own bundled GeneralUser GS -- there
@@ -61,7 +61,7 @@ pub fn find_soundfont(explicit: Option<&std::path::Path>) -> Result<Option<PathB
             return Ok(Some(path.to_path_buf()));
         }
         return Err(anyhow!(
-            "[coppersynth] soundfont {} does not exist",
+            "[serial] coppersynth_soundfont {} does not exist",
             path.display()
         ));
     }

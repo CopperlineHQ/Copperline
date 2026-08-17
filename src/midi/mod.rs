@@ -502,7 +502,8 @@ impl MidiSerialSink {
         self.csynth_selected = false;
     }
 
-    /// The `[coppersynth]` settings the synth is fitted with when selected.
+    /// The `[serial] coppersynth_*` settings the synth is fitted with when
+    /// selected.
     #[cfg(feature = "coppersynth")]
     pub fn set_csynth_options(&mut self, options: crate::csynth::CsynthOptions) {
         self.csynth_options = options;
