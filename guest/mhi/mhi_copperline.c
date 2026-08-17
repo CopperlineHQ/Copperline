@@ -337,13 +337,15 @@ ULONG i_MHIQuery(ULONG query __asm("d1"), struct MHICopperlineBase *base __asm("
             return MHIF_SUPPORTED;
 
         /* The seven params this board's PARAM_SELECT table defines (mhi.md
-         * "Param latches") are only stored, never applied to PCM -- that's
-         * M4 work (docs/internals/mhi.md, PR notes). Reporting these as
-         * MHIF_SUPPORTED here would tell a client its `MHISetParam` calls
-         * are audible, which they are not; report unsupported until PCM
-         * behavior lands, at which point this should return MHIF_SUPPORTED
-         * again (translate_param() above keeps the same seven-entry list
-         * either way, since the board still needs to store the latch). */
+         * "Param latches") always exist and round-trip, but whether
+         * `MHISetParam` calls are actually *audible* depends on the board's
+         * own CAPS bit 6 (mhi.md "M4: the DSP chain") -- reading it here
+         * rather than hardcoding MHIF_SUPPORTED/UNSUPPORTED is what lets
+         * this one library binary answer correctly against both an M1-M3
+         * board (latches inert) and an M4-or-later board (latches audible)
+         * with no rebuild needed either way (translate_param() above keeps
+         * the same seven-entry list regardless, since the board still
+         * needs to store the latch even when CAPS says it's inert). */
         case MHIQ_VOLUME_CONTROL:
         case MHIQ_PANNING_CONTROL:
         case MHIQ_BASS_CONTROL:
@@ -351,7 +353,7 @@ ULONG i_MHIQuery(ULONG query __asm("d1"), struct MHICopperlineBase *base __asm("
         case MHIQ_TREBLE_CONTROL:
         case MHIQ_CROSSMIXING:
         case MHIQ_PREFACTOR_CONTROL:
-            return MHIF_UNSUPPORTED;
+            return (caps & MHI_CAPS_PARAMS_APPLIED) ? MHIF_SUPPORTED : MHIF_UNSUPPORTED;
 
         /* Reserved param-index territory (mhi.md: indices 7-65535,
          * "unimplemented in this version") -- no 5/10-band EQ yet. */

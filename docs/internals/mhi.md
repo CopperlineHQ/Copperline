@@ -57,7 +57,7 @@ implements degrades safely on old fields rather than reading garbage. See
 
 | Offset | Name | Width | Access | Reset value | Group |
 |---|---|---|---|---|---|
-| `0x00` | `VERSION` | word | RO | `0x0001` | Capability/version |
+| `0x00` | `VERSION` | word | RO | `0x0002` | Capability/version |
 | `0x02` | `CAPS` | word | RO | board-fixed | Capability/version |
 | `0x04` | `STATUS` | word | RO | `0x0000` (STOPPED) | Status/control |
 | `0x06` | `CONTROL` | word | WO | -- | Status/control |
@@ -84,7 +84,8 @@ autoconfig identity.
 ### Capability/version registers
 
 - **`VERSION`** (`0x00`, RO) -- the register-protocol version this board
-  implements, currently `1`. A guest library reads this once at
+  implements, currently `2` (bumped from `1` by M4 -- see
+  [Versioning](#versioning)'s worked example). A guest library reads this once at
   `FindConfigDev` time and refuses to drive a board whose major protocol
   it does not understand (see [Versioning](#versioning)).
 - **`CAPS`** (`0x02`, RO) -- a bitmask of the MPEG formats and bitrate
@@ -98,7 +99,8 @@ autoconfig identity.
   | 3 | Layer III supported |
   | 4 | CBR (constant bitrate) supported |
   | 5 | VBR accepted as input, including re-entry at an arbitrary (non-frame-aligned) byte offset -- see [Seek-entry hardening](#seek-entry-hardening) |
-  | 6-15 | reserved, read as 0 |
+  | 6 | Param latches are applied to decoded PCM (see [Param latches](#param-latches)) |
+  | 7-15 | reserved, read as 0 |
 
   M1-M2 sets bits 0-5 (MPEG-1/2/2.5, Layer III, CBR, VBR) and no others --
   Layer I/II are not implemented, so bits for them do not exist in this
@@ -113,11 +115,17 @@ autoconfig identity.
   no seek call of its own), so M3 only proves and documents a stronger
   guarantee about behavior the board's registers never described a limit
   on in the first place -- not a change to any offset, width, access
-  rule, or bit meaning `VERSION` exists to gate. This register is what the
-  guest library's `MHIQuery` handler
-  consults for `MHIQ_MPEG1`/`MHIQ_MPEG2`/`MHIQ_MPEG25`/`MHIQ_LAYER3`/
+  rule, or bit meaning `VERSION` exists to gate. **M4** adds bit 6
+  (`VERSION` 2 -- see [Versioning](#versioning)), a genuine behavior
+  change unlike bit 5's rewording. This register is what the guest
+  library's `MHIQuery` handler consults for
+  `MHIQ_MPEG1`/`MHIQ_MPEG2`/`MHIQ_MPEG25`/`MHIQ_LAYER3`/
   `MHIQ_VARIABLE_BITRATE` -- it is genuine hardware-reported capability,
-  unlike decoder identity (below).
+  unlike decoder identity (below). Bit 6 is what lets a single guest
+  library binary answer correctly against both an M1-M3 board (latches
+  exist but are inert) and an M4 board (latches are audible): the library
+  reads this bit at `FindConfigDev` time rather than assuming its own
+  build date implies the board's behavior.
 
   Decoder identity strings (`MHIQ_DECODER_NAME`, `MHIQ_DECODER_VERSION`,
   `MHIQ_AUTHOR`, `MHIQ_CAPABILITIES`'s MIME-type string,
@@ -318,13 +326,126 @@ regardless of how many parameters the guest library ends up exposing.
   guest library's own bookkeeping the only source of truth, which this
   avoids).
 
-  **M1-M2 scope**: writes latch the value and it reads back correctly;
-  nothing about decoded audio changes yet. **M4** connects these latches
-  to the actual PCM path (volume/pan as post-decode gain and stereo
-  placement, tone controls as a simple filter bank) -- this is why the
-  register shape is fixed now: M4 changes what a latch *does*, never
+  **M1-M3 scope**: writes latch the value and it reads back correctly;
+  nothing about decoded audio changes. **M4** (`VERSION` 2, `CAPS` bit 6)
+  connects these latches to the actual PCM path -- this is why the
+  register shape was fixed from M1: M4 changes what a latch *does*, never
   where it lives or how it's addressed, so no guest library rebuild is
-  needed when M4 lands.
+  needed to keep talking to the register file, only to answer `MHIQuery`
+  correctly (see `CAPS` bit 6 above).
+
+#### M4: the DSP chain
+
+Every latch is applied, every produced sample, in one fixed order --
+order is audible, so it is as much a part of the contract as the latch
+ranges themselves:
+
+```text
+decoded PCM -> prefactor -> bass -> mid -> treble -> volume -> pan -> crossmix -> (FIFO -> resampler)
+```
+
+This runs entirely in the causal native-rate producer, *before* the FIFO
+a non-causal resampler pulls from (see
+[Determinism and timing](#determinism-and-timing)) -- so a latch write's
+effect lands at the decoded stream's own sample rate, and the resampler
+never needs to know params exist. A latch change takes effect at the next
+sample this chain produces; there is no ramping or click/zipper
+suppression in this version (matching a cheap hardware decoder with no
+smoothing of its own -- a later `VERSION` could add it without moving any
+existing field). Filter state (see "Tone filters" below) is genuine
+machine state and round-trips through savestates exactly like the
+decoder's own reservoir does.
+
+- **Volume** (index `0`) -- linear gain, `gain = value / 100.0`: `0` is
+  exact digital silence, `100` (default) is unity (matches the range's
+  own "100 = 0 dB" definition -- unity is the *maximum*, there is no
+  boost). Applied as `sample * gain` to both channels identically.
+- **Prefactor** (index `6`) -- linear gain, `gain = value / 50.0`: `50`
+  (default) is unity, `100` is `2.0` (+6.02 dB headroom, matching MHI's
+  own "50 = unity" definition needing boost room above it), `0` is
+  silence. Same shape as volume, different curve -- prefactor is meant as
+  a pre-EQ trim a client rides independently of the user-facing volume
+  control.
+- **Panning** (index `1`) -- a linear **balance** control, not a mono-
+  source pan pot: the decoded stream is already stereo (or joint-stereo
+  collapsed to two channels by the decoder), so "panning" here scales the
+  two existing channels' gains rather than placing a single signal in a
+  stereo field. Let `p = value / 100.0`:
+
+  ```text
+  gain_left  = min(1.0, 2.0 * (1.0 - p))
+  gain_right = min(1.0, 2.0 * p)
+  ```
+
+  At `p = 0.5` (`value = 50`, default) both gains are exactly `1.0` --
+  identity, chosen deliberately so the default param set is a no-op on
+  decoded audio (every param's default reduces to unity/identity by this
+  same reasoning). At `p = 0` (hard left) `gain_right = 0` (right channel
+  silenced, left untouched); at `p = 1` (hard right), the mirror image.
+  Between `0` and `0.5` only the right channel's gain moves (linearly `0`
+  to `1`); between `0.5` and `1` only the left channel's gain moves
+  (linearly `1` to `0`) -- a piecewise-linear crossfade, hence "linear":
+  no constant-power (sine/cosine) law, no dB curve, exactly reproducible
+  with one multiply and one `min` per channel.
+- **Crossmixing** (index `5`) -- stereo-to-mono blend. Let
+  `mix = value / 100.0` and `mono = (left + right) / 2.0`:
+
+  ```text
+  left'  = left  * (1.0 - mix) + mono * mix
+  right' = right * (1.0 - mix) + mono * mix
+  ```
+
+  `0` (default) leaves both channels untouched; `100` collapses both
+  channels to the identical mono sum (`left' == right'` exactly).
+- **Tone filters: bass/mid/treble** (indices `2`/`3`/`4`) -- a fixed
+  three-band filter bank, one 2nd-order IIR (biquad) section per band,
+  run independently on each channel (so stereo image is preserved except
+  for whatever a shelf/peak filter itself does to level). Each band's
+  gain in dB is `(value - 50.0) / 50.0 * 12.0`: `50` (default) is exactly
+  `0.0` dB, i.e. a unity-coefficient filter that is the identity
+  transform in exact arithmetic (`0` and `100` are `-12` dB / `+12` dB,
+  a conventional EQ range). Corner frequencies and filter types, computed
+  against whatever the decoder's *current native sample rate* is (the
+  same rate the resampler keys its cache on):
+
+  | Band | Type | Corner | Notes |
+  |---|---|---|---|
+  | Bass | Low shelf | 200 Hz | RBJ Audio EQ Cookbook `lowShelf`, shelf slope `S = 1.0` |
+  | Mid | Peaking (bell) | 1000 Hz | RBJ Cookbook `peakingEQ`, `Q = 1.0` (about one octave wide) |
+  | Treble | High shelf | 4000 Hz | RBJ Cookbook `highShelf`, shelf slope `S = 1.0` |
+
+  Corner frequencies are clamped to `min(corner_hz, sample_rate_hz *
+  0.45)` before the coefficients are derived, so a low-sample-rate MPEG
+  stream (MPEG-2.5's 8/11.025/12 kHz modes) never asks for a corner at or
+  past Nyquist -- the filter degrades gracefully (a lower effective
+  corner) rather than becoming numerically unstable. The three bands run
+  in series, bass first, in the fixed order shown above; each is
+  transparent (unity, no phase or magnitude change beyond floating-point
+  rounding) at its own default value regardless of what the other two
+  bands are doing, since each is an independent biquad section.
+
+  Coefficient derivation (the RBJ Cookbook formulas, reproduced here so
+  an independent implementation matches bit-for-bit modulo its own
+  floating-point unit's `sin`/`cos`/`sqrt`): with `A = 10^(dBgain/40)`,
+  `w0 = 2*pi*f0/Fs`, `cs = cos(w0)`, `sn = sin(w0)`,
+
+  - Peaking (mid): `alpha = sn / (2*Q)`; `b0=1+alpha*A, b1=-2*cs,
+    b2=1-alpha*A, a0=1+alpha/A, a1=-2*cs, a2=1-alpha/A`.
+  - Low shelf (bass): `alpha = sn/2 * sqrt((A + 1/A)*(1/S - 1) + 2)`;
+    `b0=A*((A+1)-(A-1)*cs+2*sqrt(A)*alpha), b1=2*A*((A-1)-(A+1)*cs),
+    b2=A*((A+1)-(A-1)*cs-2*sqrt(A)*alpha), a0=(A+1)+(A-1)*cs+2*sqrt(A)*alpha,
+    a1=-2*((A-1)+(A+1)*cs), a2=(A+1)+(A-1)*cs-2*sqrt(A)*alpha`.
+  - High shelf (treble): mirrors the low shelf with every `cs` sign
+    flipped in the `(A-1)`/`(A+1)` grouping: `b0=A*((A+1)+(A-1)*cs+
+    2*sqrt(A)*alpha), b1=-2*A*((A-1)+(A+1)*cs),
+    b2=A*((A+1)+(A-1)*cs-2*sqrt(A)*alpha), a0=(A+1)-(A-1)*cs+2*sqrt(A)*alpha,
+    a1=2*((A-1)-(A+1)*cs), a2=(A+1)-(A-1)*cs-2*sqrt(A)*alpha`.
+
+  Every `b`/`a` coefficient above is then normalized by dividing through
+  by `a0` (the classic Direct Form II transposed structure Copperline's
+  own `AnalogLedFilter`/`BiquadLowPass` -- `src/chipset/paula.rs` -- already
+  uses for the LED filter, reused here rather than inventing a second
+  filter-processing convention in the same codebase).
 
 ## Access size and alignment
 
@@ -509,7 +630,7 @@ protocol, and the split is intentional, not an oversight:
 | `MHIQ_IS_HARDWARE`/`_IS_68K`/`_IS_PPC` | Guest library -- static answers (this is a real register-mailbox device the library talks to over the Zorro bus, so `MHIQ_IS_HARDWARE` answers true; it runs no 68k/PPC code of its own, so both processor queries answer false) |
 | MPEG version/layer/bitrate-mode support (`MHIQ_MPEG1`/`_MPEG2`/`_MPEG25`, `MHIQ_LAYER3`, `MHIQ_VARIABLE_BITRATE`) | `CAPS` register (`0x02`) -- genuinely board-reported, since a future board revision's decoder could differ |
 | `MHIQ_JOINT_STEREO` | Guest library -- fixed `MHIF_SUPPORTED`; decoding joint-stereo Layer III is inherent to any conforming decoder, not a distinct board capability worth its own `CAPS` bit |
-| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- `MHIF_UNSUPPORTED` in this M1-M2 scope for every one of these, including the seven params this board's [param latch](#param-latches) table already defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): the latches exist and round-trip, but nothing yet applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not. **M4** connects the latches to the PCM path (see above); only then does this answer flip to `MHIF_SUPPORTED` for those seven. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
+| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- keyed off `CAPS` bit 6 for the seven params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): `MHIF_UNSUPPORTED` against an M1-M3 board (bit 6 clear -- the latches exist and round-trip, but nothing applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not), `MHIF_SUPPORTED` against an M4-or-later board (bit 6 set). One guest library binary answers correctly either way -- see `CAPS`'s own bit-6 note above. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless of bit 6, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
 | Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely a host-side (Amiga-side) bookkeeping concept; the board has no notion of "a handle" and, in this M1-M2 scope, serves exactly one client at a time |
 | Transport (`MHIPlay`/`MHIStop`/`MHIPause`), status (`MHIGetStatus`), queueing (`MHIQueueBuffer`/`MHIGetEmpty`), params (`MHISetParam`) | Guest library translates 1:1 to/from this board's `CONTROL`/`STATUS`/descriptor-queue/`PARAM_*` registers |
 
@@ -537,6 +658,22 @@ between versions is not permitted by this spec's own conventions; a
 protocol revision that needs to do that must move to a new offset and
 leave the old one reading its previous semantics (or a fixed sentinel) for
 compatibility, exactly like any other stable ABI.
+
+**Worked example: `VERSION` 1 -> 2 (M4).** M4 makes the param latches
+(indices `0`-`6`, already defined and already readable/writable since
+M1) actually audible. No offset moves, no access rule changes, and every
+field that existed at `VERSION` 1 keeps exactly its `VERSION` 1 meaning
+-- but the *documented semantic* of writing `PARAM_VALUE` changes (from
+"latched, otherwise inert" to "affects the next produced sample"), which
+this document's own rule above ("any... semantic described above is a
+protocol change") requires a bump for, independent of whether a guest
+built against `VERSION` 1 would even notice (it would: its own decoded
+audio starts changing when it writes params it always assumed were
+no-ops). `CAPS` gains bit 6 at a previously-reserved position (`6-15
+reserved` at `VERSION` 1 already defined that range as inert, so an old
+board and a new board agree on what an old guest sees there) -- exactly
+the "new fields land at previously-reserved offsets" case this section
+describes as not needing special-casing beyond the bump itself.
 
 ## Porting to another emulator
 
@@ -612,7 +749,23 @@ content above.
   MP3 input buffer, not yet root-caused to a specific missing field --
   see that test's long comment for the investigation.
 - **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
-  `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**.
+  `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**;
+  M4's `ToneFilterBank` (bass/mid/treble biquad coefficients and filter
+  memory -- genuine machine state, the same reasoning as the decoder's own
+  reservoir) bumped it again to **58**.
+- **M4 DSP chain implementation**: `Biquad` is Direct Form II transposed,
+  reusing `src/chipset/paula.rs`'s `AnalogLedFilter`/`BiquadLowPass`
+  structure and `process` shape rather than a second filter convention in
+  the same codebase (see "Tone filters: bass/mid/treble" above for the RBJ
+  Cookbook coefficient formulas). `ToneFilterBank` recomputes coefficients
+  only when the latch values or the native sample rate actually change
+  (`retune_if_stale`), preserving each biquad's own `z1`/`z2` memory across
+  a recompute so a latch write never introduces a discontinuity beyond
+  what the new coefficients themselves imply. `STOP` (`cmd_stop`) and
+  `RESET` both clear that filter memory (`ToneFilterBank::clear_state`/a
+  fresh `ToneFilterBank`), matching the existing resampler-history-clear
+  reasoning in both places -- a stopped or reset stream's filter ringing
+  must not bleed into whatever plays next.
 - **Launcher**: the machine-configuration launcher's **I/O Ports** tab
   (Sound section) has a plain fit/don't-fit toggle for the board (same as
   Toccata, see [](toccata)'s "What's out of scope" section); host-side

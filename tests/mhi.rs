@@ -79,7 +79,7 @@ fn scratch_dir(name: &str) -> PathBuf {
 /// Every check line up to (and including) the final summary, as
 /// `(kind, rest)` where `kind` is `PASS`/`FAIL`/`INFO`/`SUMMARY`. `prefix`
 /// is the guest probe's own line prefix (`"MHITEST: "` for `mhitest.c`,
-/// `"MHISEEK: "` for `mhiseek.c`).
+/// `"MHISEEK: "` for `mhiseek.c`, `"MHIPARAM: "` for `mhiparam.c`).
 fn parse_probe_lines(output: &str, prefix: &str) -> Vec<(String, String)> {
     output
         .lines()
@@ -1030,6 +1030,219 @@ fn mhi_m3_seek_switches_from_tone_a_to_tone_b_across_a_stop() {
         late_880 > late_440 * 10.0,
         "expected 880 Hz dominant late in the capture (after the seek), got 440={late_440} \
          880={late_880}"
+    );
+
+    let _ = std::fs::remove_dir_all(&mount);
+    let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_file(&wav_path);
+    let _ = std::fs::remove_file(&shot);
+}
+// M4: a live MHISetParam mid-playback reaches the DSP chain end to end.
+// ---------------------------------------------------------------------
+
+const MHI_PARAM_TONE: &str = "tests/data/mhi/param_tone_cbr64_mono.mp3"; // 440 Hz, 3s
+
+/// Stage a boot volume that runs `mhiparam` (`guest/mhi/test/mhiparam.c`)
+/// against the committed tone fixture, mirroring `stage_m1_mount`'s
+/// `LIBS:`/`SYS:` layout.
+fn stage_param_mount(mount: &Path) {
+    let _ = std::fs::remove_dir_all(mount);
+    std::fs::create_dir_all(mount.join("S")).expect("create S/");
+    std::fs::create_dir_all(mount.join("Libs")).expect("create Libs/");
+    std::fs::copy(
+        repo_root().join("guest/mhi/mhi_copperline.library"),
+        mount.join("Libs").join("mhi_copperline.library"),
+    )
+    .expect("stage mhi_copperline.library");
+    std::fs::copy(
+        repo_root().join("guest/mhi/test/mhiparam"),
+        mount.join("mhiparam"),
+    )
+    .expect("stage mhiparam");
+    std::fs::copy(repo_root().join(MHI_PARAM_TONE), mount.join("tone.mp3"))
+        .expect("stage tone fixture");
+    std::fs::write(
+        mount.join("S").join("Startup-Sequence"),
+        "FailAt 21\n\
+         SYS:mhiparam SYS:tone.mp3 >SYS:mhiparam.out\n\
+         Echo >\"SYS:done\" \"done\"\n",
+    )
+    .expect("write Startup-Sequence");
+}
+
+fn write_param_config(cfg_path: &Path, mount: &Path) {
+    std::fs::write(
+        cfg_path,
+        format!(
+            "rom = \"<bundled-aros>\"\n\n\
+             [machine]\n\
+             rtc_time = \"2005-03-18 01:58:29\"\n\
+             rtc_frozen = true\n\n\
+             [mhi]\n\
+             enabled = true\n\n\
+             [[filesys]]\n\
+             path = '{}'\n\
+             volume = \"MHIPARAM\"\n\
+             bootpri = 6\n",
+            mount.display()
+        ),
+    )
+    .expect("write test config");
+}
+
+/// Generous margin over the fixture's 3s duration plus boot -- same
+/// order-of-magnitude reasoning as `M2_RUN_SECS`.
+const PARAM_RUN_SECS: &str = "30";
+
+/// End-to-end proof of MHI-PLAN-M3-M4.md WP4.5: `mhiparam` plays
+/// `tone.mp3` (440 Hz, 3s), and ~1s in issues a live `MHISetParam` volume
+/// drop (100 -> 20) and hard pan-right (50 -> 100) together, mid-playback.
+/// Proves the capture shows both effects at the expected emulated moment:
+/// before the change, both channels carry the tone near full amplitude;
+/// after it, overall RMS drops sharply *and* the left channel is
+/// specifically far quieter than the right (the pan, not just the volume,
+/// took effect) -- not a change the M1-M3 "latched, otherwise inert"
+/// behavior could ever produce, so this also proves the board's `CAPS`
+/// bit 6 upgrade is real, not just documented.
+#[test]
+#[ignore = "runs the emulator"]
+fn mhi_m4_live_setparam_changes_volume_and_balance_mid_playback() {
+    let _guard = lock_emulator_tests();
+    let mount = scratch_dir("m4-param-mount");
+    stage_param_mount(&mount);
+    let cfg_path = scratch_dir("m4-param-cfg").with_extension("toml");
+    write_param_config(&cfg_path, &mount);
+    let wav_path = scratch_dir("m4-param").with_extension("wav");
+    let shot = scratch_dir("m4-param-shot").with_extension("png");
+
+    let out = run_copperline(&[
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--noaudio",
+        "--audio-wav",
+        wav_path.to_str().unwrap(),
+        "--screenshot-after",
+        PARAM_RUN_SECS,
+        shot.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "emulator run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        mount.join("done").is_file(),
+        "Startup-Sequence never reached its completion marker under {}",
+        mount.display()
+    );
+
+    let raw = std::fs::read_to_string(mount.join("mhiparam.out"))
+        .unwrap_or_else(|e| panic!("reading mhiparam.out under {}: {e}", mount.display()));
+    let lines = parse_probe_lines(&raw, "MHIPARAM: ");
+    assert!(
+        !lines.is_empty(),
+        "no MHIPARAM: lines captured; raw output:\n{raw}"
+    );
+    let fails: Vec<&(String, String)> = lines.iter().filter(|(k, _)| k == "FAIL").collect();
+    assert!(
+        fails.is_empty(),
+        "mhiparam reported failing checks: {fails:?}\nfull output:\n{raw}"
+    );
+    let (last_kind, last_rest) = lines.last().expect("no MHIPARAM: lines captured");
+    assert_eq!(
+        (last_kind.as_str(), last_rest.as_str()),
+        ("SUMMARY", "PASS"),
+        "mhiparam did not end with a PASS summary; full output:\n{raw}"
+    );
+
+    let (channels, sample_rate, samples) = read_wav_f32(&wav_path);
+    assert_eq!(channels, 2, "expected stereo capture");
+    assert_eq!(sample_rate, 44100, "expected 44.1 kHz capture");
+
+    // Find playback onset the same way the M2 tone test does implicitly
+    // (fixed offset into a known-quiet boot), but robustly: scan for the
+    // first 0.3s window whose RMS clears a real-tone threshold.
+    let total_secs = (samples.len() / channels as usize) as f64 / sample_rate as f64;
+    let mut onset = None;
+    let mut t = 0.0;
+    while t + 0.3 <= total_secs {
+        let window = left_channel_window(channels, sample_rate, &samples, t, 0.3);
+        let rms = (window.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()
+            / window.len() as f64)
+            .sqrt();
+        if rms > 0.03 {
+            onset = Some(t);
+            break;
+        }
+        t += 0.2;
+    }
+    let onset = onset.expect("no window ever cleared the RMS threshold");
+
+    // Before the change (mhiparam waits MHIPARAM_CHANGE_AT_SECS = 1s
+    // before issuing MHISetParam): both channels near full amplitude,
+    // roughly equal (panning still centered).
+    let before_l = left_channel_window(channels, sample_rate, &samples, onset + 0.2, 0.3);
+    let before_r = {
+        let start = ((onset + 0.2) * sample_rate as f64) as usize;
+        let len = (0.3 * sample_rate as f64) as usize;
+        (start..start + len)
+            .filter_map(|frame| samples.get(frame * channels as usize + 1).copied())
+            .collect::<Vec<_>>()
+    };
+    let rms_before_l = (before_l
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        / before_l.len() as f64)
+        .sqrt();
+    let rms_before_r = (before_r
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        / before_r.len() as f64)
+        .sqrt();
+    assert!(
+        rms_before_l > 0.05,
+        "expected audible energy before the param change, got RMS {rms_before_l}"
+    );
+    assert!(
+        (rms_before_l - rms_before_r).abs() < rms_before_l * 0.2,
+        "expected roughly balanced channels before the pan change, got L={rms_before_l} \
+         R={rms_before_r}"
+    );
+
+    // Well after the change (past both the 1s wait and the change taking
+    // effect): overall level down sharply, and left specifically much
+    // quieter than right.
+    let after_l = left_channel_window(channels, sample_rate, &samples, onset + 1.5, 0.3);
+    let after_r = {
+        let start = ((onset + 1.5) * sample_rate as f64) as usize;
+        let len = (0.3 * sample_rate as f64) as usize;
+        (start..start + len)
+            .filter_map(|frame| samples.get(frame * channels as usize + 1).copied())
+            .collect::<Vec<_>>()
+    };
+    let rms_after_l = (after_l
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        / after_l.len() as f64)
+        .sqrt();
+    let rms_after_r = (after_r
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        / after_r.len() as f64)
+        .sqrt();
+    assert!(
+        rms_after_l < rms_before_l * 0.3,
+        "expected the volume drop to sharply reduce the left channel, got before={rms_before_l} \
+         after={rms_after_l}"
+    );
+    assert!(
+        rms_after_l < rms_after_r * 0.3,
+        "expected the hard pan-right to make left much quieter than right after the change, \
+         got L={rms_after_l} R={rms_after_r}"
     );
 
     let _ = std::fs::remove_dir_all(&mount);

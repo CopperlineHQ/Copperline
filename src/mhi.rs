@@ -78,12 +78,16 @@ const OFF_PARAM_SELECT: u32 = 0x1C;
 const OFF_PARAM_VALUE: u32 = 0x1E;
 
 /// The register-protocol version this board implements (`docs/internals/
-/// mhi.md`'s "Versioning").
-const VERSION: u16 = 1;
+/// mhi.md`'s "Versioning"). Bumped 1 -> 2 by M4: the param latches'
+/// documented semantic changed from "latched, otherwise inert" to
+/// "affects the next produced sample" -- see that section's worked
+/// v1->v2 example.
+const VERSION: u16 = 2;
 
-/// MPEG-1/2/2.5, Layer III, CBR, and VBR-as-input (no seek) -- bits 0-5; see
-/// the `CAPS` table. Bits 6-15 (Layer I/II, a future capability) stay 0.
-const CAPS: u16 = 0b0011_1111;
+/// MPEG-1/2/2.5, Layer III, CBR, VBR-as-input (no seek), and (M4) param
+/// latches applied to decoded PCM -- bits 0-6; see the `CAPS` table. Bits
+/// 7-15 (Layer I/II, the 5/10-band EQ, a future capability) stay 0.
+const CAPS: u16 = 0b0111_1111;
 
 /// `QUEUE_DEPTH`'s fixed value.
 const QUEUE_DEPTH: u16 = 16;
@@ -308,6 +312,240 @@ struct CurrentFrame {
     completes: u32,
 }
 
+// ---------------------------------------------------------------------
+// M4: the param-latch DSP chain (docs/internals/mhi.md's "M4: the DSP
+// chain"). Runs in the causal native-rate producer, before the FIFO a
+// non-causal resampler pulls from -- see that section and "Determinism
+// and timing".
+// ---------------------------------------------------------------------
+
+/// Volume (index 0): `value / 100.0` -- `0` silence, `100` (default) unity.
+fn volume_gain(value: u16) -> f32 {
+    f32::from(value) / 100.0
+}
+
+/// Prefactor (index 6): `value / 50.0` -- `50` (default) unity, `100` is
+/// `2.0` (+6.02 dB headroom).
+fn prefactor_gain(value: u16) -> f32 {
+    f32::from(value) / 50.0
+}
+
+/// Panning (index 1): a linear balance control (not a constant-power pan
+/// law) -- `(gain_left, gain_right)`. Both are exactly `1.0` at `value =
+/// 50` (default), so the default param set is a no-op on decoded audio.
+fn pan_gains(value: u16) -> (f32, f32) {
+    let p = f32::from(value) / 100.0;
+    ((2.0 * (1.0 - p)).min(1.0), (2.0 * p).min(1.0))
+}
+
+/// Crossmixing (index 5): stereo-to-mono blend fraction, `value / 100.0`
+/// -- `0` (default) leaves channels untouched, `100` collapses both to
+/// the identical mono sum.
+fn crossmix_fraction(value: u16) -> f32 {
+    f32::from(value) / 100.0
+}
+
+fn apply_crossmix(left: f32, right: f32, mix: f32) -> (f32, f32) {
+    let mono = (left + right) * 0.5;
+    (
+        left * (1.0 - mix) + mono * mix,
+        right * (1.0 - mix) + mono * mix,
+    )
+}
+
+/// A tone band's gain in dB from its `0`-`100` latch value: `50`
+/// (default) is exactly `0.0` dB (identity filter).
+fn band_gain_db(value: u16) -> f32 {
+    (f32::from(value) - 50.0) / 50.0 * 12.0
+}
+
+/// One 2nd-order IIR section, Direct Form II transposed -- the same
+/// structure and `process` shape as `crate::chipset::paula`'s
+/// `BiquadLowPass`/`AnalogLedFilter`, reused here rather than inventing a
+/// second filter-processing convention in the same codebase. Holds only
+/// coefficients and state; coefficient derivation (RBJ Audio EQ Cookbook)
+/// lives in the `*_coeffs` constructors below, per docs/internals/mhi.md's
+/// "Tone filters: bass/mid/treble".
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl Biquad {
+    /// Corner frequencies are clamped below `sample_rate_hz * 0.45` before
+    /// coefficients are derived, so a low-sample-rate MPEG-2.5 stream
+    /// never asks for a corner at or past Nyquist.
+    fn clamp_corner(corner_hz: f32, sample_rate_hz: f32) -> f32 {
+        corner_hz.min(sample_rate_hz * 0.45)
+    }
+
+    fn peaking(corner_hz: f32, q: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let alpha = sn / (2.0 * q);
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cs;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cs;
+        let a2 = 1.0 - alpha / a;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    fn low_shelf(corner_hz: f32, shelf_slope: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let sqrt_a = a.sqrt();
+        let alpha = sn / 2.0 * ((a + 1.0 / a) * (1.0 / shelf_slope - 1.0) + 2.0).sqrt();
+
+        let b0 = a * ((a + 1.0) - (a - 1.0) * cs + 2.0 * sqrt_a * alpha);
+        let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cs);
+        let b2 = a * ((a + 1.0) - (a - 1.0) * cs - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) + (a - 1.0) * cs + 2.0 * sqrt_a * alpha;
+        let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cs);
+        let a2 = (a + 1.0) + (a - 1.0) * cs - 2.0 * sqrt_a * alpha;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    fn high_shelf(corner_hz: f32, shelf_slope: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let sqrt_a = a.sqrt();
+        let alpha = sn / 2.0 * ((a + 1.0 / a) * (1.0 / shelf_slope - 1.0) + 2.0).sqrt();
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cs + 2.0 * sqrt_a * alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cs);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cs - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cs + 2.0 * sqrt_a * alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cs);
+        let a2 = (a + 1.0) - (a - 1.0) * cs - 2.0 * sqrt_a * alpha;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn normalized(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    /// Replaces this section's coefficients with `new`'s, preserving `z1`/
+    /// `z2` (the filter's own memory) -- a latch write recomputes what the
+    /// filter *does* without discarding what it has already integrated,
+    /// avoiding a click that a full reset would introduce.
+    fn retune(&mut self, new: Biquad) {
+        self.b0 = new.b0;
+        self.b1 = new.b1;
+        self.b2 = new.b2;
+        self.a1 = new.a1;
+        self.a2 = new.a2;
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let output = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * output + self.z2;
+        self.z2 = self.b2 * input - self.a2 * output;
+        output
+    }
+
+    fn clear_state(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
+const BASS_CORNER_HZ: f32 = 200.0;
+const MID_CORNER_HZ: f32 = 1000.0;
+const MID_Q: f32 = 1.0;
+const TREBLE_CORNER_HZ: f32 = 4000.0;
+const SHELF_SLOPE: f32 = 1.0;
+
+/// The three-band bass/mid/treble filter bank, one independent `Biquad`
+/// per channel per band (stereo image preserved except for whatever a
+/// shelf/peak filter itself does to level). Recomputes coefficients only
+/// when the latch values or the native sample rate actually change (both
+/// are rare compared to per-sample processing), keeping each biquad's own
+/// `z1`/`z2` memory intact across a recompute.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ToneFilterBank {
+    bass_l: Biquad,
+    bass_r: Biquad,
+    mid_l: Biquad,
+    mid_r: Biquad,
+    treble_l: Biquad,
+    treble_r: Biquad,
+    /// `(bass_value, mid_value, treble_value, native_rate)` coefficients
+    /// were last derived for; `None` before the first sample (forces the
+    /// first `retune_if_stale` call to compute real coefficients rather
+    /// than trusting the all-zero `Default` state).
+    tuned_for: Option<(u16, u16, u16, u32)>,
+}
+
+impl ToneFilterBank {
+    fn retune_if_stale(&mut self, bass: u16, mid: u16, treble: u16, rate: u32) {
+        let key = (bass, mid, treble, rate);
+        if self.tuned_for == Some(key) {
+            return;
+        }
+        let rate_hz = rate as f32;
+        let bass_coeffs =
+            Biquad::low_shelf(BASS_CORNER_HZ, SHELF_SLOPE, band_gain_db(bass), rate_hz);
+        let mid_coeffs = Biquad::peaking(MID_CORNER_HZ, MID_Q, band_gain_db(mid), rate_hz);
+        let treble_coeffs =
+            Biquad::high_shelf(TREBLE_CORNER_HZ, SHELF_SLOPE, band_gain_db(treble), rate_hz);
+        self.bass_l.retune(bass_coeffs);
+        self.bass_r.retune(bass_coeffs);
+        self.mid_l.retune(mid_coeffs);
+        self.mid_r.retune(mid_coeffs);
+        self.treble_l.retune(treble_coeffs);
+        self.treble_r.retune(treble_coeffs);
+        self.tuned_for = Some(key);
+    }
+
+    fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let left = self
+            .treble_l
+            .process(self.mid_l.process(self.bass_l.process(left)));
+        let right = self
+            .treble_r
+            .process(self.mid_r.process(self.bass_r.process(right)));
+        (left, right)
+    }
+
+    /// Zeroes every band's `z1`/`z2` memory without discarding its tuned
+    /// coefficients (avoids an unnecessary recompute when the latch
+    /// values that produced them haven't changed) -- used by `STOP`, so a
+    /// stopped stream's filter ringing doesn't bleed into whatever plays
+    /// next, the same reasoning as `STOP`'s resampler-history clear.
+    fn clear_state(&mut self) {
+        self.bass_l.clear_state();
+        self.bass_r.clear_state();
+        self.mid_l.clear_state();
+        self.mid_r.clear_state();
+        self.treble_l.clear_state();
+        self.treble_r.clear_state();
+    }
+}
+
 /// The MHI board: `ZorroDevice` glue and register-window decode around
 /// [`Decoder`], plus the same two-cadence split as `Toccata` -- a causal
 /// native-rate producer (`advance_native`) that paces decode and
@@ -377,6 +615,9 @@ pub struct Mhi {
     /// Emulated Paula-clock ticks accumulated while stalled this way; see
     /// `MAX_STALL_TICKS`.
     stall_ticks: u64,
+    /// M4's bass/mid/treble filter bank -- see `docs/internals/mhi.md`'s
+    /// "M4: the DSP chain".
+    tone_filters: ToneFilterBank,
 }
 
 impl Mhi {
@@ -404,6 +645,7 @@ impl Mhi {
             resamplers: HashMap::new(),
             last_decode_stalled: false,
             stall_ticks: 0,
+            tone_filters: ToneFilterBank::default(),
         }
     }
 
@@ -547,6 +789,7 @@ impl Mhi {
         self.resamplers.clear();
         self.last_decode_stalled = false;
         self.stall_ticks = 0;
+        self.tone_filters.clear_state();
     }
 
     fn handle_doorbell(&mut self, host: &mut DeviceHost) {
@@ -732,17 +975,39 @@ impl Mhi {
         }
     }
 
+    /// Produces one native-rate sample: pulls the next raw decoded sample
+    /// from `current_frame`, runs it through the M4 param DSP chain (see
+    /// `docs/internals/mhi.md`'s "M4: the DSP chain" -- prefactor -> tone
+    /// filters -> volume -> pan -> crossmix, in that fixed order), and
+    /// pushes the result into `decoded` for the mixer-rate resampler to
+    /// pull from later.
     fn produce_one_sample(&mut self) {
         let frame = self
             .current_frame
             .as_mut()
             .expect("produce_one_sample requires a current frame");
-        let sample = frame.samples[frame.idx];
+        let (raw_l, raw_r) = frame.samples[frame.idx];
+        let rate = frame.rate;
         frame.idx += 1;
+        let frame_finished = frame.idx >= frame.samples.len();
+
+        let params = self.params;
+        self.tone_filters
+            .retune_if_stale(params[2], params[3], params[4], rate);
+        let pre = prefactor_gain(params[6]);
+        let (l, r) = self.tone_filters.process(raw_l * pre, raw_r * pre);
+        let vol = volume_gain(params[0]);
+        let (gain_l, gain_r) = pan_gains(params[1]);
+        let (l, r) = apply_crossmix(
+            l * vol * gain_l,
+            r * vol * gain_r,
+            crossmix_fraction(params[5]),
+        );
+
         if self.decoded.len() < DECODED_CAPACITY {
-            self.decoded.push_back(sample);
+            self.decoded.push_back((l, r));
         }
-        if frame.idx >= frame.samples.len() {
+        if frame_finished {
             let finished = self.current_frame.take().unwrap();
             self.finish_frame(&finished);
             self.acquire_next_frame();
@@ -893,6 +1158,13 @@ impl ZorroDevice for Mhi {
         self.resamplers.clear();
         self.last_decode_stalled = false;
         self.stall_ticks = 0;
+        // Same reasoning: a stale filter's z1/z2 memory would otherwise
+        // ring a few pre-reset samples into the freshly reset silence,
+        // even though `params` above already went back to their flat
+        // defaults (a `Default` bank + `tuned_for: None` forces
+        // `retune_if_stale` to genuinely recompute on the very next
+        // sample rather than trusting an unrelated stale cache key).
+        self.tone_filters = ToneFilterBank::default();
     }
 
     fn kind(&self) -> &'static str {
@@ -1024,8 +1296,8 @@ mod tests {
         let mut board = Mhi::new();
         let mut mem = memory(0x100);
         let mut host = DeviceHost::new(&mut mem);
-        assert_eq!(board.read(OFF_VERSION, 2, &mut host), 1);
-        assert_eq!(board.read(OFF_CAPS, 2, &mut host), 0x3F);
+        assert_eq!(board.read(OFF_VERSION, 2, &mut host), 2);
+        assert_eq!(board.read(OFF_CAPS, 2, &mut host), 0x7F);
         assert_eq!(board.read(OFF_QUEUE_DEPTH, 2, &mut host), 16);
         assert_eq!(board.read(OFF_STATUS, 2, &mut host), 0); // STOPPED
     }
@@ -1967,6 +2239,281 @@ mod tests {
             "decoded PCM drifted from the committed golden capture -- if this is an \
              intentional decode-path change, regenerate the fixture (see this test's \
              doc comment); otherwise this is a real regression"
+        );
+    }
+
+    // ---- M4: the param-latch DSP chain (MHI-PLAN-M3-M4.md WP4.5) ----
+
+    #[test]
+    fn dsp_helper_functions_produce_exact_expected_gains() {
+        assert_eq!(volume_gain(100), 1.0);
+        assert_eq!(volume_gain(0), 0.0);
+        assert_eq!(volume_gain(50), 0.5);
+
+        assert_eq!(prefactor_gain(50), 1.0);
+        assert_eq!(prefactor_gain(0), 0.0);
+        assert_eq!(prefactor_gain(100), 2.0);
+
+        assert_eq!(pan_gains(50), (1.0, 1.0));
+        assert_eq!(pan_gains(0), (1.0, 0.0));
+        assert_eq!(pan_gains(100), (0.0, 1.0));
+        assert_eq!(pan_gains(75), (0.5, 1.0));
+        assert_eq!(pan_gains(25), (1.0, 0.5));
+
+        assert_eq!(crossmix_fraction(0), 0.0);
+        assert_eq!(crossmix_fraction(100), 1.0);
+
+        assert_eq!(apply_crossmix(1.0, -1.0, 0.0), (1.0, -1.0));
+        assert_eq!(apply_crossmix(1.0, -1.0, 1.0), (0.0, 0.0));
+        assert_eq!(apply_crossmix(2.0, 0.0, 0.5), (1.5, 0.5));
+
+        assert_eq!(band_gain_db(50), 0.0);
+        assert_eq!(band_gain_db(0), -12.0);
+        assert_eq!(band_gain_db(100), 12.0);
+    }
+
+    /// Precomputed reference coefficients (independent Python
+    /// implementation of the same RBJ Cookbook formulas
+    /// `docs/internals/mhi.md`'s "Tone filters: bass/mid/treble" section
+    /// documents) for one peaking and one low-shelf case -- proves this
+    /// module's `Biquad` constructors match the documented math, not just
+    /// that they're internally self-consistent. Tolerance accounts for f64
+    /// (Python) vs. `f32` (this module) precision, not an algorithm
+    /// difference.
+    #[test]
+    fn biquad_coefficients_match_independently_precomputed_reference_values() {
+        let peaking = Biquad::peaking(1000.0, 1.0, 12.0, 44100.0);
+        let expected = [1.1024303, -1.9117108, 0.8288492, -1.9117108, 0.9312795];
+        let got = [peaking.b0, peaking.b1, peaking.b2, peaking.a1, peaking.a2];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-4, "got {got:?}, expected {expected:?}");
+        }
+
+        let low_shelf = Biquad::low_shelf(200.0, 1.0, -12.0, 44100.0);
+        let expected = [0.9859057, -1.9436854, 0.9581753, -1.9430958, 0.9446706];
+        let got = [
+            low_shelf.b0,
+            low_shelf.b1,
+            low_shelf.b2,
+            low_shelf.a1,
+            low_shelf.a2,
+        ];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-4, "got {got:?}, expected {expected:?}");
+        }
+    }
+
+    /// `Biquad::peaking`/`low_shelf`/`high_shelf` at `gain_db = 0.0` (the
+    /// default param value's mapping, `band_gain_db(50) == 0.0`) must be
+    /// mathematically exact identity filters (RBJ Cookbook property: at
+    /// `A = 1`, `b1 == a1` and `b2 == a2` bit-for-bit, since both are
+    /// computed from the identical expression -- see this module's
+    /// `Biquad` doc comment) -- process a sequence of varied, non-trivial
+    /// samples and every output must equal its input exactly.
+    #[test]
+    fn biquad_at_zero_db_is_an_exact_identity_filter() {
+        for ctor in [
+            Biquad::peaking(1000.0, 1.0, 0.0, 44100.0),
+            Biquad::low_shelf(200.0, 1.0, 0.0, 44100.0),
+            Biquad::high_shelf(4000.0, 1.0, 0.0, 44100.0),
+        ] {
+            let mut filter = ctor;
+            for input in [0.0f32, 1.0, -1.0, 0.37, -0.82, 0.001, -0.999] {
+                assert_eq!(filter.process(input), input);
+            }
+        }
+    }
+
+    /// The M4 DSP chain at every param's documented default (`PARAM_
+    /// DEFAULTS`) must be an exact no-op: `produce_one_sample` fed a
+    /// known, non-trivial stereo sample through a freshly constructed
+    /// board (defaults) must push that exact sample into `decoded`
+    /// unchanged. This is the property the panning/crossmix/tone-filter
+    /// formulas were each deliberately chosen around (see their doc
+    /// comments), proven here at the whole-chain level rather than one
+    /// param at a time.
+    #[test]
+    fn default_params_are_an_exact_no_op_on_produced_samples() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.6, -0.3)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        assert_eq!(board.decoded.pop_back(), Some((0.6, -0.3)));
+    }
+
+    #[test]
+    fn volume_latch_scales_both_channels_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[0] = 50; // volume: gain 0.5
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.8, -0.4)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert!((l - 0.4).abs() < 1e-6);
+        assert!((r - -0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn prefactor_latch_scales_both_channels_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[6] = 100; // prefactor: gain 2.0
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.25, -0.1)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert!((l - 0.5).abs() < 1e-6);
+        assert!((r - -0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hard_pan_left_and_right_silence_the_opposite_channel_exactly() {
+        for (pan_value, expect_left, expect_right) in [(0u16, 1.0f32, 0.0f32), (100, 0.0, 1.0)] {
+            let mut board = Mhi::new();
+            board.status = Status::Playing;
+            board.params[1] = pan_value;
+            board.current_frame = Some(CurrentFrame {
+                samples: vec![(1.0, 1.0)],
+                idx: 0,
+                rate: 44_100,
+                completes: 0,
+            });
+            board.produce_one_sample();
+            let (l, r) = board.decoded.pop_back().unwrap();
+            assert_eq!(l, expect_left);
+            assert_eq!(r, expect_right);
+        }
+    }
+
+    #[test]
+    fn full_crossmix_makes_both_channels_identical_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[5] = 100; // crossmix: full mono
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(1.0, -0.5)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert_eq!(l, r);
+        assert!((l - 0.25).abs() < 1e-6); // (1.0 + -0.5) / 2
+    }
+
+    /// A sustained bass boost's DC gain must be measurably above unity (and
+    /// a sustained cut measurably below), proving the filter bank's
+    /// `retune_if_stale` wiring actually reaches decoded audio -- not just
+    /// that the standalone `Biquad` constructors compute plausible
+    /// coefficients (the two tests above already cover that in isolation).
+    /// A single sample can't show this (a biquad's state starts at zero),
+    /// so this drives many identical samples to let the IIR reach its DC
+    /// steady state.
+    #[test]
+    fn sustained_bass_boost_and_cut_measurably_change_dc_gain() {
+        fn steady_state_left_gain(bass_value: u16) -> f32 {
+            let mut board = Mhi::new();
+            board.status = Status::Playing;
+            board.params[2] = bass_value;
+            let mut last = 0.0;
+            for _ in 0..2000 {
+                board.current_frame = Some(CurrentFrame {
+                    samples: vec![(1.0, 1.0)],
+                    idx: 0,
+                    rate: 44_100,
+                    completes: 0,
+                });
+                board.produce_one_sample();
+                last = board.decoded.pop_back().unwrap().0;
+            }
+            last
+        }
+        let boost = steady_state_left_gain(100);
+        let cut = steady_state_left_gain(0);
+        assert!(
+            boost > 1.05,
+            "expected a measurable bass boost, got {boost}"
+        );
+        assert!(cut < 0.95, "expected a measurable bass cut, got {cut}");
+    }
+
+    /// Extends `savestate_round_trip_reproduces_an_uninterrupted_runs_
+    /// output`'s claim to M4: mid-playback param state (non-default latch
+    /// values) and hot filter memory (built up by a boosted band, not the
+    /// all-zero state a freshly constructed `ToneFilterBank` starts with)
+    /// must both round-trip through a savestate and keep producing
+    /// identical output afterward.
+    #[test]
+    fn savestate_round_trip_preserves_hot_param_and_filter_state() {
+        let mut mem = memory(0x1000);
+        let f1 = mp3_frame(128, 0x10);
+        let f2 = mp3_frame(128, 0x40);
+        mem.chip_ram[0..f1.len()].copy_from_slice(&f1);
+        mem.chip_ram[f1.len()..f1.len() + f2.len()].copy_from_slice(&f2);
+
+        let mut board = Mhi::new();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, &f1);
+            stage_and_ring(&mut board, &mut host, f1.len() as u32, &f2);
+            board.write(OFF_PARAM_SELECT, 2, 2, &mut host); // select bass
+            board.write(OFF_PARAM_VALUE, 2, 100, &mut host); // full boost
+            board.write(OFF_PARAM_SELECT, 2, 0, &mut host); // select volume
+            board.write(OFF_PARAM_VALUE, 2, 70, &mut host);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+            // Partway into the first frame -- the bass filter's z1/z2
+            // memory is genuinely hot by now (mp3_frame's silent payload
+            // still runs every sample through the boosted bass biquad,
+            // building up real filter state even though the audible
+            // content is zero).
+            ZorroDevice::tick(&mut board, 137, &mut host);
+        }
+
+        let bytes = bincode::serialize(&board).unwrap();
+        let mut resumed: Mhi = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(resumed.params[2], 100, "bass latch must round-trip");
+        assert_eq!(resumed.params[0], 70, "volume latch must round-trip");
+
+        let mut mem_a = memory(0x1000);
+        let mut cd_a = crate::chipset::paula::CdAudioRing::default();
+        let mut toc_a = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_a = MhiAudioRing::default();
+        let mut host_a = host_with_rings(&mut mem_a, &mut cd_a, &mut toc_a, &mut mhi_a);
+        let mut mem_b = memory(0x1000);
+        let mut cd_b = crate::chipset::paula::CdAudioRing::default();
+        let mut toc_b = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_b = MhiAudioRing::default();
+        let mut host_b = host_with_rings(&mut mem_b, &mut cd_b, &mut toc_b, &mut mhi_b);
+
+        for _ in 0..3000 {
+            ZorroDevice::tick(&mut board, 61, &mut host_a);
+            ZorroDevice::tick(&mut resumed, 61, &mut host_b);
+        }
+        let frames_a: Vec<_> = (0..1500).map(|_| mhi_a.next_sample()).collect();
+        let frames_b: Vec<_> = (0..1500).map(|_| mhi_b.next_sample()).collect();
+        assert_eq!(
+            frames_a, frames_b,
+            "hot param/filter state resumed mid-stream must reproduce an uninterrupted \
+             run's output exactly"
         );
     }
 }
