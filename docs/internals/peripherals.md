@@ -610,6 +610,14 @@ are replicated by hand, and WinMM's `MIDIHDR` is packed -- so the mirrors are
 pinned with compile-time layout assertions and want checking against live MIDI,
 not just review.
 
+On macOS the process holds exactly one `MIDIClient`, created at first use
+(enumeration included) and never disposed. CoreMIDI's link to the MIDIServer
+daemon is per-process and does not recover: the daemon exits a few seconds
+after the system-wide last client is disposed, and a process whose link dies
+that way cannot create a client again until it is relaunched. The one held
+client keeps the daemon running for the app's lifetime; each machine's
+backend owns only its ports.
+
 Two debug knobs help tell a dead path from a routing one:
 `COPPERLINE_MIDI_DEBUG=1` reports per-second tx/rx byte counts and the
 first bytes sent (no tx while a song plays means the guest is not driving

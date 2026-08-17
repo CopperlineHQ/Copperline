@@ -83,3 +83,4 @@ __pycache__/
 
 # Local clangd configs (machine-specific include paths).
 .clangd
+/tools/bezel-preview/target/
