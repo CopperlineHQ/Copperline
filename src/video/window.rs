@@ -7563,13 +7563,40 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugWaveArm) => self.debugger_wave_arm(),
             (ToolPanelKind::Debugger, UiControl::DebugWaveStop) => self.debugger_wave_stop(),
             (ToolPanelKind::Debugger, UiControl::DebugAudioMute(idx)) => {
-                let paula = &mut self.emu.bus_mut().paula;
                 let (label, muted) = if idx < 4 {
+                    let paula = &mut self.emu.bus_mut().paula;
                     paula.toggle_channel_muted(idx);
                     (format!("AUD{idx}"), paula.channel_muted(idx))
                 } else {
-                    paula.toggle_cd_muted();
-                    ("CD audio".to_string(), paula.cd_muted())
+                    // Rows past the channels are the line-mixed sources, in
+                    // the same order `audio_extra_kinds` builds the tab's
+                    // rows. A click on a slot no fitted source occupies is
+                    // dead space, not a hidden toggle.
+                    let Some(kind) = Self::audio_extra_kinds(self.emu.bus())
+                        .get(idx - 4)
+                        .copied()
+                    else {
+                        return;
+                    };
+                    let paula = &mut self.emu.bus_mut().paula;
+                    match kind {
+                        ui::AudioExtraKind::Cd => {
+                            paula.toggle_cd_muted();
+                            ("CD audio".to_string(), paula.cd_muted())
+                        }
+                        ui::AudioExtraKind::Synth => {
+                            paula.toggle_synth_muted();
+                            ("MIDI synth".to_string(), paula.synth_muted())
+                        }
+                        ui::AudioExtraKind::Toccata => {
+                            paula.toggle_toccata_muted();
+                            ("Toccata".to_string(), paula.toccata_muted())
+                        }
+                        ui::AudioExtraKind::Mhi => {
+                            paula.toggle_mhi_muted();
+                            ("MHI".to_string(), paula.mhi_muted())
+                        }
+                    }
                 };
                 self.show_osd(format!(
                     "{label} {}",
@@ -11627,6 +11654,62 @@ impl App {
         })
     }
 
+    /// The Audio tab's line-mixed source rows for this machine, in draw
+    /// order: CD-DA always, then one row per fitted source. The view
+    /// builder and the mute-click dispatcher both use this list, so a
+    /// click on row `4 + i` always lands on the source drawn there.
+    fn audio_extra_kinds(bus: &crate::bus::Bus) -> Vec<ui::AudioExtraKind> {
+        let mut kinds = vec![ui::AudioExtraKind::Cd];
+        #[cfg(feature = "midi")]
+        if bus.midi_serial().is_some_and(Self::midi_synth_fitted) {
+            kinds.push(ui::AudioExtraKind::Synth);
+        }
+        if bus.toccata_board().is_some() {
+            kinds.push(ui::AudioExtraKind::Toccata);
+        }
+        #[cfg(feature = "mhi")]
+        if bus.mhi_board().is_some() {
+            kinds.push(ui::AudioExtraKind::Mhi);
+        }
+        kinds
+    }
+
+    /// Whether the serial port's MIDI sink has an in-process synth fitted
+    /// (an MT-32 or the Coppersynth) -- the condition for the Audio tab's
+    /// synth row. A host MIDI endpoint sounds on the host, so there is
+    /// nothing for the mixer (or the row's scope) to show.
+    #[cfg(feature = "midi")]
+    fn midi_synth_fitted(midi: &crate::midi::MidiSerialSink) -> bool {
+        #[cfg(feature = "mt32")]
+        if midi.mt32().is_some() {
+            return true;
+        }
+        #[cfg(feature = "coppersynth")]
+        if midi.csynth().is_some() {
+            return true;
+        }
+        let _ = midi;
+        false
+    }
+
+    /// The fitted in-process synth's display name for the Audio tab row.
+    #[cfg(feature = "midi")]
+    fn midi_synth_label(midi: &crate::midi::MidiSerialSink) -> String {
+        #[cfg(feature = "mt32")]
+        if midi.mt32().is_some() {
+            return match midi.mt32_version() {
+                Some(version) => format!("MT-32 ({version})"),
+                None => "MT-32".to_string(),
+            };
+        }
+        #[cfg(feature = "coppersynth")]
+        if midi.csynth().is_some() {
+            return crate::midi::MIDI_OUT_CSYNTH_LABEL.to_string();
+        }
+        let _ = midi;
+        "synth".to_string()
+    }
+
     /// Snapshot the machine into the debugger panel's formatted lines.
     /// Everything reads through side-effect-free peeks, so inspecting
     /// state never perturbs the emulation.
@@ -12008,39 +12091,135 @@ impl App {
                         scope: bus.paula.audio_scope_samples(ch),
                     });
                 }
-                let cd_scope = bus.paula.cd_scope_samples();
-                let cd_active = cd_scope.iter().any(|&s| s != 0);
-                let cd_peak = cd_scope
-                    .iter()
-                    .map(|&s| (s as i16).abs())
-                    .max()
-                    .unwrap_or(0);
-                // A SCSI CD-ROM drive reports its play operation (state,
-                // track, position); the CDTV/CD32 controllers stream
-                // without one, so their row keeps the scope-derived state.
-                let cd_status = bus
-                    .scsi_cd_playback_line()
-                    .unwrap_or_else(|| if cd_active { "playing" } else { "idle" }.to_string());
-                let cd = ui::AudioRowView {
-                    text: vec![
-                        ui::DbgLine::hilit(format!("CD-DA  {cd_status}")),
-                        ui::DbgLine::plain(format!("  peak {cd_peak:>3}")),
-                    ],
-                    muted: bus.paula.cd_muted(),
-                    scope: cd_scope,
-                };
+                // One row per line-mixed source, in the same order the
+                // mute-click dispatcher maps clicks back through.
+                let mut extras: Vec<ui::AudioExtraRow> = Vec::new();
+                for kind in Self::audio_extra_kinds(bus) {
+                    let row = match kind {
+                        ui::AudioExtraKind::Cd => {
+                            let cd_scope = bus.paula.cd_scope_samples();
+                            let cd_active = cd_scope.iter().any(|&s| s != 0);
+                            let cd_peak = cd_scope
+                                .iter()
+                                .map(|&s| (s as i16).abs())
+                                .max()
+                                .unwrap_or(0);
+                            // A SCSI CD-ROM drive reports its play operation
+                            // (state, track, position); the CDTV/CD32
+                            // controllers stream without one, so their row
+                            // keeps the scope-derived state.
+                            let cd_status = bus.scsi_cd_playback_line().unwrap_or_else(|| {
+                                if cd_active { "playing" } else { "idle" }.to_string()
+                            });
+                            ui::AudioRowView {
+                                text: vec![
+                                    ui::DbgLine::hilit(format!("CD-DA  {cd_status}")),
+                                    ui::DbgLine::plain(format!("  peak {cd_peak:>3}")),
+                                ],
+                                muted: bus.paula.cd_muted(),
+                                scope: cd_scope,
+                            }
+                        }
+                        ui::AudioExtraKind::Synth => {
+                            #[cfg(feature = "midi")]
+                            {
+                                let scope = bus.paula.synth_scope_samples();
+                                let sounding = scope.iter().any(|&s| s != 0);
+                                let peak =
+                                    scope.iter().map(|&s| (s as i16).abs()).max().unwrap_or(0);
+                                let label = bus
+                                    .midi_serial()
+                                    .map(Self::midi_synth_label)
+                                    .unwrap_or_else(|| "synth".to_string());
+                                let head = format!(
+                                    "MIDI  {label}  {}",
+                                    if sounding { "sounding" } else { "idle" }
+                                );
+                                ui::AudioRowView {
+                                    text: vec![
+                                        if sounding {
+                                            ui::DbgLine::hilit(head)
+                                        } else {
+                                            ui::DbgLine::plain(head)
+                                        },
+                                        ui::DbgLine::plain(format!("  peak {peak:>3}")),
+                                    ],
+                                    muted: bus.paula.synth_muted(),
+                                    scope,
+                                }
+                            }
+                            #[cfg(not(feature = "midi"))]
+                            unreachable!("synth row is only offered with the midi feature")
+                        }
+                        ui::AudioExtraKind::Toccata => {
+                            let Some(board) = bus.toccata_board() else {
+                                continue;
+                            };
+                            let d = board.debug_status();
+                            let head =
+                                format!("Toccata  {}", if d.playing { "playing" } else { "idle" });
+                            ui::AudioRowView {
+                                text: vec![
+                                    if d.playing {
+                                        ui::DbgLine::hilit(head)
+                                    } else {
+                                        ui::DbgLine::plain(head)
+                                    },
+                                    ui::DbgLine::plain(format!(
+                                        "  {} Hz {} {}  FIFO {:>4}/{}",
+                                        d.rate_hz,
+                                        if d.sixteen_bit { "16-bit" } else { "8-bit" },
+                                        if d.channels == 2 { "stereo" } else { "mono" },
+                                        d.fifo_len,
+                                        d.fifo_capacity,
+                                    )),
+                                ],
+                                muted: bus.paula.toccata_muted(),
+                                scope: bus.paula.toccata_scope_samples(),
+                            }
+                        }
+                        ui::AudioExtraKind::Mhi => {
+                            #[cfg(feature = "mhi")]
+                            {
+                                let Some(board) = bus.mhi_board() else {
+                                    continue;
+                                };
+                                let d = board.debug_status();
+                                let head = format!("MHI  {}  {} Hz", d.state, d.native_rate);
+                                ui::AudioRowView {
+                                    text: vec![
+                                        if d.state == "playing" {
+                                            ui::DbgLine::hilit(head)
+                                        } else {
+                                            ui::DbgLine::plain(head)
+                                        },
+                                        ui::DbgLine::plain(format!(
+                                            "  queue {}  vol {}  pan {}  B/M/T {}/{}/{}",
+                                            d.queued, d.volume, d.panning, d.bass, d.mid, d.treble,
+                                        )),
+                                    ],
+                                    muted: bus.paula.mhi_muted(),
+                                    scope: bus.paula.mhi_scope_samples(),
+                                }
+                            }
+                            #[cfg(not(feature = "mhi"))]
+                            unreachable!("MHI row is only offered with the mhi feature")
+                        }
+                    };
+                    extras.push(ui::AudioExtraRow { kind, row });
+                }
                 // Mirror the text into `lines` for the headless/text fallback
                 // and the non-empty-view invariant; the tab itself is drawn
                 // graphically from the structured view.
                 lines.push(ui::DbgLine::hilit(header.clone()));
-                for row in channels.iter().chain(std::iter::once(&cd)) {
+                for row in channels.iter().chain(extras.iter().map(|extra| &extra.row)) {
                     lines.push(ui::DbgLine::plain(""));
                     lines.extend(row.text.iter().cloned());
                 }
                 audio = Some(ui::AudioScopeView {
                     header,
                     channels,
-                    cd,
+                    extras,
                 });
             }
             ui::DebugTab::Memory => {

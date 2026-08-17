@@ -285,6 +285,22 @@ impl Ad1848 {
         (l * self.left_volume, r * self.right_volume)
     }
 
+    /// Bytes currently buffered in the playback FIFO, for the debugger.
+    pub fn fifo_len(&self) -> usize {
+        self.fifo.len()
+    }
+
+    /// The playback FIFO's capacity in bytes, for the debugger.
+    pub fn fifo_capacity(&self) -> usize {
+        FIFO_CAPACITY
+    }
+
+    /// The format latched at the last codec start, as (channels, 16-bit?),
+    /// for the debugger.
+    pub fn active_format(&self) -> (usize, bool) {
+        (self.active_channels, self.active_sixteen_bit)
+    }
+
     // -----------------------------------------------------------------
     // Board control/status (base+0x0000)
     // -----------------------------------------------------------------

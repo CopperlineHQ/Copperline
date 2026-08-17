@@ -96,16 +96,31 @@ Step frames (**Frame**) to watch the state machine advance -- the Running
 line is highlighted while a channel is actively streaming samples.
 
 Each channel row also has a **Mute** button on the left and an oscilloscope on
-the right; a fifth row at the bottom does the same for the **CD-DA** audio
-stream (CDTV, CD32, or a SCSI CD-ROM unit). The oscilloscope traces the
-channel's output level (the DAC sample scaled by AUDxVOL), so both the
-waveform and its loudness are visible; the CD scope traces the mixed CD stereo
-level, and when the machine's CD drive is a SCSI CD-ROM unit the row's status
-line reports its play operation (playing/paused/done, track, and MSF
-position). Clicking **Mute** silences that channel (or the CD stream) in the
-host output while leaving its trace drawn (greyed) so you can still see what
-it would play. Mutes are developer aids: they change only the audio you hear,
-never the emulated Paula state, and are not part of a save state.
+the right; shorter rows at the bottom do the same for every line-mixed audio
+source the machine has. The **CD-DA** row (CDTV, CD32, or a SCSI CD-ROM unit)
+is always present; the others appear only while their source is fitted:
+
+- **MIDI** -- the in-process synthesizer on the serial port (the emulated
+  MT-32, with its control-ROM version, or the Coppersynth General MIDI
+  synth), with a sounding/idle state and the trace's peak level. A host
+  MIDI endpoint has no row: it sounds on the host, outside the mixer.
+- **Toccata** -- the sound board's codec output (what an AHI driver plays
+  through it): playback state, the latched sample rate and format, and the
+  board FIFO's fill level.
+- **MHI** -- the MPEG audio decoder board: transport state
+  (stopped/playing/paused/out of data), the stream's native sample rate,
+  the descriptor queue depth, and the volume/pan/bass/mid/treble param
+  latches.
+
+The oscilloscope traces a channel's output level (the DAC sample scaled by
+AUDxVOL), so both the waveform and its loudness are visible; a source row's
+scope traces that source's mixed stereo level, and when the machine's CD
+drive is a SCSI CD-ROM unit the CD row's status line reports its play
+operation (playing/paused/done, track, and MSF position). Clicking **Mute**
+silences that channel or source in the host output while leaving its trace
+drawn (greyed) so you can still see what it would play. Mutes are developer
+aids: they change only the audio you hear, never the emulated machine state,
+and are not part of a save state.
 
 **Memory** is a hex/ASCII dump, 256 bytes per page. Type a hex address in
 the `$` box and press Enter to jump there; the `<` and `>` buttons page by

@@ -50,14 +50,24 @@ const FS_VARIANTS: [crate::diskimage::Variant; 3] = [
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
 const SCRIM: u32 = rgba(0, 0, 0);
 const SCRIM_ALPHA: f32 = 0.45;
-// Audio-tab oscilloscope trace colours (Paula ch0..3 then CD-DA).
-const AUDIO_SCOPE_COLORS: [u32; 5] = [
+// Audio-tab oscilloscope trace colours for the four Paula channels.
+const AUDIO_SCOPE_COLORS: [u32; 4] = [
     rgba(120, 255, 150), // ch0 green
     rgba(96, 200, 255),  // ch1 cyan
     rgba(230, 130, 245), // ch2 magenta
     rgba(240, 214, 96),  // ch3 yellow
-    rgba(255, 170, 90),  // CD amber
 ];
+
+/// Trace colour for a line-mixed source row (CD-DA, MIDI synth, Toccata,
+/// MHI).
+fn audio_extra_color(kind: AudioExtraKind) -> u32 {
+    match kind {
+        AudioExtraKind::Cd => rgba(255, 170, 90),       // amber
+        AudioExtraKind::Synth => rgba(160, 160, 255),   // lavender
+        AudioExtraKind::Toccata => rgba(120, 235, 235), // teal
+        AudioExtraKind::Mhi => rgba(255, 130, 150),     // coral
+    }
+}
 const AUDIO_MUTE_FACE: u32 = rgba(96, 44, 44);
 
 // ---------------------------------------------------------------------------
@@ -740,7 +750,9 @@ pub enum UiControl {
     DebugWaveArm,
     /// Waveform tab: stop the capture, finishing the file.
     DebugWaveStop,
-    /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
+    /// Audio tab: toggle mute for a row (0..3 = Paula channels, 4.. = the
+    /// line-mixed source rows in `AudioScopeView::extras` order, CD-DA
+    /// first).
     DebugAudioMute(usize),
     /// Frame analyzer: run/pause the machine while keeping the pane open.
     AnalyzerRun,
@@ -1284,22 +1296,33 @@ fn copper_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
     ]
 }
 
-// Audio tab layout: a header line, four Paula channel blocks, then a CD row.
-// Each block has a mute button on the left, text detail in the middle, and an
-// oscilloscope box on the right.
+// Audio tab layout: a header line, four Paula channel blocks, then one
+// shorter row per line-mixed source (CD-DA always, MIDI synth / Toccata /
+// MHI while fitted). Each block has a mute button on the left, text detail
+// in the middle, and an oscilloscope box on the right.
 const AUDIO_HEADER_H: usize = 16;
 const AUDIO_ROW_H: usize = 46;
-const AUDIO_CD_ROW_H: usize = 30;
+const AUDIO_EXTRA_ROW_H: usize = 30;
 const AUDIO_MUTE_W: usize = 54;
 const AUDIO_TEXT_X: usize = 70;
 const AUDIO_SCOPE_X: usize = 470;
+/// The most rows the tab can hold: four Paula channels plus every
+/// line-mixed source (CD-DA, MIDI synth, Toccata, MHI).
+const AUDIO_MAX_ROWS: usize = 8;
 
 /// Geometry of one Audio-tab row: (mute button rect, scope box rect). `idx`
-/// 0..3 are the Paula channels, 4 is the CD-DA row.
+/// 0..3 are the Paula channels; 4.. are the line-mixed source rows in the
+/// order `AudioScopeView::extras` presents them (CD-DA first).
 fn audio_row_geom(rect: Rect, idx: usize) -> (Rect, Rect) {
-    let top = debug_content_top(rect) + AUDIO_HEADER_H + idx.min(4) * AUDIO_ROW_H;
+    let top = debug_content_top(rect)
+        + AUDIO_HEADER_H
+        + if idx < 4 {
+            idx * AUDIO_ROW_H
+        } else {
+            4 * AUDIO_ROW_H + (idx - 4) * AUDIO_EXTRA_ROW_H
+        };
     let row_h = if idx >= 4 {
-        AUDIO_CD_ROW_H
+        AUDIO_EXTRA_ROW_H
     } else {
         AUDIO_ROW_H
     };
@@ -1318,8 +1341,11 @@ fn audio_row_geom(rect: Rect, idx: usize) -> (Rect, Rect) {
     (mute, scope)
 }
 
-/// The five Audio-tab mute buttons (four Paula channels then CD).
-fn audio_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
+/// The Audio-tab mute buttons: four Paula channels, then every possible
+/// line-mixed source slot. A slot with no row drawn in it still hit-tests
+/// (the geometry cannot see which sources are fitted); the click dispatcher
+/// rebuilds the fitted-source list and ignores clicks past its end.
+fn audio_tab_button_rects(rect: Rect) -> [(UiControl, Rect); AUDIO_MAX_ROWS] {
     std::array::from_fn(|i| (UiControl::DebugAudioMute(i), audio_row_geom(rect, i).0))
 }
 
@@ -1630,14 +1656,34 @@ pub struct DebuggerView {
     pub audio: Option<AudioScopeView>,
 }
 
-/// Per-channel and CD audio state for the debugger Audio tab.
+/// Per-channel and line-mixed-source state for the debugger Audio tab.
 pub struct AudioScopeView {
     /// Header line (DMACON / AUDEN / ADKCON summary).
     pub header: String,
     /// The four Paula channels, in order.
     pub channels: Vec<AudioRowView>,
-    /// The CD-DA row.
-    pub cd: AudioRowView,
+    /// The line-mixed source rows drawn under the channels, in order:
+    /// CD-DA first (always present), then one row per fitted source
+    /// (MIDI synth, Toccata, MHI). Row `4 + i` of the tab is `extras[i]`,
+    /// and the mute-click dispatcher maps clicks back through the same
+    /// order.
+    pub extras: Vec<AudioExtraRow>,
+}
+
+/// Which line-mixed source an extra Audio-tab row shows; picks the row's
+/// trace colour and the mute's OSD label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioExtraKind {
+    Cd,
+    Synth,
+    Toccata,
+    Mhi,
+}
+
+/// One line-mixed source row of the Audio tab.
+pub struct AudioExtraRow {
+    pub kind: AudioExtraKind,
+    pub row: AudioRowView,
 }
 
 /// One row of the Audio tab: text detail, mute state, and a scope trace.
@@ -3009,8 +3055,9 @@ fn draw_video_tab(
     }
 }
 
-/// Draw the Audio tab: a header line, four Paula channel blocks and a CD row,
-/// each with a mute button, text detail, and an output oscilloscope.
+/// Draw the Audio tab: a header line, four Paula channel blocks, and one
+/// row per line-mixed source, each with a mute button, text detail, and an
+/// output oscilloscope.
 fn draw_audio_tab(
     frame: &mut [u8],
     rect: Rect,
@@ -3028,14 +3075,24 @@ fn draw_audio_tab(
         1,
         scale,
     );
-    for idx in 0..5 {
+    // Channels occupy rows 0..3 and the line-mixed sources rows 4.. --
+    // fixed slots, so the extras stay where the mute hit-test expects them
+    // even if a channel row were ever absent.
+    let rows = audio
+        .channels
+        .iter()
+        .enumerate()
+        .take(4)
+        .map(|(idx, row)| (idx, row, AUDIO_SCOPE_COLORS[idx.min(3)]))
+        .chain(
+            audio
+                .extras
+                .iter()
+                .enumerate()
+                .map(|(i, extra)| (4 + i, &extra.row, audio_extra_color(extra.kind))),
+        );
+    for (idx, row, color) in rows.filter(|(idx, ..)| *idx < AUDIO_MAX_ROWS) {
         let (mute_rect, scope_rect) = audio_row_geom(rect, idx);
-        let row = if idx < 4 {
-            audio.channels.get(idx)
-        } else {
-            Some(&audio.cd)
-        };
-        let Some(row) = row else { continue };
         let control = UiControl::DebugAudioMute(idx);
         draw_mute_button(frame, mute_rect, row.muted, hover == Some(control), scale);
         // Text detail lines to the right of the mute button.
@@ -3055,7 +3112,6 @@ fn draw_audio_tab(
                 scale,
             );
         }
-        let color = AUDIO_SCOPE_COLORS[idx.min(4)];
         draw_audio_scope(frame, scope_rect, &row.scope, color, row.muted, scale);
     }
 }
@@ -10832,6 +10888,16 @@ mod tests {
             ui_audio.control_at(cd_pos),
             Some(UiControl::DebugAudioMute(4))
         );
+        // The line-mixed source slots continue below the CD row (last slot
+        // = AUDIO_MAX_ROWS - 1); the click dispatcher decides whether a
+        // fitted source actually occupies one.
+        let (last_control, last_mute) = audio_tab_button_rects(rect)[AUDIO_MAX_ROWS - 1];
+        assert_eq!(last_control, UiControl::DebugAudioMute(AUDIO_MAX_ROWS - 1));
+        let last_pos = (last_mute.x as i32 + 2, last_mute.y as i32 + 2);
+        assert_eq!(
+            ui_audio.control_at(last_pos),
+            Some(UiControl::DebugAudioMute(AUDIO_MAX_ROWS - 1))
+        );
         // On another tab that position does not resolve to a mute.
         assert_eq!(ui.control_at(pos), Some(UiControl::PanelBody));
 
@@ -11645,8 +11711,10 @@ mod tests {
         assert!(crate::waveform::parse_wave_args("PC=C033C2 2F".split_whitespace()).is_ok());
         save(&frame, "debugger-waveform");
 
-        // Audio tab: the four Paula channels plus CD, with representative
-        // state, mute buttons (AUD2 shown muted), and synthetic scope traces.
+        // Audio tab: the four Paula channels plus every line-mixed source
+        // row (CD, MIDI synth, Toccata, MHI), with representative state,
+        // mute buttons (AUD2 and MHI shown muted), and synthetic scope
+        // traces.
         let mut frame = vec![0u8; w * h * 4];
         let wave = |amp: f32, cycles: f32| -> Vec<i8> {
             (0..220)
@@ -11698,18 +11766,56 @@ mod tests {
                 scope: wave(48.0, 9.0),
             },
         ];
-        let cd = AudioRowView {
-            text: vec![
-                DbgLine::hilit("CD-DA  playing"),
-                DbgLine::plain("  peak  72"),
-            ],
-            muted: false,
-            scope: wave(72.0, 4.0),
-        };
+        let extras = vec![
+            AudioExtraRow {
+                kind: AudioExtraKind::Cd,
+                row: AudioRowView {
+                    text: vec![
+                        DbgLine::hilit("CD-DA  playing"),
+                        DbgLine::plain("  peak  72"),
+                    ],
+                    muted: false,
+                    scope: wave(72.0, 4.0),
+                },
+            },
+            AudioExtraRow {
+                kind: AudioExtraKind::Synth,
+                row: AudioRowView {
+                    text: vec![
+                        DbgLine::hilit("MIDI  MT-32  sounding"),
+                        DbgLine::plain("  peak  58"),
+                    ],
+                    muted: false,
+                    scope: wave(58.0, 5.0),
+                },
+            },
+            AudioExtraRow {
+                kind: AudioExtraKind::Toccata,
+                row: AudioRowView {
+                    text: vec![
+                        DbgLine::hilit("Toccata  playing"),
+                        DbgLine::plain("  44100 Hz 16-bit stereo  FIFO  612/1024"),
+                    ],
+                    muted: false,
+                    scope: wave(84.0, 7.0),
+                },
+            },
+            AudioExtraRow {
+                kind: AudioExtraKind::Mhi,
+                row: AudioRowView {
+                    text: vec![
+                        DbgLine::hilit("MHI  playing  44100 Hz"),
+                        DbgLine::plain("  queue 3  vol 100  pan 50  B/M/T 50/50/50"),
+                    ],
+                    muted: true,
+                    scope: wave(66.0, 11.0),
+                },
+            },
+        ];
         let audio = AudioScopeView {
             header,
             channels,
-            cd,
+            extras,
         };
         let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,

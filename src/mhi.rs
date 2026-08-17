@@ -762,6 +762,21 @@ impl ToneFilterBank {
     }
 }
 
+/// Snapshot of the board's state for the debugger's Audio tab: transport
+/// state, the current stream's native rate, the descriptor queue depth, and
+/// the audible param latches (0-100 each, pan/tone centred at 50).
+#[derive(Debug, Clone, Copy)]
+pub struct MhiDebug {
+    pub state: &'static str,
+    pub native_rate: u32,
+    pub queued: u32,
+    pub volume: u16,
+    pub panning: u16,
+    pub bass: u16,
+    pub mid: u16,
+    pub treble: u16,
+}
+
 /// The MHI board: `ZorroDevice` glue and register-window decode around
 /// [`Decoder`], plus the same two-cadence split as `Toccata` -- a causal
 /// native-rate producer (`advance_native`) that paces decode and
@@ -868,6 +883,25 @@ impl Mhi {
     /// `QUEUE_COUNT`: descriptors enqueued but not yet fully played out.
     fn queue_count(&self) -> u32 {
         self.desc_lengths.len() as u32 + self.current_frame.as_ref().map_or(0, |f| f.completes)
+    }
+
+    /// Board-state snapshot for the debugger's Audio tab.
+    pub fn debug_status(&self) -> MhiDebug {
+        MhiDebug {
+            state: match self.status {
+                Status::Stopped => "stopped",
+                Status::Playing => "playing",
+                Status::Paused => "paused",
+                Status::OutOfData => "out of data",
+            },
+            native_rate: self.native_rate,
+            queued: self.queue_count(),
+            volume: self.params[0],
+            panning: self.params[1],
+            bass: self.params[2],
+            mid: self.params[3],
+            treble: self.params[4],
+        }
     }
 
     fn merge_half(old: u16, off: u32, size: usize, value: u32) -> u16 {
