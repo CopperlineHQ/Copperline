@@ -194,9 +194,15 @@ pub enum LauncherTab {
     /// The `[lide]` built-in Zorro II IDE board: personality, boot ROM(s),
     /// and its drives, reached from the Storage tab.
     Lide,
-    /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
-    /// section headings.
+    /// The "I/O Ports" strip tab, whose default category is the serial
+    /// port. Parallel, networking and audio are its sibling categories,
+    /// switched between via the top nav row, with no Back button --
+    /// `IoPorts.label()` is therefore the strip's "I/O Ports", not
+    /// "Serial Port".
     IoPorts,
+    IoParallel,
+    IoNetworking,
+    IoAudio,
     Input,
     Zorro,
     /// The "A/V & Emu" strip tab, whose default category is Audio (its rows are
@@ -289,6 +295,9 @@ impl LauncherTab {
             LauncherTab::Cd => "CD",
             LauncherTab::Lide => "Lide",
             LauncherTab::IoPorts => "I/O Ports",
+            LauncherTab::IoParallel => "Parallel Port",
+            LauncherTab::IoNetworking => "Networking",
+            LauncherTab::IoAudio => "Audio",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvAudio => "A/V & Emu",
@@ -323,6 +332,9 @@ impl LauncherTab {
             LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation | LauncherTab::AvPaths => {
                 LauncherTab::AvAudio
+            }
+            LauncherTab::IoParallel | LauncherTab::IoNetworking | LauncherTab::IoAudio => {
+                LauncherTab::IoPorts
             }
             other => other,
         }
@@ -363,6 +375,10 @@ impl LauncherTab {
             | LauncherTab::AvVideo
             | LauncherTab::AvEmulation
             | LauncherTab::AvPaths => AV_NAV,
+            LauncherTab::IoPorts
+            | LauncherTab::IoParallel
+            | LauncherTab::IoNetworking
+            | LauncherTab::IoAudio => IO_NAV,
             LauncherTab::CreateFloppy | LauncherTab::CreateHard => CREATE_NAV,
             #[cfg(feature = "game-library")]
             LauncherTab::Whdload | LauncherTab::WhdloadLibrary => WHDLOAD_NAV,
@@ -407,6 +423,15 @@ const WHDLOAD_NAV: &[(&str, LauncherTab)] = &[
 const CREATE_NAV: &[(&str, LauncherTab)] = &[
     ("Floppy Disk", LauncherTab::CreateFloppy),
     ("Hard Disk", LauncherTab::CreateHard),
+];
+
+/// The I/O Ports categories, left to right. `IoPorts` is the default,
+/// so its button reads "Serial Port".
+const IO_NAV: &[(&str, LauncherTab)] = &[
+    ("Serial Port", LauncherTab::IoPorts),
+    ("Parallel Port", LauncherTab::IoParallel),
+    ("Networking", LauncherTab::IoNetworking),
+    ("Audio", LauncherTab::IoAudio),
 ];
 
 /// The A/V & Emu categories, left to right (matching "A/V"). `AvAudio` is the
@@ -1300,11 +1325,10 @@ pub fn rows(
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::Lide => Cow::Borrowed(&LIDE_ROWS),
-        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
-            serial_mode,
-            midi_out_is_mt32,
-            parallel_device,
-        )),
+        LauncherTab::IoPorts => Cow::Owned(io_serial_rows(serial_mode, midi_out_is_mt32)),
+        LauncherTab::IoParallel => Cow::Owned(io_parallel_rows(parallel_device)),
+        LauncherTab::IoNetworking => Cow::Owned(io_networking_rows()),
+        LauncherTab::IoAudio => Cow::Owned(io_audio_rows()),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
         // A/V & Emu defaults to the Audio category; Video and Emulation are its
@@ -1316,26 +1340,34 @@ pub fn rows(
     }
 }
 
-/// The I/O Ports tab: a `Serial:` section (only in a `midi` build, which is the
-/// only build with serial rows), a `Parallel:` section, an `Ethernet:`
-/// section, and a `Sound:` section, each under a greyed heading and each
+/// The I/O Ports pages, one section each: `Serial:` (only in a `midi`
+/// build, which is the only build with serial rows), `Parallel:`,
+/// `Ethernet:` and `Audio:`, each under its greyed heading and each
 /// showing only the rows relevant to its selected device/mode.
-fn io_ports_rows(
-    serial_mode: SerialMode,
-    midi_out_is_mt32: bool,
-    parallel_device: ParallelDevice,
-) -> Vec<Row> {
+fn io_serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> Vec<Row> {
     let mut rows = Vec::new();
     let serial = serial_rows(serial_mode, midi_out_is_mt32);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
     }
-    rows.push(section_header("Parallel:"));
+    rows
+}
+
+fn io_parallel_rows(parallel_device: ParallelDevice) -> Vec<Row> {
+    let mut rows = vec![section_header("Parallel:")];
     rows.extend_from_slice(parallel_rows(parallel_device));
-    rows.push(section_header("Ethernet:"));
+    rows
+}
+
+fn io_networking_rows() -> Vec<Row> {
+    let mut rows = vec![section_header("Ethernet:")];
     rows.extend_from_slice(&ETHERNET_ROWS);
-    rows.push(section_header("Sound:"));
+    rows
+}
+
+fn io_audio_rows() -> Vec<Row> {
+    let mut rows = vec![section_header("Audio:")];
     rows.extend_from_slice(&SOUND_ROWS);
     rows
 }
@@ -2092,7 +2124,7 @@ pub struct MachineSetup {
     hostsocket_gateway: Option<String>,
     hostsocket_resolver: Option<String>,
     /// The MacroSystem Toccata sound board, edited in the I/O Ports tab's
-    /// Sound section (`[toccata] enabled`). No other options exist yet.
+    /// Audio page (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
     /// The MHI virtual MPEG audio decoder board, edited in the same Sound
     /// section (`[mhi] enabled`) in an `mhi` build, the only build that can
@@ -12161,31 +12193,83 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
-    fn io_ports_tab_groups_serial_parallel_and_ethernet_under_headers() {
+    fn io_ports_pages_carry_one_section_each() {
+        let header = |tab| {
+            let r = rows(tab, ParallelDevice::None, SerialMode::Midi, false);
+            r.iter()
+                .filter(|x| x.kind == RowKind::SectionHeader)
+                .map(|x| x.label)
+                .collect::<Vec<_>>()
+        };
+        // Serial Port page: the Device / Mode selector and (in MIDI) the
+        // endpoints, under the one heading.
+        assert_eq!(
+            header(LauncherTab::IoPorts),
+            ["Serial:"],
+            "the strip tab is the serial page"
+        );
         let r = rows(
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Midi,
             false,
         );
-        let headers: Vec<_> = r
-            .iter()
-            .filter(|x| x.kind == RowKind::SectionHeader)
-            .map(|x| x.label)
-            .collect();
-        assert_eq!(headers, ["Serial:", "Parallel:", "Ethernet:", "Sound:"]);
-        // Serial section: the Device / Mode selector, and (in MIDI) the endpoints.
         assert!(r.iter().any(|x| x.field == LauncherField::SerialMode));
         assert!(r.iter().any(|x| x.field == LauncherField::MidiOut));
-        // Parallel section: the device selector.
+        assert!(
+            !r.iter().any(|x| x.field == LauncherField::ParallelDevice),
+            "parallel lives on its own page now"
+        );
+        // Parallel Port page: the device selector.
+        assert_eq!(header(LauncherTab::IoParallel), ["Parallel:"]);
+        let r = rows(
+            LauncherTab::IoParallel,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::ParallelDevice));
-        // Ethernet section: the A2065 board selector.
+        // Networking page: the A2065 board selector.
+        assert_eq!(header(LauncherTab::IoNetworking), ["Ethernet:"]);
+        let r = rows(
+            LauncherTab::IoNetworking,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::Ethernet));
-        // Sound section: the Toccata board toggle, and (in an `mhi` build)
+        // Audio page: the Toccata board toggle, and (in an `mhi` build)
         // the MHI board toggle alongside it.
+        assert_eq!(header(LauncherTab::IoAudio), ["Audio:"]);
+        let r = rows(
+            LauncherTab::IoAudio,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::Toccata));
         #[cfg(feature = "mhi")]
         assert!(r.iter().any(|x| x.field == LauncherField::Mhi));
+        // The four pages switch between each other on the nav row, under
+        // the one strip entry, with no Back button -- the A/V pattern.
+        for tab in [
+            LauncherTab::IoParallel,
+            LauncherTab::IoNetworking,
+            LauncherTab::IoAudio,
+        ] {
+            assert_eq!(tab.strip_tab(), LauncherTab::IoPorts);
+            assert_eq!(tab.parent_tab(), None);
+            assert!(tab.has_top_nav());
+        }
+        assert_eq!(
+            LauncherTab::IoPorts.nav_options(),
+            [
+                ("Serial Port", LauncherTab::IoPorts),
+                ("Parallel Port", LauncherTab::IoParallel),
+                ("Networking", LauncherTab::IoNetworking),
+                ("Audio", LauncherTab::IoAudio),
+            ]
+        );
     }
 
     #[test]
@@ -12399,9 +12483,14 @@ mod tests {
     #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::SamplerInput)
+            rows(
+                LauncherTab::IoParallel,
+                device,
+                SerialMode::default(),
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::SamplerInput)
         };
         // The sampler rows are hidden (not greyed) unless the sampler is chosen.
         assert!(!has(ParallelDevice::None));
@@ -12437,9 +12526,14 @@ mod tests {
         let mut s = MachineSetup::default();
         // The Output file row shows only when the printer is selected.
         let has_output = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::ParallelOutput)
+            rows(
+                LauncherTab::IoParallel,
+                device,
+                SerialMode::default(),
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::ParallelOutput)
         };
         assert!(!has_output(ParallelDevice::None));
         assert!(has_output(ParallelDevice::Printer));

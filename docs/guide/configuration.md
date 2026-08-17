@@ -1217,7 +1217,7 @@ With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
 `mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial section) sets all
+`mode = "midi"`. The launcher's **I/O Ports** tab (Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows
@@ -1777,7 +1777,7 @@ net = "nat"   # or "bridge", "loopback"; "none" for an isolated NIC
 
 Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain;
 `--a2065-net BACKEND` is the matching per-run flag, and the launcher's
-**I/O Ports** tab (Ethernet section) has the same picker. `net` selects the
+**I/O Ports** tab (Networking page) has the same picker. `net` selects the
 host network backend:
 
 - `"nat"` -- userspace NAT: the guest gets outbound IPv4 internet through a
@@ -1819,7 +1819,7 @@ chain. Its stock, open-source AHI driver (`toccata.audio`) works unmodified,
 so any AHI-aware guest application gets 16-bit sound with no
 Copperline-specific setup. No other options exist yet. Omit the section
 (or `enabled = false`) for no board. The launcher's **I/O Ports** tab
-(Sound section) has the matching fit/don't-fit toggle; host-side audio
+(Audio page) has the matching fit/don't-fit toggle; host-side audio
 capture and backend settings (`--audio-wav`, `--audio-stems`, device
 selection) stay command-line/config-file only and have no launcher row.
 The board's output joins the mixer as the `toccata` source for
@@ -1839,7 +1839,7 @@ chain, serving the Amiga MHI API through the ported
 hardware-accelerated MP3 decoding. No other options exist yet. Omit the
 section (or `enabled = false`) for no board. Needs a build with the `mhi`
 feature (on by default; off only for the wasm32 build). The launcher's
-**I/O Ports** tab (Sound section) has the matching fit/don't-fit toggle;
+**I/O Ports** tab (Audio page) has the matching fit/don't-fit toggle;
 host-side audio capture and backend settings (`--audio-wav`,
 `--audio-stems`, device selection) stay command-line/config-file only and
 have no launcher row.
@@ -1880,7 +1880,7 @@ with an online mode) opens `bsdsocket.library` and calls
 Roadshow -- but there is no guest-side stack to install, configure, or boot:
 the library autoboots from the board's ROM on Kickstart 1.3 through 3.x and
 on the bundled AROS ROM. `--hostsocket-net BACKEND` is the matching per-run
-flag, and the launcher's **I/O Ports** tab (Ethernet section) has the same
+flag, and the launcher's **I/O Ports** tab (Networking page) has the same
 picker.
 
 `net` selects the same host network backends as the A2065 (see above for
