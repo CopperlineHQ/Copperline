@@ -97,14 +97,24 @@ autoconfig identity.
   | 2 | MPEG-2.5 supported |
   | 3 | Layer III supported |
   | 4 | CBR (constant bitrate) supported |
-  | 5 | VBR accepted as input (decodes correctly; no seek support) |
+  | 5 | VBR accepted as input, including re-entry at an arbitrary (non-frame-aligned) byte offset -- see [Seek-entry hardening](#seek-entry-hardening) |
   | 6-15 | reserved, read as 0 |
 
-  M1-M2 sets bits 0-5 (MPEG-1/2/2.5, Layer III, CBR, VBR-no-seek) and no
-  others -- Layer I/II are not implemented, so bits for them do not exist
-  in this version; a future version that adds them would need a `CAPS`
-  bit for each, which is exactly the kind of change that bumps
-  `VERSION`. This register is what the guest library's `MHIQuery` handler
+  M1-M2 sets bits 0-5 (MPEG-1/2/2.5, Layer III, CBR, VBR) and no others --
+  Layer I/II are not implemented, so bits for them do not exist in this
+  version; a future version that adds them would need a `CAPS` bit for
+  each, which is exactly the kind of change that bumps `VERSION`. Bit 5's
+  own meaning was tightened in M3 (VBR entry at an arbitrary byte offset
+  is now hardened, not just "VBR decodes"; see
+  [Seek-entry hardening](#seek-entry-hardening)) without moving its value
+  or bumping `VERSION`: M1-M2 already accepted VBR as input and never
+  claimed seek support as a *board* feature (seeking was always the
+  player's job, done via `MHIStop`/reposition/`MHIQueueBuffer` -- MHI has
+  no seek call of its own), so M3 only proves and documents a stronger
+  guarantee about behavior the board's registers never described a limit
+  on in the first place -- not a change to any offset, width, access
+  rule, or bit meaning `VERSION` exists to gate. This register is what the
+  guest library's `MHIQuery` handler
   consults for `MHIQ_MPEG1`/`MHIQ_MPEG2`/`MHIQ_MPEG25`/`MHIQ_LAYER3`/
   `MHIQ_VARIABLE_BITRATE` -- it is genuine hardware-reported capability,
   unlike decoder identity (below).
@@ -149,7 +159,7 @@ autoconfig identity.
   | `0` | (no-op) | Ignored; reserved so an accidental zero write is inert |
   | `1` | `PLAY` | `STOPPED`/`PAUSED` &rarr; `PLAYING`. From `STOPPED`, playback (and bitstream consumption) starts at the head of the queue if non-empty, or the board immediately reports `OUT_OF_DATA` if the queue is empty. From `PAUSED`, resumes exactly where it left off. No-op from `PLAYING`/`OUT_OF_DATA`. |
   | `2` | `PAUSE` | `PLAYING` &rarr; `PAUSED`. Halts bitstream consumption and audio output; the queue is untouched and the decoder's cross-frame state is preserved, so `PLAY` resumes mid-stream with no audible gap or restart. No-op from any other state (in particular, `PAUSE` from `OUT_OF_DATA` or `STOPPED` does nothing -- MHI's own `MHIPause` is only meaningful while playing). |
-  | `3` | `STOP` | Any state &rarr; `STOPPED`. **Discards every queued descriptor**, completed or not yet started (`QUEUE_COUNT` &rarr; 0), and resets `COMPLETED_COUNT` to 0. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step. |
+  | `3` | `STOP` | Any state &rarr; `STOPPED`. **Discards every queued descriptor**, completed or not yet started (`QUEUE_COUNT` &rarr; 0), and resets `COMPLETED_COUNT` to 0. **Also resets the decoder's cross-frame state** (bit reservoir, MDCT/QMF overlap) -- a fresh transport session starts with a fresh decoder, not one still carrying the discarded stream's reservoir into whatever plays next. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step, and this is also exactly what a seeking player's `MHIStop` &rarr; reposition &rarr; `MHIQueueBuffer` sequence needs: nothing from the pre-seek stream can bleed into the post-seek decode (see [Seek-entry hardening](#seek-entry-hardening)). |
 
   Values above `3` are reserved and behave as the no-op.
 
@@ -401,6 +411,57 @@ guest-visible contract changes -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
 still only ever advance in whole-descriptor, whole-frame steps -- only the
 emulated wall-clock-adjacent pacing of how many ticks that takes.
 
+### Seek-entry hardening
+
+MHI itself has no seek call -- the ABI is exactly `MHIAllocDecoder`/
+`MHIFreeDecoder`/`MHIQueueBuffer`/`MHIGetEmpty`/`MHIGetStatus`/`MHIPlay`/
+`MHIStop`/`MHIPause`/`MHIQuery`/`MHISetParam`, nothing more. Seeking is
+entirely the player's own responsibility: it calls `MHIStop`, repositions
+its own file read to wherever it wants to resume, and `MHIQueueBuffer`s
+buffers starting at that new position. From the board's side, a seek is
+indistinguishable from any other `STOP` followed by fresh descriptors --
+there is no seek-specific register or command, and none is needed.
+
+Two things this puts on the board, both true since M1-M2 and exercised
+explicitly by M3's test suite:
+
+- **`STOP` resets decoder state, not just the queue** (see the `CONTROL`
+  table above) -- otherwise the discarded pre-seek stream's bit reservoir
+  or MDCT/QMF overlap would audibly bleed into the first frame or two
+  decoded after the seek. `src/mhi.rs`'s
+  `stop_resets_decoder_state_so_a_reseek_matches_a_fresh_decode` proves
+  this against a real encoded fixture: decode a real prefix, `STOP`,
+  requeue the remainder as a seek would, and the result must be
+  byte-for-byte identical to decoding that same remainder on a board that
+  never saw the prefix.
+- **Bitstream re-entry at an arbitrary byte offset resyncs cleanly.** A
+  player's file-position seek lands wherever the underlying file format
+  puts it -- routinely not aligned to an MPEG frame boundary, and
+  routinely just past metadata (an ID3v2 tag between tracks in a
+  concatenated file, a Xing/LAME info frame, silence-trimming padding).
+  The board's existing resync machinery (see "Undecodable bitstream
+  content" above) already handles this with no seek-specific code: bytes
+  that are not a valid frame sync are skipped exactly like any other
+  undecodable content, bounded by the same per-tick resync budget. This
+  holds for VBR content too -- a VBR stream's frames vary in size but
+  each still carries its own valid sync header, so the same byte-level
+  resync search finds the next real frame regardless of bitrate mode; a
+  frame decoded starting immediately after a blind seek may legitimately
+  sound imperfect for a frame or two (the bit reservoir it would have
+  inherited from now-discarded prior frames is empty, matching what any
+  real decoder does when handed a stream it has never seen the start of),
+  but decoding itself is always correct and resumes clean steady-state
+  output once caught up.
+  `mid_frame_entry_resyncs_to_the_next_real_frame` and
+  `seek_entry_past_an_id3v2_tag_resyncs_correctly` in `src/mhi.rs` cover
+  these cases directly.
+
+Nothing above is a new register, command, or protocol surface -- it is a
+guarantee about existing behavior (`STOP`'s semantics, the resync path's
+robustness) that M3 proved and documented rather than a M3-only feature a
+pre-M3 board would lack. See [CAPS](#capability-version-registers) for why
+this did not need a `VERSION` bump.
+
 **An incomplete trailing frame** (the queued bytes end mid-frame -- too few
 bytes for the decoder to tell whether they are even a valid sync, let alone
 decode them) is different from undecodable content: it is not junk to skip,
@@ -570,3 +631,26 @@ content above.
   complete" treatment undecodable content gets. Reset on `RESET`/`STOP`
   and whenever a frame decodes or the bitstream reaches empty, so it never
   carries stale state across sessions.
+- **Golden CI fixtures**: `tests/data/mhi/golden_tone_cbr64_mono.mp3` (a
+  tiny locally-synthesized CBR fixture, `ffmpeg` sine source encoded with
+  `lame`) and `vbr_sweep.mp3` (same synthesis, LAME `-V4` VBR) are
+  committed -- unlike `test-assets/mhi/` (gitignored, fetched from Aminet),
+  these are Copperline's own generated output, not third-party binaries,
+  so the "ROMs and disk images are local assets and are never committed"
+  rule does not apply. `src/mhi.rs`'s `golden_tone_decodes_to_a_stable_pcm_capture`
+  decodes the CBR fixture through the real board/minimp3 path and compares
+  against a committed golden PCM capture
+  (`golden_tone_cbr64_mono.pcm`) on every plain `cargo test` -- unlike
+  every `#[ignore]`d integration test in `tests/mhi.rs`, this needs no
+  fetched `test-assets/`, so it catches minimp3-vendoring drift or
+  resampler/pacing regressions immediately rather than only when a
+  developer happens to have local assets staged. The same two fixtures
+  back the M3 seek-entry tests (`stop_resets_decoder_state_so_a_reseek_
+  matches_a_fresh_decode`, `mid_frame_entry_resyncs_to_the_next_real_frame`,
+  `seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window`) --
+  real encoded streams carry genuine cross-frame reservoir state that a
+  hand-authored `mp3_frame` (all-zero body, no reservoir use) cannot, so
+  the "STOP doesn't leak decoder state across a seek" claim is provable
+  only against real content. To regenerate after an intentional
+  decode-path change, see `golden_tone_decodes_to_a_stable_pcm_capture`'s
+  own doc comment.

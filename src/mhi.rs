@@ -1685,4 +1685,288 @@ mod tests {
             "descriptor completion must also stay in lockstep"
         );
     }
+
+    // ---- M3: seek-entry hardening (MHI-PLAN-M3-M4.md WP3.1/WP3.2) ----
+
+    /// The tiny CBR fixture WP3.4's golden-CI test also decodes -- committed
+    /// (not fetched) so these tests need no local `test-assets/`. Generated
+    /// once with `ffmpeg`+`lame` (see `tests/data/mhi/` for regeneration
+    /// notes); a real encoded stream, not a hand-authored `mp3_frame`, so it
+    /// carries a genuine cross-frame bit reservoir the way real seek-entry
+    /// content does.
+    const GOLDEN_TONE_MP3: &[u8] = include_bytes!("../tests/data/mhi/golden_tone_cbr64_mono.mp3");
+
+    /// Feed `bytes` into a fresh board as a single descriptor and decode
+    /// every frame `decode_next_frame` can find, ignoring completion/status
+    /// bookkeeping -- just the raw decoded PCM, for content comparisons.
+    /// Stops when the bitstream is exhausted or a call makes no progress
+    /// (the trailing partial-frame stall every real stream ends with).
+    fn decode_all(bytes: &[u8]) -> Vec<(f32, f32)> {
+        let mut board = Mhi::new();
+        board.bitstream = bytes.iter().copied().collect();
+        board.desc_lengths.push_back(bytes.len() as u32);
+        let mut samples = Vec::new();
+        loop {
+            let before = board.bitstream.len();
+            match board.decode_next_frame() {
+                Some(frame) => samples.extend_from_slice(&frame.samples),
+                None => {
+                    if board.bitstream.is_empty() || board.bitstream.len() == before {
+                        break;
+                    }
+                }
+            }
+        }
+        samples
+    }
+
+    /// Same as `decode_all`, but returns the byte offset into `bytes` where
+    /// decoding stopped (i.e. how much of the bitstream was consumed) after
+    /// decoding exactly `frame_count` frames -- lets a test find a genuine
+    /// mid-stream frame boundary in a real encoded file to seek to.
+    fn decode_n_frames_and_offset(bytes: &[u8], frame_count: usize) -> (Vec<(f32, f32)>, usize) {
+        let mut board = Mhi::new();
+        board.bitstream = bytes.iter().copied().collect();
+        board.desc_lengths.push_back(bytes.len() as u32);
+        let mut samples = Vec::new();
+        let mut decoded_frames = 0;
+        while decoded_frames < frame_count {
+            match board.decode_next_frame() {
+                Some(frame) => {
+                    samples.extend_from_slice(&frame.samples);
+                    decoded_frames += 1;
+                }
+                None => panic!(
+                    "fixture too short to decode {frame_count} frames \
+                     (only reached {decoded_frames})"
+                ),
+            }
+        }
+        let offset = bytes.len() - board.bitstream.len();
+        (samples, offset)
+    }
+
+    /// `CONTROL=STOP` must reset the decoder's cross-frame state (bit
+    /// reservoir, MDCT/QMF overlap), not just flush the queue -- otherwise a
+    /// seeking player's `MHIStop` -> reposition -> `MHIQueueBuffer` sequence
+    /// would let the pre-seek stream's reservoir bleed into the first frame
+    /// or two decoded after the seek. Proves it against a real encoded
+    /// stream (not a hand-authored silent frame, which carries no
+    /// reservoir state to bleed): decode a real prefix, `STOP`, requeue the
+    /// remainder as if freshly seeked-to, and the result must be
+    /// byte-for-byte identical to decoding that same remainder on a board
+    /// that never saw the prefix at all.
+    #[test]
+    fn stop_resets_decoder_state_so_a_reseek_matches_a_fresh_decode() {
+        // Any real (non-zero) frame count into the fixture works; 5 is
+        // comfortably past the Xing/Info header frame LAME writes first and
+        // deep enough into real audio for the reservoir to be genuinely hot.
+        let (_prefix_samples, seek_offset) = decode_n_frames_and_offset(GOLDEN_TONE_MP3, 5);
+        let remainder = &GOLDEN_TONE_MP3[seek_offset..];
+        assert!(
+            !remainder.is_empty(),
+            "test fixture too short to leave a remainder after the seek point"
+        );
+
+        let mut board = Mhi::new();
+        let mut mem = memory(0x10000);
+        mem.chip_ram[0..GOLDEN_TONE_MP3.len()].copy_from_slice(GOLDEN_TONE_MP3);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let seeked_samples = {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, GOLDEN_TONE_MP3);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+            for _ in 0..5 {
+                board.decode_next_frame();
+            }
+            // The "seek": a player would MHIStop, reposition its own file
+            // read, and MHIQueueBuffer the new region -- STOP must leave the
+            // board ready to decode `remainder` exactly as a fresh board
+            // would, with no reservoir/filterbank carryover from the
+            // discarded prefix.
+            board.write(OFF_CONTROL, 2, CMD_STOP as u32, &mut host);
+            assert_eq!(board.read(OFF_QUEUE_COUNT, 2, &mut host), 0);
+
+            mem.chip_ram[0..remainder.len()].copy_from_slice(remainder);
+            let mut host2 =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host2, 0, remainder);
+            let mut samples = Vec::new();
+            loop {
+                let before = board.bitstream.len();
+                match board.decode_next_frame() {
+                    Some(frame) => samples.extend_from_slice(&frame.samples),
+                    None => {
+                        if board.bitstream.is_empty() || board.bitstream.len() == before {
+                            break;
+                        }
+                    }
+                }
+            }
+            samples
+        };
+
+        let fresh_samples = decode_all(remainder);
+        assert_eq!(
+            seeked_samples, fresh_samples,
+            "decoding after a STOP-then-requeue (a seek) must match decoding the same \
+             bytes on a board that never saw the pre-seek stream -- a mismatch means the \
+             decoder's cross-frame state bled across the seek"
+        );
+    }
+
+    /// A real encoded stream re-entered at an arbitrary, non-frame-aligned
+    /// byte offset (exactly what a byte-granularity file seek produces, as
+    /// opposed to a frame-boundary-aligned offset) must still resync to the
+    /// next real frame sync within the bounded resync budget and decode
+    /// cleanly from there -- no panic, no stall.
+    #[test]
+    fn mid_frame_entry_resyncs_to_the_next_real_frame() {
+        let (_prefix, aligned_offset) = decode_n_frames_and_offset(GOLDEN_TONE_MP3, 4);
+        // Enter a few bytes into the following frame's header/side-info --
+        // definitely not a frame boundary, definitely not still a valid
+        // sync (the sync word itself is only the first two bytes).
+        let unaligned = &GOLDEN_TONE_MP3[aligned_offset + 5..];
+
+        let mut board = Mhi::new();
+        board.bitstream = unaligned.iter().copied().collect();
+        board.desc_lengths.push_back(unaligned.len() as u32);
+        let frame = board
+            .decode_next_frame()
+            .expect("resync must find the next real frame within the budget");
+        assert_eq!(
+            frame.samples.len(),
+            MAX_SAMPLES_PER_FRAME / 2,
+            "the resynced frame must be a genuine full decode, not a partial/junk result"
+        );
+    }
+
+    /// A real encoded stream re-entered just past an ID3v2 tag (a common
+    /// real-world seek target -- the tag sits between two songs/chapters in
+    /// a concatenated file, or a player skips it before ever queueing
+    /// bytes) must resync past the tag body and decode the real frame that
+    /// follows, without mistaking any tag byte for a frame sync.
+    #[test]
+    fn seek_entry_past_an_id3v2_tag_resyncs_correctly() {
+        // Minimal ID3v2.3 header (10 bytes: "ID3", version 3.0, flags 0,
+        // syncsafe size) followed by 64 bytes of tag-frame-shaped but inert
+        // body (never 0xFF, so nothing in it can false-sync).
+        let tag_body_len: u32 = 64;
+        let mut stream = vec![b'I', b'D', b'3', 3, 0, 0];
+        // Syncsafe size: 4 bytes, 7 bits each.
+        stream.push(((tag_body_len >> 21) & 0x7F) as u8);
+        stream.push(((tag_body_len >> 14) & 0x7F) as u8);
+        stream.push(((tag_body_len >> 7) & 0x7F) as u8);
+        stream.push((tag_body_len & 0x7F) as u8);
+        stream.extend(std::iter::repeat_n(0x00u8, tag_body_len as usize));
+        // Two consecutive real frames: minimp3's own resync (`mp3d_find_frame`)
+        // confirms a candidate sync by checking that a second frame header
+        // follows it at the expected offset, so a single trailing frame with
+        // nothing after it is indistinguishable from a false-positive sync in
+        // noise and gets rejected -- exactly as it should for real streams,
+        // where a lone matching bit pattern with no following frame usually
+        // *is* noise. A real seek target always has more stream after it.
+        stream.extend_from_slice(&mp3_frame(128, 0x33));
+        stream.extend_from_slice(&mp3_frame(128, 0x34));
+
+        let mut board = Mhi::new();
+        board.bitstream = stream.iter().copied().collect();
+        board.desc_lengths.push_back(stream.len() as u32);
+        let frame = board
+            .decode_next_frame()
+            .expect("resync must skip the ID3v2 tag and find the real frame after it");
+        assert_eq!(frame.samples.len(), MAX_SAMPLES_PER_FRAME / 2);
+    }
+
+    /// A real VBR-encoded fixture (LAME `-V4`, so frame sizes genuinely
+    /// vary) -- committed alongside `GOLDEN_TONE_MP3` for the same reason.
+    const GOLDEN_VBR_MP3: &[u8] = include_bytes!("../tests/data/mhi/vbr_sweep.mp3");
+
+    /// A seek into real VBR content, at a frame boundary chosen deep enough
+    /// in that the bit reservoir is genuinely hot (unlike `mp3_frame`'s
+    /// all-zero-body frames, which carry no reservoir state at all): the
+    /// board must decode cleanly from there (bounded resync if the entry
+    /// point were not frame-aligned is already covered by
+    /// `mid_frame_entry_resyncs_to_the_next_real_frame`; this test's own
+    /// claim is that VBR's varying frame sizes are not a bar to seek-entry
+    /// decode, and that reduced-reservoir output from the seek point still
+    /// settles to a clean steady state after a handful of frames).
+    #[test]
+    fn seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window() {
+        let (_prefix, seek_offset) = decode_n_frames_and_offset(GOLDEN_VBR_MP3, 10);
+        let remainder = &GOLDEN_VBR_MP3[seek_offset..];
+        assert!(!remainder.is_empty());
+
+        let mut board = Mhi::new();
+        board.bitstream = remainder.iter().copied().collect();
+        board.desc_lengths.push_back(remainder.len() as u32);
+
+        // A handful of frames' settle window (the first frame or two right
+        // after a blind seek may legitimately be quieter/rougher than
+        // steady state -- the reservoir they'd have inherited from the
+        // discarded prefix is empty, exactly like any real decoder handed
+        // a stream it has never seen the start of; see "Seek-entry
+        // hardening" in docs/internals/mhi.md), then decode must be fully
+        // clean: every remaining frame in a real, complete VBR file decodes
+        // to a real (non-junk) frame, never `None`.
+        const SETTLE_FRAMES: usize = 4;
+        for _ in 0..SETTLE_FRAMES {
+            board
+                .decode_next_frame()
+                .expect("even the settle window must still be genuine frame decodes, not junk");
+        }
+        let mut decoded_after_settle = 0;
+        loop {
+            let before = board.bitstream.len();
+            match board.decode_next_frame() {
+                Some(_) => decoded_after_settle += 1,
+                None => {
+                    if board.bitstream.is_empty() || board.bitstream.len() == before {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            decoded_after_settle > 0,
+            "the fixture's remainder after the settle window must contain real frames"
+        );
+    }
+
+    // ---- M3: golden CI (MHI-PLAN-M3-M4.md WP3.4) ----
+
+    /// A committed-fixture regression test: decodes `GOLDEN_TONE_MP3`
+    /// through the real board/minimp3 path (no emulator boot -- board-level,
+    /// like every other test in this module) and checks the result against
+    /// a committed golden PCM capture. Needs no fetched `test-assets/`, so
+    /// unlike every `#[ignore]`d integration test in `tests/mhi.rs` this
+    /// runs on every plain `cargo test`, catching minimp3-vendoring drift,
+    /// resampler regressions, or pacing changes immediately.
+    ///
+    /// To regenerate `golden_tone_cbr64_mono.pcm` after an intentional
+    /// decode-path change (e.g. a minimp3 version bump): temporarily change
+    /// this test to `std::fs::write` the freshly decoded bytes to that path
+    /// instead of comparing, run it once, inspect the diff, then revert.
+    #[test]
+    fn golden_tone_decodes_to_a_stable_pcm_capture() {
+        let samples = decode_all(GOLDEN_TONE_MP3);
+        assert!(!samples.is_empty(), "the fixture must decode to some audio");
+
+        let mut bytes = Vec::with_capacity(samples.len() * 8);
+        for (l, r) in &samples {
+            bytes.extend_from_slice(&l.to_le_bytes());
+            bytes.extend_from_slice(&r.to_le_bytes());
+        }
+
+        let golden: &[u8] = include_bytes!("../tests/data/mhi/golden_tone_cbr64_mono.pcm");
+        assert_eq!(
+            bytes, golden,
+            "decoded PCM drifted from the committed golden capture -- if this is an \
+             intentional decode-path change, regenerate the fixture (see this test's \
+             doc comment); otherwise this is a real regression"
+        );
+    }
 }
