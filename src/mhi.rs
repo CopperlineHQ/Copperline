@@ -103,12 +103,18 @@ const OFF_PARAM_SELECT: u32 = 0x1C;
 const OFF_PARAM_VALUE: u32 = 0x1E;
 
 /// The register-protocol version this board implements (`docs/internals/
-/// mhi.md`'s "Versioning").
-const VERSION: u16 = 1;
+/// mhi.md`'s "Versioning"). Bumped 1 -> 2 by M4: the param latches'
+/// documented semantic changed from "latched, otherwise inert" to
+/// "affects the next produced sample" -- see that section's worked
+/// v1->v2 example.
+const VERSION: u16 = 2;
 
-/// MPEG-1/2/2.5, Layer III, CBR, and VBR-as-input (no seek) -- bits 0-5; see
-/// the `CAPS` table. Bits 6-15 (Layer I/II, a future capability) stay 0.
-const CAPS: u16 = 0b0011_1111;
+/// MPEG-1/2/2.5, Layer III, CBR, VBR accepted as input (including
+/// re-entry at an arbitrary byte offset -- MHI itself has no seek call;
+/// see docs/internals/mhi.md's "Seek-entry hardening"), and (M4) param
+/// latches applied to decoded PCM -- bits 0-6; see the `CAPS` table. Bits
+/// 7-15 (Layer I/II, the 5/10-band EQ, a future capability) stay 0.
+const CAPS: u16 = 0b0111_1111;
 
 /// `QUEUE_DEPTH`'s fixed value.
 const QUEUE_DEPTH: u16 = 16;
@@ -522,6 +528,240 @@ struct CurrentFrame {
     completes: u32,
 }
 
+// ---------------------------------------------------------------------
+// M4: the param-latch DSP chain (docs/internals/mhi.md's "M4: the DSP
+// chain"). Runs in the causal native-rate producer, before the FIFO a
+// non-causal resampler pulls from -- see that section and "Determinism
+// and timing".
+// ---------------------------------------------------------------------
+
+/// Volume (index 0): `value / 100.0` -- `0` silence, `100` (default) unity.
+fn volume_gain(value: u16) -> f32 {
+    f32::from(value) / 100.0
+}
+
+/// Prefactor (index 6): `value / 50.0` -- `50` (default) unity, `100` is
+/// `2.0` (+6.02 dB headroom).
+fn prefactor_gain(value: u16) -> f32 {
+    f32::from(value) / 50.0
+}
+
+/// Panning (index 1): a linear balance control (not a constant-power pan
+/// law) -- `(gain_left, gain_right)`. Both are exactly `1.0` at `value =
+/// 50` (default), so the default param set is a no-op on decoded audio.
+fn pan_gains(value: u16) -> (f32, f32) {
+    let p = f32::from(value) / 100.0;
+    ((2.0 * (1.0 - p)).min(1.0), (2.0 * p).min(1.0))
+}
+
+/// Crossmixing (index 5): stereo-to-mono blend fraction, `value / 100.0`
+/// -- `0` (default) leaves channels untouched, `100` collapses both to
+/// the identical mono sum.
+fn crossmix_fraction(value: u16) -> f32 {
+    f32::from(value) / 100.0
+}
+
+fn apply_crossmix(left: f32, right: f32, mix: f32) -> (f32, f32) {
+    let mono = (left + right) * 0.5;
+    (
+        left * (1.0 - mix) + mono * mix,
+        right * (1.0 - mix) + mono * mix,
+    )
+}
+
+/// A tone band's gain in dB from its `0`-`100` latch value: `50`
+/// (default) is exactly `0.0` dB (identity filter).
+fn band_gain_db(value: u16) -> f32 {
+    (f32::from(value) - 50.0) / 50.0 * 12.0
+}
+
+/// One 2nd-order IIR section, Direct Form II transposed -- the same
+/// structure and `process` shape as `crate::chipset::paula`'s
+/// `BiquadLowPass`/`AnalogLedFilter`, reused here rather than inventing a
+/// second filter-processing convention in the same codebase. Holds only
+/// coefficients and state; coefficient derivation (RBJ Audio EQ Cookbook)
+/// lives in the `*_coeffs` constructors below, per docs/internals/mhi.md's
+/// "Tone filters: bass/mid/treble".
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl Biquad {
+    /// Corner frequencies are clamped below `sample_rate_hz * 0.45` before
+    /// coefficients are derived, so a low-sample-rate MPEG-2.5 stream
+    /// never asks for a corner at or past Nyquist.
+    fn clamp_corner(corner_hz: f32, sample_rate_hz: f32) -> f32 {
+        corner_hz.min(sample_rate_hz * 0.45)
+    }
+
+    fn peaking(corner_hz: f32, q: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let alpha = sn / (2.0 * q);
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cs;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cs;
+        let a2 = 1.0 - alpha / a;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    fn low_shelf(corner_hz: f32, shelf_slope: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let sqrt_a = a.sqrt();
+        let alpha = sn / 2.0 * ((a + 1.0 / a) * (1.0 / shelf_slope - 1.0) + 2.0).sqrt();
+
+        let b0 = a * ((a + 1.0) - (a - 1.0) * cs + 2.0 * sqrt_a * alpha);
+        let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cs);
+        let b2 = a * ((a + 1.0) - (a - 1.0) * cs - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) + (a - 1.0) * cs + 2.0 * sqrt_a * alpha;
+        let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cs);
+        let a2 = (a + 1.0) + (a - 1.0) * cs - 2.0 * sqrt_a * alpha;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    fn high_shelf(corner_hz: f32, shelf_slope: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let f0 = Self::clamp_corner(corner_hz, sample_rate_hz);
+        let a = 10f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sample_rate_hz;
+        let (sn, cs) = (w0.sin(), w0.cos());
+        let sqrt_a = a.sqrt();
+        let alpha = sn / 2.0 * ((a + 1.0 / a) * (1.0 / shelf_slope - 1.0) + 2.0).sqrt();
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cs + 2.0 * sqrt_a * alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cs);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cs - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cs + 2.0 * sqrt_a * alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cs);
+        let a2 = (a + 1.0) - (a - 1.0) * cs - 2.0 * sqrt_a * alpha;
+        Self::normalized(b0, b1, b2, a0, a1, a2)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn normalized(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    /// Replaces this section's coefficients with `new`'s, preserving `z1`/
+    /// `z2` (the filter's own memory) -- a latch write recomputes what the
+    /// filter *does* without discarding what it has already integrated,
+    /// avoiding a click that a full reset would introduce.
+    fn retune(&mut self, new: Biquad) {
+        self.b0 = new.b0;
+        self.b1 = new.b1;
+        self.b2 = new.b2;
+        self.a1 = new.a1;
+        self.a2 = new.a2;
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let output = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * output + self.z2;
+        self.z2 = self.b2 * input - self.a2 * output;
+        output
+    }
+
+    fn clear_state(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
+const BASS_CORNER_HZ: f32 = 200.0;
+const MID_CORNER_HZ: f32 = 1000.0;
+const MID_Q: f32 = 1.0;
+const TREBLE_CORNER_HZ: f32 = 4000.0;
+const SHELF_SLOPE: f32 = 1.0;
+
+/// The three-band bass/mid/treble filter bank, one independent `Biquad`
+/// per channel per band (stereo image preserved except for whatever a
+/// shelf/peak filter itself does to level). Recomputes coefficients only
+/// when the latch values or the native sample rate actually change (both
+/// are rare compared to per-sample processing), keeping each biquad's own
+/// `z1`/`z2` memory intact across a recompute.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ToneFilterBank {
+    bass_l: Biquad,
+    bass_r: Biquad,
+    mid_l: Biquad,
+    mid_r: Biquad,
+    treble_l: Biquad,
+    treble_r: Biquad,
+    /// `(bass_value, mid_value, treble_value, native_rate)` coefficients
+    /// were last derived for; `None` before the first sample (forces the
+    /// first `retune_if_stale` call to compute real coefficients rather
+    /// than trusting the all-zero `Default` state).
+    tuned_for: Option<(u16, u16, u16, u32)>,
+}
+
+impl ToneFilterBank {
+    fn retune_if_stale(&mut self, bass: u16, mid: u16, treble: u16, rate: u32) {
+        let key = (bass, mid, treble, rate);
+        if self.tuned_for == Some(key) {
+            return;
+        }
+        let rate_hz = rate as f32;
+        let bass_coeffs =
+            Biquad::low_shelf(BASS_CORNER_HZ, SHELF_SLOPE, band_gain_db(bass), rate_hz);
+        let mid_coeffs = Biquad::peaking(MID_CORNER_HZ, MID_Q, band_gain_db(mid), rate_hz);
+        let treble_coeffs =
+            Biquad::high_shelf(TREBLE_CORNER_HZ, SHELF_SLOPE, band_gain_db(treble), rate_hz);
+        self.bass_l.retune(bass_coeffs);
+        self.bass_r.retune(bass_coeffs);
+        self.mid_l.retune(mid_coeffs);
+        self.mid_r.retune(mid_coeffs);
+        self.treble_l.retune(treble_coeffs);
+        self.treble_r.retune(treble_coeffs);
+        self.tuned_for = Some(key);
+    }
+
+    fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let left = self
+            .treble_l
+            .process(self.mid_l.process(self.bass_l.process(left)));
+        let right = self
+            .treble_r
+            .process(self.mid_r.process(self.bass_r.process(right)));
+        (left, right)
+    }
+
+    /// Zeroes every band's `z1`/`z2` memory without discarding its tuned
+    /// coefficients (avoids an unnecessary recompute when the latch
+    /// values that produced them haven't changed) -- used by `STOP`, so a
+    /// stopped stream's filter ringing doesn't bleed into whatever plays
+    /// next, the same reasoning as `STOP`'s resampler-history clear.
+    fn clear_state(&mut self) {
+        self.bass_l.clear_state();
+        self.bass_r.clear_state();
+        self.mid_l.clear_state();
+        self.mid_r.clear_state();
+        self.treble_l.clear_state();
+        self.treble_r.clear_state();
+    }
+}
+
 /// The MHI board: `ZorroDevice` glue and register-window decode around
 /// [`Decoder`], plus the same two-cadence split as `Toccata` -- a causal
 /// native-rate producer (`advance_native`) that paces decode and
@@ -591,6 +831,9 @@ pub struct Mhi {
     /// Emulated Paula-clock ticks accumulated while stalled this way; see
     /// `MAX_STALL_TICKS`.
     stall_ticks: u64,
+    /// M4's bass/mid/treble filter bank -- see `docs/internals/mhi.md`'s
+    /// "M4: the DSP chain".
+    tone_filters: ToneFilterBank,
 }
 
 impl Mhi {
@@ -618,6 +861,7 @@ impl Mhi {
             resamplers: HashMap::new(),
             last_decode_stalled: false,
             stall_ticks: 0,
+            tone_filters: ToneFilterBank::default(),
         }
     }
 
@@ -761,6 +1005,7 @@ impl Mhi {
         self.resamplers.clear();
         self.last_decode_stalled = false;
         self.stall_ticks = 0;
+        self.tone_filters.clear_state();
     }
 
     fn handle_doorbell(&mut self, host: &mut DeviceHost) {
@@ -945,17 +1190,39 @@ impl Mhi {
         }
     }
 
+    /// Produces one native-rate sample: pulls the next raw decoded sample
+    /// from `current_frame`, runs it through the M4 param DSP chain (see
+    /// `docs/internals/mhi.md`'s "M4: the DSP chain" -- prefactor -> tone
+    /// filters -> volume -> pan -> crossmix, in that fixed order), and
+    /// pushes the result into `decoded` for the mixer-rate resampler to
+    /// pull from later.
     fn produce_one_sample(&mut self) {
         let frame = self
             .current_frame
             .as_mut()
             .expect("produce_one_sample requires a current frame");
-        let sample = frame.samples[frame.idx];
+        let (raw_l, raw_r) = frame.samples[frame.idx];
+        let rate = frame.rate;
         frame.idx += 1;
+        let frame_finished = frame.idx >= frame.samples.len();
+
+        let params = self.params;
+        self.tone_filters
+            .retune_if_stale(params[2], params[3], params[4], rate);
+        let pre = prefactor_gain(params[6]);
+        let (l, r) = self.tone_filters.process(raw_l * pre, raw_r * pre);
+        let vol = volume_gain(params[0]);
+        let (gain_l, gain_r) = pan_gains(params[1]);
+        let (l, r) = apply_crossmix(
+            l * vol * gain_l,
+            r * vol * gain_r,
+            crossmix_fraction(params[5]),
+        );
+
         if self.decoded.len() < DECODED_CAPACITY {
-            self.decoded.push_back(sample);
+            self.decoded.push_back((l, r));
         }
-        if frame.idx >= frame.samples.len() {
+        if frame_finished {
             let finished = self.current_frame.take().unwrap();
             self.finish_frame(&finished);
             self.acquire_next_frame();
@@ -1089,6 +1356,13 @@ impl ZorroDevice for Mhi {
         self.resamplers.clear();
         self.last_decode_stalled = false;
         self.stall_ticks = 0;
+        // Same reasoning: a stale filter's z1/z2 memory would otherwise
+        // ring a few pre-reset samples into the freshly reset silence,
+        // even though `params` above already went back to their flat
+        // defaults (a `Default` bank + `tuned_for: None` forces
+        // `retune_if_stale` to genuinely recompute on the very next
+        // sample rather than trusting an unrelated stale cache key).
+        self.tone_filters = ToneFilterBank::default();
     }
 
     fn kind(&self) -> &'static str {
@@ -1224,8 +1498,8 @@ mod tests {
         let mut board = Mhi::new();
         let mut mem = memory(0x100);
         let mut host = DeviceHost::new(&mut mem);
-        assert_eq!(board.read(OFF_VERSION, 2, &mut host), 1);
-        assert_eq!(board.read(OFF_CAPS, 2, &mut host), 0x3F);
+        assert_eq!(board.read(OFF_VERSION, 2, &mut host), 2);
+        assert_eq!(board.read(OFF_CAPS, 2, &mut host), 0x7F);
         assert_eq!(board.read(OFF_QUEUE_DEPTH, 2, &mut host), 16);
         assert_eq!(board.read(OFF_STATUS, 2, &mut host), 0); // STOPPED
     }
@@ -1959,6 +2233,597 @@ mod tests {
         assert_eq!(
             board.completed_count, resumed.completed_count,
             "descriptor completion must also stay in lockstep"
+        );
+    }
+
+    // ---- M3: seek-entry hardening ----
+
+    /// The tiny CBR fixture WP3.4's golden-CI test also decodes -- committed
+    /// (not fetched) so these tests need no local `test-assets/`. Generated
+    /// once with `ffmpeg`+`lame` (see `tests/data/mhi/` for regeneration
+    /// notes); a real encoded stream, not a hand-authored `mp3_frame`, so it
+    /// carries a genuine cross-frame bit reservoir the way real seek-entry
+    /// content does.
+    const GOLDEN_TONE_MP3: &[u8] = include_bytes!("../tests/data/mhi/golden_tone_cbr64_mono.mp3");
+
+    /// Feed `bytes` into a fresh board as a single descriptor and decode
+    /// every frame `decode_next_frame` can find, ignoring completion/status
+    /// bookkeeping -- just the raw decoded PCM, for content comparisons.
+    /// Stops when the bitstream is exhausted or a call makes no progress
+    /// (the trailing partial-frame stall every real stream ends with).
+    fn decode_all(bytes: &[u8]) -> Vec<(f32, f32)> {
+        let mut board = Mhi::new();
+        board.bitstream = bytes.iter().copied().collect();
+        board.desc_lengths.push_back(bytes.len() as u32);
+        let mut samples = Vec::new();
+        loop {
+            let before = board.bitstream.len();
+            match board.decode_next_frame() {
+                Some(frame) => samples.extend_from_slice(&frame.samples),
+                None => {
+                    if board.bitstream.is_empty() || board.bitstream.len() == before {
+                        break;
+                    }
+                }
+            }
+        }
+        samples
+    }
+
+    /// Same as `decode_all`, but returns the byte offset into `bytes` where
+    /// decoding stopped (i.e. how much of the bitstream was consumed) after
+    /// decoding exactly `frame_count` frames -- lets a test find a genuine
+    /// mid-stream frame boundary in a real encoded file to seek to.
+    fn decode_n_frames_and_offset(bytes: &[u8], frame_count: usize) -> (Vec<(f32, f32)>, usize) {
+        let mut board = Mhi::new();
+        board.bitstream = bytes.iter().copied().collect();
+        board.desc_lengths.push_back(bytes.len() as u32);
+        let mut samples = Vec::new();
+        let mut decoded_frames = 0;
+        while decoded_frames < frame_count {
+            match board.decode_next_frame() {
+                Some(frame) => {
+                    samples.extend_from_slice(&frame.samples);
+                    decoded_frames += 1;
+                }
+                None => panic!(
+                    "fixture too short to decode {frame_count} frames \
+                     (only reached {decoded_frames})"
+                ),
+            }
+        }
+        let offset = bytes.len() - board.bitstream.len();
+        (samples, offset)
+    }
+
+    /// `CONTROL=STOP` must reset the decoder's cross-frame state (bit
+    /// reservoir, MDCT/QMF overlap), not just flush the queue -- otherwise a
+    /// seeking player's `MHIStop` -> reposition -> `MHIQueueBuffer` sequence
+    /// would let the pre-seek stream's reservoir bleed into the first frame
+    /// or two decoded after the seek. Proves it against a real encoded
+    /// stream (not a hand-authored silent frame, which carries no
+    /// reservoir state to bleed): decode a real prefix, `STOP`, requeue the
+    /// remainder as if freshly seeked-to, and the result must be
+    /// byte-for-byte identical to decoding that same remainder on a board
+    /// that never saw the prefix at all.
+    #[test]
+    fn stop_resets_decoder_state_so_a_reseek_matches_a_fresh_decode() {
+        // Any real (non-zero) frame count into the fixture works; 5 is
+        // comfortably past the Xing/Info header frame LAME writes first and
+        // deep enough into real audio for the reservoir to be genuinely hot.
+        let (_prefix_samples, seek_offset) = decode_n_frames_and_offset(GOLDEN_TONE_MP3, 5);
+        let remainder = &GOLDEN_TONE_MP3[seek_offset..];
+        assert!(
+            !remainder.is_empty(),
+            "test fixture too short to leave a remainder after the seek point"
+        );
+
+        let mut board = Mhi::new();
+        let mut mem = memory(0x10000);
+        mem.chip_ram[0..GOLDEN_TONE_MP3.len()].copy_from_slice(GOLDEN_TONE_MP3);
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        let seeked_samples = {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, GOLDEN_TONE_MP3);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+            for _ in 0..5 {
+                board.decode_next_frame();
+            }
+            // The "seek": a player would MHIStop, reposition its own file
+            // read, and MHIQueueBuffer the new region -- STOP must leave the
+            // board ready to decode `remainder` exactly as a fresh board
+            // would, with no reservoir/filterbank carryover from the
+            // discarded prefix.
+            board.write(OFF_CONTROL, 2, CMD_STOP as u32, &mut host);
+            assert_eq!(board.read(OFF_QUEUE_COUNT, 2, &mut host), 0);
+
+            mem.chip_ram[0..remainder.len()].copy_from_slice(remainder);
+            let mut host2 =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host2, 0, remainder);
+            let mut samples = Vec::new();
+            loop {
+                let before = board.bitstream.len();
+                match board.decode_next_frame() {
+                    Some(frame) => samples.extend_from_slice(&frame.samples),
+                    None => {
+                        if board.bitstream.is_empty() || board.bitstream.len() == before {
+                            break;
+                        }
+                    }
+                }
+            }
+            samples
+        };
+
+        let fresh_samples = decode_all(remainder);
+        assert_eq!(
+            seeked_samples, fresh_samples,
+            "decoding after a STOP-then-requeue (a seek) must match decoding the same \
+             bytes on a board that never saw the pre-seek stream -- a mismatch means the \
+             decoder's cross-frame state bled across the seek"
+        );
+    }
+
+    /// A real encoded stream re-entered at an arbitrary, non-frame-aligned
+    /// byte offset (exactly what a byte-granularity file seek produces, as
+    /// opposed to a frame-boundary-aligned offset) must still resync to the
+    /// next real frame sync within the bounded resync budget and decode
+    /// cleanly from there -- no panic, no stall.
+    #[test]
+    fn mid_frame_entry_resyncs_to_the_next_real_frame() {
+        let (_prefix, aligned_offset) = decode_n_frames_and_offset(GOLDEN_TONE_MP3, 4);
+        // Enter a few bytes into the following frame's header/side-info --
+        // definitely not a frame boundary, definitely not still a valid
+        // sync (the sync word itself is only the first two bytes).
+        let unaligned = &GOLDEN_TONE_MP3[aligned_offset + 5..];
+
+        let mut board = Mhi::new();
+        board.bitstream = unaligned.iter().copied().collect();
+        board.desc_lengths.push_back(unaligned.len() as u32);
+        let frame = board
+            .decode_next_frame()
+            .expect("resync must find the next real frame within the budget");
+        assert_eq!(
+            frame.samples.len(),
+            1152,
+            "the resynced frame must be a genuine full decode, not a partial/junk result"
+        );
+    }
+
+    /// A real encoded stream re-entered just past an ID3v2 tag (a common
+    /// real-world seek target -- the tag sits between two songs/chapters in
+    /// a concatenated file, or a player skips it before ever queueing
+    /// bytes) must resync past the tag body and decode the real frame that
+    /// follows, without mistaking any tag byte for a frame sync.
+    #[test]
+    fn seek_entry_past_an_id3v2_tag_resyncs_correctly() {
+        // Minimal ID3v2.3 header (10 bytes: "ID3", version 3.0, flags 0,
+        // syncsafe size) followed by 64 bytes of tag-frame-shaped but inert
+        // body (never 0xFF, so nothing in it can false-sync).
+        let tag_body_len: u32 = 64;
+        let mut stream = vec![b'I', b'D', b'3', 3, 0, 0];
+        // Syncsafe size: 4 bytes, 7 bits each.
+        stream.push(((tag_body_len >> 21) & 0x7F) as u8);
+        stream.push(((tag_body_len >> 14) & 0x7F) as u8);
+        stream.push(((tag_body_len >> 7) & 0x7F) as u8);
+        stream.push((tag_body_len & 0x7F) as u8);
+        stream.extend(std::iter::repeat_n(0x00u8, tag_body_len as usize));
+        // Two real frames: a real seek target always has more stream after
+        // it, and this exercises the resync loop finding the sync and then
+        // continuing to decode past it, not just recognizing one header.
+        stream.extend_from_slice(&mp3_frame(128, 0x33));
+        stream.extend_from_slice(&mp3_frame(128, 0x34));
+
+        let mut board = Mhi::new();
+        board.bitstream = stream.iter().copied().collect();
+        board.desc_lengths.push_back(stream.len() as u32);
+        let frame = board
+            .decode_next_frame()
+            .expect("resync must skip the ID3v2 tag and find the real frame after it");
+        assert_eq!(frame.samples.len(), 1152);
+    }
+
+    /// A real VBR-encoded fixture (LAME `-V4`, so frame sizes genuinely
+    /// vary) -- committed alongside `GOLDEN_TONE_MP3` for the same reason.
+    const GOLDEN_VBR_MP3: &[u8] = include_bytes!("../tests/data/mhi/vbr_sweep.mp3");
+
+    /// A seek into real VBR content, at a frame boundary chosen deep enough
+    /// in that the bit reservoir is genuinely hot (unlike `mp3_frame`'s
+    /// all-zero-body frames, which carry no reservoir state at all): the
+    /// board must decode cleanly from there (bounded resync if the entry
+    /// point were not frame-aligned is already covered by
+    /// `mid_frame_entry_resyncs_to_the_next_real_frame`; this test's own
+    /// claim is that VBR's varying frame sizes are not a bar to seek-entry
+    /// decode, and that reduced-reservoir output from the seek point still
+    /// settles to a clean steady state after a handful of frames).
+    #[test]
+    fn seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window() {
+        let (_prefix, seek_offset) = decode_n_frames_and_offset(GOLDEN_VBR_MP3, 10);
+        let remainder = &GOLDEN_VBR_MP3[seek_offset..];
+        assert!(!remainder.is_empty());
+
+        let mut board = Mhi::new();
+        board.bitstream = remainder.iter().copied().collect();
+        board.desc_lengths.push_back(remainder.len() as u32);
+
+        // A handful of frames' settle window (the first frame or two right
+        // after a blind seek may legitimately be quieter/rougher than
+        // steady state -- the reservoir they'd have inherited from the
+        // discarded prefix is empty, exactly like any real decoder handed
+        // a stream it has never seen the start of; see "Seek-entry
+        // hardening" in docs/internals/mhi.md), then decode must be fully
+        // clean: every remaining frame in a real, complete VBR file decodes
+        // to a real (non-junk) frame, never `None`.
+        const SETTLE_FRAMES: usize = 4;
+        for _ in 0..SETTLE_FRAMES {
+            board
+                .decode_next_frame()
+                .expect("even the settle window must still be genuine frame decodes, not junk");
+        }
+        let mut decoded_after_settle = 0;
+        loop {
+            let before = board.bitstream.len();
+            match board.decode_next_frame() {
+                Some(_) => decoded_after_settle += 1,
+                None => {
+                    if board.bitstream.is_empty() || board.bitstream.len() == before {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            decoded_after_settle > 0,
+            "the fixture's remainder after the settle window must contain real frames"
+        );
+    }
+
+    // ---- M3: golden CI ----
+
+    /// A committed-fixture regression test: decodes `GOLDEN_TONE_MP3`
+    /// through the real board/decoder path (no emulator boot -- board-level,
+    /// like every other test in this module) and checks the result against
+    /// a committed golden PCM capture. Needs no fetched `test-assets/`, so
+    /// unlike every `#[ignore]`d integration test in `tests/mhi.rs` this
+    /// runs on every plain `cargo test`, catching decoder-dependency drift,
+    /// resampler regressions, or pacing changes immediately.
+    ///
+    /// Compared with a tolerance, not byte-for-byte: Symphonia's own
+    /// precomputed tables call `powf`, whose last-ulp rounding can differ
+    /// across platforms/optimization levels (`docs/internals/mhi.md`'s
+    /// "Decoder" note -- confirmed in practice: the fixture generated on
+    /// one host failed this test byte-exact on others in CI). A max-per-
+    /// sample-absolute-difference bound catches a real regression (wrong
+    /// tone, dropped/garbled audio, decoder swap) -- which would land
+    /// orders of magnitude above the threshold -- while tolerating that
+    /// noise floor.
+    ///
+    /// To regenerate `golden_tone_cbr64_mono.pcm` after an intentional
+    /// decode-path change (e.g. a Symphonia version bump): temporarily
+    /// change this test to `std::fs::write` the freshly decoded bytes to
+    /// that path instead of comparing, run it once, inspect the diff, then
+    /// revert.
+    #[test]
+    fn golden_tone_decodes_to_a_stable_pcm_capture() {
+        let samples = decode_all(GOLDEN_TONE_MP3);
+        assert!(!samples.is_empty(), "the fixture must decode to some audio");
+
+        let golden: &[u8] = include_bytes!("../tests/data/mhi/golden_tone_cbr64_mono.pcm");
+        let golden_samples: Vec<(f32, f32)> = golden
+            .chunks_exact(8)
+            .map(|c| {
+                let l = f32::from_le_bytes(c[0..4].try_into().unwrap());
+                let r = f32::from_le_bytes(c[4..8].try_into().unwrap());
+                (l, r)
+            })
+            .collect();
+        assert_eq!(
+            samples.len(),
+            golden_samples.len(),
+            "decoded sample count drifted from the committed golden capture -- a real \
+             regression (pacing, resync, or a dropped/extra frame), not decoder rounding \
+             noise, would change this"
+        );
+
+        let max_abs_diff = samples
+            .iter()
+            .zip(&golden_samples)
+            .flat_map(|(&(l, r), &(gl, gr))| [(l - gl).abs(), (r - gr).abs()])
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-4,
+            "decoded PCM drifted from the committed golden capture by {max_abs_diff} (max \
+             per-sample abs diff, threshold 1e-4) -- if this is an intentional decode-path \
+             change, regenerate the fixture (see this test's doc comment); otherwise this is \
+             a real regression"
+        );
+    }
+
+    // ---- M4: the param-latch DSP chain ----
+
+    #[test]
+    fn dsp_helper_functions_produce_exact_expected_gains() {
+        assert_eq!(volume_gain(100), 1.0);
+        assert_eq!(volume_gain(0), 0.0);
+        assert_eq!(volume_gain(50), 0.5);
+
+        assert_eq!(prefactor_gain(50), 1.0);
+        assert_eq!(prefactor_gain(0), 0.0);
+        assert_eq!(prefactor_gain(100), 2.0);
+
+        assert_eq!(pan_gains(50), (1.0, 1.0));
+        assert_eq!(pan_gains(0), (1.0, 0.0));
+        assert_eq!(pan_gains(100), (0.0, 1.0));
+        assert_eq!(pan_gains(75), (0.5, 1.0));
+        assert_eq!(pan_gains(25), (1.0, 0.5));
+
+        assert_eq!(crossmix_fraction(0), 0.0);
+        assert_eq!(crossmix_fraction(100), 1.0);
+
+        assert_eq!(apply_crossmix(1.0, -1.0, 0.0), (1.0, -1.0));
+        assert_eq!(apply_crossmix(1.0, -1.0, 1.0), (0.0, 0.0));
+        assert_eq!(apply_crossmix(2.0, 0.0, 0.5), (1.5, 0.5));
+
+        assert_eq!(band_gain_db(50), 0.0);
+        assert_eq!(band_gain_db(0), -12.0);
+        assert_eq!(band_gain_db(100), 12.0);
+    }
+
+    /// Precomputed reference coefficients (independent Python
+    /// implementation of the same RBJ Cookbook formulas
+    /// `docs/internals/mhi.md`'s "Tone filters: bass/mid/treble" section
+    /// documents) for one peaking and one low-shelf case -- proves this
+    /// module's `Biquad` constructors match the documented math, not just
+    /// that they're internally self-consistent. Tolerance accounts for f64
+    /// (Python) vs. `f32` (this module) precision, not an algorithm
+    /// difference.
+    #[test]
+    fn biquad_coefficients_match_independently_precomputed_reference_values() {
+        let peaking = Biquad::peaking(1000.0, 1.0, 12.0, 44100.0);
+        let expected = [1.1024303, -1.9117108, 0.8288492, -1.9117108, 0.9312795];
+        let got = [peaking.b0, peaking.b1, peaking.b2, peaking.a1, peaking.a2];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-4, "got {got:?}, expected {expected:?}");
+        }
+
+        let low_shelf = Biquad::low_shelf(200.0, 1.0, -12.0, 44100.0);
+        let expected = [0.9859057, -1.9436854, 0.9581753, -1.9430958, 0.9446706];
+        let got = [
+            low_shelf.b0,
+            low_shelf.b1,
+            low_shelf.b2,
+            low_shelf.a1,
+            low_shelf.a2,
+        ];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-4, "got {got:?}, expected {expected:?}");
+        }
+    }
+
+    /// `Biquad::peaking`/`low_shelf`/`high_shelf` at `gain_db = 0.0` (the
+    /// default param value's mapping, `band_gain_db(50) == 0.0`) must be
+    /// mathematically exact identity filters (RBJ Cookbook property: at
+    /// `A = 1`, `b1 == a1` and `b2 == a2` bit-for-bit, since both are
+    /// computed from the identical expression -- see this module's
+    /// `Biquad` doc comment) -- process a sequence of varied, non-trivial
+    /// samples and every output must equal its input exactly.
+    #[test]
+    fn biquad_at_zero_db_is_an_exact_identity_filter() {
+        for ctor in [
+            Biquad::peaking(1000.0, 1.0, 0.0, 44100.0),
+            Biquad::low_shelf(200.0, 1.0, 0.0, 44100.0),
+            Biquad::high_shelf(4000.0, 1.0, 0.0, 44100.0),
+        ] {
+            let mut filter = ctor;
+            for input in [0.0f32, 1.0, -1.0, 0.37, -0.82, 0.001, -0.999] {
+                assert_eq!(filter.process(input), input);
+            }
+        }
+    }
+
+    /// The M4 DSP chain at every param's documented default (`PARAM_
+    /// DEFAULTS`) must be an exact no-op: `produce_one_sample` fed a
+    /// known, non-trivial stereo sample through a freshly constructed
+    /// board (defaults) must push that exact sample into `decoded`
+    /// unchanged. This is the property the panning/crossmix/tone-filter
+    /// formulas were each deliberately chosen around (see their doc
+    /// comments), proven here at the whole-chain level rather than one
+    /// param at a time.
+    #[test]
+    fn default_params_are_an_exact_no_op_on_produced_samples() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.6, -0.3)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        assert_eq!(board.decoded.pop_back(), Some((0.6, -0.3)));
+    }
+
+    #[test]
+    fn volume_latch_scales_both_channels_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[0] = 50; // volume: gain 0.5
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.8, -0.4)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert!((l - 0.4).abs() < 1e-6);
+        assert!((r - -0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn prefactor_latch_scales_both_channels_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[6] = 100; // prefactor: gain 2.0
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(0.25, -0.1)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert!((l - 0.5).abs() < 1e-6);
+        assert!((r - -0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hard_pan_left_and_right_silence_the_opposite_channel_exactly() {
+        for (pan_value, expect_left, expect_right) in [(0u16, 1.0f32, 0.0f32), (100, 0.0, 1.0)] {
+            let mut board = Mhi::new();
+            board.status = Status::Playing;
+            board.params[1] = pan_value;
+            board.current_frame = Some(CurrentFrame {
+                samples: vec![(1.0, 1.0)],
+                idx: 0,
+                rate: 44_100,
+                completes: 0,
+            });
+            board.produce_one_sample();
+            let (l, r) = board.decoded.pop_back().unwrap();
+            assert_eq!(l, expect_left);
+            assert_eq!(r, expect_right);
+        }
+    }
+
+    #[test]
+    fn full_crossmix_makes_both_channels_identical_exactly() {
+        let mut board = Mhi::new();
+        board.status = Status::Playing;
+        board.params[5] = 100; // crossmix: full mono
+        board.current_frame = Some(CurrentFrame {
+            samples: vec![(1.0, -0.5)],
+            idx: 0,
+            rate: 44_100,
+            completes: 0,
+        });
+        board.produce_one_sample();
+        let (l, r) = board.decoded.pop_back().unwrap();
+        assert_eq!(l, r);
+        assert!((l - 0.25).abs() < 1e-6); // (1.0 + -0.5) / 2
+    }
+
+    /// A sustained bass boost's DC gain must be measurably above unity (and
+    /// a sustained cut measurably below), proving the filter bank's
+    /// `retune_if_stale` wiring actually reaches decoded audio -- not just
+    /// that the standalone `Biquad` constructors compute plausible
+    /// coefficients (the two tests above already cover that in isolation).
+    /// A single sample can't show this (a biquad's state starts at zero),
+    /// so this drives many identical samples to let the IIR reach its DC
+    /// steady state.
+    #[test]
+    fn sustained_bass_boost_and_cut_measurably_change_dc_gain() {
+        fn steady_state_left_gain(bass_value: u16) -> f32 {
+            let mut board = Mhi::new();
+            board.status = Status::Playing;
+            board.params[2] = bass_value;
+            let mut last = 0.0;
+            for _ in 0..2000 {
+                board.current_frame = Some(CurrentFrame {
+                    samples: vec![(1.0, 1.0)],
+                    idx: 0,
+                    rate: 44_100,
+                    completes: 0,
+                });
+                board.produce_one_sample();
+                last = board.decoded.pop_back().unwrap().0;
+            }
+            last
+        }
+        let boost = steady_state_left_gain(100);
+        let cut = steady_state_left_gain(0);
+        assert!(
+            boost > 1.05,
+            "expected a measurable bass boost, got {boost}"
+        );
+        assert!(cut < 0.95, "expected a measurable bass cut, got {cut}");
+    }
+
+    /// Extends `savestate_round_trip_reproduces_an_uninterrupted_runs_
+    /// output`'s claim to M4: mid-playback param state (non-default latch
+    /// values) and hot filter memory (built up by a boosted band, not the
+    /// all-zero state a freshly constructed `ToneFilterBank` starts with)
+    /// must both round-trip through a savestate and keep producing
+    /// identical output afterward.
+    #[test]
+    fn savestate_round_trip_preserves_hot_param_and_filter_state() {
+        // A real encoded fixture, not `mp3_frame` (whose all-zero body
+        // decodes to digital silence -- running silence through a biquad
+        // forever leaves z1/z2 at exactly 0.0 regardless of whether
+        // savestate serialization works at all, so a test built on it
+        // can't actually distinguish "filter memory round-tripped" from
+        // "filter memory was silently dropped and reinitialized to its
+        // own zero default"). Real audio content gives the boosted bass
+        // band genuine non-zero memory to lose.
+        let mut mem = memory(0x4000);
+        mem.chip_ram[0..GOLDEN_TONE_MP3.len()].copy_from_slice(GOLDEN_TONE_MP3);
+
+        let mut board = Mhi::new();
+        let mut cd_audio = crate::chipset::paula::CdAudioRing::default();
+        let mut toccata_audio = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_audio = MhiAudioRing::default();
+        {
+            let mut host =
+                host_with_rings(&mut mem, &mut cd_audio, &mut toccata_audio, &mut mhi_audio);
+            stage_and_ring(&mut board, &mut host, 0, GOLDEN_TONE_MP3);
+            board.write(OFF_PARAM_SELECT, 2, 2, &mut host); // select bass
+            board.write(OFF_PARAM_VALUE, 2, 100, &mut host); // full boost
+            board.write(OFF_PARAM_SELECT, 2, 0, &mut host); // select volume
+            board.write(OFF_PARAM_VALUE, 2, 70, &mut host);
+            board.write(OFF_CONTROL, 2, CMD_PLAY as u32, &mut host);
+            // Well past LAME's leading encoder-delay silence (the first
+            // real frame or so of a LAME-encoded stream is priming
+            // silence, not audible content) -- the bass filter's z1/z2
+            // memory is genuinely hot by now, primed by real decoded
+            // audio through the boosted bass biquad.
+            ZorroDevice::tick(&mut board, 200_000, &mut host);
+        }
+        assert!(
+            board.tone_filters.bass_l.z1 != 0.0 || board.tone_filters.bass_l.z2 != 0.0,
+            "test setup must leave genuine non-zero filter memory before serializing, or \
+             this test cannot tell a real savestate bug apart from a passing default"
+        );
+
+        let bytes = bincode::serialize(&board).unwrap();
+        let mut resumed: Mhi = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(resumed.params[2], 100, "bass latch must round-trip");
+        assert_eq!(resumed.params[0], 70, "volume latch must round-trip");
+
+        let mut mem_a = memory(0x1000);
+        let mut cd_a = crate::chipset::paula::CdAudioRing::default();
+        let mut toc_a = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_a = MhiAudioRing::default();
+        let mut host_a = host_with_rings(&mut mem_a, &mut cd_a, &mut toc_a, &mut mhi_a);
+        let mut mem_b = memory(0x1000);
+        let mut cd_b = crate::chipset::paula::CdAudioRing::default();
+        let mut toc_b = crate::chipset::paula::ToccataAudioRing::default();
+        let mut mhi_b = MhiAudioRing::default();
+        let mut host_b = host_with_rings(&mut mem_b, &mut cd_b, &mut toc_b, &mut mhi_b);
+
+        for _ in 0..3000 {
+            ZorroDevice::tick(&mut board, 61, &mut host_a);
+            ZorroDevice::tick(&mut resumed, 61, &mut host_b);
+        }
+        let frames_a: Vec<_> = (0..1500).map(|_| mhi_a.next_sample()).collect();
+        let frames_b: Vec<_> = (0..1500).map(|_| mhi_b.next_sample()).collect();
+        assert_eq!(
+            frames_a, frames_b,
+            "hot param/filter state resumed mid-stream must reproduce an uninterrupted \
+             run's output exactly"
         );
     }
 }
