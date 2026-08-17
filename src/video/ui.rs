@@ -37,9 +37,6 @@ const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
 /// DDF fetch-bound verticals on the Frame Analyzer heatmap.
 const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
-/// The ROM identification table's internal grid: fainter than the lit
-/// outline around it, so the cells divide without shouting.
-const ROM_TABLE_GRID: u32 = rgba(62, 64, 60);
 /// The mark inside a ticked box.
 const TICK_GREEN: u32 = rgba(72, 214, 96);
 
@@ -6142,8 +6139,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 RowKind::SectionHeader
                 | RowKind::BootpriHeader
                 | RowKind::Note
-                | RowKind::RomInfoHeader
-                | RowKind::RomInfoValue => {}
+                | RowKind::RomInfo => {}
                 RowKind::Text => {
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
@@ -7694,98 +7690,26 @@ fn draw_launcher_row(
         );
         return;
     }
-    // The ROM tab's identification table: three greyed columns under the
-    // path row, headers first, then whatever the image on the row above
-    // checksums to. The table stands whether or not an image is loaded.
-    if matches!(r.kind, RowKind::RomInfoHeader | RowKind::RomInfoValue) {
-        // The host-disk table's style exactly -- dark fill, bordered box,
-        // headings over a rule -- minus the clickability, plus a divider
-        // between the columns. Its right edge lines up with the Clear
-        // button above it, and every cell reads from the left.
-        let (browse, _) = launcher_path_rects(rect, row_y);
-        // Left edge on the indented row labels ("  Kickstart ROM"), right
-        // edge on the Browse button's left, and the bottom sits close
-        // under the value line rather than padding out the grid row.
-        let table = Rect {
-            x: launcher_pane_x(rect) + 2 * font::GLYPH_W,
-            y: row_y,
-            w: browse
-                .x
-                .saturating_sub(launcher_pane_x(rect) + 2 * font::GLYPH_W),
-            h: 2 * LAUNCH_ROW_H - 12,
-        };
-        let col_w = table.w / 3;
-        let cell_at = |cell: &str, col: usize| {
-            (
-                table.x + col * col_w + 6,
-                truncate_to_width(cell, col_w.saturating_sub(12)),
-            )
-        };
-        if r.kind == RowKind::RomInfoHeader {
-            // The box spans this row and the value row below, sunk into
-            // the panel exactly as the disk selector is: dark fill, the
-            // lit outline all the way round, then the inset bevel.
-            fill_rect(frame, scale_rect(table, scale), ENTRY_BG, scale);
-            draw_outline(frame, table, BUTTON_EDGE_LIGHT, scale);
-            draw_rect_bevel(
-                frame,
-                scale_rect(
-                    Rect {
-                        x: table.x + 1,
-                        y: table.y + 1,
-                        w: table.w.saturating_sub(2),
-                        h: table.h.saturating_sub(2),
-                    },
-                    scale,
-                ),
-                BUTTON_EDGE_DARK,
-                ENTRY_BG,
-                scale,
-            );
-            for (col, title) in ["Name", "Version", "Revision"].iter().enumerate() {
-                let (cx, text) = cell_at(title, col);
-                draw_panel_text(frame, cx, table.y + 5, &text, PANEL_TEXT_DIM, 1, scale);
-            }
-            // The grid: the rule under the headings and the column
-            // dividers run edge to edge, meeting the border, so every
-            // cell reads as a closed box.
-            fill_rect(
-                frame,
-                scale_rect(
-                    Rect {
-                        x: table.x + 1,
-                        y: table.y + LAUNCH_ROW_H - 4,
-                        w: table.w.saturating_sub(2),
-                        h: 1,
-                    },
-                    scale,
-                ),
-                ROM_TABLE_GRID,
-                scale,
-            );
-            for col in 1..3 {
-                fill_rect(
-                    frame,
-                    scale_rect(
-                        Rect {
-                            x: table.x + col * col_w,
-                            y: table.y + 1,
-                            w: 1,
-                            h: table.h.saturating_sub(2),
-                        },
-                        scale,
-                    ),
-                    ROM_TABLE_GRID,
-                    scale,
-                );
-            }
-            return;
-        }
+    // The ROM tab's identification lines: one greyed fact per row --
+    // Name, Version, Revision -- indented two spaces under the indented
+    // path row, the value following its label. The prefix stands even
+    // when an unrecognised image leaves the value blank.
+    if r.kind == RowKind::RomInfo {
         let (name, version, revision) = state.rom_note_cells(r.field);
-        for (col, cell) in [name, version, revision].iter().enumerate() {
-            let (cx, text) = cell_at(cell, col);
-            draw_panel_text(frame, cx, row_y + 2, &text, PANEL_TEXT, 1, scale);
-        }
+        let value = match r.label {
+            "Version" => version,
+            "Revision" => revision,
+            _ => name,
+        };
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect) + 4 * font::GLYPH_W,
+            row_y + 4,
+            &format!("{}: {}", r.label, value),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
         return;
     }
     // The ROM tab's identification line: what the image on the row above
@@ -7890,11 +7814,7 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader
-        | RowKind::BootpriHeader
-        | RowKind::Note
-        | RowKind::RomInfoHeader
-        | RowKind::RomInfoValue => {}
+        RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::Note | RowKind::RomInfo => {}
         RowKind::Text => {
             draw_launcher_value_box(
                 frame,
@@ -10111,9 +10031,9 @@ mod tests {
         use super::super::window::{texture_height, texture_width};
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
-        // Pixels painted in the table colour on a given ROM-tab row: the
-        // header row is index 2 and the value row index 3 (under the
-        // section heading and the path row).
+        // Pixels painted in the info-line ink on a given ROM-tab row:
+        // the Name line is index 2, under the section heading and the
+        // path row.
         // The headers draw dimmed, the values in full text colour; both
         // count as the table's ink.
         let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
@@ -10131,7 +10051,7 @@ mod tests {
             }
             lit
         };
-        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 3);
+        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 2);
         let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
 
         let mut setup = launcher::MachineSetup::default();
@@ -10152,14 +10072,10 @@ mod tests {
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         draw(&mut blank_frame, scale, &ui, None, None);
-        assert_eq!(
-            note_row_pixels(&blank_frame, rect),
-            0,
-            "an unidentified image must leave the value line empty"
-        );
+        let blank_ink = note_row_pixels(&blank_frame, rect);
         assert!(
-            row_pixels(&blank_frame, rect, 2) > 0,
-            "the table's column headers stand even over an empty slot"
+            blank_ink > 0,
+            "the Name: prefix stands even over an unrecognised image"
         );
 
         let mut frame = vec![0u8; w * h * 4];
@@ -10169,8 +10085,8 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None);
         assert!(
-            note_row_pixels(&frame, rect) > 0,
-            "the identification is drawn under the ROM path row"
+            note_row_pixels(&frame, rect) > blank_ink,
+            "the identification's value adds ink beyond the prefix"
         );
     }
 

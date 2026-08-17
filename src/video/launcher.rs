@@ -717,11 +717,11 @@ pub enum RowKind {
     /// A hard-drive image: a path with Browse/Clear, plus an editable
     /// volume-name field (used when the image is a host directory).
     Drive,
-    /// The greyed column headers of a ROM row's identification table.
-    RomInfoHeader,
-    /// The identification itself: Name / Version / Revision cells, blank
-    /// when the slot is empty or the image is unrecognised.
-    RomInfoValue,
+    /// One greyed line of a ROM row's identification -- the row's label
+    /// says which fact it carries (Name, Version, Revision), and the
+    /// value follows it. Blank after the prefix when the image is
+    /// unrecognised.
+    RomInfo,
     /// A non-interactive greyed heading that groups the rows beneath it
     /// (e.g. the `Serial:` / `Parallel:` sections of the I/O Ports tab). Its
     /// `field` is inert.
@@ -961,14 +961,15 @@ const MEMORY_ROWS: [Row; 8] = [
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
 // its dumper called it. The table stands whether or not an image is
 // loaded; empty cells mean an empty (or unrecognised) slot.
-const ROM_ROWS: [Row; 7] = [
+const ROM_ROWS: [Row; 8] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
-    row(F::Rom, "", RowKind::RomInfoHeader),
-    row(F::Rom, "", RowKind::RomInfoValue),
-    // A blank header as a spacer: the next section starts a row clear
-    // of the table. The extended slot gets no table of its own -- the
-    // checksum table rarely names one, and a blank grid says nothing.
+    // What the chosen image is, one greyed line per fact, indented
+    // under its row. The label picks which fact the line carries.
+    row(F::Rom, "Name", RowKind::RomInfo),
+    row(F::Rom, "Version", RowKind::RomInfo),
+    row(F::Rom, "Revision", RowKind::RomInfo),
+    // A blank header as a spacer before the next section.
     section_header(""),
     section_header("Extended ROM:"),
     row(F::ExtendedRom, "  Extended ROM", PathRow),
@@ -9967,8 +9968,9 @@ mod tests {
             [
                 ("Primary ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Kickstart ROM", RowKind::Path, F::Rom),
-                ("", RowKind::RomInfoHeader, F::Rom),
-                ("", RowKind::RomInfoValue, F::Rom),
+                ("Name", RowKind::RomInfo, F::Rom),
+                ("Version", RowKind::RomInfo, F::Rom),
+                ("Revision", RowKind::RomInfo, F::Rom),
                 ("", RowKind::SectionHeader, F::SectionHeader),
                 ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Extended ROM", RowKind::Path, F::ExtendedRom),
