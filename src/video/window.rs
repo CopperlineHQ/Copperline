@@ -6376,29 +6376,31 @@ impl App {
                     .midi_serial_mut()
                     .and_then(crate::midi::MidiSerialSink::csynth_mut)
                     .and_then(|synth| synth.panel_button(button));
-                if let Some(crate::csynth::PanelRequest::Mt32Mode(mode)) = request {
-                    // The engine already switched; mirror the choice into
-                    // the session's options so a power cycle keeps it.
-                    let value = match mode {
-                        crate::csynth::Mt32Mode::On => "on",
-                        crate::csynth::Mt32Mode::Off => "off",
-                        crate::csynth::Mt32Mode::Auto => "auto",
-                    };
-                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.set_csynth_mt32_mode(value);
+                match request {
+                    Some(crate::csynth::PanelRequest::Mt32Mode(mode)) => {
+                        // The engine already switched; mirror the choice
+                        // into the session's options so a power cycle
+                        // keeps it.
+                        let value = match mode {
+                            crate::csynth::Mt32Mode::On => "on",
+                            crate::csynth::Mt32Mode::Off => "off",
+                            crate::csynth::Mt32Mode::Auto => "auto",
+                        };
+                        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                            sink.set_csynth_mt32_mode(value);
+                        }
                     }
+                    Some(crate::csynth::PanelRequest::ResetSoundfont) => {
+                        // Confirmed at the fascia; the unit holds its
+                        // Initializing... screen while the bank swaps.
+                        if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                            sink.reset_csynth_soundfont();
+                        }
+                    }
+                    None => {}
                 }
             }
             CsynthPress::PowerOn(held) => {
-                // Both INSTRUMENT halves held through the power-on put
-                // the default soundfont back before the unit comes up.
-                let reset_font =
-                    held == [crate::csynth::Button::Both(crate::csynth::Pair::Instrument)];
-                if reset_font {
-                    if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                        sink.reset_csynth_soundfont();
-                    }
-                }
                 self.set_csynth_powered(true);
                 let came_up = if let Some(synth) = self
                     .emu
@@ -6407,20 +6409,15 @@ impl App {
                     .and_then(crate::midi::MidiSerialSink::csynth_mut)
                 {
                     // What was held on the fascia through the power-on
-                    // reaches the unit the way it reads its own buttons.
-                    if !reset_font {
-                        synth.panel_power_on_held(&held);
-                    }
+                    // reaches the unit the way it reads its own buttons
+                    // -- the factory questions included.
+                    synth.panel_power_on_held(&held);
                     true
                 } else {
                     false
                 };
                 if came_up {
-                    self.show_osd(if reset_font {
-                        "Coppersynth: default SoundFont"
-                    } else {
-                        "Coppersynth: power on"
-                    });
+                    self.show_osd("Coppersynth: power on");
                 } else {
                     // Asked to switch on and it did not: say why.
                     self.report_csynth();
