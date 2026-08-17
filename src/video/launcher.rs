@@ -961,20 +961,17 @@ const MEMORY_ROWS: [Row; 8] = [
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
 // its dumper called it. The table stands whether or not an image is
 // loaded; empty cells mean an empty (or unrecognised) slot.
-const ROM_ROWS: [Row; 11] = [
+const ROM_ROWS: [Row; 7] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
-    // Blank headers as spacers: the table sits a row clear of the path
-    // above it, and the next section starts a row clear of the table.
-    section_header(""),
     row(F::Rom, "", RowKind::RomInfoHeader),
     row(F::Rom, "", RowKind::RomInfoValue),
+    // A blank header as a spacer: the next section starts a row clear
+    // of the table. The extended slot gets no table of its own -- the
+    // checksum table rarely names one, and a blank grid says nothing.
     section_header(""),
     section_header("Extended ROM:"),
     row(F::ExtendedRom, "  Extended ROM", PathRow),
-    section_header(""),
-    row(F::ExtendedRom, "", RowKind::RomInfoHeader),
-    row(F::ExtendedRom, "", RowKind::RomInfoValue),
 ];
 // Each drive is a greyed "DFn:" heading with its settings indented under it. The
 // heading is keyed on the drive's image field so `row_hidden` drops it along
@@ -9970,15 +9967,11 @@ mod tests {
             [
                 ("Primary ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Kickstart ROM", RowKind::Path, F::Rom),
-                ("", RowKind::SectionHeader, F::SectionHeader),
                 ("", RowKind::RomInfoHeader, F::Rom),
                 ("", RowKind::RomInfoValue, F::Rom),
                 ("", RowKind::SectionHeader, F::SectionHeader),
                 ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Extended ROM", RowKind::Path, F::ExtendedRom),
-                ("", RowKind::SectionHeader, F::SectionHeader),
-                ("", RowKind::RomInfoHeader, F::ExtendedRom),
-                ("", RowKind::RomInfoValue, F::ExtendedRom),
             ]
         );
 
@@ -9997,14 +9990,12 @@ mod tests {
         // The bundled AROS pair fills both slots' tables with numbers
         // read off the images themselves, so they follow releases.
         let bundled = LauncherState::new(MachineSetup::default());
-        for field in [F::Rom, F::ExtendedRom] {
-            let (name, version, revision) = bundled.rom_note_cells(field);
-            assert_eq!(name, "AROS");
-            assert!(
-                !version.is_empty() && !revision.is_empty(),
-                "the AROS image carries its own numbers"
-            );
-        }
+        let (name, version, revision) = bundled.rom_note_cells(F::Rom);
+        assert_eq!(name, "AROS");
+        assert!(
+            !version.is_empty() && !revision.is_empty(),
+            "the AROS image carries its own numbers"
+        );
         // An unrecognised image is an empty table, not a missing one.
         let mut setup = MachineSetup::default();
         setup.set_path(F::Rom, std::path::PathBuf::from("mystery-dump.rom"));

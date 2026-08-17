@@ -37,6 +37,9 @@ const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
 /// DDF fetch-bound verticals on the Frame Analyzer heatmap.
 const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
+/// The ROM identification table's internal grid: fainter than the lit
+/// outline around it, so the cells divide without shouting.
+const ROM_TABLE_GRID: u32 = rgba(62, 64, 60);
 /// The mark inside a ticked box.
 const TICK_GREEN: u32 = rgba(72, 214, 96);
 
@@ -7700,14 +7703,16 @@ fn draw_launcher_row(
         // between the columns. Its right edge lines up with the Clear
         // button above it, and every cell reads from the left.
         let (browse, _) = launcher_path_rects(rect, row_y);
-        // Left edge on the section heading's own x, right edge on the
-        // Browse button's left, so the table sits squarely in the column
-        // the rows above it use.
+        // Left edge on the indented row labels ("  Kickstart ROM"), right
+        // edge on the Browse button's left, and the bottom sits close
+        // under the value line rather than padding out the grid row.
         let table = Rect {
-            x: launcher_pane_x(rect),
+            x: launcher_pane_x(rect) + 2 * font::GLYPH_W,
             y: row_y,
-            w: browse.x.saturating_sub(launcher_pane_x(rect)),
-            h: 2 * LAUNCH_ROW_H - 4,
+            w: browse
+                .x
+                .saturating_sub(launcher_pane_x(rect) + 2 * font::GLYPH_W),
+            h: 2 * LAUNCH_ROW_H - 12,
         };
         let col_w = table.w / 3;
         let cell_at = |cell: &str, col: usize| {
@@ -7755,7 +7760,7 @@ fn draw_launcher_row(
                     },
                     scale,
                 ),
-                BUTTON_EDGE_LIGHT,
+                ROM_TABLE_GRID,
                 scale,
             );
             for col in 1..3 {
@@ -7770,7 +7775,7 @@ fn draw_launcher_row(
                         },
                         scale,
                     ),
-                    BUTTON_EDGE_LIGHT,
+                    ROM_TABLE_GRID,
                     scale,
                 );
             }
@@ -7779,7 +7784,7 @@ fn draw_launcher_row(
         let (name, version, revision) = state.rom_note_cells(r.field);
         for (col, cell) in [name, version, revision].iter().enumerate() {
             let (cx, text) = cell_at(cell, col);
-            draw_panel_text(frame, cx, row_y + 2, &text, PANEL_TEXT_DIM, 1, scale);
+            draw_panel_text(frame, cx, row_y + 2, &text, PANEL_TEXT, 1, scale);
         }
         return;
     }
@@ -10107,22 +10112,26 @@ mod tests {
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
         // Pixels painted in the table colour on a given ROM-tab row: the
-        // header row is index 3 and the value row index 4 (under the
-        // section heading, the path row, and the spacer).
+        // header row is index 2 and the value row index 3 (under the
+        // section heading and the path row).
+        // The headers draw dimmed, the values in full text colour; both
+        // count as the table's ink.
         let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
             let row_y = launcher_row_y(rect, row);
             let mut lit = 0;
             for y in row_y..row_y + LAUNCH_ROW_H {
                 for x in launcher_pane_x(rect)..rect.x + rect.w - LAUNCH_MARGIN {
                     let p = (y * w + x) * 4;
-                    if frame[p..p + 4] == PANEL_TEXT_DIM.to_le_bytes() {
+                    if frame[p..p + 4] == PANEL_TEXT_DIM.to_le_bytes()
+                        || frame[p..p + 4] == PANEL_TEXT.to_le_bytes()
+                    {
                         lit += 1;
                     }
                 }
             }
             lit
         };
-        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 4);
+        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 3);
         let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
 
         let mut setup = launcher::MachineSetup::default();
@@ -10149,7 +10158,7 @@ mod tests {
             "an unidentified image must leave the value line empty"
         );
         assert!(
-            row_pixels(&blank_frame, rect, 3) > 0,
+            row_pixels(&blank_frame, rect, 2) > 0,
             "the table's column headers stand even over an empty slot"
         );
 
