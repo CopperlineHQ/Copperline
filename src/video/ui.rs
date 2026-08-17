@@ -7714,9 +7714,12 @@ fn draw_launcher_row(
             )
         };
         if r.kind == RowKind::RomInfoHeader {
-            // The box spans this row and the value row below.
-            fill_rect(frame, scale_rect(table, scale), BUTTON_EDGE_DARK, scale);
-            fill_rect(
+            // The box spans this row and the value row below, sunk into
+            // the panel exactly as the disk selector is: dark fill, the
+            // lit outline all the way round, then the inset bevel.
+            fill_rect(frame, scale_rect(table, scale), ENTRY_BG, scale);
+            draw_outline(frame, table, BUTTON_EDGE_LIGHT, scale);
+            draw_rect_bevel(
                 frame,
                 scale_rect(
                     Rect {
@@ -7727,6 +7730,7 @@ fn draw_launcher_row(
                     },
                     scale,
                 ),
+                BUTTON_EDGE_DARK,
                 ENTRY_BG,
                 scale,
             );
@@ -10092,8 +10096,8 @@ mod tests {
         let scale = 1;
         let (w, h) = (texture_width(scale), texture_height(scale));
         // Pixels painted in the table colour on a given ROM-tab row: the
-        // header row is index 2 and the value row index 3 (under the
-        // section heading and the Kickstart ROM path row).
+        // header row is index 3 and the value row index 4 (under the
+        // section heading, the path row, and the spacer).
         let row_pixels = |frame: &[u8], rect: Rect, row: usize| {
             let row_y = launcher_row_y(rect, row);
             let mut lit = 0;
@@ -10107,7 +10111,7 @@ mod tests {
             }
             lit
         };
-        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 3);
+        let note_row_pixels = |frame: &[u8], rect: Rect| row_pixels(frame, rect, 4);
         let panel_of = |state: LauncherState| Panel::Launcher(Box::new(state));
 
         let mut setup = launcher::MachineSetup::default();
@@ -10134,7 +10138,7 @@ mod tests {
             "an unidentified image must leave the value line empty"
         );
         assert!(
-            row_pixels(&blank_frame, rect, 2) > 0,
+            row_pixels(&blank_frame, rect, 3) > 0,
             "the table's column headers stand even over an empty slot"
         );
 

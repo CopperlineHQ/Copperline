@@ -961,13 +961,18 @@ const MEMORY_ROWS: [Row; 8] = [
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
 // its dumper called it. The table stands whether or not an image is
 // loaded; empty cells mean an empty (or unrecognised) slot.
-const ROM_ROWS: [Row; 8] = [
+const ROM_ROWS: [Row; 11] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
+    // Blank headers as spacers: the table sits a row clear of the path
+    // above it, and the next section starts a row clear of the table.
+    section_header(""),
     row(F::Rom, "", RowKind::RomInfoHeader),
     row(F::Rom, "", RowKind::RomInfoValue),
+    section_header(""),
     section_header("Extended ROM:"),
     row(F::ExtendedRom, "  Extended ROM", PathRow),
+    section_header(""),
     row(F::ExtendedRom, "", RowKind::RomInfoHeader),
     row(F::ExtendedRom, "", RowKind::RomInfoValue),
 ];
@@ -9965,10 +9970,13 @@ mod tests {
             [
                 ("Primary ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Kickstart ROM", RowKind::Path, F::Rom),
+                ("", RowKind::SectionHeader, F::SectionHeader),
                 ("", RowKind::RomInfoHeader, F::Rom),
                 ("", RowKind::RomInfoValue, F::Rom),
+                ("", RowKind::SectionHeader, F::SectionHeader),
                 ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Extended ROM", RowKind::Path, F::ExtendedRom),
+                ("", RowKind::SectionHeader, F::SectionHeader),
                 ("", RowKind::RomInfoHeader, F::ExtendedRom),
                 ("", RowKind::RomInfoValue, F::ExtendedRom),
             ]
