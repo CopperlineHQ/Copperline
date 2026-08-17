@@ -1178,7 +1178,7 @@ button.
 ```toml
 [serial]
 mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
-# midi_out = "FluidSynth"  # midi mode: host destination, or "mt32"
+# midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
@@ -1196,7 +1196,10 @@ Paula's serial in/out is connected:
   port). `--list-midi` prints the host endpoints. Either may instead be
   `"mt32"`, which is Copperline's own emulated MT-32 rather than anything
   on the host, and brings its own `mt32_*` keys with it; see
-  [the MT-32 chapter](mt32.md).
+  [the MT-32 chapter](mt32.md). `midi_out` may also be `"coppersynth"` --
+  Coppersynth, the built-in General MIDI synthesizer, which needs no
+  ROMs at all; see [the Coppersynth chapter](coppersynth.md) and the
+  `[coppersynth]` section below.
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
   device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
@@ -1217,7 +1220,7 @@ With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
 `mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial section) sets all
+`mode = "midi"`. The launcher's **I/O Ports** tab (Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows
@@ -1228,6 +1231,26 @@ takes a `host:port`, with an IPv6 literal in brackets
 
 The browser build has its own serial transport (the page bridges the port
 to a WebSocket); see [the browser chapter](browser.md).
+
+## `[coppersynth]` -- Coppersynth
+
+```toml
+[coppersynth]
+# soundfont = "/path/to/bank.sf2"   # override the built-in bank
+# mt32_mode = "auto"                # auto, on, or off
+# panel = true                      # start with the front panel shown
+```
+
+Coppersynth's own keys, in force when `[serial] midi_out = "coppersynth"`. The
+built-in bank (GeneralUser GS) is inside the executable, so none of them
+is required: `soundfont` plays a different bank (`.sf2`, or a `.zip`
+holding one; the `COPPERLINE_SOUNDFONT` environment variable and an
+`.sf2` beside the executable are also honoured), `mt32_mode` sets how
+MT-32 games are translated, and `panel` starts the session with the
+front panel under the display. All three are on the launcher's
+**I/O Ports** tab once Coppersynth is the MIDI output, and in the
+menu's **Coppersynth** category while it plays; see
+[the Coppersynth chapter](coppersynth.md).
 
 ## `[parallel]` -- Centronics parallel port
 
@@ -1777,7 +1800,7 @@ net = "nat"   # or "bridge", "loopback"; "none" for an isolated NIC
 
 Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain;
 `--a2065-net BACKEND` is the matching per-run flag, and the launcher's
-**I/O Ports** tab (Ethernet section) has the same picker. `net` selects the
+**I/O Ports** tab (Networking page) has the same picker. `net` selects the
 host network backend:
 
 - `"nat"` -- userspace NAT: the guest gets outbound IPv4 internet through a
@@ -1819,7 +1842,7 @@ chain. Its stock, open-source AHI driver (`toccata.audio`) works unmodified,
 so any AHI-aware guest application gets 16-bit sound with no
 Copperline-specific setup. No other options exist yet. Omit the section
 (or `enabled = false`) for no board. The launcher's **I/O Ports** tab
-(Sound section) has the matching fit/don't-fit toggle; host-side audio
+(Audio page) has the matching fit/don't-fit toggle; host-side audio
 capture and backend settings (`--audio-wav`, `--audio-stems`, device
 selection) stay command-line/config-file only and have no launcher row.
 The board's output joins the mixer as the `toccata` source for
@@ -1839,7 +1862,7 @@ chain, serving the Amiga MHI API through the ported
 hardware-accelerated MP3 decoding. No other options exist yet. Omit the
 section (or `enabled = false`) for no board. Needs a build with the `mhi`
 feature (on by default; off only for the wasm32 build). The launcher's
-**I/O Ports** tab (Sound section) has the matching fit/don't-fit toggle;
+**I/O Ports** tab (Audio page) has the matching fit/don't-fit toggle;
 host-side audio capture and backend settings (`--audio-wav`,
 `--audio-stems`, device selection) stay command-line/config-file only and
 have no launcher row.
@@ -1880,7 +1903,7 @@ with an online mode) opens `bsdsocket.library` and calls
 Roadshow -- but there is no guest-side stack to install, configure, or boot:
 the library autoboots from the board's ROM on Kickstart 1.3 through 3.x and
 on the bundled AROS ROM. `--hostsocket-net BACKEND` is the matching per-run
-flag, and the launcher's **I/O Ports** tab (Ethernet section) has the same
+flag, and the launcher's **I/O Ports** tab (Networking page) has the same
 picker.
 
 `net` selects the same host network backends as the A2065 (see above for

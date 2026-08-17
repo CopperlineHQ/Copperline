@@ -244,7 +244,7 @@ freeze, and resume the clock mid-run with `rtc.get` / `rtc.set`.
     `--audio-wav` writes, just under a different name.
   - `source` -- one file per audio source: `DIR/paula.wav`,
     `DIR/drivesounds.wav`, and (only when this run's config plausibly
-    produces them) `DIR/cdda.wav` and `DIR/mt32.wav`.
+    produces them) `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav` and `DIR/mhi.wav`.
   - `channel` -- one file per named sub-channel of a source. In this
     milestone only Paula exposes sub-channels: `DIR/paula-0.wav` ..
     `DIR/paula-3.wav`, its four physical channels. `channel` is a

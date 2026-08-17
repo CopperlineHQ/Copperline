@@ -244,7 +244,8 @@ net = "nat"   # "bridge", "loopback", or "none" for isolation
 ```
 
 (`--a2065-net BACKEND` is the matching per-run flag, and the launcher's
-**I/O Ports** tab has the same picker under its **Ethernet:** heading. Bridged
+**I/O Ports** tab's **Networking** page has the same picker under its
+**Ethernet:** heading. Bridged
 mode adds a live host-adapter picker. `--list-net-interfaces` prints the stable
 names accepted by `[a2065] interface` and `--a2065-interface`.)
 

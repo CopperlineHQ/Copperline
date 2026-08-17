@@ -2025,7 +2025,8 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             // "mt32" names the built-in synth, not a host endpoint, so the
             // host output starts unset and the device is attached below.
             let wants_mt32 = crate::config::midi_out_is_mt32(cfg.serial.midi_out.as_deref());
-            let host_out = (!wants_mt32)
+            let wants_csynth = crate::config::midi_out_is_csynth(cfg.serial.midi_out.as_deref());
+            let host_out = (!wants_mt32 && !wants_csynth)
                 .then_some(cfg.serial.midi_out.as_deref())
                 .flatten();
             // Likewise on the way in: "mt32" is the module's own MIDI OUT,
@@ -2041,9 +2042,10 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             let mut sink = crate::midi::MidiSerialSink::open(host_out, host_in)?;
             #[cfg(feature = "mt32")]
             {
+                let (control_override, pcm_override) = crate::mt32::rom_overrides();
                 sink.set_mt32_roms(crate::mt32::Mt32Roms {
-                    control: cfg.serial.mt32_control_rom.clone(),
-                    pcm: cfg.serial.mt32_pcm_rom.clone(),
+                    control: control_override.or_else(|| cfg.serial.mt32_control_rom.clone()),
+                    pcm: pcm_override.or_else(|| cfg.serial.mt32_pcm_rom.clone()),
                 });
                 if wants_mt32 {
                     sink.set_output_endpoint(Some(crate::config::MIDI_OUT_MT32));
@@ -2051,6 +2053,31 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
                 if wants_mt32_in {
                     sink.set_input_endpoint(Some(crate::config::MIDI_OUT_MT32));
                 }
+            }
+            #[cfg(feature = "coppersynth")]
+            {
+                sink.set_csynth_options(crate::csynth::CsynthOptions {
+                    soundfont: cfg.csynth.soundfont.clone(),
+                    mt32_mode: cfg.csynth.mt32_mode.clone(),
+                });
+                if wants_csynth {
+                    sink.set_output_endpoint(Some(crate::config::MIDI_OUT_CSYNTH));
+                }
+            }
+            #[cfg(not(feature = "coppersynth"))]
+            if wants_csynth {
+                log::warn!(
+                    "[serial] midi_out = \"coppersynth\" needs a build with --features coppersynth; \
+                     the MIDI output is unset"
+                );
+            }
+            // Coppersynth has no MIDI OUT jack of its own, so there is
+            // nothing to wire back as an input.
+            if wants_csynth && crate::config::midi_out_is_csynth(cfg.serial.midi_in.as_deref()) {
+                log::warn!(
+                    "[serial] midi_in = \"coppersynth\": Coppersynth has no MIDI \
+                     output to read back; the MIDI input is unset"
+                );
             }
             #[cfg(not(feature = "mt32"))]
             let _ = wants_mt32_in;

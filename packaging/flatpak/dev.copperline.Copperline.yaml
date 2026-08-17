@@ -142,3 +142,19 @@ modules:
       - type: file
         url: https://aminet.net/util/boot/skick346.lha
         sha256: 02b4d01852d12ab391c6469064f917221a0f7319fd0b3ba6c359403ec1d59f96
+      # Coppersynth's bundled soundfont. The synth crate's build script
+      # embeds assets/GeneralUser-GS.sf2 into the library, downloading it
+      # first when absent -- which an offline Flathub build cannot. Staged
+      # here instead, pinned to an upstream commit, into the vendored
+      # crate's cache path, so the sandboxed build embeds the same bank as
+      # every other build. GeneralUser GS permits redistribution; its
+      # licence text travels inside the bundle beside the bank.
+      - type: file
+        url: https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60/GeneralUser-GS.sf2
+        sha256: 9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe
+        dest: cargo/vendor/coppersynth/assets
+      - type: file
+        url: https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60/documentation/LICENSE.txt
+        sha256: 7b32efefdf95ce38a043799f0659853ddc00fbaa14d8c50f0aca16b9b8b405be
+        dest: cargo/vendor/coppersynth/assets
+        dest-filename: GeneralUser-GS.LICENSE.txt

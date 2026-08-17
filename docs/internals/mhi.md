@@ -699,7 +699,7 @@ to:
    scenarios and captures built against one implementation reproduce on
    the other.
 
-Copperline's own implementation notes -- the `minimp3`-based decoder
+Copperline's own implementation notes -- the Symphonia-based decoder
 choice, how `push_source("mhi", ...)` joins the mixer, `BoardDevice`
 wiring, and savestate serialization of in-flight decoder/queue state --
 are Copperline-internal and out of scope for this document; they belong
@@ -712,14 +712,26 @@ This section summarizes `src/mhi.rs` (`[mhi]`, feature-gated behind the
 default-on `mhi` build feature); it does not change any of the protocol
 content above.
 
-- **Decoder**: [`minimp3-sys`](https://crates.io/crates/minimp3-sys), MIT-
-  licensed bindgen bindings (compiled from source via the `cc` crate, no
-  system minimp3 dependency) around lieff/minimp3.c (CC0), built without
-  `MINIMP3_FLOAT_OUTPUT` so the C library's own synthesis filterbank
-  quantizes to `int16_t` before Rust ever sees a sample -- the same
-  bit-exact, platform-independent "C float path" every other minimp3
-  consumer relies on. Samples convert to `f32` the same way
-  `Ad1848::produce_one_sample` does.
+- **Decoder**:
+  [Symphonia](https://crates.io/crates/symphonia-bundle-mp3)'s pure-Rust
+  MPEG audio decoder (`MpaDecoder`, MPL-2.0), with only its Layer III
+  feature enabled to match `CAPS`. Pure Rust is the point: the previous
+  decoder (`minimp3-sys`) compiled a vendored C minimp3 whose SIMD
+  detection broke the default build on MSVC ARM64 hosts (issue #474), and
+  it was the last C compile in the default feature set. `MpaDecoder` is
+  packet-based, so `src/mhi.rs` carries its own packetizer that cuts the
+  doorbell-fed byte queue into whole frames using the same ISO 11172-3
+  header/length arithmetic Symphonia's parser applies; junk bytes, fake
+  syncs, free-format frames (bitrate index 0, outside `CAPS`), and
+  non-Layer-III frames are consumed as resync junk. Everything
+  register-visible (pacing, completion counts, interrupts) derives from
+  integer header parsing and decode success/failure, so emulated-machine
+  behaviour is reproducible byte-for-byte across platforms; the decoded
+  PCM itself is deterministic per platform, but a few of Symphonia's
+  precomputed tables call `powf`, whose last-ulp rounding may differ
+  between libm implementations, so `--audio-wav` captures of MHI audio
+  are guaranteed identical run-to-run on one platform rather than across
+  operating systems.
 - **Mixer cadence**: reuses Toccata's causal-producer/non-causal-resampler
   split ([](toccata)'s "Mixer cadence and resampling") -- a causal
   producer decodes and evaluates queue/interrupt state at the board's own
@@ -727,15 +739,20 @@ content above.
   `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls from that
   FIFO to the mixer's fixed rate, so the resampler's lookahead can never
   reorder when a descriptor completes or an interrupt raises.
-- **Savestates**: rather than reinterpret `mp3dec_t`'s raw FFI bytes, the
-  board keeps a field-for-field `DecoderSnapshot` shadow struct that
-  `serde` derives normally and copies to/from the live decoder state by
-  value, so an upstream field-layout change fails to compile instead of
-  silently deserializing into the wrong offsets. The board also retains
-  every not-yet-decoded byte of every queued descriptor and the in-flight
-  frame's un-played sample tail, so a save/restore cycle reproduces an
-  uninterrupted run's decoded output exactly -- the savestate approach is
-  re-decode of the retained, not-yet-completed bitstream, not a snapshot
+- **Savestates**: Symphonia keeps its cross-frame decoder state (Layer III
+  bit reservoir, IMDCT overlap, synthesis delay line) private, so the
+  board's `DecoderSnapshot` serializes a warmup history instead: the raw
+  bytes of the most recently submitted frames (a few KiB, bounded), which
+  a restore re-decodes into a fresh decoder with the output discarded.
+  The replay is exact because each piece of that state is a function of
+  the trailing few frames alone -- the reservoir holds at most the
+  trailing 2048 bytes of main data, and the overlap/synthesis state is
+  rewritten by each frame -- see the "Savestates" section of
+  `src/mhi.rs`'s module doc comment for the full argument. The board also
+  retains every not-yet-decoded byte of every queued descriptor and the
+  in-flight frame's un-played sample tail, so a save/restore cycle
+  reproduces an uninterrupted run's decoded output exactly -- the
+  savestate approach is re-decode of retained bitstream, not a snapshot
   of decoded PCM. This is proven bit-for-bit at the struct level
   in-process (`savestate_round_trip_reproduces_an_uninterrupted_runs_output`
   in `src/mhi.rs`'s own tests). `tests/mhi.rs`'s end-to-end equivalent
@@ -750,9 +767,11 @@ content above.
   see that test's long comment for the investigation.
 - **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
   `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**;
-  M4's `ToneFilterBank` (bass/mid/treble biquad coefficients and filter
-  memory -- genuine machine state, the same reasoning as the decoder's own
-  reservoir) bumped it again to **58**.
+  the decoder-snapshot reshape for the Symphonia move (issue #474) bumped
+  it again to **58**; M4's `ToneFilterBank` (bass/mid/treble biquad
+  coefficients and filter memory -- genuine machine state, the same
+  reasoning as the decoder's own warmup history) bumped it once more to
+  **59**.
 - **M4 DSP chain implementation**: `Biquad` is Direct Form II transposed,
   reusing `src/chipset/paula.rs`'s `AnalogLedFilter`/`BiquadLowPass`
   structure and `process` shape rather than a second filter convention in
@@ -767,7 +786,7 @@ content above.
   reasoning in both places -- a stopped or reset stream's filter ringing
   must not bleed into whatever plays next.
 - **Launcher**: the machine-configuration launcher's **I/O Ports** tab
-  (Sound section) has a plain fit/don't-fit toggle for the board (same as
+  (Audio page) has a plain fit/don't-fit toggle for the board (same as
   Toccata, see [](toccata)'s "What's out of scope" section); host-side
   audio capture/backend options stay command-line/config-file only.
 - **Large-descriptor DMA copy**: `DESC_LEN` genuinely does not truncate --
@@ -791,11 +810,11 @@ content above.
   these are Copperline's own generated output, not third-party binaries,
   so the "ROMs and disk images are local assets and are never committed"
   rule does not apply. `src/mhi.rs`'s `golden_tone_decodes_to_a_stable_pcm_capture`
-  decodes the CBR fixture through the real board/minimp3 path and compares
+  decodes the CBR fixture through the real board/decoder path and compares
   against a committed golden PCM capture
   (`golden_tone_cbr64_mono.pcm`) on every plain `cargo test` -- unlike
   every `#[ignore]`d integration test in `tests/mhi.rs`, this needs no
-  fetched `test-assets/`, so it catches minimp3-vendoring drift or
+  fetched `test-assets/`, so it catches decoder-dependency drift or
   resampler/pacing regressions immediately rather than only when a
   developer happens to have local assets staged. The same two fixtures
   back the M3 seek-entry tests (`stop_resets_decoder_state_so_a_reseek_

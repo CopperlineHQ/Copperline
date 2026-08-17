@@ -25,6 +25,7 @@ default = [
     "net-bridge",
     "fluxbridge",
     "mt32",
+    "coppersynth",
     "cpu-jit",
     "profile-stats",
     "game-library",
@@ -33,6 +34,10 @@ default = [
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
 mt32 = ["dep:mt32-rs"]
+# Coppersynth, the built-in General MIDI synthesizer (soundfont player
+# with an MT-32 translation layer), reachable as the "coppersynth" MIDI-Out
+# device. No ROMs needed; the soundfont is fetched or bundled separately.
+coppersynth = ["dep:coppersynth"]
 # The WHDLoad game library: the launcher's Library page, the local game
 # database it reads, and the OpenRetro sync that fills it.
 #
@@ -45,12 +50,12 @@ mt32 = ["dep:mt32-rs"]
 # loads. See src/gamelib/.
 game-library = ["dep:ureq", "dep:serde_json", "dep:zeroize"]
 # The MHI virtual MPEG audio decoder board (src/mhi.rs, `[mhi]`): pulls in
-# minimp3-sys, whose build.rs compiles the vendored (CC0) minimp3.c through
-# the `cc` crate. That needs a native C toolchain, which the wasm32 browser
-# build (crates/copperline-web, `default-features = false`) does not carry,
-# so this stays a default-on native feature rather than an unconditional
-# dependency -- the same shape as `mt32`/`wasm-boards` above.
-mhi = ["dep:minimp3-sys"]
+# Symphonia's pure-Rust MPEG audio decoder. Kept a default-on feature (not an
+# unconditional dependency) so builds that do not want the board -- the
+# wasm32 browser build (crates/copperline-web, `default-features = false`)
+# does not wire it up -- carry none of it, the same shape as `mt32`/
+# `wasm-boards` above.
+mhi = ["dep:symphonia-bundle-mp3", "dep:symphonia-core"]
 display-plan-trace = []
 # Detailed host-cost counters used by native diagnostics. The browser crate
 # builds the core with `default-features = false`, so its release hot paths do
@@ -123,6 +128,8 @@ fluxbridge = ["dep:fluxbridge"]
 m68k = { version = "0.10", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
+# The General MIDI synthesiser (Coppersynth), pinned by revision.
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "2f0920d72497be34ba38b7b2c0b77ef667562c34", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"
@@ -139,15 +146,20 @@ serde_json = { version = "1", optional = true }
 # away into nothing at all.
 zeroize = { version = "1", optional = true }
 serde-big-array = "0.5"
-# MP3 (MPEG-1/2/2.5 Layer III) decoding for the MHI board (src/mhi.rs). CC0
-# C library (github.com/lieff/minimp3) wrapped by MIT-licensed bindgen
-# bindings, compiled by `build.rs` via the `cc` crate -- no vendored/system
-# dependency beyond a C toolchain, clean on macOS/Linux/Windows. Left at the
-# default (non-`MINIMP3_FLOAT_OUTPUT`) build: `mp3d_sample_t` is `int16_t`,
-# so the only floating point is the internal synthesis filterbank's, exactly
-# the same "C float path" every other minimp3 consumer relies on for
-# bit-exact, platform-independent output -- see src/mhi.rs's doc comment.
-minimp3-sys = { version = "0.3", optional = true }
+# MP3 (MPEG-1/2/2.5 Layer III) decoding for the MHI board (src/mhi.rs).
+# Symphonia's MPEG audio decoder: pure Rust (MPL-2.0, GPL-compatible), so it
+# builds on every target Rust itself does -- in particular on
+# aarch64-pc-windows-msvc, where the previous decoder's C build broke (its
+# vendored minimp3.c promised NEON for MSVC ARM64 but only detected it via
+# GCC/Clang macros; issue #474). Removing it also removed the last C compile
+# from the default build. Only the Layer III feature is enabled, matching
+# the board's CAPS register (Layer I/II are not part of protocol VERSION 1;
+# see docs/internals/mhi.md). symphonia-core is the same project's type
+# crate (Packet/CodecParameters/AudioBuffer), needed to drive the decoder
+# directly -- src/mhi.rs feeds it hand-packetized frames from the board's
+# byte-queue bitstream rather than going through a format reader.
+symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp3"], optional = true }
+symphonia-core = { version = "0.6.1", default-features = false, optional = true }
 # Save-state and snapshot serialization (src/savestate.rs and friends).
 # Held on the 1.x serde API on purpose: bincode 2+/3 replaces the API and
 # defaults to a different wire format, so moving would invalidate every

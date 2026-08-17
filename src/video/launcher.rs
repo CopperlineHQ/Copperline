@@ -194,9 +194,15 @@ pub enum LauncherTab {
     /// The `[lide]` built-in Zorro II IDE board: personality, boot ROM(s),
     /// and its drives, reached from the Storage tab.
     Lide,
-    /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
-    /// section headings.
+    /// The "I/O Ports" strip tab, whose default category is the serial
+    /// port. Parallel, networking and audio are its sibling categories,
+    /// switched between via the top nav row, with no Back button --
+    /// `IoPorts.label()` is therefore the strip's "I/O Ports", not
+    /// "Serial Port".
     IoPorts,
+    IoParallel,
+    IoNetworking,
+    IoAudio,
     Input,
     Zorro,
     /// The "A/V & Emu" strip tab, whose default category is Audio (its rows are
@@ -289,6 +295,9 @@ impl LauncherTab {
             LauncherTab::Cd => "CD",
             LauncherTab::Lide => "Lide",
             LauncherTab::IoPorts => "I/O Ports",
+            LauncherTab::IoParallel => "Parallel Port",
+            LauncherTab::IoNetworking => "Networking",
+            LauncherTab::IoAudio => "Audio",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvAudio => "A/V & Emu",
@@ -323,6 +332,9 @@ impl LauncherTab {
             LauncherTab::FluxBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation | LauncherTab::AvPaths => {
                 LauncherTab::AvAudio
+            }
+            LauncherTab::IoParallel | LauncherTab::IoNetworking | LauncherTab::IoAudio => {
+                LauncherTab::IoPorts
             }
             other => other,
         }
@@ -363,6 +375,10 @@ impl LauncherTab {
             | LauncherTab::AvVideo
             | LauncherTab::AvEmulation
             | LauncherTab::AvPaths => AV_NAV,
+            LauncherTab::IoPorts
+            | LauncherTab::IoParallel
+            | LauncherTab::IoNetworking
+            | LauncherTab::IoAudio => IO_NAV,
             LauncherTab::CreateFloppy | LauncherTab::CreateHard => CREATE_NAV,
             #[cfg(feature = "game-library")]
             LauncherTab::Whdload | LauncherTab::WhdloadLibrary => WHDLOAD_NAV,
@@ -407,6 +423,15 @@ const WHDLOAD_NAV: &[(&str, LauncherTab)] = &[
 const CREATE_NAV: &[(&str, LauncherTab)] = &[
     ("Floppy Disk", LauncherTab::CreateFloppy),
     ("Hard Disk", LauncherTab::CreateHard),
+];
+
+/// The I/O Ports categories, left to right. `IoPorts` is the default,
+/// so its button reads "Serial Port".
+const IO_NAV: &[(&str, LauncherTab)] = &[
+    ("Serial Port", LauncherTab::IoPorts),
+    ("Parallel Port", LauncherTab::IoParallel),
+    ("Networking", LauncherTab::IoNetworking),
+    ("Audio", LauncherTab::IoAudio),
 ];
 
 /// The A/V & Emu categories, left to right (matching "A/V"). `AvAudio` is the
@@ -611,6 +636,14 @@ pub enum LauncherField {
     Mt32Lcd,
     #[cfg(feature = "midi")]
     MidiIn,
+    /// Coppersynth's soundfont (.sf2); unset means the bundled
+    /// default's search path.
+    #[cfg(feature = "coppersynth")]
+    CsynthSoundfont,
+    CsynthPanel,
+    /// The MT-32 mode of Coppersynth: Auto / On / Off.
+    #[cfg(feature = "coppersynth")]
+    CsynthMt32Mode,
     // Parallel
     ParallelDevice,
     ParallelOutput,
@@ -1101,8 +1134,19 @@ const SERIAL_ROWS_MT32: [Row; 7] = [
     row(F::MidiOut, "  MIDI output", Cycle),
     row(F::Mt32ControlRom, "  Control ROM", PathRow),
     row(F::Mt32PcmRom, "  PCM ROM", PathRow),
-    row(F::Mt32Panel, "  Front panel", Toggle),
+    row(F::Mt32Panel, "  Front panel", Cycle),
     row(F::Mt32Lcd, "  Display", Cycle),
+];
+// Coppersynth needs no ROMs: its rows are the soundfont it
+// plays and whether the MT-32 translation layer sits in front of it.
+#[cfg(all(feature = "midi", feature = "coppersynth"))]
+const SERIAL_ROWS_CSYNTH: [Row; 6] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::MidiIn, "  MIDI input", Cycle),
+    row(F::MidiOut, "  MIDI output", Cycle),
+    row(F::CsynthSoundfont, "  Soundfont", PathRow),
+    row(F::CsynthPanel, "  Front panel", Cycle),
+    row(F::CsynthMt32Mode, "  MT-32 mode", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
@@ -1264,6 +1308,7 @@ pub fn rows(
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
+    midi_out_is_csynth: bool,
 ) -> Cow<'static, [Row]> {
     match tab {
         LauncherTab::CreateFloppy => Cow::Borrowed(&NEW_FLOPPY_ROWS),
@@ -1300,11 +1345,14 @@ pub fn rows(
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::Lide => Cow::Borrowed(&LIDE_ROWS),
-        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(
+        LauncherTab::IoPorts => Cow::Owned(io_serial_rows(
             serial_mode,
             midi_out_is_mt32,
-            parallel_device,
+            midi_out_is_csynth,
         )),
+        LauncherTab::IoParallel => Cow::Owned(io_parallel_rows(parallel_device)),
+        LauncherTab::IoNetworking => Cow::Owned(io_networking_rows()),
+        LauncherTab::IoAudio => Cow::Owned(io_audio_rows()),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
         // A/V & Emu defaults to the Audio category; Video and Emulation are its
@@ -1316,33 +1364,49 @@ pub fn rows(
     }
 }
 
-/// The I/O Ports tab: a `Serial:` section (only in a `midi` build, which is the
-/// only build with serial rows), a `Parallel:` section, an `Ethernet:`
-/// section, and a `Sound:` section, each under a greyed heading and each
+/// The I/O Ports pages, one section each: `Serial:` (only in a `midi`
+/// build, which is the only build with serial rows), `Parallel:`,
+/// `Ethernet:` and `Audio:`, each under its greyed heading and each
 /// showing only the rows relevant to its selected device/mode.
-fn io_ports_rows(
+fn io_serial_rows(
     serial_mode: SerialMode,
     midi_out_is_mt32: bool,
-    parallel_device: ParallelDevice,
+    midi_out_is_csynth: bool,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    let serial = serial_rows(serial_mode, midi_out_is_mt32);
+    let serial = serial_rows(serial_mode, midi_out_is_mt32, midi_out_is_csynth);
     if !serial.is_empty() {
         rows.push(section_header("Serial:"));
         rows.extend_from_slice(serial);
     }
-    rows.push(section_header("Parallel:"));
+    rows
+}
+
+fn io_parallel_rows(parallel_device: ParallelDevice) -> Vec<Row> {
+    let mut rows = vec![section_header("Parallel:")];
     rows.extend_from_slice(parallel_rows(parallel_device));
-    rows.push(section_header("Ethernet:"));
+    rows
+}
+
+fn io_networking_rows() -> Vec<Row> {
+    let mut rows = vec![section_header("Ethernet:")];
     rows.extend_from_slice(&ETHERNET_ROWS);
-    rows.push(section_header("Sound:"));
+    rows
+}
+
+fn io_audio_rows() -> Vec<Row> {
+    let mut rows = vec![section_header("Audio:")];
     rows.extend_from_slice(&SOUND_ROWS);
     rows
 }
 
 /// Serial rows for the current mode. Only the `midi` build has any; without it
 /// the Serial section is empty and omitted from the I/O Ports tab.
-fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row] {
+fn serial_rows(
+    serial_mode: SerialMode,
+    midi_out_is_mt32: bool,
+    midi_out_is_csynth: bool,
+) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
         if serial_mode != SerialMode::Midi {
@@ -1356,12 +1420,16 @@ fn serial_rows(serial_mode: SerialMode, midi_out_is_mt32: bool) -> &'static [Row
         if midi_out_is_mt32 {
             return &SERIAL_ROWS_MT32;
         }
-        let _ = midi_out_is_mt32;
+        #[cfg(feature = "coppersynth")]
+        if midi_out_is_csynth {
+            return &SERIAL_ROWS_CSYNTH;
+        }
+        let _ = (midi_out_is_mt32, midi_out_is_csynth);
         &SERIAL_ROWS_MIDI
     }
     #[cfg(not(feature = "midi"))]
     {
-        let _ = (serial_mode, midi_out_is_mt32);
+        let _ = (serial_mode, midi_out_is_mt32, midi_out_is_csynth);
         &[]
     }
 }
@@ -2092,10 +2160,10 @@ pub struct MachineSetup {
     hostsocket_gateway: Option<String>,
     hostsocket_resolver: Option<String>,
     /// The MacroSystem Toccata sound board, edited in the I/O Ports tab's
-    /// Sound section (`[toccata] enabled`). No other options exist yet.
+    /// Audio page (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
-    /// The MHI virtual MPEG audio decoder board, edited in the same Sound
-    /// section (`[mhi] enabled`) in an `mhi` build, the only build that can
+    /// The MHI virtual MPEG audio decoder board, edited on the same Audio
+    /// page (`[mhi] enabled`) in an `mhi` build, the only build that can
     /// fit the board. Kept as an unconditional passthrough field even in a
     /// non-`mhi` build so loading and re-saving a config does not silently
     /// drop a `[mhi] enabled` set by some other build -- only the launcher
@@ -2160,6 +2228,10 @@ pub struct MachineSetup {
     mt32_pcm_rom: Option<PathBuf>,
     mt32_panel: bool,
     mt32_lcd: Mt32Lcd,
+    /// Coppersynth's soundfont and translation mode ([coppersynth]).
+    csynth_soundfont: Option<PathBuf>,
+    csynth_mt32_mode: Option<String>,
+    csynth_panel: bool,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -2429,6 +2501,9 @@ impl MachineSetup {
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
             mt32_panel: cfg.serial.mt32_panel,
             mt32_lcd: cfg.serial.mt32_lcd,
+            csynth_soundfont: cfg.csynth.soundfont.clone(),
+            csynth_mt32_mode: cfg.csynth.mt32_mode.clone(),
+            csynth_panel: cfg.csynth.panel,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -2494,6 +2569,10 @@ impl MachineSetup {
     /// what puts its ROM and panel rows on the I/O Ports tab.
     pub fn midi_out_is_mt32(&self) -> bool {
         crate::config::midi_out_is_mt32(self.midi_out.as_deref())
+    }
+
+    pub fn midi_out_is_csynth(&self) -> bool {
+        crate::config::midi_out_is_csynth(self.midi_out.as_deref())
     }
 
     pub fn serial_mode(&self) -> SerialMode {
@@ -2900,6 +2979,18 @@ impl MachineSetup {
         if self.mt32_lcd != base.serial.mt32_lcd {
             raw.serial.mt32_lcd = Some(self.mt32_lcd.label().to_string());
         }
+        if self.csynth_soundfont != base.csynth.soundfont {
+            raw.csynth.soundfont = self
+                .csynth_soundfont
+                .as_ref()
+                .map(|p| p.display().to_string());
+        }
+        if self.csynth_mt32_mode != base.csynth.mt32_mode {
+            raw.csynth.mt32_mode = self.csynth_mt32_mode.clone();
+        }
+        if self.csynth_panel != base.csynth.panel {
+            raw.csynth.panel = Some(self.csynth_panel);
+        }
         if self.menu_scale != base.menu_scale {
             raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
@@ -3188,6 +3279,9 @@ impl MachineSetup {
         self.mt32_pcm_rom = base.serial.mt32_pcm_rom.clone();
         self.mt32_panel = base.serial.mt32_panel;
         self.mt32_lcd = base.serial.mt32_lcd;
+        self.csynth_soundfont = base.csynth.soundfont.clone();
+        self.csynth_mt32_mode = base.csynth.mt32_mode.clone();
+        self.csynth_panel = base.csynth.panel;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -3544,6 +3638,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom.as_deref(),
             F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont.as_deref(),
             F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
@@ -3969,6 +4065,9 @@ impl MachineSetup {
     }
 
     pub fn value_label(&self, field: LauncherField) -> String {
+        fn enabled_label(on: bool) -> String {
+            if on { "Enabled" } else { "Disabled" }.to_string()
+        }
         match field {
             F::WhdloadMachine => match self.whdload_machine {
                 crate::config::WhdloadMachine::Auto => "Auto".to_string(),
@@ -4027,6 +4126,9 @@ impl MachineSetup {
             F::Bezel => self.bezel.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
+            F::Mt32Panel => enabled_label(self.mt32_panel),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthPanel => enabled_label(self.csynth_panel),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -4129,6 +4231,9 @@ impl MachineSetup {
                 if self.midi_out_is_mt32() {
                     return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
                 }
+                if self.midi_out_is_csynth() {
+                    return crate::midi::MIDI_OUT_CSYNTH_LABEL.to_string();
+                }
                 self.midi_out.clone().unwrap_or_else(|| "None".to_string())
             }
             #[cfg(feature = "midi")]
@@ -4139,6 +4244,19 @@ impl MachineSetup {
                 }
                 self.midi_in.clone().unwrap_or_else(|| "None".to_string())
             }
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont if self.csynth_soundfont.is_none() => {
+                // The bundled bank, named rather than blank: an unset row
+                // is not an empty setting, it is the default in force.
+                "GeneralUser-GS".to_string()
+            }
+            #[cfg(feature = "coppersynth")]
+            F::CsynthMt32Mode => match self.csynth_mt32_mode.as_deref() {
+                None => "Auto".to_string(),
+                Some(m) if m.eq_ignore_ascii_case("on") => "On".to_string(),
+                Some(m) if m.eq_ignore_ascii_case("off") => "Off".to_string(),
+                Some(_) => "Auto".to_string(),
+            },
             F::ParallelDevice => match self.parallel_device {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
@@ -4440,6 +4558,10 @@ impl MachineSetup {
             F::Mt32Lcd => {
                 self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);
             }
+            // Two states cycle the same either way round.
+            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
+            #[cfg(feature = "coppersynth")]
+            F::CsynthPanel => self.csynth_panel = !self.csynth_panel,
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -4509,14 +4631,16 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::MidiOut => {
-                // MT-32 rides at the end of the output list: it is
-                // always there to be chosen, whatever the host offers.
+                // The built-in synths ride at the end of the output
+                // list: always there to be chosen, whatever the host
+                // offers -- the MT-32 first, then Coppersynth.
                 let names: Vec<String> = self
                     .midi_endpoints
                     .outputs
                     .iter()
                     .map(|e| e.name.clone())
                     .chain(mt32_endpoint(true))
+                    .chain(csynth_endpoint(true))
                     .collect();
                 self.midi_out =
                     crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
@@ -4543,6 +4667,29 @@ impl MachineSetup {
                     .chain(mt32_endpoint(self.midi_out_is_mt32()))
                     .collect();
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
+            }
+            #[cfg(feature = "coppersynth")]
+            F::CsynthMt32Mode => {
+                // Auto -> On -> Off, stored as the config spells it, with
+                // Auto stored as unset so an untouched row emits nothing.
+                let next = match self.csynth_mt32_mode.as_deref() {
+                    None => Some("on"),
+                    Some(m) if m.eq_ignore_ascii_case("on") => Some("off"),
+                    Some(m) if m.eq_ignore_ascii_case("off") => None,
+                    Some(_) => Some("on"),
+                };
+                let next = if forward {
+                    next
+                } else {
+                    // The same ring walked the other way.
+                    match self.csynth_mt32_mode.as_deref() {
+                        None => Some("off"),
+                        Some(m) if m.eq_ignore_ascii_case("off") => Some("on"),
+                        Some(m) if m.eq_ignore_ascii_case("on") => None,
+                        Some(_) => None,
+                    }
+                };
+                self.csynth_mt32_mode = next.map(str::to_string);
             }
             F::ParallelDevice => {
                 // None -> Printer -> Sampler. Selecting Printer reveals its
@@ -4730,7 +4877,6 @@ impl MachineSetup {
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
-            F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             F::Toccata => self.toccata = !self.toccata,
@@ -4761,6 +4907,8 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = Some(path),
             F::Mt32ControlRom => self.mt32_control_rom = Some(path),
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
@@ -4829,6 +4977,8 @@ impl MachineSetup {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
             F::Mt32ControlRom => self.mt32_control_rom = None,
+            #[cfg(feature = "coppersynth")]
+            F::CsynthSoundfont => self.csynth_soundfont = None,
             F::Mt32PcmRom => self.mt32_pcm_rom = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
@@ -8020,14 +8170,29 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
 /// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
 /// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    #[cfg(all(feature = "midi", feature = "mt32"))]
+    #[cfg(all(feature = "midi", feature = "mt32", feature = "coppersynth"))]
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_MT32,
+        &SERIAL_ROWS_CSYNTH,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
+    #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_MT32,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
     ];
-    #[cfg(all(feature = "midi", not(feature = "mt32")))]
+    #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
+    let serial: &[&[Row]] = &[
+        &SERIAL_ROWS_MIDI,
+        &SERIAL_ROWS_CSYNTH,
+        &SERIAL_ROWS_TCP_CONNECT,
+        &SERIAL_ROWS_TCP_LISTEN,
+    ];
+    #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_TCP_CONNECT,
@@ -8238,6 +8403,10 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
 #[cfg(feature = "midi")]
 fn mt32_endpoint(wanted: bool) -> Option<String> {
     (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
+}
+
+fn csynth_endpoint(wanted: bool) -> Option<String> {
+    (wanted && cfg!(feature = "coppersynth")).then(|| crate::config::MIDI_OUT_CSYNTH.to_string())
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -9652,6 +9821,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::Off,
             false,
+            false,
         );
         let shape: Vec<(&str, RowKind, LauncherField)> =
             rows.iter().map(|r| (r.label, r.kind, r.field)).collect();
@@ -10179,6 +10349,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::Off,
             false,
+            false,
         );
         let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
         // What to boot and how first, then the places things live.
@@ -10413,6 +10584,7 @@ mod tests {
                 ParallelDevice::None,
                 SerialMode::Midi,
                 s.midi_out_is_mt32(),
+                false,
             )
             .iter()
             .map(|r| r.field)
@@ -10446,8 +10618,14 @@ mod tests {
             LauncherField::Mt32PcmRom,
             std::path::PathBuf::from("MT32_PCM.ROM"),
         );
-        s.toggle(LauncherField::Mt32Panel);
+        // The panel row cycles its two states now, arrows rather than
+        // a checkbox.
+        s.cycle(LauncherField::Mt32Panel, true);
         assert!(s.toggle_value(LauncherField::Mt32Panel));
+        assert_eq!(s.value_label(LauncherField::Mt32Panel), "Enabled");
+        s.cycle(LauncherField::Mt32Panel, false);
+        assert_eq!(s.value_label(LauncherField::Mt32Panel), "Disabled");
+        s.cycle(LauncherField::Mt32Panel, true);
 
         let raw = s.to_raw();
         assert_eq!(
@@ -10776,9 +10954,15 @@ mod tests {
     #[test]
     fn serial_address_rows_appear_only_in_their_tcp_mode() {
         let has = |mode, field| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
-                .iter()
-                .any(|r| r.field == field)
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == field)
         };
         // Dialling out needs somewhere to dial; listening needs somewhere to
         // bind. Neither mode carries the other's address, and the modes with
@@ -10797,7 +10981,13 @@ mod tests {
             (SerialMode::TcpConnect, LauncherField::SerialConnect),
             (SerialMode::Tcp, LauncherField::SerialListen),
         ] {
-            let r = rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false);
+            let r = rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            );
             let found = r.iter().find(|r| r.field == field).unwrap();
             assert_eq!(found.kind, RowKind::Text);
             assert!(LauncherState::is_serial_addr(field));
@@ -10958,7 +11148,15 @@ mod tests {
             LauncherTab::CreateHard,
             LauncherTab::CreateGeometry,
         ] {
-            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+            for r in rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            {
                 // The page heading is inert and carries no field.
                 if r.kind == RowKind::SectionHeader {
                     continue;
@@ -11075,7 +11273,15 @@ mod tests {
 
         // Every row shows something in its value column.
         for tab in [LauncherTab::CreateFloppy, LauncherTab::CreateHard] {
-            for r in rows(tab, ParallelDevice::None, SerialMode::default(), false).iter() {
+            for r in rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            {
                 match r.kind {
                     RowKind::Cycle | RowKind::Text | RowKind::Size => assert!(
                         !state.row_value(r.field).is_empty(),
@@ -11671,6 +11877,7 @@ mod tests {
             ParallelDevice::None,
             SerialMode::default(),
             false,
+            false,
         );
         assert_eq!(
             storage.first().map(|r| r.field),
@@ -11685,7 +11892,13 @@ mod tests {
             (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
             (LauncherTab::Lide, LauncherField::LideBoard),
         ] {
-            let page = rows(tab, ParallelDevice::None, SerialMode::default(), false);
+            let page = rows(
+                tab,
+                ParallelDevice::None,
+                SerialMode::default(),
+                false,
+                false,
+            );
             assert!(page.iter().any(|r| r.field == marker));
         }
     }
@@ -11726,7 +11939,7 @@ mod tests {
         assert!(!LauncherTab::System.has_top_nav());
 
         // Each category shows only its own settings; the default is Audio.
-        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false);
+        let page = |t| rows(t, ParallelDevice::None, SerialMode::default(), false, false);
         let audio = page(LauncherTab::AvAudio);
         assert!(audio.iter().any(|r| r.field == F::AudioDevice));
         assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
@@ -12161,31 +12374,87 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
-    fn io_ports_tab_groups_serial_parallel_and_ethernet_under_headers() {
+    fn io_ports_pages_carry_one_section_each() {
+        let header = |tab| {
+            let r = rows(tab, ParallelDevice::None, SerialMode::Midi, false, false);
+            r.iter()
+                .filter(|x| x.kind == RowKind::SectionHeader)
+                .map(|x| x.label)
+                .collect::<Vec<_>>()
+        };
+        // Serial Port page: the Device / Mode selector and (in MIDI) the
+        // endpoints, under the one heading.
+        assert_eq!(
+            header(LauncherTab::IoPorts),
+            ["Serial:"],
+            "the strip tab is the serial page"
+        );
         let r = rows(
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Midi,
             false,
+            false,
         );
-        let headers: Vec<_> = r
-            .iter()
-            .filter(|x| x.kind == RowKind::SectionHeader)
-            .map(|x| x.label)
-            .collect();
-        assert_eq!(headers, ["Serial:", "Parallel:", "Ethernet:", "Sound:"]);
-        // Serial section: the Device / Mode selector, and (in MIDI) the endpoints.
         assert!(r.iter().any(|x| x.field == LauncherField::SerialMode));
         assert!(r.iter().any(|x| x.field == LauncherField::MidiOut));
-        // Parallel section: the device selector.
+        assert!(
+            !r.iter().any(|x| x.field == LauncherField::ParallelDevice),
+            "parallel lives on its own page now"
+        );
+        // Parallel Port page: the device selector.
+        assert_eq!(header(LauncherTab::IoParallel), ["Parallel:"]);
+        let r = rows(
+            LauncherTab::IoParallel,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::ParallelDevice));
-        // Ethernet section: the A2065 board selector.
+        // Networking page: the A2065 board selector.
+        assert_eq!(header(LauncherTab::IoNetworking), ["Ethernet:"]);
+        let r = rows(
+            LauncherTab::IoNetworking,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::Ethernet));
-        // Sound section: the Toccata board toggle, and (in an `mhi` build)
+        // Audio page: the Toccata board toggle, and (in an `mhi` build)
         // the MHI board toggle alongside it.
+        assert_eq!(header(LauncherTab::IoAudio), ["Audio:"]);
+        let r = rows(
+            LauncherTab::IoAudio,
+            ParallelDevice::None,
+            SerialMode::Midi,
+            false,
+            false,
+        );
         assert!(r.iter().any(|x| x.field == LauncherField::Toccata));
         #[cfg(feature = "mhi")]
         assert!(r.iter().any(|x| x.field == LauncherField::Mhi));
+        // The four pages switch between each other on the nav row, under
+        // the one strip entry, with no Back button -- the A/V pattern.
+        for tab in [
+            LauncherTab::IoParallel,
+            LauncherTab::IoNetworking,
+            LauncherTab::IoAudio,
+        ] {
+            assert_eq!(tab.strip_tab(), LauncherTab::IoPorts);
+            assert_eq!(tab.parent_tab(), None);
+            assert!(tab.has_top_nav());
+        }
+        assert_eq!(
+            LauncherTab::IoPorts.nav_options(),
+            [
+                ("Serial Port", LauncherTab::IoPorts),
+                ("Parallel Port", LauncherTab::IoParallel),
+                ("Networking", LauncherTab::IoNetworking),
+                ("Audio", LauncherTab::IoAudio),
+            ]
+        );
     }
 
     #[test]
@@ -12399,9 +12668,15 @@ mod tests {
     #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::SamplerInput)
+            rows(
+                LauncherTab::IoParallel,
+                device,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::SamplerInput)
         };
         // The sampler rows are hidden (not greyed) unless the sampler is chosen.
         assert!(!has(ParallelDevice::None));
@@ -12412,9 +12687,15 @@ mod tests {
     #[test]
     fn midi_rows_appear_only_in_midi_mode() {
         let has = |mode| {
-            rows(LauncherTab::IoPorts, ParallelDevice::None, mode, false)
-                .iter()
-                .any(|r| r.field == LauncherField::MidiOut)
+            rows(
+                LauncherTab::IoPorts,
+                ParallelDevice::None,
+                mode,
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::MidiOut)
         };
         assert!(!has(SerialMode::Stdout));
         assert!(has(SerialMode::Midi));
@@ -12437,9 +12718,15 @@ mod tests {
         let mut s = MachineSetup::default();
         // The Output file row shows only when the printer is selected.
         let has_output = |device| {
-            rows(LauncherTab::IoPorts, device, SerialMode::default(), false)
-                .iter()
-                .any(|r| r.field == LauncherField::ParallelOutput)
+            rows(
+                LauncherTab::IoParallel,
+                device,
+                SerialMode::default(),
+                false,
+                false,
+            )
+            .iter()
+            .any(|r| r.field == LauncherField::ParallelOutput)
         };
         assert!(!has_output(ParallelDevice::None));
         assert!(has_output(ParallelDevice::Printer));
@@ -12979,6 +13266,7 @@ mod tests {
             LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Stdout,
+            false,
             false,
         );
         assert!(!serial.iter().any(|r| r.field == LauncherField::MidiOut));

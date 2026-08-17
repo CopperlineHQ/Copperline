@@ -193,11 +193,16 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      BoardDevice gained the Mhi variant (the virtual MPEG audio decoder
 //      board, `[mhi]`, feature-gated behind `mhi`), appended at the end of
 //      the enum.
-//  58: Mhi gained the M4 bass/mid/treble filter bank (tone_filters,
+//  58: The MHI board's decoder snapshot changed shape: the minimp3
+//      field-for-field `mp3dec_t` shadow became a Symphonia warmup history
+//      (the raw bytes of the most recently decoded frames, re-decoded on
+//      restore) when the decoder moved to pure Rust for MSVC ARM64 hosts
+//      (issue #474).
+//  59: Mhi gained the M4 bass/mid/treble filter bank (tone_filters,
 //      `ToneFilterBank`) -- the param-latch DSP chain's genuine machine
 //      state (biquad coefficients and filter memory), `[mhi]`, feature-
 //      gated behind `mhi`.
-pub const STATE_VERSION: u32 = 58;
+pub const STATE_VERSION: u32 = 59;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

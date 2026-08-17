@@ -540,10 +540,12 @@ The layout is:
   that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
-  *I/O Ports* (the serial, parallel, Ethernet, and sound boards under
-  **Serial:** / **Parallel:** / **Ethernet:** / **Sound:** headings, with
+  *I/O Ports* (the serial, parallel, networking, and audio boards, each
+  on its own page -- **Serial Port**, **Parallel Port**, **Networking**,
+  **Audio** -- switched between on the top nav row, with
   each port's options indented
-  beneath it: serial mode and MIDI endpoints, with the emulated MT-32's ROM
+  beneath its heading: serial mode and MIDI endpoints, with the emulated
+  MT-32's ROM
   images, front panel and display style when it is the chosen output (see
   [The MT-32](mt32.md)), and, for the two TCP modes, the address box that
   mode needs -- **Connect** (`tcp-connect`) for the `host:port` to dial, or
