@@ -1497,6 +1497,11 @@ mod tests {
                 frame[..strip_start].iter().all(|&b| b == 0),
                 "the panel must not paint above its strip"
             );
+            // The pixel checks above are the test; the files are for
+            // eyes, and only a run that asked for them writes them.
+            if !crate::envcfg::flag("COPPERLINE_UI_PREVIEW") {
+                continue;
+            }
             let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
                 .join(name);
