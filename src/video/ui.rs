@@ -6097,7 +6097,9 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                             if browse.contains(pos) {
                                 return Some(UiControl::LauncherBoardBrowse { board, opt });
                             }
-                            if clear.contains(pos) {
+                            if !state.setup.zorro_boards()[board].value(opt).is_empty()
+                                && clear.contains(pos)
+                            {
                                 return Some(UiControl::LauncherBoardClear { board, opt });
                             }
                         }
@@ -6325,7 +6327,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if browse.contains(pos) {
                         return Some(UiControl::LauncherBrowse(r.field));
                     }
-                    if clear.contains(pos) {
+                    if launcher_clear_enabled(&state.setup, r.field) && clear.contains(pos) {
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
@@ -6362,7 +6364,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         if browse.contains(pos) {
                             return Some(UiControl::LauncherBrowse(r.field));
                         }
-                        if clear.contains(pos) {
+                        if launcher_clear_enabled(&state.setup, r.field) && clear.contains(pos) {
                             return Some(UiControl::LauncherClear(r.field));
                         }
                         // A support archive with nothing chosen can fetch
@@ -7804,13 +7806,19 @@ fn draw_launcher_row(
         ) {
             if greyed_as != Some(GreyedAs::Blank) {
                 // Centred across the stepper span, where the value the
-                // row cannot have would sit.
+                // row cannot have would sit -- but the reasons vary in
+                // length, and a long one truly centred starts left of its
+                // shorter neighbours, which reads as a ragged margin
+                // rather than a centred column. So no reason starts
+                // further left than the commonest one would.
                 let (prev, _, next) = launcher_cycle_rects(rect, row_y);
                 let span = (next.x + next.w).saturating_sub(prev.x);
+                let floor_w = "needs 68020+".chars().count() * font::GLYPH_W;
+                let min_x = prev.x + span.saturating_sub(floor_w) / 2;
                 let text_w = reason.chars().count() * font::GLYPH_W;
                 draw_panel_text(
                     frame,
-                    prev.x + span.saturating_sub(text_w) / 2,
+                    (prev.x + span.saturating_sub(text_w) / 2).max(min_x),
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
@@ -8212,7 +8220,7 @@ fn draw_launcher_row(
                     frame,
                     clear,
                     "Clear",
-                    true,
+                    launcher_clear_enabled(setup, r.field),
                     hover == Some(UiControl::LauncherClear(r.field)),
                     scale,
                 );
@@ -8538,7 +8546,7 @@ fn draw_launcher_row(
                 frame,
                 clear,
                 "Clear",
-                true,
+                launcher_clear_enabled(setup, r.field),
                 hover == Some(UiControl::LauncherClear(r.field)),
                 scale,
             );
@@ -8722,7 +8730,7 @@ fn draw_launcher_board_option(
                 frame,
                 clear,
                 "Clear",
-                true,
+                !value.is_empty(),
                 hover == Some(UiControl::LauncherBoardClear { board, opt }),
                 scale,
             );
@@ -12983,6 +12991,62 @@ mod tests {
             // The base swaps them.
             assert_eq!(probe(false, LauncherField::PathsBase), (true, false));
             assert_eq!(probe(true, LauncherField::PathsBase), (false, true));
+        }
+
+        // A Clear with nothing behind it takes no clicks. The drive rows
+        // and the floppy rows draw their own buttons rather than going
+        // through the Path arm, so each stands trial here: empty, the
+        // button is greyed and dead; with an image chosen, it answers.
+        {
+            let probe = |set: bool, tab: LauncherTab, field: LauncherField, kind: RowKind| {
+                let mut setup = launcher::MachineSetup::default();
+                // A machine that has all the rows: the default model
+                // carries no IDE port, and a row that does not apply
+                // takes no clicks whatever its buttons say.
+                setup.select_model(Some(MachineModel::A1200));
+                if set {
+                    setup.set_path(field, std::path::PathBuf::from("/probe/disk.img"));
+                }
+                let idx = launcher::rows(tab, Default::default(), Default::default(), false, false)
+                    .iter()
+                    .filter(|r| !setup.row_hidden(r.field))
+                    .position(|r| r.field == field && r.kind == kind)
+                    .expect("the field has a visible row");
+                let mut state = LauncherState::new(setup);
+                state.tab = tab;
+                let panel = Panel::Launcher(Box::new(state));
+                let rect = panel_rect(&panel);
+                let nav = if tab.has_top_nav() {
+                    launcher_nav_block_h(tab)
+                } else {
+                    0
+                };
+                let row_y = launcher_row_y(rect, idx) + nav;
+                let (_, clear) = launcher_path_rects(rect, row_y);
+                let got = panel_control_at(
+                    &panel,
+                    (
+                        (clear.x + clear.w / 2) as i32,
+                        (clear.y + clear.h / 2) as i32,
+                    ),
+                );
+                got == Some(UiControl::LauncherClear(field))
+            };
+            for (tab, field, kind) in [
+                (
+                    LauncherTab::Floppy,
+                    LauncherField::Df0Image,
+                    RowKind::FloppyMedia,
+                ),
+                (
+                    LauncherTab::Storage,
+                    LauncherField::IdeMaster,
+                    RowKind::Drive,
+                ),
+            ] {
+                assert!(!probe(false, tab, field, kind), "{field:?} empty must grey");
+                assert!(probe(true, tab, field, kind), "{field:?} set must answer");
+            }
         }
 
         // The confirm over Reset default answers every click on the panel:
