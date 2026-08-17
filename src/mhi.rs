@@ -59,8 +59,12 @@
 //! bytes of main data (a frame's `main_data_begin` can reach back at most
 //! 511 of them), the IMDCT overlap is fully rewritten by each decoded
 //! frame, and the synthesis filterbank's 16-block delay line is shallower
-//! than one frame's 36 blocks -- and the history is kept deep enough
-//! (`WARMUP_HISTORY_MIN_BYTES`/`_FRAMES`) to cover all of it. The board
+//! than one frame's 36 blocks -- and the history is kept deep enough to
+//! cover all of it: byte/frame floors for the reservoir span, plus a hold
+//! on the last two *decoded* frames so a run of rejected header-shaped
+//! junk (which touches only reservoir state) cannot evict the frames the
+//! overlap/synthesis state actually came from (`WARMUP_HISTORY_*`,
+//! `Decoder::trim_history`). The board
 //! additionally keeps every not-yet-decoded byte of every queued descriptor
 //! (`bitstream`/`desc_lengths`) and the in-flight decoded frame's un-played
 //! sample tail (`current_frame`), so a save/restore cycle reproduces an
@@ -176,14 +180,31 @@ const MAX_RESYNC_ATTEMPTS_PER_TICK: u32 = 64;
 const MPEG_HEADER_LEN: usize = 4;
 
 /// Savestate warmup-history bounds (see the module doc comment's
-/// "Savestates"): enough raw frame bytes to cover Symphonia's whole
-/// 2048-byte bit-reservoir buffer with margin for the header/side-info
-/// overhead raw frames carry over main data, and enough whole frames that
-/// the two most recent ones -- the only ones whose spectral output still
-/// influences the IMDCT-overlap/synthesis state -- always re-decode from
-/// fully covered reservoir data.
+/// "Savestates" and `Decoder::trim_history`).
+///
+/// `MIN_BYTES`/`MIN_FRAMES`: enough raw frame bytes to cover Symphonia's
+/// whole 2048-byte bit-reservoir buffer with margin for the header/
+/// side-info overhead raw frames carry over main data, and enough whole
+/// frames for re-decode context.
+///
+/// `MIN_DECODED`: the two most recent *successfully decoded* frames are
+/// the only ones whose spectral output still shapes the IMDCT-overlap/
+/// synthesis state (a rejected frame leaves both untouched -- its only
+/// state effect is on the bit reservoir), so trimming never drops a
+/// decoded frame unless at least this many newer decoded frames remain --
+/// otherwise a run of undecodable header-shaped junk would evict exactly
+/// the state the restore replay exists to rebuild.
+///
+/// `MAX_BYTES`/`MAX_FRAMES`: hard caps that override that hold, so a
+/// hostile guest feeding unbounded undecodable junk after real audio
+/// cannot grow the history without limit. When they bite, a savestate
+/// taken mid-flood loses only the pre-junk overlap tail of the next
+/// decoded frame's PCM; register-visible state never depends on it.
 const WARMUP_HISTORY_MIN_BYTES: usize = 4096;
 const WARMUP_HISTORY_MIN_FRAMES: usize = 4;
+const WARMUP_HISTORY_MIN_DECODED: usize = 2;
+const WARMUP_HISTORY_MAX_BYTES: usize = 16 * 1024;
+const WARMUP_HISTORY_MAX_FRAMES: usize = 256;
 
 /// The board's transport state (`STATUS`, `0x04`). Deliberately its own
 /// numbering -- see the register map's note on why this does not match
@@ -210,7 +231,9 @@ impl Status {
 /// Serializable stand-in for the decoder's private cross-frame state: the
 /// raw bytes of the frames most recently fed to it, which a restore
 /// re-decodes (output discarded) to rebuild that state exactly. See the
-/// module doc comment's "Savestates" for why this replay is exact.
+/// module doc comment's "Savestates" for why this replay is exact. Only
+/// the bytes are carried; each entry's decode outcome is recomputed by
+/// the replay itself.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct DecoderSnapshot {
     history: Vec<Vec<u8>>,
@@ -283,11 +306,24 @@ struct Decoder {
     /// change, so a genuinely respec'd stream gets a fresh decoder -- see
     /// `submit_frame`.
     spec: Option<(u32, bool)>,
-    /// Raw bytes of the most recent frames fed to `mpa` (decoded and
-    /// rejected alike -- a failed decode can advance reservoir state too),
-    /// oldest first, trimmed to the `WARMUP_HISTORY_*` bounds.
-    history: VecDeque<Vec<u8>>,
+    /// The most recent frames fed to `mpa` (decoded and rejected alike --
+    /// a post-side-info rejection still advances reservoir state), oldest
+    /// first, trimmed by `trim_history`.
+    history: VecDeque<HistoryFrame>,
     history_bytes: usize,
+    /// How many `history` entries have `decoded` set -- kept alongside so
+    /// `trim_history` need not rescan the deque.
+    history_decoded: usize,
+}
+
+/// One warmup-history entry: an exactly-cut frame previously fed to the
+/// decoder, and whether it decoded. Rejected frames matter to the restore
+/// replay too (reservoir state), but only decoded frames refresh the
+/// overlap/synthesis state the trim policy must preserve -- see
+/// `WARMUP_HISTORY_MIN_DECODED`.
+struct HistoryFrame {
+    bytes: Vec<u8>,
+    decoded: bool,
 }
 
 /// One decoded frame's stereo samples and native sample rate.
@@ -300,6 +336,7 @@ impl Decoder {
             spec: None,
             history: VecDeque::new(),
             history_bytes: 0,
+            history_decoded: 0,
         }
     }
 
@@ -334,6 +371,26 @@ impl Decoder {
                 return (0, None);
             }
             let frame = self.submit_frame(&input[..frame_len], rate, mono);
+            if frame.is_none() {
+                // The candidate carried a header-shaped word but its
+                // declared frame failed to decode -- a fake sync inside
+                // junk, or a corrupt encode. Its declared length cannot be
+                // trusted to delimit anything: consuming it wholesale
+                // could swallow a real frame whose header sits inside that
+                // span. Resume the sync hunt at the next header candidate
+                // within the span when one exists; only when nothing
+                // header-shaped hides inside it is the whole span skipped.
+                // (The failed attempt still advanced decoder state, which
+                // the warmup history has recorded.)
+                let scan_end = frame_len.min(input.len() - MPEG_HEADER_LEN + 1);
+                for j in 1..scan_end {
+                    let hdr = [input[j], input[j + 1], input[j + 2], input[j + 3]];
+                    if parse_frame_candidate(hdr).is_some() {
+                        return (j as u32, None);
+                    }
+                }
+                return (frame_len as u32, None);
+            }
             return (frame_len as u32, frame);
         }
         // No candidate anywhere: everything up to the last possible header
@@ -342,10 +399,12 @@ impl Decoder {
         ((input.len() - (MPEG_HEADER_LEN - 1)) as u32, None)
     }
 
-    /// Feed one exactly-cut frame to the decoder, recording it in the
-    /// warmup history. A decode failure here is the "fake sync header that
-    /// passes the header check but fails Layer III decode" case: the
-    /// caller still consumes the frame's bytes as junk.
+    /// Feed one exactly-cut frame to the decoder, recording the attempt
+    /// (and its outcome) in the warmup history. A decode failure here is
+    /// the "fake sync header that passes the header check but fails Layer
+    /// III decode" case: the caller consumes a single byte and rehunts
+    /// (see `decode_frame`); the attempt still lands in the history
+    /// because a post-side-info rejection advances reservoir state.
     fn submit_frame(&mut self, frame: &[u8], rate: u32, mono: bool) -> Option<DecodedFrame> {
         if self.spec.is_some_and(|spec| spec != (rate, mono)) {
             // A mid-stream sample-rate/channel change is a new stream:
@@ -355,39 +414,59 @@ impl Decoder {
             *self = Decoder::new();
         }
         self.spec = Some((rate, mono));
-        self.history.push_back(frame.to_vec());
+        let packet = Packet::new(0, Timestamp::ZERO, Duration::ZERO, frame);
+        let result = match self.mpa.decode_ref(&packet.as_packet_ref()) {
+            Ok(GenericAudioBufferRef::F32(buf)) => {
+                let samples: Option<Vec<(f32, f32)>> = if mono {
+                    buf.plane(0).map(|p| p.iter().map(|&v| (v, v)).collect())
+                } else {
+                    buf.plane_pair(0, 1)
+                        .map(|(l, r)| l.iter().zip(r).map(|(&l, &r)| (l, r)).collect())
+                };
+                samples.filter(|s| !s.is_empty()).map(|s| (s, rate))
+            }
+            // MpaDecoder only ever produces f32 buffers.
+            Ok(_) => None,
+            Err(_) => None,
+        };
+        self.history.push_back(HistoryFrame {
+            bytes: frame.to_vec(),
+            decoded: result.is_some(),
+        });
         self.history_bytes += frame.len();
+        self.history_decoded += usize::from(result.is_some());
+        self.trim_history();
+        result
+    }
+
+    /// Trim the warmup history to its bounds. A rejected front entry goes
+    /// as soon as the byte/frame floors stay covered; a *decoded* front
+    /// entry is additionally held until at least
+    /// `WARMUP_HISTORY_MIN_DECODED` newer decoded frames exist, so a run
+    /// of rejected header-shaped junk can never evict the successes whose
+    /// overlap/synthesis state the restore replay rebuilds. The hard caps
+    /// override that hold -- see the `WARMUP_HISTORY_*` doc comment for
+    /// what is (and is not) lost when they bite.
+    fn trim_history(&mut self) {
         while self.history.len() > WARMUP_HISTORY_MIN_FRAMES {
-            let front_len = self.history.front().map_or(0, Vec::len);
-            if self.history_bytes - front_len < WARMUP_HISTORY_MIN_BYTES {
+            let front = self.history.front().expect("len checked above");
+            if self.history_bytes - front.bytes.len() < WARMUP_HISTORY_MIN_BYTES {
                 break;
             }
-            self.history.pop_front();
-            self.history_bytes -= front_len;
+            let over_cap = self.history.len() > WARMUP_HISTORY_MAX_FRAMES
+                || self.history_bytes > WARMUP_HISTORY_MAX_BYTES;
+            if front.decoded && self.history_decoded <= WARMUP_HISTORY_MIN_DECODED && !over_cap {
+                break;
+            }
+            let front = self.history.pop_front().expect("len checked above");
+            self.history_bytes -= front.bytes.len();
+            self.history_decoded -= usize::from(front.decoded);
         }
-        let packet = Packet::new(0, Timestamp::ZERO, Duration::ZERO, frame);
-        let Ok(decoded) = self.mpa.decode_ref(&packet.as_packet_ref()) else {
-            return None;
-        };
-        let GenericAudioBufferRef::F32(buf) = decoded else {
-            // MpaDecoder only ever produces f32 buffers.
-            return None;
-        };
-        let samples: Vec<(f32, f32)> = if mono {
-            buf.plane(0)?.iter().map(|&v| (v, v)).collect()
-        } else {
-            let (left, right) = buf.plane_pair(0, 1)?;
-            left.iter().zip(right).map(|(&l, &r)| (l, r)).collect()
-        };
-        if samples.is_empty() {
-            return None;
-        }
-        Some((samples, rate))
     }
 
     fn snapshot(&self) -> DecoderSnapshot {
         DecoderSnapshot {
-            history: self.history.iter().cloned().collect(),
+            history: self.history.iter().map(|f| f.bytes.clone()).collect(),
         }
     }
 
@@ -396,9 +475,11 @@ impl Decoder {
         for frame in &snapshot.history {
             // Replay through the exact live-decode path (spec-change reset
             // included), discarding the PCM: only the decoder state
-            // matters. The guards cannot fail for a history this module
-            // wrote itself; they keep a hand-corrupted savestate from
-            // panicking.
+            // matters. Decode is deterministic, so each entry's `decoded`
+            // flag (which the snapshot does not carry) rebuilds itself to
+            // the value the live decoder recorded. The guards cannot fail
+            // for a history this module wrote itself; they keep a
+            // hand-corrupted savestate from panicking.
             if frame.len() < MPEG_HEADER_LEN {
                 continue;
             }
@@ -1100,14 +1181,16 @@ mod tests {
     /// granule, past the 576/2 = 288 spectral-pair maximum the Layer III
     /// format itself allows, so any conforming decoder must reject the
     /// frame -- a *deterministically* undecodable body (an integer-domain
-    /// side-info check, not a probabilistic Huffman desync) that still
-    /// consumes the header-declared frame length as junk. This is exactly
-    /// the "fake sync header that passes the header check but fails Layer
-    /// III decode" shape the resync-budget bug describes. The seed keeps
-    /// frames distinguishable via the same header don't-care bit
-    /// `mp3_frame` uses; 0xFF body bytes never alias a Layer III frame
-    /// header (0xFF 0xFF parses as Layer I with an invalid bitrate index),
-    /// so the junk between real headers contains no nested candidates.
+    /// side-info check, not a probabilistic Huffman desync) that the
+    /// packetizer then skips in one resync attempt, whole-span, since
+    /// nothing header-shaped hides inside it (see `decode_frame`'s
+    /// rejected-candidate scan). This is exactly the "fake sync header
+    /// that passes the header check but fails Layer III decode" shape the
+    /// resync-budget bug describes. The seed keeps frames distinguishable
+    /// via the same header don't-care bit `mp3_frame` uses; 0xFF body
+    /// bytes never alias a Layer III frame header (0xFF 0xFF parses as
+    /// Layer I with an invalid bitrate index), so the junk between real
+    /// headers contains no nested candidates.
     fn corrupt_frame(bitrate_kbps: u32, seed: u8) -> Vec<u8> {
         let mut frame = mp3_frame(bitrate_kbps, seed);
         for b in frame.iter_mut().skip(4) {
@@ -1600,6 +1683,82 @@ mod tests {
             completed_second,
             "a valid frame following a corrupted region must still decode and complete"
         );
+    }
+
+    /// Feed `bytes` through `Decoder::decode_frame` the way the board's
+    /// resync loop does -- consuming whatever each call reports, stopping
+    /// on "wait for more" -- and return the first decoded frame, if any.
+    fn drive_decoder(decoder: &mut Decoder, bytes: &[u8]) -> Option<DecodedFrame> {
+        let mut pos = 0usize;
+        let mut guard = 0u32;
+        while pos < bytes.len() {
+            let (consumed, frame) = decoder.decode_frame(&bytes[pos..]);
+            if frame.is_some() {
+                return frame;
+            }
+            if consumed == 0 {
+                return None;
+            }
+            pos += consumed as usize;
+            guard += 1;
+            assert!(guard < 10_000, "resync must make byte progress");
+        }
+        None
+    }
+
+    /// Regression test for a PR #479 review finding: a fake sync whose
+    /// declared frame length spans the start of a real frame must not
+    /// swallow it. On decode failure the packetizer steps a single byte
+    /// and resyncs (a fake header's declared span is not trusted to
+    /// delimit anything), so the real frame is still found and decoded.
+    #[test]
+    fn a_real_frame_starting_inside_a_fake_frames_declared_span_is_still_found() {
+        let mut decoder = Decoder::new();
+        // The first 30 bytes of a corrupt frame -- a valid 128 kbps header
+        // declaring a 417-byte frame, all-ones body -- then a complete
+        // real frame: the fake header's declared span covers the real
+        // frame's start, so consuming the declared length would skip it.
+        let mut stream = corrupt_frame(128, 1)[..30].to_vec();
+        stream.extend_from_slice(&mp3_frame(128, 2));
+        let (samples, rate) =
+            drive_decoder(&mut decoder, &stream).expect("the real frame must still be found");
+        assert_eq!(rate, 44_100);
+        assert_eq!(samples.len(), 1152);
+    }
+
+    /// Regression test for a PR #479 review finding: a long run of
+    /// undecodable header-shaped frames must not evict the last
+    /// successfully decoded frames from the savestate warmup history --
+    /// rejected frames only advance reservoir state, while the live
+    /// decoder's overlap/synthesis state still comes from those last
+    /// successes, so only a replay that includes them can rebuild it. A
+    /// stream of nothing but junk must meanwhile stay hard-bounded
+    /// instead of growing the history forever.
+    #[test]
+    fn warmup_history_keeps_the_last_decoded_frames_across_a_junk_flood_and_stays_bounded() {
+        let mut decoder = Decoder::new();
+        for seed in 0..3 {
+            drive_decoder(&mut decoder, &mp3_frame(128, seed)).expect("setup frame must decode");
+        }
+        assert!(decoder.history_decoded >= WARMUP_HISTORY_MIN_DECODED);
+
+        // Far more junk than WARMUP_HISTORY_MIN_BYTES of failed attempts:
+        // under byte/frame floors alone this evicted the decoded frames.
+        drive_decoder(&mut decoder, &garbage_stream(8 * 1024, 0x5A));
+        assert!(
+            decoder.history_decoded >= WARMUP_HISTORY_MIN_DECODED,
+            "rejected frames must not evict the last decoded frames from the warmup history"
+        );
+
+        // A truly unbounded junk flood saturates at the hard caps rather
+        // than growing without limit (here it also finally releases the
+        // decoded frames -- the documented, bounded trade-off).
+        drive_decoder(&mut decoder, &garbage_stream(64 * 1024, 0xA5));
+        assert!(
+            decoder.history_bytes <= WARMUP_HISTORY_MAX_BYTES + MAX_FRAME_INPUT,
+            "history bytes must stay hard-bounded under a junk flood"
+        );
+        assert!(decoder.history.len() <= WARMUP_HISTORY_MAX_FRAMES + 1);
     }
 
     /// Regression test for the "PAUSE keeps draining audio" bug: `PAUSE`
