@@ -14,6 +14,7 @@ Code contributions from (the full list is on
 - Nicolas Ramz
 - Ben Letchford
 - Volker Schwaberow
+- Matt Harlum
 
 ## Patreon sponsors
 

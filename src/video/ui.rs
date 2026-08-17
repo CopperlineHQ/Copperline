@@ -2009,6 +2009,7 @@ const CONTRIBUTORS: &[&str] = &[
     "Nicolas Ramz",
     "Ben Letchford",
     "Volker Schwaberow",
+    "Matt Harlum",
 ];
 const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
 
