@@ -10299,6 +10299,29 @@ fn front_panel_hdd_led_present_for_filesys_mount() {
 }
 
 #[test]
+fn front_panel_hdd_led_present_for_zorro_ide() {
+    let mut bus = empty_bus();
+    // No storage controller: no HDD LED at all.
+    assert_eq!(bus.front_panel_status().hdd_led, None);
+
+    // A lide-compatible Zorro IDE board is a hard-disk controller, so its
+    // presence alone gives the machine an HDD LED -- even hardware-only
+    // (no boot ROM) with no drives attached.
+    let board =
+        crate::ide_zorro::IdeZorro::new(crate::ide_zorro::LidePersonality::Ripple, Vec::new())
+            .unwrap();
+    bus.attach_devices(vec![crate::zorro_device::BoardDevice::IdeZorro(board)]);
+    assert_eq!(bus.front_panel_status().hdd_led, Some(false));
+
+    bus.note_hdd_activity();
+    assert_eq!(bus.front_panel_status().hdd_led, Some(true));
+
+    // The hold expires once emulated time passes the deadline.
+    bus.emulated_cck += u64::from(PAULA_CLOCK_HZ);
+    assert_eq!(bus.front_panel_status().hdd_led, Some(false));
+}
+
+#[test]
 fn front_panel_reports_host_output_volume() {
     let mut bus = empty_bus();
 
