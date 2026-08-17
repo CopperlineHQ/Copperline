@@ -7701,12 +7701,16 @@ fn draw_launcher_row(
             "Revision" => revision,
             _ => name,
         };
+        // The prefix in grey, the fact itself in full text colour.
+        let x = launcher_pane_x(rect) + 4 * font::GLYPH_W;
+        let prefix = format!("{}: ", r.label);
+        draw_panel_text(frame, x, row_y + 4, &prefix, PANEL_TEXT_DIM, 1, scale);
         draw_panel_text(
             frame,
-            launcher_pane_x(rect) + 4 * font::GLYPH_W,
+            x + prefix.chars().count() * font::GLYPH_W,
             row_y + 4,
-            &format!("{}: {}", r.label, value),
-            PANEL_TEXT_DIM,
+            &value,
+            PANEL_TEXT,
             1,
             scale,
         );

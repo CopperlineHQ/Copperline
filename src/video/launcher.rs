@@ -961,7 +961,7 @@ const MEMORY_ROWS: [Row; 8] = [
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
 // its dumper called it. The table stands whether or not an image is
 // loaded; empty cells mean an empty (or unrecognised) slot.
-const ROM_ROWS: [Row; 8] = [
+const ROM_ROWS: [Row; 7] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
     // What the chosen image is, one greyed line per fact, indented
@@ -969,8 +969,6 @@ const ROM_ROWS: [Row; 8] = [
     row(F::Rom, "Name", RowKind::RomInfo),
     row(F::Rom, "Version", RowKind::RomInfo),
     row(F::Rom, "Revision", RowKind::RomInfo),
-    // A blank header as a spacer before the next section.
-    section_header(""),
     section_header("Extended ROM:"),
     row(F::ExtendedRom, "  Extended ROM", PathRow),
 ];
@@ -9971,7 +9969,6 @@ mod tests {
                 ("Name", RowKind::RomInfo, F::Rom),
                 ("Version", RowKind::RomInfo, F::Rom),
                 ("Revision", RowKind::RomInfo, F::Rom),
-                ("", RowKind::SectionHeader, F::SectionHeader),
                 ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
                 ("  Extended ROM", RowKind::Path, F::ExtendedRom),
             ]
