@@ -10290,6 +10290,41 @@ mod tests {
     }
 
     #[test]
+    fn serial_section_carries_the_coppersynth_keys() -> Result<()> {
+        // All three keys parse under [serial], like the MT-32's.
+        let text = "[serial]\nmode = \"midi\"\nmidi_out = \"coppersynth\"\n\
+                    coppersynth_soundfont = \"bank.sf2\"\n\
+                    coppersynth_mt32_mode = \"on\"\ncoppersynth_panel = true\n";
+        let cfg = parse_config(text)?;
+        assert_eq!(
+            cfg.serial.coppersynth_soundfont.as_deref(),
+            Some(std::path::Path::new("bank.sf2"))
+        );
+        assert_eq!(cfg.serial.coppersynth_mt32_mode.as_deref(), Some("on"));
+        assert!(cfg.serial.coppersynth_panel);
+
+        // They serialize back under [serial] and survive the round trip
+        // -- the text a launcher Save writes must load again.
+        let raw: RawConfig = toml::from_str(text)?;
+        let written = raw.to_toml_string()?;
+        for key in [
+            "coppersynth_soundfont",
+            "coppersynth_mt32_mode",
+            "coppersynth_panel",
+        ] {
+            assert!(written.contains(key), "{key} missing from:\n{written}");
+        }
+        let reloaded = parse_config(&written)?;
+        assert_eq!(reloaded.serial.coppersynth_mt32_mode.as_deref(), Some("on"));
+
+        // The rejection names the key exactly as [serial] spells it, so
+        // a launcher-saved config that goes stale says where to look.
+        let err = parse_config("[serial]\ncoppersynth_mt32_mode = \"maybe\"\n").unwrap_err();
+        assert!(err.to_string().contains("coppersynth_mt32_mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
     fn serial_section_selects_tcp_connect_and_address() -> Result<()> {
         let cfg =
             parse_config("[serial]\nmode = \"tcp-connect\"\nconnect = \"bbs.example.com:1337\"\n")?;
