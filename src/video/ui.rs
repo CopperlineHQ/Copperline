@@ -4334,7 +4334,7 @@ const LAUNCH_TOGGLE_W: usize = 64;
 const LAUNCH_ACTION_W: usize = 84;
 const LAUNCH_ACTION_H: usize = 22;
 const LAUNCH_BROWSE_W: usize = 66;
-const LAUNCH_CLEAR_W: usize = 54;
+const LAUNCH_CLEAR_W: usize = LAUNCH_BROWSE_W;
 /// Width of the path-preview text column before a path row's Browse/Clear
 /// buttons. The buttons sit just after it (near the other control widgets)
 /// rather than out at the panel's right edge; a long value is clipped to fit.
@@ -5562,16 +5562,16 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }
 
-/// Whether the row's second button has anything to do: a Reset with the
-/// default already in force is shown but greyed, so the pair of buttons
-/// keeps its shape while saying there is nothing to undo.
+/// Whether the row's second button has anything to do: a Clear with
+/// nothing behind it is shown but greyed, so the pair of buttons keeps
+/// its shape while saying there is nothing to take away. The Paths page
+/// keeps its own arrangement -- its Reset only appears once something
+/// is set, so it is always live.
 fn launcher_clear_enabled(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
-    #[cfg(feature = "coppersynth")]
-    if field == LauncherField::CsynthSoundfont {
-        return setup.path(field).is_some();
+    if field.is_paths_field() {
+        return true;
     }
-    let _ = (setup, field);
-    true
+    setup.path(field).is_some()
 }
 
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
@@ -7803,9 +7803,14 @@ fn draw_launcher_row(
             Some(GreyedAs::DimmedValue | GreyedAs::DimmedReason)
         ) {
             if greyed_as != Some(GreyedAs::Blank) {
+                // Centred across the stepper span, where the value the
+                // row cannot have would sit.
+                let (prev, _, next) = launcher_cycle_rects(rect, row_y);
+                let span = (next.x + next.w).saturating_sub(prev.x);
+                let text_w = reason.chars().count() * font::GLYPH_W;
                 draw_panel_text(
                     frame,
-                    launcher_control_x(rect),
+                    prev.x + span.saturating_sub(text_w) / 2,
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
@@ -8361,12 +8366,10 @@ fn draw_launcher_row(
             }
             if has_clear {
                 // "Reset" where the row goes back to a default rather
-                // than being emptied -- the Paths page, and the
-                // soundfont row. Everywhere else the button really does
-                // clear a path, and says so.
-                #[cfg(feature = "coppersynth")]
-                let resets = r.field.is_paths_field() || r.field == LauncherField::CsynthSoundfont;
-                #[cfg(not(feature = "coppersynth"))]
+                // than being emptied -- the Paths page. Everywhere else
+                // the button clears, and says so (the SoundFont row's
+                // clear also lands on the bundled default, but it wears
+                // the same word as its neighbours).
                 let resets = r.field.is_paths_field();
                 let label = if resets { "Reset" } else { "Clear" };
                 let enabled = launcher_clear_enabled(setup, r.field);
