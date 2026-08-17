@@ -4687,13 +4687,9 @@ fn audio_tab_lists_and_mutes_fitted_board_rows() {
     // Fit a Toccata and (feature permitting) an MHI board; the Audio tab
     // grows one row per board, in CD -> Toccata -> MHI order, and the
     // mute clicks map through the same order.
-    let mut devices = vec![crate::zorro_device::BoardDevice::Toccata(Box::new(
-        crate::toccata::Toccata::new(),
-    ))];
+    let mut devices = vec![crate::zorro_device::BoardDevice::Toccata(Box::default())];
     #[cfg(feature = "mhi")]
-    devices.push(crate::zorro_device::BoardDevice::Mhi(Box::new(
-        crate::mhi::Mhi::new(),
-    )));
+    devices.push(crate::zorro_device::BoardDevice::Mhi(Box::default()));
     app.emu.bus_mut().attach_devices(devices);
     app.open_debugger();
     if let Some(panel) = app.debugger_panel.as_mut() {
