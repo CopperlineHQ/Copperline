@@ -608,10 +608,11 @@ fn walk(root: &Path, dir: &Path, depth: usize, walked: &mut usize, out: &mut Vec
             if !crate::package::worth_walking(&name) {
                 continue;
             }
-            // A directory with a slave under it is one game, and is not
-            // looked inside for more: a game's own data directories are
-            // not each a game of their own.
-            match crate::package::holds_a_slave(&path) {
+            // A directory that is one game is listed and not looked
+            // inside for more; a shelf of games -- a collection filed by
+            // letter or by genre -- is walked into. `one_game` is what
+            // tells them apart.
+            match crate::package::one_game(&path) {
                 true => out.extend(relative(&path)),
                 false => walk(root, &path, depth + 1, walked, out),
             }
@@ -841,6 +842,48 @@ mod tests {
         assert_eq!(
             found,
             ["A/B/Three_v1.0.LHA", "A/Two_v1.0.lha", "One_v1.0.lha"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_collection_of_unpacked_games_filed_by_letter_lists_each_game() {
+        // The layout from issue 469: games unpacked onto disk and filed
+        // under a/, b/ and so on. Each letter folder answered "there is a
+        // slave under me" and was swallowed as one game, so the list held
+        // the letters and none of what was under them.
+        let dir = scratch("letters");
+        std::fs::create_dir_all(dir.join("a/AlienBreed/data")).unwrap();
+        std::fs::write(dir.join("a/AlienBreed/AlienBreed.slave"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("a/AnotherWorld")).unwrap();
+        std::fs::write(dir.join("a/AnotherWorld/AnotherWorld.slave"), b"x").unwrap();
+        // A letter folder mixing an archive in beside an unpacked game.
+        std::fs::create_dir_all(dir.join("b/Barbarian")).unwrap();
+        std::fs::write(dir.join("b/Barbarian/Barbarian.slave"), b"x").unwrap();
+        std::fs::write(dir.join("b/Benefactor_v1.0.lha"), b"x").unwrap();
+        // An unpacked .lha keeps its wrapper as one game, not two.
+        std::fs::create_dir_all(dir.join("a/Aladdin_v1/Aladdin")).unwrap();
+        std::fs::write(dir.join("a/Aladdin_v1/Aladdin/Aladdin.Slave"), b"x").unwrap();
+        std::fs::write(dir.join("a/Aladdin_v1/Aladdin.info"), b"x").unwrap();
+        // A letter folder holding a single unpacked game has exactly a
+        // wrapper's shape, and is taken for one: listed under the
+        // letter, and it still boots. The ambiguity is real; this pins
+        // which way it falls.
+        std::fs::create_dir_all(dir.join("c/Cabal")).unwrap();
+        std::fs::write(dir.join("c/Cabal/Cabal.slave"), b"x").unwrap();
+
+        let mut found = packages(&dir);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "a/Aladdin_v1",
+                "a/AlienBreed",
+                "a/AnotherWorld",
+                "b/Barbarian",
+                "b/Benefactor_v1.0.lha",
+                "c"
+            ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

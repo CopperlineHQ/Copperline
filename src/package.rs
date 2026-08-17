@@ -222,16 +222,75 @@ pub fn read_first(path: &Path, want: impl Fn(&Path) -> bool) -> Result<Option<Ve
     }
 }
 
+/// Whether a directory is one game rather than a shelf of them.
+///
+/// This is the test a scan applies to the *children* of the library, and
+/// never to the library itself, which of course has slaves somewhere under
+/// it. The trouble is that so does everything in between: a collection
+/// filed by letter answers "there is a slave down there" for `A/` just as
+/// `Aladdin_v1/` does, and taking the first yes for a game swallowed a
+/// whole shelf as one entry.
+///
+/// So the question is asked in two parts. A `.slave` directly inside makes
+/// it a game outright -- the shape an unpacked game has, and what stops a
+/// game's own data directories being games of their own. Without one, it
+/// is a game only as a *wrapper*: exactly one subdirectory with a slave
+/// under it and no packages of its own, which is what an unpacked `.lha`
+/// looks like -- `Aladdin_v1/Aladdin/Aladdin.Slave` beside an icon.
+/// Anything else -- several slave-holding subdirectories, or packages
+/// mixed in beside them -- is a shelf, and the scan walks into it.
+///
+/// A shelf holding a single game is genuinely indistinguishable from a
+/// wrapper and is taken for one; it still lists and still boots, under the
+/// shelf's name.
+pub fn one_game(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut subdirs = Vec::new();
+    let mut packages = false;
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("._") {
+            continue;
+        }
+        if kind.is_dir() {
+            if worth_walking(&name) {
+                subdirs.push(entry.path());
+            }
+        } else if is_slave_name(&name) {
+            return true;
+        } else if Kind::of_name(&name).is_some() {
+            packages = true;
+        }
+    }
+    if packages {
+        return false;
+    }
+    let mut holding = 0;
+    for sub in &subdirs {
+        if holds_a_slave(sub) {
+            holding += 1;
+            if holding > 1 {
+                return false;
+            }
+        }
+    }
+    holding == 1
+}
+
 /// Whether a `.slave` sits anywhere within `dir`, within a few levels.
 ///
-/// This is the test a scan applies to the *children* of a game folder, and
-/// never to the folder itself -- a library holds games, so a slave is
-/// somewhere under it too, and asking of the library would answer yes and
-/// mean nothing. Walking down and stopping at the first child that says
-/// yes is what picks out `Aladdin_v1/` from a folder of a hundred like it.
-///
-/// The depth limit is what stops the question from reading somebody's
-/// whole home directory when the answer is no.
+/// What [`one_game`] asks of a wrapper's subdirectories. The depth limit
+/// is what stops the question from reading somebody's whole home
+/// directory when the answer is no.
 pub fn holds_a_slave(dir: &Path) -> bool {
     fn look(dir: &Path, depth: usize) -> bool {
         if depth > FOLDER_SLAVE_DEPTH {
@@ -493,6 +552,49 @@ mod tests {
             listed,
             ["Aaa.slave", "data/Bbb.slave", "data/deep/Zzz.slave"].map(PathBuf::from)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_game_tells_a_game_from_a_shelf_of_them() {
+        let dir = std::env::temp_dir().join(format!("copperline-onegame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // An unpacked game: the slave sits at its root.
+        std::fs::create_dir_all(dir.join("AlienBreed/data")).unwrap();
+        std::fs::write(dir.join("AlienBreed/AlienBreed.slave"), b"x").unwrap();
+        assert!(one_game(&dir.join("AlienBreed")));
+
+        // A wrapper, which is what unpacking an .lha leaves: one
+        // subdirectory with the slave, an icon beside it.
+        std::fs::create_dir_all(dir.join("Aladdin_v1/Aladdin")).unwrap();
+        std::fs::write(dir.join("Aladdin_v1/Aladdin/Aladdin.Slave"), b"x").unwrap();
+        std::fs::write(dir.join("Aladdin_v1/Aladdin.info"), b"x").unwrap();
+        assert!(one_game(&dir.join("Aladdin_v1")));
+
+        // A letter folder holding two unpacked games is a shelf, not a
+        // game -- the bug that swallowed a collection filed by letter.
+        std::fs::create_dir_all(dir.join("a/AnotherWorld")).unwrap();
+        std::fs::write(dir.join("a/AnotherWorld/AnotherWorld.slave"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("a/Agony")).unwrap();
+        std::fs::write(dir.join("a/Agony/Agony.slave"), b"x").unwrap();
+        assert!(!one_game(&dir.join("a")));
+
+        // So is one mixing an archive in beside an unpacked game: taken
+        // for a game, the archive would never be listed.
+        std::fs::create_dir_all(dir.join("b/Barbarian")).unwrap();
+        std::fs::write(dir.join("b/Barbarian/Barbarian.slave"), b"x").unwrap();
+        std::fs::write(dir.join("b/Benefactor_v1.0.lha"), b"x").unwrap();
+        assert!(!one_game(&dir.join("b")));
+
+        // A folder with no slave anywhere under it is nothing at all.
+        std::fs::create_dir_all(dir.join("Screenshots")).unwrap();
+        std::fs::write(dir.join("Screenshots/one.png"), b"x").unwrap();
+        assert!(!one_game(&dir.join("Screenshots")));
+
+        // And a resource fork still does not make one.
+        std::fs::create_dir_all(dir.join("Junk")).unwrap();
+        std::fs::write(dir.join("Junk/._Game.Slave"), b"x").unwrap();
+        assert!(!one_game(&dir.join("Junk")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
