@@ -1,11 +1,13 @@
 # Coppersynth
 
-Copperline can put a General MIDI sound module on the other end of the
-Amiga's MIDI cable. The module is Coppersynth, Copperline's own SoundFont
+Copperline can put a "General MIDI" sound module on the other end 
+of the Amiga's MIDI cable. 
+
+The module is Coppersynth, Copperline's own SoundFont
 synthesizer in the style of a Roland Sound Canvas: sixteen parts, an
 SC-55-style front panel, and an MT-32 translation layer in front, so a
-game that talks to an MT-32 plays correctly with no ROMs and no
-configuration.
+game that talks to an MT-32 plays correctly **with no ROMs and no
+configuration**.
 
 Audio is mixed in beside the Amiga's own four channels, so a game that
 plays MIDI music and Amiga sound effects gets both.
@@ -45,17 +47,14 @@ midi_out = "coppersynth"
 Coppersynth carries its own bank -- **GeneralUser GS** by S. Christian
 Collins, an instrument library in its own right with the complete General
 MIDI sound set, SFX bank and drum kits included, at a very reasonable
-size -- and needs no files. To play a different one, set
+size -- and needs no extra files. To play a different one, set
 `[serial] coppersynth_soundfont`,
 use the launcher's **Browse**, or press the panel's **LOAD** button in a
 running session; `.sf2` files and `.zip` archives containing one both
 load, and the launcher's **Clear** (the menu's **Reset**) puts the
-built-in bank back. A bank with defects
-(loop points past its data are common in rips) is repaired at load rather
-than refused, and the log says what the mending cost. A bank that does
-not fill all 128 programs keeps honest numbering: an unfilled slot shows
-its number and the name `Empty`, and playback falls back to the bank's
-default sound.
+built-in bank back. A bank that does not fill all 128 programs keeps 
+honest numbering: an unfilled slot shows its number and the name `Empty`, 
+and playback falls back to the bank's default sound.
 
 ## MT-32 mode
 
@@ -69,49 +68,47 @@ CM-64/32L drum kit, MT-32 rhythm selects it automatically.
 
 ## The front panel
 
+![The Coppersynth front panel](../images/ui-preview-csynth-panel-strip.png)
+
 **Front panel** in the launcher row, the menu toggle, or
 `[serial] coppersynth_panel`
 puts the module's fascia under the display: the backlit LCD with the part
 values, the sixteen-part level meters, and the sound's name -- a game's
-MT-32 instrument uploads show under their own names. Buttons press with a
-left click; a right click latches a button down, which is how two-button
+MT-32 instrument uploads via SysEx to show extra info. Buttons press with a
+left click; a right click latches a button down, which is how multi-button
 gestures are made: latch one half of a pair and click the other to view
 that setting across all parts, or latch **ALL** and click **MUTE** to
 monitor (solo) the shown part.
 
-- **PART ◄ ►** selects a part; **INSTRUMENT ◄ ►** changes its sound (on
-  part 10, the drum kit). A change made at the panel holds against the
-  game until power-off.
-- **LEVEL** is a ceiling on the part's volume, whatever the game sends.
-  **PAN**, **REVERB**, **CHORUS**, **KEY SHIFT** and **MIDI CH** edit the
-  shown part; with **ALL** lit they set every part at once.
-- **MUTE** silences the shown part (all of them, with **ALL** lit). Held
-  ◄ ► buttons repeat, faster the longer they are held.
-- The **VOLUME** knob is the module's output level, separate from
-  anything the game sends. **POWER** switches the module off and on;
-  games' sysex display messages appear on the LCD and stay until a button
-  is pressed.
+| Button | Function |
+|---|---|
+| **PART < >** | Selects a part |
+| **INSTRUMENT < >** | Changes the timbre/sound for the selected part |
+| **LEVEL < >** | Volume ceiling |
+| **PAN < >** | Pans the part left or right |
+| **REVERB < >** | Reverb DSP level |
+| **CHORUS < >** | Chorus DSP level |
+| **KEY SHIFT < >** | Transposes the part |
+| **ALL** | Lit, sets all of the above parameters for every part |
+| **MUTE** | Silences the shown part (all of them, with **ALL** lit) |
+| **MIDI CH < >** | Sets the MIDI channel (1-16) for the selected part |
+| **VOLUME** (knob) | The module's main output level, separate from anything MIDI sends |
+| **POWER** | Switches the module off and on |
 
-## Bonus Features
+### Button combinations
 
-The front panel has a few extra features similar to an SC-55.
-Latch/hold buttons with a right click on a switched-off unit, then
-press **POWER**.
+Coppersynth front panel has various features accessed with multi-button
+combinations. Other than "Solo", these all require the unit to first be powered off.
 
-- **INSTRUMENT ◄** asks `Init MT-32, Sure?` with the ALL and MUTE
-  lamps flashing: **ALL** forces MT-32 mode on, **MUTE** forces it
-  off, and the choice lands in the configuration like the menu's.
-- **INSTRUMENT ►** asks `Init SoundFont,Sure?` the same way: **ALL**
-  holds the screen at `Initializing...` for a moment, reloads the
-  built-in SoundFont and boots; **MUTE** carries on with the loaded
-  one.
-- Both **PART** buttons start demo mode: the part box reads `S-1` and
-  the unit plays its two bundled songs through its own engine. **ALL**
-  plays, **MUTE** stops, the **PART** arrows change song. Power off to
-  leave.
-- Both **MIDI CH** and both **INSTRUMENT** buttons show the Coppersynth
-  version and build date on the way up (**ALL** or **MUTE** carries on
-  the boot) -- the fourth latch switches the unit on by itself.
+**Right click to hold/latch.**
+
+| Combination | Reaches |
+|---|---|
+| ALL + MUTE | Solo the selected PART. Same combo to disable solo |
+| INSTRUMENT < + POWER | MT-32 Mode. MUTE disables, ALL enables |
+| INSTRUMENT > + POWER  | Load the default SoundFont. MUTE cancels, ALL confirms  |
+| PART < + PART > + POWER | Demo sequences. press ALL to play, MUTE to stop, PART buttons to skip song. 
+| Both INSTRUMENT buttons + both MIDI CH buttons | Show version info + credits
 
 ## Building without it
 
