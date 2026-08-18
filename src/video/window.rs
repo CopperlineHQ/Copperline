@@ -2231,12 +2231,21 @@ impl App {
             return;
         }
         let start = *self.gamepad_quit_hold.get_or_insert_with(Instant::now);
-        match GAMEPAD_QUIT_HOLD.checked_sub(start.elapsed()) {
-            None => self.gamepad_quit_requested = true,
-            Some(remaining) => self.show_osd(format!(
+        // A hold of exactly GAMEPAD_QUIT_HOLD counts as complete: the
+        // previous checked_sub formulation required *strictly more* than
+        // the hold, so equality showed a "0.0s" countdown instead of
+        // quitting -- observable in practice on Windows, whose clock
+        // granularity lets two Instant::now readings land on the same
+        // tick (the unit test's backdated-by-exactly-the-hold start hit
+        // it as an intermittent CI failure).
+        let elapsed = start.elapsed();
+        if elapsed >= GAMEPAD_QUIT_HOLD {
+            self.gamepad_quit_requested = true;
+        } else {
+            self.show_osd(format!(
                 "{GAMEPAD_QUIT_OSD_PREFIX}{:.1}s",
-                remaining.as_secs_f32()
-            )),
+                (GAMEPAD_QUIT_HOLD - elapsed).as_secs_f32()
+            ));
         }
     }
 

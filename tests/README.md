@@ -156,6 +156,7 @@ baselines to maintain.
 | `graffity_z2_workbench_opens_640x480x8` / `graffity_z3_workbench_opens_640x480x8` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-graffity.hdf` (WB + Picasso96 with `Graffity.card`, default 640x480x8 screen) |
 | `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
 | `toccata_ahi_driver_recognizes_the_board` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `toccata-ahi.hdf` (WB3.1 + AHI 4.18 with `toccata.audio` staged into `Devs/AHI` and Unit 0 set to Toccata) |
+| `zz9k_sdk_tools_pass_on_zorro_ii` / `zz9k_sdk_tools_pass_on_zorro_iii` | `zz9k/C/zz9k-{info,hash,chacha,aead,irqtest}` -- the unmodified ZZ9000 SDK m68k tools, built from the zz9000-sdk revision pinned in `docs/internals/zz9k.md` (build recipe in `tests/zz9k_sdk_tools.rs`'s module comment) |
 
 ## Obtaining the assets legally
 
@@ -227,6 +228,10 @@ The tracked `.bin` files are generated test programs, not ROM or disk images:
   `timing-test/README.md` "CI golden renders").
 - `assets/services/services_rom.bin` is the guest-side host-filesystem
   handler built from `guest/services/`.
+- `guest/zz9kprobe/zz9kprobe` is the zz9k crypto board's guest conformance
+  probe built from `guest/zz9kprobe/` (the vendored ZZ9000 SDK transport
+  plus the probe source); `tests/zz9k.rs` boots it on the bundled AROS ROM
+  with no external assets.
 Run the tracked-file audit in `RELEASE.md` before publishing a rewritten
 public repository.
 

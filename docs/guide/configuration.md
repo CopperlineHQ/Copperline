@@ -1974,6 +1974,47 @@ Implemented as a bundled WASM plugin board (see [](../zorro)); its
 verification record against the external bsdsocktest conformance suite
 lives in `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
+## `[zz9k]` -- ZZ9000 SDK crypto accelerator board
+
+```toml
+[zz9k]
+enabled = true
+# zorro = 3        # 2 or 3; default: 3 on a 32-bit CPU, else 2
+# size = "4M"      # Zorro III window, power of two 1M..256M; Z2 is fixed at 4M
+# int2 = false     # completion interrupt on INT2 instead of the INT6 default
+# seed = "..."     # reserved deterministic DRBG seed (hex); no current consumer
+```
+
+Fits a register-compatible subset of the MNT ZZ9000's "SDK v2" service
+platform -- the CORE, MEMORY, and CRYPTO services -- with the crypto
+computed host-side: SHA-1/256/384/512, BLAKE2s, HMAC, Poly1305, ChaCha20,
+ChaCha20-Poly1305 and AES-GCM AEAD, X25519 and P-256 key exchange, P-256
+keygen, and ECDSA/RSA signature verification, all at host speed. The
+zz9000-sdk's unmodified Amiga-side software -- `zz9k.library`, the
+`zz9k-info`/`zz9k-hash`/`zz9k-aead`/... tools, and its accelerated AmiSSL
+build -- detects the board exactly as it detects real hardware
+(manufacturer 0x6D6E, product 4 or 3), so TLS on an emulated 68k stops
+being bottlenecked by guest-side crypto. See [](../internals/zz9k) for the
+protocol contract and the pinned SDK revision.
+
+The board is pure compute: fitting it keeps the machine fully
+deterministic and replay-safe, and it works headless, in save states
+(including mid-operation), and on any machine profile. On Zorro II the
+window is pinned at 4M -- the only Zorro II size the SDK transport accepts
+shared-buffer allocations for -- and the SDK's Zorro II path polls instead
+of using the doorbell, which the board handles transparently. `zorro = 3`
+needs a 32-bit CPU (68020+), like any Zorro III board.
+
+The guest picks the completion-interrupt line itself via the SDK's
+`ENV:ZZ9K_INT2` / `ZZ9000.CFG` convention; `int2` here sets what the
+board's config-key register reports (leave it false for the INT6 default
+unless guest-side software asks otherwise).
+
+Only the SDK services above exist: the real ZZ9000's RTG, USB, and
+Ethernet faces are absent (registers read zero, services report
+unsupported), so do not install the P96 `zz9000.card` display driver
+against this board -- it is harmless but shows nothing.
+
 ## `[rtg]` -- RTG graphics card
 
 ```toml

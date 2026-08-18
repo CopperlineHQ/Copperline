@@ -2902,6 +2902,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) zz9k: RawZz9k,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) rtg: RawRtg,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) floppy: RawFloppy,
@@ -3573,6 +3575,39 @@ pub(crate) struct RawHostSocket {
     /// so those backends simply get no resolver key at all).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<String>,
+}
+
+/// `[zz9k]` bundled ZZ9000 SDK crypto board: a register-compatible subset
+/// of the MNT ZZ9000's SDK v2 service platform (CORE + MEMORY + CRYPTO)
+/// with the crypto computed host-side (see `crate::zz9k` and
+/// docs/internals/zz9k.md). Pure compute -- fitting it keeps the machine
+/// deterministic.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawZz9k {
+    /// Fit the board. Absent/false means no board is on the chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    /// Bus generation: 3 (Zorro III, needs a 32-bit CPU) or 2 (Zorro II,
+    /// window fixed at 4M -- the only Zorro II size the SDK transport
+    /// accepts shared-buffer allocations for). Defaults to 3 on a 32-bit
+    /// CPU, 2 otherwise, matching the SDK's own probe order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) zorro: Option<u8>,
+    /// Zorro III window size (power of two, 1M..256M; default "4M").
+    /// Zorro II ignores this and always maps 4M.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<String>,
+    /// Answer the guest's ZZ9000.CFG `int2` key query with "use INT2
+    /// (PORTS)" instead of the INT6 (EXTER) default for the completion
+    /// interrupt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) int2: Option<bool>,
+    /// Reserved deterministic DRBG seed (up to 64 hex digits). No current
+    /// board operation draws randomness; the default (unset) is a fixed
+    /// constant, so runs stay byte-reproducible either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seed: Option<String>,
 }
 
 /// `[rtg]` graphics card: an RTG board on the Zorro chain.
@@ -4697,6 +4732,85 @@ impl TryFrom<RawConfig> for Config {
                 raw.hostsocket.gateway.as_deref(),
                 hostsocket_resolver.as_deref(),
                 hostsocket_transport.as_deref(),
+            ));
+        }
+
+        // `[zz9k]` expands to the bundled ZZ9000 SDK crypto board (see
+        // crate::zz9k), appended the same way. Zorro III by default on a
+        // 32-bit CPU (the transport probes Z3 first); Zorro II otherwise,
+        // where the window is pinned to 4M -- the only Zorro II size the
+        // SDK transport accepts shared-buffer allocations for (its
+        // "historical fixed 4 MB" profile).
+        if raw.zz9k.enabled.unwrap_or(false) {
+            let version = match raw.zz9k.zorro {
+                None => {
+                    if cpu_has_32bit_bus(cpu) {
+                        ZorroVersion::III
+                    } else {
+                        ZorroVersion::II
+                    }
+                }
+                Some(2) => ZorroVersion::II,
+                Some(3) => ZorroVersion::III,
+                Some(other) => {
+                    errors.push(anyhow!("[zz9k] zorro must be 2 or 3, not {other}"));
+                    ZorroVersion::II
+                }
+            };
+            let size_bytes = match (version, &raw.zz9k.size) {
+                (ZorroVersion::II, None) => crate::zz9k::Z2_BOARD_SIZE,
+                (ZorroVersion::II, Some(s)) => match parse_size(s, "[zz9k] size") {
+                    Ok(n) if n == crate::zz9k::Z2_BOARD_SIZE => n,
+                    Ok(_) => {
+                        errors.push(anyhow!(
+                            "[zz9k] size on Zorro II is fixed at 4M: the SDK transport \
+                                 refuses shared-buffer allocations through any other Zorro II \
+                                 window size"
+                        ));
+                        crate::zz9k::Z2_BOARD_SIZE
+                    }
+                    Err(e) => {
+                        errors.push(e);
+                        crate::zz9k::Z2_BOARD_SIZE
+                    }
+                },
+                (ZorroVersion::III, None) => crate::zz9k::Z2_BOARD_SIZE,
+                (ZorroVersion::III, Some(s)) => match parse_size(s, "[zz9k] size") {
+                    Ok(n) if n.is_power_of_two() && (0x10_0000..=0x1000_0000).contains(&n) => n,
+                    Ok(_) => {
+                        errors.push(anyhow!(
+                            "[zz9k] size must be a power of two from 1M to 256M"
+                        ));
+                        crate::zz9k::Z2_BOARD_SIZE
+                    }
+                    Err(e) => {
+                        errors.push(e);
+                        crate::zz9k::Z2_BOARD_SIZE
+                    }
+                },
+            };
+            if let Some(seed) = &raw.zz9k.seed {
+                let trimmed = seed.trim().trim_start_matches("0x");
+                if trimmed.is_empty()
+                    || trimmed.len() > 64
+                    || !trimmed.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    errors.push(anyhow!("[zz9k] seed must be 1 to 64 hex digits"));
+                }
+            }
+            wasm_boards.push(crate::zz9k::board_config(
+                version,
+                size_bytes,
+                raw.zz9k.int2.unwrap_or(false),
+                raw.zz9k.seed.as_deref(),
+            ));
+        } else if raw.zz9k.zorro.is_some()
+            || raw.zz9k.size.is_some()
+            || raw.zz9k.int2.is_some()
+            || raw.zz9k.seed.is_some()
+        {
+            errors.push(anyhow!(
+                "[zz9k] settings need enabled = true to take effect"
             ));
         }
 
@@ -10702,6 +10816,112 @@ mod tests {
 
         // The bundled board composes with [[zorro]] metadata boards; it is
         // appended after them, so their windows are assigned first.
+        Ok(())
+    }
+
+    #[test]
+    fn zz9k_expands_to_the_bundled_wasm_board() -> Result<()> {
+        // No [zz9k] section, no board.
+        let cfg = parse_config("")?;
+        assert!(cfg.wasm_boards.is_empty());
+
+        // On the default 68000 machine the board auto-selects Zorro II,
+        // pinned to the 4M window the SDK transport requires there.
+        let cfg = parse_config("[zz9k]\nenabled = true\n")?;
+        assert_eq!(cfg.wasm_boards.len(), 1);
+        let board = &cfg.wasm_boards[0];
+        assert_eq!(board.wasm_path, Path::new(crate::zz9k::BUNDLED_ZZ9K_WASM));
+        assert_eq!(
+            board.spec.manufacturer,
+            crate::zorro::ZZ9K_MNT_MANUFACTURER_ID
+        );
+        assert_eq!(board.spec.product, crate::zorro::ZZ9K_PRODUCT_Z2);
+        assert_eq!(board.spec.size_bytes, crate::zz9k::Z2_BOARD_SIZE);
+        assert_eq!(board.spec.diag_vec, None);
+        // Pure compute: no DMA, no network -- the deterministic profile.
+        assert!(!board.manifest.caps.dma && !board.manifest.caps.net);
+        assert!(!board.manifest.caps.resolve && !board.manifest.caps.host_sockets);
+        assert_eq!(board.manifest.net, crate::net::NetConfig::None);
+        assert_eq!(
+            board.manifest.config.get("size").map(String::as_str),
+            Some("4194304")
+        );
+        assert_eq!(
+            board.manifest.config.get("int2").map(String::as_str),
+            Some("0")
+        );
+        assert!(!board.manifest.config.contains_key("seed"));
+
+        // A 32-bit CPU auto-selects Zorro III (product 4), and the
+        // int2/size/seed knobs reach the manifest.
+        let cfg = parse_config(
+            r#"
+            [cpu]
+            model = "68030"
+            [zz9k]
+            enabled = true
+            size = "16M"
+            int2 = true
+            seed = "00ff"
+            "#,
+        )?;
+        let board = &cfg.wasm_boards[0];
+        assert_eq!(board.spec.product, crate::zorro::ZZ9K_PRODUCT_Z3);
+        assert_eq!(board.spec.size_bytes, 16 * 1024 * 1024);
+        assert_eq!(
+            board.manifest.config.get("int2").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            board.manifest.config.get("seed").map(String::as_str),
+            Some("00ff")
+        );
+
+        // Explicit zorro = 2 on a 32-bit machine still pins 4M.
+        let cfg = parse_config("[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nzorro = 2\n")?;
+        assert_eq!(
+            cfg.wasm_boards[0].spec.product,
+            crate::zorro::ZZ9K_PRODUCT_Z2
+        );
+
+        // Error cases: Z3 on a 24-bit CPU, a non-4M Zorro II window, junk
+        // seed, and settings without enabled = true.
+        let err = parse_config("[zz9k]\nenabled = true\nzorro = 3\n").unwrap_err();
+        assert!(err.to_string().contains("32-bit"), "{err:#}");
+        let err = parse_config("[zz9k]\nenabled = true\nzorro = 2\nsize = \"8M\"\n").unwrap_err();
+        assert!(err.to_string().contains("fixed at 4M"), "{err:#}");
+        let err = parse_config("[zz9k]\nenabled = true\nseed = \"xyz\"\n").unwrap_err();
+        assert!(err.to_string().contains("hex"), "{err:#}");
+        let err = parse_config("[zz9k]\nint2 = true\n").unwrap_err();
+        assert!(err.to_string().contains("enabled = true"), "{err:#}");
+        let err = parse_config("[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nsize = \"3M\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("power of two"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn zorro_metadata_boards_reject_the_bundled_zz9k_sentinel() -> Result<()> {
+        let meta = temp_path("zz9k-sentinel-board.toml");
+        fs::write(
+            &meta,
+            format!(
+                r#"
+                name = "Impostor"
+                zorro = 2
+                type = "wasm"
+                size = "64K"
+                manufacturer = 2011
+                product = 33
+                wasm = "{}"
+                "#,
+                crate::zz9k::BUNDLED_ZZ9K_WASM
+            ),
+        )?;
+        let err =
+            parse_config(&format!("[[zorro]]\nmetadata = \"{}\"\n", toml_path(&meta))).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err:#}");
+        let _ = fs::remove_file(&meta);
         Ok(())
     }
 

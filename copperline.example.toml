@@ -351,6 +351,22 @@ slow = "512K"
 # enabled = true
 
 
+# zz9k: a ZZ9000 SDK v2 crypto accelerator (the MNT ZZ9000's CORE + MEMORY
+# + CRYPTO services, register-compatible, crypto computed host-side). The
+# zz9000-sdk's unmodified Amiga software -- zz9k.library, the zz9k-* tools,
+# its accelerated AmiSSL build -- detects it as real hardware (manufacturer
+# 0x6D6E) and offloads SHA/HMAC/Poly1305, ChaCha20(-Poly1305), AES-GCM,
+# X25519/P-256 key exchange, and ECDSA/RSA verify at host speed. Pure
+# compute: fitting it keeps the machine deterministic and replay-safe. See
+# docs/internals/zz9k.md for the protocol contract.
+# [zz9k]
+# enabled = true
+# zorro = 3        # 2 or 3; default 3 on a 32-bit CPU, else 2
+# size = "4M"      # Zorro III window (power of two, 1M..256M); Z2 is fixed at 4M
+# int2 = false     # completion interrupt on INT2 (PORTS) instead of INT6 (EXTER)
+# seed = "..."     # reserved deterministic DRBG seed (hex); nothing draws it yet
+
+
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.
 # Z3660 is fitted by default on any machine whose CPU has a 32-bit address bus
 # (stock A3000/A4000, or any profile given a 68020+ full-bus CPU). Picasso II,

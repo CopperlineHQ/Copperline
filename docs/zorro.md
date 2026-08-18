@@ -392,6 +392,36 @@ The board autoconfigs under the Copperline manufacturer ID with product 6
 (see below). Its conformance record against the external bsdsocktest suite
 is `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
+## Crypto: the bundled zz9k board
+
+`[zz9k]` fits the bundled ZZ9000 SDK crypto board: a register-compatible
+subset of the MNT ZZ9000's "SDK v2" service platform (the CORE + MEMORY +
+CRYPTO services) whose crypto runs host-side, so the SDK's unmodified
+Amiga-side software -- its transport library, the `zz9k-*` tools, and the
+accelerated AmiSSL build -- gets modern-speed hashing, AEAD, key exchange,
+and signature verification from an emulated 68k. See the
+[configuration guide](guide/configuration.md) for the user-facing knobs and
+[the protocol contract](internals/zz9k.md) for the register/opcode surface
+and the exact zz9000-sdk revision it tracks.
+
+Like HostSocket it is a WASM plugin board whose module ships inside the
+`copperline` binary: `crates/zz9k-plugin/` is the source, the committed
+artifact is `assets/zz9k/zz9k_plugin.wasm` (refresh with `make` in the
+crate), and config resolution (`src/zz9k.rs`) expands `[zz9k]` into a
+plugin-board entry with the module-path sentinel `<bundled-zz9k>`. Unlike
+HostSocket it is **pure compute** -- no DMA, no network, no host sockets --
+so fitting it keeps the machine fully deterministic and replay-safe, and it
+carries no autoboot ROM or guest driver of its own: the SDK software finds
+the board via `FindConfigDev` and speaks to it directly.
+
+It is also the one bundled board that does **not** autoconfig under the
+Copperline manufacturer ID: it presents the ZZ9000's own identity
+(manufacturer 0x6D6E, product 4 on Zorro III / 3 on Zorro II), because that
+identity is what the SDK's board probe looks for. The RTG/USB/Ethernet
+faces of the real ZZ9000 are absent -- their registers read zero and their
+services report unsupported -- so installing the real board's P96
+`zz9000.card` driver against it is unsupported (harmless, but no display).
+
 ## Graphics: RTG boards
 
 Copperline fits at most one RTG board through `[rtg]`. Both are functional
@@ -572,6 +602,11 @@ makes the real ROMulus flash-ROM board. The product numbers under it are:
 | 5 | Copperline services board (host `[[filesys]]` mounts; `filesys.rs`) |
 | 6 | HostSocket bsdsocket.library board (`[hostsocket]`; `hostsocket.rs`) |
 | 7 | MHI virtual MPEG audio decoder board (`[mhi]`; `mhi.rs`) |
+
+(The bundled [zz9k crypto board](#crypto-the-bundled-zz9k-board) is the one
+exception: it autoconfigs under MNT's manufacturer ID 0x6D6E with the
+ZZ9000's own product numbers, because the ZZ9000 SDK detects the board by
+that identity.)
 
 The **identification board** (`BoardSpec::copperline_id`) is always added to
 the chain (unless disabled, below) so guest software can detect that it is
