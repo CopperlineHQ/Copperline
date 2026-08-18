@@ -2,8 +2,8 @@
     {
         "type": "git",
         "url": "https://github.com/copperlinehq/coppersynth",
-        "commit": "6db5f9d35671b5ac08bf8c6aca44864761915f3f",
-        "dest": "flatpak-cargo/git/coppersynth-6db5f9d"
+        "commit": "7e489dc295029e8f10b074d85d016cc0fc96d361",
+        "dest": "flatpak-cargo/git/coppersynth-7e489dc"
     },
     {
         "type": "git",
@@ -826,7 +826,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/coppersynth-6db5f9d/.\" \"cargo/vendor/coppersynth\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/coppersynth-7e489dc/.\" \"cargo/vendor/coppersynth\""
         ]
     },
     {
@@ -6989,7 +6989,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/copperlinehq/coppersynth\"]\ngit = \"https://github.com/copperlinehq/coppersynth\"\nreplace-with = \"vendored-sources\"\nrev = \"6db5f9d35671b5ac08bf8c6aca44864761915f3f\"\n\n[source.\"https://github.com/copperlinehq/fluxbridge\"]\ngit = \"https://github.com/copperlinehq/fluxbridge\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/copperlinehq/mt32-rs\"]\ngit = \"https://github.com/copperlinehq/mt32-rs\"\nreplace-with = \"vendored-sources\"\nrev = \"ac00f818629a549a2712747660091e4f84d55599\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/copperlinehq/coppersynth\"]\ngit = \"https://github.com/copperlinehq/coppersynth\"\nreplace-with = \"vendored-sources\"\nrev = \"7e489dc295029e8f10b074d85d016cc0fc96d361\"\n\n[source.\"https://github.com/copperlinehq/fluxbridge\"]\ngit = \"https://github.com/copperlinehq/fluxbridge\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/copperlinehq/mt32-rs\"]\ngit = \"https://github.com/copperlinehq/mt32-rs\"\nreplace-with = \"vendored-sources\"\nrev = \"ac00f818629a549a2712747660091e4f84d55599\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }
