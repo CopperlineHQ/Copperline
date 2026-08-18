@@ -6442,6 +6442,19 @@ impl App {
             self.request_redraw();
             return;
         }
+        // While an edit or confirm screen owns the glass, latching
+        // gestures stand back -- a right-click means nothing there, and
+        // the flashing lamps keep their one meaning.
+        if !left
+            && self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .and_then(crate::midi::MidiSerialSink::csynth_mut)
+                .is_some_and(|synth| synth.panel_in_edit())
+        {
+            return;
+        }
         let press = self.csynth_panel.press(control, left, powered);
         self.apply_csynth_press(press);
         self.request_redraw();
