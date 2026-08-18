@@ -122,6 +122,9 @@ pub struct CsynthPanelView {
     pub volume: f32,
     /// Buttons standing in: latched down, or lit under a click.
     pub down: Vec<CsynthControl>,
+    /// The latched subset alone -- the lens blink keys on these, so an
+    /// ordinary click never blink-gates a lamp.
+    pub latched: Vec<CsynthControl>,
     pub hover: Option<CsynthControl>,
 }
 
@@ -811,7 +814,7 @@ fn draw_rounds(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usi
         if led {
             return true;
         }
-        view.down.contains(&control) && view.blink_on
+        view.latched.contains(&control) && view.blink_on
     };
     for (control, label, slot, lit) in [
         (
@@ -1179,6 +1182,11 @@ impl CsynthPanel {
             .collect()
     }
 
+    /// The latches alone, for the lens blink.
+    pub fn latched(&self) -> Vec<CsynthControl> {
+        self.holding.clone()
+    }
+
     /// A press on `control`. The window carries out what comes back.
     pub fn press(&mut self, control: CsynthControl, left: bool, powered: bool) -> CsynthPress {
         if control == CsynthControl::Dial {
@@ -1215,7 +1223,9 @@ impl CsynthPanel {
             // lets them both go.
             let is_round = |c: CsynthControl| matches!(c, CsynthControl::All | CsynthControl::Mute);
             if is_round(control) && self.holding.iter().any(|&h| is_round(h) && h != control) {
-                self.holding.clear();
+                // Only the rounds release each other; an arrow latched
+                // alongside stays standing.
+                self.holding.retain(|&h| !is_round(h));
                 return CsynthPress::None;
             }
             self.latch(control);
@@ -1476,6 +1486,7 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
+                    latched: vec![],
                     hover: None,
                 },
             ),
@@ -1487,6 +1498,7 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: vec![CsynthControl::Arrow(Pair::Level, Dir::Right)],
+                    latched: vec![],
                     hover: Some(CsynthControl::Arrow(Pair::Pan, Dir::Left)),
                 },
             ),
@@ -1498,6 +1510,7 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
+                    latched: vec![],
                     hover: None,
                 },
             ),
@@ -1619,6 +1632,23 @@ mod tests {
         );
         panel.release_press();
         assert!(panel.down().is_empty(), "the gesture spends the latch");
+        // MUTE latched under an arrow resolves to the service edit.
+        panel.press(CsynthControl::Mute, false, true);
+        assert_eq!(
+            panel.press(CsynthControl::Arrow(Pair::Chorus, Dir::Right), true, true),
+            CsynthPress::Button(Button::MuteArrow(Pair::Chorus, Dir::Right))
+        );
+        panel.release_press();
+        // The rounds release each other; a bystander latch survives.
+        panel.press(CsynthControl::Arrow(Pair::Level, Dir::Left), false, true);
+        panel.press(CsynthControl::All, false, true);
+        panel.press(CsynthControl::Mute, false, true);
+        assert_eq!(
+            panel.latched(),
+            vec![CsynthControl::Arrow(Pair::Level, Dir::Left)],
+            "only the rounds let go"
+        );
+        panel.press(CsynthControl::Arrow(Pair::Level, Dir::Left), false, true);
         // Both INSTRUMENT halves latched through a power-on arrive as
         // the pair held whole.
         panel.press(

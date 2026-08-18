@@ -6747,6 +6747,7 @@ impl App {
             .zip(csynthpanel::shown_panel_rect(csynth_panel_top()))
             .and_then(|(pos, panel)| csynthpanel::hover_at(panel, pos));
         let down = self.csynth_panel.down();
+        let latched = self.csynth_panel.latched();
         let stored_volume = self.csynth_volume;
         let sink = self.emu.bus_mut().midi_serial_mut()?;
         if !sink.csynth_selected() {
@@ -6768,6 +6769,7 @@ impl App {
             blink_on: (now_ms / 300).is_multiple_of(2),
             volume,
             down,
+            latched,
             hover,
         })
     }
