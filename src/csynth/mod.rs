@@ -255,6 +255,12 @@ impl CsynthDevice {
         self.panel.power_on_held(held);
     }
 
+    /// Whether the fascia is inside an edit or confirm screen, for the
+    /// window to hold its latching gestures back.
+    pub fn panel_in_edit(&self) -> bool {
+        self.panel.in_edit()
+    }
+
     /// Open this freshly attached panel on the Initializing... hold:
     /// the unit was rebuilt mid-reset, and the hold serves its second
     /// before the ordinary boot, as if the panel had survived.

@@ -6442,6 +6442,19 @@ impl App {
             self.request_redraw();
             return;
         }
+        // While an edit or confirm screen owns the glass, latching
+        // gestures stand back -- a right-click means nothing there, and
+        // the flashing lamps keep their one meaning.
+        if !left
+            && self
+                .emu
+                .bus_mut()
+                .midi_serial_mut()
+                .and_then(crate::midi::MidiSerialSink::csynth_mut)
+                .is_some_and(|synth| synth.panel_in_edit())
+        {
+            return;
+        }
         let press = self.csynth_panel.press(control, left, powered);
         self.apply_csynth_press(press);
         self.request_redraw();
@@ -6669,6 +6682,14 @@ impl App {
         }
         let now_ms = self.csynth_panel_epoch.elapsed().as_millis() as u64;
         let blink_on = (now_ms / 300).is_multiple_of(2);
+        // A latched ALL or MUTE flashes its lens, so the blink phase is
+        // part of what is on screen and must break the redraw cache.
+        let round_latched = self.csynth_panel.down().iter().any(|c| {
+            matches!(
+                c,
+                csynthpanel::CsynthControl::All | csynthpanel::CsynthControl::Mute
+            )
+        });
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
             return;
         };
@@ -6679,7 +6700,7 @@ impl App {
             Some(synth) => (
                 Some(synth.panel_screen(now_ms)),
                 true,
-                synth.panel_monitoring() && blink_on,
+                round_latched && blink_on,
             ),
             None => (None, false, false),
         };
@@ -6726,6 +6747,7 @@ impl App {
             .zip(csynthpanel::shown_panel_rect(csynth_panel_top()))
             .and_then(|(pos, panel)| csynthpanel::hover_at(panel, pos));
         let down = self.csynth_panel.down();
+        let latched = self.csynth_panel.latched();
         let stored_volume = self.csynth_volume;
         let sink = self.emu.bus_mut().midi_serial_mut()?;
         if !sink.csynth_selected() {
@@ -6734,13 +6756,9 @@ impl App {
         let powered = sink.csynth().is_some();
         // Switched off, the fascia is still there: dark glass, and the
         // knob standing where the hand left it.
-        let (screen, monitoring, volume) = match sink.csynth_mut() {
-            Some(synth) => (
-                synth.panel_screen(now_ms),
-                synth.panel_monitoring(),
-                synth.panel_volume_value(),
-            ),
-            None => (csynthpanel::dark_screen(), false, stored_volume),
+        let (screen, volume) = match sink.csynth_mut() {
+            Some(synth) => (synth.panel_screen(now_ms), synth.panel_volume_value()),
+            None => (csynthpanel::dark_screen(), stored_volume),
         };
         if powered {
             self.csynth_volume = volume;
@@ -6748,10 +6766,10 @@ impl App {
         Some(csynthpanel::CsynthPanelView {
             screen,
             powered,
-            mute_blinks: monitoring,
             blink_on: (now_ms / 300).is_multiple_of(2),
             volume,
             down,
+            latched,
             hover,
         })
     }
