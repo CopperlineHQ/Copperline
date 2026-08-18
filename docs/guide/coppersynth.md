@@ -68,8 +68,7 @@ CM-64/32L drum kit, MT-32 rhythm selects it automatically.
 
 ## The front panel
 
-<img width="1159" height="154" alt="Screenshot 2026-08-18 at 00 11 22" src="https://github.com/user-attachments/assets/85250453-1985-4371-84f4-c333efd487e9" />
-
+![The Coppersynth front panel](../images/ui-preview-csynth-panel-strip.png)
 
 **Front panel** in the launcher row, the menu toggle, or
 `[serial] coppersynth_panel`
