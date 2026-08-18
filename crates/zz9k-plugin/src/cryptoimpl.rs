@@ -88,9 +88,17 @@ pub fn chacha20_stream(
         return Err(STATUS_BAD_REQUEST);
     }
     let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
-    cipher.seek(u64::from(counter) * 64);
+    // Fallible seek + keystream application: a counter near u32::MAX with a
+    // multi-block source runs off the end of ChaCha20's 32-bit-block-counter
+    // keystream, and the infallible variants panic there -- which would trap
+    // the plugin and fault the whole board off one hostile descriptor.
+    cipher
+        .try_seek(u64::from(counter) * 64)
+        .map_err(|_| STATUS_BAD_REQUEST)?;
     let mut out = data.to_vec();
-    cipher.apply_keystream(&mut out);
+    cipher
+        .try_apply_keystream(&mut out)
+        .map_err(|_| STATUS_BAD_REQUEST)?;
     Ok(out)
 }
 
@@ -224,9 +232,14 @@ pub fn kx(alg: u32, flags: u32, scalar: &[u8], point: &[u8]) -> Result<Vec<u8>, 
     }
 }
 
-/// VERIFY: prehashed-SHA-256 signature check. Malformed keys or signatures
-/// verify as false (the cryptographic answer), never as an error status --
-/// the reply's payload carries the valid flag and the status stays OK.
+/// VERIFY: prehashed-SHA-256 signature check. Two failure classes,
+/// deliberately distinct (docs/internals/zz9k.md "Services"): lengths that
+/// violate the wire contract (wrong digest/signature/key sizes) complete
+/// with BAD_REQUEST, which the AmiSSL provider answers by falling back to
+/// its software implementation -- the authoritative verdict for shapes
+/// this op does not model. Parseable-but-invalid content (an off-curve
+/// point, out-of-range r/s, a signature that simply does not verify) is a
+/// *successful* verification whose payload carries valid = 0.
 pub fn verify(alg: u32, digest: &[u8], sig: &[u8], key: &[u8]) -> Result<bool, u16> {
     match alg {
         VERIFY_ECDSA_P256_SHA256 => {

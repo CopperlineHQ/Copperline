@@ -6,19 +6,37 @@
 //! First-fit with coalescing free, 16-byte minimum alignment, and
 //! generation-tagged handles so a stale handle after free reports
 //! BAD_HANDLE instead of aliasing a new allocation. A handle is
-//! `(generation << 16) | (slot + 1)` with the generation capped to 15 bits,
-//! so it can never be 0 (the tools' "was this allocated" guard) nor
-//! 0xFFFFFFFF (ZZ9K_INVALID_HANDLE).
+//! `(generation << 7) | (slot + 1)`: the slot index fits 7 bits (64 slots)
+//! and the per-slot generation gets the remaining 25, so a stale handle
+//! could only revalidate after ~33 million reuses of one slot -- and a
+//! slot whose generation would wrap is retired instead, making handle
+//! reuse impossible outright. A handle can never be 0 (the tools' "was
+//! this allocated" guard, slot + 1 >= 1) nor 0xFFFFFFFF
+//! (ZZ9K_INVALID_HANDLE: the low 7 bits would need to be 0x7F = slot 126,
+//! beyond the 64-slot table).
 
 use crate::wire::{AMIGA_MEMORY_OFFSET, MAX_SHARED_BUFFERS};
 
 const MIN_ALIGN: u32 = 16;
 
+/// Highest generation a slot may reach; a slot at the ceiling is retired
+/// rather than wrapped, so a generation value is never reused for a slot.
+const GENERATION_MAX: u32 = (1 << 25) - 1;
+
 #[derive(Clone, Copy)]
 struct Slot {
     off: u32,
     len: u32,
-    generation: u16,
+}
+
+/// One entry per slot index: the slot's live allocation (if any) plus its
+/// monotonically increasing generation. `retired` slots are never
+/// allocated from again.
+#[derive(Clone, Copy)]
+struct SlotState {
+    live: Option<Slot>,
+    generation: u32,
+    retired: bool,
 }
 
 pub struct Heap {
@@ -26,8 +44,7 @@ pub struct Heap {
     limit: u32,
     /// Free regions, sorted by offset, never adjacent (coalesced on free).
     free: Vec<(u32, u32)>,
-    slots: Vec<Option<Slot>>,
-    next_generation: u16,
+    slots: Vec<SlotState>,
 }
 
 impl Heap {
@@ -38,33 +55,29 @@ impl Heap {
             base,
             limit,
             free: vec![(base, limit - base)],
-            slots: vec![None; MAX_SHARED_BUFFERS as usize],
-            next_generation: 1,
+            slots: vec![
+                SlotState {
+                    live: None,
+                    generation: 1,
+                    retired: false,
+                };
+                MAX_SHARED_BUFFERS as usize
+            ],
         }
     }
 
-    fn bump_generation(&mut self) -> u16 {
-        let generation = self.next_generation;
-        // Cap to 15 bits and skip 0 so the encoded handle stays clear of 0
-        // and 0xFFFFFFFF for every slot index.
-        self.next_generation = if generation >= 0x7FFE {
-            1
-        } else {
-            generation + 1
-        };
-        generation
-    }
-
-    fn encode(slot: usize, generation: u16) -> u32 {
-        (u32::from(generation) << 16) | (slot as u32 + 1)
+    fn encode(slot: usize, generation: u32) -> u32 {
+        (generation << 7) | (slot as u32 + 1)
     }
 
     fn decode(&self, handle: u32) -> Option<usize> {
-        let slot = (handle & 0xFFFF).checked_sub(1)? as usize;
-        let generation = (handle >> 16) as u16;
-        match self.slots.get(slot)? {
-            Some(s) if s.generation == generation => Some(slot),
-            _ => None,
+        let slot = (handle & 0x7F).checked_sub(1)? as usize;
+        let generation = handle >> 7;
+        let state = self.slots.get(slot)?;
+        if state.live.is_some() && state.generation == generation {
+            Some(slot)
+        } else {
+            None
         }
     }
 
@@ -79,7 +92,10 @@ impl Heap {
             return None;
         }
         let len = len.checked_add(MIN_ALIGN - 1)? & !(MIN_ALIGN - 1);
-        let slot = self.slots.iter().position(|s| s.is_none())?;
+        let slot = self
+            .slots
+            .iter()
+            .position(|s| s.live.is_none() && !s.retired)?;
         for i in 0..self.free.len() {
             let (off, avail) = self.free[i];
             let aligned = off.checked_add(align - 1)? & !(align - 1);
@@ -99,12 +115,8 @@ impl Heap {
             if rest != 0 {
                 self.free.insert(insert_at, (aligned + len, rest));
             }
-            let generation = self.bump_generation();
-            self.slots[slot] = Some(Slot {
-                off: aligned,
-                len,
-                generation,
-            });
+            self.slots[slot].live = Some(Slot { off: aligned, len });
+            let generation = self.slots[slot].generation;
             return Some((Self::encode(slot, generation), aligned, len));
         }
         None
@@ -115,7 +127,15 @@ impl Heap {
         let Some(slot) = self.decode(handle) else {
             return false;
         };
-        let Slot { off, len, .. } = self.slots[slot].take().unwrap();
+        let Slot { off, len } = self.slots[slot].live.take().unwrap();
+        // Advance the slot's generation so this handle is stale forever;
+        // a slot that would wrap is retired from further allocation
+        // instead, keeping the guarantee absolute.
+        if self.slots[slot].generation >= GENERATION_MAX {
+            self.slots[slot].retired = true;
+        } else {
+            self.slots[slot].generation += 1;
+        }
         let at = self.free.partition_point(|&(o, _)| o < off);
         self.free.insert(at, (off, len));
         // Coalesce with the neighbour on each side.
@@ -134,7 +154,7 @@ impl Heap {
     /// range. `len == 0` resolves to an empty range at any in-bounds offset.
     pub fn resolve(&self, handle: u32, offset: u32, len: u32) -> Option<(u32, u32)> {
         let slot = self.decode(handle)?;
-        let s = self.slots[slot].as_ref().unwrap();
+        let s = self.slots[slot].live.as_ref().unwrap();
         if offset > s.len || len > s.len - offset {
             return None;
         }
@@ -142,7 +162,7 @@ impl Heap {
     }
 
     pub fn buffers_used(&self) -> u32 {
-        self.slots.iter().filter(|s| s.is_some()).count() as u32
+        self.slots.iter().filter(|s| s.live.is_some()).count() as u32
     }
 
     pub fn total(&self) -> u32 {
@@ -212,6 +232,41 @@ mod tests {
         assert_eq!(heap.free_bytes(), total);
         assert_eq!(heap.largest_free(), total);
         assert_eq!(heap.buffers_used(), 0);
+    }
+
+    #[test]
+    fn slot_reuse_never_revalidates_a_stale_handle() {
+        // Per-slot generations: cycling one slot many times must never
+        // hand out a handle value seen before, and every freed handle
+        // stays stale against all later allocations of the same slot.
+        let mut heap = Heap::new(0x0010_0000);
+        let (first, _, _) = heap.alloc(64, 16).unwrap();
+        assert!(heap.free(first));
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(first);
+        for _ in 0..100_000 {
+            let (handle, _, _) = heap.alloc(64, 16).unwrap();
+            assert!(seen.insert(handle), "handle value reused: {handle:#x}");
+            assert!(heap.resolve(first, 0, 1).is_none(), "stale revalidated");
+            assert!(heap.free(handle));
+        }
+    }
+
+    #[test]
+    fn generation_ceiling_retires_the_slot() {
+        // A slot whose generation reaches the ceiling is retired rather
+        // than wrapped: allocation moves on to the next slot and the old
+        // handles stay stale.
+        let mut heap = Heap::new(0x0010_0000);
+        heap.slots[0].generation = GENERATION_MAX;
+        let (h0, _, _) = heap.alloc(64, 16).unwrap();
+        assert_eq!(h0 & 0x7F, 1, "slot 0 first");
+        assert!(heap.free(h0));
+        assert!(heap.slots[0].retired);
+        let (h1, _, _) = heap.alloc(64, 16).unwrap();
+        assert_eq!(h1 & 0x7F, 2, "slot 0 retired, slot 1 next");
+        assert!(heap.resolve(h0, 0, 1).is_none());
+        assert!(heap.free(h1));
     }
 
     #[test]

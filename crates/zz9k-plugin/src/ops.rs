@@ -32,6 +32,27 @@ fn bulk_cck(len: u32) -> i64 {
     LAT_BULK_BASE + (i64::from(len) * 71) / 1000
 }
 
+/// Hard cap on any single operation's variable-length input (source, key,
+/// AAD, fill/copy length): 256 KiB. Every length is guest-controlled and
+/// the work runs synchronously inside one host call with a finite fuel
+/// budget, so an uncapped length on a large Zorro III heap could exhaust
+/// fuel and fault the board off one valid-looking request. 256 KiB is 16x
+/// the largest real consumer (a 16 KiB TLS record) and at least 2x below
+/// the measured fuel ceiling for the costliest per-byte op (SHA-512
+/// passes at 512 KiB and exhausts fuel at 1 MiB under the host's
+/// 50M-instruction budget; the wasmboard fuel-headroom test locks the cap
+/// itself). Beyond it the request completes with BAD_REQUEST. Documented
+/// in docs/internals/zz9k.md.
+const MAX_OP_BYTES: u32 = 1 << 18;
+
+fn capped(len: u32) -> Result<u32, u16> {
+    if len > MAX_OP_BYTES {
+        Err(STATUS_BAD_REQUEST)
+    } else {
+        Ok(len)
+    }
+}
+
 struct Request {
     request_id: u32,
     opcode: u16,
@@ -243,6 +264,7 @@ fn mem_fill(board: &mut Board, req: &Request) -> OpResult {
     let offset = get_be32(&req.payload, 4);
     let length = get_be32(&req.payload, 8);
     let value = req.payload[12];
+    capped(length)?;
     let (off, len) = board
         .heap
         .resolve(handle, offset, length)
@@ -260,6 +282,7 @@ fn mem_copy(board: &mut Board, req: &Request) -> OpResult {
     let src_handle = get_be32(&req.payload, 8);
     let src_offset = get_be32(&req.payload, 12);
     let length = get_be32(&req.payload, 16);
+    capped(length)?;
     let data = board.read_buf(src_handle, src_offset, length)?;
     board.write_buf(dst_handle, dst_offset, &data)?;
     Ok(Vec::new())
@@ -282,9 +305,19 @@ fn crypto_hash(board: &mut Board, req: &Request) -> (OpResult, i64) {
     let latency = bulk_cck(src_length);
     let hmac = flags & HASH_FLAG_HMAC != 0;
     let result = (|| {
+        // Unknown flag bits are rejected rather than ignored, the same
+        // posture the firmware takes for KX flags (and the SDK's builders
+        // never set any) -- silently accepting them would let e.g.
+        // Poly1305, whose contract requires flags 0, succeed under bits a
+        // future ABI may assign meaning to.
+        if flags & !HASH_FLAG_HMAC != 0 || (algorithm == HASH_POLY1305 && hmac) {
+            return Err(STATUS_UNSUPPORTED);
+        }
         let Some(digest_len) = cryptoimpl::digest_len(algorithm) else {
             return Err(STATUS_UNSUPPORTED);
         };
+        capped(src_length)?;
+        capped(key_length)?;
         let src = board.read_buf(src_handle, src_offset, src_length)?;
         let key = if hmac || algorithm == HASH_POLY1305 {
             board.read_buf(key_handle, key_offset, key_length)?
@@ -314,11 +347,19 @@ fn crypto_stream(board: &mut Board, req: &Request) -> (OpResult, i64) {
     let nonce_offset = get_be32(&req.payload, 32);
     let counter = get_be32(&req.payload, 36);
     let algorithm = get_be32(&req.payload, 40);
+    let flags = get_be32(&req.payload, 44);
     let latency = bulk_cck(src_length);
     let result = (|| {
         if algorithm != STREAM_CHACHA20 {
             return Err(STATUS_UNSUPPORTED);
         }
+        // No STREAM flag bits are defined; reject a nonzero word instead
+        // of silently ignoring meaning a future ABI may assign (the SDK
+        // builders always pass 0).
+        if flags != 0 {
+            return Err(STATUS_UNSUPPORTED);
+        }
+        capped(src_length)?;
         let src = board.read_buf(src_handle, src_offset, src_length)?;
         let key = board.read_buf(key_handle, key_offset, 32)?;
         let nonce = board.read_buf(nonce_handle, nonce_offset, 12)?;
@@ -355,11 +396,18 @@ fn crypto_aead(board: &mut Board, req: &Request) -> (OpResult, i64) {
         alg => alg,
     };
     let result = (|| {
+        // Bits outside DECRYPT and the algorithm byte are undefined;
+        // reject them (same posture as HASH/STREAM above).
+        if flags & !(AEAD_FLAG_DECRYPT | AEAD_ALG_MASK) != 0 {
+            return Err(STATUS_UNSUPPORTED);
+        }
         let key_len = match algorithm {
             AEAD_AES128_GCM => 16,
             AEAD_CHACHA20_POLY1305 | AEAD_AES256_GCM => 32,
             _ => return Err(STATUS_UNSUPPORTED),
         };
+        capped(src_length)?;
+        capped(aad_length)?;
         let key = board.read_buf(key_handle, key_offset, key_len)?;
         let nonce = board.read_buf(nonce_handle, 0, 12)?;
         let aad = if aad_length != 0 {

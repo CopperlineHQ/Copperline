@@ -2765,13 +2765,7 @@ mod tests {
                 .collect()
         }
 
-        fn submit(
-            b: &mut WasmBoard,
-            host: &mut DeviceHost,
-            id: u32,
-            opcode: u16,
-            payload: &[u8],
-        ) {
+        fn submit(b: &mut WasmBoard, host: &mut DeviceHost, id: u32, opcode: u16, payload: &[u8]) {
             let tail = r32(b, host, DESC + 24);
             let entry = REQ_RING + tail * 64;
             w32(b, host, entry, id);
@@ -2873,6 +2867,41 @@ mod tests {
                 assert!(!ZorroDevice::int2_line(&b));
                 assert!(!ZorroDevice::int6_line(&b));
             }
+        }
+
+        #[test]
+        fn zz9k_largest_allowed_operation_fits_the_fuel_budget() {
+            // The plugin caps every variable-length input at 256 KiB
+            // (BAD_REQUEST beyond) precisely so the costliest allowed
+            // request stays inside PLUGIN_FUEL_BUDGET for the single host
+            // call that computes it -- SHA-512, the heaviest per-byte op,
+            // measures fine at 512 KiB and exhausts fuel at 1 MiB, so the
+            // cap keeps a >= 2x margin. Lock the cap here through the real
+            // fuel-metered wasmtime host: fuel exhaustion would trap and
+            // fault the board, failing the status assertions.
+            let cfg = crate::zz9k::board_config(ZorroVersion::III, 0x80_0000, false, None);
+            let mut b = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+            let mut mem = empty_memory();
+            let mut host = DeviceHost::new(&mut mem);
+            let (src, _src_off) = alloc(&mut b, &mut host, 1, 0x20_0000);
+            let (dst, _dst_off) = alloc(&mut b, &mut host, 2, 64);
+            let mut p = [0u8; 40];
+            p[0..4].copy_from_slice(&src.to_be_bytes());
+            p[8..12].copy_from_slice(&(1u32 << 18).to_be_bytes());
+            p[12..16].copy_from_slice(&dst.to_be_bytes());
+            p[20..24].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+            p[32..36].copy_from_slice(&4u32.to_be_bytes()); // SHA-512
+            submit(&mut b, &mut host, 3, 0x0800, &p);
+            let (id, status, payload) = wait(&mut b, &mut host);
+            assert_eq!((id, status), (3, 0));
+            assert_eq!(&payload[0..4], &64u32.to_be_bytes());
+            // One byte beyond the cap is a wire error, not fuel roulette.
+            p[8..12].copy_from_slice(&((1u32 << 18) + 1).to_be_bytes());
+            submit(&mut b, &mut host, 4, 0x0800, &p);
+            let (id, status, _) = wait(&mut b, &mut host);
+            assert_eq!((id, status), (4, 4), "BAD_REQUEST beyond the cap");
+            // And the board is still alive (no fault happened).
+            assert_eq!(r16(&mut b, &mut host, 0x0100), 0x5A39);
         }
 
         #[test]

@@ -142,7 +142,11 @@ second), modelling a serial coprocessor:
 | VERIFY RSA | 1 ms |
 
 Completions publish in submission order; a full completion ring holds the
-queue until the guest consumes. When the completion interrupt is enabled
+queue until the guest consumes, and once a ring's worth of completions is
+waiting the board stops consuming requests -- the request ring then fills
+and the guest transport reports BUSY at submit, like stalled hardware --
+so an unconsumed completion ring can never grow board state without
+bound. When the completion interrupt is enabled
 (`0x010C` = 2), publishing a completion raises the selected line (INT6 by
 default, INT2 when the `int2` config key says so) level-sensitively until
 either acknowledge form (`0x010C` = 1 or CONFIG = `0x0088`) clears it.
@@ -180,15 +184,24 @@ handle goes stale (`BAD_HANDLE` forever after). The HOST_WINDOW and
 CARD_ONLY flags are accepted as no-op placement hints: the whole heap is
 Amiga-visible. Exhaustion (space or the 64-slot table) is `NO_MEMORY`.
 `FREE_SHARED` coalesces. `MEM_FILL`/`MEM_COPY` operate on
-handle+offset+length triples (copies may overlap).
+handle+offset+length triples (copies may overlap), subject to the
+per-operation length cap below.
 
 ### CRYPTO (0x0800)
 
 Descriptors reference (handle, offset, length) triples into shared
 buffers; every triple is bounds-checked (`BAD_HANDLE` on any violation).
-Results are the 48-byte big-endian `{bytes_written, algorithm, flags}`
-payload; the SDK reply decoder treats `bytes_written == 0` on an OK status
-as an internal error, so successful results are always nonzero.
+Every variable-length input -- source, key, AAD, and the MEM_FILL/MEM_COPY
+lengths -- is additionally capped at **256 KiB** (`BAD_REQUEST` beyond):
+each operation computes synchronously inside one fuel-metered host call,
+and the cap keeps the costliest allowed request at least 2x below the
+measured budget ceiling while leaving 16x headroom over the largest real
+consumer (a 16 KiB TLS record). Undefined descriptor flag bits are
+rejected with `UNSUPPORTED` rather than ignored, on every op (the SDK
+builders never set any). Results are the 48-byte big-endian
+`{bytes_written, algorithm, flags}` payload; the SDK reply decoder treats
+`bytes_written == 0` on an OK status as an internal error, so successful
+results are always nonzero.
 
 - `HASH` (+0x00): SHA-1 (1, 20 bytes), SHA-256 (2, 32), SHA-384 (3, 48),
   SHA-512 (4, 64), BLAKE2s-256 (5, 32), Poly1305 (6, 16-byte MAC, requires
@@ -221,9 +234,14 @@ as an internal error, so successful results are always nonzero.
   modulus (big-endian) followed by a 4-byte big-endian exponent, with
   2048/3072/4096-bit moduli all accepted under the one id and the
   signature exactly modulus-sized. The reply payload's first u32 is the
-  valid flag: **an invalid signature is a successful verification with
-  valid = 0, never an error status** (malformed keys and signatures verify
-  as invalid too -- the cryptographically correct answer).
+  valid flag, with two failure classes deliberately kept distinct:
+  lengths that violate this wire contract (wrong digest/signature/key
+  sizes) complete with `BAD_REQUEST`, which the AmiSSL provider answers
+  by falling back to its software implementation -- the authoritative
+  verdict for shapes this op does not model; parseable-but-invalid
+  content (an off-curve point, out-of-range r/s, a signature that simply
+  does not verify) is **a successful verification with valid = 0, never
+  an error status**.
 
 ### DIAG (0x0900)
 

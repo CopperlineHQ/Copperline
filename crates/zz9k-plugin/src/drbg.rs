@@ -5,11 +5,12 @@
 //! No SDK consumer needs board-side randomness today: P-256/X25519 scalars
 //! are generated on the 68k (the AmiSSL provider's OpenSSL RAND) and KEYGEN
 //! is strictly scalar*G. This DRBG exists so a future entropy-consuming op
-//! has a deterministic source wired to the board's `seed` config key (the
-//! host defaults it from host entropy at config-resolution time, and
-//! pinning it makes runs fully reproducible -- the same contract as the
-//! emulator's --rtc-time guest clock). Its state lives in the Board (linear
-//! memory), so save states capture it exactly.
+//! has a deterministic source wired to the board's `seed` config key. The
+//! default (seed unset) is a fixed constant, so the board is byte-for-byte
+//! reproducible either way -- any move to host-entropy seeding would be a
+//! deliberate determinism-contract change in docs/internals/zz9k.md, not a
+//! default. Its state lives in the Board (linear memory), so save states
+//! capture it exactly.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 

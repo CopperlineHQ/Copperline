@@ -4759,23 +4759,21 @@ impl TryFrom<RawConfig> for Config {
             };
             let size_bytes = match (version, &raw.zz9k.size) {
                 (ZorroVersion::II, None) => crate::zz9k::Z2_BOARD_SIZE,
-                (ZorroVersion::II, Some(s)) => {
-                    match parse_size(s, "[zz9k] size") {
-                        Ok(n) if n == crate::zz9k::Z2_BOARD_SIZE => n,
-                        Ok(_) => {
-                            errors.push(anyhow!(
-                                "[zz9k] size on Zorro II is fixed at 4M: the SDK transport \
+                (ZorroVersion::II, Some(s)) => match parse_size(s, "[zz9k] size") {
+                    Ok(n) if n == crate::zz9k::Z2_BOARD_SIZE => n,
+                    Ok(_) => {
+                        errors.push(anyhow!(
+                            "[zz9k] size on Zorro II is fixed at 4M: the SDK transport \
                                  refuses shared-buffer allocations through any other Zorro II \
                                  window size"
-                            ));
-                            crate::zz9k::Z2_BOARD_SIZE
-                        }
-                        Err(e) => {
-                            errors.push(e);
-                            crate::zz9k::Z2_BOARD_SIZE
-                        }
+                        ));
+                        crate::zz9k::Z2_BOARD_SIZE
                     }
-                }
+                    Err(e) => {
+                        errors.push(e);
+                        crate::zz9k::Z2_BOARD_SIZE
+                    }
+                },
                 (ZorroVersion::III, None) => crate::zz9k::Z2_BOARD_SIZE,
                 (ZorroVersion::III, Some(s)) => match parse_size(s, "[zz9k] size") {
                     Ok(n) if n.is_power_of_two() && (0x10_0000..=0x1000_0000).contains(&n) => n,
@@ -10880,9 +10878,7 @@ mod tests {
         );
 
         // Explicit zorro = 2 on a 32-bit machine still pins 4M.
-        let cfg = parse_config(
-            "[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nzorro = 2\n",
-        )?;
+        let cfg = parse_config("[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nzorro = 2\n")?;
         assert_eq!(
             cfg.wasm_boards[0].spec.product,
             crate::zorro::ZZ9K_PRODUCT_Z2
@@ -10898,10 +10894,8 @@ mod tests {
         assert!(err.to_string().contains("hex"), "{err:#}");
         let err = parse_config("[zz9k]\nint2 = true\n").unwrap_err();
         assert!(err.to_string().contains("enabled = true"), "{err:#}");
-        let err = parse_config(
-            "[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nsize = \"3M\"\n",
-        )
-        .unwrap_err();
+        let err = parse_config("[cpu]\nmodel = \"68030\"\n[zz9k]\nenabled = true\nsize = \"3M\"\n")
+            .unwrap_err();
         assert!(err.to_string().contains("power of two"), "{err:#}");
         Ok(())
     }

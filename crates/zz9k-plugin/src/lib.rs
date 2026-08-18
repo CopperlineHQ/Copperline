@@ -368,6 +368,14 @@ impl Board {
     }
 
     fn consume_one_request(&mut self) {
+        // Backpressure: while the guest leaves the completion ring full,
+        // stop consuming requests once a ring's worth of completions is
+        // already waiting -- the request ring then fills and the guest
+        // sees BUSY at submit, instead of `pending` (and linear memory)
+        // growing without bound.
+        if self.pending.len() >= RING_ENTRIES as usize {
+            return;
+        }
         let d = MAILBOX_BOARD_OFFSET;
         let head = get_be32(&self.win, d + DESC_REQ_HEAD);
         let tail = get_be32(&self.win, d + DESC_REQ_TAIL);
@@ -1052,6 +1060,197 @@ mod tests {
         assert_eq!(c.status, STATUS_OK);
         assert_eq!(get_be32(&c.payload, 0), 16);
         assert_eq!(rbytes(&b, dst_off, 4), vec![0xA8, 0x06, 0x1D, 0xC1]);
+    }
+
+    #[test]
+    fn oversized_operations_report_bad_request_not_a_trap() {
+        // Every variable-length input is capped at MAX_OP_BYTES: the work
+        // runs synchronously inside one host call with a finite fuel
+        // budget, so an uncapped length would fault the whole board.
+        let mut b = Board::new_with(0x0080_0000, false, None);
+        let (big, _) = alloc(&mut b, 1, 512 * 1024);
+        let (dst, _) = alloc(&mut b, 2, 64);
+        let over = (1 << 18) + 1;
+        let p = hash_payload(
+            HASH_SHA256,
+            0,
+            (big, 0, over),
+            (dst, 0),
+            (INVALID_HANDLE, 0, 0),
+        );
+        assert_eq!(
+            call(&mut b, 3, OP_CRYPTO_HASH, &p).status,
+            STATUS_BAD_REQUEST
+        );
+        // ... while the largest allowed length works.
+        let p = hash_payload(
+            HASH_SHA256,
+            0,
+            (big, 0, 1 << 18),
+            (dst, 0),
+            (INVALID_HANDLE, 0, 0),
+        );
+        assert_eq!(call(&mut b, 4, OP_CRYPTO_HASH, &p).status, STATUS_OK);
+        // MEM_FILL and MEM_COPY take the same cap.
+        let mut fill = [0u8; 13];
+        put_be32(&mut fill, 0, big);
+        put_be32(&mut fill, 8, over);
+        assert_eq!(
+            call(&mut b, 5, OP_MEM_FILL, &fill).status,
+            STATUS_BAD_REQUEST
+        );
+        let mut copy = [0u8; 20];
+        put_be32(&mut copy, 0, big);
+        put_be32(&mut copy, 4, over);
+        put_be32(&mut copy, 8, big);
+        put_be32(&mut copy, 16, over);
+        assert_eq!(
+            call(&mut b, 6, OP_MEM_COPY, &copy).status,
+            STATUS_BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn unknown_flag_bits_are_rejected() {
+        let mut b = mk();
+        let (src, _) = alloc(&mut b, 1, 64);
+        let (dst, _) = alloc(&mut b, 2, 64);
+        let (key, key_off) = alloc(&mut b, 3, 64);
+        wbytes(&mut b, key_off, &[0u8; 32]);
+        // HASH: an undefined flag bit is UNSUPPORTED, and Poly1305 with
+        // the HMAC bit set is UNSUPPORTED too (its contract requires 0).
+        let p = hash_payload(
+            HASH_SHA256,
+            0x2,
+            (src, 0, 3),
+            (dst, 0),
+            (INVALID_HANDLE, 0, 0),
+        );
+        assert_eq!(
+            call(&mut b, 4, OP_CRYPTO_HASH, &p).status,
+            STATUS_UNSUPPORTED
+        );
+        let p = hash_payload(HASH_POLY1305, 0x2, (src, 0, 3), (dst, 0), (key, 0, 32));
+        assert_eq!(
+            call(&mut b, 5, OP_CRYPTO_HASH, &p).status,
+            STATUS_UNSUPPORTED
+        );
+        let p = hash_payload(
+            HASH_POLY1305,
+            HASH_FLAG_HMAC,
+            (src, 0, 3),
+            (dst, 0),
+            (key, 0, 32),
+        );
+        assert_eq!(
+            call(&mut b, 6, OP_CRYPTO_HASH, &p).status,
+            STATUS_UNSUPPORTED
+        );
+        // STREAM: no flag bits are defined at all.
+        let (nonce, nonce_off) = alloc(&mut b, 7, 16);
+        wbytes(&mut b, nonce_off, &[0u8; 12]);
+        let mut p = [0u8; 48];
+        put_be32(&mut p, 0, src);
+        put_be32(&mut p, 8, 3);
+        put_be32(&mut p, 12, dst);
+        put_be32(&mut p, 20, key);
+        put_be32(&mut p, 28, nonce);
+        put_be32(&mut p, 40, STREAM_CHACHA20);
+        put_be32(&mut p, 44, 1);
+        assert_eq!(
+            call(&mut b, 8, OP_CRYPTO_STREAM, &p).status,
+            STATUS_UNSUPPORTED
+        );
+        // AEAD: bits outside DECRYPT and the algorithm byte are rejected.
+        let mut p = [0u8; 48];
+        put_be32(&mut p, 0, src);
+        put_be32(&mut p, 8, 3);
+        put_be32(&mut p, 12, dst);
+        put_be32(&mut p, 20, INVALID_HANDLE);
+        put_be32(&mut p, 32, key);
+        put_be32(&mut p, 40, nonce);
+        put_be32(&mut p, 44, 0x2);
+        assert_eq!(
+            call(&mut b, 9, OP_CRYPTO_AEAD, &p).status,
+            STATUS_UNSUPPORTED
+        );
+    }
+
+    #[test]
+    fn chacha20_counter_near_the_keystream_end_is_a_wire_error() {
+        // A counter near u32::MAX with a multi-block source runs off the
+        // 32-bit-block-counter keystream; the board must answer with a
+        // status, never trap (a trap faults the board permanently).
+        let mut b = mk();
+        let (src, _) = alloc(&mut b, 1, 256);
+        let (dst, _) = alloc(&mut b, 2, 256);
+        let (key, key_off) = alloc(&mut b, 3, 32);
+        let (nonce, nonce_off) = alloc(&mut b, 4, 16);
+        wbytes(&mut b, key_off, &[1u8; 32]);
+        wbytes(&mut b, nonce_off, &[2u8; 12]);
+        let mut p = [0u8; 48];
+        put_be32(&mut p, 0, src);
+        put_be32(&mut p, 8, 128);
+        put_be32(&mut p, 12, dst);
+        put_be32(&mut p, 20, key);
+        put_be32(&mut p, 28, nonce);
+        put_be32(&mut p, 36, 0xFFFF_FFFF);
+        put_be32(&mut p, 40, STREAM_CHACHA20);
+        assert_eq!(
+            call(&mut b, 5, OP_CRYPTO_STREAM, &p).status,
+            STATUS_BAD_REQUEST
+        );
+        // The board is still alive afterwards.
+        let c = call(&mut b, 6, OP_PING, b"ok");
+        assert_eq!(c.status, STATUS_OK);
+    }
+
+    #[test]
+    fn full_completion_ring_applies_backpressure() {
+        // With the guest never consuming completions, the board stops
+        // consuming requests once a ring's worth of completions waits:
+        // `pending` stays bounded and the request ring fills so the
+        // guest-side transport reports BUSY, exactly like stalled real
+        // hardware. Draining the completion ring un-wedges everything.
+        let mut b = mk();
+        let mut submitted = 0u32;
+        for _ in 0..4 {
+            loop {
+                let head = r32(&b, DESC + DESC_REQ_HEAD);
+                let tail = r32(&b, DESC + DESC_REQ_TAIL);
+                if (tail + 1) % RING_ENTRIES == head {
+                    break;
+                }
+                submit(&mut b, 100 + submitted, OP_PING, &[]);
+                submitted += 1;
+            }
+            for _ in 0..200 {
+                b.tick(2000);
+            }
+        }
+        assert!(
+            b.pending.len() <= RING_ENTRIES as usize,
+            "pending grew unbounded: {}",
+            b.pending.len()
+        );
+        // Request ring is left full (BUSY for the guest)...
+        let head = r32(&b, DESC + DESC_REQ_HEAD);
+        let tail = r32(&b, DESC + DESC_REQ_TAIL);
+        assert_eq!((tail + 1) % RING_ENTRIES, head);
+        // ...and draining completions lets every submission finish in
+        // order with nothing lost.
+        let mut consumed = 0u32;
+        for _ in 0..200_000 {
+            b.tick(200);
+            if let Some(c) = poll(&mut b) {
+                assert_eq!(c.request_id, 100 + consumed);
+                consumed += 1;
+                if consumed == submitted {
+                    break;
+                }
+            }
+        }
+        assert_eq!(consumed, submitted);
     }
 
     #[test]

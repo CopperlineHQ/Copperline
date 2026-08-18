@@ -45,8 +45,10 @@ fn run_copperline(args: &[&str]) -> std::process::Output {
 }
 
 fn scratch_dir(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("copperline-zz9k-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "copperline-zz9k-test-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
