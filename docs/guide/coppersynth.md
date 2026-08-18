@@ -98,13 +98,16 @@ monitor (solo) the shown part.
 ### Button combinations
 
 Coppersynth front panel has various features accessed with multi-button
-combinations. Other than "Solo", these all require the unit to first be powered off.
+combinations. The POWER combinations require the unit to first be powered
+off; the others work on a running unit.
 
 **Right click to hold/latch.**
 
 | Combination | Reaches |
 |---|---|
 | ALL + MUTE | Solo the selected PART. Same combo to disable solo |
+| MUTE + MIDI CH < or > | Device ID (1-32, default 17). MIDI CH buttons change it, ALL confirms, MUTE cancels |
+| MUTE + CHORUS < or > | Chorus Type (0-8: Off, Chorus 1-3, Celeste 1-2, Flanger, Feedback Chorus, Short Delay). CHORUS buttons change it, ALL confirms, MUTE cancels |
 | INSTRUMENT < + POWER | MT-32 Mode. MUTE disables, ALL enables |
 | INSTRUMENT > + POWER  | Load the default SoundFont. MUTE cancels, ALL confirms  |
 | PART < + PART > + POWER | Demo sequences. press ALL to play, MUTE to stop, PART buttons to skip song. 

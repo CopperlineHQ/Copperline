@@ -1402,6 +1402,11 @@ fn resolve(control: CsynthControl, latched: &[CsynthControl]) -> Button {
             | (CsynthControl::Mute, CsynthControl::All) => {
                 return Button::Monitor;
             }
+            // MUTE latched under an arrow: the service edits (Device
+            // ID on the MIDI CH pair, Chorus Type on the CHORUS pair).
+            (CsynthControl::Mute, CsynthControl::Arrow(pair, dir)) => {
+                return Button::MuteArrow(pair, dir);
+            }
             _ => {}
         }
     }
