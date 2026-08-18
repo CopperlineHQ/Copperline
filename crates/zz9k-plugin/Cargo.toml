@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "zz9k-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Bundled Copperline WASM board: ZZ9000 SDK v2 crypto accelerator (CORE + MEMORY + CRYPTO services)"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+# "cdylib" is what actually ships (the wasm32-unknown-unknown board). "rlib"
+# is added so `cargo test` (native target) can link a normal test harness
+# against this crate at all -- same reasoning as crates/hostsocket-plugin.
+crate-type = ["cdylib", "rlib"]
+
+# Crypto engine: pure-Rust RustCrypto crates only. The emulator's root
+# Cargo.toml has a hard no-C-in-the-default-build rule; these dependencies
+# live in this standalone crate's own lockfile and never touch the root
+# dependency tree (the emulator embeds the committed .wasm artifact).
+[dependencies]
+sha1 = { version = "0.10", default-features = false }
+# "oid" gives sha2's digests AssociatedOid, which rsa's Pkcs1v15Sign::new
+# needs to build the DigestInfo prefix for signature verification.
+sha2 = { version = "0.10", default-features = false, features = ["oid"] }
+blake2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+poly1305 = { version = "0.8", default-features = false }
+chacha20 = { version = "0.9", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "precomputed-tables", "alloc", "zeroize"] }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "alloc"] }
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+# rand_core (a transitive dependency of p256/rsa) enables getrandom, which
+# has no wasm32-unknown-unknown backend by default. "custom" compiles a
+# register-your-own stub instead; nothing in this board ever draws host
+# randomness (the whole point is determinism), so no implementation is
+# registered and a call would fail -- and none exists.
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+
+# The shipped artifact (assets/zz9k/zz9k_plugin.wasm) is built with this
+# profile; size matters because the module is embedded in the copperline
+# binary. Mirrors crates/hostsocket-plugin.
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

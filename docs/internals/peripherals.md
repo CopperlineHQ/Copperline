@@ -416,6 +416,31 @@ functions) stay `_hs_stub` rather than jumping off the end of the table
 (see `guest/hostsocket/entry.s`'s own jump-table comment for the full
 accounting).
 
+## zz9k crypto board (`zz9k.rs`, `crates/zz9k-plugin/`)
+
+The `[zz9k]` option fits the bundled ZZ9000 SDK crypto board: a
+register-compatible subset of the MNT ZZ9000's SDK v2 service platform
+(CORE + MEMORY + CRYPTO) whose crypto runs host-side on pure-Rust
+RustCrypto inside the plugin, so the zz9000-sdk's unmodified Amiga
+software -- transport library, tools, accelerated AmiSSL -- offloads
+TLS-era crypto at host speed. Like HostSocket it is a bundled WASM plugin
+board with a path-sentinel module, but unlike every other bundled board it
+autoconfigs under MNT's own manufacturer ID (0x6D6E, product 4/3): the
+SDK's `FindConfigDev` probe is the detection mechanism, so compatibility
+*is* the identity. The whole board -- registers, ring mailbox, and the
+shared-buffer heap the guest copies payloads through -- is one byte array
+in the plugin's linear memory; there is no DMA, no network, and no host
+randomness (key-exchange scalars always come from the guest), which keeps
+the board pure compute and therefore deterministic, replay-safe, and
+save-state-exact including mid-operation (pending completions carry
+remaining-colour-clock counters, never host time). Requests are picked up
+by the plugin's tick scanning the request ring -- the SDK's Zorro II
+transport never rings the doorbell -- computed at dispatch, and completed
+after a deterministic latency table, one request per tick so no single
+wasm call approaches the plugin fuel budget. The register/opcode contract,
+the pinned zz9000-sdk revision, and every firmware-latitude choice are
+specified in [](zz9k.md).
+
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 
 The CDTV model pairs the DMAC (which autoconfigs ahead of the Zorro chain,

@@ -72,6 +72,16 @@ const PRODUCT_HOSTSOCKET: u8 = 0x06;
 #[cfg(feature = "mhi")]
 const PRODUCT_MHI: u8 = 0x07;
 
+/// MNT Research's registered expansion manufacturer ID, carried by the
+/// bundled ZZ9000 SDK crypto board (`crate::zz9k`, `[zz9k]`): the SDK's
+/// Amiga-side transport detects the board by this identity, so the
+/// emulated board presents it rather than a Copperline product number.
+pub const ZZ9K_MNT_MANUFACTURER_ID: u16 = 0x6D6E;
+/// The ZZ9000's Zorro II and Zorro III autoconfig product numbers (the
+/// transport probes Z3 first, then Z2).
+pub const ZZ9K_PRODUCT_Z2: u8 = 3;
+pub const ZZ9K_PRODUCT_Z3: u8 = 4;
+
 /// Village Tronic's registered expansion manufacturer ID.
 pub const PICASSO2_MANUFACTURER_ID: u16 = 2167;
 /// Picasso II linear VRAM aperture. Product 13 is the unsupported segmented
@@ -276,6 +286,35 @@ impl BoardSpec {
             serial: 0,
             size_bytes: 0x1_0000,
             backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
+    /// The bundled ZZ9000 SDK crypto board (`[zz9k]`): the MNT ZZ9000's own
+    /// autoconfig identity ([`ZZ9K_MNT_MANUFACTURER_ID`], product 4 on
+    /// Zorro III / 3 on Zorro II) over an I/O window served entirely by the
+    /// embedded WASM plugin in `crate::zz9k` -- registers, mailbox rings,
+    /// and the shared-buffer heap alike. No autoboot ROM: the SDK's own
+    /// Amiga-side software finds the board via `FindConfigDev`. The
+    /// placeholder device slot is reassigned when the plugin board is
+    /// attached, same as any `[[zorro]]` metadata board. Contract:
+    /// `docs/internals/zz9k.md`.
+    pub fn zz9k(version: ZorroVersion, size_bytes: usize) -> Self {
+        Self {
+            name: "ZZ9000 SDK crypto board".into(),
+            version,
+            manufacturer: ZZ9K_MNT_MANUFACTURER_ID,
+            product: match version {
+                ZorroVersion::II => ZZ9K_PRODUCT_Z2,
+                ZorroVersion::III => ZZ9K_PRODUCT_Z3,
+            },
+            serial: 0,
+            size_bytes,
+            backing: BoardBacking::Device(0),
             memlist: false,
             memory_space: false,
             chained: false,
@@ -1172,6 +1211,13 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
             if wasm == crate::hostsocket::BUNDLED_HOSTSOCKET_WASM {
                 bail!(
                     "{}: wasm = {:?} is reserved for the bundled [hostsocket] board",
+                    path.display(),
+                    wasm
+                );
+            }
+            if wasm == crate::zz9k::BUNDLED_ZZ9K_WASM {
+                bail!(
+                    "{}: wasm = {:?} is reserved for the bundled [zz9k] board",
                     path.display(),
                     wasm
                 );

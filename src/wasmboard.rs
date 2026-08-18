@@ -1803,6 +1803,9 @@ impl WasmBoard {
         let module = if path == Path::new(crate::hostsocket::BUNDLED_HOSTSOCKET_WASM) {
             Module::new(&engine, crate::hostsocket::HOSTSOCKET_WASM)
                 .context("compiling the bundled HostSocket plugin")?
+        } else if path == Path::new(crate::zz9k::BUNDLED_ZZ9K_WASM) {
+            Module::new(&engine, crate::zz9k::ZZ9K_WASM)
+                .context("compiling the bundled zz9k plugin")?
         } else {
             Module::from_file(&engine, path)
                 .with_context(|| format!("compiling WASM plugin {}", path.display()))?
@@ -2700,6 +2703,220 @@ mod tests {
         let mut rmem = empty_memory();
         let mut rhost = DeviceHost::new(&mut rmem);
         assert_eq!(restored.read(0x08, 1, &mut rhost), rom_first);
+    }
+
+    // -- Bundled zz9k board: the committed crypto plugin driven through the
+    // -- real wasmtime host, 16-bit accesses like the 68k's. The plugin
+    // -- crate's own native suite covers the protocol corner cases; these
+    // -- prove the wasm artifact + manifest config + snapshot path.
+
+    mod zz9k {
+        use super::*;
+        use crate::zorro::ZorroVersion;
+
+        const DESC: u32 = 0xD000;
+        const REQ_RING: u32 = DESC + 0x080;
+        const COMPL_RING: u32 = DESC + 0x880;
+        const RING_ENTRIES: u32 = 32;
+
+        fn board(int2: bool) -> WasmBoard {
+            let cfg = crate::zz9k::board_config(ZorroVersion::III, 0x40_0000, int2, None);
+            assert_eq!(cfg.spec.manufacturer, 0x6D6E);
+            assert_eq!(cfg.spec.product, 4);
+            WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap()
+        }
+
+        fn r16(b: &mut WasmBoard, host: &mut DeviceHost, off: u32) -> u16 {
+            b.read(off, 2, host) as u16
+        }
+
+        fn w16(b: &mut WasmBoard, host: &mut DeviceHost, off: u32, value: u16) {
+            b.write(off, 2, u32::from(value), host);
+        }
+
+        fn w32(b: &mut WasmBoard, host: &mut DeviceHost, off: u32, value: u32) {
+            w16(b, host, off, (value >> 16) as u16);
+            w16(b, host, off + 2, (value & 0xFFFF) as u16);
+        }
+
+        fn r32(b: &mut WasmBoard, host: &mut DeviceHost, off: u32) -> u32 {
+            (u32::from(r16(b, host, off)) << 16) | u32::from(r16(b, host, off + 2))
+        }
+
+        fn wbytes(b: &mut WasmBoard, host: &mut DeviceHost, off: u32, data: &[u8]) {
+            let mut i = 0;
+            while i + 1 < data.len() {
+                w16(
+                    b,
+                    host,
+                    off + i as u32,
+                    u16::from_be_bytes([data[i], data[i + 1]]),
+                );
+                i += 2;
+            }
+            if i < data.len() {
+                b.write(off + i as u32, 1, u32::from(data[i]), host);
+            }
+        }
+
+        fn rbytes(b: &mut WasmBoard, host: &mut DeviceHost, off: u32, len: usize) -> Vec<u8> {
+            (0..len)
+                .map(|i| b.read(off + i as u32, 1, host) as u8)
+                .collect()
+        }
+
+        fn submit(
+            b: &mut WasmBoard,
+            host: &mut DeviceHost,
+            id: u32,
+            opcode: u16,
+            payload: &[u8],
+        ) {
+            let tail = r32(b, host, DESC + 24);
+            let entry = REQ_RING + tail * 64;
+            w32(b, host, entry, id);
+            w16(b, host, entry + 4, opcode);
+            w16(b, host, entry + 6, 1); // QUEUED
+            w16(b, host, entry + 8, 1); // INLINE_PAYLOAD
+            w16(b, host, entry + 10, payload.len() as u16);
+            w32(b, host, entry + 12, id ^ 0xC0FF_EE00);
+            wbytes(b, host, entry + 16, payload);
+            w32(b, host, DESC + 24, (tail + 1) % RING_ENTRIES);
+            // Z3 doorbell through the register aperture, like the transport.
+            w16(b, host, 0x1108, 1);
+        }
+
+        /// Tick until one completion is available, consume and return it
+        /// (request_id, status, payload).
+        fn wait(b: &mut WasmBoard, host: &mut DeviceHost) -> (u32, u16, Vec<u8>) {
+            for _ in 0..100_000 {
+                b.tick(20, host);
+                let head = r32(b, host, DESC + 36);
+                let tail = r32(b, host, DESC + 40);
+                if head != tail {
+                    let entry = COMPL_RING + head * 64;
+                    let raw = rbytes(b, host, entry, 64);
+                    w32(b, host, DESC + 36, (head + 1) % RING_ENTRIES);
+                    let id = u32::from_be_bytes(raw[0..4].try_into().unwrap());
+                    let status = u16::from_be_bytes(raw[6..8].try_into().unwrap());
+                    return (id, status, raw[16..].to_vec());
+                }
+            }
+            panic!("no completion");
+        }
+
+        fn alloc(b: &mut WasmBoard, host: &mut DeviceHost, id: u32, len: u32) -> (u32, u32) {
+            let mut p = [0u8; 12];
+            p[0..4].copy_from_slice(&len.to_be_bytes());
+            p[4..8].copy_from_slice(&16u32.to_be_bytes());
+            submit(b, host, id, 0x0100, &p);
+            let (rid, status, payload) = wait(b, host);
+            assert_eq!((rid, status), (id, 0));
+            let handle = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+            let arm = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+            (handle, 0x1_0000 + (arm - 0x20_0000))
+        }
+
+        #[test]
+        fn bundled_zz9k_board_boots_and_hashes_through_the_mailbox() {
+            let mut b = board(false);
+            let mut mem = empty_memory();
+            let mut host = DeviceHost::new(&mut mem);
+            // Bootstrap detection, as zz9k_open performs it.
+            assert_eq!(r16(&mut b, &mut host, 0x0100), 0x5A39);
+            assert_eq!(r16(&mut b, &mut host, 0x0102), 0x0203);
+            assert_eq!(r32(&mut b, &mut host, 0x0104), 0x3FE4_3000);
+            assert_eq!(r32(&mut b, &mut host, DESC), 0x5A5A_394B);
+            let caps = r32(&mut b, &mut host, DESC + 44);
+            assert_eq!(caps, 0x7D07);
+
+            // SHA-256("abc") end to end through shared buffers.
+            let (src, src_off) = alloc(&mut b, &mut host, 1, 64);
+            let (dst, dst_off) = alloc(&mut b, &mut host, 2, 64);
+            wbytes(&mut b, &mut host, src_off, b"abc");
+            let mut p = [0u8; 40];
+            p[0..4].copy_from_slice(&src.to_be_bytes());
+            p[8..12].copy_from_slice(&3u32.to_be_bytes());
+            p[12..16].copy_from_slice(&dst.to_be_bytes());
+            p[20..24].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+            p[32..36].copy_from_slice(&2u32.to_be_bytes()); // SHA256
+            submit(&mut b, &mut host, 3, 0x0800, &p);
+            let (id, status, payload) = wait(&mut b, &mut host);
+            assert_eq!((id, status), (3, 0));
+            assert_eq!(&payload[0..4], &32u32.to_be_bytes());
+            let digest = rbytes(&mut b, &mut host, dst_off, 32);
+            assert_eq!(
+                digest[..4],
+                [0xBA, 0x78, 0x16, 0xBF],
+                "SHA-256(\"abc\") head"
+            );
+        }
+
+        #[test]
+        fn zz9k_completion_irq_lines_follow_the_int2_config() {
+            for int2 in [false, true] {
+                let mut b = board(int2);
+                let mut mem = empty_memory();
+                let mut host = DeviceHost::new(&mut mem);
+                // ZZ9000.CFG key 5 readback reflects the config.
+                w16(&mut b, &mut host, 0x00E8, 5);
+                assert_ne!(r16(&mut b, &mut host, 0x00EA), 0);
+                assert_eq!(r16(&mut b, &mut host, 0x00E8) != 0, int2);
+                // Enable, complete a PING, check the line, ack, re-check.
+                w16(&mut b, &mut host, 0x010C, 0x0002);
+                submit(&mut b, &mut host, 1, 0x0002, b"hi");
+                let (_, status, _) = wait(&mut b, &mut host);
+                assert_eq!(status, 0);
+                assert_eq!(ZorroDevice::int2_line(&b), int2);
+                assert_eq!(ZorroDevice::int6_line(&b), !int2);
+                w16(&mut b, &mut host, 0x0004, 0x0088);
+                assert!(!ZorroDevice::int2_line(&b));
+                assert!(!ZorroDevice::int6_line(&b));
+            }
+        }
+
+        #[test]
+        fn zz9k_save_state_mid_operation_resumes_exactly() {
+            let mut b = board(false);
+            let mut mem = empty_memory();
+            let mut host = DeviceHost::new(&mut mem);
+            let (src, src_off) = alloc(&mut b, &mut host, 1, 64);
+            let (dst, dst_off) = alloc(&mut b, &mut host, 2, 128);
+            wbytes(&mut b, &mut host, src_off, b"snapshot me");
+            let mut p = [0u8; 40];
+            p[0..4].copy_from_slice(&src.to_be_bytes());
+            p[8..12].copy_from_slice(&11u32.to_be_bytes());
+            p[12..16].copy_from_slice(&dst.to_be_bytes());
+            p[20..24].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+            p[32..36].copy_from_slice(&4u32.to_be_bytes()); // SHA512
+            submit(&mut b, &mut host, 3, 0x0800, &p);
+            // A couple of small ticks: the request is consumed and computed
+            // but its completion latency has not elapsed.
+            b.tick(20, &mut host);
+            b.tick(20, &mut host);
+            let head = r32(&mut b, &mut host, DESC + 36);
+            let tail = r32(&mut b, &mut host, DESC + 40);
+            assert_eq!(head, tail, "completion must still be pending");
+
+            let blob = bincode::serialize(&b).unwrap();
+            let mut restored: WasmBoard = bincode::deserialize(&blob).unwrap();
+            let mut rmem = empty_memory();
+            let mut rhost = DeviceHost::new(&mut rmem);
+            let (id, status, payload) = wait(&mut restored, &mut rhost);
+            assert_eq!((id, status), (3, 0));
+            assert_eq!(&payload[0..4], &64u32.to_be_bytes());
+            let expected: [u8; 4] = [0x60, 0x30, 0xAC, 0x83];
+            assert_eq!(
+                rbytes(&mut restored, &mut rhost, dst_off, 4),
+                expected,
+                "SHA-512(\"snapshot me\") head after resume"
+            );
+            // And the original board, ticked on, produces the same bytes:
+            // the snapshot changed nothing.
+            let (id, status, _) = wait(&mut b, &mut host);
+            assert_eq!((id, status), (3, 0));
+            assert_eq!(rbytes(&mut b, &mut host, dst_off, 4), expected);
+        }
     }
 
     #[test]

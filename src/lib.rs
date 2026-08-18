@@ -120,3 +120,4 @@ pub mod whdload;
 pub mod z3660;
 pub mod zorro;
 pub mod zorro_device;
+pub mod zz9k;

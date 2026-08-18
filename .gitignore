@@ -26,6 +26,9 @@
 # Standalone HostSocket plugin build output (the committed artifact is
 # assets/hostsocket/hostsocket_plugin.wasm).
 /crates/hostsocket-plugin/target
+# Standalone zz9k crypto plugin build output (the committed artifact is
+# assets/zz9k/zz9k_plugin.wasm).
+/crates/zz9k-plugin/target
 # Standalone bezel preview harness build output (tools/bezel-preview).
 /tools/bezel-preview/target
 # CD images (cue/bin) are local assets, never committed.
