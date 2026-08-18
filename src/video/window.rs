@@ -6669,6 +6669,14 @@ impl App {
         }
         let now_ms = self.csynth_panel_epoch.elapsed().as_millis() as u64;
         let blink_on = (now_ms / 300).is_multiple_of(2);
+        // A latched ALL or MUTE flashes its lens, so the blink phase is
+        // part of what is on screen and must break the redraw cache.
+        let round_latched = self.csynth_panel.down().iter().any(|c| {
+            matches!(
+                c,
+                csynthpanel::CsynthControl::All | csynthpanel::CsynthControl::Mute
+            )
+        });
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
             return;
         };
@@ -6679,7 +6687,7 @@ impl App {
             Some(synth) => (
                 Some(synth.panel_screen(now_ms)),
                 true,
-                synth.panel_monitoring() && blink_on,
+                round_latched && blink_on,
             ),
             None => (None, false, false),
         };
