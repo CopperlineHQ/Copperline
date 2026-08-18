@@ -20,6 +20,11 @@ project:
       severity: ignore
       keys:
         - http://archive.org
+        # npcap.com answers interactive requests slowly (tens of seconds)
+        # and timed out for three consecutive CI runs on 2026-08-18 while
+        # resolving fine from other networks -- the same
+        # availability-not-correctness failure mode as archive.org above.
+        - https://npcap.com/
   authors:
     - name: Andrew Hutchings
   github: https://github.com/CopperlineHQ/Copperline
