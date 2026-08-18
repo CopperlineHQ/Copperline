@@ -98,37 +98,17 @@ monitor (solo) the shown part.
 ### Button combinations
 
 Coppersynth front panel has various features accessed with multi-button
-combinations. The POWER combinations require the unit to first be powered
-off; the others work on a running unit.
+combinations. Other than "Solo", these all require the unit to first be powered off.
 
-**Right click to hold/latch.** A held ALL or MUTE flashes to say it is
-standing in; holding one while the other is held releases both.
+**Right click to hold/latch.**
 
 | Combination | Reaches |
 |---|---|
-| ALL (held) + MUTE | Solo the selected PART. MUTE again immediately un-soloes and lets ALL go; any other press keeps the solo and releases ALL |
-| MUTE + MIDI CH < or > | Device ID (1-32, default 17). MIDI CH buttons change it, ALL confirms, MUTE cancels |
-| MUTE + CHORUS < or > | Chorus Type (0-8: Off, Chorus 1-3, Celeste 1-2, Flanger, Feedback Chorus, Short Delay). CHORUS buttons change it and each sounds as selected, ALL confirms, MUTE cancels |
-| MUTE + INSTRUMENT < or > | Part parameters (portamento time and switch, sostenuto, soft, vibrato rate/depth/delay, cutoff, resonance, envelope attack/decay/release). INSTRUMENT buttons browse, LEVEL buttons set 0-127 sounding live, PART buttons change part, ALL keeps, MUTE restores |
+| ALL + MUTE | Solo the selected PART. Same combo to disable solo |
 | INSTRUMENT < + POWER | MT-32 Mode. MUTE disables, ALL enables |
 | INSTRUMENT > + POWER  | Load the default SoundFont. MUTE cancels, ALL confirms  |
 | PART < + PART > + POWER | Demo sequences. press ALL to play, MUTE to stop, PART buttons to skip song. 
 | Both INSTRUMENT buttons + both MIDI CH buttons | Show version info + credits
-
-## MIDI implementation
-
-Coppersynth receives the SC-55mkII's controller set: bank select
-(MSB, latched until the program change), modulation, portamento time
-and switch, data entry, volume, pan, expression, hold, sostenuto,
-soft, portamento control (glide without re-trigger), reverb and
-chorus sends, RPNs (bend range, fine and coarse tune), the GS NRPNs
-(vibrato rate/depth/delay, cutoff, resonance, envelope
-attack/decay/release, and the drum set's per-note pitch, level, pan
-and effect sends), all-sound-off, reset-all-controllers (to the
-unit's own default table), all-notes-off, and the channel mode
-messages (omni as all-notes-off, mono, poly). Channel and polyphonic
-pressure are received and offered to the bank's modulators, routed
-nowhere by default -- as on the hardware.
 
 ## Building without it
 
