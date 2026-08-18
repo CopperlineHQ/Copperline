@@ -602,7 +602,7 @@ dependencies = [
 [[package]]
 name = "coppersynth"
 version = "0.9.1"
-source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=6802725790eaf1ba4d2b0e69ff5ab292b3d1f48c#6802725790eaf1ba4d2b0e69ff5ab292b3d1f48c"
+source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=ddfb6d122af3d64e5fd9422a496381db824dab74#ddfb6d122af3d64e5fd9422a496381db824dab74"
 dependencies = [
  "zip",
 ]
