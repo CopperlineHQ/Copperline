@@ -6,6 +6,10 @@
 //! instant no matter when the emulation thread called `MIDISend`. That is what
 //! keeps the guest's byte timing intact. Input arrives on a CoreMIDI thread and
 //! is pushed to the lock-free ring Paula's receiver drains.
+//!
+//! The process holds exactly one `MIDIClient`, created on first use and never
+//! disposed (see [`shared_client`]); each machine's backend owns only its
+//! ports.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::OnceLock;
@@ -76,7 +80,7 @@ extern "C" {
         notify_ref_con: *mut c_void,
         out_client: *mut MidiClientRef,
     ) -> OSStatus;
-    fn MIDIClientDispose(client: MidiClientRef) -> OSStatus;
+    fn MIDIPortDispose(port: MidiPortRef) -> OSStatus;
     fn MIDIOutputPortCreate(
         client: MidiClientRef,
         port_name: CFStringRef,
@@ -320,7 +324,6 @@ fn log_send_error(msg: &str) {
 // --- backend ------------------------------------------------------------
 
 pub struct CoreMidiBackend {
-    client: MidiClientRef,
     // Both ports are created up front so the device can be switched at runtime
     // without making ports mid-session. `dest`/`source` hold the current
     // endpoints (0 = none); switching just retargets them.
@@ -332,7 +335,7 @@ pub struct CoreMidiBackend {
     // scheduled host time, to isolate a scheduling problem from a routing one.
     immediate: bool,
     // Kept alive so the read-callback refCon stays valid; dropped after the
-    // client is disposed (see Drop).
+    // ports are disposed (see Drop) -- the client outlives them all.
     _input_state: Box<InputState>,
 }
 
@@ -406,15 +409,59 @@ impl MidiBackend for CoreMidiBackend {
 
 impl Drop for CoreMidiBackend {
     fn drop(&mut self) {
-        if self.client != 0 {
-            // Disposes the client's ports and stops the read callback before the
-            // boxed input state is freed.
-            unsafe { MIDIClientDispose(self.client) };
+        // The ports are this machine's; the client is the process's and
+        // stays (see [`shared_client`]). Disposing the input port stops
+        // the read callback before the boxed input state is freed.
+        unsafe {
+            MIDIPortDispose(self.in_port);
+            MIDIPortDispose(self.out_port);
         }
     }
 }
 
+/// The process's one CoreMIDI client, created on first use and never
+/// disposed. CoreMIDI's link to the MIDIServer daemon is per-process and
+/// unrecoverable: the daemon exits a few seconds after the system-wide
+/// last client is disposed, and a process whose link dies that way can
+/// never create a client again -- every later `MIDIClientCreate` returns
+/// OSStatus -2 until the app is relaunched. (Apple's `MIDIClientDispose`
+/// documentation describes exactly this, and advises against disposing.)
+/// One client held for the process's lifetime keeps the daemon running
+/// and the link healthy; the machines' ports come and go beneath it.
+fn shared_client() -> Result<MidiClientRef> {
+    static CLIENT: OnceLock<std::result::Result<MidiClientRef, OSStatus>> = OnceLock::new();
+    let made = CLIENT.get_or_init(|| {
+        let name = cfstring("Copperline");
+        let mut client: MidiClientRef = 0;
+        let status = unsafe { MIDIClientCreate(name, None, std::ptr::null_mut(), &mut client) };
+        unsafe { CFRelease(name) };
+        if status == 0 {
+            Ok(client)
+        } else {
+            Err(status)
+        }
+    });
+    match made {
+        Ok(client) => Ok(*client),
+        // A failed first create lost a race against the daemon shutting
+        // down, and the loss is permanent for this process: retrying
+        // returns -2 for the rest of its life, so the cached failure is
+        // the truth and the only cure is named.
+        Err(status) => bail!(
+            "MIDIClientCreate failed (OSStatus {status}); CoreMIDI cannot              recover in this process -- quit and relaunch Copperline to              restore MIDI"
+        ),
+    }
+}
+
 pub fn enumerate() -> MidiEndpoints {
+    // Enumerating without a client would answer, but leaves the process
+    // holding a server link nothing keeps alive -- the exact state that
+    // strands CoreMIDI when the daemon idles out. The client comes
+    // first, and holds the daemon up from here on.
+    if let Err(e) = shared_client() {
+        log::warn!("midi: {e:#}");
+        return MidiEndpoints::default();
+    }
     MidiEndpoints {
         inputs: sources().map(|(_, name)| MidiEndpoint { name }).collect(),
         outputs: destinations()
@@ -428,13 +475,7 @@ pub fn open(
     midi_in: Option<&str>,
     input: InputProducer,
 ) -> Result<Box<dyn MidiBackend>> {
-    let client_name = cfstring("Copperline");
-    let mut client: MidiClientRef = 0;
-    let status = unsafe { MIDIClientCreate(client_name, None, std::ptr::null_mut(), &mut client) };
-    unsafe { CFRelease(client_name) };
-    if status != 0 {
-        bail!("MIDIClientCreate failed (OSStatus {status})");
-    }
+    let client = shared_client()?;
 
     let immediate = crate::envcfg::flag("COPPERLINE_MIDI_IMMEDIATE");
     if immediate {
@@ -454,7 +495,6 @@ pub fn open(
     })?;
 
     let mut backend = CoreMidiBackend {
-        client,
         out_port,
         dest: 0,
         in_port,
@@ -512,6 +552,39 @@ mod tests {
     use ringbuf::traits::{Consumer, Split};
     use ringbuf::HeapRb;
     use std::time::Duration;
+
+    /// The new lifecycle's teardown holds up: a drop disposes only the
+    /// machine's ports, and the next open builds fresh ones on the
+    /// process's one client. (This passes immediately by design; the
+    /// test that discriminates the old lifecycle from the new is the
+    /// enumerate-linger-open one below, which must span the daemon's
+    /// idle exit and is ignored for its sleep.)
+    #[test]
+    fn backends_reopen_after_drop() {
+        let (p1, _c1) = HeapRb::<u8>::new(8).split();
+        let b1 = open(None, None, p1).expect("first open");
+        drop(b1);
+        let (p2, _c2) = HeapRb::<u8>::new(8).split();
+        let b2 = open(None, None, p2).expect("open again after drop");
+        drop(b2);
+    }
+
+    /// The launcher's exact failure: enumerate the endpoints, linger past
+    /// the MIDIServer's idle-exit window, then open. Without the shared
+    /// client the enumerate held a doomed server link and the open was the
+    /// process's first create over it -- OSStatus -2, unrecoverable.
+    /// Ignored for its 12-second sleep; run it solo:
+    /// `cargo test --release backends_open_after_an_enumerate_and_a_wait -- --ignored`
+    #[test]
+    #[ignore]
+    fn backends_open_after_an_enumerate_and_a_wait() {
+        let ends = enumerate();
+        let _ = ends;
+        std::thread::sleep(Duration::from_secs(12));
+        let (producer, _consumer) = HeapRb::<u8>::new(8).split();
+        let backend = open(None, None, producer).expect("open after enumerate and wait");
+        drop(backend);
+    }
 
     /// Round-trip a scheduled message through a loopback port (an IAC Driver bus,
     /// or whatever `COPPERLINE_MIDI_TEST_PORT` names). Proves the whole live path
