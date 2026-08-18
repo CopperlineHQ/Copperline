@@ -6734,13 +6734,9 @@ impl App {
         let powered = sink.csynth().is_some();
         // Switched off, the fascia is still there: dark glass, and the
         // knob standing where the hand left it.
-        let (screen, monitoring, volume) = match sink.csynth_mut() {
-            Some(synth) => (
-                synth.panel_screen(now_ms),
-                synth.panel_monitoring(),
-                synth.panel_volume_value(),
-            ),
-            None => (csynthpanel::dark_screen(), false, stored_volume),
+        let (screen, volume) = match sink.csynth_mut() {
+            Some(synth) => (synth.panel_screen(now_ms), synth.panel_volume_value()),
+            None => (csynthpanel::dark_screen(), stored_volume),
         };
         if powered {
             self.csynth_volume = volume;
@@ -6748,7 +6744,6 @@ impl App {
         Some(csynthpanel::CsynthPanelView {
             screen,
             powered,
-            mute_blinks: monitoring,
             blink_on: (now_ms / 300).is_multiple_of(2),
             volume,
             down,

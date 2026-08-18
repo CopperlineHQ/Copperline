@@ -115,10 +115,8 @@ pub struct CsynthPanelView {
     /// The glass, exactly as the engine's panel composed it.
     pub screen: Screen,
     pub powered: bool,
-    /// Whether the MUTE lamp should be blinking rather than steady --
-    /// the monitor is on.
-    pub mute_blinks: bool,
-    /// This half of the blink, when it does.
+    /// This half of the latch blink -- a latched ALL or MUTE flashes
+    /// its lens to say it is standing in.
     pub blink_on: bool,
     /// Where the VOLUME knob stands, 0..=1.
     pub volume: f32,
@@ -806,19 +804,28 @@ fn small_glyph(ch: char) -> [u8; 5] {
 /// ALL, MUTE and LOAD: the buttons are LEDs themselves -- a misted
 /// clear lens when off, the backlight's orange when their state is on.
 fn draw_rounds(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
-    let mute_lit = if view.mute_blinks {
-        view.blink_on
-    } else {
-        view.screen.mute_led
+    // A latched ALL or MUTE flashes its lens to say it is standing in
+    // -- unless its lamp is already speaking (lit, or flashing with a
+    // question), which takes precedence.
+    let latch_blink = |control: CsynthControl, led: bool| -> bool {
+        if led {
+            return true;
+        }
+        view.down.contains(&control) && view.blink_on
     };
     for (control, label, slot, lit) in [
         (
             CsynthControl::All,
             "ALL",
             0,
-            view.powered && view.screen.all_led,
+            view.powered && latch_blink(CsynthControl::All, view.screen.all_led),
         ),
-        (CsynthControl::Mute, "MUTE", 1, view.powered && mute_lit),
+        (
+            CsynthControl::Mute,
+            "MUTE",
+            1,
+            view.powered && latch_blink(CsynthControl::Mute, view.screen.mute_led),
+        ),
         (CsynthControl::Load, "LOAD", 2, false),
     ] {
         let rect = round_rect(panel, slot);
@@ -1158,6 +1165,10 @@ pub struct CsynthPanel {
     holding: Vec<CsynthControl>,
     /// The button a plain click is lighting until the mouse comes up.
     flash: Option<CsynthControl>,
+    /// The solo gesture just fired and ALL still stands: an immediate
+    /// second MUTE un-soloes and lets ALL go; any other press lets ALL
+    /// go and leaves the solo standing.
+    solo_armed: bool,
     dial: Option<DialGrab>,
     hold: Option<ArrowHold>,
 }
@@ -1204,6 +1215,14 @@ impl CsynthPanel {
         // Right-clicking latches a button down; that is how two-button
         // gestures are made with one pointer.
         if !left {
+            self.solo_armed = false;
+            // ALL and MUTE never stand together: latching the second
+            // lets them both go.
+            let is_round = |c: CsynthControl| matches!(c, CsynthControl::All | CsynthControl::Mute);
+            if is_round(control) && self.holding.iter().any(|&h| is_round(h) && h != control) {
+                self.holding.clear();
+                return CsynthPress::None;
+            }
             self.latch(control);
             // A pair latched whole resolves at once when running.
             if powered {
@@ -1226,7 +1245,30 @@ impl CsynthPanel {
             return CsynthPress::None;
         }
         self.flash = Some(control);
+        // The solo gesture's aftermath: with ALL still standing, an
+        // immediate second MUTE un-soloes and lets ALL go; anything
+        // else lets ALL go quietly and the press means itself alone.
+        if self.solo_armed {
+            self.solo_armed = false;
+            self.holding.clear();
+            if control == CsynthControl::Mute && powered {
+                return CsynthPress::Button(Button::Monitor);
+            }
+            let button = resolve(control, &[]);
+            return if powered {
+                CsynthPress::Button(button)
+            } else {
+                CsynthPress::None
+            };
+        }
         let latched = std::mem::take(&mut self.holding);
+        // ALL latched under a MUTE click is the solo: ALL keeps
+        // standing so a second MUTE can take it straight back.
+        if control == CsynthControl::Mute && latched == [CsynthControl::All] && powered {
+            self.holding = latched;
+            self.solo_armed = true;
+            return CsynthPress::Button(Button::Monitor);
+        }
         let button = resolve(control, &latched);
         if powered {
             // A plain arrow held down repeats, gathering speed.
@@ -1293,8 +1335,6 @@ impl CsynthPanel {
             {
                 Some(Button::Both(p1))
             }
-            (CsynthControl::All, CsynthControl::Mute)
-            | (CsynthControl::Mute, CsynthControl::All) => Some(Button::Monitor),
             _ => None,
         }
     }
@@ -1461,7 +1501,6 @@ mod tests {
                 CsynthPanelView {
                     screen: splash,
                     powered: true,
-                    mute_blinks: false,
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
@@ -1473,7 +1512,6 @@ mod tests {
                 CsynthPanelView {
                     screen,
                     powered: true,
-                    mute_blinks: false,
                     blink_on: false,
                     volume: 0.8,
                     down: vec![CsynthControl::Arrow(Pair::Level, Dir::Right)],
@@ -1485,7 +1523,6 @@ mod tests {
                 CsynthPanelView {
                     screen: dark_screen(),
                     powered: false,
-                    mute_blinks: false,
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
@@ -1588,15 +1625,47 @@ mod tests {
             panel.press(CsynthControl::Arrow(Pair::Level, Dir::Right), true, true),
             CsynthPress::Button(Button::Both(Pair::Level))
         );
-        // Latch ALL, then latch MUTE: the gesture resolves at once.
+        panel.release_press();
+        // Latch ALL, then latch MUTE: the rounds never stand together,
+        // the second latch lets them both go and no gesture fires.
         assert_eq!(
             panel.press(CsynthControl::All, false, true),
             CsynthPress::None
         );
         assert_eq!(
             panel.press(CsynthControl::Mute, false, true),
+            CsynthPress::None
+        );
+        assert!(panel.down().is_empty(), "both rounds released");
+        // The solo: latch ALL, CLICK MUTE. ALL keeps standing so an
+        // immediate second MUTE takes it straight back and lets go.
+        panel.press(CsynthControl::All, false, true);
+        assert_eq!(
+            panel.press(CsynthControl::Mute, true, true),
             CsynthPress::Button(Button::Monitor)
         );
+        panel.release_press();
+        assert!(
+            panel.down().contains(&CsynthControl::All),
+            "ALL stands through the solo"
+        );
+        assert_eq!(
+            panel.press(CsynthControl::Mute, true, true),
+            CsynthPress::Button(Button::Monitor)
+        );
+        panel.release_press();
+        assert!(panel.down().is_empty(), "the second MUTE lets ALL go");
+        // Armed again, any other press lets ALL go quietly, means
+        // itself alone, and the solo stays standing.
+        panel.press(CsynthControl::All, false, true);
+        panel.press(CsynthControl::Mute, true, true);
+        panel.release_press();
+        assert_eq!(
+            panel.press(CsynthControl::Arrow(Pair::Part, Dir::Right), true, true),
+            CsynthPress::Button(Button::Arrow(Pair::Part, Dir::Right))
+        );
+        panel.release_press();
+        assert!(panel.down().is_empty(), "ALL released on the way out");
         // Both INSTRUMENT halves latched through a power-on arrive as
         // the pair held whole.
         panel.press(
@@ -1632,13 +1701,14 @@ mod tests {
         };
         assert!(held.contains(&Button::Both(Pair::MidiCh)));
         assert!(held.contains(&Button::Both(Pair::Instrument)));
-        // ALL and MUTE latched through a power-on arrive as themselves
-        // (the unit ignores the set; the resolution must still carry it).
+        // ALL and MUTE cannot be latched together even switched off:
+        // the second latch releases both, and the power press carries
+        // nothing.
         panel.press(CsynthControl::All, false, false);
         panel.press(CsynthControl::Mute, false, false);
         assert_eq!(
             panel.press(CsynthControl::Power, true, false),
-            CsynthPress::PowerOn(vec![Button::All, Button::Mute])
+            CsynthPress::PowerOn(vec![])
         );
         // Switched on with nothing latched, the switch turns it off.
         assert_eq!(
