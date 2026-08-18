@@ -315,6 +315,22 @@ impl GamepadReader {
         Ok(())
     }
 
+    /// Whether a connected, calibrated pad carries a Quit-hotkey binding.
+    /// The window keeps the event loop polling while one is present: gilrs
+    /// is polled, not evented, so a paused or powered-off machine would
+    /// otherwise never observe the hold.
+    pub fn quit_hotkey_present(&mut self) -> bool {
+        let Some(raw) = self.raw.as_mut() else {
+            return false;
+        };
+        raw.pump();
+        let Some(id) = raw.first_gamepad() else {
+            return false;
+        };
+        let uuid = uuid_hex(raw.gilrs.gamepad(id).uuid());
+        self.store.get(&uuid).is_some_and(|cal| cal.quit.is_some())
+    }
+
     /// Poll the gamepad and return its resolved state (emulated joystick
     /// lines plus the host-side Quit hotkey), or `None` when there is no
     /// pad or no calibration for the connected one.

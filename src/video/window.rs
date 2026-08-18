@@ -4215,6 +4215,11 @@ impl ApplicationHandler for App {
         // The calibration panel polls raw gamepad events, so it needs the
         // loop awake even while the machine is paused or powered off.
         let calibrating = matches!(self.ui.panel, Some(Panel::Calibration(_)));
+        // Likewise the pad's Quit hotkey: gilrs is polled, not evented, so
+        // pressing it cannot wake a waiting loop. While a calibrated pad
+        // with one is connected, a paused/powered-off loop keeps polling
+        // (paced to a human rate below) or the hold could never start.
+        let pad_quit_watch = !calibrating && self.gamepad.quit_hotkey_present();
         // An image being written on a worker has to be collected, and the
         // launcher is up with the machine off -- nothing else would wake
         // the loop to notice it finished.
@@ -4267,7 +4272,14 @@ impl ApplicationHandler for App {
         // went down once and the repeats are this loop's own doing.
         let scrolling = self.scroll_hold.is_some();
         event_loop.set_control_flow(
-            if running || osd_active || calibrating || writing_image || scrolling || typing {
+            if running
+                || osd_active
+                || calibrating
+                || writing_image
+                || scrolling
+                || typing
+                || pad_quit_watch
+            {
                 ControlFlow::Poll
             } else {
                 ControlFlow::Wait
@@ -4278,6 +4290,11 @@ impl ApplicationHandler for App {
             // back at a human rate rather than spinning a core on it.
             std::thread::sleep(std::time::Duration::from_millis(16));
             self.request_redraw();
+        }
+        if pad_quit_watch && !running && !writing_image {
+            // Poll the pad at a human rate rather than spinning a core;
+            // plenty of granularity inside the quit hotkey's 1.5 s hold.
+            std::thread::sleep(std::time::Duration::from_millis(16));
         }
         if osd_active && !running {
             self.request_redraw();

@@ -1012,9 +1012,9 @@ machine, so any spare pad button (Select, Start, a shoulder button) can
 carry it without affecting the game. To guard against accidental presses
 it must be *held* for about a second and a half -- an on-screen countdown
 shows the hold in progress, and releasing early cancels it. It works
-whenever the pad is connected, even while the keyboard or another device
-drives the joystick ports. Skip the step to leave quitting to the
-keyboard shortcut.
+whenever the pad is connected -- even while the keyboard or another
+device drives the joystick ports, and while the machine is paused or
+powered off. Skip the step to leave quitting to the keyboard shortcut.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
