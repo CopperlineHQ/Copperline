@@ -486,6 +486,16 @@ fn mouse_sensitivity_factor(sensitivity: u8) -> f64 {
 /// How long a transient on-screen overlay message (screenshot saved,
 /// disk swapped) stays visible.
 const OSD_DURATION: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// How long the pad's calibrated Quit hotkey must be held before the
+/// application exits: long enough that a stray press cannot end the
+/// session, short enough to feel immediate.
+const GAMEPAD_QUIT_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// OSD countdown shown while the Quit hotkey is held; also the marker for
+/// withdrawing that countdown when the hold is released early.
+const GAMEPAD_QUIT_OSD_PREFIX: &str = "Quitting: keep holding ";
+
 /// On-screen overlay colours (packed R,G,B,A in memory order).
 const OSD_TEXT: u32 = rgba(236, 236, 232);
 /// Amber, for a message about something that did not go as asked.
@@ -1170,6 +1180,11 @@ pub struct App {
     /// input backend is available (e.g. headless CI) or the pad is not yet
     /// calibrated.
     gamepad: crate::gamepad::GamepadReader,
+    /// When the pad's calibrated Quit hotkey started being held, if it is
+    /// down right now. Cleared by a release before the hold completes.
+    gamepad_quit_hold: Option<Instant>,
+    /// The Quit hotkey hold completed; the next event-loop pass exits.
+    gamepad_quit_requested: bool,
     /// Host source policy for the emulated port-2 joystick/CD32 pad.
     joystick_input_mode: JoystickInputMode,
     /// Host mouse sensitivity, 0-100 ([input] mouse_sensitivity), and the speed
@@ -1967,6 +1982,8 @@ impl App {
             tint_lut: tint_lut(tint),
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
+            gamepad_quit_hold: None,
+            gamepad_quit_requested: false,
             joystick_input_mode,
             mouse_sensitivity,
             mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
@@ -2158,9 +2175,13 @@ impl App {
     /// state on its port, as it always has.
     fn pump_joystick_input(&mut self) {
         let r = self.host_routing();
+        // Poll the pad whether or not it drives a port: the calibrated
+        // Quit hotkey is a host control and works regardless of routing.
+        let pad = self.gamepad.poll();
+        self.track_gamepad_quit_hold(pad.is_some_and(|state| state.quit));
         if let Some(port) = r.gamepad {
-            match self.gamepad.poll() {
-                Some(state) => self.apply_joystick_state(port, state),
+            match pad {
+                Some(state) => self.apply_joystick_state(port, state.joystick),
                 // No physical pad but --joy-after scripting has fired: keep
                 // asserting the scripted state so it survives this release
                 // path and drives the upcoming scheduler quantum.
@@ -2189,6 +2210,33 @@ impl App {
             if Some(port) != r.gamepad && Some(port) != r.keyboard && self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
             }
+        }
+    }
+
+    /// Track the pad's calibrated Quit hotkey across polls: a hold of
+    /// [`GAMEPAD_QUIT_HOLD`] requests an application exit, with an OSD
+    /// countdown while it is in progress. Releasing earlier cancels the
+    /// hold and withdraws the countdown.
+    fn track_gamepad_quit_hold(&mut self, held: bool) {
+        if !held {
+            if self.gamepad_quit_hold.take().is_some()
+                && self
+                    .osd
+                    .as_ref()
+                    .is_some_and(|osd| osd.text.starts_with(GAMEPAD_QUIT_OSD_PREFIX))
+            {
+                self.osd = None;
+                self.request_redraw();
+            }
+            return;
+        }
+        let start = *self.gamepad_quit_hold.get_or_insert_with(Instant::now);
+        match GAMEPAD_QUIT_HOLD.checked_sub(start.elapsed()) {
+            None => self.gamepad_quit_requested = true,
+            Some(remaining) => self.show_osd(format!(
+                "{GAMEPAD_QUIT_OSD_PREFIX}{:.1}s",
+                remaining.as_secs_f32()
+            )),
         }
     }
 
@@ -4245,6 +4293,9 @@ impl ApplicationHandler for App {
             for port in 0..2 {
                 self.release_joystick_lines(port);
             }
+            // The Quit-hotkey hold cannot be observed while the panel owns
+            // the pad; drop any hold in progress rather than resuming it.
+            self.gamepad_quit_hold = None;
             if !running {
                 // Nothing paces the loop while the machine is not stepping;
                 // don't busy-spin just to poll the pad.
@@ -4252,6 +4303,10 @@ impl ApplicationHandler for App {
             }
         } else {
             self.pump_joystick_input();
+        }
+        if self.gamepad_quit_requested {
+            event_loop.exit();
+            return;
         }
         // Headless capture (screenshot/frame-dump) builds the framebuffer for
         // the saved PNG but presents nothing: it already runs unthrottled at one

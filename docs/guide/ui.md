@@ -10,7 +10,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 
 | macOS | Linux/Windows | Action |
 |---|---|---|
-| `Cmd+Q` | `Alt+Q` | Quit |
+| `Cmd+Q` | `Alt+Q` | Quit (a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
 | `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
@@ -1002,9 +1002,19 @@ Run it either from the menu ("Calibrate Gamepad...") -- which ends with a
 live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
-and the optional CD32 green/yellow/play/rewind/forward buttons; every step
-waits for the pad to return to neutral before sampling, so a held control
-cannot bleed into the next binding.
+the optional CD32 green/yellow/play/rewind/forward buttons, and an optional
+**Quit Copperline** hotkey; every step waits for the pad to return to
+neutral before sampling, so a held control cannot bleed into the next
+binding.
+
+The Quit hotkey is a host-side control: it never reaches the emulated
+machine, so any spare pad button (Select, Start, a shoulder button) can
+carry it without affecting the game. To guard against accidental presses
+it must be *held* for about a second and a half -- an on-screen countdown
+shows the hold in progress, and releasing early cancels it. It works
+whenever the pad is connected, even while the keyboard or another device
+drives the joystick ports. Skip the step to leave quitting to the
+keyboard shortcut.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
