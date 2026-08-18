@@ -1165,10 +1165,6 @@ pub struct CsynthPanel {
     holding: Vec<CsynthControl>,
     /// The button a plain click is lighting until the mouse comes up.
     flash: Option<CsynthControl>,
-    /// The solo gesture just fired and ALL still stands: an immediate
-    /// second MUTE un-soloes and lets ALL go; any other press lets ALL
-    /// go and leaves the solo standing.
-    solo_armed: bool,
     dial: Option<DialGrab>,
     hold: Option<ArrowHold>,
 }
@@ -1215,7 +1211,6 @@ impl CsynthPanel {
         // Right-clicking latches a button down; that is how two-button
         // gestures are made with one pointer.
         if !left {
-            self.solo_armed = false;
             // ALL and MUTE never stand together: latching the second
             // lets them both go.
             let is_round = |c: CsynthControl| matches!(c, CsynthControl::All | CsynthControl::Mute);
@@ -1245,30 +1240,7 @@ impl CsynthPanel {
             return CsynthPress::None;
         }
         self.flash = Some(control);
-        // The solo gesture's aftermath: with ALL still standing, an
-        // immediate second MUTE un-soloes and lets ALL go; anything
-        // else lets ALL go quietly and the press means itself alone.
-        if self.solo_armed {
-            self.solo_armed = false;
-            self.holding.clear();
-            if control == CsynthControl::Mute && powered {
-                return CsynthPress::Button(Button::Monitor);
-            }
-            let button = resolve(control, &[]);
-            return if powered {
-                CsynthPress::Button(button)
-            } else {
-                CsynthPress::None
-            };
-        }
         let latched = std::mem::take(&mut self.holding);
-        // ALL latched under a MUTE click is the solo: ALL keeps
-        // standing so a second MUTE can take it straight back.
-        if control == CsynthControl::Mute && latched == [CsynthControl::All] && powered {
-            self.holding = latched;
-            self.solo_armed = true;
-            return CsynthPress::Button(Button::Monitor);
-        }
         let button = resolve(control, &latched);
         if powered {
             // A plain arrow held down repeats, gathering speed.
@@ -1637,35 +1609,16 @@ mod tests {
             CsynthPress::None
         );
         assert!(panel.down().is_empty(), "both rounds released");
-        // The solo: latch ALL, CLICK MUTE. ALL keeps standing so an
-        // immediate second MUTE takes it straight back and lets go.
+        // The solo: latch ALL, CLICK MUTE -- one Monitor press, the
+        // latch spent. The unit itself stands a solo down on whatever
+        // press comes next.
         panel.press(CsynthControl::All, false, true);
         assert_eq!(
             panel.press(CsynthControl::Mute, true, true),
             CsynthPress::Button(Button::Monitor)
         );
         panel.release_press();
-        assert!(
-            panel.down().contains(&CsynthControl::All),
-            "ALL stands through the solo"
-        );
-        assert_eq!(
-            panel.press(CsynthControl::Mute, true, true),
-            CsynthPress::Button(Button::Monitor)
-        );
-        panel.release_press();
-        assert!(panel.down().is_empty(), "the second MUTE lets ALL go");
-        // Armed again, any other press lets ALL go quietly, means
-        // itself alone, and the solo stays standing.
-        panel.press(CsynthControl::All, false, true);
-        panel.press(CsynthControl::Mute, true, true);
-        panel.release_press();
-        assert_eq!(
-            panel.press(CsynthControl::Arrow(Pair::Part, Dir::Right), true, true),
-            CsynthPress::Button(Button::Arrow(Pair::Part, Dir::Right))
-        );
-        panel.release_press();
-        assert!(panel.down().is_empty(), "ALL released on the way out");
+        assert!(panel.down().is_empty(), "the gesture spends the latch");
         // Both INSTRUMENT halves latched through a power-on arrive as
         // the pair held whole.
         panel.press(
