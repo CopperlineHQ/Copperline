@@ -95,20 +95,35 @@ monitor (solo) the shown part.
 | **VOLUME** (knob) | The module's main output level, separate from anything MIDI sends |
 | **POWER** | Switches the module off and on |
 
-### Button combinations
+### Button combinations (POWER ON)
 
 Coppersynth front panel has various features accessed with multi-button
-combinations. Other than "Solo", these all require the unit to first be powered off.
+combinations. The table below will separate these into ones which are 
+accessed with the unit powered on.  
 
-**Right click to hold/latch.**
+```
+Hold = Right Click
+Press = Left Click 
+```
 
 | Combination | Reaches |
 |---|---|
-| ALL + MUTE | Solo the selected PART. Same combo to disable solo |
-| INSTRUMENT < + POWER | MT-32 Mode. MUTE disables, ALL enables |
-| INSTRUMENT > + POWER  | Load the default SoundFont. MUTE cancels, ALL confirms  |
-| PART < + PART > + POWER | Demo sequences. press ALL to play, MUTE to stop, PART buttons to skip song. 
-| Both INSTRUMENT buttons + both MIDI CH buttons | Show version info + credits
+| Hold `ALL` + `MUTE` | Solo the selected PART. Press `MUTE` to disable solo |
+| Hold `MUTE`, Press `CHORUS` | Change the Chorus DSP type (8 total; Chorus, Celestial, Flanger, Short Delay). `MUTE` to cancel, `ALL` to apply
+| Hold `MUTE`, press `MIDI CH` | Change the SysEx Device ID. `MUTE` to cancel, `ALL` to apply
+| Hold `MUTE`, Press `INSTRUMENT` | Change the parts parameters e.g. Portamento, Vibrato, Envelope Generators.etc. `INSTRUMENT` < or > to cycle parameter, `LEVEL` < or > to change the value. `MUTE` to cancel, `ALL` to apply. These can also be controlled via standard MIDI CC commands. 
+| Hold both `LEVEL`,`REVERB`, `KEY SHIFT`, `INSTRUMENT`, `PAN`, `CHORUS` or `MIDI CH` buttons | Holding both of any of those buttons at the same time will show their value in the Midi "equaliser" section across all 16 parts. 
+
+### Button combinations (POWER OFF)
+
+The following button combinations expect the unit to first be powered off. 
+
+| Combination | Reaches |
+|---|---|
+| Hold `INSTRUMENT <`, Press `POWER` | MT-32 Mode. `MUTE` disables, `ALL` enables |
+| Hold `INSTRUMENT >`, Press `POWER`  | Load the default SoundFont. `MUTE` cancels, `ALL` confirms  |
+| Hold `PART <` + `PART >`, Press `POWER` | Demo sequences. press `ALL` to play, `MUTE` to stop, `PART` buttons to skip song. 
+| Hold both `INSTRUMENT` + both `MIDI CH` | Show version info + credits, `MUTE` or `ALL` skips
 
 ## Building without it
 
