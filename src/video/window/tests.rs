@@ -511,6 +511,37 @@ fn numpad_mapping_stands_in_for_the_missing_gamepad() {
 }
 
 #[test]
+fn gamepad_quit_hotkey_requires_a_sustained_hold() {
+    let mut app = test_app();
+
+    // Held: the hold starts and a countdown OSD appears, but no exit is
+    // requested before the hold completes.
+    app.track_gamepad_quit_hold(true);
+    assert!(app.gamepad_quit_hold.is_some());
+    assert!(!app.gamepad_quit_requested);
+    assert!(app
+        .osd
+        .as_ref()
+        .is_some_and(|osd| osd.text.starts_with(super::GAMEPAD_QUIT_OSD_PREFIX)));
+
+    // Released early: the hold is cancelled and the countdown withdrawn.
+    app.track_gamepad_quit_hold(false);
+    assert!(app.gamepad_quit_hold.is_none());
+    assert!(app.osd.is_none());
+    assert!(!app.gamepad_quit_requested);
+
+    // A release with no hold in progress leaves an unrelated OSD alone.
+    app.show_osd("Input mapping saved");
+    app.track_gamepad_quit_hold(false);
+    assert!(app.osd.is_some());
+
+    // A hold that has lasted the full duration requests the exit.
+    app.gamepad_quit_hold = Some(std::time::Instant::now() - super::GAMEPAD_QUIT_HOLD);
+    app.track_gamepad_quit_hold(true);
+    assert!(app.gamepad_quit_requested);
+}
+
+#[test]
 fn autofire_pulses_a_held_fire_button_and_leaves_the_rest_alone() {
     use crate::bus::PortDevice;
     let mut app = test_app();

@@ -10,6 +10,10 @@
 //! persisted to a config file. Because calibration records the actual input
 //! the user pushes for each direction, it needs no axis-sign or axis-order
 //! assumptions -- inversion and layout fall out automatically.
+//!
+//! Besides the emulated controls, calibration can optionally bind one pad
+//! input as a host-side Quit hotkey. That binding never reaches the emulated
+//! port; the window turns a sustained hold of it into an application exit.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -83,6 +87,9 @@ pub struct GamepadCalibration {
     rwd: Option<RawInput>,
     #[serde(default)]
     ffw: Option<RawInput>,
+    // Host-side Quit hotkey (optional; never driven into the emulated port).
+    #[serde(default)]
+    quit: Option<RawInput>,
 }
 
 /// Resolved emulated port-2 joystick state.
@@ -102,7 +109,24 @@ pub struct JoystickState {
     pub ffw: bool,
 }
 
+/// One poll of a calibrated pad: the emulated joystick lines plus the
+/// host-side controls, which never reach the emulated port.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PadState {
+    pub joystick: JoystickState,
+    /// The calibrated Quit hotkey is currently held. Host-side only: the
+    /// window turns a sustained hold into an application exit.
+    pub quit: bool,
+}
+
 impl GamepadCalibration {
+    fn resolve_pad(&self, axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> PadState {
+        PadState {
+            joystick: self.resolve(axes, buttons),
+            quit: self.quit.is_some_and(|i| i.active(axes, buttons)),
+        }
+    }
+
     fn resolve(&self, axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> JoystickState {
         let active = |input: &Option<RawInput>| input.is_some_and(|i| i.active(axes, buttons));
         JoystickState {
@@ -291,9 +315,26 @@ impl GamepadReader {
         Ok(())
     }
 
-    /// Poll the gamepad and return the resolved port-2 joystick state, or
-    /// `None` when there is no pad or no calibration for the connected one.
-    pub fn poll(&mut self) -> Option<JoystickState> {
+    /// Whether a connected, calibrated pad carries a Quit-hotkey binding.
+    /// The window keeps the event loop polling while one is present: gilrs
+    /// is polled, not evented, so a paused or powered-off machine would
+    /// otherwise never observe the hold.
+    pub fn quit_hotkey_present(&mut self) -> bool {
+        let Some(raw) = self.raw.as_mut() else {
+            return false;
+        };
+        raw.pump();
+        let Some(id) = raw.first_gamepad() else {
+            return false;
+        };
+        let uuid = uuid_hex(raw.gilrs.gamepad(id).uuid());
+        self.store.get(&uuid).is_some_and(|cal| cal.quit.is_some())
+    }
+
+    /// Poll the gamepad and return its resolved state (emulated joystick
+    /// lines plus the host-side Quit hotkey), or `None` when there is no
+    /// pad or no calibration for the connected one.
+    pub fn poll(&mut self) -> Option<PadState> {
         let raw = self.raw.as_mut()?;
         raw.pump();
         let id = raw.first_gamepad()?;
@@ -305,7 +346,7 @@ impl GamepadReader {
                     self.logged_calibrated = Some(uuid.clone());
                     log::info!("using saved calibration for gamepad \"{}\"", pad.name());
                 }
-                Some(cal.resolve(&raw.axes, &raw.buttons))
+                Some(cal.resolve_pad(&raw.axes, &raw.buttons))
             }
             None => {
                 if !self.warned_uncalibrated {
@@ -328,7 +369,7 @@ impl GamepadReader {
 
 /// The calibration prompts in order: label and whether the step may be
 /// skipped (pads without CD32 extras skip the optional ones).
-const CAL_STEPS: [(&str, bool); 11] = [
+const CAL_STEPS: [(&str, bool); 12] = [
     ("Up", true),
     ("Down", true),
     ("Left", true),
@@ -340,6 +381,7 @@ const CAL_STEPS: [(&str, bool); 11] = [
     ("CD32 play/pause", false),
     ("CD32 reverse", false),
     ("CD32 forward", false),
+    ("Quit Copperline", false),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +569,7 @@ impl CalibrationSession {
             play: b[8],
             rwd: b[9],
             ffw: b[10],
+            quit: b[11],
         }
     }
 }
@@ -595,6 +638,11 @@ pub fn run_calibration() -> Result<()> {
         play: capture(&mut raw, "CD32 play/pause (or wait to skip)", false)?,
         rwd: capture(&mut raw, "CD32 reverse (or wait to skip)", false)?,
         ffw: capture(&mut raw, "CD32 forward (or wait to skip)", false)?,
+        quit: capture(
+            &mut raw,
+            "the Quit Copperline hotkey (or wait to skip)",
+            false,
+        )?,
     };
 
     let mut store = CalibrationStore::load();
@@ -698,6 +746,7 @@ mod tests {
             play: None,
             rwd: None,
             ffw: None,
+            quit: None,
         };
 
         let mut axes = BTreeMap::new();
@@ -791,6 +840,68 @@ mod tests {
         assert_eq!(cal.down, axis(0x31, true));
         assert_eq!(cal.fire, button(0x9004));
         assert_eq!(cal.green, None);
+        assert_eq!(cal.quit, None);
+    }
+
+    #[test]
+    fn quit_binding_resolves_host_side_only() {
+        // A pad button bound to Quit must surface as the host-side quit
+        // flag and never assert any emulated port line.
+        let cal = GamepadCalibration {
+            fire: button(0x90001),
+            quit: button(0x9000A),
+            ..Default::default()
+        };
+        let mut buttons = BTreeMap::new();
+        buttons.insert(0x9000A, true);
+        let pad = cal.resolve_pad(&BTreeMap::new(), &buttons);
+        assert!(pad.quit);
+        assert_eq!(pad.joystick, JoystickState::default());
+
+        // Fire alone drives the port and leaves quit inactive; an unbound
+        // quit (older calibration files) never activates.
+        buttons.clear();
+        buttons.insert(0x90001, true);
+        let pad = cal.resolve_pad(&BTreeMap::new(), &buttons);
+        assert!(!pad.quit && pad.joystick.fire);
+        let unbound = GamepadCalibration {
+            fire: button(0x90001),
+            ..Default::default()
+        };
+        assert!(!unbound.resolve_pad(&BTreeMap::new(), &buttons).quit);
+    }
+
+    #[test]
+    fn calibration_session_captures_optional_quit_step() {
+        let mut session = CalibrationSession::new();
+        let pad = Some(("Pad".to_string(), "abc123".to_string()));
+        let axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        session.advance(pad.clone(), &axes, &buttons);
+
+        // Capture the required steps, then skip the CD32 extras to land
+        // on the final (optional) Quit step.
+        for step in 0..5 {
+            session.advance(pad.clone(), &axes, &buttons); // neutral
+            buttons.insert(0x9000 + step as u32, true);
+            session.advance(pad.clone(), &axes, &buttons);
+            buttons.clear();
+        }
+        while session.can_skip() && session.current_step() != Some(CAL_STEPS.len() - 1) {
+            session.skip_current();
+        }
+        assert_eq!(session.current_step(), Some(CAL_STEPS.len() - 1));
+        assert!(session.can_skip());
+
+        session.advance(pad.clone(), &axes, &buttons); // neutral
+        buttons.insert(0x900FF, true);
+        assert!(session.advance(pad.clone(), &axes, &buttons));
+        assert!(session.done());
+        assert_eq!(session.to_calibration().quit, button(0x900FF));
+
+        // The post-capture live test reports the held quit binding by name.
+        assert!(session.advance(pad, &axes, &buttons));
+        assert_eq!(session.live_test(), "Quit Copperline");
     }
 
     #[test]
@@ -831,6 +942,7 @@ mod tests {
             GamepadCalibration {
                 up: axis(5, false),
                 fire: button(9),
+                quit: button(11),
                 ..Default::default()
             },
         );
@@ -838,6 +950,7 @@ mod tests {
         let back: CalibrationStore = toml::from_str(&text).unwrap();
         assert_eq!(back.get("abc123").unwrap().up, axis(5, false));
         assert_eq!(back.get("abc123").unwrap().fire, button(9));
+        assert_eq!(back.get("abc123").unwrap().quit, button(11));
         assert!(back.get("abc123").unwrap().down.is_none());
     }
 }
