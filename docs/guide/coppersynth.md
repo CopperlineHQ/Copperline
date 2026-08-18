@@ -112,6 +112,7 @@ Press = Left Click
 | Hold `MUTE`, Press `CHORUS` | Change the Chorus DSP type (8 total; Chorus, Celestial, Flanger, Short Delay). `MUTE` to cancel, `ALL` to apply
 | Hold `MUTE`, press `MIDI CH` | Change the SysEx Device ID. `MUTE` to cancel, `ALL` to apply
 | Hold `MUTE`, Press `INSTRUMENT` | Change the parts parameters e.g. Portamento, Vibrato, Envelope Generators.etc. `INSTRUMENT` < or > to cycle parameter, `LEVEL` < or > to change the value. `MUTE` to cancel, `ALL` to apply. These can also be controlled via standard MIDI CC commands. 
+| Hold both `LEVEL`,`REVERB`, `KEY SHIFT`, `INSTRUMENT`, `PAN`, `CHORUS` or `MIDI CH` buttons | Holding both of any of those buttons at the same time will show their value in the Midi "equaliser" section across all 16 parts. 
 
 ### Button combinations (POWER OFF)
 
