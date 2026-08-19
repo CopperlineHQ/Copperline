@@ -631,7 +631,17 @@ impl Akiko {
         match offset {
             0x00..=0x03 => ID[offset as usize],
             // INTREQ / INTENA (and the read-only INTENA mirror).
-            0x04..=0x07 => get_long_byte(self.intreq, offset - 0x04),
+            // The status read exposes only enabled sources (intreq AND
+            // intena): interrupt servers on the shared INT2 line read
+            // CDINTREQ on every entry, including entries for CIA-A
+            // events, and a stale latched completion bit from a disabled
+            // source must not look like fresh work. The AROS cd.device
+            // interrupt server (real-hardware-tested) signals its task on
+            // any visible RXDMADONE and wedges its sector waits if a
+            // disabled stale latch shows through; Kickstart's server
+            // tolerates either reading. TODO: verify the masking against
+            // real Akiko silicon (WinUAE returns the raw latches).
+            0x04..=0x07 => get_long_byte(self.intreq & self.intena, offset - 0x04),
             0x08..=0x0B => get_long_byte(self.intena, offset - 0x08),
             0x0C..=0x0F => get_long_byte(self.intena, offset - 0x0C),
             // 0x18-0x1B mirror 0x10/0x14/0x1C.
@@ -1979,6 +1989,24 @@ mod tests {
                                             // Both slots consumed, PBX interrupt raised.
         assert_eq!(akiko.pbx, 0);
         assert_ne!(akiko.intreq & CDINT_PBX, 0);
+    }
+
+    #[test]
+    fn intreq_read_exposes_only_enabled_sources() {
+        // The CDINTREQ status read returns intreq AND intena: interrupt
+        // servers on the shared INT2 line read it on every entry, and a
+        // stale latched completion bit from a disabled source must not
+        // look like fresh work (the AROS cd.device server signals its
+        // task on any visible RXDMADONE).
+        let mut chip = no_chip();
+        let mut akiko = Akiko::new();
+        akiko.intreq = CDINT_RXDMADONE | CDINT_TXDMADONE;
+        akiko.intena = 0;
+        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), 0);
+        akiko.intena = CDINT_RXDMADONE;
+        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), CDINT_RXDMADONE);
+        // The latch itself survives the read.
+        assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_TXDMADONE);
     }
 
     #[test]
