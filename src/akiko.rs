@@ -636,11 +636,13 @@ impl Akiko {
             // CDINTREQ on every entry, including entries for CIA-A
             // events, and a stale latched completion bit from a disabled
             // source must not look like fresh work. The AROS cd.device
-            // interrupt server (real-hardware-tested) signals its task on
-            // any visible RXDMADONE and wedges its sector waits if a
-            // disabled stale latch shows through; Kickstart's server
-            // tolerates either reading. TODO: verify the masking against
-            // real Akiko silicon (WinUAE returns the raw latches).
+            // interrupt server signals its task on any visible RXDMADONE
+            // and wedges its sector waits if a disabled stale latch shows
+            // through -- and that server ran on real CD32s in 2013 with
+            // this structure, so the real register cannot behave that
+            // way; Kickstart's server tolerates either reading. TODO:
+            // verify the masking against real Akiko silicon (WinUAE
+            // returns the raw latches).
             0x04..=0x07 => get_long_byte(self.intreq & self.intena, offset - 0x04),
             0x08..=0x0B => get_long_byte(self.intena, offset - 0x08),
             0x0C..=0x0F => get_long_byte(self.intena, offset - 0x0C),
@@ -780,7 +782,17 @@ impl Akiko {
         if self.command_active > 0 {
             self.command_active = self.command_active.saturating_sub(cck);
             if self.command_active == 0 {
-                self.execute_command();
+                if self.receive_length > 0 {
+                    // The response channel still holds an undelivered
+                    // packet (an unsolicited notification can land while
+                    // the turnaround runs): executing now would clobber
+                    // it in result_buffer. Hold the command until the
+                    // ring drains; the host cannot send another one
+                    // meanwhile (can_send_command gates on both).
+                    self.command_active = 1;
+                } else {
+                    self.execute_command();
+                }
             }
         }
 
@@ -2015,6 +2027,73 @@ mod tests {
         assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), CDINT_RXDMADONE);
         // The latch itself survives the read.
         assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_TXDMADONE);
+    }
+
+    #[test]
+    fn command_execution_waits_for_the_response_ring_to_drain() {
+        // An unsolicited notification can land in the response channel
+        // while a command's turnaround runs. Executing the command then
+        // would clobber the undelivered packet in result_buffer, so the
+        // command holds until the ring drains.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        // Kick a STATUS command; the RX window stays closed for now.
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        let tx_base = (MISC | 0x200) as usize;
+        let start = akiko.cdcomtxinx;
+        chip[tx_base + (start as usize & 0xFF)] = 0x17; // STATUS, seq 1
+        chip[tx_base + ((start as usize + 1) & 0xFF)] = 0xFFu8.wrapping_sub(0x17);
+        akiko.write(
+            AKIKO_BASE + 0x1D,
+            1,
+            u32::from(start.wrapping_add(2)),
+            &mut chip,
+        );
+        // TX restart delay, then one ring byte per pump.
+        for _ in 0..4 {
+            akiko.tick(400, &mut chip, &mut ring);
+        }
+        assert!(akiko.command_active > 0, "turnaround armed");
+        assert_eq!(akiko.receive_length, 0);
+
+        // Mid-turnaround, the drive volunteers a media packet.
+        akiko.eject_disc();
+        akiko.tick(500, &mut chip, &mut ring);
+        assert!(akiko.receive_length > 0, "notification queued");
+        assert_eq!(akiko.result_buffer[0], 0x0A);
+
+        // The turnaround expires, but the packet is still undelivered:
+        // the command must hold and the packet must survive.
+        for _ in 0..4 {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert!(akiko.command_active > 0, "command deferred");
+        assert_eq!(akiko.result_buffer[0], 0x0A, "packet survives");
+
+        // Open the RX window: the notification drains, then the command
+        // executes and its response follows it into the ring.
+        let rx0 = akiko.cdcomrxinx as usize;
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        for _ in 0..8 {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.command_active, 0, "command ran after the drain");
+        let rx = &chip[MISC as usize..MISC as usize + 0x100];
+        assert_eq!(rx[rx0 & 0xFF], 0x0A, "notification delivered first");
+        assert_eq!(rx[(rx0 + 3) & 0xFF] & 0x0F, 0x07, "then the response");
     }
 
     #[test]
