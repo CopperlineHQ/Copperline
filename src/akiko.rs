@@ -942,7 +942,8 @@ impl Akiko {
         self.cd_initialized != 0 && self.command_active == 0 && self.receive_length == 0
     }
 
-    /// TX DMA: fetch command bytes from the TX ring in chip RAM.
+    /// TX DMA: fetch command bytes from the TX ring, wherever in the
+    /// 24-bit space the guest placed it.
     fn run_command_dma(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         if self.flags & CDFLAG_TXD == 0 {
             return;
@@ -1442,8 +1443,28 @@ pub trait DmaSpace {
     }
 
     fn dma_put_bytes(&mut self, addr: u32, bytes: &[u8]) {
+        // Aggregate unmapped bytes into one warning per transfer: a
+        // sector is 2352 bytes at CD-frame cadence, and a bad
+        // destination must not flood the log.
+        let mut unmapped = 0usize;
+        let mut first = 0u32;
         for (i, &v) in bytes.iter().enumerate() {
-            self.dma_put(addr.wrapping_add(i as u32), v);
+            let a = addr.wrapping_add(i as u32) & 0x00FF_FFFF;
+            match self.dma_byte_mut(a) {
+                Some(b) => *b = v,
+                None => {
+                    if unmapped == 0 {
+                        first = a;
+                    }
+                    unmapped += 1;
+                }
+            }
+        }
+        if unmapped > 0 {
+            log::warn!(
+                "akiko: DMA write outside RAM: {unmapped} of {} bytes from {first:#010X}",
+                bytes.len()
+            );
         }
     }
 }
