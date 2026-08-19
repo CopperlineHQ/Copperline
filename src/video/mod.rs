@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#[cfg(feature = "frontend")]
+pub mod about;
 pub mod beam;
 pub mod bitplane;
 pub mod deinterlace;

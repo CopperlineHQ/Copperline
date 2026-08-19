@@ -1280,6 +1280,10 @@ pub struct App {
     /// A submenu the pointer is resting on, waiting out the dwell before
     /// it opens: `(depth, row, since)`. Hovering elsewhere disarms it.
     menu_hover_arm: Option<(usize, usize, Instant)>,
+    /// When the About panel opened, driving its entrance animation, and
+    /// when its animation last asked for a frame.
+    about_opened_at: Instant,
+    about_redraw_at: Instant,
     /// Emulated-machine summary lines for the About window.
     about_machine_lines: Vec<String>,
     /// Raw config of the running (or last-applied) machine, so the "Machine
@@ -2011,6 +2015,8 @@ impl App {
             autofire_hz,
             ui: UiState::default(),
             menu_hover_arm: None,
+            about_opened_at: Instant::now(),
+            about_redraw_at: Instant::now(),
             about_machine_lines,
             machine_config,
             paused_before_debugger: false,
@@ -4280,6 +4286,9 @@ impl ApplicationHandler for App {
         // A held scroll arrow has no event of its own to wake on: the button
         // went down once and the repeats are this loop's own doing.
         let scrolling = self.scroll_hold.is_some();
+        // The About panel animates on the clock, so it too must keep the
+        // loop awake while it is up.
+        let about_open = matches!(self.ui.panel, Some(Panel::About));
         event_loop.set_control_flow(
             if running
                 || osd_active
@@ -4287,6 +4296,7 @@ impl ApplicationHandler for App {
                 || writing_image
                 || scrolling
                 || typing
+                || about_open
                 || pad_quit_watch
             {
                 ControlFlow::Poll
@@ -4303,6 +4313,11 @@ impl ApplicationHandler for App {
         if pad_quit_watch && !running && !writing_image {
             // Poll the pad at a human rate rather than spinning a core;
             // plenty of granularity inside the quit hotkey's 1.5 s hold.
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        if about_open && !running && !writing_image {
+            // The About animation likewise paces itself when the machine
+            // is off: a human-rate tick, not a spinning core.
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
         if osd_active && !running {
@@ -4416,6 +4431,14 @@ impl ApplicationHandler for App {
         // is current when the redraw decision below is taken.
         self.update_perf_overlay(running);
         self.poll_menu_hover_arm();
+        // The About panel's entrance and wave play on the clock; keep
+        // the frames coming while it is up.
+        if matches!(self.ui.panel, Some(Panel::About))
+            && self.about_redraw_at.elapsed() >= std::time::Duration::from_millis(40)
+        {
+            self.about_redraw_at = std::time::Instant::now();
+            self.request_redraw();
+        }
         #[cfg(feature = "coppersynth")]
         {
             self.repeat_csynth_dial();
@@ -5739,7 +5762,10 @@ impl App {
                 self.ui.panel = Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));
             }
             A::OpenShortcuts => self.ui.panel = Some(Panel::Shortcuts),
-            A::OpenAbout => self.ui.panel = Some(Panel::About),
+            A::OpenAbout => {
+                self.about_opened_at = std::time::Instant::now();
+                self.ui.panel = Some(Panel::About);
+            }
             A::LoadRom => self.load_rom_from_dialog(),
 
             A::SetAudioOutput(choice) => {
@@ -10711,7 +10737,14 @@ impl App {
             match result {
                 Ok(identified) => {
                     let name = display_file_name(&main_path);
-                    let rom_line = crate::config::about_rom_line(&name, identified);
+                    // The in-memory identification sees through a Cloanto
+                    // wrapper; the path-based one names an AROS image's
+                    // version and revision. Prefer the former, fall back
+                    // to the latter.
+                    let line_id = identified
+                        .map(str::to_string)
+                        .or_else(|| crate::config::about_rom_identification(&main_path));
+                    let rom_line = crate::config::about_rom_line(&name, line_id.as_deref());
                     match identified {
                         Some(id) => info!("boot ROM loaded: {} ({id})", main_path.display()),
                         None => info!("boot ROM loaded: {}", main_path.display()),
@@ -10727,6 +10760,35 @@ impl App {
                     {
                         Some(line) => *line = rom_line,
                         None => self.about_machine_lines.push(rom_line),
+                    }
+                    // The extended ROM line follows the same swap: updated,
+                    // added after the boot ROM's line, or dropped to match
+                    // what is now fitted.
+                    let ext_line = ext_path.as_deref().map(|p| {
+                        crate::config::about_ext_rom_line(
+                            &display_file_name(p),
+                            crate::config::about_rom_identification(p).as_deref(),
+                        )
+                    });
+                    let at = self
+                        .about_machine_lines
+                        .iter()
+                        .position(|l| l.starts_with("Extended ROM: "));
+                    match (at, ext_line) {
+                        (Some(i), Some(line)) => self.about_machine_lines[i] = line,
+                        (Some(i), None) => {
+                            self.about_machine_lines.remove(i);
+                        }
+                        (None, Some(line)) => {
+                            let after_rom = self
+                                .about_machine_lines
+                                .iter()
+                                .position(|l| l.starts_with("ROM: "))
+                                .map(|i| i + 1)
+                                .unwrap_or(self.about_machine_lines.len());
+                            self.about_machine_lines.insert(after_rom, line);
+                        }
+                        (None, None) => {}
                     }
                     self.powered_on = true;
                     self.cpu_halted = false;
@@ -11606,8 +11668,11 @@ impl App {
     /// Build the per-redraw view data for the open panel, if any.
     fn build_panel_view_data(&self) -> Option<ui::PanelViewData> {
         match self.ui.panel.as_ref()? {
-            Panel::About => Some(ui::PanelViewData::About(ui::AboutView {
+            Panel::About => Some(ui::PanelViewData::About(crate::video::about::AboutView {
                 machine_lines: self.about_machine_lines.clone(),
+                elapsed_ms: self.about_opened_at.elapsed().as_millis() as u64,
+                machine_fitted: self.about_machine_lines.first().map(String::as_str)
+                    != Some(crate::config::ABOUT_PLACEHOLDER_LINE),
             })),
             Panel::Shortcuts => Some(ui::PanelViewData::Shortcuts),
             // Self-contained: the panel's own state is everything it draws.
