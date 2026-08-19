@@ -5829,7 +5829,7 @@ impl Bus {
         // Akiko: advance the CD controller (sector DMA pacing, command
         // and response rings) and level-feed its INT2 line like Gayle's.
         if let Some(akiko) = self.akiko.as_mut() {
-            akiko.tick(cck, &mut self.mem.chip_ram, self.paula.cd_audio_mut());
+            akiko.tick(cck, &mut self.mem, self.paula.cd_audio_mut());
             if akiko.int2_line() {
                 self.paula.intreq |= INT_PORTS;
             }

@@ -3377,7 +3377,7 @@ impl CpuBus {
         {
             self.bus.cpu_slow_external_access(Self::access_words(size));
             if let Some(akiko) = self.bus.akiko.as_mut() {
-                return akiko.read(addr, size, &mut self.bus.mem.chip_ram);
+                return akiko.read(addr, size, &mut self.bus.mem);
             }
         }
         if self
@@ -3694,7 +3694,7 @@ impl CpuBus {
         {
             self.bus.cpu_slow_external_access(Self::access_words(size));
             if let Some(akiko) = self.bus.akiko.as_mut() {
-                akiko.write(addr, size, value, &mut self.bus.mem.chip_ram);
+                akiko.write(addr, size, value, &mut self.bus.mem);
             }
             return;
         }
