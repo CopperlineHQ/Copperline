@@ -21,10 +21,11 @@ Built from source on 2026-08-19 from AROS upstream master
 (https://github.com/aros-development-team/AROS) at commit 15be4732,
 plus the cd.device series of pull request 1018
 (https://github.com/aros-development-team/AROS/pull/1018, through commit
-e3eb2b54), which is not yet merged. Fixes Copperline contributed or
+e3eb2b54; merged into master the same day as d07902abd0af). Fixes Copperline contributed or
 depends on, in master unless noted:
 
-- the cd.device CD32 CD-boot series of pull request 1018 (in flight):
+- the cd.device CD32 CD-boot series of pull request 1018 (merged
+  2026-08-19):
   CD0: registered with the DosType CDVDFS actually claims (a 2019
   regression had left it unmountable), latched-completion handling in
   the Akiko command loop, the disc probe moved off the boot task onto
