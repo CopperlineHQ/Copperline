@@ -1126,7 +1126,16 @@ impl Akiko {
             return 15;
         }
         self.result_buffer[1] = 0x0A; // matches real CD32 captures
-        let index = (self.toc_counter as u32 / TOC_REPEAT) as usize;
+
+        // The firmware's TOC dump streams the track entries first and the
+        // A0/A1/A2 session entries last. Drivers may treat the lead-out
+        // entry (A2) as "TOC complete" and stop parsing, so every track
+        // entry must precede it; session-entries-first starves such a
+        // parser of the track list (KS cd.device is order-insensitive,
+        // AROS cd.device latches at A2).
+        let pos = (self.toc_counter as u32 / TOC_REPEAT) as usize;
+        let tracks = self.toc.len() - 3;
+        let index = if pos < tracks { pos + 3 } else { pos - tracks };
         let entry = toc_entry_bytes(&self.toc[index]);
         self.result_buffer[2..15].copy_from_slice(&entry);
         // Fake the head's running position, as the real firmware does.
@@ -1993,5 +2002,58 @@ mod tests {
                 && ring[(i + 12) & 0xFF] == 0x08
         });
         assert!(found, "lead-out TOC packet not found in RX ring");
+    }
+
+    #[test]
+    fn toc_dump_streams_track_entries_before_session_entries() {
+        // The firmware's TOC dump delivers the track entries first and the
+        // A0/A1/A2 session entries last. A driver may treat the lead-out
+        // entry (A2) as end-of-TOC and stop parsing, so a track entry
+        // arriving after A2 would be lost.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        let pre = akiko.cdcomrxinx as usize;
+        let response = dma_command(
+            &mut akiko,
+            &mut chip,
+            &[
+                0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        assert_eq!(response[0], 0x04);
+        assert!(akiko.toc_counter >= 0, "TOC dump should be armed");
+        // The ring serializes responses: the 3-byte command response
+        // first, then the TOC packets.
+        let start = pre + 3;
+
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        for _ in 0..400 {
+            akiko.tick(CCK_PER_CD_FRAME / 4, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.toc_counter, -1, "TOC dump should have completed");
+
+        // One data track: 4 entries x TOC_REPEAT packets of 16 bytes,
+        // laid out in DMA order from the pre-dump RX index (no wrap).
+        let rx_base = 0x1000usize;
+        let ring = &chip[rx_base..rx_base + 0x100];
+        let points: Vec<u8> = (0..4 * TOC_REPEAT as usize)
+            .map(|p| ring[(start + p * 16 + 5) & 0xFF])
+            .collect();
+        let expected: Vec<u8> = [0x01, 0xA0, 0xA1, 0xA2]
+            .iter()
+            .flat_map(|&pt| std::iter::repeat_n(pt, TOC_REPEAT as usize))
+            .collect();
+        assert_eq!(points, expected, "TOC stream order: tracks then A0/A1/A2");
     }
 }
