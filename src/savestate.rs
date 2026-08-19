@@ -202,7 +202,7 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      `ToneFilterBank`) -- the param-latch DSP chain's genuine machine
 //      state (biquad coefficients and filter memory), `[mhi]`, feature-
 //      gated behind `mhi`.
-pub const STATE_VERSION: u32 = 59;
+pub const STATE_VERSION: u32 = 60;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

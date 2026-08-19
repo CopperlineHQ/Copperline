@@ -81,6 +81,17 @@ const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
 /// TX/RX DMA restart delay: ~3 scanlines, expressed in colour clocks.
 const DMA_RESTART_DELAY_CCK: u32 = 3 * 227;
 
+/// Drive-microcontroller command turnaround: a received command executes
+/// this much emulated time after its last byte arrives, roughly 1 ms.
+/// The real Chinon takes at least that long, and drivers depend on the
+/// asynchrony: they finish arming DMA windows, interrupt enables, and
+/// flag bits after kicking the command, then sleep until the completion
+/// interrupt. Executing synchronously inside the guest's register write
+/// delivers the response before the driver has finished arming, which
+/// inverts its interrupt handshake (observed with AROS cd.device).
+/// TODO: measure the real command latency per opcode on CD32 hardware.
+const CMD_EXEC_DELAY_CCK: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 1000;
+
 fn get_long_byte(value: u32, offset: u32) -> u8 {
     (value >> (8 * (3 - offset))) as u8
 }
@@ -387,7 +398,7 @@ pub struct Akiko {
     command_buffer: [u8; 32],
     command_length: usize,
     command: u8,
-    command_active: u8,
+    command_active: u32,
     checksum_error: bool,
     unknown_command: bool,
 
@@ -756,6 +767,13 @@ impl Akiko {
             }
         }
 
+        if self.command_active > 0 {
+            self.command_active = self.command_active.saturating_sub(cck);
+            if self.command_active == 0 {
+                self.execute_command();
+            }
+        }
+
         self.read_counter_cck -= cck as i32;
         if self.read_counter_cck <= 0 {
             self.read_counter_cck += (CCK_PER_CD_FRAME / self.speed.max(1)) as i32;
@@ -879,12 +897,10 @@ impl Akiko {
     fn run_internal(&mut self, chip_ram: &mut [u8]) {
         self.return_data(chip_ram);
         self.run_command_dma(chip_ram);
-        if self.command_active > 0 {
-            self.command_active -= 1;
-            if self.command_active == 0 {
-                self.execute_command();
-            }
-        }
+        // Command execution is paced by emulated time (`command_active`
+        // counts down in tick()), never by register accesses: the drive's
+        // microcontroller answers after CMD_EXEC_DELAY_CCK, while the
+        // guest is off arming its completion interrupt.
     }
 
     // ----- command path ----------------------------------------------------
@@ -931,7 +947,7 @@ impl Akiko {
 
         if cmd_len < 0 {
             self.unknown_command = true;
-            self.command_active = 1;
+            self.command_active = CMD_EXEC_DELAY_CCK;
             return;
         }
         let cmd_len = cmd_len as usize;
@@ -945,11 +961,17 @@ impl Akiko {
         if checksum != 0xFF {
             self.checksum_error = true;
         }
-        self.command_active = 1;
+        self.command_active = CMD_EXEC_DELAY_CCK;
         self.command_length = cmd_len;
     }
 
     fn execute_command(&mut self) {
+        log::trace!(
+            "akiko: exec cmd {:02x?} csum_err={} unknown={}",
+            &self.command_buffer[..self.command_length.min(13)],
+            self.checksum_error,
+            self.unknown_command
+        );
         self.command_length = 0;
         self.result_buffer = [0; 32];
 
@@ -1273,6 +1295,11 @@ impl Akiko {
         raw[2] = 0;
         raw[3] = (self.sector_counter & 31) as u8;
 
+        log::trace!(
+            "akiko: sector {sector} -> slot {slot} (tag {}, pbx {:04x})",
+            self.sector_counter & 31,
+            self.pbx
+        );
         let base = self.addressdata + slot * 4096;
         chip_put_bytes(chip_ram, base, &raw);
         // Clear the slot's subcode area.
@@ -1952,6 +1979,55 @@ mod tests {
                                             // Both slots consumed, PBX interrupt raised.
         assert_eq!(akiko.pbx, 0);
         assert_ne!(akiko.intreq & CDINT_PBX, 0);
+    }
+
+    #[test]
+    fn command_execution_is_paced_by_emulated_time_not_accesses() {
+        // The drive's microcontroller answers a command CMD_EXEC_DELAY_CCK
+        // after its last byte, never synchronously inside the guest's
+        // register write. Drivers finish arming their completion interrupt
+        // after kicking the command; a response delivered mid-arming
+        // inverts the handshake (observed with AROS cd.device).
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        let tx_base = (MISC | 0x200) as usize;
+        let start = akiko.cdcomtxinx;
+        chip[tx_base + (start as usize & 0xFF)] = 0x17; // STATUS, seq 1
+        chip[tx_base + ((start as usize + 1) & 0xFF)] = 0xFFu8.wrapping_sub(0x17);
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        let rx_before = akiko.cdcomrxinx;
+        akiko.write(
+            AKIKO_BASE + 0x1D,
+            1,
+            u32::from(start.wrapping_add(2)),
+            &mut chip,
+        );
+
+        // Hammer the register file without advancing time: no response.
+        for _ in 0..64 {
+            let _ = akiko.read(AKIKO_BASE + 0x04, 4, &mut chip);
+        }
+        assert_eq!(akiko.cdcomrxinx, rx_before, "no response before the delay");
+
+        // Advance past the turnaround: the response arrives.
+        for _ in 0..8 {
+            akiko.tick(CMD_EXEC_DELAY_CCK / 4, &mut chip, &mut ring);
+        }
+        assert_ne!(akiko.cdcomrxinx, rx_before, "response after the delay");
     }
 
     #[test]
