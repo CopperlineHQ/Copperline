@@ -81,6 +81,17 @@ const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
 /// TX/RX DMA restart delay: ~3 scanlines, expressed in colour clocks.
 const DMA_RESTART_DELAY_CCK: u32 = 3 * 227;
 
+/// Drive-microcontroller command turnaround: a received command executes
+/// this much emulated time after its last byte arrives, roughly 1 ms.
+/// The real Chinon takes at least that long, and drivers depend on the
+/// asynchrony: they finish arming DMA windows, interrupt enables, and
+/// flag bits after kicking the command, then sleep until the completion
+/// interrupt. Executing synchronously inside the guest's register write
+/// delivers the response before the driver has finished arming, which
+/// inverts its interrupt handshake (observed with AROS cd.device).
+/// TODO: measure the real command latency per opcode on CD32 hardware.
+const CMD_EXEC_DELAY_CCK: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 1000;
+
 fn get_long_byte(value: u32, offset: u32) -> u8 {
     (value >> (8 * (3 - offset))) as u8
 }
@@ -387,7 +398,7 @@ pub struct Akiko {
     command_buffer: [u8; 32],
     command_length: usize,
     command: u8,
-    command_active: u8,
+    command_active: u32,
     checksum_error: bool,
     unknown_command: bool,
 
@@ -620,7 +631,19 @@ impl Akiko {
         match offset {
             0x00..=0x03 => ID[offset as usize],
             // INTREQ / INTENA (and the read-only INTENA mirror).
-            0x04..=0x07 => get_long_byte(self.intreq, offset - 0x04),
+            // The status read exposes only enabled sources (intreq AND
+            // intena): interrupt servers on the shared INT2 line read
+            // CDINTREQ on every entry, including entries for CIA-A
+            // events, and a stale latched completion bit from a disabled
+            // source must not look like fresh work. The AROS cd.device
+            // interrupt server signals its task on any visible RXDMADONE
+            // and wedges its sector waits if a disabled stale latch shows
+            // through -- and that server ran on real CD32s in 2013 with
+            // this structure, so the real register cannot behave that
+            // way; Kickstart's server tolerates either reading. TODO:
+            // verify the masking against real Akiko silicon (WinUAE
+            // returns the raw latches).
+            0x04..=0x07 => get_long_byte(self.intreq & self.intena, offset - 0x04),
             0x08..=0x0B => get_long_byte(self.intena, offset - 0x08),
             0x0C..=0x0F => get_long_byte(self.intena, offset - 0x0C),
             // 0x18-0x1B mirror 0x10/0x14/0x1C.
@@ -756,6 +779,23 @@ impl Akiko {
             }
         }
 
+        if self.command_active > 0 {
+            self.command_active = self.command_active.saturating_sub(cck);
+            if self.command_active == 0 {
+                if self.receive_length > 0 {
+                    // The response channel still holds an undelivered
+                    // packet (an unsolicited notification can land while
+                    // the turnaround runs): executing now would clobber
+                    // it in result_buffer. Hold the command until the
+                    // ring drains; the host cannot send another one
+                    // meanwhile (can_send_command gates on both).
+                    self.command_active = 1;
+                } else {
+                    self.execute_command();
+                }
+            }
+        }
+
         self.read_counter_cck -= cck as i32;
         if self.read_counter_cck <= 0 {
             self.read_counter_cck += (CCK_PER_CD_FRAME / self.speed.max(1)) as i32;
@@ -879,12 +919,10 @@ impl Akiko {
     fn run_internal(&mut self, chip_ram: &mut [u8]) {
         self.return_data(chip_ram);
         self.run_command_dma(chip_ram);
-        if self.command_active > 0 {
-            self.command_active -= 1;
-            if self.command_active == 0 {
-                self.execute_command();
-            }
-        }
+        // Command execution is paced by emulated time (`command_active`
+        // counts down in tick()), never by register accesses: the drive's
+        // microcontroller answers after CMD_EXEC_DELAY_CCK, while the
+        // guest is off arming its completion interrupt.
     }
 
     // ----- command path ----------------------------------------------------
@@ -931,7 +969,7 @@ impl Akiko {
 
         if cmd_len < 0 {
             self.unknown_command = true;
-            self.command_active = 1;
+            self.command_active = CMD_EXEC_DELAY_CCK;
             return;
         }
         let cmd_len = cmd_len as usize;
@@ -945,11 +983,17 @@ impl Akiko {
         if checksum != 0xFF {
             self.checksum_error = true;
         }
-        self.command_active = 1;
+        self.command_active = CMD_EXEC_DELAY_CCK;
         self.command_length = cmd_len;
     }
 
     fn execute_command(&mut self) {
+        log::trace!(
+            "akiko: exec cmd {:02x?} csum_err={} unknown={}",
+            &self.command_buffer[..self.command_length.min(13)],
+            self.checksum_error,
+            self.unknown_command
+        );
         self.command_length = 0;
         self.result_buffer = [0; 32];
 
@@ -1104,7 +1148,13 @@ impl Akiko {
 
     fn command_media_status(&mut self) -> usize {
         self.result_buffer[0] = 0x0A;
-        self.result_buffer[1] = u8::from(self.disc.is_some());
+        // Disc present is 0x83, cross-checked against both real-hardware
+        // ROM drivers: the CD32 Kickstart media handler masks this byte
+        // with 0x03 and treats nonzero as present (extended ROM $E59712,
+        // "andib #3"), while AROS cd.device compares the whole byte
+        // against 0x83 - only 0x83 satisfies both. WinUAE returns a bare
+        // 0x01 here, which only works because of Kickstart's mask.
+        self.result_buffer[1] = if self.disc.is_some() { 0x83 } else { 0x00 };
         2
     }
 
@@ -1126,7 +1176,16 @@ impl Akiko {
             return 15;
         }
         self.result_buffer[1] = 0x0A; // matches real CD32 captures
-        let index = (self.toc_counter as u32 / TOC_REPEAT) as usize;
+
+        // The firmware's TOC dump streams the track entries first and the
+        // A0/A1/A2 session entries last. Drivers may treat the lead-out
+        // entry (A2) as "TOC complete" and stop parsing, so every track
+        // entry must precede it; session-entries-first starves such a
+        // parser of the track list (KS cd.device is order-insensitive,
+        // AROS cd.device latches at A2).
+        let pos = (self.toc_counter as u32 / TOC_REPEAT) as usize;
+        let tracks = self.toc.len() - 3;
+        let index = if pos < tracks { pos + 3 } else { pos - tracks };
         let entry = toc_entry_bytes(&self.toc[index]);
         self.result_buffer[2..15].copy_from_slice(&entry);
         // Fake the head's running position, as the real firmware does.
@@ -1264,6 +1323,11 @@ impl Akiko {
         raw[2] = 0;
         raw[3] = (self.sector_counter & 31) as u8;
 
+        log::trace!(
+            "akiko: sector {sector} -> slot {slot} (tag {}, pbx {:04x})",
+            self.sector_counter & 31,
+            self.pbx
+        );
         let base = self.addressdata + slot * 4096;
         chip_put_bytes(chip_ram, base, &raw);
         // Clear the slot's subcode area.
@@ -1508,12 +1572,14 @@ mod tests {
         assert!(akiko.receive_length > 0);
 
         // Runtime insert: another packet, now showing media present.
+        // 0x83 satisfies both ROM drivers (KS masks with 3, AROS matches
+        // the whole byte).
         akiko.receive_length = 0;
         akiko.insert_disc(test_disc());
         assert!(akiko.media_notify);
         akiko.handler();
         assert_eq!(akiko.result_buffer[0], 0x0A);
-        assert_eq!(akiko.result_buffer[1], 1);
+        assert_eq!(akiko.result_buffer[1], 0x83);
     }
 
     fn test_disc() -> CdImage {
@@ -1946,6 +2012,140 @@ mod tests {
     }
 
     #[test]
+    fn intreq_read_exposes_only_enabled_sources() {
+        // The CDINTREQ status read returns intreq AND intena: interrupt
+        // servers on the shared INT2 line read it on every entry, and a
+        // stale latched completion bit from a disabled source must not
+        // look like fresh work (the AROS cd.device server signals its
+        // task on any visible RXDMADONE).
+        let mut chip = no_chip();
+        let mut akiko = Akiko::new();
+        akiko.intreq = CDINT_RXDMADONE | CDINT_TXDMADONE;
+        akiko.intena = 0;
+        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), 0);
+        akiko.intena = CDINT_RXDMADONE;
+        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), CDINT_RXDMADONE);
+        // The latch itself survives the read.
+        assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_TXDMADONE);
+    }
+
+    #[test]
+    fn command_execution_waits_for_the_response_ring_to_drain() {
+        // An unsolicited notification can land in the response channel
+        // while a command's turnaround runs. Executing the command then
+        // would clobber the undelivered packet in result_buffer, so the
+        // command holds until the ring drains.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        // Kick a STATUS command; the RX window stays closed for now.
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        let tx_base = (MISC | 0x200) as usize;
+        let start = akiko.cdcomtxinx;
+        chip[tx_base + (start as usize & 0xFF)] = 0x17; // STATUS, seq 1
+        chip[tx_base + ((start as usize + 1) & 0xFF)] = 0xFFu8.wrapping_sub(0x17);
+        akiko.write(
+            AKIKO_BASE + 0x1D,
+            1,
+            u32::from(start.wrapping_add(2)),
+            &mut chip,
+        );
+        // TX restart delay, then one ring byte per pump.
+        for _ in 0..4 {
+            akiko.tick(400, &mut chip, &mut ring);
+        }
+        assert!(akiko.command_active > 0, "turnaround armed");
+        assert_eq!(akiko.receive_length, 0);
+
+        // Mid-turnaround, the drive volunteers a media packet.
+        akiko.eject_disc();
+        akiko.tick(500, &mut chip, &mut ring);
+        assert!(akiko.receive_length > 0, "notification queued");
+        assert_eq!(akiko.result_buffer[0], 0x0A);
+
+        // The turnaround expires, but the packet is still undelivered:
+        // the command must hold and the packet must survive.
+        for _ in 0..4 {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert!(akiko.command_active > 0, "command deferred");
+        assert_eq!(akiko.result_buffer[0], 0x0A, "packet survives");
+
+        // Open the RX window: the notification drains, then the command
+        // executes and its response follows it into the ring.
+        let rx0 = akiko.cdcomrxinx as usize;
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        for _ in 0..8 {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.command_active, 0, "command ran after the drain");
+        let rx = &chip[MISC as usize..MISC as usize + 0x100];
+        assert_eq!(rx[rx0 & 0xFF], 0x0A, "notification delivered first");
+        assert_eq!(rx[(rx0 + 3) & 0xFF] & 0x0F, 0x07, "then the response");
+    }
+
+    #[test]
+    fn command_execution_is_paced_by_emulated_time_not_accesses() {
+        // The drive's microcontroller answers a command CMD_EXEC_DELAY_CCK
+        // after its last byte, never synchronously inside the guest's
+        // register write. Drivers finish arming their completion interrupt
+        // after kicking the command; a response delivered mid-arming
+        // inverts the handshake (observed with AROS cd.device).
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        let tx_base = (MISC | 0x200) as usize;
+        let start = akiko.cdcomtxinx;
+        chip[tx_base + (start as usize & 0xFF)] = 0x17; // STATUS, seq 1
+        chip[tx_base + ((start as usize + 1) & 0xFF)] = 0xFFu8.wrapping_sub(0x17);
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        let rx_before = akiko.cdcomrxinx;
+        akiko.write(
+            AKIKO_BASE + 0x1D,
+            1,
+            u32::from(start.wrapping_add(2)),
+            &mut chip,
+        );
+
+        // Hammer the register file without advancing time: no response.
+        for _ in 0..64 {
+            let _ = akiko.read(AKIKO_BASE + 0x04, 4, &mut chip);
+        }
+        assert_eq!(akiko.cdcomrxinx, rx_before, "no response before the delay");
+
+        // Advance past the turnaround: the response arrives.
+        for _ in 0..8 {
+            akiko.tick(CMD_EXEC_DELAY_CCK / 4, &mut chip, &mut ring);
+        }
+        assert_ne!(akiko.cdcomrxinx, rx_before, "response after the delay");
+    }
+
+    #[test]
     fn toc_dump_streams_entries_after_leadin_play_command() {
         let mut ring = CdAudioRing::default();
         let mut chip = vec![0u8; 64 * 1024];
@@ -1993,5 +2193,58 @@ mod tests {
                 && ring[(i + 12) & 0xFF] == 0x08
         });
         assert!(found, "lead-out TOC packet not found in RX ring");
+    }
+
+    #[test]
+    fn toc_dump_streams_track_entries_before_session_entries() {
+        // The firmware's TOC dump delivers the track entries first and the
+        // A0/A1/A2 session entries last. A driver may treat the lead-out
+        // entry (A2) as end-of-TOC and stop parsing, so a track entry
+        // arriving after A2 would be lost.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        let pre = akiko.cdcomrxinx as usize;
+        let response = dma_command(
+            &mut akiko,
+            &mut chip,
+            &[
+                0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        assert_eq!(response[0], 0x04);
+        assert!(akiko.toc_counter >= 0, "TOC dump should be armed");
+        // The ring serializes responses: the 3-byte command response
+        // first, then the TOC packets.
+        let start = pre + 3;
+
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+        for _ in 0..400 {
+            akiko.tick(CCK_PER_CD_FRAME / 4, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.toc_counter, -1, "TOC dump should have completed");
+
+        // One data track: 4 entries x TOC_REPEAT packets of 16 bytes,
+        // laid out in DMA order from the pre-dump RX index (no wrap).
+        let rx_base = 0x1000usize;
+        let ring = &chip[rx_base..rx_base + 0x100];
+        let points: Vec<u8> = (0..4 * TOC_REPEAT as usize)
+            .map(|p| ring[(start + p * 16 + 5) & 0xFF])
+            .collect();
+        let expected: Vec<u8> = [0x01, 0xA0, 0xA1, 0xA2]
+            .iter()
+            .flat_map(|&pt| std::iter::repeat_n(pt, TOC_REPEAT as usize))
+            .collect();
+        assert_eq!(points, expected, "TOC stream order: tracks then A0/A1/A2");
     }
 }
