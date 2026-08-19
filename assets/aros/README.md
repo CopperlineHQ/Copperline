@@ -18,12 +18,20 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 ## Provenance
 
 Built from source on 2026-08-19 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 15be4732,
-plus the cd.device series of pull request 1018
-(https://github.com/aros-development-team/AROS/pull/1018, through commit
-e3eb2b54; merged into master the same day as d07902abd0af). Fixes Copperline contributed or
+(https://github.com/aros-development-team/AROS) at commit d07902ab
+(the merge of the cd.device CD32 CD-boot series, pull request 1018),
+plus the low-chip boot-console series of pull request 1022
+(https://github.com/aros-development-team/AROS/pull/1022, through commit
+89a6f60e), which is not yet merged. Fixes Copperline contributed or
 depends on, in master unless noted:
 
+- the low-chip boot-console series of pull request 1022 (in flight):
+  a boot console that cannot get its window latches the failure and
+  degrades to a sink instead of re-attempting a 40 KiB Workbench screen
+  on every packet (the loop a CD32 game that fills all of chip RAM used
+  to trigger), the bitmap-allocation failure paths gain diagnostics
+  including free-chip figures, and a window closed on a failed
+  console.device open no longer leaves a dangling pointer.
 - the cd.device CD32 CD-boot series of pull request 1018 (merged
   2026-08-19):
   CD0: registered with the DosType CDVDFS actually claims (a 2019
