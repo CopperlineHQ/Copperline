@@ -1136,7 +1136,13 @@ impl Akiko {
 
     fn command_media_status(&mut self) -> usize {
         self.result_buffer[0] = 0x0A;
-        self.result_buffer[1] = u8::from(self.disc.is_some());
+        // Disc present is 0x83, cross-checked against both real-hardware
+        // ROM drivers: the CD32 Kickstart media handler masks this byte
+        // with 0x03 and treats nonzero as present (extended ROM $E59712,
+        // "andib #3"), while AROS cd.device compares the whole byte
+        // against 0x83 - only 0x83 satisfies both. WinUAE returns a bare
+        // 0x01 here, which only works because of Kickstart's mask.
+        self.result_buffer[1] = if self.disc.is_some() { 0x83 } else { 0x00 };
         2
     }
 
@@ -1554,12 +1560,14 @@ mod tests {
         assert!(akiko.receive_length > 0);
 
         // Runtime insert: another packet, now showing media present.
+        // 0x83 satisfies both ROM drivers (KS masks with 3, AROS matches
+        // the whole byte).
         akiko.receive_length = 0;
         akiko.insert_disc(test_disc());
         assert!(akiko.media_notify);
         akiko.handler();
         assert_eq!(akiko.result_buffer[0], 0x0A);
-        assert_eq!(akiko.result_buffer[1], 1);
+        assert_eq!(akiko.result_buffer[1], 0x83);
     }
 
     fn test_disc() -> CdImage {

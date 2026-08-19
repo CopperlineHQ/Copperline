@@ -465,6 +465,20 @@ audio mixes into the host output, and both light the blue CD LED. The
 512 KiB extended ROM sits at `$E00000`, and the CD32 pad protocol drives
 port 2.
 
+The drive protocol is cross-checked against both ROM drivers known to have
+run on real hardware, Kickstart's cd.device and AROS's, which pinned down
+four behaviours where the two disagree with older emulator lore: the drive
+microcontroller answers a command about a millisecond after its last byte
+rather than inside the guest's register write (drivers arm their
+completion interrupt in that window); the TOC dump streams the track
+entries before the A0/A1/A2 session entries, since a parser may treat the
+lead-out entry as end-of-TOC; the CDINTREQ status read exposes only
+enabled sources (`intreq & intena`), because INT2 servers read it on every
+chain entry and a stale latch from a disabled source must not look like
+fresh work; and the media-status packet reports a present disc as `$83`
+(Kickstart masks the byte with 3, AROS compares it whole -- only `$83`
+satisfies both).
+
 `cdrom.rs` parses BIN/CUE cue sheets (single- or multi-file;
 MODE1/2048, MODE1/2352, and AUDIO tracks) for both machines.
 
