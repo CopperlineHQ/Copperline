@@ -17,11 +17,20 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-07 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit f51ea232b1,
-with no local patches. Fixes Copperline contributed or depends on, all
-in master:
+Built from source on 2026-08-19 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit 15be4732,
+plus the cd.device series of pull request 1018
+(https://github.com/aros-development-team/AROS/pull/1018, through commit
+d9f7a465), which is not yet merged. Fixes Copperline contributed or
+depends on, in master unless noted:
 
+- the cd.device CD32 CD-boot series of pull request 1018 (in flight):
+  CD0: registered with the DosType CDVDFS actually claims (a 2019
+  regression had left it unmountable), latched-completion handling in
+  the Akiko command loop, the disc probe moved off the boot task onto
+  the unit task, timeouts on the drive waits, and a DosEnvec that no
+  longer carries stack garbage. With these, CD32 discs mount through
+  CDVDFS and boot.
 - the NTSC boot fix of pull request 876
   (https://github.com/aros-development-team/AROS/pull/876, commit
   c4780bddbd): dosboot and intuition probed BestModeID for a 640x480 mode
