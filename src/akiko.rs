@@ -599,7 +599,7 @@ impl Akiko {
 
     // ----- CPU access ------------------------------------------------------
 
-    pub fn read(&mut self, addr: u32, size: usize, chip_ram: &mut [u8]) -> u32 {
+    pub fn read(&mut self, addr: u32, size: usize, mem: &mut (impl DmaSpace + ?Sized)) -> u32 {
         let offset = addr & 0xFFFF;
         if offset >= 0x8000 {
             return 0;
@@ -609,11 +609,17 @@ impl Akiko {
             value = (value << 8) | u32::from(self.read_byte((offset + i) & 0x3F));
         }
         self.c2p_read_step(offset);
-        self.run_internal(chip_ram);
+        self.run_internal(mem);
         value
     }
 
-    pub fn write(&mut self, addr: u32, size: usize, value: u32, chip_ram: &mut [u8]) {
+    pub fn write(
+        &mut self,
+        addr: u32,
+        size: usize,
+        value: u32,
+        mem: &mut (impl DmaSpace + ?Sized),
+    ) {
         let offset = addr & 0xFFFF;
         if offset >= 0x8000 {
             return;
@@ -624,7 +630,7 @@ impl Akiko {
             let shift = 8 * (size as u32 - 1 - i);
             self.write_byte((offset + i) & 0x3F, (value >> shift) as u8);
         }
-        self.run_internal(chip_ram);
+        self.run_internal(mem);
     }
 
     fn read_byte(&mut self, offset: u32) -> u8 {
@@ -761,7 +767,12 @@ impl Akiko {
 
     /// Advance the controller by `cck` colour clocks: sector DMA pacing,
     /// DMA restart delays, audio playback, and status push-backs.
-    pub fn tick(&mut self, cck: u32, chip_ram: &mut [u8], cd_audio: &mut CdAudioRing) {
+    pub fn tick(
+        &mut self,
+        cck: u32,
+        mem: &mut (impl DmaSpace + ?Sized),
+        cd_audio: &mut CdAudioRing,
+    ) {
         self.tx_dma_delay_cck = self.tx_dma_delay_cck.saturating_sub(cck);
         self.rx_dma_delay_cck = self.rx_dma_delay_cck.saturating_sub(cck);
 
@@ -802,7 +813,7 @@ impl Akiko {
             if self.seek_delay > 0 {
                 self.seek_delay -= 1;
             } else {
-                self.run_sector_read(chip_ram);
+                self.run_sector_read(mem);
             }
         }
 
@@ -825,7 +836,7 @@ impl Akiko {
         }
 
         self.handler();
-        self.run_internal(chip_ram);
+        self.run_internal(mem);
     }
 
     /// Produce the next CD-DA sector of the running play command.
@@ -916,9 +927,9 @@ impl Akiko {
     /// The WinUAE `akiko_internal` equivalent, run after register
     /// accesses and ticks: pump RX data out, TX commands in, and run a
     /// completed command.
-    fn run_internal(&mut self, chip_ram: &mut [u8]) {
-        self.return_data(chip_ram);
-        self.run_command_dma(chip_ram);
+    fn run_internal(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
+        self.return_data(mem);
+        self.run_command_dma(mem);
         // Command execution is paced by emulated time (`command_active`
         // counts down in tick()), never by register accesses: the drive's
         // microcontroller answers after CMD_EXEC_DELAY_CCK, while the
@@ -932,7 +943,7 @@ impl Akiko {
     }
 
     /// TX DMA: fetch command bytes from the TX ring in chip RAM.
-    fn run_command_dma(&mut self, chip_ram: &mut [u8]) {
+    fn run_command_dma(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         if self.flags & CDFLAG_TXD == 0 {
             return;
         }
@@ -948,7 +959,7 @@ impl Akiko {
         if !self.can_send_command() {
             return;
         }
-        let byte = chip_byte(chip_ram, self.cdtx_address + u32::from(self.cdcomtxinx));
+        let byte = mem.dma_get(self.cdtx_address + u32::from(self.cdcomtxinx));
         self.add_command_byte(byte);
         self.cdcomtxinx = self.cdcomtxinx.wrapping_add(1);
         if self.cdcomtxinx == self.cdcomtxcmp {
@@ -1227,7 +1238,7 @@ impl Akiko {
     }
 
     /// RX DMA: write pending response bytes into the RX ring.
-    fn return_data(&mut self, chip_ram: &mut [u8]) {
+    fn return_data(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         if self.receive_length == 0 {
             return;
         }
@@ -1242,11 +1253,7 @@ impl Akiko {
         }
         while self.receive_offset < self.receive_length {
             self.last_rx = self.result_buffer[self.receive_offset];
-            chip_put_byte(
-                chip_ram,
-                self.cdrx_address + u32::from(self.cdcomrxinx),
-                self.last_rx,
-            );
+            mem.dma_put(self.cdrx_address + u32::from(self.cdcomrxinx), self.last_rx);
             self.cdcomrxinx = self.cdcomrxinx.wrapping_add(1);
             self.receive_offset += 1;
             if self.cdcomrxinx == self.cdcomrxcmp {
@@ -1264,7 +1271,7 @@ impl Akiko {
 
     // ----- sector DMA ------------------------------------------------------
 
-    fn run_sector_read(&mut self, chip_ram: &mut [u8]) {
+    fn run_sector_read(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         if self.flags & CDFLAG_ENABLE == 0 {
             return;
         }
@@ -1329,9 +1336,9 @@ impl Akiko {
             self.pbx
         );
         let base = self.addressdata + slot * 4096;
-        chip_put_bytes(chip_ram, base, &raw);
+        mem.dma_put_bytes(base, &raw);
         // Clear the slot's subcode area.
-        chip_put_bytes(chip_ram, base + 0xC00, &[0u8; 73 * 2]);
+        mem.dma_put_bytes(base + 0xC00, &[0u8; 73 * 2]);
         self.pbx &= !(1 << slot);
         self.intreq |= CDINT_PBX;
 
@@ -1339,16 +1346,15 @@ impl Akiko {
             // Sector-synchronous subcode delivery: zeroed payload with
             // the hardware's end markers.
             self.subcodeoffset = if self.subcodeoffset >= 128 { 0 } else { 128 };
-            chip_put_bytes(
-                chip_ram,
+            mem.dma_put_bytes(
                 self.subcode_address + u32::from(self.subcodeoffset),
                 &[0u8; 96],
             );
             let tail = self.subcode_address + u32::from(self.subcodeoffset) + 96;
-            chip_put_byte(chip_ram, tail, 0xFF);
-            chip_put_byte(chip_ram, tail + 1, 0xFF);
-            chip_put_byte(chip_ram, tail + 2, 0);
-            chip_put_byte(chip_ram, tail + 3, 0);
+            mem.dma_put(tail, 0xFF);
+            mem.dma_put(tail + 1, 0xFF);
+            mem.dma_put(tail + 2, 0);
+            mem.dma_put(tail + 3, 0);
             self.subcodeoffset = self.subcodeoffset.wrapping_add(100);
             self.intreq |= CDINT_SUBCODE;
         }
@@ -1406,38 +1412,82 @@ impl Akiko {
     }
 }
 
-fn chip_byte(chip_ram: &[u8], addr: u32) -> u8 {
-    let len = chip_ram.len();
-    if len == 0 {
-        return 0;
+/// The 24-bit address space Akiko's DMA engines read and write. The
+/// address registers mask to $00FFF000, i.e. Akiko drives a full 24-bit
+/// address bus, so the command/response rings and sector buffers can live
+/// in any RAM in the low 16 MB - Zorro II fast RAM included, which is
+/// where AROS puts its MEMF_24BITDMA allocations when fast RAM exists.
+/// WinUAE routes these accesses through its general bus accessors for the
+/// same reason. Reads outside RAM float to zero and writes are dropped,
+/// both logged. Per-byte resolution costs a few bank range checks at most
+/// 2352 bytes per CD frame, which is noise.
+pub trait DmaSpace {
+    fn dma_byte_mut(&mut self, addr: u32) -> Option<&mut u8>;
+
+    fn dma_get(&mut self, addr: u32) -> u8 {
+        match self.dma_byte_mut(addr & 0x00FF_FFFF) {
+            Some(b) => *b,
+            None => {
+                log::warn!("akiko: DMA read outside RAM at {addr:#010X}");
+                0
+            }
+        }
     }
-    chip_ram[(addr as usize) & (len - 1)]
+
+    fn dma_put(&mut self, addr: u32, value: u8) {
+        match self.dma_byte_mut(addr & 0x00FF_FFFF) {
+            Some(b) => *b = value,
+            None => log::warn!("akiko: DMA write outside RAM at {addr:#010X}"),
+        }
+    }
+
+    fn dma_put_bytes(&mut self, addr: u32, bytes: &[u8]) {
+        for (i, &v) in bytes.iter().enumerate() {
+            self.dma_put(addr.wrapping_add(i as u32), v);
+        }
+    }
 }
 
-fn chip_put_byte(chip_ram: &mut [u8], addr: u32, value: u8) {
-    let len = chip_ram.len();
-    if len == 0 {
-        return;
+impl DmaSpace for crate::memory::Memory {
+    fn dma_byte_mut(&mut self, addr: u32) -> Option<&mut u8> {
+        let a = addr as usize;
+        if a < self.chip_ram.len() {
+            return Some(&mut self.chip_ram[a]);
+        }
+        let slow = crate::memory::SLOW_RAM_BASE as usize;
+        if a >= slow && a < slow + self.slow_ram.len() {
+            return Some(&mut self.slow_ram[a - slow]);
+        }
+        let mb = self.mb_ram_base() as usize;
+        if a >= mb && a < mb + self.mb_ram.len() {
+            return Some(&mut self.mb_ram[a - mb]);
+        }
+        let accel = crate::memory::ACCEL_RAM_BASE as usize;
+        if a >= accel && a < accel + self.accel_ram.len() {
+            return Some(&mut self.accel_ram[a - accel]);
+        }
+        if let Some((board, off)) = self.zorro.region_at(addr, 1) {
+            return Some(&mut self.zorro.board_ram_mut(board)[off]);
+        }
+        None
     }
-    chip_ram[(addr as usize) & (len - 1)] = value;
 }
 
-/// Like `chip_put_byte` but for a contiguous run: a single `copy_from_slice`
-/// in the common (non-wrapping) case instead of one masked store per byte,
-/// used for sector/subcode DMA where `bytes` can be a couple of KB.
-fn chip_put_bytes(chip_ram: &mut [u8], addr: u32, bytes: &[u8]) {
-    let len = chip_ram.len();
-    if len == 0 || bytes.is_empty() {
-        return;
+/// Identity-mapped space for unit tests: a bare RAM image from address 0.
+impl DmaSpace for [u8] {
+    fn dma_byte_mut(&mut self, addr: u32) -> Option<&mut u8> {
+        let a = addr as usize;
+        if a < self.len() {
+            Some(&mut self[a])
+        } else {
+            None
+        }
     }
-    let start = (addr as usize) & (len - 1);
-    let end = start + bytes.len();
-    if end <= len {
-        chip_ram[start..end].copy_from_slice(bytes);
-    } else {
-        let first_len = len - start;
-        chip_ram[start..].copy_from_slice(&bytes[..first_len]);
-        chip_put_bytes(chip_ram, 0, &bytes[first_len..]);
+}
+
+impl DmaSpace for Vec<u8> {
+    fn dma_byte_mut(&mut self, addr: u32) -> Option<&mut u8> {
+        self.as_mut_slice().dma_byte_mut(addr)
     }
 }
 
@@ -2027,6 +2077,86 @@ mod tests {
         assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), CDINT_RXDMADONE);
         // The latch itself survives the read.
         assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_TXDMADONE);
+    }
+
+    /// Two-bank space: chip at 0 and "fast" at $200000, like a CD32 with
+    /// a Zorro II RAM expansion.
+    struct SplitSpace {
+        chip: Vec<u8>,
+        fast: Vec<u8>,
+        fast_base: u32,
+    }
+
+    impl DmaSpace for SplitSpace {
+        fn dma_byte_mut(&mut self, addr: u32) -> Option<&mut u8> {
+            let a = addr as usize;
+            if a < self.chip.len() {
+                return Some(&mut self.chip[a]);
+            }
+            let f = self.fast_base as usize;
+            if a >= f && a < f + self.fast.len() {
+                return Some(&mut self.fast[a - f]);
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn dma_reaches_fast_ram_buffers() {
+        // Akiko drives a 24-bit address bus: a guest may point the
+        // command/response rings at fast RAM (AROS allocates them
+        // MEMF_24BITDMA, which prefers fast when it exists). The rings
+        // must not alias into chip RAM.
+        let mut ring = CdAudioRing::default();
+        let mut space = SplitSpace {
+            chip: vec![0u8; 64 * 1024],
+            fast: vec![0u8; 64 * 1024],
+            fast_base: 0x0020_0000,
+        };
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut space, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        // Misc buffer (rings) in fast RAM at $201000.
+        const MISC: u32 = 0x0020_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut space);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut space);
+        let tx_off = (MISC - 0x0020_0000 + 0x200) as usize;
+        let start = akiko.cdcomtxinx;
+        space.fast[tx_off + (start as usize & 0xFF)] = 0x17; // STATUS, seq 1
+        space.fast[tx_off + ((start as usize + 1) & 0xFF)] = 0xFFu8.wrapping_sub(0x17);
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut space,
+        );
+        let rx0 = akiko.cdcomrxinx as usize;
+        akiko.write(
+            AKIKO_BASE + 0x1D,
+            1,
+            u32::from(start.wrapping_add(2)),
+            &mut space,
+        );
+        for _ in 0..64 {
+            akiko.tick(2048, &mut space, &mut ring);
+        }
+
+        // The response landed in the fast-RAM ring, and chip RAM at the
+        // aliased offset stayed untouched.
+        let rx_off = (MISC - 0x0020_0000) as usize;
+        assert_eq!(
+            space.fast[rx_off + (rx0 & 0xFF)] & 0x0F,
+            0x07,
+            "response in fast"
+        );
+        assert_eq!(
+            space.chip[(MISC as usize & 0xFFFF) + (rx0 & 0xFF)],
+            0,
+            "chip clean"
+        );
     }
 
     #[test]

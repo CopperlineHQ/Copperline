@@ -477,7 +477,11 @@ enabled sources (`intreq & intena`), because INT2 servers read it on every
 chain entry and a stale latch from a disabled source must not look like
 fresh work; and the media-status packet reports a present disc as `$83`
 (Kickstart masks the byte with 3, AROS compares it whole -- only `$83`
-satisfies both).
+satisfies both). Akiko's DMA engines drive a full 24-bit address bus (the
+address registers mask to `$00FFF000`), so the rings and sector buffers
+resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
+included, which is where AROS places its `MEMF_24BITDMA` allocations when
+fast RAM exists -- not just chip RAM.
 
 `cdrom.rs` parses BIN/CUE cue sheets (single- or multi-file;
 MODE1/2048, MODE1/2352, and AUDIO tracks) for both machines.
