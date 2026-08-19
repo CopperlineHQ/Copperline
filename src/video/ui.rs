@@ -28,9 +28,9 @@ const MENU_HILIGHT_TEXT: u32 = rgba(255, 255, 255);
 const PANEL_BG: u32 = rgba(30, 32, 36);
 const PANEL_TITLE_BG: u32 = rgba(0, 85, 170);
 const PANEL_TITLE_TEXT: u32 = rgba(255, 255, 255);
-const PANEL_TEXT: u32 = rgba(214, 216, 208);
-const PANEL_TEXT_DIM: u32 = rgba(136, 138, 130);
-const PANEL_TEXT_HILIGHT: u32 = rgba(120, 255, 150);
+pub(in crate::video) const PANEL_TEXT: u32 = rgba(214, 216, 208);
+pub(in crate::video) const PANEL_TEXT_DIM: u32 = rgba(136, 138, 130);
+pub(in crate::video) const PANEL_TEXT_HILIGHT: u32 = rgba(120, 255, 150);
 const PANEL_TEXT_ACCENT: u32 = rgba(255, 184, 80);
 const BUTTON_TEXT: u32 = rgba(220, 222, 214);
 const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
@@ -968,7 +968,7 @@ pub enum UiControl {
 
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
-        Panel::About => (560, 380),
+        Panel::About => (560, 450),
         Panel::Shortcuts => (600, shortcuts_panel_height()),
         Panel::Calibration(_) => (620, 372),
         Panel::InputMap(_) => (INPUT_MAP_W, input_map_panel_height()),
@@ -1025,7 +1025,7 @@ fn panel_rect(panel: &Panel) -> Rect {
     }
 }
 
-const TITLE_H: usize = 22;
+pub(in crate::video) const TITLE_H: usize = 22;
 
 fn close_button_rect(rect: Rect) -> Rect {
     Rect {
@@ -1550,11 +1550,6 @@ pub const MEM_PAGE_BYTES: u32 = 256;
 // View data built by window.rs each redraw
 // ---------------------------------------------------------------------------
 
-pub struct AboutView {
-    /// Emulated-machine summary lines (built once at startup).
-    pub machine_lines: Vec<String>,
-}
-
 pub struct CalRow {
     pub label: &'static str,
     pub binding: String,
@@ -1851,7 +1846,7 @@ pub struct FrameAnalyzerView {
 }
 
 pub enum PanelViewData {
-    About(AboutView),
+    About(super::about::AboutView),
     Shortcuts,
     Calibration(CalibrationView),
     Debugger(Box<DebuggerView>),
@@ -1862,7 +1857,7 @@ pub enum PanelViewData {
 // Drawing
 // ---------------------------------------------------------------------------
 
-fn draw_panel_text(
+pub(in crate::video) fn draw_panel_text(
     frame: &mut [u8],
     x: usize,
     y: usize,
@@ -2011,7 +2006,11 @@ fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: bool, scale: usi
 /// Word-wrap `text` so no panel line is cropped: the first line holds up to
 /// `first_width` characters, continuations up to `rest_width` (they are drawn
 /// indented). Words longer than a whole line are hard-split.
-fn wrap_text(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
+pub(in crate::video) fn wrap_text(
+    text: &str,
+    first_width: usize,
+    rest_width: usize,
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     for word in text.split_whitespace() {
@@ -2043,73 +2042,6 @@ fn wrap_text(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
         lines.push(cur);
     }
     lines
-}
-
-/// Contributors and Patreon sponsors credited in the About panel. Keep
-/// both in step with CREDITS.md and the website's Community section.
-const CONTRIBUTORS: &[&str] = &[
-    "Bernie Innocenti",
-    "Lee Hobson",
-    "jbl007",
-    "Simon Dick",
-    "Nicolas Ramz",
-    "Ben Letchford",
-    "Volker Schwaberow",
-    "Matt Harlum",
-];
-const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
-
-fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
-    let cx = |text: &str, px: usize| rect.x + rect.w.saturating_sub(text.len() * 8 * px) / 2;
-    let title = "Copperline";
-    let mut y = rect.y + TITLE_H + 14;
-    draw_panel_text(frame, cx(title, 3), y, title, PANEL_TEXT_HILIGHT, 3, scale);
-    y += 30;
-    let version = concat!("version ", env!("COPPERLINE_DISPLAY_VERSION"));
-    draw_panel_text(frame, cx(version, 1), y, version, PANEL_TEXT_DIM, 1, scale);
-    y += 14;
-    let tagline = "A cycle-stepped Amiga emulator";
-    draw_panel_text(frame, cx(tagline, 2), y, tagline, PANEL_TEXT, 2, scale);
-    y += 22;
-    let author = "by Andrew \"LinuxJedi\" Hutchings";
-    draw_panel_text(frame, cx(author, 1), y, author, PANEL_TEXT_DIM, 1, scale);
-    y += 24;
-    let max_chars = rect.w.saturating_sub(48) / 16;
-    for line in &view.machine_lines {
-        for (i, part) in wrap_text(line, max_chars, max_chars.saturating_sub(1))
-            .iter()
-            .enumerate()
-        {
-            // Continuation lines are indented by one glyph cell.
-            let x = rect.x + 24 + if i == 0 { 0 } else { 16 };
-            draw_panel_text(frame, x, y, part, PANEL_TEXT, 2, scale);
-            y += 18;
-        }
-    }
-    y += 10;
-    for line in [
-        "m68k CPU core (MIT)",
-        "font8x8 by Daniel Hepper / Marcel Sondaar",
-        "winit + pixels + cpal + gilrs",
-    ] {
-        draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT_DIM, 1, scale);
-        y += 12;
-    }
-    y += 10;
-    let max_small = rect.w.saturating_sub(48) / 8;
-    let contributors = format!("Contributors: {}", CONTRIBUTORS.join(", "));
-    let sponsors = format!("Patreon sponsors: {}", PATREON_SPONSORS.join(", "));
-    for line in [&contributors, &sponsors] {
-        for (i, part) in wrap_text(line, max_small, max_small.saturating_sub(1))
-            .iter()
-            .enumerate()
-        {
-            // Continuation lines are indented by one glyph cell.
-            let x = rect.x + 24 + if i == 0 { 0 } else { 8 };
-            draw_panel_text(frame, x, y, part, PANEL_TEXT, 1, scale);
-            y += 12;
-        }
-    }
 }
 
 fn draw_drop_chooser(
@@ -9401,7 +9333,7 @@ pub fn draw_panel_layer(
     let rect = panel_rect(panel);
     match (panel, data) {
         (Panel::About, Some(PanelViewData::About(view))) => {
-            draw_about(frame, rect, view, texture_scale)
+            super::about::draw(frame, rect, view, texture_scale)
         }
         (Panel::Shortcuts, _) => draw_shortcuts(frame, rect, texture_scale),
         (Panel::Calibration(session), Some(PanelViewData::Calibration(view))) => {
@@ -11515,7 +11447,7 @@ mod tests {
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::About),
         };
-        let data = PanelViewData::About(AboutView {
+        let data = PanelViewData::About(crate::video::about::AboutView {
             machine_lines: vec![
                 "Machine: A1200".to_string(),
                 "CPU: M68EC020 @ 14 MHz".to_string(),
@@ -11524,10 +11456,61 @@ mod tests {
                 "ROM: system v3.1 a1200 release image path rom".to_string(),
                 "Floppy drives: 1".to_string(),
             ],
+            // Deep into the entrance so the snapshot shows the settled page.
+            elapsed_ms: 60_000,
+            machine_fitted: true,
         });
         draw(&mut frame, scale, &ui, None, Some(&data));
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "about");
+
+        // Mid-entrance: the title half printed, the wave half drawn in.
+        // The entrance is a pure function of elapsed time, so comparing
+        // against the just-opened page makes deterministic assertions:
+        // by mid-entrance the title's first slot has its settled letter
+        // and wave columns stand on the left, while the strip's right
+        // edge is still untouched -- the reveal front has not reached it.
+        let about_at = |elapsed_ms: u64| {
+            let mut frame = vec![0u8; w * h * 4];
+            let data = PanelViewData::About(crate::video::about::AboutView {
+                machine_lines: vec![crate::config::ABOUT_PLACEHOLDER_LINE.to_string()],
+                elapsed_ms,
+                machine_fitted: false,
+            });
+            draw(&mut frame, scale, &ui, None, Some(&data));
+            frame
+        };
+        let opened = about_at(0);
+        let mid = about_at(2_500);
+        let region_differs = |a: &[u8], b: &[u8], x0: usize, x1: usize, y0: usize, y1: usize| {
+            (y0..y1).any(|y| {
+                a[(y * w + x0) * 4..(y * w + x1) * 4] != b[(y * w + x0) * 4..(y * w + x1) * 4]
+            })
+        };
+        let rect = panel_rect(&Panel::About);
+        let title_y = rect.y + TITLE_H + 14;
+        let slot0 = rect.x + (rect.w - 240) / 2;
+        assert!(
+            region_differs(&mid, &opened, slot0, slot0 + 24, title_y, title_y + 24),
+            "title's first letter should have settled by mid-entrance"
+        );
+        let base = rect.y + rect.h - 8;
+        assert!(
+            region_differs(&mid, &opened, rect.x, rect.x + rect.w / 4, base - 8, base),
+            "wave columns should have arrived on the left by mid-entrance"
+        );
+        assert!(
+            !region_differs(
+                &mid,
+                &opened,
+                rect.x + rect.w - 24,
+                rect.x + rect.w,
+                base - 60,
+                base
+            ),
+            "the reveal front should not have reached the right edge yet"
+        );
+        save(&mid, "about-opening");
 
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {

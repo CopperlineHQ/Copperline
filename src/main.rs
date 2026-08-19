@@ -2649,7 +2649,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         // belongs to the machine, and run_machine installs the real setting
         // when one is started.
         config::MouseCapture::default(),
-        vec!["Configure a machine, then press Run.".to_string()],
+        vec![config::ABOUT_PLACEHOLDER_LINE.to_string()],
         raw_cfg,
         audio_output_enabled,
         // The placeholder runs no sampler; run_machine attaches it on Run.

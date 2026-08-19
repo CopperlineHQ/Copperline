@@ -6350,14 +6350,45 @@ pub fn rom_identification(path: &Path) -> Option<String> {
     crate::romdb::describe_file(path).map(|id| id.label().to_string())
 }
 
-/// The `ROM:` line the About panel and the ROM-load OSD show: the file's
-/// name, with the identification beside it when the image is a known one.
+/// The identification the About page prefers: a known checksum's label,
+/// or for the bundled AROS the version and revision read off the image
+/// itself, the way the launcher's Kickstart row shows them. `None` for
+/// an image nothing can name -- the file name carries the line then.
+pub fn about_rom_identification(path: &Path) -> Option<String> {
+    let id = rom_identification(path)?;
+    if id != "bundled AROS" {
+        return Some(id);
+    }
+    match crate::romdb::rom_self_versions(path) {
+        Some((version, revision)) if !version.is_empty() => Some(if revision.is_empty() {
+            format!("AROS {version}")
+        } else {
+            format!("AROS {version} ({revision})")
+        }),
+        _ => Some(id),
+    }
+}
+
+/// The `ROM:` line the About panel and the ROM-load OSD show: the
+/// identification the configuration page shows when the image is a known
+/// one, the file's name when it is not.
 pub fn about_rom_line(name: &str, identification: Option<&str>) -> String {
     match identification {
-        Some(id) => format!("ROM: {name} ({id})"),
+        Some(id) => format!("ROM: {id}"),
         None => format!("ROM: {name}"),
     }
 }
+
+/// The `Extended ROM:` line, shown only when one is fitted: the same
+/// shape as the boot ROM's line.
+pub fn about_ext_rom_line(name: &str, identification: Option<&str>) -> String {
+    format!("Extended {}", about_rom_line(name, identification))
+}
+
+/// The About machine line of the configuration screen, where no
+/// machine is fitted yet. The About page recognises it and centres it
+/// as an invitation rather than bulleting it as a fact.
+pub const ABOUT_PLACEHOLDER_LINE: &str = "Configure a machine, press Run!";
 
 /// Emulated-machine summary lines for the About window.
 pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
@@ -6392,8 +6423,16 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
         // says which Kickstart it actually is.
         lines.push(about_rom_line(
             &name.to_string_lossy(),
-            rom_identification(&cfg.rom_path).as_deref(),
+            about_rom_identification(&cfg.rom_path).as_deref(),
         ));
+    }
+    if let Some(ext) = cfg.extended_rom_path.as_deref() {
+        if let Some(name) = ext.file_name() {
+            lines.push(about_ext_rom_line(
+                &name.to_string_lossy(),
+                about_rom_identification(ext).as_deref(),
+            ));
+        }
     }
     let drives = cfg
         .floppy_connected
@@ -11281,12 +11320,23 @@ mod tests {
         fs::write(&unknown, vec![0xA5u8; 4096]).unwrap();
         assert_eq!(rom_identification(&unknown), None);
         cfg.rom_path = unknown.clone();
+        // An unknown extended ROM gets a line of its own, named the same
+        // way; without one fitted no such line appears.
+        cfg.extended_rom_path = Some(unknown.clone());
         let name = unknown.file_name().unwrap().to_string_lossy().into_owned();
         let lines = about_machine_lines(&cfg);
         assert!(
             lines.iter().any(|l| *l == format!("ROM: {name}")),
             "{lines:?}"
         );
+        assert!(
+            lines.iter().any(|l| *l == format!("Extended ROM: {name}")),
+            "{lines:?}"
+        );
+        cfg.extended_rom_path = None;
+        assert!(!about_machine_lines(&cfg)
+            .iter()
+            .any(|l| l.starts_with("Extended ROM: ")),);
         let _ = fs::remove_file(&unknown);
 
         // A directory, a missing file and an over-large one are all just
@@ -11298,17 +11348,44 @@ mod tests {
         assert_eq!(rom_identification(&huge), None);
         let _ = fs::remove_file(&huge);
 
-        // A recognised image: the About line carries the version beside the
-        // file name. The bytes of a real Kickstart are not in the tree, so
-        // the composition is exercised through the same helper the panel
+        // A recognised image: the About line shows the identification
+        // alone, an unrecognised one falls back to the file name. The
+        // bytes of a real Kickstart are not in the tree, so the
+        // composition is exercised through the same helper the panel
         // uses, fed the label of a real table entry.
         let entry = crate::romdb::identify_crc(0x1483A091, 512 * 1024).expect("KS 3.1 A1200");
         assert_eq!(entry.label, "Kickstart 3.1 (40.68) A1200");
         assert_eq!(
             about_rom_line("kick40068.A1200", Some(entry.label)),
-            "ROM: kick40068.A1200 (Kickstart 3.1 (40.68) A1200)"
+            "ROM: Kickstart 3.1 (40.68) A1200"
         );
         assert_eq!(about_rom_line("mystery.rom", None), "ROM: mystery.rom");
+
+        // The bundled AROS names its own numbers: a fake image wearing
+        // the AROS file name, a version header at offset 12 and a $VER
+        // cookie in the body, resolves to the composed line the launcher's
+        // Kickstart row shows; stripped of both it stays "bundled AROS".
+        // The identification keys on the exact AROS file name, so it
+        // sits inside a unique directory rather than being uniquified.
+        let dir = temp_path("aros-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let aros = dir.join(crate::romsearch::AROS_MAIN_FILE);
+        let mut data = vec![0u8; 32];
+        data[12..14].copy_from_slice(&46u16.to_be_bytes());
+        data[14..16].copy_from_slice(&7u16.to_be_bytes());
+        data.extend_from_slice(b"$VER: AROS ROM 46.0.7 (1.1.2024)\n");
+        fs::write(&aros, &data).unwrap();
+        assert_eq!(
+            about_rom_identification(&aros).as_deref(),
+            Some("AROS 46.7 (46.0.7)")
+        );
+        fs::write(&aros, b"").unwrap();
+        assert_eq!(
+            about_rom_identification(&aros).as_deref(),
+            Some("bundled AROS")
+        );
+        let _ = fs::remove_file(&aros);
+        let _ = fs::remove_dir(&dir);
     }
 
     fn temp_adf() -> Result<PathBuf> {
