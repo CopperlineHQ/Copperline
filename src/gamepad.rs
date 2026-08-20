@@ -342,6 +342,23 @@ impl RawGamepads {
                     log::info!("gamepad diag: {:?}", event.event);
                 }
             }
+            // Any disconnect resets the accumulated state: gilrs has
+            // already dropped the pad from its connected list, so the id
+            // cannot be compared against the driven pad below, and after a
+            // reset the surviving pad's state rebuilds from its next events.
+            if event.event == gilrs::EventType::Disconnected {
+                self.axes.clear();
+                self.buttons.clear();
+                self.mapped = MappedPadState::default();
+                continue;
+            }
+            // Accumulate state only for the pad this reader drives -- the
+            // first connected one, the same selection poll() and the
+            // calibration flow make -- so a bystander pad's drift or
+            // presses cannot leak into it.
+            if self.first_gamepad() != Some(event.id) {
+                continue;
+            }
             match event.event {
                 gilrs::EventType::AxisChanged(axis, value, code) => {
                     self.axes.insert(code.into_u32(), value);
@@ -349,32 +366,34 @@ impl RawGamepads {
                 }
                 gilrs::EventType::ButtonChanged(button, value, code) => {
                     if self.collapsed_dpad_half_axis(event.id, button, code) {
-                        self.reroute_collapsed_dpad(button, value, code);
+                        apply_collapsed_dpad(
+                            &mut self.axes,
+                            &mut self.buttons,
+                            &mut self.mapped,
+                            button,
+                            value,
+                            code.into_u32(),
+                        );
                     } else {
                         let pressed = value >= AXIS_ACTIVE_THRESHOLD;
                         self.buttons.insert(code.into_u32(), pressed);
                         self.mapped.set_button(button, pressed);
                     }
                 }
-                gilrs::EventType::ButtonPressed(button, code) => {
-                    // A collapsed half-axis d-pad also emits Pressed/Released
-                    // at gilrs's threshold crossings; the ButtonChanged value
-                    // stream carries the direction, so drop these.
-                    if !self.collapsed_dpad_half_axis(event.id, button, code) {
-                        self.buttons.insert(code.into_u32(), true);
-                        self.mapped.set_button(button, true);
-                    }
+                // A collapsed half-axis d-pad also emits Pressed/Released at
+                // gilrs's threshold crossings; the ButtonChanged value stream
+                // carries the direction, so the guards drop those here.
+                gilrs::EventType::ButtonPressed(button, code)
+                    if !self.collapsed_dpad_half_axis(event.id, button, code) =>
+                {
+                    self.buttons.insert(code.into_u32(), true);
+                    self.mapped.set_button(button, true);
                 }
-                gilrs::EventType::ButtonReleased(button, code) => {
-                    if !self.collapsed_dpad_half_axis(event.id, button, code) {
-                        self.buttons.insert(code.into_u32(), false);
-                        self.mapped.set_button(button, false);
-                    }
-                }
-                gilrs::EventType::Disconnected => {
-                    self.axes.clear();
-                    self.buttons.clear();
-                    self.mapped = MappedPadState::default();
+                gilrs::EventType::ButtonReleased(button, code)
+                    if !self.collapsed_dpad_half_axis(event.id, button, code) =>
+                {
+                    self.buttons.insert(code.into_u32(), false);
+                    self.mapped.set_button(button, false);
                 }
                 _ => {}
             }
@@ -416,27 +435,34 @@ impl RawGamepads {
         }
     }
 
-    /// Recover both directions from a collapsed half-axis d-pad event: the
-    /// 0..1 button value spans the full axis, so recentre it to -1..1 and
-    /// store it as the raw axis it really is (which is also what the
-    /// pre-database calibration format recorded for these pads). The named
-    /// state gets the same value on the matching d-pad axis, flipped
-    /// vertically because SDL entries put up at the negative end while the
-    /// named convention is up-positive.
-    fn reroute_collapsed_dpad(&mut self, button: gilrs::Button, value: f32, code: gilrs::ev::Code) {
-        let v = value * 2.0 - 1.0;
-        self.axes.insert(code.into_u32(), v);
-        self.buttons.remove(&code.into_u32());
-        use gilrs::Button as B;
-        match button {
-            B::DPadUp | B::DPadDown => self.mapped.dpad_y = -v,
-            B::DPadLeft | B::DPadRight => self.mapped.dpad_x = v,
-            _ => {}
-        }
-    }
-
     fn first_gamepad(&self) -> Option<gilrs::GamepadId> {
         self.gilrs.gamepads().next().map(|(id, _)| id)
+    }
+}
+
+/// Recover both directions from a collapsed half-axis d-pad event (see
+/// [`RawGamepads::collapsed_dpad_half_axis`]): the 0..1 button value spans
+/// the full axis, so recentre it to -1..1 and store it as the raw axis it
+/// really is (which is also what the pre-database calibration format
+/// recorded for these pads). The named state gets the same value on the
+/// matching d-pad axis, flipped vertically because SDL entries put up at
+/// the negative end while the named convention is up-positive.
+fn apply_collapsed_dpad(
+    axes: &mut BTreeMap<u32, f32>,
+    buttons: &mut BTreeMap<u32, bool>,
+    mapped: &mut MappedPadState,
+    button: gilrs::Button,
+    value: f32,
+    code: u32,
+) {
+    let v = value * 2.0 - 1.0;
+    axes.insert(code, v);
+    buttons.remove(&code);
+    use gilrs::Button as B;
+    match button {
+        B::DPadUp | B::DPadDown => mapped.dpad_y = -v,
+        B::DPadLeft | B::DPadRight => mapped.dpad_x = v,
+        _ => {}
     }
 }
 
@@ -1033,6 +1059,45 @@ mod tests {
         mapped.set_button(gilrs::Button::DPadRight, true);
         let s = mapped.resolve();
         assert!(s.down && s.right && !s.up && !s.left);
+    }
+
+    #[test]
+    fn collapsed_dpad_reroute_recentres_and_replaces_the_button() {
+        use gilrs::Button as B;
+        let mut axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        let mut mapped = MappedPadState::default();
+        // A stale pressed entry from before the collapse was detected must
+        // not linger once the code is rerouted as an axis.
+        buttons.insert(7, true);
+
+        // Physical up: button value 0.0 is the SDL-negative axis end. Raw
+        // recentres to -1 (the shape legacy calibrations recorded); the
+        // named state flips to the up-positive convention.
+        apply_collapsed_dpad(&mut axes, &mut buttons, &mut mapped, B::DPadUp, 0.0, 7);
+        assert_eq!(axes.get(&7), Some(&-1.0));
+        assert!(!buttons.contains_key(&7));
+        assert_eq!(mapped.dpad_y, 1.0);
+        let s = mapped.resolve();
+        assert!(s.up && !s.down);
+
+        // Rest sits at mid-travel and recentres to exactly 0.
+        apply_collapsed_dpad(&mut axes, &mut buttons, &mut mapped, B::DPadUp, 0.5, 7);
+        assert_eq!(axes.get(&7), Some(&0.0));
+        assert_eq!(mapped.resolve(), JoystickState::default());
+
+        // Physical down arrives through the same surviving button name.
+        apply_collapsed_dpad(&mut axes, &mut buttons, &mut mapped, B::DPadUp, 1.0, 7);
+        assert_eq!(axes.get(&7), Some(&1.0));
+        assert_eq!(mapped.dpad_y, -1.0);
+        let s = mapped.resolve();
+        assert!(s.down && !s.up);
+
+        // Horizontal has no flip: the SDL-negative end is left.
+        apply_collapsed_dpad(&mut axes, &mut buttons, &mut mapped, B::DPadRight, 0.0, 8);
+        assert_eq!(axes.get(&8), Some(&-1.0));
+        assert_eq!(mapped.dpad_x, -1.0);
+        assert!(mapped.resolve().left && !mapped.resolve().right);
     }
 
     #[test]
