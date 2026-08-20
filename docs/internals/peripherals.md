@@ -523,10 +523,13 @@ overflow, and ghost suppression on the real A500 key matrix (the seven
 qualifiers are on dedicated lines and never ghost). The protocol was
 cross-checked against real-hardware-validated replacement keyboard
 firmware. Mouse deltas
-feed the JOY0DAT quadrature counters. Gamepads are read through raw
-`gilrs` events against the per-UUID calibration described in
-[](../guide/ui); on CD32 machines the pad output is serialized through
-the CD32 pad protocol instead of the plain digital joystick lines.
+feed the JOY0DAT quadrature counters. Gamepads are read through `gilrs`
+with its bundled SDL controller database enabled: a recognised pad
+resolves through a fixed standard layout, overridden per-UUID by the
+calibration described in [](../guide/ui), which records raw event codes
+and is the only path for unrecognised pads. On CD32 machines the pad
+output is serialized through the CD32 pad protocol instead of the plain
+digital joystick lines.
 
 The window layer has one host-source policy for the emulated port-2
 joystick/CD32 pad: gamepad (the default) or keyboard. Keyboard mode

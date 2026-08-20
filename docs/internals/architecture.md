@@ -62,7 +62,7 @@ src/
   midi/             # host MIDI serial bridge (CoreMIDI / ALSA / WinMM)
   audio.rs          # AudioSink trait + cpal/WAV/null outputs
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
-  gamepad.rs        # gilrs input + guided calibration
+  gamepad.rs        # gilrs input: database layout + calibration override
   screenshot.rs     # PNG export helpers
   recorder.rs       # video+audio capture (ZMBV/PCM AVI writer)
   inputrec.rs       # live-input recording to the scripted-input format

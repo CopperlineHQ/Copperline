@@ -2132,13 +2132,13 @@ fn list_midi_endpoints() -> Result<()> {
 fn main() -> Result<()> {
     let mut log_builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    // Copperline reads raw gamepad axis/button codes with gilrs's SDL
-    // controller mappings disabled (see gamepad.rs) and applies its own
-    // per-UUID calibration from gamepads.toml. gilrs's mapping subsystem is
-    // therefore unused, so its "No mapping found for UUID ...; default mapping
-    // will be used" warnings are misleading noise even when the pad works.
-    // Silence gilrs below error level unless the user has explicitly asked for
-    // its logs via RUST_LOG.
+    // Copperline resolves gamepads through gilrs's bundled SDL controller
+    // mappings, overridden per-UUID by calibrations from gamepads.toml (see
+    // gamepad.rs). For a pad the database misses, gilrs logs "No mapping
+    // found for UUID ...; default mapping will be used", but gamepad.rs
+    // already prints a clearer calibration prompt for that case. Silence
+    // gilrs below error level unless the user has explicitly asked for its
+    // logs via RUST_LOG.
     if std::env::var_os("RUST_LOG").is_none() {
         log_builder.filter_module("gilrs", log::LevelFilter::Error);
         // The Cranelift JIT backend logs every compiled trace's full IR

@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Generic USB gamepad support via a one-time guided calibration.
+//! Generic USB gamepad support: bundled controller-database defaults with a
+//! one-time guided calibration as the per-pad override.
 //!
-//! gilrs is used with its SDL controller mappings DISABLED, so we read raw
-//! axis/button event codes. That works for any pad regardless of how well it
-//! is covered by SDL_GameControllerDB (many cheap "retro" pads have broken or
-//! missing entries). Calibration records which raw input drives each Amiga
-//! port-2 joystick direction and button, keyed by controller UUID and
-//! persisted to a config file. Because calibration records the actual input
-//! the user pushes for each direction, it needs no axis-sign or axis-order
-//! assumptions -- inversion and layout fall out automatically.
+//! gilrs is built with its bundled SDL_GameControllerDB mappings (and the
+//! SDL_GAMECONTROLLERCONFIG environment variable) enabled. A pad the
+//! database or the platform driver recognises works out of the box through
+//! a fixed standard layout: d-pad and left stick drive the directions,
+//! South is fire/CD32 red, East blue, West green, North yellow, Start
+//! play/pause, and the left/right shoulders and triggers are reverse and
+//! forward. The default layout binds no Quit hotkey.
+//!
+//! A saved calibration always wins over the database. That keeps unknown
+//! pads working and broken database entries fixable the same way (many
+//! cheap "retro" pads have broken or missing SDL_GameControllerDB entries):
+//! calibrate once, pushing each control when prompted. Calibration records
+//! which raw axis/button event code drives each Amiga port-2 joystick
+//! direction and button, keyed by controller UUID and persisted to a config
+//! file. Because it records the actual input the user pushes for each
+//! direction, it needs no axis-sign or axis-order assumptions -- inversion
+//! and layout fall out automatically.
 //!
 //! Besides the emulated controls, calibration can optionally bind one pad
 //! input as a host-side Quit hotkey. That binding never reaches the emulated
@@ -28,6 +38,13 @@ const AXIS_ACTIVE_THRESHOLD: f32 = 0.5;
 /// calibration, so a resting/drifting stick isn't mistaken for a deliberate
 /// push.
 const AXIS_CAPTURE_THRESHOLD: f32 = 0.6;
+
+/// Format tag written into newly recorded calibrations. Format 0 (absent in
+/// the file) predates the bundled SDL controller mappings being enabled;
+/// those mappings can flip the sign a database-covered pad reports for a
+/// named axis, so a format-0 calibration on such a pad may have reversed
+/// stick directions and earns a recalibration hint.
+const CALIBRATION_FORMAT: u32 = 1;
 
 /// One raw gamepad input bound to a joystick action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +107,10 @@ pub struct GamepadCalibration {
     // Host-side Quit hotkey (optional; never driven into the emulated port).
     #[serde(default)]
     quit: Option<RawInput>,
+    /// [`CALIBRATION_FORMAT`] at recording time; 0 for files written before
+    /// the bundled controller mappings were enabled.
+    #[serde(default)]
+    format: u32,
 }
 
 /// Resolved emulated port-2 joystick state.
@@ -196,51 +217,221 @@ fn uuid_hex(uuid: [u8; 16]) -> String {
 // gilrs I/O: a raw reader shared by the runtime and the calibration flow.
 // ---------------------------------------------------------------------------
 
-/// A gilrs instance with SDL controller mappings turned off, plus the current
-/// raw axis/button state accumulated from its events.
+/// Standard-layout state for a pad the controller database or platform
+/// driver recognises, accumulated from gilrs's named events. Only consulted
+/// when the pad has no saved calibration.
+#[derive(Clone, Copy, Debug, Default)]
+struct MappedPadState {
+    dpad_up: bool,
+    dpad_down: bool,
+    dpad_left: bool,
+    dpad_right: bool,
+    south: bool,
+    east: bool,
+    west: bool,
+    north: bool,
+    start: bool,
+    left_shoulder: bool,
+    right_shoulder: bool,
+    left_trigger: bool,
+    right_trigger: bool,
+    /// Left stick and d-pad axes in gilrs's convention: up and right are
+    /// positive. Hat-style d-pads arrive as axes on some platforms.
+    left_x: f32,
+    left_y: f32,
+    dpad_x: f32,
+    dpad_y: f32,
+}
+
+impl MappedPadState {
+    fn set_button(&mut self, button: gilrs::Button, pressed: bool) {
+        use gilrs::Button as B;
+        match button {
+            B::DPadUp => self.dpad_up = pressed,
+            B::DPadDown => self.dpad_down = pressed,
+            B::DPadLeft => self.dpad_left = pressed,
+            B::DPadRight => self.dpad_right = pressed,
+            B::South => self.south = pressed,
+            B::East => self.east = pressed,
+            B::West => self.west = pressed,
+            B::North => self.north = pressed,
+            B::Start => self.start = pressed,
+            B::LeftTrigger => self.left_shoulder = pressed,
+            B::RightTrigger => self.right_shoulder = pressed,
+            B::LeftTrigger2 => self.left_trigger = pressed,
+            B::RightTrigger2 => self.right_trigger = pressed,
+            _ => {}
+        }
+    }
+
+    fn set_axis(&mut self, axis: gilrs::Axis, value: f32) {
+        use gilrs::Axis as A;
+        match axis {
+            A::LeftStickX => self.left_x = value,
+            A::LeftStickY => self.left_y = value,
+            A::DPadX => self.dpad_x = value,
+            A::DPadY => self.dpad_y = value,
+            _ => {}
+        }
+    }
+
+    /// The fixed standard layout: d-pad and left stick drive the directions;
+    /// South = fire/red, East = blue, West = green, North = yellow, Start =
+    /// play/pause, left shoulder/trigger = reverse, right = forward.
+    fn resolve(&self) -> JoystickState {
+        let t = AXIS_ACTIVE_THRESHOLD;
+        JoystickState {
+            up: self.dpad_up || self.left_y >= t || self.dpad_y >= t,
+            down: self.dpad_down || self.left_y <= -t || self.dpad_y <= -t,
+            left: self.dpad_left || self.left_x <= -t || self.dpad_x <= -t,
+            right: self.dpad_right || self.left_x >= t || self.dpad_x >= t,
+            fire: self.south,
+            button2: self.east,
+            green: self.west,
+            yellow: self.north,
+            play: self.start,
+            rwd: self.left_shoulder || self.left_trigger,
+            ffw: self.right_shoulder || self.right_trigger,
+        }
+    }
+}
+
+/// A gilrs instance with the bundled SDL controller mappings enabled, plus
+/// the current input state accumulated from its events in two forms: raw
+/// axis/button codes (what calibration records and resolves against) and the
+/// named standard layout (the default for recognised, uncalibrated pads).
 struct RawGamepads {
     gilrs: gilrs::Gilrs,
     axes: BTreeMap<u32, f32>,
     buttons: BTreeMap<u32, bool>,
+    mapped: MappedPadState,
 }
 
 impl RawGamepads {
     fn new() -> Result<Self> {
         let gilrs = gilrs::GilrsBuilder::new()
-            .add_included_mappings(false)
-            .add_env_mappings(false)
+            .add_included_mappings(true)
+            .add_env_mappings(true)
             .build()
             .map_err(|e| anyhow!("gamepad init: {e}"))?;
         Ok(Self {
             gilrs,
             axes: BTreeMap::new(),
             buttons: BTreeMap::new(),
+            mapped: MappedPadState::default(),
         })
     }
 
-    /// Drain pending events into the raw axis/button state.
+    /// Drain pending events into the raw and named input state.
     fn pump(&mut self) {
         while let Some(event) = self.gilrs.next_event() {
+            // COPPERLINE_DIAG_GAMEPAD=1 logs every gilrs event as delivered
+            // (named control, post-mapping value, raw code) plus each pad's
+            // identity and mapping source on connect: the ground truth for
+            // diagnosing a wrong or broken controller-database entry.
+            if crate::envcfg::flag("COPPERLINE_DIAG_GAMEPAD") {
+                if event.event == gilrs::EventType::Connected {
+                    let pad = self.gilrs.gamepad(event.id);
+                    log::info!(
+                        "gamepad diag: connected \"{}\" uuid {} mapping source {:?}",
+                        pad.name(),
+                        uuid_hex(pad.uuid()),
+                        pad.mapping_source()
+                    );
+                } else {
+                    log::info!("gamepad diag: {:?}", event.event);
+                }
+            }
             match event.event {
-                gilrs::EventType::AxisChanged(_, value, code) => {
+                gilrs::EventType::AxisChanged(axis, value, code) => {
                     self.axes.insert(code.into_u32(), value);
+                    self.mapped.set_axis(axis, value);
                 }
-                gilrs::EventType::ButtonChanged(_, value, code) => {
-                    self.buttons
-                        .insert(code.into_u32(), value >= AXIS_ACTIVE_THRESHOLD);
+                gilrs::EventType::ButtonChanged(button, value, code) => {
+                    if self.collapsed_dpad_half_axis(event.id, button, code) {
+                        self.reroute_collapsed_dpad(button, value, code);
+                    } else {
+                        let pressed = value >= AXIS_ACTIVE_THRESHOLD;
+                        self.buttons.insert(code.into_u32(), pressed);
+                        self.mapped.set_button(button, pressed);
+                    }
                 }
-                gilrs::EventType::ButtonPressed(_, code) => {
-                    self.buttons.insert(code.into_u32(), true);
+                gilrs::EventType::ButtonPressed(button, code) => {
+                    // A collapsed half-axis d-pad also emits Pressed/Released
+                    // at gilrs's threshold crossings; the ButtonChanged value
+                    // stream carries the direction, so drop these.
+                    if !self.collapsed_dpad_half_axis(event.id, button, code) {
+                        self.buttons.insert(code.into_u32(), true);
+                        self.mapped.set_button(button, true);
+                    }
                 }
-                gilrs::EventType::ButtonReleased(_, code) => {
-                    self.buttons.insert(code.into_u32(), false);
+                gilrs::EventType::ButtonReleased(button, code) => {
+                    if !self.collapsed_dpad_half_axis(event.id, button, code) {
+                        self.buttons.insert(code.into_u32(), false);
+                        self.mapped.set_button(button, false);
+                    }
                 }
                 gilrs::EventType::Disconnected => {
                     self.axes.clear();
                     self.buttons.clear();
+                    self.mapped = MappedPadState::default();
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Whether this d-pad button event is really one half of an axis-mapped
+    /// d-pad that gilrs collapsed to a single button.
+    ///
+    /// gilrs's SDL-mapping parser drops the `+`/`-` qualifiers of half-axis
+    /// d-pad entries (`dpup:-a1,dpdown:+a1`, the common shape for cheap
+    /// stickless pads) and keys its table by the native axis code, so the
+    /// second binding for an axis overwrites the first: exactly one button
+    /// of the pair keeps a code, and every event for that axis arrives as
+    /// that one button with the full axis travel in its 0..1 value (0 = the
+    /// SDL-negative end = up/left on standard entries, 0.5 = rest). Left as
+    /// buttons, one direction per axis is lost and the other fires from the
+    /// wrong end, so [`Self::reroute_collapsed_dpad`] turns these events
+    /// back into a signed axis for both the raw and the named state.
+    fn collapsed_dpad_half_axis(
+        &self,
+        id: gilrs::GamepadId,
+        button: gilrs::Button,
+        code: gilrs::ev::Code,
+    ) -> bool {
+        use gilrs::Button as B;
+        let pair = match button {
+            B::DPadUp | B::DPadDown => (B::DPadUp, B::DPadDown),
+            B::DPadLeft | B::DPadRight => (B::DPadLeft, B::DPadRight),
+            _ => return false,
+        };
+        let pad = self.gilrs.gamepad(id);
+        if pad.mapping_source() != gilrs::MappingSource::SdlMappings {
+            return false;
+        }
+        match (pad.button_code(pair.0), pad.button_code(pair.1)) {
+            (Some(c), None) | (None, Some(c)) => c == code,
+            _ => false,
+        }
+    }
+
+    /// Recover both directions from a collapsed half-axis d-pad event: the
+    /// 0..1 button value spans the full axis, so recentre it to -1..1 and
+    /// store it as the raw axis it really is (which is also what the
+    /// pre-database calibration format recorded for these pads). The named
+    /// state gets the same value on the matching d-pad axis, flipped
+    /// vertically because SDL entries put up at the negative end while the
+    /// named convention is up-positive.
+    fn reroute_collapsed_dpad(&mut self, button: gilrs::Button, value: f32, code: gilrs::ev::Code) {
+        let v = value * 2.0 - 1.0;
+        self.axes.insert(code.into_u32(), v);
+        self.buttons.remove(&code.into_u32());
+        use gilrs::Button as B;
+        match button {
+            B::DPadUp | B::DPadDown => self.mapped.dpad_y = -v,
+            B::DPadLeft | B::DPadRight => self.mapped.dpad_x = v,
+            _ => {}
         }
     }
 
@@ -249,15 +440,17 @@ impl RawGamepads {
     }
 }
 
-/// Runtime reader: maps the first connected, calibrated pad to the emulated
-/// port-2 joystick. Held by the window and polled once per scheduler quantum.
+/// Runtime reader: maps the first connected pad to the emulated port-2
+/// joystick, through its saved calibration when one exists and through the
+/// standard layout when the controller database or platform driver knows the
+/// pad. Held by the window and polled once per scheduler quantum.
 pub struct GamepadReader {
     raw: Option<RawGamepads>,
     store: CalibrationStore,
     warned_uncalibrated: bool,
-    /// UUID of the pad whose calibration we last announced as in use, so we
-    /// log it once per pad (and again if a different pad is plugged in).
-    logged_calibrated: Option<String>,
+    /// UUID of the pad whose input source we last announced, so we log it
+    /// once per pad (and again if a different pad is plugged in).
+    logged_pad: Option<String>,
 }
 
 impl Default for GamepadReader {
@@ -279,7 +472,7 @@ impl GamepadReader {
             raw,
             store: CalibrationStore::load(),
             warned_uncalibrated: false,
-            logged_calibrated: None,
+            logged_pad: None,
         }
     }
 
@@ -311,7 +504,7 @@ impl GamepadReader {
         self.store.save()?;
         self.warned_uncalibrated = false;
         // Re-announce on the next poll now that a (new) calibration is live.
-        self.logged_calibrated = None;
+        self.logged_pad = None;
         Ok(())
     }
 
@@ -333,20 +526,50 @@ impl GamepadReader {
 
     /// Poll the gamepad and return its resolved state (emulated joystick
     /// lines plus the host-side Quit hotkey), or `None` when there is no
-    /// pad or no calibration for the connected one.
+    /// pad, or the connected one is neither calibrated nor known to the
+    /// controller database.
     pub fn poll(&mut self) -> Option<PadState> {
         let raw = self.raw.as_mut()?;
         raw.pump();
         let id = raw.first_gamepad()?;
         let pad = raw.gilrs.gamepad(id);
         let uuid = uuid_hex(pad.uuid());
+        let mapped = !matches!(pad.mapping_source(), gilrs::MappingSource::None);
         match self.store.get(&uuid) {
             Some(cal) => {
-                if self.logged_calibrated.as_deref() != Some(uuid.as_str()) {
-                    self.logged_calibrated = Some(uuid.clone());
+                if self.logged_pad.as_deref() != Some(uuid.as_str()) {
+                    self.logged_pad = Some(uuid.clone());
                     log::info!("using saved calibration for gamepad \"{}\"", pad.name());
+                    if cal.format < CALIBRATION_FORMAT
+                        && matches!(pad.mapping_source(), gilrs::MappingSource::SdlMappings)
+                    {
+                        // The bundled mappings can flip named-axis signs
+                        // relative to what an old-format calibration
+                        // recorded for this (database-covered) pad.
+                        log::warn!(
+                            "gamepad \"{}\" was calibrated before the bundled controller \
+                             mappings were enabled; recalibrate if a direction is reversed",
+                            pad.name()
+                        );
+                    }
                 }
                 Some(cal.resolve_pad(&raw.axes, &raw.buttons))
+            }
+            None if mapped => {
+                if self.logged_pad.as_deref() != Some(uuid.as_str()) {
+                    self.logged_pad = Some(uuid.clone());
+                    log::info!(
+                        "gamepad \"{}\" recognised by the controller database; using the \
+                         standard layout (calibrate to customise)",
+                        pad.name()
+                    );
+                }
+                // The default layout binds no Quit hotkey; only an explicit
+                // calibration may arm a host-side control.
+                Some(PadState {
+                    joystick: raw.mapped.resolve(),
+                    quit: false,
+                })
             }
             None => {
                 if !self.warned_uncalibrated {
@@ -570,6 +793,7 @@ impl CalibrationSession {
             rwd: b[9],
             ffw: b[10],
             quit: b[11],
+            format: CALIBRATION_FORMAT,
         }
     }
 }
@@ -643,6 +867,7 @@ pub fn run_calibration() -> Result<()> {
             "the Quit Copperline hotkey (or wait to skip)",
             false,
         )?,
+        format: CALIBRATION_FORMAT,
     };
 
     let mut store = CalibrationStore::load();
@@ -741,12 +966,7 @@ mod tests {
             right: axis(0x10030, true),
             fire: button(0x90001),
             button2: button(0x90002),
-            green: None,
-            yellow: None,
-            play: None,
-            rwd: None,
-            ffw: None,
-            quit: None,
+            ..Default::default()
         };
 
         let mut axes = BTreeMap::new();
@@ -767,6 +987,82 @@ mod tests {
         let s = cal.resolve(&axes, &buttons);
         assert!(s.right && !s.left && s.button2 && !s.fire);
         assert!(!s.up && !s.down);
+    }
+
+    #[test]
+    fn default_layout_maps_standard_controls_to_cd32_actions() {
+        // A database-covered pad with no calibration resolves through the
+        // fixed standard layout: face buttons onto the CD32 colours, Start
+        // onto play/pause, shoulders and triggers onto the transport keys.
+        let mut mapped = MappedPadState::default();
+        mapped.set_button(gilrs::Button::South, true);
+        mapped.set_button(gilrs::Button::Start, true);
+        mapped.set_button(gilrs::Button::LeftTrigger, true);
+        mapped.set_button(gilrs::Button::RightTrigger2, true);
+        mapped.set_button(gilrs::Button::DPadUp, true);
+        let s = mapped.resolve();
+        assert!(s.fire && s.play && s.rwd && s.ffw && s.up);
+        assert!(!s.button2 && !s.green && !s.yellow && !s.down);
+
+        mapped = MappedPadState::default();
+        mapped.set_button(gilrs::Button::East, true);
+        mapped.set_button(gilrs::Button::West, true);
+        mapped.set_button(gilrs::Button::North, true);
+        let s = mapped.resolve();
+        assert!(s.button2 && s.green && s.yellow);
+        assert!(!s.fire && !s.play && !s.rwd && !s.ffw);
+    }
+
+    #[test]
+    fn default_layout_directions_from_stick_dpad_buttons_and_hat_axes() {
+        // gilrs's named-axis convention is up/right positive; a deflection
+        // must pass the activity threshold, and d-pad buttons, hat-style
+        // d-pad axes, and the left stick all drive the same four lines.
+        let mut mapped = MappedPadState::default();
+        mapped.set_axis(gilrs::Axis::LeftStickY, 0.9);
+        mapped.set_axis(gilrs::Axis::LeftStickX, -0.9);
+        let s = mapped.resolve();
+        assert!(s.up && s.left && !s.down && !s.right);
+
+        mapped.set_axis(gilrs::Axis::LeftStickY, 0.3); // below threshold
+        mapped.set_axis(gilrs::Axis::LeftStickX, 0.0);
+        assert_eq!(mapped.resolve(), JoystickState::default());
+
+        mapped = MappedPadState::default();
+        mapped.set_axis(gilrs::Axis::DPadY, -1.0);
+        mapped.set_button(gilrs::Button::DPadRight, true);
+        let s = mapped.resolve();
+        assert!(s.down && s.right && !s.up && !s.left);
+    }
+
+    #[test]
+    fn calibration_format_tags_new_recordings_and_defaults_to_legacy() {
+        // Files written before the bundled mappings were enabled carry no
+        // format key and must load as format 0 (legacy); anything recorded
+        // now is stamped with the current format.
+        let legacy: CalibrationStore = toml::from_str(
+            "[gamepads.0123]\nup = { kind = \"axis\", code = 49, positive = false }\n",
+        )
+        .unwrap();
+        let cal = legacy.get("0123").unwrap();
+        assert_eq!(cal.format, 0);
+        assert_eq!(cal.up, axis(49, false));
+
+        let mut session = CalibrationSession::new();
+        let pad = Some(("Pad".to_string(), "abc123".to_string()));
+        let axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        for step in 0..5 {
+            session.advance(pad.clone(), &axes, &buttons); // neutral
+            buttons.insert(0x9000 + step as u32, true);
+            session.advance(pad.clone(), &axes, &buttons);
+            buttons.clear();
+        }
+        while session.can_skip() {
+            session.skip_current();
+        }
+        assert!(session.done());
+        assert_eq!(session.to_calibration().format, CALIBRATION_FORMAT);
     }
 
     #[test]
