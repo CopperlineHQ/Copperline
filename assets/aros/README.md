@@ -18,11 +18,32 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 ## Provenance
 
 Built from source on 2026-08-20 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit f4bfdd4c
-(the merge of the CD32 quiet-boot and requester-gate series, pull
-request 1032). Fixes Copperline contributed or depends on, all in
-master:
+(https://github.com/aros-development-team/AROS) at commit 677a83bb
+(the merge of the m68k chip-RAM footprint series, pull request 1034).
+Fixes Copperline contributed or depends on, all in master:
 
+- the m68k chip-RAM footprint series of pull request 1034
+  (https://github.com/aros-development-team/AROS/pull/1034, merged
+  2026-08-20): the boot-time chip RAM cost of the ROM drops by well over
+  a megabyte on an unexpanded machine. The CD32 boot node asked CDVDFS
+  for 32 buffers, which CDVDFS multiplies into 16-sector chunks - a 1 MB
+  cache allocated from MEMF_24BITDMA the moment CD0: mounts, which on a
+  fast-RAM-less CD32 is chip RAM (and why adding fast RAM used to "fix"
+  CD games); it now asks for 4 (128 KiB). CreatePool committed a full
+  puddle up front, so the ~45 pools alive after boot pinned 324 KiB that
+  was 97% empty; the pool header is now a chunk-sized allocation and the
+  first data puddle is sized to the first request. And exec's
+  NewCreateTaskA floored every task stack at 16 KiB on m68k - roughly
+  200 KiB across the resident tasks against measured per-task peaks in
+  the hundreds of bytes; the floor is now 4 KiB there (interrupts run on
+  the supervisor stack on m68k, so task stacks carry only user-mode
+  frames), the resident system tasks take measured sizes with generous
+  headroom, and the boot shell and default CLI command stacks are 8 KiB
+  (Kickstart's default is 4000 bytes). Free chip RAM at the boot
+  handoff: A1200 1.30 MB -> 1.72 MB, CD32 with a disc in the drive
+  164 KiB -> 1.48 MB, and a 1 MB A500 keeps 236 KiB of its slow RAM free
+  where before the OS left 64 bytes. Chip-only CD32 games that needed a
+  fast-RAM expansion under the AROS ROM now boot without one.
 - the CD32 quiet-boot and requester-gate series of pull request 1032
   (https://github.com/aros-development-team/AROS/pull/1032, merged
   2026-08-19): a CD boot runs appliance-quiet like the CD32 Kickstart
