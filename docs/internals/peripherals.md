@@ -529,7 +529,11 @@ resolves through a fixed standard layout, overridden per-UUID by the
 calibration described in [](../guide/ui), which records raw event codes
 and is the only path for unrecognised pads. On CD32 machines the pad
 output is serialized through the CD32 pad protocol instead of the plain
-digital joystick lines.
+digital joystick lines, modelled after the pad's 4021 shift register:
+in load mode the register's output follows Blue continuously (which is
+how Blue doubles as the plain second button on POTxY), and while the
+register is clocking each shifted bit reflects only its own button
+line, a held Blue included.
 
 The window layer has one host-source policy for the emulated port-2
 joystick/CD32 pad: gamepad (the default) or keyboard. Keyboard mode

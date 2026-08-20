@@ -48,11 +48,16 @@ impl Bus {
                     let x_bit = (8 + 4 * port) as u16; // POT0X=8, POT1X=12
                     let y_bit = x_bit + 2; // POT0Y=10, POT1Y=14
                     if self.cd32_pad_serial_mode(port) {
-                        // The mode-select POTxX pin reads low (driven);
-                        // POTxY carries the serial bit, which a held Blue
-                        // button still grounds.
+                        // The mode-select POTxX pin reads low (driven).
+                        // POTxY carries the pad's 4021 shift-register
+                        // output: its last stage follows Blue only while
+                        // the register is in load mode (how Blue reads as
+                        // a plain second button, and the pre-clock bit-8
+                        // state), so once the register is clocking a held
+                        // Blue is just its own bit of the report and does
+                        // not ground the later bits.
                         v &= !(1 << x_bit);
-                        if self.cd32_pad_serial_bit(port) && !self.input.ports[port].button2 {
+                        if self.cd32_pad_serial_bit(port) {
                             v |= 1 << y_bit;
                         } else {
                             v &= !(1 << y_bit);
