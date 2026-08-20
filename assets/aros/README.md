@@ -17,15 +17,34 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-19 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit d07902ab
-(the merge of the cd.device CD32 CD-boot series, pull request 1018),
-plus the low-chip boot-console series of pull request 1022
-(https://github.com/aros-development-team/AROS/pull/1022, through commit
-89a6f60e), which is not yet merged. Fixes Copperline contributed or
-depends on, in master unless noted:
+Built from source on 2026-08-20 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit f4bfdd4c
+(the merge of the CD32 quiet-boot and requester-gate series, pull
+request 1032). Fixes Copperline contributed or depends on, all in
+master:
 
-- the low-chip boot-console series of pull request 1022 (in flight):
+- the CD32 quiet-boot and requester-gate series of pull request 1032
+  (https://github.com/aros-development-team/AROS/pull/1032, merged
+  2026-08-19): a CD boot runs appliance-quiet like the CD32 Kickstart
+  (the boot process keeps pr_WindowPtr at -1 through the whole run and
+  the initial CLI gets NIL: instead of a console window, so no "Please
+  insert volume" requester can ever block a pad-only machine);
+  cd.device no longer aborts the command exchange when the drive
+  volunteers a play-status packet, which desynchronised every later
+  command by one reply and dumped Pinball Fantasies to the shell when a
+  table started its music; CD_PLAYTRACK sends a real M:S:F lead-out end
+  position and CD_ATTENUATE handles mute/unmute/query correctly;
+  ReadJoyPort's controller probe drives the right port's POTGO bits;
+  and lowlevel.library implements the Kickstart-private requester-gate
+  vectors at LVO -120/-126 (a nested EasyRequestArgs suppress/restore
+  pair, semantics recovered from the real 40.34 ROM) that CD32 titles
+  call blind at startup - Pinball Illusions crashed into genmodule's
+  poison vector there and hung on its loading screen. With these, both
+  Pinball Fantasies and Pinball Illusions cold-boot from CD to playable
+  tables on the AROS ROM.
+- the low-chip boot-console series of pull request 1022
+  (https://github.com/aros-development-team/AROS/pull/1022, merged
+  2026-08-19):
   a boot console that cannot get its window latches the failure and
   degrades to a sink instead of re-attempting a 40 KiB Workbench screen
   on every packet (the loop a CD32 game that fills all of chip RAM used
