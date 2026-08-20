@@ -62,7 +62,7 @@ impl ControlHandle {
     /// the window exists so scripts can attach as soon as it opens;
     /// threads are spawned later by [`ControlHandle::start`].
     pub fn bind(config: &Config) -> Result<Self> {
-        let bind = crate::gdbstub::normalize_listen_addr(&config.listen)?;
+        let bind = crate::debugger::normalize_listen_addr(&config.listen)?;
         let listener =
             TcpListener::bind(&bind).with_context(|| format!("binding control server {bind}"))?;
         let local = listener.local_addr().context("resolving control address")?;

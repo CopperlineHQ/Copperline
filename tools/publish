@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Assemble a publisher-kit game bundle around the Copperline player.
+
+Builds crates/copperline-player against a game manifest, then stages the
+distributable bundle for the host platform: the player binary, the game
+payload as a sidecar file, the AROS boot ROM pair, and the license
+documents publishers are required to pass on. See docs/guide/publishing.md.
+
+Usage:
+  tools/publish --manifest /path/to/game.toml [--payload PATH] [--out DIR]
+                [--portable] [--skip-build]
+
+The payload defaults to the file the manifest names, looked for next to the
+manifest. On macOS the bundle is a .app plus a .zip of it; elsewhere it is
+a directory plus a .tar.gz (Linux) or .zip (Windows). --portable adds a
+portable.txt so per-user data stays inside the bundle directory (itch.io
+style zips).
+"""
+
+import argparse
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import tarfile
+import tomllib
+import zipfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+AROS_FILES = [
+    "aros-amiga-m68k-rom.bin",
+    "aros-amiga-m68k-ext.bin",
+    "LICENSE",
+    "README.md",
+    "ACKNOWLEDGEMENTS",
+]
+
+
+def fail(msg: str) -> "NoReturn":
+    print(f"publish: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def copperline_version() -> str:
+    for line in (REPO / "Cargo.toml").read_text().splitlines():
+        if line.startswith("version"):
+            return line.split('"')[1]
+    return "unknown"
+
+
+def load_manifest(path: Path) -> dict:
+    try:
+        manifest = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        fail(f"cannot read manifest {path}: {e}")
+    for key in ("game", "payload", "machine"):
+        if key not in manifest:
+            fail(f"manifest is missing its [{key}] section")
+    return manifest
+
+
+def payload_file_name(manifest: dict) -> str:
+    payload = manifest["payload"]
+    for kind in ("cd", "adf"):
+        if kind in payload:
+            return payload[kind]
+    if "run" in payload:
+        return payload["run"]["files"]
+    fail("[payload] must name one of cd, adf, or run")
+
+
+def build_player(manifest_path: Path) -> Path:
+    env = dict(os.environ, COPPERLINE_GAME_MANIFEST=str(manifest_path))
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--manifest-path",
+            str(REPO / "crates/copperline-player/Cargo.toml"),
+        ],
+        env=env,
+        check=True,
+    )
+    return REPO / "crates/copperline-player/target/release/copperline-player"
+
+
+def write_licenses(dest: Path, title: str) -> None:
+    """The license documents every bundle must carry: Copperline's GPL text
+    and a README telling the publisher's users where the source lives."""
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO / "LICENSE", dest / "LICENSE.Copperline.txt")
+    version = copperline_version()
+    (dest / "README.txt").write_text(
+        f"{title} runs on the Copperline player, built from Copperline "
+        f"{version}, a cycle-driven Amiga emulator licensed under the GNU "
+        "General Public License v3.0 or later (LICENSE.Copperline.txt).\n"
+        "\n"
+        "Complete corresponding source code:\n"
+        f"  https://github.com/CopperlineHQ/Copperline (tag v{version})\n"
+        "\n"
+        "The bundled AROS boot ROM is a separate work under the AROS Public "
+        "License 1.1; its license and acknowledgements ship in the aros "
+        "folder beside the ROM files.\n"
+        "\n"
+        "The game itself is a separate work by the publisher, distributed "
+        "alongside the player as a data file, and is not covered by the "
+        "licenses above.\n"
+    )
+
+
+def stage_aros(dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in AROS_FILES:
+        shutil.copy2(REPO / "assets/aros" / name, dest / name)
+
+
+def bundle_macos(
+    out: Path, binary: Path, payload: Path, manifest: dict, manifest_dir: Path
+) -> Path:
+    game = manifest["game"]
+    title, game_id = game["title"], game["id"]
+    version = game.get("version", "1.0")
+    app = out / f"{title}.app"
+    if app.exists():
+        shutil.rmtree(app)
+    macos = app / "Contents/MacOS"
+    resources = app / "Contents/Resources"
+    macos.mkdir(parents=True)
+    resources.mkdir(parents=True)
+    shutil.copy2(binary, macos / game_id)
+    copy_payload(payload, resources / payload.name)
+    stage_aros(resources / "aros")
+    write_licenses(resources / "LICENSES", title)
+
+    info = {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleDisplayName": title,
+        "CFBundleExecutable": game_id,
+        "CFBundleIdentifier": f"dev.copperline.player.{game_id}",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": title,
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
+        "LSApplicationCategoryType": "public.app-category.games",
+        "LSMinimumSystemVersion": "11.0",
+        "NSHighResolutionCapable": True,
+        "NSHumanReadableCopyright": (
+            "Built on Copperline, licensed GPL-3.0-or-later; "
+            "see Resources/LICENSES."
+        ),
+    }
+    icon = manifest.get("branding", {}).get("icon")
+    if icon:
+        icns = resources / f"{game_id}.icns"
+        made = subprocess.run(
+            ["sips", "-s", "format", "icns", str(manifest_dir / icon), "--out", str(icns)],
+            capture_output=True,
+        )
+        if made.returncode == 0:
+            info["CFBundleIconFile"] = f"{game_id}.icns"
+        else:
+            print("publish: note: sips could not convert the icon to .icns; "
+                  "the Finder icon stays generic (the dock icon is baked in)")
+    with open(app / "Contents/Info.plist", "wb") as f:
+        plistlib.dump(info, f)
+    (app / "Contents/PkgInfo").write_bytes(b"APPL????")
+
+    # Ad-hoc signature: unsigned arm64 binaries will not launch at all.
+    subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True
+    )
+    archive = out / f"{title}-{version}-macos.zip"
+    if archive.exists():
+        archive.unlink()
+    subprocess.run(
+        ["ditto", "-c", "-k", "--keepParent", str(app), str(archive)], check=True
+    )
+    return archive
+
+
+def bundle_directory(
+    out: Path, binary: Path, payload: Path, manifest: dict, portable: bool
+) -> Path:
+    game = manifest["game"]
+    title, game_id = game["title"], game["id"]
+    version = game.get("version", "1.0")
+    stage = out / game_id
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    exe = game_id + (".exe" if sys.platform == "win32" else "")
+    shutil.copy2(binary, stage / exe)
+    copy_payload(payload, stage / payload.name)
+    stage_aros(stage / "aros")
+    write_licenses(stage / "LICENSES", title)
+    if portable:
+        # An empty portable.txt keeps saves and settings in this directory.
+        (stage / "portable.txt").write_text("")
+    if sys.platform == "win32":
+        archive = out / f"{title}-{version}-windows.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+            for path in sorted(stage.rglob("*")):
+                z.write(path, path.relative_to(out))
+    else:
+        archive = out / f"{title}-{version}-linux.tar.gz"
+        with tarfile.open(archive, "w:gz") as t:
+            t.add(stage, arcname=stage.name)
+    return archive
+
+
+def copy_payload(src: Path, dest: Path) -> None:
+    if src.is_dir():
+        shutil.copytree(src, dest)
+    else:
+        shutil.copy2(src, dest)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--manifest", required=True, type=Path)
+    ap.add_argument("--payload", type=Path, help="payload path (default: beside the manifest)")
+    ap.add_argument("--out", type=Path, default=REPO / "target/publish")
+    ap.add_argument("--portable", action="store_true",
+                    help="keep per-user data inside the bundle directory")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="reuse the already-built player binary")
+    args = ap.parse_args()
+
+    manifest_path = args.manifest.resolve()
+    manifest = load_manifest(manifest_path)
+    payload = args.payload or manifest_path.parent / payload_file_name(manifest)
+    if not payload.exists():
+        fail(f"payload {payload} does not exist (name it with --payload)")
+    if payload.name != payload_file_name(manifest):
+        fail(
+            f"payload must be named {payload_file_name(manifest)!r} as the "
+            f"manifest bakes that file name into the player"
+        )
+
+    binary = REPO / "crates/copperline-player/target/release/copperline-player"
+    if not args.skip_build:
+        binary = build_player(manifest_path)
+    if not binary.is_file():
+        fail(f"player binary {binary} is missing (drop --skip-build)")
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        archive = bundle_macos(args.out, binary, payload, manifest, manifest_path.parent)
+    else:
+        archive = bundle_directory(args.out, binary, payload, manifest, args.portable)
+    print(f"publish: bundle ready: {archive}")
+    print(
+        "publish: smoke-test it headless before shipping, e.g.\n"
+        f"  <bundle-exe> --screenshot-after 30 /tmp/boot.png"
+    )
+
+
+if __name__ == "__main__":
+    main()

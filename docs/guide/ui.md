@@ -326,6 +326,10 @@ belongs to the Amiga.
   screenshots, frame dumps and recordings are never shader-processed -- and
   it steps aside for the frames it cannot sensibly draw: while the menu or
   any panel is open, under RTG, and in programmable multisync scan modes.
+- **Shader Strength**: how strongly the shader pass is applied, stepped
+  10% at a time with **Stronger** / **Softer** (the category row shows the
+  figure); greyed while the shader is off. The start-up strength is
+  `[display] shader_strength` (see [Configuration](configuration.md)).
 - **Screen Tint**: the monochrome-monitor tint over the picture --
   **Colour** (full colour), **Black & white**, **Green** and **Amber** (the
   two classic monochrome phosphors), and **Sepia** -- the same looks as the
@@ -991,8 +995,10 @@ standard layout. The d-pad and left stick drive the directions; the south
 face button (A / Cross) is fire / CD32 red, east (B / Circle) is blue,
 west (X / Square) is green, north (Y / Triangle) is yellow, Start is
 play/pause, and the left and right shoulders or triggers are reverse and
-forward. Personal SDL mapping strings in the standard
-`SDL_GAMECONTROLLERCONFIG` environment variable are honoured too.
+forward. Select/Back and the guide button -- which no emulated control
+uses -- open the pop-up menu (below). Personal SDL mapping strings in the
+standard `SDL_GAMECONTROLLERCONFIG` environment variable are honoured
+too.
 
 Calibration is the per-pad override, and the only path for controllers
 the database does not cover: push each control when prompted. This
@@ -1012,10 +1018,10 @@ Run it either from the menu ("Calibrate Gamepad...") -- which ends with a
 live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
-the optional CD32 green/yellow/play/rewind/forward buttons, and an optional
-**Quit Copperline** hotkey; every step waits for the pad to return to
-neutral before sampling, so a held control cannot bleed into the next
-binding.
+the optional CD32 green/yellow/play/rewind/forward buttons, an optional
+**Open menu** button, and an optional **Quit Copperline** hotkey; every
+step waits for the pad to return to neutral before sampling, so a held
+control cannot bleed into the next binding.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can
@@ -1027,6 +1033,16 @@ device drives the joystick ports, and while the machine is paused or
 powered off. Skip the step to leave quitting to the keyboard shortcut.
 The default database layout never binds a Quit hotkey; only a
 calibration can arm one.
+
+The Menu button is the other host-side control: a press opens the pop-up
+menu (or closes an open overlay panel), and while the menu is up the pad
+walks it -- the d-pad steps rows (hold to repeat), right opens a
+category, left backs out of one, fire activates the row, and the second
+button backs out a level at a time, closing the menu from the top: the
+same walk the arrow keys and `Esc` do. While the menu or a panel is
+open, the pad stops driving the emulated port, just as the keyboard
+does. On the default database layout Select/Back and the guide button
+carry it; a calibration can put it anywhere (or skip it).
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;

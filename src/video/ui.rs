@@ -12738,6 +12738,9 @@ mod tests {
         let devices = ["Built-in Output".to_string()];
         let none: [String; 0] = [];
         let rows = menu::build(&menu::MenuState {
+            player: false,
+            player_save_states: false,
+            paused: false,
             fullscreen: false,
             status_bar_hidden: false,
             bezel: crate::config::BezelStyle::None,
@@ -12759,6 +12762,7 @@ mod tests {
             tv_centre: crate::config::TvCentre::default(),
             tv_centre_applies: true,
             shader: crate::config::ShaderKind::None,
+            shader_strength: 1.0,
             custom_shader_available: false,
             tint: crate::config::Tint::None,
             menu_scale: crate::config::MenuScale::Normal,

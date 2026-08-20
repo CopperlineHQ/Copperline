@@ -8523,6 +8523,7 @@ fn mt32_endpoint(wanted: bool) -> Option<String> {
     (wanted && cfg!(feature = "mt32")).then(|| crate::config::MIDI_OUT_MT32.to_string())
 }
 
+#[cfg(feature = "midi")]
 fn csynth_endpoint(wanted: bool) -> Option<String> {
     (wanted && cfg!(feature = "coppersynth")).then(|| crate::config::MIDI_OUT_CSYNTH.to_string())
 }
@@ -8824,14 +8825,14 @@ fn overscan_name(overscan: Overscan) -> &'static str {
     }
 }
 
-fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {
+pub(crate) fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {
     match aspect {
         PixelAspect::Tv => "tv",
         PixelAspect::Square => "square",
     }
 }
 
-fn display_scaling_name(scaling: DisplayScaling) -> &'static str {
+pub(crate) fn display_scaling_name(scaling: DisplayScaling) -> &'static str {
     match scaling {
         DisplayScaling::Smooth => "smooth",
         DisplayScaling::Integer => "integer",
@@ -8853,7 +8854,7 @@ fn shader_name(shader: &ShaderMode) -> String {
 
 /// The `[display] tint` value for a tint: the canonical config name (not
 /// the picker's "off" spelling, which only parses back).
-fn tint_name(tint: Tint) -> &'static str {
+pub(crate) fn tint_name(tint: Tint) -> &'static str {
     match tint {
         Tint::None => "none",
         Tint::Bw => "bw",

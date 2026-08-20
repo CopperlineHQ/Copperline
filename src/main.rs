@@ -8,7 +8,9 @@
 //!   the bundled AROS open-source Kickstart replacement (see src/romsearch.rs).
 
 use anyhow::{anyhow, Result};
-use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, gdbstub, priority, video};
+#[cfg(feature = "gdb")]
+use copperline::gdbstub;
+use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
 use log::{info, warn};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -58,7 +60,10 @@ pub struct CliArgs {
     pub benchmark_until: Option<f32>,
     /// `--gdb ADDR`: run a headless GDB remote-protocol server on ADDR,
     /// `:PORT`, or `PORT`, pausing at reset until the debugger resumes.
-    pub gdb: Option<gdbstub::Config>,
+    /// Held as the listen address so the struct has one shape whether or
+    /// not the `gdb` feature is compiled in; rejected at validation when
+    /// it is not, like the control flags.
+    pub gdb: Option<String>,
     /// `--control ADDR`: run the headless Copperline Control Protocol
     /// server (JSON-RPC over loopback TCP), pausing at reset until a
     /// client resumes. `--control-token`/`--control-info` refine it.
@@ -340,7 +345,7 @@ where
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
     let mut benchmark_until: Option<f32> = None;
-    let mut gdb: Option<gdbstub::Config> = None;
+    let mut gdb: Option<String> = None;
     let mut control_listen: Option<String> = None;
     let mut control_gui_listen: Option<String> = None;
     let mut control_token: Option<String> = None;
@@ -964,7 +969,7 @@ where
                 let listen = args
                     .next()
                     .ok_or_else(|| anyhow!("--gdb requires ADDR, :PORT, or PORT"))?;
-                gdb = Some(gdbstub::Config::new(listen));
+                gdb = Some(listen);
             }
             "--control" => {
                 let listen = args
@@ -1629,6 +1634,13 @@ fn validate_run_args(cli: &CliArgs) -> Result<()> {
 }
 
 fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
+    #[cfg(not(feature = "gdb"))]
+    if cli.gdb.is_some() {
+        return Err(anyhow!(
+            "this build was compiled without the gdb feature; \
+             rebuild with --features gdb for --gdb"
+        ));
+    }
     if cli.gdb.is_none() {
         return Ok(());
     }
@@ -2280,6 +2292,11 @@ fn main() -> Result<()> {
         ));
         run_prog_name = Some(prepared.prog_name);
     }
+    // Only the gdb dispatch reads the program name; without the feature,
+    // keep the binding "used" so the staging code is one shape in both
+    // builds.
+    #[cfg(not(feature = "gdb"))]
+    let _ = &run_prog_name;
     if cli.load_state.is_some() {
         // A save state restores the full ROM image, so a Kickstart file is not
         // required to load one. Still resolve the bundled-AROS sentinel when
@@ -2433,7 +2450,9 @@ fn main() -> Result<()> {
     if let Some(target_secs) = cli.benchmark_until {
         return run_headless_benchmark(emu, target_secs);
     }
-    if let Some(mut gdb) = cli.gdb {
+    #[cfg(feature = "gdb")]
+    if let Some(listen) = cli.gdb {
+        let mut gdb = gdbstub::Config::new(listen);
         // --run + --gdb: stop at the program's first instruction, the
         // moment the guest OS loads it.
         gdb.stop_on_load = run_prog_name.clone();
@@ -3335,10 +3354,7 @@ mod tests {
     #[test]
     fn gdb_mode_parses_and_defaults_to_null_audio() -> Result<()> {
         let args = parse(&["--gdb", ":2345"])?;
-        assert_eq!(
-            args.gdb,
-            Some(copperline::gdbstub::Config::new(":2345".to_string()))
-        );
+        assert_eq!(args.gdb.as_deref(), Some(":2345"));
         assert!(!args.audio_live);
         validate_gdb_args(&args)?;
         Ok(())

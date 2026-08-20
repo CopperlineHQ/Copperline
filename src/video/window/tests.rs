@@ -518,7 +518,7 @@ fn gamepad_quit_hotkey_requires_a_sustained_hold() {
     // requested before the hold completes.
     app.track_gamepad_quit_hold(true);
     assert!(app.gamepad_quit_hold.is_some());
-    assert!(!app.gamepad_quit_requested);
+    assert!(!app.quit_requested);
     assert!(app
         .osd
         .as_ref()
@@ -528,7 +528,7 @@ fn gamepad_quit_hotkey_requires_a_sustained_hold() {
     app.track_gamepad_quit_hold(false);
     assert!(app.gamepad_quit_hold.is_none());
     assert!(app.osd.is_none());
-    assert!(!app.gamepad_quit_requested);
+    assert!(!app.quit_requested);
 
     // A release with no hold in progress leaves an unrelated OSD alone.
     app.show_osd("Input mapping saved");
@@ -538,7 +538,7 @@ fn gamepad_quit_hotkey_requires_a_sustained_hold() {
     // A hold that has lasted the full duration requests the exit.
     app.gamepad_quit_hold = Some(std::time::Instant::now() - super::GAMEPAD_QUIT_HOLD);
     app.track_gamepad_quit_hold(true);
-    assert!(app.gamepad_quit_requested);
+    assert!(app.quit_requested);
 }
 
 #[test]

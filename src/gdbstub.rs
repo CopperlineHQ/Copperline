@@ -7,7 +7,7 @@
 //! memory-mapped devices; Amiga custom-chip state is exposed through `monitor`
 //! commands so inspection remains side-effect-free.
 
-use crate::debugger::custom_reg_name;
+use crate::debugger::{custom_reg_name, normalize_listen_addr, parse_custom_reg};
 use crate::emulator::Emulator;
 use crate::timetravel::ReverseOutcome;
 use anyhow::{anyhow, bail, Context, Result};
@@ -137,23 +137,6 @@ fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>)
 enum SessionEnd {
     Detached,
     Killed,
-}
-
-/// Expand the listen-address shorthand shared by the debug servers
-/// (`--gdb`, `--control`, `--control-gui`): bare `PORT` and `:PORT`
-/// bind loopback; anything else is taken verbatim.
-pub(crate) fn normalize_listen_addr(input: &str) -> Result<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("listen address requires ADDR, :PORT, or PORT"));
-    }
-    if trimmed.starts_with(':') {
-        return Ok(format!("127.0.0.1{trimmed}"));
-    }
-    if trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(format!("127.0.0.1:{trimmed}"));
-    }
-    Ok(trimmed.to_string())
 }
 
 struct Session {
@@ -1121,24 +1104,6 @@ fn parse_z_packet(packet: &str) -> Result<(u32, usize)> {
         .next()
         .unwrap_or("1");
     Ok((parse_hex_u32(addr)?, parse_hex_usize(kind)?))
-}
-
-pub(crate) fn parse_custom_reg(input: &str) -> Option<u16> {
-    if let Ok(value) = parse_hex_u32(input) {
-        return Some(custom_offset_from_value(value));
-    }
-    let needle = input.trim().to_ascii_uppercase();
-    (0..=0x1FEu16)
-        .step_by(2)
-        .find(|&off| custom_reg_name(off).to_ascii_uppercase() == needle)
-}
-
-fn custom_offset_from_value(value: u32) -> u16 {
-    if (0x00DF_F000..=0x00DF_FFFF).contains(&value) {
-        (value - 0x00DF_F000) as u16 & 0x1FE
-    } else {
-        value as u16 & 0x1FE
-    }
 }
 
 fn parse_hex_u16(input: &str) -> Result<u16> {

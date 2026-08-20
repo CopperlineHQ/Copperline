@@ -107,6 +107,10 @@ pub struct GamepadCalibration {
     // Host-side Quit hotkey (optional; never driven into the emulated port).
     #[serde(default)]
     quit: Option<RawInput>,
+    // Host-side Menu button (optional; never driven into the emulated
+    // port). Opens the pop-up menu, which the d-pad then walks.
+    #[serde(default)]
+    menu: Option<RawInput>,
     /// [`CALIBRATION_FORMAT`] at recording time; 0 for files written before
     /// the bundled controller mappings were enabled.
     #[serde(default)]
@@ -138,6 +142,9 @@ pub struct PadState {
     /// The calibrated Quit hotkey is currently held. Host-side only: the
     /// window turns a sustained hold into an application exit.
     pub quit: bool,
+    /// The Menu button is currently held. Host-side only: a press opens
+    /// (or closes) the pop-up menu, and the pad walks it while it is up.
+    pub menu: bool,
 }
 
 impl GamepadCalibration {
@@ -145,6 +152,7 @@ impl GamepadCalibration {
         PadState {
             joystick: self.resolve(axes, buttons),
             quit: self.quit.is_some_and(|i| i.active(axes, buttons)),
+            menu: self.menu.is_some_and(|i| i.active(axes, buttons)),
         }
     }
 
@@ -231,6 +239,11 @@ struct MappedPadState {
     west: bool,
     north: bool,
     start: bool,
+    /// Select/Back and the guide button. Unused by the standard joystick
+    /// layout, so the default mapping can spend them on the host-side
+    /// Menu control without robbing any emulated control.
+    select: bool,
+    mode: bool,
     left_shoulder: bool,
     right_shoulder: bool,
     left_trigger: bool,
@@ -256,6 +269,8 @@ impl MappedPadState {
             B::West => self.west = pressed,
             B::North => self.north = pressed,
             B::Start => self.start = pressed,
+            B::Select => self.select = pressed,
+            B::Mode => self.mode = pressed,
             B::LeftTrigger => self.left_shoulder = pressed,
             B::RightTrigger => self.right_shoulder = pressed,
             B::LeftTrigger2 => self.left_trigger = pressed,
@@ -534,11 +549,11 @@ impl GamepadReader {
         Ok(())
     }
 
-    /// Whether a connected, calibrated pad carries a Quit-hotkey binding.
-    /// The window keeps the event loop polling while one is present: gilrs
-    /// is polled, not evented, so a paused or powered-off machine would
-    /// otherwise never observe the hold.
-    pub fn quit_hotkey_present(&mut self) -> bool {
+    /// Whether a connected pad carries a host-side control (the Quit
+    /// hotkey or the Menu button). The window keeps the event loop polling
+    /// while one is present: gilrs is polled, not evented, so a paused or
+    /// powered-off machine would otherwise never observe the press.
+    pub fn host_hotkey_present(&mut self) -> bool {
         let Some(raw) = self.raw.as_mut() else {
             return false;
         };
@@ -546,8 +561,14 @@ impl GamepadReader {
         let Some(id) = raw.first_gamepad() else {
             return false;
         };
-        let uuid = uuid_hex(raw.gilrs.gamepad(id).uuid());
-        self.store.get(&uuid).is_some_and(|cal| cal.quit.is_some())
+        let pad = raw.gilrs.gamepad(id);
+        let uuid = uuid_hex(pad.uuid());
+        match self.store.get(&uuid) {
+            Some(cal) => cal.quit.is_some() || cal.menu.is_some(),
+            // The database's standard layout always carries the Menu
+            // control on Select/Back and the guide button.
+            None => !matches!(pad.mapping_source(), gilrs::MappingSource::None),
+        }
     }
 
     /// Poll the gamepad and return its resolved state (emulated joystick
@@ -590,11 +611,14 @@ impl GamepadReader {
                         pad.name()
                     );
                 }
-                // The default layout binds no Quit hotkey; only an explicit
-                // calibration may arm a host-side control.
+                // The default layout binds no Quit hotkey: exiting is
+                // destructive, so only an explicit calibration may arm it.
+                // The menu is harmless and dismissible, so the layout's
+                // otherwise-unused Select/Back and guide buttons open it.
                 Some(PadState {
                     joystick: raw.mapped.resolve(),
                     quit: false,
+                    menu: raw.mapped.select || raw.mapped.mode,
                 })
             }
             None => {
@@ -618,7 +642,7 @@ impl GamepadReader {
 
 /// The calibration prompts in order: label and whether the step may be
 /// skipped (pads without CD32 extras skip the optional ones).
-const CAL_STEPS: [(&str, bool); 12] = [
+const CAL_STEPS: [(&str, bool); 13] = [
     ("Up", true),
     ("Down", true),
     ("Left", true),
@@ -630,6 +654,7 @@ const CAL_STEPS: [(&str, bool); 12] = [
     ("CD32 play/pause", false),
     ("CD32 reverse", false),
     ("CD32 forward", false),
+    ("Open menu", false),
     ("Quit Copperline", false),
 ];
 
@@ -818,7 +843,8 @@ impl CalibrationSession {
             play: b[8],
             rwd: b[9],
             ffw: b[10],
-            quit: b[11],
+            menu: b[11],
+            quit: b[12],
             format: CALIBRATION_FORMAT,
         }
     }
@@ -888,6 +914,7 @@ pub fn run_calibration() -> Result<()> {
         play: capture(&mut raw, "CD32 play/pause (or wait to skip)", false)?,
         rwd: capture(&mut raw, "CD32 reverse (or wait to skip)", false)?,
         ffw: capture(&mut raw, "CD32 forward (or wait to skip)", false)?,
+        menu: capture(&mut raw, "the Menu button (or wait to skip)", false)?,
         quit: capture(
             &mut raw,
             "the Quit Copperline hotkey (or wait to skip)",

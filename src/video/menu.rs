@@ -50,6 +50,8 @@ pub enum MenuAction {
     /// `(dh, dv)`, a monitor's H-CENTER/V-CENTER knobs.
     StepTvCentre(i32, i32),
     ResetTvCentre,
+    /// Step the CRT shader's strength by one notch, up (+1) or down (-1).
+    StepShaderStrength(i8),
     ToggleFullscreen,
     ToggleStatusBar,
     TogglePerfOverlay,
@@ -96,6 +98,13 @@ pub enum MenuAction {
     LoadState,
     QuickSave(usize),
     QuickLoad(usize),
+
+    // The player build's session rows. The full build reaches these through
+    // the status bar and shortcuts; a player session has neither, so the
+    // menu is where they live.
+    TogglePause,
+    ResetMachine,
+    Quit,
 }
 
 impl MenuAction {
@@ -116,6 +125,8 @@ impl MenuAction {
                 | MenuAction::LoadRom
                 | MenuAction::SaveState
                 | MenuAction::LoadState
+                | MenuAction::ResetMachine
+                | MenuAction::Quit
         )
     }
 }
@@ -406,6 +417,16 @@ impl MenuNav {
 /// The machine's state, as far as the menu needs to know it. Gathered once
 /// when the menu opens so building the tree touches nothing live.
 pub struct MenuState<'a> {
+    /// Whether this is the player build's trimmed tree: no tools, no
+    /// machine configuration, no recording or debug rows -- the settings an
+    /// end user of a shipped game changes, plus Pause, Reset, and Quit.
+    pub player: bool,
+    /// Whether the player tree offers the quick save/load slots; some
+    /// titles treat them as part of the game and some as cheating, so the
+    /// game's manifest decides.
+    pub player_save_states: bool,
+    /// Whether emulation is paused, for the player tree's Pause toggle.
+    pub paused: bool,
     pub fullscreen: bool,
     pub status_bar_hidden: bool,
     /// Which monitor front the bezel pass is drawing, if any.
@@ -429,6 +450,8 @@ pub struct MenuState<'a> {
     pub tv_centre: TvCentre,
     pub tv_centre_applies: bool,
     pub shader: ShaderKind,
+    /// How strongly the CRT pass is applied, 0.0 to 1.0.
+    pub shader_strength: f32,
     /// Whether a custom shader file is configured. Without one the Custom
     /// row is shown but cannot be chosen.
     pub custom_shader_available: bool,
@@ -515,8 +538,14 @@ fn tv_centre_label(centre: TvCentre) -> String {
     }
 }
 
+/// How far one Stronger/Softer step moves the CRT shader's strength.
+pub const SHADER_STRENGTH_STEP: f32 = 0.1;
+
 /// Build the menu as it stands for this machine.
 pub fn build(s: &MenuState) -> Vec<MenuRow> {
+    if s.player {
+        return player_build(s);
+    }
     let mut rows = vec![
         MenuRow::action("Machine Configuration...", MenuAction::OpenMachineConfig),
         MenuRow::action("Frame Analyzer...", MenuAction::OpenFrameAnalyzer),
@@ -549,6 +578,35 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::action("Load Kickstart ROM...", MenuAction::LoadRom),
         MenuRow::action("Keyboard Shortcuts...", MenuAction::OpenShortcuts),
         MenuRow::action("About...", MenuAction::OpenAbout),
+    ]);
+    rows
+}
+
+/// The player build's tree: what an end user of a shipped game changes.
+/// Everything here reuses the full build's section builders where the
+/// section is already end-user shaped; what is dropped -- tools, machine
+/// configuration, warp, recording, ROM loading -- is dropped by never being
+/// offered, so no other code changes.
+fn player_build(s: &MenuState) -> Vec<MenuRow> {
+    let mut rows = vec![
+        MenuRow::submenu("Video Settings", player_video_rows(s)),
+        MenuRow::submenu("Audio Settings", audio_rows(s)),
+        MenuRow::submenu("Input Settings", input_rows(s)),
+        MenuRow::toggle("Pause", MenuAction::TogglePause, s.paused),
+        MenuRow::action("Reset", MenuAction::ResetMachine),
+    ];
+    if s.player_save_states {
+        rows.push(MenuRow::submenu(
+            "Save State",
+            vec![
+                MenuRow::submenu("Quick Save", quick_slot_rows(s, true)),
+                MenuRow::submenu("Quick Load", quick_slot_rows(s, false)),
+            ],
+        ));
+    }
+    rows.extend([
+        MenuRow::action("About...", MenuAction::OpenAbout),
+        MenuRow::action("Quit", MenuAction::Quit),
     ]);
     rows
 }
@@ -593,16 +651,18 @@ fn audio_rows(s: &MenuState) -> Vec<MenuRow> {
     ]
 }
 
-fn video_rows(s: &MenuState) -> Vec<MenuRow> {
-    let aspects = [
+fn aspect_rows(s: &MenuState) -> Vec<MenuRow> {
+    [
         ("TV (4:3)", PixelAspect::Tv),
         ("Square", PixelAspect::Square),
     ]
     .into_iter()
     .map(|(label, a)| MenuRow::choice(label, MenuAction::SetPixelAspect(a), s.pixel_aspect == a))
-    .collect();
+    .collect()
+}
 
-    let scalings = DisplayScaling::MENU_ORDER
+fn scaling_rows(s: &MenuState) -> Vec<MenuRow> {
+    DisplayScaling::MENU_ORDER
         .iter()
         .map(|m| {
             MenuRow::choice(
@@ -611,32 +671,56 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
                 s.scaling == *m,
             )
         })
-        .collect();
+        .collect()
+}
 
+fn shader_rows(s: &MenuState) -> Vec<MenuRow> {
     // Custom is listed whether or not a shader file is configured. Greyed,
     // it says the feature is there and wants a file; absent, it says nothing.
-    let shaders = ShaderKind::MENU_ORDER
+    ShaderKind::MENU_ORDER
         .iter()
         .map(|k| {
             MenuRow::choice(k.menu_label(), MenuAction::SetShader(*k), s.shader == *k)
                 .available(*k != ShaderKind::Custom || s.custom_shader_available)
         })
-        .collect();
+        .collect()
+}
 
-    let tints = Tint::MENU_ORDER
+/// The strength steps, like the centring's, are nudged rather than picked:
+/// the rows leave the menu up, and each stops at its end of the knob's
+/// travel. Offered as a category with the value on it, greyed while no
+/// shader pass runs.
+fn shader_strength_row(s: &MenuState) -> MenuRow {
+    let steps = vec![
+        MenuRow::action("Stronger", MenuAction::StepShaderStrength(1))
+            .available(s.shader_strength < 1.0),
+        MenuRow::action("Softer", MenuAction::StepShaderStrength(-1))
+            .available(s.shader_strength > 0.0),
+    ];
+    MenuRow::submenu("Shader Strength", steps)
+        .with_value(format!("{:.0}%", s.shader_strength * 100.0))
+        .available(s.shader != ShaderKind::None)
+}
+
+fn tint_rows(s: &MenuState) -> Vec<MenuRow> {
+    Tint::MENU_ORDER
         .iter()
         .map(|t| MenuRow::choice(t.menu_label(), MenuAction::SetTint(*t), s.tint == *t))
-        .collect();
+        .collect()
+}
 
-    let bezels = BezelStyle::MENU_ORDER
+fn bezel_rows(s: &MenuState) -> Vec<MenuRow> {
+    BezelStyle::MENU_ORDER
         .iter()
         .map(|b| MenuRow::choice(b.menu_label(), MenuAction::SetBezel(*b), s.bezel == *b))
-        .collect();
+        .collect()
+}
 
+fn centring_rows(s: &MenuState) -> Vec<MenuRow> {
     // The centring steps, like the sampler gain's, are nudged rather than
     // picked: the rows leave the menu up, and each stops at its end of the
     // knob's travel.
-    let centring = vec![
+    vec![
         MenuRow::action("Picture Left", MenuAction::StepTvCentre(-1, 0))
             .available(s.tv_centre.h > -TV_H_CENTRE_RANGE),
         MenuRow::action("Picture Right", MenuAction::StepTvCentre(1, 0))
@@ -647,24 +731,33 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
             .available(s.tv_centre.v < TV_V_CENTRE_RANGE),
         MenuRow::action("Reset", MenuAction::ResetTvCentre)
             .available(s.tv_centre != TvCentre::default()),
-    ];
+    ]
+}
 
-    let sizes = MenuScale::MENU_ORDER
+fn menu_size_rows(s: &MenuState) -> Vec<MenuRow> {
+    MenuScale::MENU_ORDER
         .iter()
         .map(|m| MenuRow::choice(m.label(), MenuAction::SetMenuScale(*m), s.menu_scale == *m))
-        .collect();
+        .collect()
+}
 
+/// A TV-aperture control: greyed under full overscan, which presents the
+/// whole raster and leaves the knob nothing to move.
+fn centring_row(s: &MenuState) -> MenuRow {
+    MenuRow::submenu("Screen Centring", centring_rows(s))
+        .with_value(tv_centre_label(s.tv_centre))
+        .available(s.tv_centre_applies)
+}
+
+fn video_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
-        MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
-        MenuRow::submenu("Pixel Aspect", aspects),
-        MenuRow::submenu("Scaling", scalings),
-        // A TV-aperture control: greyed under full overscan, which
-        // presents the whole raster and leaves the knob nothing to move.
-        MenuRow::submenu("Screen Centring", centring)
-            .with_value(tv_centre_label(s.tv_centre))
-            .available(s.tv_centre_applies),
-        MenuRow::submenu("CRT Shader", shaders),
-        MenuRow::submenu("Screen Tint", tints),
+        MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
+        MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
+        MenuRow::submenu("Scaling", scaling_rows(s)),
+        centring_row(s),
+        MenuRow::submenu("CRT Shader", shader_rows(s)),
+        shader_strength_row(s),
+        MenuRow::submenu("Screen Tint", tint_rows(s)),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
         MenuRow::toggle(
             "Status Bar",
@@ -674,8 +767,25 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         // No value on the row: the tick in the child list already says
         // which front is on, and naming it here widens every row in the
         // category to fit the longest style name.
-        MenuRow::submenu("Monitor Bezel", bezels),
+        MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
         MenuRow::toggle("Performance", MenuAction::TogglePerfOverlay, s.perf_overlay),
+    ]
+}
+
+/// The player build's video section: the full build's minus the rows a
+/// shipped game does not surface (the status bar is permanently hidden and
+/// the performance overlay is a diagnostic).
+fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
+    vec![
+        MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
+        MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
+        MenuRow::submenu("Scaling", scaling_rows(s)),
+        centring_row(s),
+        MenuRow::submenu("CRT Shader", shader_rows(s)),
+        shader_strength_row(s),
+        MenuRow::submenu("Screen Tint", tint_rows(s)),
+        MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
+        MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
     ]
 }
 
@@ -958,27 +1068,29 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
     ]
 }
 
+/// The numbered slots, for either direction. A slot names what is in it,
+/// so a save that would overwrite something says so before it is chosen
+/// rather than after.
+fn quick_slot_rows(s: &MenuState, save: bool) -> Vec<MenuRow> {
+    let caption = if save { "Quick Save" } else { "Quick Load" };
+    std::iter::once(MenuRow::caption(caption))
+        .chain((0..SAVE_SLOTS).map(|i| {
+            let held = s.save_slots[i].as_deref().unwrap_or("empty");
+            let label = format!("{}: {held}", i + 1);
+            let action = if save {
+                MenuAction::QuickSave(i)
+            } else {
+                MenuAction::QuickLoad(i)
+            };
+            MenuRow::action(&label, action)
+        }))
+        .collect()
+}
+
 fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
-    // A slot names what is in it, so a save that would overwrite something
-    // says so before it is chosen rather than after.
-    let slots = |save: bool| -> Vec<MenuRow> {
-        let caption = if save { "Quick Save" } else { "Quick Load" };
-        std::iter::once(MenuRow::caption(caption))
-            .chain((0..SAVE_SLOTS).map(|i| {
-                let held = s.save_slots[i].as_deref().unwrap_or("empty");
-                let label = format!("{}: {held}", i + 1);
-                let action = if save {
-                    MenuAction::QuickSave(i)
-                } else {
-                    MenuAction::QuickLoad(i)
-                };
-                MenuRow::action(&label, action)
-            }))
-            .collect()
-    };
     vec![
-        MenuRow::submenu("Quick Save", slots(true)),
-        MenuRow::submenu("Quick Load", slots(false)),
+        MenuRow::submenu("Quick Save", quick_slot_rows(s, true)),
+        MenuRow::submenu("Quick Load", quick_slot_rows(s, false)),
         MenuRow::action("Save State...", MenuAction::SaveState),
         MenuRow::action("Load State...", MenuAction::LoadState),
     ]
@@ -1144,6 +1256,9 @@ mod tests {
         slots: &'a [Option<String>; SAVE_SLOTS],
     ) -> MenuState<'a> {
         MenuState {
+            player: false,
+            player_save_states: false,
+            paused: false,
             fullscreen: false,
             status_bar_hidden: false,
             bezel: BezelStyle::None,
@@ -1162,6 +1277,7 @@ mod tests {
             tv_centre: TvCentre::default(),
             tv_centre_applies: true,
             shader: ShaderKind::None,
+            shader_strength: 1.0,
             custom_shader_available: false,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
@@ -1545,5 +1661,96 @@ mod tests {
         let rows = build(&st);
         let video = video_children(&rows);
         assert!(!find(&video, "Screen Centring").expect("centring").enabled);
+    }
+
+    /// The player tree is what a shipped game's user gets: settings,
+    /// session rows, About, Quit -- and none of the tools, machine
+    /// configuration, or capture rows.
+    #[test]
+    fn the_player_tree_holds_settings_and_session_rows_only() {
+        let slots = empty_slots();
+        let none: [String; 0] = [];
+        let mut st = state(&none, &none, &none, &none, &slots);
+        st.player = true;
+        let rows = build(&st);
+
+        for expected in [
+            "Video Settings",
+            "Audio Settings",
+            "Input Settings",
+            "Pause",
+            "Reset",
+            "About...",
+            "Quit",
+        ] {
+            assert!(find(&rows, expected).is_some(), "missing {expected}");
+        }
+        for dropped in [
+            "Machine Configuration...",
+            "Frame Analyzer...",
+            "Debugger...",
+            "Console...",
+            "Warp Settings",
+            "Recording",
+            "Load Kickstart ROM...",
+        ] {
+            assert!(find(&rows, dropped).is_none(), "{dropped} leaked in");
+        }
+        // Save states are the manifest's call, off here.
+        assert!(find(&rows, "Save State").is_none());
+
+        // The video section drops the status bar (there is none) and the
+        // performance overlay (a diagnostic), and keeps the picture rows.
+        let video = find(&rows, "Video Settings")
+            .and_then(|r| r.children())
+            .expect("video section");
+        assert!(find(video, "Status Bar").is_none());
+        assert!(find(video, "Performance").is_none());
+        for kept in [
+            "CRT Shader",
+            "Shader Strength",
+            "Monitor Bezel",
+            "Fullscreen",
+        ] {
+            assert!(find(video, kept).is_some(), "missing {kept}");
+        }
+
+        st.player_save_states = true;
+        let rows = build(&st);
+        let saves = find(&rows, "Save State")
+            .and_then(|r| r.children())
+            .expect("save slots opted in");
+        assert!(find(saves, "Quick Save").is_some());
+        assert!(find(saves, "Quick Load").is_some());
+        // The file dialogs stay out: slots only.
+        assert!(find(saves, "Save State...").is_none());
+    }
+
+    /// The strength stepper stops at each end of its travel and is greyed
+    /// while no shader pass runs (both trees carry it).
+    #[test]
+    fn shader_strength_steps_within_its_travel() {
+        let slots = empty_slots();
+        let none: [String; 0] = [];
+        let mut st = state(&none, &none, &none, &none, &slots);
+        let rows = build(&st);
+        let video = find(&rows, "Video Settings")
+            .and_then(|r| r.children())
+            .expect("video section");
+        let strength = find(video, "Shader Strength").expect("strength row");
+        assert!(!strength.enabled, "greyed while the shader is off");
+
+        st.shader = ShaderKind::Crt;
+        st.shader_strength = 1.0;
+        let rows = build(&st);
+        let video = find(&rows, "Video Settings")
+            .and_then(|r| r.children())
+            .expect("video section");
+        let strength = find(video, "Shader Strength").expect("strength row");
+        assert!(strength.enabled);
+        assert_eq!(strength.value.as_deref(), Some("100%"));
+        let steps = strength.children().expect("steps");
+        assert!(!find(steps, "Stronger").expect("stronger").enabled);
+        assert!(find(steps, "Softer").expect("softer").enabled);
     }
 }

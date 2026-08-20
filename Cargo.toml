@@ -30,6 +30,7 @@ default = [
     "profile-stats",
     "game-library",
     "mhi",
+    "gdb",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
@@ -117,6 +118,10 @@ net-nat = ["dep:smoltcp"]
 net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
+# The remote GDB stub (`--gdb`, src/gdbstub.rs): a 68k-aware gdbserver over
+# TCP. Default on; player builds (crates/copperline-player) leave it out so
+# a shipped game carries no debugger surface.
+gdb = []
 # Real floppy drives through FluxBridge (src/fluxbridge/): the Greaseweazle
 # driver enabled on the dependency below stands in for a disk image on any bay.
 # FluxBridge is a pure-Rust library, so there is nothing to install and no C++
