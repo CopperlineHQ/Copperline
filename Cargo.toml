@@ -326,6 +326,12 @@ too_many_arguments = "allow"
 # channels) keep the channel number visible and often index several parallel
 # arrays; iterator rewrites obscure that.
 needless_range_loop = "allow"
+# Promoted to warn-by-default in clippy 1.98, instantly flagging ~46
+# established chunks_exact(N) sites across the chipset, floppy, DMS, and
+# video code. The as_chunks form changes element types (&[T] -> &[T; N]),
+# so migrating is a deliberate sweep of hot hardware paths, not a lint
+# chore to smuggle into an unrelated change. Allowed until that sweep.
+chunks_exact_to_as_chunks = "allow"
 
 [profile.release]
 opt-level = 3
