@@ -117,6 +117,11 @@ pub trait SerialSink: Send {
     /// future that was just left behind.
     fn reset_after_timeline_jump(&mut self) {}
 
+    /// The machine reset under the sink: an in-process synthesizer
+    /// treats it as its line dropping and releases what it was
+    /// holding. Ordinary byte sinks have nothing to do.
+    fn machine_reset(&mut self) {}
+
     /// The MIDI sink, when this is one, for runtime device switching. `None`
     /// for every other sink.
     #[cfg(feature = "midi")]

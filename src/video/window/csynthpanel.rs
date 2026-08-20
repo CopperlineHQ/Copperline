@@ -40,7 +40,7 @@ const HOVER_LIFT: f32 = 16.0;
 /// The glass. A Sound Canvas is the MT-32's negative: a bright amber
 /// backlight with dark characters printed over it, and nothing at all
 /// when the light goes out.
-const GLASS_LIT: u32 = rgba(233, 158, 48);
+const GLASS_LIT: u32 = rgba(244, 137, 5);
 const GLASS_DARK: u32 = rgba(150, 160, 159);
 const INK: u32 = rgba(43, 22, 8);
 /// Captions printed on the glass sit lighter than the values written
@@ -115,16 +115,14 @@ pub struct CsynthPanelView {
     /// The glass, exactly as the engine's panel composed it.
     pub screen: Screen,
     pub powered: bool,
-    /// This half of the latch blink -- a latched ALL or MUTE flashes
-    /// its lens to say it is standing in.
+    /// This half of the blink phase, for the lamps the unit itself
+    /// blinks -- the monitor's MUTE among them.
     pub blink_on: bool,
     /// Where the VOLUME knob stands, 0..=1.
     pub volume: f32,
     /// Buttons standing in: latched down, or lit under a click.
     pub down: Vec<CsynthControl>,
-    /// The latched subset alone -- the lens blink keys on these, so an
-    /// ordinary click never blink-gates a lamp.
-    pub latched: Vec<CsynthControl>,
+    /// The button under the pointer, if any.
     pub hover: Option<CsynthControl>,
 }
 
@@ -145,6 +143,7 @@ pub fn dark_screen() -> Screen {
         bars: [0; 16],
         all_led: false,
         mute_led: false,
+        mute_blink: false,
         translating: false,
     }
 }
@@ -806,28 +805,22 @@ fn small_glyph(ch: char) -> [u8; 5] {
 
 /// ALL, MUTE and LOAD: the buttons are LEDs themselves -- a misted
 /// clear lens when off, the backlight's orange when their state is on.
+/// The lamps say only what the unit says: lit states, and the blinks
+/// the manual prescribes -- a latch is shown by the button sitting
+/// down, not by the lamp.
 fn draw_rounds(frame: &mut [u8], panel: Rect, view: &CsynthPanelView, scale: usize) {
-    // A latched ALL or MUTE flashes its lens to say it is standing in
-    // -- unless its lamp is already speaking (lit, or flashing with a
-    // question), which takes precedence.
-    let latch_blink = |control: CsynthControl, led: bool| -> bool {
-        if led {
-            return true;
-        }
-        view.latched.contains(&control) && view.blink_on
-    };
     for (control, label, slot, lit) in [
         (
             CsynthControl::All,
             "ALL",
             0,
-            view.powered && latch_blink(CsynthControl::All, view.screen.all_led),
+            view.powered && view.screen.all_led,
         ),
         (
             CsynthControl::Mute,
             "MUTE",
             1,
-            view.powered && latch_blink(CsynthControl::Mute, view.screen.mute_led),
+            view.powered && (view.screen.mute_led || (view.screen.mute_blink && view.blink_on)),
         ),
         (CsynthControl::Load, "LOAD", 2, false),
     ] {
@@ -1182,7 +1175,8 @@ impl CsynthPanel {
             .collect()
     }
 
-    /// The latches alone, for the lens blink.
+    /// The latches alone, for the tests' eyes.
+    #[cfg(test)]
     pub fn latched(&self) -> Vec<CsynthControl> {
         self.holding.clone()
     }
@@ -1219,14 +1213,20 @@ impl CsynthPanel {
         // Right-clicking latches a button down; that is how two-button
         // gestures are made with one pointer.
         if !left {
-            // ALL and MUTE never stand together: latching the second
-            // lets them both go.
+            // ALL and MUTE never stand latched together: the second
+            // round completes the gesture instead -- ALL and MUTE
+            // pressed at once, however the two clicks were made -- and
+            // both let go.
             let is_round = |c: CsynthControl| matches!(c, CsynthControl::All | CsynthControl::Mute);
             if is_round(control) && self.holding.iter().any(|&h| is_round(h) && h != control) {
-                // Only the rounds release each other; an arrow latched
+                // Only the rounds spend each other; an arrow latched
                 // alongside stays standing.
                 self.holding.retain(|&h| !is_round(h));
-                return CsynthPress::None;
+                return if powered {
+                    CsynthPress::Button(Button::Monitor)
+                } else {
+                    CsynthPress::None
+                };
             }
             self.latch(control);
             // A pair latched whole resolves at once when running.
@@ -1306,7 +1306,8 @@ impl CsynthPanel {
     }
 
     /// A gesture the latched set already names whole: both halves of a
-    /// pair, or ALL with MUTE.
+    /// pair. (ALL with MUTE fires from the latch handler itself, since
+    /// the rounds never stand latched together.)
     fn latched_gesture(&self) -> Option<Button> {
         let [a, b] = self.holding[..] else {
             return None;
@@ -1424,11 +1425,6 @@ fn resolve(control: CsynthControl, latched: &[CsynthControl]) -> Button {
             | (CsynthControl::Mute, CsynthControl::All) => {
                 return Button::Monitor;
             }
-            // MUTE latched under an arrow: the service edits (Device
-            // ID on the MIDI CH pair, Chorus Type on the CHORUS pair).
-            (CsynthControl::Mute, CsynthControl::Arrow(pair, dir)) => {
-                return Button::MuteArrow(pair, dir);
-            }
             _ => {}
         }
     }
@@ -1486,7 +1482,6 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
-                    latched: vec![],
                     hover: None,
                 },
             ),
@@ -1498,7 +1493,6 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: vec![CsynthControl::Arrow(Pair::Level, Dir::Right)],
-                    latched: vec![],
                     hover: Some(CsynthControl::Arrow(Pair::Pan, Dir::Left)),
                 },
             ),
@@ -1510,7 +1504,6 @@ mod tests {
                     blink_on: false,
                     volume: 0.8,
                     down: Vec::new(),
-                    latched: vec![],
                     hover: None,
                 },
             ),
@@ -1611,15 +1604,16 @@ mod tests {
             CsynthPress::Button(Button::Both(Pair::Level))
         );
         panel.release_press();
-        // Latch ALL, then latch MUTE: the rounds never stand together,
-        // the second latch lets them both go and no gesture fires.
+        // Latch ALL, then latch MUTE: the rounds never stand together
+        // -- the second latch is the gesture, ALL and MUTE at once,
+        // and both let go.
         assert_eq!(
             panel.press(CsynthControl::All, false, true),
             CsynthPress::None
         );
         assert_eq!(
             panel.press(CsynthControl::Mute, false, true),
-            CsynthPress::None
+            CsynthPress::Button(Button::Monitor)
         );
         assert!(panel.down().is_empty(), "both rounds released");
         // The solo: latch ALL, CLICK MUTE -- one Monitor press, the
@@ -1632,11 +1626,12 @@ mod tests {
         );
         panel.release_press();
         assert!(panel.down().is_empty(), "the gesture spends the latch");
-        // MUTE latched under an arrow resolves to the service edit.
+        // MUTE latched under an arrow is nothing special: the arrow
+        // means itself, as on the unit.
         panel.press(CsynthControl::Mute, false, true);
         assert_eq!(
             panel.press(CsynthControl::Arrow(Pair::Chorus, Dir::Right), true, true),
-            CsynthPress::Button(Button::MuteArrow(Pair::Chorus, Dir::Right))
+            CsynthPress::Button(Button::Arrow(Pair::Chorus, Dir::Right))
         );
         panel.release_press();
         // The rounds release each other; a bystander latch survives.

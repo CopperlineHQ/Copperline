@@ -27,6 +27,22 @@ pub const SOUNDFONT_NAME: &str = "GeneralUser-GS.sf2";
 /// needs no file at all: Coppersynth embeds its own.
 pub const SOUNDFONT_ZIP_NAME: &str = "GeneralUser-GS.zip";
 
+/// Whether the unit's battery-backed memory is read and written this
+/// run. Off until a frontend asks for it, so only a real session ever
+/// touches the file: tests and library users get a unit that
+/// remembers nothing, which is also what `--factory` asks for.
+static PERSIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_persistence(on: bool) {
+    PERSIST.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The battery-backed memory's file, with the machines' other
+/// batteries.
+fn state_path() -> Option<PathBuf> {
+    Some(crate::paths::coppersynth_nvram_file())
+}
+
 /// The `[serial] coppersynth_*` settings the device is fitted with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CsynthOptions {
@@ -153,17 +169,55 @@ pub struct CsynthDevice {
     panel: FrontPanel,
 }
 
+impl Drop for CsynthDevice {
+    /// The power going off writes the battery-backed memory, exactly
+    /// once, wherever the unit is dropped -- an endpoint change, the
+    /// machine going down, or the window closing.
+    fn drop(&mut self) {
+        // The panel hears about the power first: a demo left running
+        // stands down to the GS basic setting before anything is
+        // remembered.
+        self.panel.power_off(&mut self.engine);
+        if !PERSIST.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Some(path) = state_path() else {
+            return;
+        };
+        // The directory is Copperline's own and may not exist yet.
+        if let Err(e) = crate::paths::ensure_parent(&path)
+            .and_then(|()| std::fs::write(&path, self.engine.save_state()))
+        {
+            log::warn!("midi: writing {}: {e}", path.display());
+        }
+    }
+}
+
 impl CsynthDevice {
     /// Fit the synthesizer with the given options.
     pub fn open(options: &CsynthOptions) -> Result<Self> {
         let mode = options.mode()?;
         let soundfont = find_soundfont(options.soundfont.as_deref())?;
-        let engine = match &soundfont {
+        let mut engine = match &soundfont {
             Some(path) => open_engine(path, mode)?,
             // Nothing configured: the bank Coppersynth carries itself.
             None => coppersynth::engine::Engine::open_bundled(crate::audio::MIX_SAMPLE_RATE, mode)
                 .map_err(|e| anyhow!("{e}"))?,
         };
+        // The battery-backed memory: the engine sorts out what the
+        // bytes mean and what its Back Up switch allows.
+        if PERSIST.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(path) = state_path() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => engine.load_state(&bytes),
+                    // No file is an ordinary first run; anything else
+                    // means settings that were meant to come back have
+                    // not, and the user should hear about it.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => log::warn!("midi: reading {}: {e}", path.display()),
+                }
+            }
+        }
         let (mended, dropped) = engine.bank_repairs();
         let source = soundfont
             .as_ref()
@@ -210,6 +264,13 @@ impl CsynthDevice {
         })
     }
 
+    /// The machine reset or the timeline jumped: the source
+    /// power-cycled under the synthesizer, so the line is dropped and
+    /// everything sounding is released.
+    pub fn line_dropped(&mut self) {
+        self.engine.midi_off_line();
+    }
+
     /// Take a byte off the serial line.
     pub fn write_byte(&mut self, b: u8) {
         if let Some((w, since_flush)) = &mut self.capture {
@@ -252,7 +313,7 @@ impl CsynthDevice {
     /// Buttons held through the power-on, read as the unit reads its
     /// fascia at start-up.
     pub fn panel_power_on_held(&mut self, held: &[Button]) {
-        self.panel.power_on_held(held);
+        self.panel.power_on_held(&mut self.engine, held);
     }
 
     /// Whether the fascia is inside an edit or confirm screen, for the

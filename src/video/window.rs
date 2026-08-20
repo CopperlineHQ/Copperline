@@ -6708,14 +6708,6 @@ impl App {
         }
         let now_ms = self.csynth_panel_epoch.elapsed().as_millis() as u64;
         let blink_on = (now_ms / 300).is_multiple_of(2);
-        // A latched ALL or MUTE flashes its lens, so the blink phase is
-        // part of what is on screen and must break the redraw cache.
-        let round_latched = self.csynth_panel.down().iter().any(|c| {
-            matches!(
-                c,
-                csynthpanel::CsynthControl::All | csynthpanel::CsynthControl::Mute
-            )
-        });
         let Some(sink) = self.emu.bus_mut().midi_serial_mut() else {
             return;
         };
@@ -6723,11 +6715,13 @@ impl App {
             return;
         }
         let key = match sink.csynth_mut() {
-            Some(synth) => (
-                Some(synth.panel_screen(now_ms)),
-                true,
-                round_latched && blink_on,
-            ),
+            Some(synth) => {
+                let screen = synth.panel_screen(now_ms);
+                // The monitor's blinking MUTE lamp is on-screen state,
+                // so its phase must break the redraw cache.
+                let blinking = screen.mute_blink;
+                (Some(screen), true, blinking && blink_on)
+            }
             None => (None, false, false),
         };
         if self.csynth_panel_drawn.as_ref() == Some(&key) {
@@ -6773,7 +6767,6 @@ impl App {
             .zip(csynthpanel::shown_panel_rect(csynth_panel_top()))
             .and_then(|(pos, panel)| csynthpanel::hover_at(panel, pos));
         let down = self.csynth_panel.down();
-        let latched = self.csynth_panel.latched();
         let stored_volume = self.csynth_volume;
         let sink = self.emu.bus_mut().midi_serial_mut()?;
         if !sink.csynth_selected() {
@@ -6795,7 +6788,6 @@ impl App {
             blink_on: (now_ms / 300).is_multiple_of(2),
             volume,
             down,
-            latched,
             hover,
         })
     }

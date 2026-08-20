@@ -2204,6 +2204,12 @@ fn main() -> Result<()> {
     if cli.list_sampler_inputs {
         return print_sampler_input_devices();
     }
+    // The synthesizer's battery-backed memory is the frontend's to
+    // ask for; `--factory` leaves the file alone in both directions,
+    // the same promise the flag makes about the saved default
+    // configuration.
+    #[cfg(feature = "coppersynth")]
+    copperline::csynth::set_persistence(!cli.factory);
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());

@@ -992,6 +992,14 @@ impl SerialSink for MidiSerialSink {
         self.anchor = None;
         self.framer = MidiFramer::default();
 
+        // Coppersynth keeps its settings across the jump; only the
+        // sounding notes belong to the abandoned future, and they are
+        // released the way a dropped line releases them.
+        #[cfg(feature = "coppersynth")]
+        if let Some(synth) = &mut self.csynth {
+            synth.line_dropped();
+        }
+
         #[cfg(feature = "mt32")]
         {
             // mt32-rs does not expose a snapshot of its voices, memory,
@@ -1009,6 +1017,15 @@ impl SerialSink for MidiSerialSink {
                 );
                 self.attach_mt32();
             }
+        }
+    }
+
+    fn machine_reset(&mut self) {
+        // The guest power-cycled under the synthesizer: the line is
+        // dropped, and whatever it was holding lets go.
+        #[cfg(feature = "coppersynth")]
+        if let Some(synth) = &mut self.csynth {
+            synth.line_dropped();
         }
     }
 
