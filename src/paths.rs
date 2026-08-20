@@ -410,6 +410,12 @@ pub fn akiko_nvram_file() -> PathBuf {
     battery_ram("cd32-nvram.bin")
 }
 
+/// Coppersynth's battery-backed memory, kept with the machines' other
+/// batteries.
+pub fn coppersynth_nvram_file() -> PathBuf {
+    battery_ram("copperline.nvram")
+}
+
 // --- where a dialog opens ------------------------------------------------
 //
 // Not Copperline's to write, and not created: these only say where a file

@@ -66,7 +66,7 @@ translates. The mode can be changed live from the menu (**Coppersynth →
 MT-32 Mode**) or at the front panel. When the loaded bank carries the GS
 CM-64/32L drum kit, MT-32 rhythm selects it automatically.
 
-## The front panel
+## The Front Panel
 
 ![The Coppersynth front panel](../images/ui-preview-csynth-panel-strip.png)
 
@@ -76,14 +76,17 @@ puts the module's fascia under the display: the backlit LCD with the part
 values, the sixteen-part level meters, and the sound's name -- a game's
 MT-32 instrument uploads via SysEx to show extra info. Buttons press with a
 left click; a right click latches a button down, which is how multi-button
-gestures are made: latch one half of a pair and click the other to view
-that setting across all parts, or latch **ALL** and click **MUTE** to
-monitor (solo) the shown part.
+gestures are made. The module remembers its settings across power cycles,
+like the real unit's battery does.
+
+These button combinations / settings mostly reference an actual SC-55, so you
+could also reference the official SC-55 MKII manual for more info on some of 
+these settings and parameters. 
 
 | Button | Function |
 |---|---|
 | **PART < >** | Selects a part |
-| **INSTRUMENT < >** | Changes the timbre/sound for the selected part |
+| **INSTRUMENT < >** | Changes the timbre/sound for the selected part (drum kits on a drum part) |
 | **LEVEL < >** | Volume ceiling |
 | **PAN < >** | Pans the part left or right |
 | **REVERB < >** | Reverb DSP level |
@@ -91,39 +94,40 @@ monitor (solo) the shown part.
 | **KEY SHIFT < >** | Transposes the part |
 | **ALL** | Lit, sets all of the above parameters for every part |
 | **MUTE** | Silences the shown part (all of them, with **ALL** lit) |
-| **MIDI CH < >** | Sets the MIDI channel (1-16) for the selected part |
+| **MIDI CH < >** | Sets the MIDI channel (1-16, Off) for the selected part; with **ALL** lit, the SysEx Device ID (1-32) |
 | **VOLUME** (knob) | The module's main output level, separate from anything MIDI sends |
 | **POWER** | Switches the module off and on |
 
 ### Button combinations (POWER ON)
 
 Coppersynth front panel has various features accessed with multi-button
-combinations. The table below will separate these into ones which are 
-accessed with the unit powered on.  
+combinations. The table below will separate these into ones which are
+accessed with the unit powered on.
 
 ```
 Hold = Right Click
-Press = Left Click 
+Press = Left Click
 ```
 
 | Combination | Reaches |
 |---|---|
-| Hold `ALL` + `MUTE` | Solo the selected PART. Press `MUTE` to disable solo |
-| Hold `MUTE`, Press `CHORUS` | Change the Chorus DSP type (8 total; Chorus, Celestial, Flanger, Short Delay). `MUTE` to cancel, `ALL` to apply
-| Hold `MUTE`, press `MIDI CH` | Change the SysEx Device ID. `MUTE` to cancel, `ALL` to apply
-| Hold `MUTE`, Press `INSTRUMENT` | Change the parts parameters e.g. Portamento, Vibrato, Envelope Generators.etc. `INSTRUMENT` < or > to cycle parameter, `LEVEL` < or > to change the value. `MUTE` to cancel, `ALL` to apply. These can also be controlled via standard MIDI CC commands. 
-| Hold both `LEVEL`,`REVERB`, `KEY SHIFT`, `INSTRUMENT`, `PAN`, `CHORUS` or `MIDI CH` buttons | Holding both of any of those buttons at the same time will show their value in the Midi "equaliser" section across all 16 parts. 
+| Hold `ALL` + `MUTE` (either order, hold or press) | Solo the selected PART -- the MUTE lamp blinks. Press `MUTE` to disable solo |
+| Hold `PART <` + `PART >` | The part settings menu, opening on Part Mode (Norm/Drum). `MUTE` steps forward through the settings (Bend Range, Vib. Rate, Cutoff Freq, Portamento and the rest), `ALL` steps back, `INSTRUMENT` < or > changes the value, `PART` < or > moves between parts. Press both `PART` buttons again to leave. These can also be controlled via standard MIDI CC/NRPN commands |
+| Hold `PART <` + `PART >` with `ALL` lit | The system menu: master tune, the Reverb and Chorus DSP types, the meter display styles, reception switches and Back Up. Same controls as above |
+| Hold `INSTRUMENT <` + `INSTRUMENT >` | Variation select: `INSTRUMENT` < or > walks the SoundFont's variation banks for the part's instrument. Press both again to leave |
+| Hold both `LEVEL`, `REVERB`, `KEY SHIFT`, `INSTRUMENT`, `PAN`, `CHORUS` or `MIDI CH` buttons | Holding both of any of those buttons at the same time will show their value in the Midi "equaliser" section across all 16 parts |
 
 ### Button combinations (POWER OFF)
 
-The following button combinations expect the unit to first be powered off. 
+The following button combinations expect the unit to first be powered off.
 
 | Combination | Reaches |
 |---|---|
 | Hold `INSTRUMENT <`, Press `POWER` | MT-32 Mode. `MUTE` disables, `ALL` enables |
-| Hold `INSTRUMENT >`, Press `POWER`  | Load the default SoundFont. `MUTE` cancels, `ALL` confirms  |
-| Hold `PART <` + `PART >`, Press `POWER` | Demo sequences. press `ALL` to play, `MUTE` to stop, `PART` buttons to skip song. 
-| Hold both `INSTRUMENT` + both `MIDI CH` | Show version info + credits, `MUTE` or `ALL` skips
+| Hold `INSTRUMENT >`, Press `POWER` | Init GS: returns every setting to the GS standard. `MUTE` cancels, `ALL` confirms |
+| Hold `INSTRUMENT <` + `INSTRUMENT >`, Press `POWER` | Init All: the factory preset, including the default SoundFont. `MUTE` cancels, `ALL` confirms |
+| Hold `PART <` + `PART >`, Press `POWER` | Demo sequences. Press `ALL` to play, `MUTE` to stop, `PART` buttons to skip song, `ALL` + `MUTE` to leave |
+| Hold both `INSTRUMENT` + both `MIDI CH` | Show version info + credits, `MUTE` or `ALL` skips |
 
 ## Building without it
 

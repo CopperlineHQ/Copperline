@@ -255,13 +255,13 @@ pub(in crate::video) fn draw(frame: &mut [u8], rect: Rect, view: &AboutView, sca
     if room < 16 {
         return;
     }
-    // One column in from the left so the water clears the panel's
-    // trim; being a whole column, the inset keeps the grid landing
-    // exactly on the unchanged right edge.
+    // A sliver in from the left so the water butts against the
+    // panel's trim without touching it; the grid anchors to the right
+    // edge, so that end stays exactly where it is.
     let strip = Rect {
-        x: rect.x + WAVE_COL,
+        x: rect.x + 2,
         y: base - room,
-        w: rect.w - WAVE_COL,
+        w: rect.w - 2,
         h: room,
     };
     draw_waves(frame, strip, elapsed as f32 / 1000.0, scale);
@@ -273,7 +273,9 @@ pub(in crate::video) fn draw(frame: &mut [u8], rect: Rect, view: &AboutView, sca
 /// wavelength.
 fn draw_waves(frame: &mut [u8], strip: Rect, t: f32, scale: usize) {
     let base = strip.y + strip.h;
-    let cols = strip.w / WAVE_COL;
+    // The columns anchor to the strip's right edge; whatever is left
+    // over on the left becomes a clipped first bar against the trim.
+    let cols = strip.w.div_ceil(WAVE_COL);
     for layer in &LAYERS {
         for c in 0..cols {
             let phase = t * layer.speed - c as f32 * layer.spacing;
@@ -285,7 +287,12 @@ fn draw_waves(frame: &mut [u8], strip: Rect, t: f32, scale: usize) {
             // lift is 0..=1 and height <= 1, so h stays within the strip
             // and the subtractions below cannot underflow.
             let h = (((strip.h as f32 - 6.0) * layer.height * lift) as usize + 6).min(strip.h);
-            draw_bar(frame, strip.x + c * WAVE_COL, base, h, lift, layer, scale);
+            let grid_x = (strip.x + strip.w).saturating_sub((cols - c) * WAVE_COL);
+            let x = grid_x.max(strip.x);
+            let w = (WAVE_COL - 1).saturating_sub(x - grid_x);
+            if w > 0 {
+                draw_bar(frame, x, w, base, h, lift, layer, scale);
+            }
         }
     }
 }
@@ -297,6 +304,7 @@ fn draw_waves(frame: &mut [u8], strip: Rect, t: f32, scale: usize) {
 fn draw_bar(
     frame: &mut [u8],
     x: usize,
+    w: usize,
     base: usize,
     h: usize,
     lift: f32,
@@ -317,7 +325,7 @@ fn draw_bar(
         let band = Rect {
             x,
             y: top,
-            w: WAVE_COL - 1,
+            w,
             h: bottom - top,
         };
         fill_rect(frame, scale_rect(band, scale), color, scale);
@@ -326,7 +334,7 @@ fn draw_bar(
         let fleck = Rect {
             x,
             y: base - h,
-            w: WAVE_COL - 1,
+            w,
             h: 2,
         };
         let l = (layer.depth * 235.0) as u32;

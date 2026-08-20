@@ -3739,6 +3739,10 @@ impl Bus {
     }
 
     pub fn reset_for_keyboard_reset(&mut self) {
+        // The serial sink hears about the reset first: an in-process
+        // synthesizer releases what the interrupted guest left
+        // sounding, exactly as if its line had dropped.
+        self.paula.serial.machine_reset();
         let video_standard = self.agnus.video_standard();
         let agnus_revision = self.agnus.revision();
         self.cia_a = Cia::new(Which::A);
