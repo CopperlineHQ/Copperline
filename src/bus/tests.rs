@@ -10075,6 +10075,46 @@ fn cd32_pad_serial_protocol_shifts_button_bits() {
 }
 
 #[test]
+fn cd32_pad_held_blue_does_not_ground_the_serial_report() {
+    use crate::chipset::cia::REG_DDRA;
+    let mut bus = empty_bus();
+    bus.input.set_port_device(1, PortDevice::Cd32Pad);
+    // Blue arrives as the port's second button; Yellow gives the report a
+    // later pressed bit of its own.
+    bus.input
+        .set_joystick(1, false, false, false, false, false, true);
+    bus.input
+        .set_cd32_buttons(1, false, false, false, false, true);
+
+    let ddra = (REG_DDRA as u64) << 8;
+    let pra = (REG_PRA as u64) << 8;
+    let _ = bus.cia_a_write(ddra, 1, 0x80);
+    let _ = bus.cia_a_write(pra, 1, 0x80);
+    bus.custom_write(0x034, 2, 0x2000); // POTGO: OUTRX, DATRX=0
+
+    // The pad's 4021 output follows Blue only in load mode: while the
+    // register is clocking, the held Blue reads low as its own bit and
+    // every later bit still reflects its own button line (active low).
+    let expected = [
+        false, // 8 Blue pressed
+        true,  // 7 Red released
+        false, // 6 Yellow pressed
+        true,  // 5 Green released
+        true,  // 4 FFW released
+        true,  // 3 RWD released
+        true,  // 2 Play released
+        true,  // 1 pad-present
+        false, // 0 zeros
+    ];
+    for (step, want) in expected.iter().enumerate() {
+        let potgor = bus.custom_read(0x016, 2) as u16;
+        assert_eq!(potgor & (1 << 14) != 0, *want, "serial bit at step {step}");
+        let _ = bus.cia_a_write(pra, 1, 0x00); // falling edge: shift
+        let _ = bus.cia_a_write(pra, 1, 0x80); // rising edge
+    }
+}
+
+#[test]
 fn cd32_pad_serial_protocol_on_port_1_uses_pot0x_fir0_and_pot0y() {
     use crate::chipset::cia::REG_DDRA;
     let mut bus = empty_bus();

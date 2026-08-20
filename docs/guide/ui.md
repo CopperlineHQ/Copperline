@@ -941,10 +941,10 @@ two explicit input modes, and the active one is always shown by the gamepad
 / keyboard icon in the status bar (next to the volume control), so a "my
 keys aren't working" surprise can be spotted and fixed at a glance:
 
-- **gamepad** (the default): use only a calibrated gamepad; every keyboard
-  key passes through to the Amiga. With no pad connected there is no
-  joystick input. This is the no-surprise mode for interactive AmigaOS
-  setup.
+- **gamepad** (the default): use only a recognised or
+  [calibrated](#gamepad-calibration) gamepad; every keyboard key passes
+  through to the Amiga. With no pad connected there is no joystick input.
+  This is the no-surprise mode for interactive AmigaOS setup.
 - **keyboard**: use the keyboard-joystick mapping so the joystick port
   works without a controller.
 
@@ -985,11 +985,21 @@ autofire_hz`.
 
 ## Gamepad calibration
 
-Pads are read through raw `gilrs` events with no controller database, so
-each controller is calibrated once: push each control when prompted. This
+Most pads work with no setup at all: a controller found in the bundled
+SDL_GameControllerDB (or identified by the platform driver) uses a fixed
+standard layout. The d-pad and left stick drive the directions; the south
+face button (A / Cross) is fire / CD32 red, east (B / Circle) is blue,
+west (X / Square) is green, north (Y / Triangle) is yellow, Start is
+play/pause, and the left and right shoulders or triggers are reverse and
+forward. Personal SDL mapping strings in the standard
+`SDL_GAMECONTROLLERCONFIG` environment variable are honoured too.
+
+Calibration is the per-pad override, and the only path for controllers
+the database does not cover: push each control when prompted. This
 records raw axis/button codes and directions, which makes any pad work
-regardless of database coverage and handles inverted or odd axis layouts
-automatically.
+regardless of database coverage -- including pads with broken database
+entries -- and handles inverted or odd axis layouts automatically. A
+saved calibration always wins over the database for its pad.
 
 ```{figure} ../images/ui-preview-calibration.png
 :alt: The gamepad calibration window
@@ -1015,11 +1025,17 @@ shows the hold in progress, and releasing early cancels it. It works
 whenever the pad is connected -- even while the keyboard or another
 device drives the joystick ports, and while the machine is paused or
 powered off. Skip the step to leave quitting to the keyboard shortcut.
+The default database layout never binds a Quit hotkey; only a
+calibration can arm one.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
 `%APPDATA%\copperline\` on Windows, or beside the executable in
-[portable mode](#quick-save-slots)).
+[portable mode](#quick-save-slots)). A calibration recorded by a
+Copperline version that predates the bundled controller database can
+resolve a stick direction reversed on a database-covered pad; the log
+suggests recalibrating when it loads such a file, and recalibrating
+once fixes it.
 
 ## Input mapping
 
