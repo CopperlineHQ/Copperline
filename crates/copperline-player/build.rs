@@ -181,8 +181,14 @@ fn main() {
         )
     };
     let file_name_only = |what: &str, value: &str| {
-        let path = Path::new(value);
-        if value.is_empty() || path.components().count() != 1 {
+        // Exactly one Normal component: a count alone would also accept
+        // "." and "..", which resolve to whole directories at runtime.
+        let mut components = Path::new(value).components();
+        let bare = matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        );
+        if !bare {
             fail(&format!(
                 "[payload] {what} must be a bare file name beside the binary, not a path: {value:?}"
             ));

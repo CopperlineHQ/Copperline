@@ -17,7 +17,10 @@ title = "Example Game"
 # Per-user save/settings directory name (~/.config/<id>/); also the bundle's
 # internal identity. Letters, digits, ".", "-", "_".
 id = "copperline-example"
-# Optional release version: shown by --version, names the published bundle.
+# Optional release version: shown by --version, names the published bundle,
+# and marks the per-user staged copy of adf/run payloads -- bump it when
+# shipping an update so the copy refreshes even if the new payload
+# preserves every file size and timestamp.
 # version = "1.0"
 
 [payload]

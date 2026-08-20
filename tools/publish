@@ -73,6 +73,13 @@ def payload_file_name(manifest: dict) -> str:
     fail("[payload] must name one of cd, adf, or run")
 
 
+def player_binary() -> Path:
+    """Where cargo leaves the built player, platform executable suffix
+    included -- omitting .exe would declare every Windows build missing."""
+    exe = "copperline-player.exe" if sys.platform == "win32" else "copperline-player"
+    return REPO / "crates/copperline-player/target/release" / exe
+
+
 def build_player(manifest_path: Path) -> Path:
     env = dict(os.environ, COPPERLINE_GAME_MANIFEST=str(manifest_path))
     subprocess.run(
@@ -86,7 +93,7 @@ def build_player(manifest_path: Path) -> Path:
         env=env,
         check=True,
     )
-    return REPO / "crates/copperline-player/target/release/copperline-player"
+    return player_binary()
 
 
 def write_licenses(dest: Path, title: str) -> None:
@@ -120,7 +127,7 @@ def stage_aros(dest: Path) -> None:
 
 
 def bundle_macos(
-    out: Path, binary: Path, payload: Path, manifest: dict, manifest_dir: Path
+    out: Path, binary: Path, payload: Path, manifest: dict, manifest_dir: Path, portable: bool
 ) -> Path:
     game = manifest["game"]
     title, game_id = game["title"], game["id"]
@@ -170,6 +177,10 @@ def bundle_macos(
     with open(app / "Contents/Info.plist", "wb") as f:
         plistlib.dump(info, f)
     (app / "Contents/PkgInfo").write_bytes(b"APPL????")
+    if portable:
+        # The marker lives beside the executable, which is where the player
+        # looks for it; written before signing so it is part of the seal.
+        (macos / "portable.txt").write_text("")
 
     # Ad-hoc signature: unsigned arm64 binaries will not launch at all.
     subprocess.run(
@@ -243,7 +254,7 @@ def main() -> None:
             f"manifest bakes that file name into the player"
         )
 
-    binary = REPO / "crates/copperline-player/target/release/copperline-player"
+    binary = player_binary()
     if not args.skip_build:
         binary = build_player(manifest_path)
     if not binary.is_file():
@@ -251,7 +262,9 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
-        archive = bundle_macos(args.out, binary, payload, manifest, manifest_path.parent)
+        archive = bundle_macos(
+            args.out, binary, payload, manifest, manifest_path.parent, args.portable
+        )
     else:
         archive = bundle_directory(args.out, binary, payload, manifest, args.portable)
     print(f"publish: bundle ready: {archive}")

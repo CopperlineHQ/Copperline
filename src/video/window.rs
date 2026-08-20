@@ -3485,7 +3485,14 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.toggle_input_recording()
+                        // Input recordings are replay scripts, and the
+                        // player has no way to play one back: a diagnostic
+                        // surface, so off in shipped games. Screenshots
+                        // and video recording stay -- they are end-user
+                        // features, not debugging ones.
+                        if !crate::video::player_profile() {
+                            self.toggle_input_recording()
+                        }
                     }
                     (KeyCode::KeyR, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>

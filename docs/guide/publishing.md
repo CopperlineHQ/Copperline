@@ -59,8 +59,12 @@ Payload kinds:
   way `--run` boots one ([Warp launch](run.md)), warp-booting to the program's load.
   On first launch the files tree is copied into the per-game config
   directory; guest writes land in the copy, so saves persist and survive
-  updates (an updated payload re-copies its own members and leaves
-  everything else alone).
+  updates: an updated payload removes members it no longer carries,
+  re-copies its own, and leaves everything else alone. Updates are
+  detected by each member's size and timestamp plus the manifest's
+  version and pin -- so bump `[game] version` (or pin the payload) when
+  shipping an update, and the staged copy refreshes even if the archive
+  preserved every timestamp.
 - **adf**: the image is in DF0 at power-on, also from a per-user copy so
   the guest can write to it.
 
@@ -109,6 +113,12 @@ walks it, fire activates, and the second button backs out. Everything set
 in the menu persists per game in `settings.toml` under the per-game config
 directory (`~/.config/<id>/` and platform equivalents), alongside gamepad
 calibration, keymaps, saves, and NVRAM.
+
+The end-user shortcuts stay: fullscreen, mouse capture, screenshots, and
+video recording work as in the full build. What is gone is every
+debugging surface -- the debugger, console, performance overlay, status
+bar, and input-recording shortcuts are disabled, and the save-state keys
+follow the manifest's `save_states` choice.
 
 ## Verifying a bundle
 

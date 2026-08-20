@@ -66,8 +66,13 @@ static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 /// cached on first use, so a late call would split host data across two
 /// homes. Call it first thing in `main`.
 pub fn set_app_identity(name: &str) {
+    // The leading character must be alphanumeric -- the same rule the game
+    // manifest enforces -- so "." and ".." cannot slip through and select
+    // the config base directory or its parent instead of a child.
     assert!(
-        !name.is_empty()
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),

@@ -238,9 +238,7 @@ fn stage_payload() -> Result<Payload> {
         )
     })?;
     if let Some(pin) = baked::PAYLOAD_SHA256 {
-        let bytes =
-            std::fs::read(&sidecar).with_context(|| format!("reading {}", sidecar.display()))?;
-        let digest = copperline::hash::sha256_hex(&bytes);
+        let digest = sha256_of_file(&sidecar)?;
         if digest != pin {
             bail!(
                 "the game data ({}) does not match this build of {} \
@@ -288,15 +286,38 @@ fn find_sidecar(name: &str) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(name)).find(|p| p.exists())
 }
 
+/// The sidecar's SHA-256, streamed a megabyte at a time: a pinned payload
+/// can be a CD image of hundreds of megabytes, which must never be held
+/// in memory (let alone twice) just to be checked.
+fn sha256_of_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut hasher = copperline::hash::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize())
+}
+
 /// The per-user copy of a writable payload (`adf` file or `run` tree),
 /// staged WHDLoad-style under the per-game config directory.
 ///
-/// A `.payload` marker records the sidecar's fingerprint. Unchanged, the
-/// copy is reused as it stands -- which is where the guest's writes live,
-/// so reuse is what makes saves persist. Changed (the publisher shipped an
-/// update), the payload's own members are copied over the old ones while
-/// anything else in the tree is left alone, so game-created files survive
-/// the update.
+/// A `.payload` marker records the sidecar's identity: the game version
+/// and pin from the manifest, then every member's path, size, and mtime.
+/// Unchanged, the copy is reused as it stands -- which is where the
+/// guest's writes live, so reuse is what makes saves persist. Changed
+/// (the publisher shipped an update), members the new payload no longer
+/// carries are removed first, then the payload's own members are copied
+/// over the old ones. Anything the marker never owned, which is exactly
+/// the files the game created, is left alone, so saves survive updates.
 fn staged_copy(sidecar: &Path) -> Result<PathBuf> {
     let home = paths::config_dir().context(
         "no per-user directory available to stage the game files (no HOME/APPDATA); \
@@ -304,7 +325,7 @@ fn staged_copy(sidecar: &Path) -> Result<PathBuf> {
     )?;
     let dest = home.join("game");
     let marker = home.join(".payload");
-    let print = fingerprint(sidecar)?;
+    let print = marker_contents(sidecar)?;
     let recorded = std::fs::read_to_string(&marker).ok();
     let dest_path = dest.join(baked::PAYLOAD_FILE);
     if recorded.as_deref() == Some(print.as_str()) && dest_path.exists() {
@@ -314,11 +335,54 @@ fn staged_copy(sidecar: &Path) -> Result<PathBuf> {
         );
         return Ok(dest_path);
     }
+    // An update to a run tree: members of the previous payload the new one
+    // no longer carries are removed before the copy, so a renamed or
+    // deleted file cannot linger and still be loaded. Everything the
+    // marker never owned -- the files the game created -- is left alone.
+    if sidecar.is_dir() {
+        if let Some(old) = &recorded {
+            for stale in marker_members(old).difference(&marker_members(&print)) {
+                let _ = std::fs::remove_file(dest_path.join(stale));
+            }
+        }
+    }
     std::fs::create_dir_all(&dest)?;
     copy_over(sidecar, &dest_path)?;
     std::fs::write(&marker, &print)?;
     log::info!("game files: staged into {}", dest.display());
     Ok(dest_path)
+}
+
+/// What the `.payload` marker holds: `#`-prefixed meta lines carrying the
+/// baked game version and pin, then the sidecar's member fingerprint. The
+/// meta lines are what catches an update that preserves every size and
+/// timestamp (reproducible archives do): the publisher bumps the version,
+/// or the pin -- content-exact by definition -- changes with the file.
+fn marker_contents(sidecar: &Path) -> Result<String> {
+    Ok(format!(
+        "#version\t{}\n#pin\t{}\n{}",
+        baked::GAME_VERSION,
+        baked::PAYLOAD_SHA256.unwrap_or("-"),
+        fingerprint(sidecar)?
+    ))
+}
+
+/// The member paths a marker records: everything the payload owns in the
+/// staged tree, and nothing the guest wrote. Entries that are not plain
+/// relative paths are dropped rather than resolved -- the marker is the
+/// player's own file, but a removal must still never reach outside the
+/// staged copy.
+fn marker_members(marker: &str) -> std::collections::BTreeSet<PathBuf> {
+    marker
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split('\t').next())
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        })
+        .collect()
 }
 
 /// Copy the sidecar over the staged copy: a file plainly, a tree
@@ -339,9 +403,11 @@ fn copy_over(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// A cheap change detector for the sidecar: every member's relative path,
-/// size, and mtime. Any publisher update changes it (a fresh install's
-/// mtimes count as a change, which just costs one harmless recopy);
-/// unchanged payloads never re-copy, so guest writes survive.
+/// size, and mtime -- never the content, which would cost a full read of
+/// the payload on every launch. An update that preserves both size and
+/// timestamp is caught by the marker's version/pin meta lines instead
+/// ([`marker_contents`]); a fresh install's mtimes count as a change,
+/// which just costs one harmless recopy.
 fn fingerprint(path: &Path) -> Result<String> {
     fn entry(out: &mut String, root: &Path, path: &Path) -> Result<()> {
         let meta = std::fs::metadata(path)?;
