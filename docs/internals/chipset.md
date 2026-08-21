@@ -341,9 +341,9 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- **Live (beam-timed) collisions** stay on the 6-plane decode: CLXCON2 is
-  interpreted in the rendered collision path but not yet in the beam-timed
-  `COLLISIONS_AGA_DECODE` path.
+- **Live (beam-timed) collisions** follow the rendered path's AGA decode:
+  CLXCON2 extends both decodes to planes 7-8 on Lisa, while OCS/ECS and a
+  zero CLXCON2 keep the classic six-plane results.
 - **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
   sprite resolution, but the compositor does not place sprites on the SHRES
   pixel grid.

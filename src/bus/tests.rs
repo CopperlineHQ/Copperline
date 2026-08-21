@@ -7,8 +7,9 @@
 use super::{
     bitplane_slot_plan_bplcon0_key, bitplane_words_per_row, clipped_display_rows_before_visible,
     display_window_contains_vpos, diw_h_start, diw_h_stop, diw_v_start, diw_v_stop,
-    framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits, live_display_window_x,
-    live_manual_sprite_collision_sources, live_sprite_playfield_collision_bits_in_range,
+    framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits,
+    live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
+    live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock,
@@ -7831,6 +7832,7 @@ fn shifted_horizontal_diw_offsets_live_playfield_clxdat_fetch_origin() {
         0,
         0,
         0,
+        0,
         0x2C93,
         0x2DC1,
         DiwHigh::ocs_implicit(),
@@ -7883,6 +7885,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -7939,6 +7942,7 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -8015,6 +8019,7 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
         0,
         0,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8088,6 +8093,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
         0,
         0,
         0,
+        0,
         0x2C81,
         0x2DC1,
         DiwHigh::ocs_implicit(),
@@ -8157,6 +8163,7 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
         0,
         BPLCON3_BRDSPRT,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8206,6 +8213,7 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
         0,
         BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8252,6 +8260,7 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -11790,5 +11799,123 @@ fn searchable_regions_cover_the_32_bit_ram_banks() {
     assert!(
         regions.windows(2).all(|w| w[0].0 <= w[1].0),
         "regions must be in ascending address order: {regions:08X?}"
+    );
+}
+
+#[test]
+fn live_clxcon2_extends_playfield_collision_match_to_planes_seven_and_eight() {
+    // Plane index 6 (AGA plane 7) set, everything else empty.
+    let idx = 0b0100_0000u8;
+    // CLXCON2 with ENBP7 (bit 6) and MVBP7 (bit 0): plane 7 enabled and
+    // required to be set.
+    let clxcon2 = (1 << 6) | (1 << 0);
+    // Pre-AGA decode ignores the extra planes entirely: the match is true
+    // because no CLXCON plane is enabled.
+    let ocs = live_playfield_collision_pixel(idx, 0, 0, false);
+    assert!(ocs.pf1_match && ocs.pf2_match);
+    // AGA decode: plane 7 participates; it matches when enabled+set.
+    let aga = live_playfield_collision_pixel(idx, 0, clxcon2, false);
+    assert!(aga.pf1_match && aga.pf2_match);
+    // The same pixel with plane 7 cleared fails the enabled-plane match.
+    let aga_clear = live_playfield_collision_pixel(0, 0, clxcon2, false);
+    assert!(!aga_clear.pf1_match || !aga_clear.pf2_match);
+    // A zero CLXCON2 leaves the classic six-plane behaviour untouched even
+    // under the AGA decode.
+    let aga_zero = live_playfield_collision_pixel(idx, 0, 0, false);
+    assert_eq!(aga_zero.pf1_match, ocs.pf1_match);
+    assert_eq!(aga_zero.pf2_match, ocs.pf2_match);
+}
+
+#[test]
+fn beam_timed_live_pixel_decode_applies_clxcon2_like_the_renderer() {
+    // Dual-playfield row: planes 1 and 2 carry overlapping odd/even group
+    // pixels, plane 8 data gates an AGA CLXCON2 requirement.
+    let row = CapturedBitplaneRow {
+        nplanes: 8,
+        words_per_row: 2,
+        fetch_origin_cck: None,
+        planes: [
+            vec![0, 0],
+            vec![0, 0xFFFF],
+            vec![0, 0xFFFF],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0xFFFF],
+        ],
+    };
+    let pixel_at = |agnus: AgnusRevision, clxcon: u16, clxcon2: u16| {
+        live_bitplane_collision_pixel_at(
+            &row,
+            agnus,
+            // DBLPF plus the AGA 8-plane encoding (BPU=0 with bit 4).
+            0x0610,
+            0,
+            clxcon,
+            clxcon2,
+            0x2C93,
+            0x2DC1,
+            DiwHigh::ocs_implicit(),
+            0x0038,
+            [0; 8],
+            100,
+        )
+        .expect("the sampled x lands inside the display window")
+    };
+    // CLXCON requires plane 6 to be set; its data is clear, so the even
+    // match (pf2_match) fails under every decode.
+    let clxcon_requires_clear_plane = (1 << (6 + 5)) | (1 << 5);
+    let ocs = pixel_at(AgnusRevision::Ocs, clxcon_requires_clear_plane, 0);
+    let aga_zero_clxcon2 = pixel_at(AgnusRevision::AgaAlice, clxcon_requires_clear_plane, 0);
+    assert_eq!(ocs.pf1_match, aga_zero_clxcon2.pf1_match);
+    assert_eq!(ocs.pf2_match, aga_zero_clxcon2.pf2_match);
+    assert!(
+        !aga_zero_clxcon2.pf2_match,
+        "the unmet plane-6 requirement fails the match"
+    );
+
+    // AGA with plane 8 enabled and required instead: the enabled-plane
+    // match now passes on the same line content.
+    let aga = pixel_at(AgnusRevision::AgaAlice, 0, (1 << 7) | (1 << 1));
+    assert!(aga.pf1 && aga.pf2);
+    assert!(aga.pf1_match && aga.pf2_match);
+
+    // And a plane-8 requirement against cleared plane-8 data must fail:
+    let row_clear = CapturedBitplaneRow {
+        planes: [
+            vec![0, 0],
+            vec![0, 0xFFFF],
+            vec![0, 0xFFFF],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+        ],
+        ..row
+    };
+    let aga_unmet = live_bitplane_collision_pixel_at(
+        &row_clear,
+        AgnusRevision::AgaAlice,
+        0x0610,
+        0,
+        0,
+        (1 << 7) | (1 << 1),
+        0x2C93,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+        100,
+    )
+    .unwrap();
+    assert!(
+        !aga_unmet.pf2_match,
+        "an unmet plane-8 requirement must fail the even match"
+    );
+    assert!(
+        aga_unmet.pf1 && aga_unmet.pf2 && !aga_unmet.pf2_match,
+        "raw pixels overlap but the gated match fails"
     );
 }

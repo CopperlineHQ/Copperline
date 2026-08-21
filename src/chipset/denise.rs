@@ -269,8 +269,9 @@ pub struct Denise {
     /// timing paths described in docs/internals/chipset.md.
     pub bplcon4: u16,
     /// AGA CLXCON2 ($10E): collision enable/match bits for planes 7-8.
-    /// Lisa-gated. Interpreted by the rendered collision decode; the
-    /// beam-timed live path still stops at the classic 6 planes.
+    /// Lisa-gated. Interpreted by both collision decodes (rendered and
+    /// beam-timed live); a zero CLXCON2 leaves the classic six-plane
+    /// behaviour untouched.
     pub clxcon2: u16,
     pub clxcon: u16,
     pub clxdat: u16,
