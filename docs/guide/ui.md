@@ -53,6 +53,49 @@ the keyboard hardware directly behaves. `Ctrl+Amiga+Amiga` runs the
 authentic reset protocol (reset warning, then KCLK held low), so the
 reboot lands a fraction of a second after the chord, as on real hardware.
 
+## Keyboard and controller navigation
+
+Everything the mouse can reach in the launcher, the menu, the status bar
+and the overlay panels can be reached with the arrow keys or a
+controller.
+
+The arrows move the focus, which lights the control it is on. Return (or
+the pad's fire button) works it; `Esc` (or the pad's second button) steps
+back out -- out of an open setting, then the page, then the surface.
+Left and right move along the row, up and down to the row above or below;
+at the edge of a surface the focus stays where it is. Controls that
+cannot be pressed are skipped.
+
+| Control | Return / fire |
+|---|---|
+| Buttons, tabs, the close gadget | Presses it |
+| Tick boxes and cover art | Ticks it |
+| Text boxes | Opens it for typing |
+| `< value >` settings | Opens it; left and right change the value, Return closes it |
+| Volume slider | Opens it; left and right move it |
+
+Lists -- the games, the favourites, the host's disks -- are walked with
+up and down, which move the list's own selection and scroll it. Right
+steps to the tick beside a row and then out of the list; left leaves it.
+
+Stepping down off the foot of a surface reaches the status bar, and up
+returns. Left out of a settings page returns to the category button that
+opened it, and right opens that button's page. Walking off the bottom of
+the menu closes it and leaves the focus on the menu button.
+
+Clicking anything puts the focus away and leaves it where the pointer
+pressed, so going back to the keyboard resumes from there. While the
+focus is shown the pointer highlights nothing; moving the mouse puts it
+away again.
+
+A controller drives all of this with its d-pad, fire and second button.
+Its [Menu button](#gamepad-calibration) is the way in from a running
+machine.
+
+The debugger, frame analyzer and console windows are not navigated this
+way, but `Esc` closes the focused one and the pad's second button closes
+the top one.
+
 ## Status bar
 
 The status bar (44 pixels below the display) holds, left to right (it can
@@ -893,7 +936,8 @@ either direction.
 
 An Amiga has two game ports, and either accepts any controller. Copperline
 models that: each port carries a device -- `mouse`, `joystick`, `cd32` pad,
-`analogue` paddles, or `none` -- set with `[input] port1`/`port2` in the
+`analogue` paddles, or `none`, and port 1 additionally `gamepad-mouse` --
+set with `[input] port1`/`port2` in the
 config (or `--port1`/`--port2`, or the launcher's *Input* tab). The default
 is the stock wiring, a mouse in port 1 and a joystick in port 2 (a CD32 pad
 on the CD32 profile). The runtime menu's **Port 1 Device** / **Port 2
@@ -939,6 +983,15 @@ protocol instead, including the red/blue/green/yellow and transport
 buttons, on either port. An `analogue` device presents pot resistances on
 the POTxX/POTxY pins; no live host device maps to it yet -- drive it with
 `--pot-after` scripting or the control protocol's `input.analogue`.
+
+A `gamepad-mouse` device is a mouse a gamepad moves as well as the host's
+own; the machine still sees one mouse. The d-pad moves the pointer,
+gathering speed while a direction is held, and the left stick moves it
+proportionally where the pad has one. Fire is the left button, the second
+button the right, and `mouse_sensitivity` scales both hands alike. It is
+offered on port 1 only. While it is chosen the pad drives no joystick
+port -- whichever port it would have driven falls to the keyboard until
+the device is changed back.
 
 Copperline can also emulate the joystick from the host keyboard. There are
 two explicit input modes, and the active one is always shown by the gamepad
@@ -1019,9 +1072,10 @@ live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
 the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, and an optional **Quit Copperline** hotkey; every
-step waits for the pad to return to neutral before sampling, so a held
-control cannot bleed into the next binding.
+**Open menu** button, and an optional **Quit Copperline** hotkey. Push a
+control to bind it, or hold any control for about a second to skip a step
+the pad has no control for; the four directions and fire cannot be
+skipped.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can
@@ -1035,14 +1089,17 @@ The default database layout never binds a Quit hotkey; only a
 calibration can arm one.
 
 The Menu button is the other host-side control: a press opens the pop-up
-menu (or closes an open overlay panel), and while the menu is up the pad
-walks it -- the d-pad steps rows (hold to repeat), right opens a
-category, left backs out of one, fire activates the row, and the second
-button backs out a level at a time, closing the menu from the top: the
-same walk the arrow keys and `Esc` do. While the menu or a panel is
-open, the pad stops driving the emulated port, just as the keyboard
-does. On the default database layout Select/Back and the guide button
-carry it; a calibration can put it anywhere (or skip it).
+menu (or closes an open overlay panel), and from there the pad walks
+whatever is up, as described under
+[Keyboard and controller navigation](#keyboard-and-controller-navigation)
+above. While the menu or a panel is open the pad stops driving the
+emulated port, just as the keyboard does. On the default database layout
+Select/Back and the guide button carry it; a calibration can put it
+anywhere (or skip it).
+
+Once every step is captured, pushing a control tests its binding and
+holding one hands the panel's Save and Cancel buttons to the pad, so a
+calibration can be finished without the mouse.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;

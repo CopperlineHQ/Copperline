@@ -59,6 +59,7 @@ pub(super) fn entry_char_for_key(code: KeyCode) -> Option<char> {
 /// step with its captured binding, and a prompt for what to do next.
 pub(super) fn build_calibration_view(
     session: &crate::gamepad::CalibrationSession,
+    pad_has_the_buttons: bool,
 ) -> ui::CalibrationView {
     use crate::gamepad::CalibrationSession;
     let pad_line = if session.backend_missing() {
@@ -80,17 +81,20 @@ pub(super) fn build_calibration_view(
     let status = if session.backend_missing() {
         "Calibration needs a gamepad backend (not available headless).".to_string()
     } else if session.done() {
-        if session.live_test().is_empty() {
-            "All steps captured. Push controls to test, then Save.".to_string()
+        if pad_has_the_buttons {
+            "All steps captured. Choose Save or Cancel.".to_string()
+        } else if session.live_test().is_empty() {
+            "All steps captured. Push controls to test, hold any control for Save or Cancel."
+                .to_string()
         } else {
             format!("Testing: {}", session.live_test())
         }
     } else if !session.connected() {
         "Waiting for a controller to be connected.".to_string()
     } else if session.can_skip() {
-        "Push and hold the control, or Skip if the pad lacks it.".to_string()
+        "Push the control, or hold any control if the pad lacks it.".to_string()
     } else {
-        "Push and hold the control on the pad.".to_string()
+        "Push the control on the pad.".to_string()
     };
     ui::CalibrationView {
         pad_line,

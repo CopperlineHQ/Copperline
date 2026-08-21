@@ -4246,8 +4246,13 @@ fn port_devices_round_trip_through_raw_against_the_profile_baseline() {
     assert!(raw.input.port1.is_none());
     assert!(raw.input.port2.is_none());
 
-    // Non-default devices are written and read back.
-    s.cycle(LauncherField::Port1Device, true); // Mouse -> Joystick
+    // Non-default devices are written and read back. Port 1 offers the
+    // gamepad-driven mouse between Mouse and Joystick; port 2 does not
+    // offer it at all, a mouse belonging in port 1.
+    s.cycle(LauncherField::Port1Device, true); // Mouse -> Gamepad Mouse
+    assert_eq!(s.port_devices[0], PortDevice::GamepadMouse);
+    assert_eq!(s.to_raw().input.port1.as_deref(), Some("gamepad-mouse"));
+    s.cycle(LauncherField::Port1Device, true); // -> Joystick
     s.cycle(LauncherField::Port2Device, true); // Joystick -> Cd32Pad
     let raw = s.to_raw();
     assert_eq!(raw.input.port1.as_deref(), Some("joystick"));

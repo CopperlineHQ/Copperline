@@ -205,7 +205,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  60: Akiko's `command_active` widened from u8 to u32: it now counts the
 //      drive microcontroller's command turnaround in emulated CCKs
 //      (CMD_EXEC_DELAY_CCK) instead of counting register accesses.
-pub const STATE_VERSION: u32 = 60;
+//  61: PortDevice gained the GamepadMouse variant (a mouse a gamepad can
+//      move as well as the host's own, `[input] port1`), appended at the
+//      end of the enum.
+pub const STATE_VERSION: u32 = 61;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

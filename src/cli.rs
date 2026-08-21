@@ -671,7 +671,10 @@ where
             }
             "--port1" => {
                 overrides.port1 = Some(args.next().ok_or_else(|| {
-                    anyhow!("--port1 requires a device (mouse/joystick/cd32/analogue/none)")
+                    anyhow!(
+                        "--port1 requires a device \
+                         (mouse/gamepad-mouse/joystick/cd32/analogue/none)"
+                    )
                 })?);
             }
             "--port2" => {

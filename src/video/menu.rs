@@ -334,11 +334,23 @@ impl MenuNav {
     /// Step the cursor, skipping rows that cannot be picked and wrapping at
     /// both ends. Starting with no cursor, down lands on the first row and up
     /// on the last, so a menu just opened answers either key sensibly.
+    /// Step the cursor, wrapping round the level.
     pub fn step(&mut self, root: &[MenuRow], forward: bool) {
+        self.walk(root, forward, true);
+    }
+
+    /// Step the cursor without wrapping: at the end of the level it
+    /// stays where it is and says so, which is how the caller knows the
+    /// walk has run out of menu and belongs somewhere else.
+    pub fn step_within(&mut self, root: &[MenuRow], forward: bool) -> bool {
+        self.walk(root, forward, false)
+    }
+
+    fn walk(&mut self, root: &[MenuRow], forward: bool, wrap: bool) -> bool {
         let rows = self.current(root);
         if rows.is_empty() {
             self.cursor = None;
-            return;
+            return false;
         }
         let n = rows.len();
         let start = match self.cursor {
@@ -352,18 +364,23 @@ impl MenuNav {
             }
         };
         for hop in 1..=n {
-            let i = if forward {
-                (start + hop) % n
+            let (i, wrapped) = if forward {
+                (start + hop, start + hop >= n)
             } else {
-                (start + n - hop % n) % n
+                ((start + n - hop % n) % n, hop > start)
             };
+            let i = i % n;
+            if wrapped && !wrap {
+                return false;
+            }
             if rows[i].enabled {
                 self.cursor = Some(i);
-                return;
+                return true;
             }
         }
         // Nothing on this level can be picked; leave the cursor alone rather
         // than parking it on a row that would refuse.
+        false
     }
 
     /// Open the submenu under the cursor. Returns false when there is none,
@@ -790,8 +807,11 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 fn input_rows(s: &MenuState) -> Vec<MenuRow> {
-    const DEVICES: [PortDevice; 5] = [
+    const DEVICES: [PortDevice; 6] = [
         PortDevice::Mouse,
+        // A mouse a gamepad can move as well as the hand on the desk,
+        // offered on port 1 alone: that is where a mouse belongs.
+        PortDevice::GamepadMouse,
         PortDevice::Joystick,
         PortDevice::Cd32Pad,
         PortDevice::Analogue,
@@ -800,6 +820,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
     let port = |n: usize| -> Vec<MenuRow> {
         DEVICES
             .iter()
+            .filter(|d| n == 0 || **d != PortDevice::GamepadMouse)
             .map(|d| {
                 MenuRow::choice(
                     d.menu_label(),

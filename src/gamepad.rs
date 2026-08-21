@@ -136,7 +136,7 @@ pub struct JoystickState {
 
 /// One poll of a calibrated pad: the emulated joystick lines plus the
 /// host-side controls, which never reach the emulated port.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PadState {
     pub joystick: JoystickState,
     /// The calibrated Quit hotkey is currently held. Host-side only: the
@@ -145,7 +145,21 @@ pub struct PadState {
     /// The Menu button is currently held. Host-side only: a press opens
     /// (or closes) the pop-up menu, and the pad walks it while it is up.
     pub menu: bool,
+    /// The left stick, each axis in [-1, 1], right and up positive.
+    ///
+    /// The joystick lines above are what a digital port can hear, so
+    /// they are all a calibration records; this is the deflection behind
+    /// them, which only a pad the controller database knows can report.
+    /// Gamepad Mouse spends it on how fast the pointer moves, where a
+    /// switch could only say whether it moves at all.
+    pub stick: (f32, f32),
 }
+
+/// How long a control must be held for the hold to mean something: a
+/// step skipped while capturing, and the panel's own buttons once
+/// everything is captured. Long enough that pressing a control to
+/// capture or to try it never trips it.
+const CAL_HOLD: std::time::Duration = std::time::Duration::from_millis(700);
 
 impl GamepadCalibration {
     fn resolve_pad(&self, axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> PadState {
@@ -153,6 +167,10 @@ impl GamepadCalibration {
             joystick: self.resolve(axes, buttons),
             quit: self.quit.is_some_and(|i| i.active(axes, buttons)),
             menu: self.menu.is_some_and(|i| i.active(axes, buttons)),
+            // A calibration binds raw inputs one at a time and has no
+            // notion of an axis pair, so a calibrated pad reports no
+            // deflection and its d-pad moves the pointer instead.
+            stick: (0.0, 0.0),
         }
     }
 
@@ -619,6 +637,7 @@ impl GamepadReader {
                     joystick: raw.mapped.resolve(),
                     quit: false,
                     menu: raw.mapped.select || raw.mapped.mode,
+                    stick: (raw.mapped.left_x, raw.mapped.left_y),
                 })
             }
             None => {
@@ -658,21 +677,22 @@ const CAL_STEPS: [(&str, bool); 13] = [
     ("Quit Copperline", false),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CalPhase {
-    /// Wait for every control to return to rest before sampling, so a
-    /// held input from the previous step is not recaptured.
-    WaitNeutral,
-    Capture,
-}
-
 /// A guided calibration in progress: which step is being prompted, what
 /// has been captured so far, and the connected pad's identity. Fed raw
 /// gamepad state by [`GamepadReader::calibration_tick`].
 pub struct CalibrationSession {
     bindings: [Option<RawInput>; CAL_STEPS.len()],
     step: usize,
-    phase: CalPhase,
+    /// Every control active on the last tick. A press is a control that
+    /// was not active and now is, so a control already down when a step
+    /// begins -- one held over from the step before, or one a pad
+    /// reports as down at rest -- never presses, and can never be
+    /// captured by a step that is not asking for it.
+    active: Vec<RawInput>,
+    /// The press being waited on, and when it began. Released before the
+    /// hold, it is the step's binding; still down at the hold, the step
+    /// is skipped -- not every pad has every control.
+    pending: Option<(RawInput, std::time::Instant)>,
     /// The last pad seen, kept across disconnects so a finished session
     /// can still be saved if the pad is unplugged at the end.
     pad: Option<(String, String)>,
@@ -681,14 +701,27 @@ pub struct CalibrationSession {
     /// Once every step is captured, the names of the bindings currently
     /// being pressed, so the user can test the calibration before saving.
     live_test: String,
+    /// Once every step is captured, whether a hold has asked for the
+    /// panel's own buttons: the testing is finished, and the pad walks
+    /// Save and Cancel with the bindings it has just been taught.
+    handed_over: bool,
+    /// The pad as the bindings just captured see it, kept while those
+    /// bindings are being tested. Holding one long enough hands the
+    /// panel's own buttons to the pad, which walks them with exactly the
+    /// controls it has just been taught -- so reaching Save proves the
+    /// calibration works rather than asking for a mouse to finish.
+    live_pad: PadState,
 }
 
 impl CalibrationSession {
     pub fn new() -> Self {
         Self {
             bindings: [None; CAL_STEPS.len()],
+            live_pad: PadState::default(),
+            handed_over: false,
+            active: Vec::new(),
+            pending: None,
             step: 0,
-            phase: CalPhase::WaitNeutral,
             pad: None,
             connected: false,
             backend_missing: false,
@@ -733,6 +766,35 @@ impl CalibrationSession {
         &self.live_test
     }
 
+    /// The pad as the bindings under test see it. Meaningless before the
+    /// last step is captured, since there is nothing to resolve against.
+    pub fn live_pad(&self) -> PadState {
+        self.live_pad
+    }
+
+    /// Whether a hold has asked for the panel's own buttons, the
+    /// testing being finished.
+    pub fn handed_over(&self) -> bool {
+        self.handed_over
+    }
+
+    /// A session with every step captured, for tests of what the panel
+    /// does once there is nothing left to capture.
+    #[cfg(test)]
+    pub(crate) fn finished_for_test() -> Self {
+        let mut session = Self::new();
+        session.step = CAL_STEPS.len();
+        session.connected = true;
+        session
+    }
+
+    /// Pretend a hold has asked for the panel's buttons, for the same
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn hand_over_for_test(&mut self) {
+        self.handed_over = true;
+    }
+
     /// Whether the current prompt may be skipped (optional CD32 extras).
     pub fn can_skip(&self) -> bool {
         self.step < CAL_STEPS.len() && !CAL_STEPS[self.step].1
@@ -753,12 +815,15 @@ impl CalibrationSession {
         }
     }
 
-    /// Skip the current (optional) step.
+    /// Skip the current (optional) step. The Skip button's way of doing
+    /// what holding a control does.
     pub fn skip_current(&mut self) {
         if self.can_skip() {
             self.bindings[self.step] = None;
             self.step += 1;
-            self.phase = CalPhase::WaitNeutral;
+            // Whatever is down stays down as far as the next step is
+            // concerned: it never pressed, so it cannot be captured.
+            self.pending = None;
         }
     }
 
@@ -785,16 +850,25 @@ impl CalibrationSession {
             }
         }
         if changed {
-            // A (re)connected pad may still report a stale deflection;
-            // require neutral before sampling for the current prompt.
-            self.phase = CalPhase::WaitNeutral;
+            // A (re)connected pad may still report a stale deflection.
+            // Forgetting what was active makes everything it reports
+            // look like it was already down, so nothing is captured
+            // until something is pressed afresh.
+            self.active = active_inputs(axes, buttons);
+            self.pending = None;
         }
         if !self.connected {
             return changed;
         }
+        let now = active_inputs(axes, buttons);
+        // What was pressed this tick: active now, and not before.
+        let pressed = now.iter().copied().find(|i| !self.active.contains(i));
+        let held = |input: &RawInput| now.contains(input);
         if self.done() {
             // Live test: show which captured bindings are active right now
-            // so the calibration can be verified before saving.
+            // so the calibration can be verified before saving. A press
+            // is how a binding is tried, so it is a hold that says the
+            // testing is finished and asks for the panel's buttons.
             let labels: Vec<&str> = self
                 .bindings
                 .iter()
@@ -807,25 +881,79 @@ impl CalibrationSession {
                 self.live_test = live_test;
                 changed = true;
             }
+            self.live_pad = self.to_calibration().resolve_pad(axes, buttons);
+            changed |= self.watch_hold(pressed, &held, |session| {
+                session.handed_over = true;
+                true
+            });
+            self.active = now;
             return changed;
         }
-        match self.phase {
-            CalPhase::WaitNeutral => {
-                if raw_state_neutral(axes, buttons) {
-                    self.phase = CalPhase::Capture;
-                    // The phase flip itself is invisible; no redraw needed.
-                }
+        // A press captures the control it was made with; holding it says
+        // the pad has not got that control, and skips the step. Which of
+        // the two it was is only known when the button comes back up, so
+        // nothing is captured until it does.
+        let skippable = !CAL_STEPS[self.step].1;
+        changed |= self.watch_hold(pressed, &held, move |session| {
+            if !skippable {
+                return false;
             }
-            CalPhase::Capture => {
-                if let Some(input) = strongest_input_from(axes, buttons) {
-                    self.bindings[self.step] = Some(input);
-                    self.step += 1;
-                    self.phase = CalPhase::WaitNeutral;
-                    changed = true;
+            session.bindings[session.step] = None;
+            session.step += 1;
+            true
+        });
+        self.active = now;
+        changed
+    }
+
+    /// Follow one press through to what it turns out to be.
+    ///
+    /// A press is remembered rather than acted on: released before the
+    /// hold it is a press, and it binds the step; still down at the
+    /// hold, `on_hold` has it instead and the press is spent, so a
+    /// control kept down after that does nothing more.
+    ///
+    /// `on_hold` says whether it took the hold. Where it did not -- a
+    /// step that cannot be skipped -- the press stays pending, so
+    /// holding one of the four directions and letting go still binds it
+    /// rather than quietly coming to nothing.
+    fn watch_hold(
+        &mut self,
+        pressed: Option<RawInput>,
+        held: &dyn Fn(&RawInput) -> bool,
+        on_hold: impl FnOnce(&mut Self) -> bool,
+    ) -> bool {
+        match self.pending {
+            None => {
+                if let Some(input) = pressed {
+                    self.pending = Some((input, std::time::Instant::now()));
+                }
+                false
+            }
+            Some((input, since)) => {
+                if !held(&input) {
+                    self.pending = None;
+                    self.on_press(input);
+                    true
+                } else if since.elapsed() >= CAL_HOLD && on_hold(self) {
+                    self.pending = None;
+                    true
+                } else {
+                    false
                 }
             }
         }
-        changed
+    }
+
+    /// A control pressed and released: the binding for the step being
+    /// captured, and nothing at all once every step is captured -- there
+    /// a press is how a binding is tried.
+    fn on_press(&mut self, input: RawInput) {
+        if self.done() {
+            return;
+        }
+        self.bindings[self.step] = Some(input);
+        self.step += 1;
     }
 
     /// The captured bindings as a persistable calibration.
@@ -854,6 +982,31 @@ impl Default for CalibrationSession {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Every control the pad has active right now: each pressed button, and
+/// each axis deflected past the capture threshold, in the direction it
+/// is deflected.
+///
+/// Calibration works from this rather than from "the strongest one",
+/// because what a step wants is the control that was *pressed* -- and a
+/// pad reporting something as down at rest, which several do, would
+/// otherwise be captured by every step in turn.
+fn active_inputs(axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> Vec<RawInput> {
+    let mut active: Vec<RawInput> = buttons
+        .iter()
+        .filter(|(_, &pressed)| pressed)
+        .map(|(&code, _)| RawInput::Button { code })
+        .collect();
+    active.extend(
+        axes.iter()
+            .filter(|(_, v)| v.abs() >= AXIS_CAPTURE_THRESHOLD)
+            .map(|(&code, &v)| RawInput::Axis {
+                code,
+                positive: v > 0.0,
+            }),
+    );
+    active
 }
 
 /// The most strongly deflected axis or any pressed button, if past the
@@ -1006,6 +1159,100 @@ mod tests {
         Some(RawInput::Button { code })
     }
 
+    /// A press captures the control it was made with, and a control
+    /// already down when a step begins is not a press: several pads
+    /// report something as held at rest, and every step in turn was
+    /// capturing it.
+    #[test]
+    fn a_step_captures_the_control_that_was_pressed() {
+        let pad = Some(("Pad".to_string(), "uuid".to_string()));
+        let mut session = CalibrationSession::new();
+        let axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        // Something the pad reports as down from the start.
+        buttons.insert(0x90001, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(0), "nothing was pressed");
+
+        // A press: down, then up. Nothing is captured until it comes up,
+        // since until then it could still turn out to be a hold.
+        buttons.insert(0x90002, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(0), "still down");
+        buttons.insert(0x90002, false);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(1), "captured on release");
+        assert_eq!(session.binding_text(0), "button 90002");
+
+        // The control that was down all along still is, and still has
+        // not pressed: the next step is untouched by it.
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(1));
+    }
+
+    /// Holding a control skips the step, for a pad that lacks it -- but
+    /// only where the step may be skipped at all.
+    #[test]
+    fn holding_a_control_skips_the_step_it_can_skip() {
+        let pad = Some(("Pad".to_string(), "uuid".to_string()));
+        let mut session = CalibrationSession::new();
+        let axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+
+        // Up is required: holding it through the hold skips nothing, and
+        // the press is still there to bind it when the control comes up.
+        buttons.insert(0x90001, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        session.pending = Some((RawInput::Button { code: 0x90001 }, held_long_enough()));
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(0), "a required step stands");
+        buttons.insert(0x90001, false);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(1), "and the release binds it");
+        assert_eq!(session.binding_text(0), "button 90001");
+        buttons.remove(&0x90001);
+
+        // Walk to the first step that may be skipped, then hold.
+        while !session.can_skip() && !session.done() {
+            let code = 0x90010 + session.step as u32;
+            buttons.insert(code, true);
+            session.advance(pad.clone(), &axes, &buttons);
+            buttons.insert(code, false);
+            session.advance(pad.clone(), &axes, &buttons);
+        }
+        let at = session.step;
+        assert!(session.can_skip(), "there is a step to skip");
+        buttons.insert(0x90020, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        session.pending = Some((RawInput::Button { code: 0x90020 }, held_long_enough()));
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(at + 1), "the step was skipped");
+        assert_eq!(session.binding_text(at), "skipped");
+    }
+
+    /// Once every step is captured, a press tries a binding and a hold
+    /// asks for the panel's own buttons.
+    #[test]
+    fn a_hold_at_the_end_asks_for_the_panels_buttons() {
+        let pad = Some(("Pad".to_string(), "uuid".to_string()));
+        let mut session = CalibrationSession::finished_for_test();
+        let axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        buttons.insert(0x90001, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert!(!session.handed_over(), "a press is how a binding is tried");
+        session.pending = Some((RawInput::Button { code: 0x90001 }, held_long_enough()));
+        session.advance(pad.clone(), &axes, &buttons);
+        assert!(session.handed_over(), "and a hold asks for the buttons");
+    }
+
+    /// A moment far enough in the past that a press begun then has
+    /// become a hold.
+    fn held_long_enough() -> std::time::Instant {
+        std::time::Instant::now() - CAL_HOLD
+    }
+
     #[test]
     fn resolve_reads_calibrated_axes_and_buttons_with_recorded_signs() {
         // Up/down share one axis with opposite signs (a typical retro pad
@@ -1144,11 +1391,16 @@ mod tests {
         let pad = Some(("Pad".to_string(), "abc123".to_string()));
         let axes = BTreeMap::new();
         let mut buttons = BTreeMap::new();
+        // The pad arrives first: what it reports as it connects was not
+        // pressed by anyone, so nothing is captured from it.
+        session.advance(pad.clone(), &axes, &buttons);
         for step in 0..5 {
-            session.advance(pad.clone(), &axes, &buttons); // neutral
+            // Down, then up: a control is captured by being pressed,
+            // which is only known once it comes back up.
             buttons.insert(0x9000 + step as u32, true);
             session.advance(pad.clone(), &axes, &buttons);
             buttons.clear();
+            session.advance(pad.clone(), &axes, &buttons);
         }
         while session.can_skip() {
             session.skip_current();
@@ -1186,20 +1438,22 @@ mod tests {
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert_eq!(session.current_step(), Some(0));
 
-        // Neutral first, then a deflected axis captures step 0 (Up).
-        assert!(!session.advance(pad.clone(), &axes, &buttons));
+        // A deflected axis, pressed and released, captures step 0 (Up).
+        // Nothing is captured while it is down: until it comes up it
+        // could still turn out to be a hold.
         axes.insert(0x31, -0.9);
+        assert!(!session.advance(pad.clone(), &axes, &buttons));
+        assert_eq!(session.current_step(), Some(0));
+        axes.clear();
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert_eq!(session.current_step(), Some(1));
         assert_eq!(session.binding_text(0), "axis 31-");
 
-        // Still held: the same input must not capture step 1 until the
-        // controls return to neutral.
-        assert!(!session.advance(pad.clone(), &axes, &buttons));
-        assert_eq!(session.current_step(), Some(1));
-        axes.clear();
-        assert!(!session.advance(pad.clone(), &axes, &buttons));
+        // The other way on the same axis is a different control, and it
+        // binds step 1 the same way.
         axes.insert(0x31, 0.9);
+        assert!(!session.advance(pad.clone(), &axes, &buttons));
+        axes.clear();
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert_eq!(session.binding_text(1), "axis 31+");
 
@@ -1209,8 +1463,9 @@ mod tests {
             assert_eq!(session.current_step(), Some(expected_step));
             axes.clear();
             buttons.clear();
-            session.advance(pad.clone(), &axes, &buttons);
             buttons.insert(0x9000 + expected_step as u32, true);
+            session.advance(pad.clone(), &axes, &buttons);
+            buttons.clear();
             assert!(session.advance(pad.clone(), &axes, &buttons));
         }
         assert_eq!(session.binding_text(4), "button 9004");
@@ -1270,10 +1525,12 @@ mod tests {
         // Capture the required steps, then skip the CD32 extras to land
         // on the final (optional) Quit step.
         for step in 0..5 {
-            session.advance(pad.clone(), &axes, &buttons); // neutral
+            // Down, then up: a control is captured by being pressed,
+            // which is only known once it comes back up.
             buttons.insert(0x9000 + step as u32, true);
             session.advance(pad.clone(), &axes, &buttons);
             buttons.clear();
+            session.advance(pad.clone(), &axes, &buttons);
         }
         while session.can_skip() && session.current_step() != Some(CAL_STEPS.len() - 1) {
             session.skip_current();
@@ -1281,13 +1538,15 @@ mod tests {
         assert_eq!(session.current_step(), Some(CAL_STEPS.len() - 1));
         assert!(session.can_skip());
 
-        session.advance(pad.clone(), &axes, &buttons); // neutral
         buttons.insert(0x900FF, true);
+        session.advance(pad.clone(), &axes, &buttons);
+        buttons.clear();
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert!(session.done());
         assert_eq!(session.to_calibration().quit, button(0x900FF));
 
         // The post-capture live test reports the held quit binding by name.
+        buttons.insert(0x900FF, true);
         assert!(session.advance(pad, &axes, &buttons));
         assert_eq!(session.live_test(), "Quit Copperline");
     }
@@ -1310,14 +1569,16 @@ mod tests {
         assert!(!session.advance(None, &axes, &buttons));
         assert_eq!(session.current_step(), Some(0));
 
-        // On reconnect the stale deflection must not capture; the session
-        // requires neutral first, then captures a fresh push.
+        // On reconnect the stale deflection must not capture: it was
+        // already there, so nobody pressed it. A fresh push does.
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert!(!session.advance(pad.clone(), &axes, &buttons));
         assert_eq!(session.current_step(), Some(0));
         axes.clear();
         session.advance(pad.clone(), &axes, &buttons);
         axes.insert(0x30, 1.0);
+        assert!(!session.advance(pad.clone(), &axes, &buttons));
+        axes.clear();
         assert!(session.advance(pad.clone(), &axes, &buttons));
         assert_eq!(session.current_step(), Some(1));
     }

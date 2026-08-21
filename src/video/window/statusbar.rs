@@ -7,6 +7,57 @@
 
 use super::*;
 
+// Where the focus stands on the bar while it is being drawn, and how
+// far through its breath it is. The bar's buttons light for the focus
+// exactly as they light under the pointer, in the focus's own blue.
+thread_local! {
+    static NAV_LIGHT: std::cell::Cell<(Option<BarControl>, f32)> =
+        const { std::cell::Cell::new((None, 0.0)) };
+    /// Whether the marker is up on a panel rather than here. The
+    /// keyboard is in charge either way, so the pointer lights nothing
+    /// in the bar while it is.
+    static NAV_ELSEWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say where the focus is on the bar, for the drawing about to happen.
+pub(in crate::video) fn set_nav_light(target: Option<BarControl>, mix: f32, elsewhere: bool) {
+    NAV_ELSEWHERE.with(|flag| flag.set(elsewhere));
+    NAV_LIGHT.with(|light| light.set((target, mix.clamp(0.0, 1.0))));
+}
+
+/// How lit a control is: all the way under the pointer, and as far as
+/// the breath has come when the focus is on it. Negative says the
+/// focus has it, so one number carries both.
+fn lit(hover: Option<BarControl>, control: BarControl) -> f32 {
+    // The focus is asked first: a control the mouse is resting on
+    // still breathes when the keyboard walks onto it.
+    let focused = NAV_LIGHT.with(|light| {
+        let (target, mix) = light.get();
+        if target == Some(control) {
+            mix
+        } else {
+            0.0
+        }
+    });
+    if focused != 0.0 {
+        return -focused;
+    }
+    // And while the marker is up at all, the keyboard is in charge: a
+    // hand left resting on the mouse would otherwise mark a second
+    // control wherever it happens to sit. Moving the mouse puts the
+    // marker away, and the pointer has the bar back.
+    if NAV_LIGHT.with(|light| light.get().0.is_some()) || NAV_ELSEWHERE.with(std::cell::Cell::get) {
+        return 0.0;
+    }
+    if hover == Some(control) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+use crate::video::ui::light_face;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_scale: usize) {
     let status = view.status;
@@ -59,7 +110,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
                 frame,
                 scale_rect(rect, texture_scale),
                 idx,
-                hover == Some(BarControl::DriveLoad(idx)),
+                lit(hover, BarControl::DriveLoad(idx)),
                 texture_scale,
             );
         }
@@ -68,7 +119,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
                 frame,
                 scale_rect(rect, texture_scale),
                 drive.multi && !drive.bridged,
-                hover == Some(BarControl::DriveSwap(idx)),
+                lit(hover, BarControl::DriveSwap(idx)),
                 texture_scale,
             );
         }
@@ -79,7 +130,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
                 // Greyed on a bridged drive: the disk is in a real drive and
                 // comes out by hand, not from here.
                 drive.inserted && !drive.bridged,
-                hover == Some(BarControl::DriveEject(idx)),
+                lit(hover, BarControl::DriveEject(idx)),
                 texture_scale,
             );
         }
@@ -88,7 +139,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         draw_cd_button(
             frame,
             scale_rect(rect, texture_scale),
-            hover == Some(BarControl::CdLoad),
+            lit(hover, BarControl::CdLoad),
             texture_scale,
         );
     }
@@ -97,7 +148,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
             frame,
             scale_rect(rect, texture_scale),
             view.media.cd == Some(true),
-            hover == Some(BarControl::CdEject),
+            lit(hover, BarControl::CdEject),
             texture_scale,
         );
     }
@@ -105,14 +156,14 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         frame,
         scale_rect(joystick_toggle_rect(), texture_scale),
         view.joystick_input_mode,
-        hover == Some(BarControl::Joystick),
+        lit(hover, BarControl::Joystick),
         texture_scale,
     );
     draw_keyboard_button(
         frame,
         scale_rect(keyboard_toggle_rect(), texture_scale),
         view.keyboard_panel_shown,
-        hover == Some(BarControl::Keyboard),
+        lit(hover, BarControl::Keyboard),
         texture_scale,
     );
     if view.control_connected {
@@ -127,62 +178,67 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
             texture_scale,
         );
     }
-    draw_volume_control(frame, status.output_volume_percent, texture_scale);
+    draw_volume_control(
+        frame,
+        status.output_volume_percent,
+        lit(hover, BarControl::Volume),
+        texture_scale,
+    );
     draw_menu_button(
         frame,
         scale_rect(menu_button_rect(), texture_scale),
-        hover == Some(BarControl::Menu),
+        lit(hover, BarControl::Menu),
         texture_scale,
     );
     draw_shot_button(
         frame,
         scale_rect(shot_button_rect(), texture_scale),
-        hover == Some(BarControl::Screenshot),
+        lit(hover, BarControl::Screenshot),
         texture_scale,
     );
     draw_pause_button(
         frame,
         scale_rect(pause_button_rect(), texture_scale),
         view.paused,
-        hover == Some(BarControl::Pause),
+        lit(hover, BarControl::Pause),
         texture_scale,
     );
     draw_power_button(
         frame,
         scale_rect(power_button_rect(), texture_scale),
         view.powered_on,
-        hover == Some(BarControl::Power),
+        lit(hover, BarControl::Power),
         texture_scale,
     );
     draw_reboot_button(
         frame,
         scale_rect(reboot_button_rect(), texture_scale),
-        hover == Some(BarControl::Reboot),
+        lit(hover, BarControl::Reboot),
         texture_scale,
     );
 }
 
 /// Per-drive status feeding the media controls in the status bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct DriveBar {
+pub(in crate::video) struct DriveBar {
     /// Drive is wired up this session; unconnected drives get no controls.
-    pub(super) connected: bool,
+    pub(in crate::video) connected: bool,
     /// A disk is currently inserted (enables the eject button).
-    pub(super) inserted: bool,
+    pub(in crate::video) inserted: bool,
     /// More than one image is queued for this drive (enables swap).
-    pub(super) multi: bool,
+    pub(in crate::video) multi: bool,
     /// Backed by a real drive on a bridge. The buttons still draw, so the
     /// drive is visibly there and numbered, but there is no media for the
     /// emulator to load, swap, or eject -- the disk is in someone's hand.
-    pub(super) bridged: bool,
+    pub(in crate::video) bridged: bool,
 }
 
 /// Removable-media status for the bar: the floppy drives plus the CD
 /// drive (None on machines without one, Some(disc inserted) otherwise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct MediaBar {
-    pub(super) drives: [DriveBar; 4],
-    pub(super) cd: Option<bool>,
+pub(in crate::video) struct MediaBar {
+    pub(in crate::video) drives: [DriveBar; 4],
+    pub(in crate::video) cd: Option<bool>,
 }
 
 /// Everything draw_status_bar needs for one frame.
@@ -202,7 +258,7 @@ pub(super) struct StatusBarView {
 
 /// A clickable status-bar control, used for hit-testing and hover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BarControl {
+pub(in crate::video) enum BarControl {
     Power,
     Pause,
     Reboot,
@@ -223,7 +279,7 @@ pub(super) enum BarControl {
 /// The fixed controls (volume, screenshot, pause, power, reboot) keep
 /// their own rect functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct BarLayout {
+pub(in crate::video) struct BarLayout {
     pub(super) drive_load: [Option<Rect>; 4],
     pub(super) drive_swap: [Option<Rect>; 4],
     pub(super) drive_eject: [Option<Rect>; 4],
@@ -235,7 +291,7 @@ pub(super) struct BarLayout {
 /// One or two drives sit in a single full-height row; three or four
 /// stack two-up in shorter rows, so even the worst case (four drives
 /// plus CD) keeps the counter and ends clear of the volume control.
-pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
+pub(in crate::video) fn bar_layout(media: &MediaBar) -> BarLayout {
     let mut layout = BarLayout {
         drive_load: [None; 4],
         drive_swap: [None; 4],
@@ -311,7 +367,7 @@ pub(super) fn bar_layout(media: &MediaBar) -> BarLayout {
 }
 
 /// Map a cursor position to the status-bar control under it.
-pub(super) fn control_at(pos: (i32, i32), layout: &BarLayout) -> Option<BarControl> {
+pub(in crate::video) fn control_at(pos: (i32, i32), layout: &BarLayout) -> Option<BarControl> {
     for idx in 0..4 {
         if layout.drive_load[idx].is_some_and(|r| r.contains(pos)) {
             return Some(BarControl::DriveLoad(idx));
@@ -356,7 +412,7 @@ pub(super) fn control_at(pos: (i32, i32), layout: &BarLayout) -> Option<BarContr
     None
 }
 
-pub(super) fn status_bar_rect() -> Rect {
+pub(in crate::video) fn status_bar_rect() -> Rect {
     Rect {
         x: 0,
         y: status_bar_top(),
@@ -487,7 +543,7 @@ pub(super) fn menu_button_rect() -> Rect {
     }
 }
 
-pub(super) fn volume_control_hit_rect() -> Rect {
+pub(in crate::video) fn volume_control_hit_rect() -> Rect {
     Rect {
         x: VOLUME_SLIDER_X - 8,
         y: status_bar_top() + STATUS_CONTROL_Y,
@@ -605,11 +661,20 @@ pub(super) fn draw_fdd_track_counter(frame: &mut [u8], track: Option<u8>, textur
     }
 }
 
-pub(super) fn draw_volume_control(frame: &mut [u8], percent: u8, texture_scale: usize) {
+pub(super) fn draw_volume_control(
+    frame: &mut [u8],
+    percent: u8,
+    hovered: f32,
+    texture_scale: usize,
+) {
     let percent = percent.min(100);
     draw_speaker_glyph(frame, texture_scale);
 
     let rect = scale_rect(volume_slider_track_rect(), texture_scale);
+    // The slider lights under the pointer as the buttons beside it do:
+    // it is as clickable as they are, and looked as though it were not.
+    // What lights is the track itself -- the rectangle the hand takes
+    // hold of -- and not the speaker beside it.
     fill_rect(frame, rect, LED_BEZEL_DARK, texture_scale);
     draw_rect_bevel(frame, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM, texture_scale);
 
@@ -641,8 +706,16 @@ pub(super) fn draw_volume_control(frame: &mut [u8], percent: u8, texture_scale: 
         );
     }
 
+    // The knob is what lights: it is the thing the hand takes hold of,
+    // and the track it runs in keeps its own colours. Standing open for
+    // changing it holds the blue steady instead of breathing.
     let knob = scale_rect(volume_slider_knob_rect(percent), texture_scale);
-    fill_rect(frame, knob, BUTTON_FACE, texture_scale);
+    fill_rect(
+        frame,
+        knob,
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hovered),
+        texture_scale,
+    );
     draw_rect_bevel(
         frame,
         knob,
@@ -652,12 +725,8 @@ pub(super) fn draw_volume_control(frame: &mut [u8], percent: u8, texture_scale: 
     );
 }
 
-pub(super) fn draw_button_base(frame: &mut [u8], rect: Rect, hover: bool, texture_scale: usize) {
-    let face = if hover {
-        BUTTON_FACE_HOVER
-    } else {
-        BUTTON_FACE
-    };
+pub(super) fn draw_button_base(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
+    let face = light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover);
     fill_rect(frame, rect, face, texture_scale);
     draw_rect_bevel(
         frame,
@@ -672,7 +741,7 @@ pub(super) fn draw_disk_button(
     frame: &mut [u8],
     rect: Rect,
     drive_idx: usize,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
     draw_button_base(frame, rect, hover, texture_scale);
@@ -685,10 +754,15 @@ pub(super) fn draw_swap_button(
     frame: &mut [u8],
     rect: Rect,
     enabled: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
-    draw_button_base(frame, rect, hover && enabled, texture_scale);
+    draw_button_base(
+        frame,
+        rect,
+        if enabled { hover } else { 0.0 },
+        texture_scale,
+    );
     let color = if enabled {
         BUTTON_GLYPH
     } else {
@@ -759,10 +833,15 @@ pub(super) fn draw_eject_button(
     frame: &mut [u8],
     rect: Rect,
     enabled: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
-    draw_button_base(frame, rect, hover && enabled, texture_scale);
+    draw_button_base(
+        frame,
+        rect,
+        if enabled { hover } else { 0.0 },
+        texture_scale,
+    );
     let color = if enabled {
         BUTTON_GLYPH
     } else {
@@ -797,7 +876,7 @@ pub(super) fn draw_eject_button(
 }
 
 /// CD load/swap button: a compact disc.
-pub(super) fn draw_cd_button(frame: &mut [u8], rect: Rect, hover: bool, texture_scale: usize) {
+pub(super) fn draw_cd_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
     draw_button_base(frame, rect, hover, texture_scale);
     let s = texture_scale;
     // Disc centre and radii in unscaled button-local pixels.
@@ -829,7 +908,7 @@ pub(super) fn draw_cd_button(frame: &mut [u8], rect: Rect, hover: bool, texture_
 }
 
 /// Menu button: three stacked bars (opens the pop-up menu).
-pub(super) fn draw_menu_button(frame: &mut [u8], rect: Rect, hover: bool, texture_scale: usize) {
+pub(super) fn draw_menu_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
     draw_button_base(frame, rect, hover, texture_scale);
     let s = texture_scale;
     for row in 0..3 {
@@ -848,7 +927,7 @@ pub(super) fn draw_menu_button(frame: &mut [u8], rect: Rect, hover: bool, textur
 }
 
 /// Screenshot button: a small camera.
-pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: bool, texture_scale: usize) {
+pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
     draw_button_base(frame, rect, hover, texture_scale);
     let s = texture_scale;
     // Viewfinder bump, then the body, then the lens.
@@ -1265,15 +1344,11 @@ pub(super) fn draw_led(
     }
 }
 
-pub(super) fn draw_reboot_button(frame: &mut [u8], rect: Rect, hover: bool, texture_scale: usize) {
+pub(super) fn draw_reboot_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
     fill_rect(
         frame,
         rect,
-        if hover {
-            BUTTON_FACE_HOVER
-        } else {
-            BUTTON_FACE
-        },
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
         texture_scale,
     );
     draw_rect_bevel(
@@ -1292,17 +1367,13 @@ pub(super) fn draw_power_button(
     frame: &mut [u8],
     rect: Rect,
     powered_on: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
     fill_rect(
         frame,
         rect,
-        if hover {
-            BUTTON_FACE_HOVER
-        } else {
-            BUTTON_FACE
-        },
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
         texture_scale,
     );
     draw_rect_bevel(
@@ -1326,17 +1397,13 @@ pub(super) fn draw_pause_button(
     frame: &mut [u8],
     rect: Rect,
     paused: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
     fill_rect(
         frame,
         rect,
-        if hover {
-            BUTTON_FACE_HOVER
-        } else {
-            BUTTON_FACE
-        },
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
         texture_scale,
     );
     // Paused, the moulding turns over -- the MT-32 panel's pressed
@@ -1370,7 +1437,7 @@ pub(super) fn draw_joystick_button(
     frame: &mut [u8],
     rect: Rect,
     mode: JoystickInputMode,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
     draw_button_base(frame, rect, hover, texture_scale);
@@ -1416,7 +1483,7 @@ pub(super) fn draw_keyboard_button(
     frame: &mut [u8],
     rect: Rect,
     shown: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
     draw_button_base(frame, rect, hover, texture_scale);

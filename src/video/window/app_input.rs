@@ -156,6 +156,11 @@ impl App {
                 }) {
                 Ok(()) => {
                     self.mouse_captured = true;
+                    // The machine has the mouse, and with it the
+                    // keyboard: a marker left on the bar would keep
+                    // taking the guest's arrow keys and lighting
+                    // buttons behind its back.
+                    self.nav.clear();
                     self.cursor_pos = None;
                     self.last_display_cursor_pos = None;
                     self.mouse_delta_remainder = (0.0, 0.0);
@@ -212,6 +217,85 @@ impl App {
             }
         }
         self.last_display_cursor_pos = Some(pos);
+    }
+
+    /// Move the mouse with the pad, in Gamepad Mouse mode.
+    ///
+    /// A stick is proportional where the pad has one: a slight
+    /// deflection creeps and a full one crosses the screen, squared so
+    /// the slow end has room to be slow in. A d-pad has only on and off,
+    /// so it stands in with a hold that gathers speed -- a tap nudges,
+    /// and holding a direction ramps up to the same top speed the stick
+    /// reaches.
+    ///
+    /// Both go through the host mouse's own accumulator, so the machine
+    /// is given one mouse with two hands on it rather than two mice, and
+    /// the mouse-sensitivity setting means the same thing for both.
+    pub(super) fn apply_pad_mouse_state(&mut self, port: usize, pad: crate::gamepad::PadState) {
+        let now = Instant::now();
+        // Against the clock rather than the loop: the pointer must not
+        // move faster on a machine that polls more often. A long gap --
+        // the loop was asleep, or the machine was paused -- is clamped
+        // rather than spent all at once.
+        let dt = self
+            .pad_mouse_at
+            .replace(now)
+            .map(|then| now.saturating_duration_since(then))
+            .unwrap_or_default()
+            .min(PAD_MOUSE_MAX_STEP)
+            .as_secs_f64();
+        let js = pad.joystick;
+        let (mut dx, mut dy) = (0.0, 0.0);
+        let (sx, sy) = pad.stick;
+        let deflection = (f64::from(sx).powi(2) + f64::from(sy).powi(2)).sqrt();
+        if deflection > PAD_MOUSE_DEADZONE {
+            // Past the dead zone, and squared: what is left of the throw
+            // is spread over the whole speed range, so the first part of
+            // it is genuinely slow.
+            let travel = ((deflection - PAD_MOUSE_DEADZONE) / (1.0 - PAD_MOUSE_DEADZONE)).min(1.0);
+            let speed = PAD_MOUSE_FAST * travel * travel;
+            dx = f64::from(sx) / deflection * speed * dt;
+            // A stick reads up as positive; the screen reads down as
+            // positive.
+            dy = -f64::from(sy) / deflection * speed * dt;
+            self.pad_mouse_held = None;
+        } else {
+            let x = f64::from(i8::from(js.right) - i8::from(js.left));
+            let y = f64::from(i8::from(js.down) - i8::from(js.up));
+            if x != 0.0 || y != 0.0 {
+                let held = self
+                    .pad_mouse_held
+                    .get_or_insert(now)
+                    .elapsed()
+                    .as_secs_f64();
+                let ramp = (held / PAD_MOUSE_RAMP.as_secs_f64()).min(1.0);
+                let speed = PAD_MOUSE_SLOW + (PAD_MOUSE_FAST - PAD_MOUSE_SLOW) * ramp;
+                // Diagonals travel the same distance as the straights
+                // rather than the square's diagonal.
+                let length = (x * x + y * y).sqrt();
+                dx = x / length * speed * dt;
+                dy = y / length * speed * dt;
+            } else {
+                self.pad_mouse_held = None;
+            }
+        }
+        if dx != 0.0 || dy != 0.0 {
+            self.add_host_mouse_delta(dx, dy);
+        }
+        let input = &mut self.emu.bus_mut().input;
+        input.set_mouse_button(port, 0, js.fire);
+        input.set_mouse_button(port, 1, js.button2);
+    }
+
+    /// Let go of everything the pad was holding on the mouse, and forget
+    /// how long it had been held: the UI has taken the pad, or it has
+    /// been unplugged, and neither is a reason for a button to stick.
+    pub(super) fn release_pad_mouse(&mut self, port: usize) {
+        self.pad_mouse_held = None;
+        self.pad_mouse_at = None;
+        let input = &mut self.emu.bus_mut().input;
+        input.set_mouse_button(port, 0, false);
+        input.set_mouse_button(port, 1, false);
     }
 
     pub(super) fn add_host_mouse_delta(&mut self, dx: f64, dy: f64) {

@@ -779,6 +779,16 @@ const fn row(field: LauncherField, label: &'static str, kind: RowKind) -> Row {
     Row { field, label, kind }
 }
 
+/// Whether a field is one of the boot-priority steppers, whose range
+/// runs to hundreds and so wants the held ramp rather than the steady
+/// pace the shorter lists take.
+pub fn field_is_bootpri(field: LauncherField) -> bool {
+    BOOTPRI_ROWS
+        .iter()
+        .chain(LIDE_ROWS.iter())
+        .any(|r| r.field == field && r.kind == RowKind::Bootpri)
+}
+
 /// A non-interactive section heading row (see [`RowKind::SectionHeader`]).
 const fn section_header(label: &'static str) -> Row {
     Row {
@@ -1868,6 +1878,17 @@ const MOUSE_CAPTURES: [MouseCapture; 3] = [
 // Controller devices a game port accepts, in stepper order.
 const PORT_DEVICES: [PortDevice; 5] = [
     PortDevice::Mouse,
+    PortDevice::Joystick,
+    PortDevice::Cd32Pad,
+    PortDevice::Analogue,
+    PortDevice::None,
+];
+// Port 1 offers one more: a mouse a gamepad can move as well as the
+// hand on the desk. Only port 1, because only port 1 is where a mouse
+// belongs -- Workbench and nearly every game read it there.
+const PORT1_DEVICES: [PortDevice; 6] = [
+    PortDevice::Mouse,
+    PortDevice::GamepadMouse,
     PortDevice::Joystick,
     PortDevice::Cd32Pad,
     PortDevice::Analogue,
@@ -3601,7 +3622,7 @@ impl MachineSetup {
             }
             // Neither mouse row does anything unless a port holds a mouse.
             F::MouseSensitivity | F::MouseCapture => {
-                reason(self.port_devices.contains(&PortDevice::Mouse), "No mouse")
+                reason(self.port_devices.iter().any(|d| d.is_mouse()), "No mouse")
             }
             _ => None,
         }
@@ -4030,21 +4051,25 @@ impl MachineSetup {
         let routing =
             crate::video::window::host_routing_for(self.port_devices, self.joystick_input_mode);
         std::array::from_fn(|port| {
-            let source = if routing.mouse == Some(port) {
+            let source = if routing.gamepad_mouse == Some(port) {
+                "the host mouse and the gamepad".to_string()
+            } else if routing.mouse == Some(port) {
                 "the host mouse".to_string()
             } else if routing.gamepad == Some(port) && routing.keyboard2 == Some(port) {
                 "the gamepad (numpad keys without a pad)".to_string()
             } else if routing.gamepad == Some(port) {
                 "the gamepad".to_string()
             } else if routing.keyboard == Some(port) {
-                if self.port_devices[port] == PortDevice::Mouse {
+                if self.port_devices[port].is_mouse() {
                     "cursor keys as a mouse (fire keys = buttons)".to_string()
                 } else {
                     "cursor keys (Ctrl/RAlt = fire, LAlt = button 2)".to_string()
                 }
             } else {
                 match self.port_devices[port] {
-                    PortDevice::Mouse => "nothing (flip Joystick input to keyboard)".to_string(),
+                    PortDevice::Mouse | PortDevice::GamepadMouse => {
+                        "nothing (flip Joystick input to keyboard)".to_string()
+                    }
                     PortDevice::Joystick | PortDevice::Cd32Pad => {
                         "nothing (keyboard passes through to the Amiga)".to_string()
                     }
@@ -4637,7 +4662,7 @@ impl MachineSetup {
                 self.mouse_capture = cycle_slice(&MOUSE_CAPTURES, self.mouse_capture, forward)
             }
             F::Port1Device => {
-                self.port_devices[0] = cycle_slice(&PORT_DEVICES, self.port_devices[0], forward)
+                self.port_devices[0] = cycle_slice(&PORT1_DEVICES, self.port_devices[0], forward)
             }
             F::Port2Device => {
                 self.port_devices[1] = cycle_slice(&PORT_DEVICES, self.port_devices[1], forward)
@@ -5364,6 +5389,23 @@ impl MachineSetup {
     }
 
     /// The disks the Host Disk table is showing.
+    /// Fill the host-disk list with made-up rows, for tests that need
+    /// the page's list without the host having any disks to scan.
+    #[cfg(test)]
+    pub(crate) fn fake_host_disks(&mut self, rows: usize) {
+        self.host_disks = (0..rows)
+            .map(|i| HostDiskRow {
+                id: format!("disk{i}"),
+                fingerprint: None,
+                volume: format!("Volume {i}"),
+                size: "1.0 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            })
+            .collect();
+    }
+
     pub fn host_disks(&self) -> &[HostDiskRow] {
         &self.host_disks
     }

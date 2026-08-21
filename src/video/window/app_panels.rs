@@ -11,6 +11,15 @@ impl App {
         kind: ToolPanelKind,
         event: WindowEvent,
     ) {
+        // Whichever tool window the host last gave the keyboard to is
+        // the one in front, and so the one a "close this" means. Opening
+        // one focuses it, so it starts out true of the newest.
+        if matches!(
+            event,
+            WindowEvent::Focused(true) | WindowEvent::KeyboardInput { .. }
+        ) {
+            self.tool_window_front = Some(kind);
+        }
         match event {
             WindowEvent::CloseRequested => self.close_tool_panel(kind),
             WindowEvent::KeyboardInput {
@@ -1173,6 +1182,12 @@ impl App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        // Paint it now rather than waiting for something to happen: a
+        // tool window opened and left alone showed an unpainted surface
+        // until the next mouse move or key press asked for a frame.
+        window.request_redraw();
+        // Newly opened is newly in front, until another is touched.
+        self.tool_window_front = Some(kind);
         let inner = window.inner_size();
         *self.tool_window_slot(kind) = Some(ToolWindow {
             window,
@@ -1183,6 +1198,21 @@ impl App {
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
         self.request_redraw();
+    }
+
+    /// The open tool panel a "close this" means: the one in front, which
+    /// is whichever was last given the keyboard. Where that is not known
+    /// -- none has been touched since it opened -- the last in order, so
+    /// a stack of them still comes down one at a time.
+    pub(super) fn topmost_tool_panel(&self) -> Option<ToolPanelKind> {
+        self.tool_window_front
+            .filter(|&kind| self.tool_panel_is_open(kind))
+            .or_else(|| {
+                ToolPanelKind::ALL
+                    .into_iter()
+                    .rev()
+                    .find(|&kind| self.tool_panel_is_open(kind))
+            })
     }
 
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
@@ -1248,7 +1278,10 @@ impl App {
         };
         match self.gamepad.save_calibration(session) {
             Ok(()) => {
-                self.ui.panel = None;
+                // By the same door every other panel leaves: putting the
+                // panel down by hand left the marker standing on a
+                // control that had gone with it.
+                self.close_panel();
                 self.show_osd("Gamepad calibration saved");
             }
             Err(e) => {
