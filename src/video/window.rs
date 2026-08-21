@@ -1244,6 +1244,10 @@ pub struct App {
     /// When the pad's calibrated Quit hotkey started being held, if it is
     /// down right now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
+    /// The tool window last given the keyboard, which is the one in
+    /// front and so the one a "close this" means. `None` until one has
+    /// been opened.
+    tool_window_front: Option<ToolPanelKind>,
     /// Whether the pad has been handed the calibration panel's buttons
     /// and settled on one, so that is done once rather than every pass.
     cal_pad_drives: bool,
@@ -2068,6 +2072,7 @@ impl App {
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_quit_hold: None,
+            tool_window_front: None,
             cal_pad_drives: false,
             pad_mouse_at: None,
             pad_mouse_held: None,
@@ -2342,10 +2347,12 @@ impl App {
         if !self.cal_pad_drives {
             self.cal_pad_drives = true;
             // Whatever is held right now is what completed the hold, not
-            // a press meant for the buttons: the walk starts from here,
-            // so nothing already down acts. Cancel is where it starts --
-            // the safe one of the two, and the near one.
+            // a press meant for the buttons: both the walk's own edges
+            // and the Menu button's start from here, so nothing already
+            // down acts on arrival. Cancel is where it starts -- the
+            // safe one of the two, and the near one.
             self.pad_prev = live;
+            self.seed_pad_nav(live.joystick);
             self.nav_show(Some(crate::video::nav::NavTarget::Ui(UiControl::CalCancel)));
         }
         Some(live)
@@ -3730,6 +3737,15 @@ impl ApplicationHandler for App {
                     } else {
                         self.track_uncaptured_cursor_motion(pos);
                     }
+                    // A hand actually moving the mouse takes over from
+                    // the keyboard: the marker goes away, though where it
+                    // stood is remembered, so going back to the keys
+                    // resumes from there. Only real motion counts, or a
+                    // pointer merely sitting still would keep taking it.
+                    if pos != previous_cursor_pos && self.nav.showing() {
+                        self.nav.hide();
+                        self.request_redraw();
+                    }
                     self.cursor_pos = pos;
                     if self.volume_dragging {
                         if let Some(pos) = pos {
@@ -4230,10 +4246,11 @@ impl ApplicationHandler for App {
                     }
                     if !super::status_bar_hidden() {
                         // The bar lights its focus the way the
-                        // surfaces light theirs.
-                        statusbar::set_nav_light(nav_bar_target, nav_bar_mix);
+                        // surfaces light theirs, and knows when the
+                        // marker is up on one of them instead.
+                        statusbar::set_nav_light(nav_bar_target, nav_bar_mix, nav_target.is_some());
                         draw_status_bar(frame, &view, r.texture_scale);
-                        statusbar::set_nav_light(None, 0.0);
+                        statusbar::set_nav_light(None, 0.0, false);
                     }
                     // The picture loses its corners to a front's aperture
                     // and to a preset's bowed face; all three overlays live
@@ -4269,9 +4286,9 @@ impl ApplicationHandler for App {
                     }
                     // The focus lights its control the way the pointer
                     // does, breathing between the two.
-                    ui::set_nav_light(nav_target, nav_mix, nav_is_open);
+                    ui::set_nav_light(nav_target, nav_mix, nav_is_open, nav_bar_target.is_some());
                     ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
-                    ui::set_nav_light(None, 0.0, false);
+                    ui::set_nav_light(None, 0.0, false, false);
                     // The drag hint sits on top of everything: the drop will
                     // land wherever the drag is released, panels or not. The
                     // launcher refuses drops, so no hint over it.

@@ -43,6 +43,31 @@ pub(super) struct PadNav {
     back: bool,
 }
 
+impl PadNav {
+    /// Start from what the pad is doing right now rather than from
+    /// nothing, so a control already down when the walk is handed over
+    /// is not read as a press the moment it arrives.
+    fn seeded(pad: crate::gamepad::JoystickState) -> Self {
+        use crate::video::nav::Dir;
+        Self {
+            held: if pad.up {
+                Some(Dir::Up)
+            } else if pad.down {
+                Some(Dir::Down)
+            } else if pad.left {
+                Some(Dir::Left)
+            } else if pad.right {
+                Some(Dir::Right)
+            } else {
+                None
+            },
+            fire: pad.fire,
+            back: pad.button2,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for PadNav {
     fn default() -> Self {
         let now = Instant::now();
@@ -184,7 +209,17 @@ impl App {
                 Dir::Down => {
                     if !ui.menu_nav.step_within(&ui.menu_rows, true) && ui.menu_nav.depth() == 0 {
                         self.close_menu();
-                        self.nav_show(Some(crate::video::nav::NavTarget::Bar(BarControl::Menu)));
+                        // Onto the button the menu hangs from -- unless
+                        // the bar is not being shown at all, as in a
+                        // player build, where there is no such button
+                        // and the marker would stand on nothing.
+                        if crate::video::status_bar_hidden() {
+                            self.nav.clear();
+                        } else {
+                            self.nav_show(Some(crate::video::nav::NavTarget::Bar(
+                                BarControl::Menu,
+                            )));
+                        }
                     }
                 }
                 Dir::Right => {
@@ -864,7 +899,16 @@ impl App {
         self.launcher_state_mut()?
             .setup
             .scroll_host_disks(step, HOST_DISK_VISIBLE_ROWS);
-        Some(NavTarget::Ui(Self::host_disk_row_at(control, next)))
+        // The column the walk was in may not exist on the row it lands
+        // on: the attach cell is blank, and no place to stand, until a
+        // disk is ticked. The row itself always is.
+        let landing = Self::host_disk_row_at(control, next);
+        let live = crate::video::ui::control_live(&self.ui, landing);
+        Some(NavTarget::Ui(if live {
+            landing
+        } else {
+            UiControl::LauncherHostDiskSelect(next)
+        }))
     }
 
     /// Which row of the host-disk list a control belongs to.
@@ -1147,6 +1191,12 @@ impl App {
     /// way every other held control in this interface does; the buttons
     /// fire once each on the press, because a button that repeated
     /// would open and close a setting under your thumb.
+    /// Start the pad's walk from what it is doing now, so a control
+    /// already down does not act as it arrives.
+    pub(super) fn seed_pad_nav(&mut self, pad: crate::gamepad::JoystickState) {
+        self.pad_nav = PadNav::seeded(pad);
+    }
+
     pub(super) fn pad_drives_interface(
         &mut self,
         pad: crate::gamepad::JoystickState,

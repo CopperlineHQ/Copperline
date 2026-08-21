@@ -588,10 +588,53 @@ fn a_handed_over_calibration_puts_the_marker_on_cancel() {
         Some(NavTarget::Ui(UiControl::CalCancel)),
         "and the marker starts on Cancel"
     );
+    // The control that completed the hold is very often Fire. Arriving
+    // with it down must not read as a press, or Cancel is chosen the
+    // instant the pad is handed the buttons.
+    let held = crate::gamepad::JoystickState {
+        fire: true,
+        ..Default::default()
+    };
+    app.seed_pad_nav(held);
+    app.pad_drives_interface(held, None);
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::CalCancel)),
+        "a control already down does not press on arrival"
+    );
+    assert!(app.ui.panel.is_some(), "and the panel is still up");
     // Save is a place to stand only once every step is captured, which
     // it is here; Skip never is once there is nothing left to skip.
     assert!(crate::video::ui::control_live(&app.ui, UiControl::CalSave));
     assert!(!crate::video::ui::control_live(&app.ui, UiControl::CalSkip));
+}
+
+/// Left off the R/W cell of a disk nobody has ticked returns to the row,
+/// there being no attach cell in between to return to.
+#[test]
+fn left_off_an_unticked_disks_cell_returns_to_its_row() {
+    use crate::bus::PortDevice;
+    use crate::video::launcher::LauncherTab;
+    use crate::video::nav::{Dir, NavTarget};
+    use crate::video::ui::UiControl;
+
+    let mut app = test_app();
+    app.open_launcher();
+    let state = app.launcher_state_mut().expect("the launcher is open");
+    state.tab = LauncherTab::HostDisk;
+    state.setup.fake_host_disks(4);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Mouse);
+    app.nav
+        .show(Some(NavTarget::Ui(UiControl::LauncherHostDiskWritable(0))));
+    app.nav_move(Dir::Left, None);
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherHostDiskSelect(0))),
+        "and not out of the page altogether"
+    );
 }
 
 #[test]

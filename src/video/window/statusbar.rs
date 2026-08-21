@@ -13,10 +13,15 @@ use super::*;
 thread_local! {
     static NAV_LIGHT: std::cell::Cell<(Option<BarControl>, f32)> =
         const { std::cell::Cell::new((None, 0.0)) };
+    /// Whether the marker is up on a panel rather than here. The
+    /// keyboard is in charge either way, so the pointer lights nothing
+    /// in the bar while it is.
+    static NAV_ELSEWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Say where the focus is on the bar, for the drawing about to happen.
-pub(in crate::video) fn set_nav_light(target: Option<BarControl>, mix: f32) {
+pub(in crate::video) fn set_nav_light(target: Option<BarControl>, mix: f32, elsewhere: bool) {
+    NAV_ELSEWHERE.with(|flag| flag.set(elsewhere));
     NAV_LIGHT.with(|light| light.set((target, mix.clamp(0.0, 1.0))));
 }
 
@@ -41,7 +46,7 @@ fn lit(hover: Option<BarControl>, control: BarControl) -> f32 {
     // hand left resting on the mouse would otherwise mark a second
     // control wherever it happens to sit. Moving the mouse puts the
     // marker away, and the pointer has the bar back.
-    if NAV_LIGHT.with(|light| light.get().0.is_some()) {
+    if NAV_LIGHT.with(|light| light.get().0.is_some()) || NAV_ELSEWHERE.with(std::cell::Cell::get) {
         return 0.0;
     }
     if hover == Some(control) {

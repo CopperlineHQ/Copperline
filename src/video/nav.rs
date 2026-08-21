@@ -605,6 +605,14 @@ impl Nav {
         self.open = false;
     }
 
+    /// Put the marker away but remember where it was: the pointer has
+    /// moved, so the hand on the mouse is the one in charge, and going
+    /// back to the keyboard resumes from here.
+    pub(in crate::video) fn hide(&mut self) {
+        self.showing = false;
+        self.open = false;
+    }
+
     pub(in crate::video) fn clear(&mut self) {
         *self = Self::default();
     }

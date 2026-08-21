@@ -392,8 +392,9 @@ relative motion there.
 
 Controller ports: `input.get_ports` -> `{"port1": "mouse", "port2":
 "joystick"}`; `input.set_port {port, device:
-"mouse"|"joystick"|"cd32"|"analogue"|"none"}` hot-plugs a device, as if
-swapping the physical plug (the old device's held lines release; the
+"mouse"|"gamepad-mouse"|"joystick"|"cd32"|"analogue"|"none"}` hot-plugs a
+device, as if swapping the physical plug (`"gamepad-mouse"` is port 1
+only, and is refused elsewhere) (the old device's held lines release; the
 change is applied live, mid-run included, and is not journaled for
 reverse replay):
 

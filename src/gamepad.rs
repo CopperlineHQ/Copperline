@@ -884,6 +884,7 @@ impl CalibrationSession {
             self.live_pad = self.to_calibration().resolve_pad(axes, buttons);
             changed |= self.watch_hold(pressed, &held, |session| {
                 session.handed_over = true;
+                true
             });
             self.active = now;
             return changed;
@@ -894,10 +895,12 @@ impl CalibrationSession {
         // nothing is captured until it does.
         let skippable = !CAL_STEPS[self.step].1;
         changed |= self.watch_hold(pressed, &held, move |session| {
-            if skippable {
-                session.bindings[session.step] = None;
-                session.step += 1;
+            if !skippable {
+                return false;
             }
+            session.bindings[session.step] = None;
+            session.step += 1;
+            true
         });
         self.active = now;
         changed
@@ -906,14 +909,19 @@ impl CalibrationSession {
     /// Follow one press through to what it turns out to be.
     ///
     /// A press is remembered rather than acted on: released before the
-    /// hold it is a press, and `on_press` has it; still down at the hold
-    /// it is a hold, and `on_hold` runs instead. Either way the press is
-    /// spent, so a control kept down after it does nothing more.
+    /// hold it is a press, and it binds the step; still down at the
+    /// hold, `on_hold` has it instead and the press is spent, so a
+    /// control kept down after that does nothing more.
+    ///
+    /// `on_hold` says whether it took the hold. Where it did not -- a
+    /// step that cannot be skipped -- the press stays pending, so
+    /// holding one of the four directions and letting go still binds it
+    /// rather than quietly coming to nothing.
     fn watch_hold(
         &mut self,
         pressed: Option<RawInput>,
         held: &dyn Fn(&RawInput) -> bool,
-        on_hold: impl FnOnce(&mut Self),
+        on_hold: impl FnOnce(&mut Self) -> bool,
     ) -> bool {
         match self.pending {
             None => {
@@ -927,9 +935,8 @@ impl CalibrationSession {
                     self.pending = None;
                     self.on_press(input);
                     true
-                } else if since.elapsed() >= CAL_HOLD {
+                } else if since.elapsed() >= CAL_HOLD && on_hold(self) {
                     self.pending = None;
-                    on_hold(self);
                     true
                 } else {
                     false
@@ -1193,13 +1200,18 @@ mod tests {
         let axes = BTreeMap::new();
         let mut buttons = BTreeMap::new();
 
-        // Up is required: holding it through the hold captures nothing,
-        // and it is the release that binds it.
+        // Up is required: holding it through the hold skips nothing, and
+        // the press is still there to bind it when the control comes up.
         buttons.insert(0x90001, true);
         session.advance(pad.clone(), &axes, &buttons);
         session.pending = Some((RawInput::Button { code: 0x90001 }, held_long_enough()));
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(0), "a required step stands");
+        buttons.insert(0x90001, false);
+        session.advance(pad.clone(), &axes, &buttons);
+        assert_eq!(session.current_step(), Some(1), "and the release binds it");
+        assert_eq!(session.binding_text(0), "button 90001");
+        buttons.remove(&0x90001);
 
         // Walk to the first step that may be skipped, then hold.
         while !session.can_skip() && !session.done() {

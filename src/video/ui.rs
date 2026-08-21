@@ -2028,13 +2028,23 @@ thread_local! {
         const { std::cell::Cell::new((None, 0.0)) };
     /// Whether that control stands open for changing.
     static NAV_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the marker is up on the *other* surface -- the status bar
+    /// while this is a panel, or the other way about. The keyboard is in
+    /// charge either way, so the pointer lights nothing here either.
+    static NAV_ELSEWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Say where the focus is, and how far through its breath, for the
 /// drawing about to happen.
-pub(in crate::video) fn set_nav_light(target: Option<UiControl>, mix: f32, open: bool) {
+pub(in crate::video) fn set_nav_light(
+    target: Option<UiControl>,
+    mix: f32,
+    open: bool,
+    elsewhere: bool,
+) {
     NAV_LIGHT.with(|light| light.set((target, mix.clamp(0.0, 1.0))));
     NAV_OPEN.with(|flag| flag.set(open));
+    NAV_ELSEWHERE.with(|flag| flag.set(elsewhere));
 }
 
 /// How lit a control is: all the way under the pointer, and as far as
@@ -2065,7 +2075,7 @@ fn lit(hover: Option<UiControl>, control: UiControl) -> f32 {
 
 /// Whether the focus is being shown at all, whatever it is standing on.
 fn nav_showing() -> bool {
-    nav_target().is_some()
+    nav_target().is_some() || NAV_ELSEWHERE.with(std::cell::Cell::get)
 }
 
 /// What the focus is standing on, if it is being shown.
