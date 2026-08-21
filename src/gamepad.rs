@@ -1163,17 +1163,17 @@ mod tests {
         let axes = BTreeMap::new();
         let mut buttons = BTreeMap::new();
         // Something the pad reports as down from the start.
-        buttons.insert(0x900_01, true);
+        buttons.insert(0x90001, true);
         session.advance(pad.clone(), &axes, &buttons);
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(0), "nothing was pressed");
 
         // A press: down, then up. Nothing is captured until it comes up,
         // since until then it could still turn out to be a hold.
-        buttons.insert(0x900_02, true);
+        buttons.insert(0x90002, true);
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(0), "still down");
-        buttons.insert(0x900_02, false);
+        buttons.insert(0x90002, false);
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(1), "captured on release");
         assert_eq!(session.binding_text(0), "button 90002");
@@ -1195,15 +1195,15 @@ mod tests {
 
         // Up is required: holding it through the hold captures nothing,
         // and it is the release that binds it.
-        buttons.insert(0x900_01, true);
+        buttons.insert(0x90001, true);
         session.advance(pad.clone(), &axes, &buttons);
-        session.pending = Some((RawInput::Button { code: 0x900_01 }, held_long_enough()));
+        session.pending = Some((RawInput::Button { code: 0x90001 }, held_long_enough()));
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(0), "a required step stands");
 
         // Walk to the first step that may be skipped, then hold.
-        while session.can_skip() == false && !session.done() {
-            let code = 0x900_10 + session.step as u32;
+        while !session.can_skip() && !session.done() {
+            let code = 0x90010 + session.step as u32;
             buttons.insert(code, true);
             session.advance(pad.clone(), &axes, &buttons);
             buttons.insert(code, false);
@@ -1211,9 +1211,9 @@ mod tests {
         }
         let at = session.step;
         assert!(session.can_skip(), "there is a step to skip");
-        buttons.insert(0x900_20, true);
+        buttons.insert(0x90020, true);
         session.advance(pad.clone(), &axes, &buttons);
-        session.pending = Some((RawInput::Button { code: 0x900_20 }, held_long_enough()));
+        session.pending = Some((RawInput::Button { code: 0x90020 }, held_long_enough()));
         session.advance(pad.clone(), &axes, &buttons);
         assert_eq!(session.current_step(), Some(at + 1), "the step was skipped");
         assert_eq!(session.binding_text(at), "skipped");
@@ -1227,10 +1227,10 @@ mod tests {
         let mut session = CalibrationSession::finished_for_test();
         let axes = BTreeMap::new();
         let mut buttons = BTreeMap::new();
-        buttons.insert(0x900_01, true);
+        buttons.insert(0x90001, true);
         session.advance(pad.clone(), &axes, &buttons);
         assert!(!session.handed_over(), "a press is how a binding is tried");
-        session.pending = Some((RawInput::Button { code: 0x900_01 }, held_long_enough()));
+        session.pending = Some((RawInput::Button { code: 0x90001 }, held_long_enough()));
         session.advance(pad.clone(), &axes, &buttons);
         assert!(session.handed_over(), "and a hold asks for the buttons");
     }
