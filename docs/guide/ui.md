@@ -1082,9 +1082,11 @@ live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
 the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, and an optional **Quit Copperline** hotkey; every
-step waits for the pad to return to neutral before sampling, so a held
-control cannot bleed into the next binding.
+**Open menu** button, and an optional **Quit Copperline** hotkey. Push
+the control to bind it -- the binding is taken when it comes back up, so
+a control already down when a step begins cannot bleed into it -- or
+hold any control for about a second to skip a step the pad has no
+control for. The four directions and fire cannot be skipped.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can
@@ -1107,11 +1109,11 @@ or a panel is open, the pad stops driving the emulated port, just as the
 keyboard does. On the default database layout Select/Back and the guide
 button carry it; a calibration can put it anywhere (or skip it).
 
-Once every step is captured the bindings can be tested by pressing
-them, and *holding* any one of them for about a second hands the
-panel's own Save and Cancel buttons to the pad, which then walks them
-with the very controls it has just been taught. Without that, finishing
-a calibration needs the mouse.
+Once every step is captured the bindings can be tested by pushing them,
+and holding any one of them hands the panel's own Save and Cancel
+buttons to the pad, which then walks them with the very controls it has
+just been taught. Without that, finishing a calibration needs the
+mouse.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;

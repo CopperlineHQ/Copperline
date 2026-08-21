@@ -424,7 +424,7 @@ impl App {
     /// Put the focus somewhere and start its breath afresh, so a step
     /// always begins bright rather than wherever the last one left the
     /// pulse.
-    fn nav_show(&mut self, target: Option<crate::video::nav::NavTarget>) {
+    pub(super) fn nav_show(&mut self, target: Option<crate::video::nav::NavTarget>) {
         self.nav_shown_at = Instant::now();
         self.nav.show(target);
     }

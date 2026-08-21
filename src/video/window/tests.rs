@@ -564,48 +564,32 @@ fn a_gamepad_mouse_moves_the_mouse_it_is_plugged_into() {
     assert!(!app.emu.bus().input.ports[0].fire);
 }
 
-/// A finished calibration hands its own buttons to the pad, but only
-/// after a hold: a press still means "test this control".
+/// A finished calibration hands its own buttons to the pad once the
+/// session says a hold has asked for them, and lands on Cancel.
 #[test]
-fn a_held_control_hands_the_calibration_panel_to_the_pad() {
+fn a_handed_over_calibration_puts_the_marker_on_cancel() {
+    use crate::video::nav::NavTarget;
     use crate::video::ui::{Panel, UiControl};
 
     let mut app = test_app();
     app.ui.panel = Some(Panel::Calibration(
         crate::gamepad::CalibrationSession::finished_for_test(),
     ));
-    // Held from the moment the last step was captured -- a binding that
-    // reads active at rest looks exactly like this -- hands nothing
-    // over, however long it lasts: the pad has not been seen at rest.
-    if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
-        session.hold_for_test("Fire");
-    }
-    app.calibration_pad_drives();
-    app.cal_pad_hold = Some(std::time::Instant::now() - super::CAL_PAD_HOLD);
     assert!(
         app.calibration_pad_drives().is_none(),
-        "a control held since the end is not a hold anyone made"
+        "the panel keeps the pad while its bindings are being tested"
     );
-    // At rest, and the panel keeps the pad.
     if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
-        session.hold_for_test("");
+        session.hand_over_for_test();
     }
-    assert!(app.calibration_pad_drives().is_none());
-    // Held, but not for long enough yet.
-    if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
-        session.hold_for_test("Fire");
-    }
-    assert!(app.calibration_pad_drives().is_none(), "not yet");
-    // Once the hold has run its course the pad has the buttons, and
-    // keeps them: letting go is how Save gets pressed.
-    app.cal_pad_hold = Some(std::time::Instant::now() - super::CAL_PAD_HOLD);
     assert!(app.calibration_pad_drives().is_some(), "handed over");
-    if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
-        session.hold_for_test("");
-    }
-    assert!(app.calibration_pad_drives().is_some(), "and keeps them");
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::CalCancel)),
+        "and the marker starts on Cancel"
+    );
     // Save is a place to stand only once every step is captured, which
-    // it is here.
+    // it is here; Skip never is once there is nothing left to skip.
     assert!(crate::video::ui::control_live(&app.ui, UiControl::CalSave));
     assert!(!crate::video::ui::control_live(&app.ui, UiControl::CalSkip));
 }
