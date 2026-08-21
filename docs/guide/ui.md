@@ -53,6 +53,48 @@ the keyboard hardware directly behaves. `Ctrl+Amiga+Amiga` runs the
 authentic reset protocol (reset warning, then KCLK held low), so the
 reboot lands a fraction of a second after the chord, as on real hardware.
 
+## Keyboard and controller navigation
+
+Everything the mouse can reach in the launcher, the menu, the status bar
+and the overlay panels can be reached with the arrow keys or a
+controller.
+
+The arrows move the focus, which lights the control it stands on in blue
+and breathes while it is there. Return (or the pad's fire button) works
+whatever is lit; the pad's second button steps back out, closing a
+setting, then the surface. Left and right move along the row the focus is
+on, up and down to the nearest control above or below; at the edge of a
+surface the focus stays where it is.
+
+| Control | Focus | Return / fire |
+|---|---|---|
+| Buttons, tabs, the close gadget | Lights blue | Presses it |
+| Tick boxes and cover art | Green edge | Ticks it |
+| Text boxes | Light blue | Opens it for typing, with the caret |
+| `< value >` settings | Lights both arrows, value stays green | Opens it: the value turns white and left/right change it. Return again closes it |
+| Volume slider | Lights the knob | Opens it: left and right move it |
+
+Lists -- the games, the favourites, the host's disks -- are walked with
+up and down, which move the list's own selection and scroll it. Left
+leaves a list, right steps across to the tick beside a row and then on
+out of the list. Buttons that cannot be pressed are skipped.
+
+Stepping down off the foot of a surface reaches the status bar, and up
+returns. Stepping left out of a settings page returns to the category
+button that opened it, and stepping right from one opens its page.
+Walking off the bottom of the menu closes it and leaves the focus on the
+menu button. Escape (or the second button) backs out: out of an open
+setting, then out of the page, then out of the surface.
+
+Clicking anything puts the focus out and leaves it where the pointer
+pressed, so going back to the keyboard resumes from there. While the
+focus is showing, the pointer highlights nothing; moving the mouse puts
+the focus away again.
+
+A controller drives all of this with its d-pad, fire and second button.
+Its [Menu button](#gamepad-calibration) is the way in from a running
+machine.
+
 ## Status bar
 
 The status bar (44 pixels below the display) holds, left to right (it can
@@ -1035,14 +1077,14 @@ The default database layout never binds a Quit hotkey; only a
 calibration can arm one.
 
 The Menu button is the other host-side control: a press opens the pop-up
-menu (or closes an open overlay panel), and while the menu is up the pad
-walks it -- the d-pad steps rows (hold to repeat), right opens a
-category, left backs out of one, fire activates the row, and the second
-button backs out a level at a time, closing the menu from the top: the
-same walk the arrow keys and `Esc` do. While the menu or a panel is
-open, the pad stops driving the emulated port, just as the keyboard
-does. On the default database layout Select/Back and the guide button
-carry it; a calibration can put it anywhere (or skip it).
+menu (or closes an open overlay panel), and from there the pad walks
+whatever is up -- the menu, the status bar, the machine configuration
+and the panels beyond it. Its directions, fire and second button mean
+what the arrow keys, `Return` and `Esc` mean, so the walk is the one
+described under Keyboard and controller navigation above. While the menu
+or a panel is open, the pad stops driving the emulated port, just as the
+keyboard does. On the default database layout Select/Back and the guide
+button carry it; a calibration can put it anywhere (or skip it).
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
