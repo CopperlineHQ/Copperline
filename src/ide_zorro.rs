@@ -295,6 +295,30 @@ impl IdeZorro {
         Ok(())
     }
 
+    /// Visit every hard-drive image on both channels (run-ahead speculative
+    /// write control; see `Bus::for_each_hard_drive_image`).
+    pub(crate) fn for_each_hard_drive_image(
+        &mut self,
+        f: &mut dyn FnMut(&mut crate::harddrive::HardDriveImage),
+    ) {
+        for bus in &mut self.ata {
+            bus.for_each_hard_drive_image(f);
+        }
+    }
+
+    /// Whether any hard-drive image on either channel satisfies `f`.
+    pub(crate) fn any_hard_drive_image(
+        &self,
+        f: &mut dyn FnMut(&crate::harddrive::HardDriveImage) -> bool,
+    ) -> bool {
+        self.ata.iter().any(|bus| bus.any_hard_drive_image(f))
+    }
+
+    /// Whether any ATAPI drive on either channel holds a CHD-backed disc.
+    pub(crate) fn any_chd_disc(&self) -> bool {
+        self.ata.iter().any(AtaBus::any_chd_disc)
+    }
+
     /// Let go of any real disk of the host's, and say how many went.
     pub fn release_host_disks(&mut self) -> usize {
         self.ata.iter_mut().map(AtaBus::release_host_disks).sum()

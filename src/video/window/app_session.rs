@@ -141,41 +141,82 @@ impl App {
 
     /// The run-ahead level in effect for this burst, or 0 when the feature
     /// is off or unavailable. Run-ahead needs real-time pacing (it paces one
-    /// wall-clock frame per presented frame), a live chipset display (RTG
-    /// scanout does not flow through the render snapshot), and no armed
-    /// reverse history (the constant anchor rewinds would fight the
-    /// snapshot ring's monotonic frame coordinate). It also stays off while
-    /// anything makes the speculative frames host-visible or irreversible:
-    /// an offline audio capture would record guest time twice, a video
-    /// recording drains frames per iteration, and an active serial/MIDI
-    /// sink can emit speculative bytes that the replayed timeline then
-    /// emits again.
+    /// wall-clock frame per presented frame) and a machine whose host-side
+    /// couplings can ride the per-refresh snapshot/rewind cycle; the
+    /// session-shaped blocks live in [`Self::runahead_block_reason`], and
+    /// the transient ones (powered off, halted, paused) are checked here.
     pub(super) fn runahead_effective_frames(&self) -> u8 {
         if self.run_ahead_frames == 0
             || !self.powered_on
             || self.cpu_halted
             || self.paused
-            || self.emu.time_travel_enabled()
-            || self.rtg_present_dims.is_some()
-            || self.recorder.is_some()
-            || self.serial_is_midi
-            || self.emu.bus().paula.audio.offline_capture_active()
-            || !self.serial_output_quiet()
+            || self.runahead_block_reason().is_some()
         {
             return 0;
         }
         self.run_ahead_frames
     }
 
-    /// Whether the serial port's sink discards everything written to it
-    /// (`[serial] mode = "off"`). Any other mode sends guest bytes to a
-    /// host destination, which a run-ahead burst can visit twice.
-    fn serial_output_quiet(&self) -> bool {
-        self.machine_config
-            .serial
-            .mode
-            .as_deref()
-            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("off"))
+    /// Why a configured run-ahead level cannot engage right now, or None
+    /// when it can. Everything here makes the speculative frames
+    /// host-visible or irreversible: an RTG scanout does not flow through
+    /// the render snapshot; armed reverse history would fight the constant
+    /// anchor rewinds; a video recording drains frames per iteration and an
+    /// offline audio capture would record guest time twice; a serial sink
+    /// that is not `runahead_safe` (MIDI, TCP, pty -- anything that can
+    /// carry data into the guest or holds host-timing state) would see
+    /// speculative traffic; a CCP control client's event streams would
+    /// receive frames that are then rewound; armed debugger stops firing
+    /// mid-burst would commit frames whose side effects were withheld; and
+    /// `Bus::runahead_device_block` lists the boards and media whose
+    /// host-side state cannot survive a restore per display refresh. The
+    /// menu and start-up log surface the reason, so a configured level is
+    /// never silently inert.
+    pub(super) fn runahead_block_reason(&self) -> Option<&'static str> {
+        if self.emu.time_travel_enabled() {
+            return Some("rewind/reverse history armed");
+        }
+        if self.rtg_present_dims.is_some() {
+            return Some("RTG display active");
+        }
+        if self.recorder.is_some() {
+            return Some("video recording active");
+        }
+        if self.serial_is_midi {
+            return Some("MIDI device on the serial port");
+        }
+        if self.emu.bus().paula.audio.offline_capture_active() {
+            return Some("offline audio capture");
+        }
+        if !self.emu.bus().paula.serial.runahead_safe() {
+            return Some("live serial host sink");
+        }
+        if self.control_client_attached() {
+            return Some("control client attached");
+        }
+        if self.emu.machine.ui_debug_stops_armed()
+            || !self.emu.bus().ui_beam_traps().is_empty()
+            || !self.emu.bus().ui_copper_breaks().is_empty()
+        {
+            return Some("debugger stop conditions armed");
+        }
+        if self.emu.machine.headless_debugger_armed() {
+            return Some("COPPERLINE_DBG_* debugger armed");
+        }
+        self.emu.bus().runahead_device_block()
+    }
+
+    /// Whether a CCP control client is connected (its event subscriptions
+    /// and serial observer must never see speculative frames).
+    fn control_client_attached(&self) -> bool {
+        #[cfg(feature = "control")]
+        {
+            self.control.as_ref().is_some_and(|c| c.handle.connected())
+        }
+        #[cfg(not(feature = "control"))]
+        {
+            false
+        }
     }
 
     /// How many emulated frames to retire before presenting the next frame, and
@@ -197,6 +238,27 @@ impl App {
                 .time_budget_ms()
                 .map(std::time::Duration::from_millis),
         )
+    }
+
+    /// The burst for this pass: how many frames to retire before the next
+    /// presentation, the run-ahead level inside that count, and warp Max's
+    /// wall-clock budget. Warp engaged means the total is its output frame
+    /// skip (run-ahead 0); real-time pacing means one committed anchor plus
+    /// the effective run-ahead frames. A windowed session doing scheduled
+    /// capture takes neither: capture archives the committed anchor, so a
+    /// speculative burst would emulate and render extra frames for zero
+    /// latency benefit (nothing paces an unthrottled capture run).
+    pub(super) fn burst_frames(
+        &self,
+        headless_capture: bool,
+    ) -> (usize, u8, Option<std::time::Duration>) {
+        let (frame_cap, time_budget) = self.warp_burst_plan(headless_capture);
+        let runahead = if frame_cap == 1 && time_budget.is_none() && !headless_capture {
+            self.runahead_effective_frames()
+        } else {
+            0
+        };
+        (frame_cap + usize::from(runahead), runahead, time_budget)
     }
 
     /// Cycle the warp/turbo output frame-skip level (2x -> 4x -> 8x -> 16x ->

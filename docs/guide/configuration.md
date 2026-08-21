@@ -407,18 +407,28 @@ carried no information.)
   policy. It costs a whole-machine snapshot per refresh and needs the host to
   emulate at `(run_ahead_frames + 1)`x realtime inside one frame period, so
   start at 1 (the setting that works for nearly all software) and only raise
-  it while the performance overlay shows headroom. Skipping too many frames
-  makes games visibly rubber-band through their own internal animation
-  frames. Run-ahead is ignored while warp is engaged, while an RTG board owns
-  the display, while reverse history/rewind is armed, while a video or audio
-  capture is active, and while the serial port has a live host sink (MIDI,
-  stdout, TCP): speculative frames would reach those outputs and then be
-  issued again by the replayed timeline. For the same reason, a guest that
-  writes to a disk image mid-burst can issue the same write twice; the
-  replayed write converges to the same sectors, but host-side observers
-  watching the image file may see both passes. The **Run Ahead** menu item
-  (Emulation Settings) adjusts it live. `--run-ahead FRAMES` overrides the
-  config for one run.
+  it while the performance overlay shows headroom (the overlay counts
+  committed frames only, so speculative re-emulation shows up as per-frame
+  cost, not as extra FPS). Skipping too many frames makes games visibly
+  rubber-band through their own internal animation frames. Speculative
+  frames leave no host-visible trace: serial bytes and disk writes they
+  produce are withheld, and the committed re-emulation of each frame
+  delivers them exactly once -- so the default serial `stdout` sink and
+  writable HDF/ADF images work normally under run-ahead. Run-ahead stays
+  off while warp is engaged, during scheduled capture
+  (`--screenshot-after`/`--dump-frames`), while an RTG board owns the
+  display, while reverse history/rewind is armed, while a video or audio
+  capture or waveform capture is active, while a CCP control client is
+  attached, while debugger stop conditions or `COPPERLINE_DBG_*`
+  diagnostics are armed, while the serial port carries a device that can
+  talk back or needs host timing (MIDI, TCP, pty), and on machines with an
+  A2065, a WASM device board, an MHI board, a host directory volume
+  (`[filesys]`, `--whdload`, `--run`), a CHD CD image, a physical host
+  disk, or a FluxBridge drive -- host-side state those keep cannot ride the
+  per-refresh rewind. A configured level that cannot engage says why in the
+  log and in the **Run Ahead** menu item's on-screen message; that menu
+  item (Emulation Settings) also adjusts the level live. `--run-ahead
+  FRAMES` overrides the config for one run.
 
 ## `[cpu]`
 

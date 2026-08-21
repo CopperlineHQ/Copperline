@@ -70,6 +70,14 @@ pub struct Emulator {
     /// live audio output is discarded, because the frames being retired are
     /// speculative and will be re-emulated on a later iteration.
     runahead_phase: bool,
+    /// The frame currently being stepped is a speculative run-ahead frame
+    /// (not the burst's committed anchor): `stats.frames` skips it -- the
+    /// committed timeline advances one frame per burst, and counting the
+    /// re-emulations would report phantom FPS headroom -- and the Bus
+    /// withholds unrewindable host side effects (serial words, disk
+    /// write-through) for the committed re-run to deliver. See
+    /// `set_runahead_speculative`.
+    runahead_speculative: bool,
     cpu_cycles_per_instruction: f64,
     real_pacing_budget_mode: RealPacingBudgetMode,
     /// Fast batch/trace-JIT CPU execution (`[cpu] jit`). The run loop then
@@ -454,6 +462,7 @@ impl Emulator {
             stats: EmuStats::default(),
             paced,
             runahead_phase: false,
+            runahead_speculative: false,
             cpu_cycles_per_instruction,
             real_pacing_budget_mode,
             cpu_jit: false,
@@ -826,6 +835,17 @@ impl Emulator {
 
     pub fn runahead_phase(&self) -> bool {
         self.runahead_phase
+    }
+
+    /// Mark the next `step_frame` as retiring a speculative run-ahead frame
+    /// (`on = true`) or the burst's committed anchor (`on = false`). Fans
+    /// out to the Bus so serial words and disk write-through are withheld
+    /// for the committed re-emulation to deliver
+    /// (`Bus::set_speculative_frame`), and keeps `stats.frames` counting
+    /// only committed frames.
+    pub fn set_runahead_speculative(&mut self, on: bool) {
+        self.runahead_speculative = on;
+        self.bus_mut().set_speculative_frame(on);
     }
 
     /// Serialize the machine at a run-ahead anchor boundary. Same-process
@@ -1625,7 +1645,13 @@ impl Emulator {
             self.stats.started_at = Some(crate::timebase::Instant::now());
         }
         self.step_real()?;
-        self.stats.frames += 1;
+        // A speculative run-ahead frame is re-emulated later as its burst's
+        // anchor; counting both would inflate the reported frame rate by
+        // (1 + run_ahead_frames)x while `stats.busy` keeps the true host
+        // cost -- exactly the numbers the performance overlay divides.
+        if !self.runahead_speculative {
+            self.stats.frames += 1;
+        }
         // Capture a reverse-debug snapshot at this frame boundary when one is
         // due (no-op unless reverse mode is armed). Frame boundaries are the
         // only safe capture points -- mid-frame the renderer capture buffers
@@ -4275,6 +4301,43 @@ mod tests {
             probe.dropped.get(),
             dropped_while_on,
             "turning discard off releases the live stream"
+        );
+    }
+
+    #[test]
+    fn speculative_frames_stay_out_of_the_frame_statistics() {
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(std::rc::Rc::new(
+            RunaheadProbe::default(),
+        ))));
+        emu.step_frame().unwrap();
+        let committed = emu.stats.frames;
+        // A speculative run-ahead frame is re-emulated later as its burst's
+        // committed anchor; counting it would inflate the reported FPS by
+        // (1 + run_ahead_frames)x.
+        emu.set_runahead_speculative(true);
+        emu.step_frame().unwrap();
+        assert_eq!(
+            emu.stats.frames, committed,
+            "a speculative frame is not a committed frame"
+        );
+        emu.set_runahead_speculative(false);
+        emu.step_frame().unwrap();
+        assert_eq!(emu.stats.frames, committed + 1);
+    }
+
+    #[test]
+    fn audio_tab_mutes_survive_a_runahead_restore() {
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(std::rc::Rc::new(
+            RunaheadProbe::default(),
+        ))));
+        emu.step_frame().unwrap();
+        let blob = emu.runahead_snapshot().unwrap();
+        emu.bus_mut().paula.toggle_channel_muted(2);
+        emu.step_frame().unwrap();
+        emu.runahead_restore(&blob).unwrap();
+        assert!(
+            emu.bus().paula.channel_muted(2),
+            "developer mutes are host-side state and ride across the anchor rewind"
         );
     }
 }

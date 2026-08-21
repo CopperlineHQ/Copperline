@@ -105,6 +105,18 @@ pub trait SerialSink: Send {
         false
     }
 
+    /// Whether run-ahead may engage with this sink attached. True only for
+    /// output-only sinks whose bytes tolerate the speculative-frame policy:
+    /// a word completed in a speculative frame is withheld and delivered
+    /// once by the committed re-emulation, so an unordered byte stream
+    /// (discarded or printed) observes each byte exactly once. Sinks that
+    /// can carry data INTO the guest must keep the default -- input consumed
+    /// by a speculative frame cannot be rewound with the machine -- as must
+    /// sinks with host-timing or connection state (MIDI, TCP, pty).
+    fn runahead_safe(&self) -> bool {
+        false
+    }
+
     /// Update the emulated-to-host time mapping (see [`SerialTimeAnchor`]).
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
@@ -666,6 +678,10 @@ impl SerialSink for NullSerialSink {
     fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
 
     fn flush(&mut self) {}
+
+    fn runahead_safe(&self) -> bool {
+        true
+    }
 }
 
 pub struct StdoutSink {
@@ -704,6 +720,10 @@ impl SerialSink for StdoutSink {
             let _ = stdout.flush();
             self.buf.clear();
         }
+    }
+
+    fn runahead_safe(&self) -> bool {
+        true
     }
 }
 

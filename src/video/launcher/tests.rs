@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn run_ahead_frames_survives_the_config_screen_round_trip() {
+    // Relaunching from the config screen rebuilds the RawConfig from the
+    // setup state; a `[emulation] run_ahead_frames` the screen does not
+    // edit must ride through rather than silently resetting to 0 (and
+    // being stripped from a Save default).
+    let raw: RawConfig = toml::from_str("[emulation]\nrun_ahead_frames = 2\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.run_ahead_frames, Some(2));
+}
+
+#[test]
 fn ram_initialisation_controls_cycle_and_round_trip() {
     let raw: RawConfig = toml::from_str("[memory]\ninit = \"random:0xBEEF\"\n").unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();

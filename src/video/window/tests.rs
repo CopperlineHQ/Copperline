@@ -1690,6 +1690,68 @@ fn cycle_warp_speed_walks_the_levels() {
 }
 
 #[test]
+fn burst_frames_retires_the_whole_warp_cap_per_pass() {
+    let mut app = test_app();
+    // Warp engaged (the fixture is unpaced): the burst break must run to
+    // the level's frame cap, not stop after one frame. Regression: the
+    // run-ahead burst arithmetic replaced `frame_cap` with a total that
+    // was always 1 under warp, collapsing every warp level to ~1x.
+    app.warp_speed = WarpSpeed::X4;
+    assert_eq!(app.burst_frames(false), (4, 0, None));
+
+    // Warp Max keeps its wall-clock budget reachable.
+    app.warp_speed = WarpSpeed::Max;
+    let (total, runahead, budget) = app.burst_frames(false);
+    assert!(total > 1);
+    assert_eq!(runahead, 0);
+    assert!(budget.is_some());
+}
+
+#[test]
+fn burst_frames_adds_runahead_to_the_committed_anchor() {
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    app.run_ahead_frames = 2;
+    assert_eq!(
+        app.runahead_block_reason(),
+        None,
+        "the fixture machine has no run-ahead blockers"
+    );
+    assert_eq!(app.burst_frames(false), (3, 2, None));
+
+    // A windowed session doing scheduled capture archives the committed
+    // anchor, so run-ahead must not engage there.
+    assert_eq!(app.burst_frames(true), (1, 0, None));
+}
+
+#[test]
+fn armed_debugger_stops_keep_runahead_off() {
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    app.run_ahead_frames = 1;
+    assert_eq!(app.runahead_effective_frames(), 1);
+
+    // A stop firing inside a speculative frame would commit frames whose
+    // audio and host side effects were withheld; armed stops gate the
+    // feature off instead.
+    app.emu.machine.ui_set_breakpoint(0x00FC_0000, None, 0);
+    assert_eq!(app.runahead_effective_frames(), 0);
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("debugger stop conditions armed")
+    );
+    app.emu.machine.ui_set_breakpoint(0x00FC_0000, None, 0);
+    assert_eq!(app.runahead_effective_frames(), 1);
+
+    // Armed reverse history blocks it the same way.
+    app.emu.enable_time_travel(4, 25);
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("rewind/reverse history armed")
+    );
+}
+
+#[test]
 fn mouse_delta_integrator_keeps_fractional_remainder() {
     let mut delta = 0.75;
     assert_eq!(take_integral_mouse_delta(&mut delta), 0);

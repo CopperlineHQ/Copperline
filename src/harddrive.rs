@@ -66,6 +66,24 @@ pub struct HardDriveImage {
     overlay_write_warned: bool,
     /// Lowercase bus tag ("ide"/"scsi") for log messages.
     bus_name: &'static str,
+    /// Host-write buffer for run-ahead speculative frames. Not serialized:
+    /// buffered sectors belong to a timeline that is either abandoned with
+    /// this image when the anchor snapshot is restored, or persisted by
+    /// `commit_speculative_writes` when an early burst break commits the
+    /// frames that issued them.
+    speculative: SpeculativeWrites,
+}
+
+/// See `HardDriveImage::set_speculative_writes`: while `active`, sector
+/// writes against a persistent backing (a host image file or a physical
+/// disk) land in `sectors` by file LBA instead of reaching the backing, and
+/// `read_sector` consults the buffer so the speculative timeline reads back
+/// what it wrote. In-memory backings write normally -- their content rides
+/// the save state and is rewound with the machine.
+#[derive(Default)]
+struct SpeculativeWrites {
+    active: bool,
+    sectors: std::collections::HashMap<u64, Box<[u8]>>,
 }
 
 /// Serde shadow of `HardDriveImage`. File-backed images store only the host
@@ -146,6 +164,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
                     rdb_overlay: state.rdb_overlay,
                     overlay_write_warned: state.overlay_write_warned,
                     bus_name,
+                    speculative: SpeculativeWrites::default(),
                 });
             }
             #[cfg(target_arch = "wasm32")]
@@ -176,6 +195,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             rdb_overlay: state.rdb_overlay,
             overlay_write_warned: state.overlay_write_warned,
             bus_name,
+            speculative: SpeculativeWrites::default(),
         })
     }
 }
@@ -464,6 +484,7 @@ impl HardDriveImage {
             total_sectors,
             rdb_overlay: None,
             overlay_write_warned: false,
+            speculative: SpeculativeWrites::default(),
             bus_name,
         })
     }
@@ -666,6 +687,7 @@ impl HardDriveImage {
             total_sectors,
             rdb_overlay,
             overlay_write_warned: false,
+            speculative: SpeculativeWrites::default(),
             bus_name,
         })
     }
@@ -711,6 +733,14 @@ impl HardDriveImage {
             }
         }
         let file_lba = lba - self.overlay_sectors();
+        // A sector the speculative timeline wrote must read back as written,
+        // even though the backing has not been touched.
+        if !self.speculative.sectors.is_empty() {
+            if let Some(data) = self.speculative.sectors.get(&file_lba) {
+                buf[..SECTOR_SIZE].copy_from_slice(data);
+                return Ok(());
+            }
+        }
         match &mut self.backing {
             Backing::File(file) => {
                 file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
@@ -748,6 +778,17 @@ impl HardDriveImage {
             }
         }
         let file_lba = lba - self.overlay_sectors();
+        // A write issued by a speculative run-ahead frame must not reach a
+        // persistent backing: the frame may be rewound and re-emulated with
+        // different input, so the committed timeline might never issue it.
+        // Buffer it instead; in-memory backings write through as usual (their
+        // content rides the save state and rewinds with the machine).
+        if self.speculative.active && !matches!(self.backing, Backing::Memory(_)) {
+            self.speculative
+                .sectors
+                .insert(file_lba, buf[..SECTOR_SIZE].into());
+            return Ok(());
+        }
         match &mut self.backing {
             Backing::File(file) => {
                 file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
@@ -776,6 +817,41 @@ impl HardDriveImage {
         }
         if let Backing::File(file) = &mut self.backing {
             return file.flush();
+        }
+        Ok(())
+    }
+
+    /// Enter or leave the speculative run-ahead phase (see
+    /// [`SpeculativeWrites`]). Leaving keeps any buffered sectors: the burst
+    /// either restores its anchor snapshot -- replacing this image, buffer
+    /// and all, with one deserialized fresh -- or commits its frames on an
+    /// early break, in which case the caller persists the buffer with
+    /// [`Self::commit_speculative_writes`].
+    pub fn set_speculative_writes(&mut self, on: bool) {
+        self.speculative.active = on;
+    }
+
+    /// Persist every buffered speculative sector to the backing, in LBA
+    /// order, and clear the buffer. Called when frames that wrote
+    /// speculatively become the committed timeline (an early burst break).
+    pub fn commit_speculative_writes(&mut self) -> std::io::Result<()> {
+        if self.speculative.sectors.is_empty() {
+            return Ok(());
+        }
+        let mut sectors: Vec<(u64, Box<[u8]>)> = self.speculative.sectors.drain().collect();
+        sectors.sort_by_key(|(lba, _)| *lba);
+        for (file_lba, data) in sectors {
+            match &mut self.backing {
+                Backing::File(file) => {
+                    file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
+                    file.write_all(&data)?;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                Backing::Device(device) => device.write_sector(file_lba, &data)?,
+                // Memory backings never buffer; PendingDevice cannot be
+                // written and cannot have accepted a speculative write.
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -875,6 +951,43 @@ mod tests {
             .read_sector(u64::from(CYL_SECTORS) + 5, &mut sector)
             .unwrap();
         assert_eq!(&sector[..4], b"MARK");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn speculative_writes_hold_the_backing_file_until_commit() {
+        let bytes = bare_partition_bytes(2);
+        let path = temp_image("spec.hdf", &bytes);
+        let mut drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+
+        // A write issued inside a speculative run-ahead frame is buffered:
+        // the speculative timeline reads back what it wrote...
+        let written = vec![0x5A; SECTOR_SIZE];
+        let lba = u64::from(CYL_SECTORS) + 1;
+        drive.set_speculative_writes(true);
+        drive.write_sector(lba, &written).unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(lba, &mut sector).unwrap();
+        assert_eq!(sector, written);
+        // ...while the backing file still holds the original content.
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // An early burst break commits the frames that wrote: the buffered
+        // sector reaches the file. (A completed rewind instead discards the
+        // buffer with the whole image when the anchor state deserializes.)
+        drive.set_speculative_writes(false);
+        drive.commit_speculative_writes().unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(&on_disk[SECTOR_SIZE..2 * SECTOR_SIZE], &written[..]);
 
         let _ = std::fs::remove_file(&path);
     }

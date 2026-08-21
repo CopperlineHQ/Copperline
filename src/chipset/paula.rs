@@ -527,6 +527,14 @@ pub struct Paula {
     toccata_muted: bool,
     #[serde(skip)]
     mhi_muted: bool,
+    // Set while the emulator retires a speculative run-ahead frame: a
+    // completed serial word updates all guest-visible UART state as usual
+    // but is not delivered to the host sink or the observer tap. The
+    // committed re-emulation of the same frame (the next burst's anchor)
+    // delivers it exactly once. Host-side presentation policy, never
+    // emulated state.
+    #[serde(skip)]
+    speculative_tx_quiet: bool,
     // Rolling output-level scopes for the debugger's oscilloscope meters:
     // one per Paula channel plus one per line-mixed source (CD-DA, the
     // in-process MIDI synth, a Toccata board, an MHI board). Each holds the
@@ -599,6 +607,7 @@ impl Paula {
             synth_muted: false,
             toccata_muted: false,
             mhi_muted: false,
+            speculative_tx_quiet: false,
             channel_scope: std::array::from_fn(|_| {
                 std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1)
             }),
@@ -627,6 +636,33 @@ impl Paula {
     /// Enable or disable the bounded host-side serial transmit tap.
     pub fn set_serial_observation_enabled(&mut self, enabled: bool) {
         self.serial_observer = enabled.then(crate::serial::SerialObserver::default);
+    }
+
+    /// Withhold completed serial words from the host sink and observer while
+    /// a speculative run-ahead frame retires (see `speculative_tx_quiet`).
+    pub fn set_speculative_tx_quiet(&mut self, on: bool) {
+        self.speculative_tx_quiet = on;
+    }
+
+    /// Carry the developer mutes, scope buffers, recording tap, and the
+    /// port-device silence fact from the live Paula into this freshly
+    /// deserialized one. All are host-side (`serde(skip)`) and would
+    /// otherwise silently reset on every state restore -- including the
+    /// per-refresh run-ahead anchor rewind, which would make the Audio-tab
+    /// mute buttons inert.
+    pub(crate) fn adopt_host_taps(&mut self, live: &mut Paula) {
+        self.channel_muted = live.channel_muted;
+        self.cd_muted = live.cd_muted;
+        self.synth_muted = live.synth_muted;
+        self.toccata_muted = live.toccata_muted;
+        self.mhi_muted = live.mhi_muted;
+        self.synth_silent = live.synth_silent;
+        std::mem::swap(&mut self.capture, &mut live.capture);
+        std::mem::swap(&mut self.channel_scope, &mut live.channel_scope);
+        std::mem::swap(&mut self.cd_scope, &mut live.cd_scope);
+        std::mem::swap(&mut self.synth_scope, &mut live.synth_scope);
+        std::mem::swap(&mut self.toccata_scope, &mut live.toccata_scope);
+        std::mem::swap(&mut self.mhi_scope, &mut live.mhi_scope);
     }
 
     /// Drain transmissions completed since the last poll, plus the number of
@@ -1203,14 +1239,19 @@ impl Paula {
                         // Stop bit done: this many clocks are left of the span.
                         let at_cck = end_cck.saturating_sub(u64::from(remaining));
                         let word = Self::serial_tx_data_word(&shift);
-                        if let Some(observer) = self.serial_observer.as_mut() {
-                            observer.push(crate::serial::SerialTxObservation {
-                                word,
-                                long: shift.long,
-                                at_cck,
-                            });
+                        // A word completed inside a speculative run-ahead
+                        // frame is withheld from the host: the committed
+                        // re-emulation of this frame delivers it once.
+                        if !self.speculative_tx_quiet {
+                            if let Some(observer) = self.serial_observer.as_mut() {
+                                observer.push(crate::serial::SerialTxObservation {
+                                    word,
+                                    long: shift.long,
+                                    at_cck,
+                                });
+                            }
+                            self.serial.write_word(word, shift.long, at_cck);
                         }
-                        self.serial.write_word(word, shift.long, at_cck);
                     }
                     self.serial_tx_pin_high = true;
                     irq |= self.load_serial_shift_if_idle();
@@ -3472,6 +3513,24 @@ mod tests {
             &*written.lock().unwrap(),
             &[(0x0041, false), (0x0142, true)]
         );
+    }
+
+    #[test]
+    fn speculative_tx_quiet_withholds_completed_words_from_the_host_sink() {
+        let (mut paula, written, _) = paula_with_collect_serial();
+
+        // A word completing inside a speculative run-ahead frame updates
+        // every guest-visible UART state as usual but never reaches the
+        // host sink; the committed re-emulation of the frame delivers it.
+        paula.set_speculative_tx_quiet(true);
+        assert_eq!(paula.write_serdat(0x0141), INT_TBE);
+        assert_eq!(paula.tick_serial(10, 0), 0);
+        assert!(written.lock().unwrap().is_empty());
+
+        paula.set_speculative_tx_quiet(false);
+        assert_eq!(paula.write_serdat(0x0141), INT_TBE);
+        assert_eq!(paula.tick_serial(10, 0), 0);
+        assert_eq!(&*written.lock().unwrap(), &[0x41]);
     }
 
     #[test]

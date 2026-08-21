@@ -11091,6 +11091,36 @@ fn lisa_palette_writes_follow_bplcon3_bank_and_loct() {
     assert_eq!(aga.denise.palette[1], 0x0ABC);
 }
 
+/// A Lisa Denise on a non-Alice Agnus (the chipset dropdowns are
+/// independent) still owns CLXCON2: the capture path records $10E events
+/// only when Lisa is present, so the live-replay apply takes them
+/// unconditionally, exactly like the renderer's replay -- gating on the
+/// Agnus revision here dropped the write and let live CLXDAT diverge from
+/// the rendered collisions.
+#[test]
+fn live_collision_control_applies_clxcon2_regardless_of_agnus_revision() {
+    let mut control = LiveCollisionControl::from_current(
+        AgnusRevision::Ecs8372Rev4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        DiwHigh::ocs_implicit(),
+        0,
+        [0; 8],
+    );
+    control.apply_write(0x10E, 0xFFFF);
+    assert_eq!(control.clxcon2, 0x0FFF, "defined CLXCON2 bits latch");
+    control.apply_write(0x098, 0x1234);
+    assert_eq!(
+        control.clxcon2, 0,
+        "a CLXCON write resets CLXCON2 like Lisa"
+    );
+}
+
 #[test]
 fn hhposr_reads_hhposw_latch_on_ecs_agnus_only() {
     let mut ocs = empty_bus();

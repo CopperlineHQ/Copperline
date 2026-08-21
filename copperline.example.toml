@@ -95,9 +95,14 @@ pacing_budget = "cycles"
 # relative to the screen. Machine behaviour at any frame boundary is
 # unchanged. Costs a whole-machine snapshot per refresh and needs
 # (run_ahead_frames + 1)x realtime from the host inside one frame period; 1
-# works nearly everywhere. Ignored during warp, with RTG display, while
-# rewind/reverse history is armed, and in headless runs. 0..4; adjust live
-# from Emulation Settings > Run Ahead.
+# works nearly everywhere. Stays off during warp, scheduled capture, and
+# headless runs, and while anything host-coupled cannot ride the rewind
+# cycle: RTG display, rewind/reverse history, video/audio recording, a
+# serial device beyond off/stdout (MIDI, TCP, pty), a CCP control client,
+# armed debugger stops or COPPERLINE_DBG_* diagnostics, a waveform capture,
+# and network/WASM/MHI boards, host directory volumes, CHD CD images,
+# physical disks, or FluxBridge drives. The menu and log say which. 0..4;
+# adjust live from Emulation Settings > Run Ahead.
 # run_ahead_frames = 0
 
 

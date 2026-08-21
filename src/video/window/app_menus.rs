@@ -353,8 +353,18 @@ impl App {
                 } else {
                     format!("{frames} frame{}", if frames == 1 { "" } else { "s" })
                 };
-                info!("run-ahead: {label}");
-                self.show_osd(format!("Run Ahead: {label}"));
+                // A level that cannot engage says so, rather than showing a
+                // selected level that silently does nothing.
+                match (frames > 0).then(|| self.runahead_block_reason()).flatten() {
+                    Some(reason) => {
+                        info!("run-ahead: {label} (inactive: {reason})");
+                        self.show_osd(format!("Run Ahead: {label} (inactive: {reason})"));
+                    }
+                    None => {
+                        info!("run-ahead: {label}");
+                        self.show_osd(format!("Run Ahead: {label}"));
+                    }
+                }
                 self.request_redraw();
             }
             A::ToggleKeyboardPanel => self.toggle_keyboard_panel(),

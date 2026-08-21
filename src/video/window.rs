@@ -2067,6 +2067,14 @@ impl App {
         if app.rewind_armed {
             app.arm_rewind_ring();
         }
+        if app.run_ahead_frames > 0 {
+            if let Some(reason) = app.runahead_block_reason() {
+                warn!(
+                    "run-ahead ({} frames) configured but inactive: {reason}",
+                    app.run_ahead_frames
+                );
+            }
+        }
         app
     }
 
@@ -4519,19 +4527,13 @@ impl ApplicationHandler for App {
             // effective speed is the warp level times the refresh rate, host
             // CPU permitting. Real-time pacing and headless capture stay at one
             // frame per loop.
-            let (frame_cap, time_budget) = self.warp_burst_plan(headless_capture);
             // Run-ahead retires one extra speculative frame per configured
             // level on top of the presented frame: input sampled this pass
             // lands up to that many frames earlier relative to what is on
             // screen. Only the last frame of the iteration is presented and
             // audible; the anchor snapshot rewinds the machine afterwards,
             // so the state at any frame boundary is unchanged.
-            let runahead = if frame_cap == 1 && time_budget.is_none() {
-                self.runahead_effective_frames()
-            } else {
-                0
-            };
-            let total_frames = 1 + usize::from(runahead);
+            let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
             let burst_start = Instant::now();
             let mut frames_done = 0usize;
             let mut anchor_end_seconds: Option<f64> = None;
@@ -4539,9 +4541,13 @@ impl ApplicationHandler for App {
             let mut burst_complete = true;
             self.emu.set_runahead_phase(runahead > 0);
             loop {
-                // Speculative frames have their Paula output discarded; the
-                // final frame of the iteration is presented and audible.
+                // Speculative frames have their Paula output discarded (the
+                // final frame of the iteration is presented and audible) and
+                // their unrewindable host side effects withheld -- serial
+                // words and disk write-through wait for the committed
+                // re-emulation. The first frame is the committed anchor.
                 if runahead > 0 {
+                    self.emu.set_runahead_speculative(frames_done >= 1);
                     self.emu
                         .bus_mut()
                         .set_live_audio_discard(frames_done + 1 < total_frames);
@@ -4606,30 +4612,46 @@ impl ApplicationHandler for App {
             }
             self.emu.set_runahead_phase(false);
             if runahead > 0 {
+                self.emu.set_runahead_speculative(false);
                 self.emu.bus_mut().set_live_audio_discard(false);
-                // Present the final speculative frame BEFORE rewinding: the
-                // render snapshots the live bus, so it must run at post-burst
-                // state or it would capture the anchor frame instead of the
-                // one this iteration is meant to show.
-                runahead_presented = self.render_emulated_frame_if_needed();
+                // Present the final speculative frame BEFORE rewinding, and
+                // wait for the threaded renderer to apply it: the render
+                // reads the live bus, so it must complete at post-burst
+                // state -- a job merely submitted here would lose the race
+                // with the fallback render after the rewind, which would
+                // then present the anchor (the past) on top of it.
+                runahead_presented = self.finish_render_for_current_frame();
                 // One wall-clock frame period per presented frame even
                 // though the burst retired more: pace against the anchor
                 // frame's end, which advances one frame per iteration.
                 if let Some(anchor_end) = anchor_end_seconds {
                     self.emu.pace_runahead_burst(anchor_end);
                 }
+                let mut restored = false;
                 if burst_complete {
                     if let Some(blob) = &anchor_snapshot {
-                        if let Err(e) = self.emu.runahead_restore(blob) {
-                            // The machine is now at the burst's final frame
-                            // rather than the anchor. That is a valid frame
-                            // boundary, but continuing would silently drift
-                            // from the promised timeline, so run-ahead is
-                            // done for this session.
-                            error!("run-ahead disabled: anchor restore failed: {e:?}");
-                            self.run_ahead_frames = 0;
+                        match self.emu.runahead_restore(blob) {
+                            Ok(()) => restored = true,
+                            Err(e) => {
+                                // The machine is now at the burst's final frame
+                                // rather than the anchor. That is a valid frame
+                                // boundary, but continuing would silently drift
+                                // from the promised timeline, so run-ahead is
+                                // done for this session.
+                                error!("run-ahead disabled: anchor restore failed: {e:?}");
+                                self.run_ahead_frames = 0;
+                            }
                         }
                     }
+                }
+                // No rewind (an early break, or the restore failed): the
+                // burst's frames ARE the committed timeline, so the disk
+                // writes its speculative frames buffered must reach the
+                // host now. A completed rewind instead discards them with
+                // the replaced bus, and the committed re-emulation issues
+                // them itself.
+                if !restored {
+                    self.emu.bus_mut().commit_speculative_host_writes();
                 }
             }
             self.refresh_tool_windows_paced(event_loop);

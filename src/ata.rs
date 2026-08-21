@@ -507,6 +507,39 @@ impl AtaBus {
         Ok(())
     }
 
+    /// Visit every hard-drive image on this cable (run-ahead speculative
+    /// write control; see `Bus::for_each_hard_drive_image`).
+    pub(crate) fn for_each_hard_drive_image(
+        &mut self,
+        f: &mut dyn FnMut(&mut crate::harddrive::HardDriveImage),
+    ) {
+        for drive in self.drives.iter_mut().flatten() {
+            if let AtaDevice::Disk(disk) = drive {
+                f(&mut disk.disk);
+            }
+        }
+    }
+
+    /// Whether any hard-drive image on this cable satisfies `f`.
+    pub(crate) fn any_hard_drive_image(
+        &self,
+        f: &mut dyn FnMut(&crate::harddrive::HardDriveImage) -> bool,
+    ) -> bool {
+        self.drives.iter().flatten().any(|drive| match drive {
+            AtaDevice::Disk(disk) => f(&disk.disk),
+            AtaDevice::Atapi(_) => false,
+        })
+    }
+
+    /// Whether any ATAPI drive on this cable holds a CHD-backed disc (a
+    /// run-ahead gate; see `ScsiCdRom::disc_is_chd`).
+    pub(crate) fn any_chd_disc(&self) -> bool {
+        self.drives.iter().flatten().any(|drive| match drive {
+            AtaDevice::Atapi(drive) => drive.cdrom.disc_is_chd(),
+            AtaDevice::Disk(_) => false,
+        })
+    }
+
     /// Let go of any real disk of the host's, and say how many went.
     ///
     /// A drive is powered by the machine, so a machine that is switched off

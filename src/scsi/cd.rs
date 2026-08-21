@@ -109,6 +109,13 @@ impl ScsiCdRom {
         self.loaded || self.pending.is_some()
     }
 
+    /// Whether the mounted disc (or one travelling in the tray) is a CHD
+    /// image. A CHD reopens through a full header/hunk-map parse on every
+    /// state restore, so run-ahead refuses to engage with one mounted.
+    pub fn disc_is_chd(&self) -> bool {
+        self.image.is_chd() || self.pending.as_ref().is_some_and(|p| p.image.is_chd())
+    }
+
     /// Whether CD-DA playback is running (not paused or finished).
     pub fn audio_playing(&self) -> bool {
         self.play == PlayPhase::Playing

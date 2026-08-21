@@ -3468,6 +3468,130 @@ fn raw_track_write_dma_uses_raw_index_timing() -> Result<()> {
 }
 
 #[test]
+fn write_dma_armed_against_empty_bay_lands_at_post_insert_rotation() -> Result<()> {
+    let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+    let path = temp_ext2_raw(&raw_words)?;
+    let mut ctrl = FloppyController::default();
+    let mut chip_ram = vec![0xAB, 0xCD];
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+
+    // DF0 selected, motor line on, empty bay -- with the mechanism's last
+    // rotation having left the head mid-track. The write arms and pends;
+    // the rotational start it latches now is from a platter phase that
+    // will not survive the media insert.
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    ctrl.drives[0].set_rotation_word(2);
+    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | 1;
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+
+    // Nothing moves against the empty bay.
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    assert!(!ctrl.tick(word_cck * 125, dmacon, &mut chip_ram));
+
+    // A disk arrives: rotation restarts at the index, and the pending
+    // write lands where the head really is when cells first go down --
+    // word 0 -- not at the stale position latched against the empty bay.
+    ctrl.insert_disk_image(0, path.clone(), false)?;
+    assert!(ctrl.tick(word_cck, dmacon, &mut chip_ram));
+
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: false,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut reloaded = FloppyController::from_config(&cfg)?;
+    reloaded.ensure_track(0, 0);
+    assert_eq!(
+        reloaded.drives[0].cached_words(),
+        [0xABC9, 0x2222, 0x3333, 0x4444]
+    );
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn speculative_write_holds_the_host_file_until_commit() -> Result<()> {
+    let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+    let path = temp_ext2_raw(&raw_words)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: false,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    let mut chip_ram = vec![0xAB, 0xCD];
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.ensure_track(0, 0);
+    ctrl.drives[0].set_rotation_word(0);
+    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.set_dskpt_low(0);
+
+    // The write completes inside a speculative run-ahead frame: the
+    // in-memory image takes it (the anchor restore would rewind it), the
+    // host file must not.
+    ctrl.set_speculative_writes(true);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | 1;
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    assert!(ctrl.tick(word_cck, dmacon, &mut chip_ram));
+    ctrl.set_speculative_writes(false);
+
+    ctrl.ensure_track(0, 0);
+    assert_eq!(
+        ctrl.drives[0].cached_words(),
+        [0xABC9, 0x2222, 0x3333, 0x4444],
+        "the in-memory image carries the write"
+    );
+    {
+        let mut untouched = FloppyController::from_config(&cfg)?;
+        untouched.ensure_track(0, 0);
+        assert_eq!(
+            untouched.drives[0].cached_words(),
+            raw_words,
+            "the host file does not"
+        );
+    }
+
+    // An early burst break commits the frames that wrote: the held
+    // write-through is delivered.
+    ctrl.commit_speculative_writes();
+    let mut reloaded = FloppyController::from_config(&cfg)?;
+    reloaded.ensure_track(0, 0);
+    assert_eq!(
+        reloaded.drives[0].cached_words(),
+        [0xABC9, 0x2222, 0x3333, 0x4444]
+    );
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
 fn cpu_dskdat_write_without_dma_overlays_raw_track() -> Result<()> {
     let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
     let path = temp_ext2_raw(&raw_words)?;

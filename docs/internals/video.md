@@ -424,14 +424,27 @@ Run-ahead (`[emulation] run_ahead_frames`) sits on top of this pipeline as a
 presentation policy only. Each display refresh retires `1 + n` frames with
 the per-frame pacing sleep suppressed (one `pace_runahead_burst` sleep at the
 anchor frame's end time instead), snapshots the machine after the anchor
-frame, renders and presents only the last frame of the burst -- discarding
-the speculative frames' Paula output via `set_live_audio_discard` so the
-audible timeline stays continuous -- then restores the anchor snapshot. The
+frame, renders and presents only the last frame of the burst -- waiting for
+the threaded renderer to apply it (`finish_render_for_current_frame`), since
+a job merely submitted would lose to the post-rewind fallback render and
+present the anchor instead -- then restores the anchor snapshot. The
+speculative frames' Paula output is discarded via `set_live_audio_discard`
+so the audible timeline stays continuous, and their unrewindable host side
+effects are withheld (`Bus::set_speculative_frame`): completed serial words
+stay off the host sink, floppy write-through skips the image file, and
+hard-drive sector writes land in a per-image buffer that speculative reads
+consult. The buffers die with the rewound bus -- the committed re-emulation
+of each frame issues its own writes -- except when an early burst break (a
+debugger stop, a step error) commits the burst's frames instead of
+rewinding, in which case `commit_speculative_host_writes` persists them.
+`stats.frames` counts only committed frames, so the performance overlay
+reports the presented rate and the true host cost per presented frame. The
 restore deliberately skips the save-state-load audio reset and pacing
 re-anchor: emulated time oscillates within each burst while wall-clock
 pacing marches forward one frame period per iteration. The state at any
-frame boundary is byte-identical with run-ahead off; warp, RTG scanout,
-armed reverse history, and headless capture all bypass it.
+frame boundary is byte-identical with run-ahead off; warp, scheduled
+capture in a windowed session, headless runs, and the eligibility gates
+listed in the configuration guide all bypass it.
 
 Progressive frames have two exact reuse checks. First, two consecutive
 renders with identical lightweight inputs arm a pre-render key containing

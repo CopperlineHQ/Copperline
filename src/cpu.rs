@@ -1950,6 +1950,23 @@ impl M68kMachine {
         self.ui_stop.is_some()
     }
 
+    /// Whether the interactive debugger has any armed stop condition
+    /// (breakpoints, watches, register watches, or exception/task/loadseg
+    /// catches). The run-ahead gate asks: a stop firing inside a
+    /// speculative frame would commit frames whose host side effects were
+    /// withheld.
+    pub fn ui_debug_stops_armed(&self) -> bool {
+        self.ui_breaks.armed()
+    }
+
+    /// Whether the `COPPERLINE_DBG_*` headless debugger is attached. Its
+    /// hit counters, trace files, and screenshots are host-side, so they
+    /// would double-count every event under speculative re-emulation; the
+    /// run-ahead gate stays off while it is armed.
+    pub fn headless_debugger_armed(&self) -> bool {
+        self.dbg.is_some()
+    }
+
     /// Promote a custom-register watch or beam-trap hit recorded by the
     /// bus (which sees every writer and every colour clock, including
     /// while the CPU sits in STOP) into the machine-level stop reason.

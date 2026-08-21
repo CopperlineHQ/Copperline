@@ -4330,10 +4330,198 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
+        // The Audio-tab mutes, scope buffers, and the recording tap are
+        // host-side observation state: carry them like the sinks, so a
+        // restore (including the per-refresh run-ahead rewind) does not
+        // silently un-mute a channel or wipe a meter.
+        self.paula.adopt_host_taps(&mut live.paula);
+        // An armed waveform capture watches one continuous timeline; the
+        // restore just abandoned it. Finish the file cleanly (footer and
+        // flush) instead of dropping the Box and truncating the VCD.
+        if let Some(mut wave) = live.wave.take() {
+            log::info!("waveform capture finished: state restore left its timeline");
+            wave.finish();
+        }
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
         Ok(())
+    }
+
+    /// Visit every hard-drive image on every controller (Gayle, A4000 IDE,
+    /// A3000 SDMAC, and the SCSI/IDE Zorro boards), for run-ahead
+    /// speculative write control.
+    pub(crate) fn for_each_hard_drive_image(
+        &mut self,
+        f: &mut dyn FnMut(&mut crate::harddrive::HardDriveImage),
+    ) {
+        if let Some(gayle) = &mut self.gayle {
+            gayle.for_each_hard_drive_image(f);
+        }
+        if let Some(ide) = &mut self.ide_a4000 {
+            ide.for_each_hard_drive_image(f);
+        }
+        if let Some(sdmac) = &mut self.sdmac {
+            sdmac.wd.for_each_hard_drive_image(f);
+        }
+        for device in &mut self.devices {
+            match device {
+                crate::zorro_device::BoardDevice::A2091(board) => {
+                    board.wd.for_each_hard_drive_image(f);
+                }
+                crate::zorro_device::BoardDevice::A4091(board) => {
+                    board.for_each_hard_drive_image(f);
+                }
+                crate::zorro_device::BoardDevice::IdeZorro(board) => {
+                    board.for_each_hard_drive_image(f);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether any hard-drive image on any controller satisfies `f`.
+    fn any_hard_drive_image(
+        &self,
+        f: &mut dyn FnMut(&crate::harddrive::HardDriveImage) -> bool,
+    ) -> bool {
+        if let Some(gayle) = &self.gayle {
+            if gayle.any_hard_drive_image(f) {
+                return true;
+            }
+        }
+        if let Some(ide) = &self.ide_a4000 {
+            if ide.any_hard_drive_image(f) {
+                return true;
+            }
+        }
+        if let Some(sdmac) = &self.sdmac {
+            if sdmac.wd.any_hard_drive_image(f) {
+                return true;
+            }
+        }
+        self.devices.iter().any(|device| match device {
+            crate::zorro_device::BoardDevice::A2091(board) => board.wd.any_hard_drive_image(f),
+            crate::zorro_device::BoardDevice::A4091(board) => board.any_hard_drive_image(f),
+            crate::zorro_device::BoardDevice::IdeZorro(board) => board.any_hard_drive_image(f),
+            _ => false,
+        })
+    }
+
+    /// Whether any CD drive in the machine holds a CHD-backed disc (see
+    /// `CdImage::is_chd` for why run-ahead cares).
+    fn any_chd_disc(&self) -> bool {
+        if self.akiko.as_ref().is_some_and(|akiko| akiko.disc_is_chd()) {
+            return true;
+        }
+        if self.cdtv.as_ref().is_some_and(|cdtv| cdtv.disc_is_chd()) {
+            return true;
+        }
+        if self
+            .gayle
+            .as_ref()
+            .is_some_and(|gayle| gayle.any_chd_disc())
+        {
+            return true;
+        }
+        if self
+            .ide_a4000
+            .as_ref()
+            .is_some_and(|ide| ide.any_chd_disc())
+        {
+            return true;
+        }
+        if self
+            .sdmac
+            .as_ref()
+            .is_some_and(|sdmac| sdmac.wd.any_chd_disc())
+        {
+            return true;
+        }
+        self.devices.iter().any(|device| match device {
+            crate::zorro_device::BoardDevice::A2091(board) => board.wd.any_chd_disc(),
+            crate::zorro_device::BoardDevice::A4091(board) => board.any_chd_disc(),
+            crate::zorro_device::BoardDevice::IdeZorro(board) => board.any_chd_disc(),
+            _ => false,
+        })
+    }
+
+    /// Enter or leave the speculative run-ahead frame phase: while set,
+    /// host-visible side effects that cannot be rewound are withheld --
+    /// completed serial words stay off the host sink and observer, floppy
+    /// write-through skips the image file, and hard-drive sector writes land
+    /// in a per-image buffer that speculative reads consult. Leaving the
+    /// phase keeps the buffers; they are either discarded with this Bus when
+    /// the anchor snapshot is restored, or persisted by
+    /// [`Self::commit_speculative_host_writes`] when an early burst break
+    /// commits the frames that filled them.
+    pub fn set_speculative_frame(&mut self, on: bool) {
+        self.paula.set_speculative_tx_quiet(on);
+        self.floppy.set_speculative_writes(on);
+        self.for_each_hard_drive_image(&mut |image| image.set_speculative_writes(on));
+    }
+
+    /// Persist every buffered speculative disk write (see
+    /// [`Self::set_speculative_frame`]). Failures are logged rather than
+    /// propagated: the frames are already committed, so the only wrong move
+    /// is to lose the data silently.
+    pub fn commit_speculative_host_writes(&mut self) {
+        self.floppy.commit_speculative_writes();
+        self.for_each_hard_drive_image(&mut |image| {
+            if let Err(e) = image.commit_speculative_writes() {
+                log::warn!("committing speculative disk writes: {e:#}");
+            }
+        });
+    }
+
+    /// Why run-ahead cannot engage with the machine's current devices, or
+    /// None when it can. These are session-shaped facts (boards fitted,
+    /// media mounted, captures armed) rather than per-pass state, surfaced
+    /// so the menu and log can say why a configured level is inert.
+    ///
+    /// Each entry is a device whose host-side state cannot ride the
+    /// per-refresh snapshot/restore cycle: the A2065's network backend is
+    /// rebuilt on every restore (destroying NAT/TCP sessions) and consumes
+    /// unrewindable inbound packets; a WASM board re-reads its module from
+    /// disk; an MHI board re-decodes its warm-up window through Symphonia;
+    /// the filesys services board reads and writes live host directories; a
+    /// CHD image re-parses its hunk map; physical disks are re-lent under a
+    /// global reservation; a FluxBridge drive is real hardware that cannot
+    /// be rewound at all; an armed waveform capture would record every
+    /// speculative timeline into one VCD.
+    pub fn runahead_device_block(&self) -> Option<&'static str> {
+        for device in &self.devices {
+            match device {
+                crate::zorro_device::BoardDevice::A2065(_) => {
+                    return Some("A2065 network board");
+                }
+                crate::zorro_device::BoardDevice::Filesys(_) => {
+                    return Some("host directory volume");
+                }
+                #[cfg(feature = "wasm-boards")]
+                crate::zorro_device::BoardDevice::Wasm(_) => {
+                    return Some("WASM device board");
+                }
+                #[cfg(feature = "mhi")]
+                crate::zorro_device::BoardDevice::Mhi(_) => {
+                    return Some("MHI board");
+                }
+                _ => {}
+            }
+        }
+        if self.floppy.any_bridged() {
+            return Some("FluxBridge drive");
+        }
+        if self.any_hard_drive_image(&mut |image| image.is_host_disk()) {
+            return Some("physical host disk");
+        }
+        if self.any_chd_disc() {
+            return Some("CHD CD image");
+        }
+        if self.wave_on {
+            return Some("waveform capture");
+        }
+        None
     }
 
     /// Acquire physical disks named by a fully decoded state. Deserialization
@@ -8739,9 +8927,13 @@ impl LiveCollisionControl {
             0x100 => self.bplcon0 = value,
             0x102 => self.bplcon1 = value,
             0x106 => self.bplcon3 = value,
-            0x10E if live_collision_aga_decode(self.agnus_revision) => {
-                self.clxcon2 = value & 0x0FFF
-            }
+            // CLXCON2 is Lisa's register, and the event stream is already
+            // gated on Lisa at capture (see record_render_event), so apply
+            // it unconditionally exactly like the render replay does: gating
+            // on the Agnus revision here would drop the write on a
+            // Lisa-Denise / non-Alice-Agnus hybrid and let live CLXDAT
+            // diverge from the rendered collisions.
+            0x10E => self.clxcon2 = value & 0x0FFF,
             0x1E4 => self.diwhigh = DiwHigh::ecs_explicit(value),
             off @ 0x110..=0x11A => {
                 let plane = ((off - 0x110) / 2) as usize;

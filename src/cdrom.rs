@@ -175,6 +175,14 @@ struct RawTrack {
 }
 
 impl CdImage {
+    /// Whether this image is CHD-backed. A CHD deserializes through a full
+    /// header/hunk-map re-parse (see the `Deserialize` impl), which is fine
+    /// for a one-shot save-state load but far too heavy for the per-refresh
+    /// run-ahead restore, so the run-ahead gate asks.
+    pub fn is_chd(&self) -> bool {
+        matches!(self.backend, Backend::Chd(_))
+    }
+
     /// Load a CD image: a cue sheet (with its BINARY file(s)), a bare
     /// `.iso` data image, or a `.chd`.
     pub fn load(path: &Path) -> Result<Self> {

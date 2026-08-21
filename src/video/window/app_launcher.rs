@@ -1386,6 +1386,14 @@ impl App {
             .emulation
             .run_ahead_frames
             .min(crate::config::RUN_AHEAD_MAX_FRAMES);
+        if self.run_ahead_frames > 0 {
+            if let Some(reason) = self.runahead_block_reason() {
+                warn!(
+                    "run-ahead ({} frames) configured but inactive: {reason}",
+                    self.run_ahead_frames
+                );
+            }
+        }
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
         self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;

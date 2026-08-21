@@ -228,6 +228,13 @@ impl CdtvController {
         controller
     }
 
+    /// Whether the mounted disc (or one pending insertion) is a CHD image,
+    /// whose per-restore reopen cost keeps run-ahead from engaging.
+    pub fn disc_is_chd(&self) -> bool {
+        self.disc.as_ref().is_some_and(CdImage::is_chd)
+            || self.pending_disc.as_ref().is_some_and(CdImage::is_chd)
+    }
+
     pub fn insert_disc(&mut self, disc: CdImage) {
         self.disc = Some(disc);
         self.cd_media = true;

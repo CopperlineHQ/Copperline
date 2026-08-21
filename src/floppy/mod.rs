@@ -295,6 +295,33 @@ pub struct FloppyController {
     #[cfg(feature = "fluxbridge")]
     #[serde(skip)]
     bridge_media_events: Vec<(usize, bool, Option<bool>)>,
+    /// Set while a speculative run-ahead frame retires: a completed write
+    /// updates the in-memory image as usual (the image rides the save
+    /// state, so the anchor restore rewinds it) but its write-through to
+    /// the host file is held in `pending_host_flushes` instead of
+    /// performed. Host-side presentation policy, never serialized.
+    #[serde(skip)]
+    speculative: bool,
+    /// Host-file writes held back by `speculative`: replayed by
+    /// `commit_speculative_writes` when an early burst break commits the
+    /// frames that produced them, or dropped with this controller when the
+    /// anchor snapshot is restored.
+    #[serde(skip)]
+    pending_host_flushes: Vec<PendingHostFlush>,
+}
+
+/// One held-back floppy write-through (see `FloppyController::speculative`).
+enum PendingHostFlush {
+    /// Individual sectors of a standard ADF, written at their exact byte
+    /// offsets like the live write-through.
+    AdfSectors {
+        path: PathBuf,
+        track: usize,
+        sectors: Vec<(usize, [u8; BYTES_PER_SECTOR])>,
+    },
+    /// A whole re-encoded extended-ADF file. A later write to the same path
+    /// supersedes an earlier one.
+    WholeFile { path: PathBuf, bytes: Vec<u8> },
 }
 
 impl Default for FloppyController {
@@ -338,6 +365,8 @@ impl Default for FloppyController {
             idle_cache: true,
             #[cfg(feature = "fluxbridge")]
             bridge_media_events: Vec::new(),
+            speculative: false,
+            pending_host_flushes: Vec::new(),
         }
     }
 }
@@ -1291,6 +1320,45 @@ impl FloppyController {
         irq
     }
 
+    /// Enter or leave the speculative run-ahead frame phase (see the
+    /// `speculative` field). Leaving keeps `pending_host_flushes`: the
+    /// burst either restores its anchor snapshot -- replacing this
+    /// controller, buffer and all -- or commits its frames on an early
+    /// break, in which case [`Self::commit_speculative_writes`] runs.
+    pub fn set_speculative_writes(&mut self, on: bool) {
+        self.speculative = on;
+    }
+
+    /// Perform every held-back write-through (see the `speculative` field),
+    /// in the order the guest issued them. Failures are logged like the
+    /// live write-through path's.
+    pub fn commit_speculative_writes(&mut self) {
+        for flush in self.pending_host_flushes.drain(..) {
+            let (path, result) = match &flush {
+                PendingHostFlush::AdfSectors {
+                    path,
+                    track,
+                    sectors,
+                } => (
+                    path,
+                    write_standard_adf_sectors_to_disk(path, *track, sectors),
+                ),
+                PendingHostFlush::WholeFile { path, bytes } => (
+                    path,
+                    std::fs::write(path, bytes).context("writing extended ADF image"),
+                ),
+            };
+            if let Err(e) = result {
+                warn!("floppy write-through of {} failed: {e:#}", path.display());
+            }
+        }
+    }
+
+    /// Whether any bay has a real drive attached through FluxBridge.
+    pub fn any_bridged(&self) -> bool {
+        self.drives.iter().any(FloppyDrive::is_bridged)
+    }
+
     /// Turbo: spin the platter forward far enough, in zero emulated time, to
     /// complete the pending DMA through the ordinary bit engine -- first to
     /// the next DSKSYNC match when the read is sync-waiting, then to the
@@ -1378,7 +1446,14 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // No media means no cells under the head, whatever the track cache
+        // holds: a bridged bay keeps a filler track cached while its real
+        // drive is empty, and draining that would fake the dataless
+        // completion an idle mechanism must never produce.
+        if !self.drives[idx].motor_on
+            || !self.drives[idx].has_media()
+            || self.drives[idx].cached.is_empty()
+        {
             return false;
         }
         // Free-running comparator mode comes from the mirrored ADKCON; an
@@ -1499,7 +1574,12 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // Same no-media guard as the read path: a bridged bay's filler
+        // track must not let a write proceed against an empty real drive.
+        if !self.drives[idx].motor_on
+            || !self.drives[idx].has_media()
+            || self.drives[idx].cached.is_empty()
+        {
             return false;
         }
         let Some(mut dma) = self.dma.take() else {
@@ -1518,6 +1598,14 @@ impl FloppyController {
                 break;
             }
             self.drives[idx].rotation_acc_cck -= word_cck;
+            // The mechanism is delivering now (the guards above passed), so
+            // a provisional start position from an idle arming is replaced
+            // with where the head actually is as the write begins.
+            if dma.write_start_pending {
+                dma.write_start_pending = false;
+                dma.write_start_word = self.drives[idx].rotation_bit / 16;
+                dma.write_start_bit = (self.drives[idx].rotation_bit % 16) as u8;
+            }
             let word = read_chip_word(chip_ram, self.dskpt);
             dma.write_words.push(word);
             self.advance_dskpt();
@@ -1761,6 +1849,12 @@ impl FloppyController {
             write_words: Vec::new(),
             write_start_word,
             write_start_bit,
+            // An idle mechanism's rotation does not survive to the moment
+            // the write really starts (a media insert resets it), so the
+            // start position latched above is provisional until the first
+            // word is consumed.
+            write_start_pending: write
+                && (!self.drives[idx].has_media() || !self.drives[idx].motor_on),
         });
         if self.turbo() {
             self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
@@ -1826,6 +1920,10 @@ impl FloppyController {
         dma.track = new_track;
         dma.write_start_word = self.drives[drive_idx].rotation_bit / 16;
         dma.write_start_bit = (self.drives[drive_idx].rotation_bit % 16) as u8;
+        // Same provisional rule as arming: a re-latch against an idle
+        // mechanism is replaced when the first word is really consumed.
+        dma.write_start_pending =
+            !self.drives[drive_idx].has_media() || !self.drives[drive_idx].motor_on;
         self.dma = Some(dma);
     }
 
@@ -1895,6 +1993,8 @@ impl FloppyController {
         if write_words.is_empty() {
             return;
         }
+        let speculative = self.speculative;
+        let pending = &mut self.pending_host_flushes;
         let drive = &mut self.drives[drive_idx];
 
         // A bridged drive writes the MFM straight back to the real disk, laid
@@ -1982,11 +2082,26 @@ impl FloppyController {
         }
         let path = image.path.clone();
         let legacy_extended_adf = image.legacy_extended_adf;
+        // A write completed inside a speculative run-ahead frame updates the
+        // in-memory image (which the anchor restore rewinds) but must not
+        // reach the host file: the frame may be rewound and re-emulated with
+        // different input. Hold the write-through instead; it is replayed if
+        // an early burst break commits the frame, and dropped with this
+        // controller when the anchor snapshot is restored.
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
                 decode_non_empty_track_write(track, write_words).and_then(|sectors| {
                     apply_standard_adf_sectors(image_data, track, &sectors);
-                    write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                    if speculative {
+                        pending.push(PendingHostFlush::AdfSectors {
+                            path: path.clone(),
+                            track,
+                            sectors,
+                        });
+                        Ok(())
+                    } else {
+                        write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                    }
                 })
             }
             FloppyImageData::Tracks(tracks) => apply_extended_adf_write(
@@ -1999,7 +2114,20 @@ impl FloppyController {
                 lose_tail_bits,
             )
             .and_then(|encoded| {
-                std::fs::write(&path, encoded).context("writing extended ADF image")
+                if speculative {
+                    // The encode is the whole file, so only the newest one
+                    // per path matters.
+                    pending.retain(|flush| {
+                        !matches!(flush, PendingHostFlush::WholeFile { path: p, .. } if *p == path)
+                    });
+                    pending.push(PendingHostFlush::WholeFile {
+                        path: path.clone(),
+                        bytes: encoded,
+                    });
+                    Ok(())
+                } else {
+                    std::fs::write(&path, encoded).context("writing extended ADF image")
+                }
             }),
         };
         match write_result {
@@ -3658,6 +3786,12 @@ struct DiskDma {
     write_words: Vec<u16>,
     write_start_word: usize,
     write_start_bit: u8,
+    /// A write armed against an idle mechanism (no media, or motor off)
+    /// latched a rotational start position that means nothing: the platter
+    /// position resets when a disk arrives. Re-latch from the live rotation
+    /// when the mechanism first delivers a word, which is where the head
+    /// really is when cells start going down.
+    write_start_pending: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -421,10 +421,13 @@ Shown only when something is on the port.
   frame boundary is unchanged. Level **1 frame** works for nearly all
   software; higher levels need proportionally more host CPU (watch the
   performance overlay) and eventually skip the guest's own animation frames,
-  which looks like rubber-banding. It is ignored while warp, RTG display, or
-  rewind/reverse history is active; the start-up value is
-  `[emulation] run_ahead_frames` or `--run-ahead` (see
-  [Configuration](configuration.md)).
+  which looks like rubber-banding. It stays off while warp, RTG display,
+  rewind/reverse history, a recording or capture, a control client, armed
+  debugger stops, or a host-coupled device (network/WASM/MHI boards, host
+  directory volumes, CHD CDs, physical disks, real drives) is active --
+  selecting a level that cannot engage says why on screen. The start-up
+  value is `[emulation] run_ahead_frames` or `--run-ahead` (see
+  [Configuration](configuration.md), which lists every condition).
 
 ### Warp Settings
 

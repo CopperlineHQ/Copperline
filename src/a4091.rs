@@ -280,6 +280,40 @@ impl A4091 {
         Ok(())
     }
 
+    /// Visit every hard-drive image on this board's bus (run-ahead
+    /// speculative write control; see `Bus::for_each_hard_drive_image`).
+    pub(crate) fn for_each_hard_drive_image(
+        &mut self,
+        f: &mut dyn FnMut(&mut crate::harddrive::HardDriveImage),
+    ) {
+        for target in self.targets.iter_mut().flatten() {
+            if let Some(image) = target.hard_drive_image_mut() {
+                f(image);
+            }
+        }
+    }
+
+    /// Whether any hard-drive image on this board's bus satisfies `f`.
+    pub(crate) fn any_hard_drive_image(
+        &self,
+        f: &mut dyn FnMut(&crate::harddrive::HardDriveImage) -> bool,
+    ) -> bool {
+        self.targets
+            .iter()
+            .flatten()
+            .any(|target| target.hard_drive_image().is_some_and(&mut *f))
+    }
+
+    /// Whether any CD-ROM target on this board's bus holds a CHD-backed
+    /// disc (a run-ahead gate; see `ScsiCdRom::disc_is_chd`).
+    pub(crate) fn any_chd_disc(&self) -> bool {
+        self.targets.iter().flatten().any(|target| {
+            target
+                .cd_ref()
+                .is_some_and(crate::scsi::ScsiCdRom::disc_is_chd)
+        })
+    }
+
     /// The lowest-ID CD-ROM drive on the board's bus, when one is attached.
     pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)

@@ -507,6 +507,13 @@ impl Akiko {
     /// Mount a CD image. The TOC is built once here. When the controller
     /// is already running (runtime disc swap, not boot-time mount), the
     /// drive volunteers a media-status packet so the OS sees the change.
+    /// Whether the mounted disc (or one pending insertion) is a CHD image,
+    /// whose per-restore reopen cost keeps run-ahead from engaging.
+    pub fn disc_is_chd(&self) -> bool {
+        self.disc.as_ref().is_some_and(CdImage::is_chd)
+            || self.pending_disc.as_ref().is_some_and(CdImage::is_chd)
+    }
+
     pub fn insert_disc(&mut self, disc: CdImage) {
         self.toc = build_toc(&disc);
         self.disc = Some(disc);
