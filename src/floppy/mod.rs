@@ -1713,19 +1713,25 @@ impl FloppyController {
         // instant, dataless completion -- trackloaders (Gods, Shadow of the
         // Beast disk 2) issue the read within the spin-up window and poll the
         // buffer for arriving data, dead-spinning if it never fills.
-        // TODO: media-less and motor-off drives should also arm and idle
-        // (real Paula would wait for sync forever); they keep the instant
-        // completion until the software relying on it is characterized.
+        //
+        // The same honesty covers a drive with no media or a stopped
+        // platter: the transfer arms and then idles, because no cells pass
+        // under the head for the shifter to drain. Real Paula waits for
+        // sync forever in that state; the guest's own timeout governs, and
+        // a media insert or motor start mid-transfer brings the transfer to
+        // life exactly as on hardware. (The read and write tick paths idle
+        // while `!motor_on || cached.is_empty()`, and the turbo burst
+        // refuses drives that are not ready, so nothing completes early.)
         if !self.drives[idx].has_media() || !self.drives[idx].motor_on {
             if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
                 log::info!(
-                    "disk-dma refused: df{idx} media={} motor_on={} motor_cck={}",
+                    "disk-dma armed against an idle mechanism: df{idx} media={} motor_on={} \
+                     motor_cck={} (transfer will pend until the mechanism delivers)",
                     self.drives[idx].has_media(),
                     self.drives[idx].motor_on,
                     self.drives[idx].motor_cck,
                 );
             }
-            return self.no_drive_completion();
         }
 
         let track = self.track_for_drive(idx);
