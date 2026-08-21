@@ -59,47 +59,42 @@ Everything the mouse can reach in the launcher, the menu, the status bar
 and the overlay panels can be reached with the arrow keys or a
 controller.
 
-The arrows move the focus, which lights the control it stands on in blue
-and breathes while it is there. Return (or the pad's fire button) works
-whatever is lit; the pad's second button steps back out, closing a
-setting, then the surface. Left and right move along the row the focus is
-on, up and down to the nearest control above or below; at the edge of a
-surface the focus stays where it is.
+The arrows move the focus, which lights the control it is on. Return (or
+the pad's fire button) works it; `Esc` (or the pad's second button) steps
+back out -- out of an open setting, then the page, then the surface.
+Left and right move along the row, up and down to the row above or below;
+at the edge of a surface the focus stays where it is. Controls that
+cannot be pressed are skipped.
 
-| Control | Focus | Return / fire |
-|---|---|---|
-| Buttons, tabs, the close gadget | Lights blue | Presses it |
-| Tick boxes and cover art | Green edge | Ticks it |
-| Text boxes | Light blue | Opens it for typing, with the caret |
-| `< value >` settings | Lights both arrows, value stays green | Opens it: the value turns white and left/right change it. Return again closes it |
-| Volume slider | Lights the knob | Opens it: left and right move it |
+| Control | Return / fire |
+|---|---|
+| Buttons, tabs, the close gadget | Presses it |
+| Tick boxes and cover art | Ticks it |
+| Text boxes | Opens it for typing |
+| `< value >` settings | Opens it; left and right change the value, Return closes it |
+| Volume slider | Opens it; left and right move it |
 
 Lists -- the games, the favourites, the host's disks -- are walked with
-up and down, which move the list's own selection and scroll it. Left
-leaves a list, right steps across to the tick beside a row and then on
-out of the list. Buttons that cannot be pressed are skipped.
+up and down, which move the list's own selection and scroll it. Right
+steps to the tick beside a row and then out of the list; left leaves it.
 
 Stepping down off the foot of a surface reaches the status bar, and up
-returns. Stepping left out of a settings page returns to the category
-button that opened it, and stepping right from one opens its page.
-Walking off the bottom of the menu closes it and leaves the focus on the
-menu button. Escape (or the second button) backs out: out of an open
-setting, then out of the page, then out of the surface.
+returns. Left out of a settings page returns to the category button that
+opened it, and right opens that button's page. Walking off the bottom of
+the menu closes it and leaves the focus on the menu button.
 
-Clicking anything puts the focus out and leaves it where the pointer
+Clicking anything puts the focus away and leaves it where the pointer
 pressed, so going back to the keyboard resumes from there. While the
-focus is showing, the pointer highlights nothing; moving the mouse puts
-the focus away again.
+focus is shown the pointer highlights nothing; moving the mouse puts it
+away again.
 
 A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
 machine.
 
-The debugger, frame analyzer and console windows are deliberately not
-walked -- they are worked with the keyboard and mouse -- but `Esc`
-closes the focused one, and the pad's second button (or its Menu
-button) closes the top one, so a window opened from the menu can be put
-away again the same way.
+The debugger, frame analyzer and console windows are not navigated this
+way, but `Esc` closes the focused one and the pad's second button closes
+the top one.
 
 ## Status bar
 
@@ -989,19 +984,14 @@ buttons, on either port. An `analogue` device presents pot resistances on
 the POTxX/POTxY pins; no live host device maps to it yet -- drive it with
 `--pot-after` scripting or the control protocol's `input.analogue`.
 
-A `gamepad-mouse` device is the same quadrature mouse the machine always
-sees, moved by a gamepad as well as by the host's own mouse -- one mouse
-with two hands on it, not two mice. The pad's d-pad moves the pointer,
-gathering speed while a direction is held; its left stick moves it
-proportionally where the pad has one, so a slight deflection creeps and a
-full one crosses the screen. Fire is the left button and the second
-button is the right, and the
-[mouse sensitivity](configuration.md#mouse-sensitivity) setting scales it
-along with the host mouse. It is offered on port 1 alone, which is where
-a mouse belongs. While it is chosen that pad drives no joystick port --
-one pad cannot be both -- and whichever port it would have driven falls
-to the keyboard until the device is changed back; the joystick input mode
-itself is untouched, so switching away restores it.
+A `gamepad-mouse` device is a mouse a gamepad moves as well as the host's
+own; the machine still sees one mouse. The d-pad moves the pointer,
+gathering speed while a direction is held, and the left stick moves it
+proportionally where the pad has one. Fire is the left button, the second
+button the right, and `mouse_sensitivity` scales both hands alike. It is
+offered on port 1 only. While it is chosen the pad drives no joystick
+port -- whichever port it would have driven falls to the keyboard until
+the device is changed back.
 
 Copperline can also emulate the joystick from the host keyboard. There are
 two explicit input modes, and the active one is always shown by the gamepad
@@ -1082,11 +1072,10 @@ live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
 the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, and an optional **Quit Copperline** hotkey. Push
-the control to bind it -- the binding is taken when it comes back up, so
-a control already down when a step begins cannot bleed into it -- or
-hold any control for about a second to skip a step the pad has no
-control for. The four directions and fire cannot be skipped.
+**Open menu** button, and an optional **Quit Copperline** hotkey. Push a
+control to bind it, or hold any control for about a second to skip a step
+the pad has no control for; the four directions and fire cannot be
+skipped.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can
@@ -1101,19 +1090,16 @@ calibration can arm one.
 
 The Menu button is the other host-side control: a press opens the pop-up
 menu (or closes an open overlay panel), and from there the pad walks
-whatever is up -- the menu, the status bar, the machine configuration
-and the panels beyond it. Its directions, fire and second button mean
-what the arrow keys, `Return` and `Esc` mean, so the walk is the one
-described under Keyboard and controller navigation above. While the menu
-or a panel is open, the pad stops driving the emulated port, just as the
-keyboard does. On the default database layout Select/Back and the guide
-button carry it; a calibration can put it anywhere (or skip it).
+whatever is up, as described under
+[Keyboard and controller navigation](#keyboard-and-controller-navigation)
+above. While the menu or a panel is open the pad stops driving the
+emulated port, just as the keyboard does. On the default database layout
+Select/Back and the guide button carry it; a calibration can put it
+anywhere (or skip it).
 
-Once every step is captured the bindings can be tested by pushing them,
-and holding any one of them hands the panel's own Save and Cancel
-buttons to the pad, which then walks them with the very controls it has
-just been taught. Without that, finishing a calibration needs the
-mouse.
+Once every step is captured, pushing a control tests its binding and
+holding one hands the panel's Save and Cancel buttons to the pad, so a
+calibration can be finished without the mouse.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;

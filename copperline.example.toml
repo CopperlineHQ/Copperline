@@ -671,11 +671,9 @@ floppy_sounds_volume = 100
 # device, as on a real Amiga:
 #   "mouse"    quadrature mouse (three buttons)
 #   "gamepad-mouse"
-#              the same mouse, moved by a gamepad as well as by the host's
-#              own: the pad's d-pad and left stick move the pointer and its
-#              two buttons click. Port 1 only, and while it is chosen that
-#              pad drives no joystick port -- whichever port it would have
-#              driven falls to the keyboard until the port is changed back
+#              a mouse a gamepad moves as well as the host's own (d-pad and
+#              left stick move the pointer, its two buttons click). Port 1
+#              only; while it is chosen the pad drives no joystick port
 #   "joystick" digital switch joystick (fire + second button)
 #   "cd32"     CD32 joypad (adds the serial button protocol)
 #   "analogue" analogue paddles / proportional stick on the POT pins,
