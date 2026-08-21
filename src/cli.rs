@@ -689,6 +689,15 @@ where
                         .map_err(|_| anyhow!("--autofire rate must be a whole number of Hz"))?,
                 );
             }
+            "--run-ahead" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--run-ahead requires a frame count (0 = off)"))?;
+                overrides.run_ahead_frames =
+                    Some(value.parse::<u8>().map_err(|_| {
+                        anyhow!("--run-ahead must be a whole number of frames (0..4)")
+                    })?);
+            }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
                     anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty)")
@@ -1343,6 +1352,8 @@ fn print_help() {
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
          --autofire HZ                  pulse a held fire button at HZ (0 = off, the default)\n  \
+         --run-ahead FRAMES             run-ahead input-latency reduction, 0..4 frames\n  \
+         \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \

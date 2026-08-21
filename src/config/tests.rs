@@ -4777,3 +4777,17 @@ fn toml_path(path: &Path) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
 }
+
+#[test]
+fn emulation_run_ahead_frames_parses_and_rejects_out_of_range() -> Result<()> {
+    assert_eq!(parse_config("")?.emulation.run_ahead_frames, 0);
+    let cfg = parse_config(
+        r#"
+            [emulation]
+            run_ahead_frames = 2
+            "#,
+    )?;
+    assert_eq!(cfg.emulation.run_ahead_frames, 2);
+    assert!(parse_config("[emulation]\nrun_ahead_frames = 5").is_err());
+    Ok(())
+}

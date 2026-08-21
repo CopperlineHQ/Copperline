@@ -65,6 +65,11 @@ pub struct Emulator {
     /// (headless screenshot/frame-dump runs). The emulated result is
     /// identical either way.
     paced: bool,
+    /// Run-ahead burst phase (see `set_runahead_phase`): while set, the
+    /// per-frame pacing sleep inside `step_real` is suppressed and Paula's
+    /// live audio output is discarded, because the frames being retired are
+    /// speculative and will be re-emulated on a later iteration.
+    runahead_phase: bool,
     cpu_cycles_per_instruction: f64,
     real_pacing_budget_mode: RealPacingBudgetMode,
     /// Fast batch/trace-JIT CPU execution (`[cpu] jit`). The run loop then
@@ -448,6 +453,7 @@ impl Emulator {
             machine,
             stats: EmuStats::default(),
             paced,
+            runahead_phase: false,
             cpu_cycles_per_instruction,
             real_pacing_budget_mode,
             cpu_jit: false,
@@ -806,6 +812,58 @@ impl Emulator {
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
         Ok(())
+    }
+
+    /// Enter or leave the run-ahead burst phase. While in the phase, the
+    /// per-frame pacing sleep inside `step_real` is suppressed; the caller
+    /// paces once per burst against the anchor frame's end time instead
+    /// (`pace_runahead_burst`). Live-audio discarding for speculative
+    /// frames is the caller's concern (`Bus::set_live_audio_discard`), so
+    /// the final frame of a burst can stay audible.
+    pub fn set_runahead_phase(&mut self, on: bool) {
+        self.runahead_phase = on;
+    }
+
+    pub fn runahead_phase(&self) -> bool {
+        self.runahead_phase
+    }
+
+    /// Serialize the machine at a run-ahead anchor boundary. Same-process
+    /// bincode like the reverse-debug ring (no framing), taken at a frame
+    /// boundary where `M68kMachine::write_state` is consistent.
+    pub fn runahead_snapshot(&self) -> Result<Vec<u8>> {
+        self.snapshot_blob()
+    }
+
+    /// Restore an anchor snapshot produced by [`Self::runahead_snapshot`].
+    /// Unlike [`Self::restore_blob`] this deliberately does NOT reset the
+    /// live audio stream or re-anchor real-time pacing: the audible
+    /// timeline continues uninterrupted across the rewind, and the pacing
+    /// coordinate keeps marching forward while emulated time oscillates
+    /// within the burst. Host-side Paula settings survive as usual.
+    pub fn runahead_restore(&mut self, blob: &[u8]) -> Result<()> {
+        let mono = self.bus_mut().paula.mono_output();
+        let separation = self.bus_mut().paula.stereo_separation();
+        let filter = self.bus_mut().paula.led_filter_mode();
+        let mut cursor = std::io::Cursor::new(blob);
+        self.machine.apply_state(&mut cursor)?;
+        self.bus_mut().paula.set_mono_output(mono);
+        self.bus_mut().paula.set_stereo_separation(separation);
+        self.bus_mut().paula.set_led_filter_mode(filter);
+        self.reset_realtime_quantum();
+        Ok(())
+    }
+
+    /// Pace a completed run-ahead burst. `anchor_end_seconds` is the
+    /// emulated time at the end of the iteration's anchor (first) frame:
+    /// presented frames advance one per iteration, so wall-clock budget per
+    /// iteration is one frame period even though the burst retired more.
+    /// No-op when unpaced (warp/headless).
+    pub fn pace_runahead_burst(&mut self, anchor_end_seconds: f64) {
+        if !self.paced {
+            return;
+        }
+        self.pace_to_emulated_target(anchor_end_seconds);
     }
 
     /// Capture a snapshot into the ring if one is due at the current frame.
@@ -1619,8 +1677,10 @@ impl Emulator {
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
         // Pace presentation to wall-clock only for the interactive window;
-        // headless runs advance the deterministic core unthrottled.
-        let slept = if self.paced {
+        // headless runs advance the deterministic core unthrottled. During a
+        // run-ahead burst the sleep is deferred to the burst's anchor target
+        // (`pace_runahead_burst`), so speculative frames retire unpaced.
+        let slept = if self.paced && !self.runahead_phase {
             self.sleep_until_realtime_device_time()
         } else {
             Duration::ZERO
@@ -1802,17 +1862,21 @@ impl Emulator {
     /// Returns the host time actually slept, so the caller can subtract it
     /// from the frame's busy-time accounting.
     fn sleep_until_realtime_device_time(&mut self) -> Duration {
+        let emulated_now = self.bus().emulated_seconds();
+        self.pace_to_emulated_target(emulated_now)
+    }
+
+    /// Sleep until wall-clock reaches `emulated_now` minus the live-audio
+    /// lead. Shared by the per-frame pacer and the run-ahead burst pacer
+    /// (which passes an anchor-frame target instead of the current time).
+    fn pace_to_emulated_target(&mut self, emulated_now: f64) -> Duration {
         let Some(started_at) = self.stats.started_at else {
             return Duration::ZERO;
         };
         let mut slept = Duration::ZERO;
         let now = Instant::now();
         let live_audio_lead_seconds = self.bus().live_audio_output_lead_seconds();
-        let target = realtime_device_time_target(
-            started_at,
-            self.bus().emulated_seconds(),
-            live_audio_lead_seconds,
-        );
+        let target = realtime_device_time_target(started_at, emulated_now, live_audio_lead_seconds);
         if let Some(wait) = target.and_then(|target| target.checked_duration_since(now)) {
             let sleep_started = Instant::now();
             std::thread::sleep(wait);
@@ -4131,5 +4195,86 @@ mod tests {
 
         assert_eq!(*resets.borrow(), 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    struct RunaheadProbe {
+        discard: std::cell::Cell<bool>,
+        dropped: std::cell::Cell<u64>,
+        pushed: std::cell::Cell<u64>,
+    }
+
+    impl Default for RunaheadProbe {
+        fn default() -> Self {
+            Self {
+                discard: std::cell::Cell::new(false),
+                dropped: std::cell::Cell::new(0),
+                pushed: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    /// Test sink that mirrors the live CpalSink contract: frames pushed
+    /// while discard is set never reach the queue.
+    struct RunaheadProbeSink(std::rc::Rc<RunaheadProbe>);
+
+    impl crate::audio::AudioSink for RunaheadProbeSink {
+        fn push(&mut self, _left: f32, _right: f32) {
+            self.0.pushed.set(self.0.pushed.get() + 1);
+            if self.0.discard.get() {
+                self.0.dropped.set(self.0.dropped.get() + 1);
+            }
+        }
+        fn flush(&mut self) {}
+        fn set_live_output_discard(&mut self, on: bool) {
+            self.0.discard.set(on);
+        }
+    }
+
+    #[test]
+    fn runahead_restore_rewinds_machine_state_and_keeps_positions_monotonic() {
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(std::rc::Rc::new(
+            RunaheadProbe::default(),
+        ))));
+        emu.step_frame().unwrap();
+        let retired_at_anchor = emu.retired_instructions;
+        let blob = emu.runahead_snapshot().unwrap();
+
+        // Advance past the anchor and leave a marker in chip RAM.
+        emu.step_frame().unwrap();
+        assert!(emu.retired_instructions > retired_at_anchor);
+        emu.bus_mut().mem.chip_ram[0x2000] = 0xAB;
+
+        emu.runahead_restore(&blob).unwrap();
+        assert_eq!(
+            emu.bus().mem.chip_ram[0x2000],
+            0,
+            "writes after the anchor are rolled back by the restore"
+        );
+        assert!(
+            emu.retired_instructions >= retired_at_anchor,
+            "the position coordinate stays monotonic across an anchor restore"
+        );
+    }
+
+    #[test]
+    fn runahead_audio_discard_reaches_the_sink_and_releases_cleanly() {
+        let probe = std::rc::Rc::new(RunaheadProbe::default());
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(probe.clone())));
+        emu.bus_mut().set_live_audio_discard(true);
+        emu.step_frame().unwrap();
+        let dropped_while_on = probe.dropped.get();
+        assert!(
+            dropped_while_on > 0,
+            "Paula output during the discard window never reaches the queue"
+        );
+        emu.bus_mut().set_live_audio_discard(false);
+        let pushed_before = probe.pushed.get();
+        emu.step_frame().unwrap();
+        assert!(probe.pushed.get() > pushed_before, "output flows again");
+        assert_eq!(
+            probe.dropped.get(),
+            dropped_while_on,
+            "turning discard off releases the live stream"
+        );
     }
 }

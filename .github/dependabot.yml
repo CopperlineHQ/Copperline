@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # The root workspace (the emulator, the ctl binary, the m68k fork).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # The browser frontend has its own lockfile.
+  - package-ecosystem: cargo
+    directory: /crates/copperline-web
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # The fuzz harnesses are a standalone workspace with their own lockfile.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # GitHub Actions versions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

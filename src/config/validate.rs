@@ -129,6 +129,18 @@ impl TryFrom<RawConfig> for Config {
                 Some(0) => bail!("[emulation] rewind_interval_frames must be at least 1"),
                 Some(n) => n,
             },
+            run_ahead_frames: match raw.emulation.run_ahead_frames {
+                None => defaults.emulation.run_ahead_frames,
+                Some(n) => {
+                    if n > crate::config::RUN_AHEAD_MAX_FRAMES {
+                        bail!(
+                            "[emulation] run_ahead_frames must be 0..={}",
+                            crate::config::RUN_AHEAD_MAX_FRAMES
+                        );
+                    }
+                    n
+                }
+            },
         };
         let chip_ram_bytes = match raw.memory.chip.as_deref() {
             None => defaults.chip_ram_bytes,

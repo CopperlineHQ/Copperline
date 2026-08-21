@@ -73,6 +73,13 @@ pub trait AudioSink {
     /// Suspend only the host live-output stream while emulation is
     /// intentionally not producing samples. Offline sinks can ignore this.
     fn set_live_output_suspended(&mut self, _suspended: bool) {}
+    /// Drop live-output frames instead of queueing them while set. Run-ahead
+    /// bursts use this for speculative skipped frames: their guest times are
+    /// re-emulated on a later iteration, so the audio never existed on the
+    /// audible timeline and must not reach the speakers. Offline sinks
+    /// (WAV capture, stems) ignore this; run-ahead switches itself off while
+    /// an offline capture is attached so nothing speculative reaches them.
+    fn set_live_output_discard(&mut self, _on: bool) {}
     /// Discard host-side live-output frames that belong to an abandoned
     /// emulated timeline. The emulated Paula/CD/floppy audio state is not
     /// touched; only queued cpal presentation samples are reset.
@@ -88,6 +95,12 @@ pub trait AudioSink {
     /// sink; loading a state over that machine detects it here so the restored
     /// machine can be given a real host output instead of staying silent.
     fn is_null_sink(&self) -> bool {
+        false
+    }
+    /// True for sinks that record to a host file rather than playing live
+    /// (the WAV capture). Presentation policies that re-emit guest time use
+    /// this to keep speculative frames out of offline recordings.
+    fn is_offline_sink(&self) -> bool {
         false
     }
     /// True once the live output device has gone away (e.g. unplugged) and the
@@ -139,6 +152,7 @@ pub struct CpalSink {
     underruns: Arc<AtomicU64>,
     total_underruns: Arc<AtomicU64>,
     live_output_suspended: Arc<AtomicBool>,
+    live_output_discard: Arc<AtomicBool>,
     // Set by the stream error callback when the output device disappears
     // (unplugged); polled by the host so it can rebuild on the default device.
     device_lost: Arc<AtomicBool>,
@@ -462,6 +476,7 @@ impl CpalSink {
         let device_lost_for_cb = Arc::clone(&device_lost);
         let live_output_suspended = Arc::new(AtomicBool::new(false));
         let live_output_suspended_for_cb = Arc::clone(&live_output_suspended);
+        let live_output_discard = Arc::new(AtomicBool::new(false));
         let profile_enabled = audio_profile_enabled();
         let profile_callbacks = Arc::new(AtomicU64::new(0));
         let profile_callbacks_for_cb = Arc::clone(&profile_callbacks);
@@ -569,6 +584,7 @@ impl CpalSink {
             underruns,
             total_underruns,
             live_output_suspended,
+            live_output_discard,
             profile_callbacks,
             profile_callback_frames,
             profile_callback_device_cck,
@@ -687,6 +703,9 @@ fn pop_live_audio_frame(
 impl AudioSink for CpalSink {
     fn push(&mut self, left: f32, right: f32) {
         self.generated_frames = self.generated_frames.saturating_add(1);
+        if self.live_output_discard.load(Ordering::Relaxed) {
+            return;
+        }
         if !self.playback_started.load(Ordering::Relaxed)
             && self.producer.is_empty()
             && !sample_is_audible(left, right)
@@ -768,6 +787,10 @@ impl AudioSink for CpalSink {
         self.dropped_old_frames.store(0, Ordering::Relaxed);
         self.overruns = 0;
         self.last_log = Instant::now();
+    }
+
+    fn set_live_output_discard(&mut self, on: bool) {
+        self.live_output_discard.store(on, Ordering::Relaxed);
     }
 
     fn reset_live_output_after_timeline_jump(&mut self) {
@@ -868,6 +891,10 @@ impl AudioSink for WavSink {
 
     fn flush(&mut self) {
         let _ = self.writer.flush();
+    }
+
+    fn is_offline_sink(&self) -> bool {
+        true
     }
 }
 

@@ -333,6 +333,13 @@ The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
 
+Disk DMA against a mechanism that cannot deliver cells -- no media in the
+drive, or the motor line off -- arms normally and then pends: Paula has no
+readiness interlock and waits for data forever, so the guest's own timeout
+governs. A media insert or motor start mid-transfer brings the pending
+transfer to life exactly as on hardware; nothing completes early (the
+turbo burst also refuses drives that are not ready).
+
 ## Known AGA/ECS gaps and non-goals
 
 Most ECS and AGA behaviour is implemented (the register notes above and
@@ -341,9 +348,6 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- **Live (beam-timed) collisions** stay on the 6-plane decode: CLXCON2 is
-  interpreted in the rendered collision path but not yet in the beam-timed
-  `COLLISIONS_AGA_DECODE` path.
 - **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
   sprite resolution, but the compositor does not place sprites on the SHRES
   pixel grid.

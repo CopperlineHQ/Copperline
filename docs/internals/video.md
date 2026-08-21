@@ -420,6 +420,19 @@ capture paths call `finish_render_for_current_frame` so screenshots, frame
 dumps, recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
 
+Run-ahead (`[emulation] run_ahead_frames`) sits on top of this pipeline as a
+presentation policy only. Each display refresh retires `1 + n` frames with
+the per-frame pacing sleep suppressed (one `pace_runahead_burst` sleep at the
+anchor frame's end time instead), snapshots the machine after the anchor
+frame, renders and presents only the last frame of the burst -- discarding
+the speculative frames' Paula output via `set_live_audio_discard` so the
+audible timeline stays continuous -- then restores the anchor snapshot. The
+restore deliberately skips the save-state-load audio reset and pacing
+re-anchor: emulated time oscillates within each burst while wall-clock
+pacing marches forward one frame period per iteration. The state at any
+frame boundary is byte-identical with run-ahead off; warp, RTG scanout,
+armed reverse history, and headless capture all bypass it.
+
 Progressive frames have two exact reuse checks. First, two consecutive
 renders with identical lightweight inputs arm a pre-render key containing
 every captured bitplane row, sprite line/latch, register/event stream,

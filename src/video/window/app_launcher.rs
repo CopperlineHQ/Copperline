@@ -1382,6 +1382,10 @@ impl App {
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
         self.mouse_capture = cfg.mouse_capture;
         self.autofire_hz = cfg.autofire_hz;
+        self.run_ahead_frames = cfg
+            .emulation
+            .run_ahead_frames
+            .min(crate::config::RUN_AHEAD_MAX_FRAMES);
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
         self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;

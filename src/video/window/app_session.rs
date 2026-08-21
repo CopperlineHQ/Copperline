@@ -139,6 +139,45 @@ impl App {
         }
     }
 
+    /// The run-ahead level in effect for this burst, or 0 when the feature
+    /// is off or unavailable. Run-ahead needs real-time pacing (it paces one
+    /// wall-clock frame per presented frame), a live chipset display (RTG
+    /// scanout does not flow through the render snapshot), and no armed
+    /// reverse history (the constant anchor rewinds would fight the
+    /// snapshot ring's monotonic frame coordinate). It also stays off while
+    /// anything makes the speculative frames host-visible or irreversible:
+    /// an offline audio capture would record guest time twice, a video
+    /// recording drains frames per iteration, and an active serial/MIDI
+    /// sink can emit speculative bytes that the replayed timeline then
+    /// emits again.
+    pub(super) fn runahead_effective_frames(&self) -> u8 {
+        if self.run_ahead_frames == 0
+            || !self.powered_on
+            || self.cpu_halted
+            || self.paused
+            || self.emu.time_travel_enabled()
+            || self.rtg_present_dims.is_some()
+            || self.recorder.is_some()
+            || self.serial_is_midi
+            || self.emu.bus().paula.audio.offline_capture_active()
+            || !self.serial_output_quiet()
+        {
+            return 0;
+        }
+        self.run_ahead_frames
+    }
+
+    /// Whether the serial port's sink discards everything written to it
+    /// (`[serial] mode = "off"`). Any other mode sends guest bytes to a
+    /// host destination, which a run-ahead burst can visit twice.
+    fn serial_output_quiet(&self) -> bool {
+        self.machine_config
+            .serial
+            .mode
+            .as_deref()
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("off"))
+    }
+
     /// How many emulated frames to retire before presenting the next frame, and
     /// an optional wall-clock budget that bounds that burst. Warp's output frame
     /// skip applies only while warp is engaged and not doing headless capture;

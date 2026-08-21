@@ -218,12 +218,24 @@ impl AudioMux {
         self.master.set_live_output_suspended(suspended);
     }
 
+    pub fn set_live_output_discard(&mut self, on: bool) {
+        self.master.set_live_output_discard(on);
+    }
+
     pub fn reset_live_output_after_timeline_jump(&mut self) {
         self.master.reset_live_output_after_timeline_jump();
     }
 
     pub fn is_null_sink(&self) -> bool {
         self.master.is_null_sink()
+    }
+
+    /// Whether any file-backed capture path is attached (stem writers, or a
+    /// master sink that records to disk). Presentation policies that rewind
+    /// the machine need to know: speculative frames must not reach an
+    /// offline recording twice.
+    pub fn offline_capture_active(&self) -> bool {
+        self.stems.is_some() || self.master.is_offline_sink()
     }
 
     pub fn device_lost(&self) -> bool {

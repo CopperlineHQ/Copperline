@@ -89,6 +89,17 @@ pacing_budget = "cycles"
 # rewind_budget_mb = 256
 # rewind_interval_frames = 25
 
+# Run-ahead input-latency reduction: each display refresh retires
+# (1 + run_ahead_frames) emulated frames, presents the last, then rewinds to
+# the anchor boundary, so input lands up to run_ahead_frames frames earlier
+# relative to the screen. Machine behaviour at any frame boundary is
+# unchanged. Costs a whole-machine snapshot per refresh and needs
+# (run_ahead_frames + 1)x realtime from the host inside one frame period; 1
+# works nearly everywhere. Ignored during warp, with RTG display, while
+# rewind/reverse history is armed, and in headless runs. 0..4; adjust live
+# from Emulation Settings > Run Ahead.
+# run_ahead_frames = 0
+
 
 [cpu]
 

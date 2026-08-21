@@ -1292,6 +1292,10 @@ pub struct App {
     /// host input policy, not machine state: it gates a *held* fire button
     /// into a pulse train, so nothing changes unless the user holds fire.
     autofire_hz: u8,
+    /// Run-ahead frames for input-latency reduction, 0 = off (see
+    /// `[emulation] run_ahead_frames`). A presentation policy: the machine
+    /// state at any frame boundary is identical with it on or off.
+    run_ahead_frames: u8,
     /// Pop-up menu and main-window overlay state. Debugger and frame
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
@@ -1877,6 +1881,11 @@ impl App {
             .autofire_hz
             .unwrap_or(0)
             .min(crate::config::AUTOFIRE_MAX_HZ);
+        let run_ahead_frames = machine_config
+            .emulation
+            .run_ahead_frames
+            .unwrap_or(0)
+            .min(crate::config::RUN_AHEAD_MAX_FRAMES);
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -2035,6 +2044,7 @@ impl App {
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
+            run_ahead_frames,
             ui: UiState::default(),
             menu_hover_arm: None,
             about_opened_at: Instant::now(),
@@ -4493,6 +4503,10 @@ impl ApplicationHandler for App {
         // Run one scheduler quantum. Rebuild the host framebuffer only
         // when Agnus has crossed into a new frame; the expensive renderer
         // reconstructs a completed hardware frame, not an instruction slice.
+        // Set when a run-ahead burst already presented its final frame this
+        // pass (before the anchor rewind), so the generic render below must
+        // not run again against the rewound bus.
+        let mut runahead_presented = false;
         if running {
             // If the live output device vanished (unplugged), reopen on the
             // current default so sound continues.
@@ -4506,41 +4520,115 @@ impl ApplicationHandler for App {
             // CPU permitting. Real-time pacing and headless capture stay at one
             // frame per loop.
             let (frame_cap, time_budget) = self.warp_burst_plan(headless_capture);
+            // Run-ahead retires one extra speculative frame per configured
+            // level on top of the presented frame: input sampled this pass
+            // lands up to that many frames earlier relative to what is on
+            // screen. Only the last frame of the iteration is presented and
+            // audible; the anchor snapshot rewinds the machine afterwards,
+            // so the state at any frame boundary is unchanged.
+            let runahead = if frame_cap == 1 && time_budget.is_none() {
+                self.runahead_effective_frames()
+            } else {
+                0
+            };
+            let total_frames = 1 + usize::from(runahead);
             let burst_start = Instant::now();
             let mut frames_done = 0usize;
+            let mut anchor_end_seconds: Option<f64> = None;
+            let mut anchor_snapshot: Option<Vec<u8>> = None;
+            let mut burst_complete = true;
+            self.emu.set_runahead_phase(runahead > 0);
             loop {
+                // Speculative frames have their Paula output discarded; the
+                // final frame of the iteration is presented and audible.
+                if runahead > 0 {
+                    self.emu
+                        .bus_mut()
+                        .set_live_audio_discard(frames_done + 1 < total_frames);
+                }
                 if let Err(e) = self.emu.step_frame() {
                     error!("emulator step halted: {e:?}");
                     self.cpu_halted = true;
                     self.sync_live_audio_suspension();
+                    burst_complete = false;
                     break;
                 }
                 #[cfg(feature = "control")]
                 self.control_emit_events();
                 frames_done += 1;
+                if runahead > 0 && frames_done == 1 {
+                    anchor_end_seconds = Some(self.emu.bus().emulated_seconds());
+                    match self.emu.runahead_snapshot() {
+                        Ok(blob) => anchor_snapshot = Some(blob),
+                        Err(e) => {
+                            // Without an anchor there is nothing to rewind
+                            // to, so continuing the burst would commit
+                            // speculative frames. Stop for this pass and
+                            // give up on run-ahead for the session: a
+                            // serialization failure here will not get
+                            // better on the next iteration.
+                            warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
+                            self.run_ahead_frames = 0;
+                            burst_complete = false;
+                            break;
+                        }
+                    }
+                }
                 // The warp-launch gate ends its warp the frame the guest
                 // loads the target program.
                 if self.poll_warp_launch() {
+                    burst_complete = false;
                     break;
                 }
                 // A breakpoint/watchpoint hit pauses the machine and brings
                 // the debugger window up with the reason; end the burst so the
                 // stop surfaces at the frame where it happened.
                 if self.surface_debug_stop() {
+                    burst_complete = false;
                     break;
                 }
                 // A remote run_until frame/cck target completes the
                 // pending resume and pauses at its boundary.
                 #[cfg(feature = "control")]
                 if self.control_run_target_reached() {
+                    burst_complete = false;
                     break;
                 }
-                if frames_done >= frame_cap {
+                if frames_done >= total_frames {
                     break;
                 }
                 if let Some(budget) = time_budget {
                     if burst_start.elapsed() >= budget {
+                        burst_complete = false;
                         break;
+                    }
+                }
+            }
+            self.emu.set_runahead_phase(false);
+            if runahead > 0 {
+                self.emu.bus_mut().set_live_audio_discard(false);
+                // Present the final speculative frame BEFORE rewinding: the
+                // render snapshots the live bus, so it must run at post-burst
+                // state or it would capture the anchor frame instead of the
+                // one this iteration is meant to show.
+                runahead_presented = self.render_emulated_frame_if_needed();
+                // One wall-clock frame period per presented frame even
+                // though the burst retired more: pace against the anchor
+                // frame's end, which advances one frame per iteration.
+                if let Some(anchor_end) = anchor_end_seconds {
+                    self.emu.pace_runahead_burst(anchor_end);
+                }
+                if burst_complete {
+                    if let Some(blob) = &anchor_snapshot {
+                        if let Err(e) = self.emu.runahead_restore(blob) {
+                            // The machine is now at the burst's final frame
+                            // rather than the anchor. That is a valid frame
+                            // boundary, but continuing would silently drift
+                            // from the promised timeline, so run-ahead is
+                            // done for this session.
+                            error!("run-ahead disabled: anchor restore failed: {e:?}");
+                            self.run_ahead_frames = 0;
+                        }
                     }
                 }
             }
@@ -4599,7 +4687,8 @@ impl ApplicationHandler for App {
         }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
-        let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
+        let mut rendered =
+            self.powered_on && (runahead_presented || self.render_emulated_frame_if_needed());
         if self.recorder.is_some() && self.powered_on {
             rendered |= self.finish_render_for_current_frame();
         }

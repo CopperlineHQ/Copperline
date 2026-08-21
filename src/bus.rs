@@ -4514,6 +4514,10 @@ impl Bus {
         self.paula.set_live_audio_suspended(suspended);
     }
 
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.paula.set_live_audio_discard(on);
+    }
+
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
         self.paula.reset_live_audio_after_timeline_jump();
     }
@@ -8002,6 +8006,7 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
             control.bplcon0,
             control.bplcon1,
             control.clxcon,
+            control.clxcon2,
             control.diwstrt,
             control.diwstop,
             control.diwhigh,
@@ -8634,6 +8639,7 @@ fn live_bitplane_collision_bits_in_range(
             control.bplcon0,
             control.bplcon1,
             control.clxcon,
+            control.clxcon2,
             control.diwstrt,
             control.diwstop,
             control.diwhigh,
@@ -8665,6 +8671,7 @@ struct LiveCollisionControl {
     bplcon1: u16,
     bplcon3: u16,
     clxcon: u16,
+    clxcon2: u16,
     diwstrt: u16,
     diwstop: u16,
     diwhigh: DiwHigh,
@@ -8679,6 +8686,7 @@ impl LiveCollisionControl {
         bplcon1: u16,
         bplcon3: u16,
         clxcon: u16,
+        clxcon2: u16,
         diwstrt: u16,
         diwstop: u16,
         diwhigh: DiwHigh,
@@ -8691,6 +8699,7 @@ impl LiveCollisionControl {
             bplcon1,
             bplcon3,
             clxcon,
+            clxcon2,
             diwstrt,
             diwstop,
             diwhigh,
@@ -8706,6 +8715,7 @@ impl LiveCollisionControl {
             bplcon1: snapshot.bplcon1,
             bplcon3: snapshot.bplcon3,
             clxcon: snapshot.clxcon,
+            clxcon2: snapshot.clxcon2,
             diwstrt: snapshot.diwstrt,
             diwstop: snapshot.diwstop,
             diwhigh: snapshot.diwhigh,
@@ -8719,10 +8729,19 @@ impl LiveCollisionControl {
             0x08E => self.diwstrt = value,
             0x090 => self.diwstop = value,
             0x092 => self.ddfstrt = value,
-            0x098 => self.clxcon = value,
+            // Lisa resets CLXCON2 on a CLXCON write; pre-AGA CLXCON2 is
+            // always zero, so mirroring the render replay unconditionally
+            // changes nothing there.
+            0x098 => {
+                self.clxcon = value;
+                self.clxcon2 = 0;
+            }
             0x100 => self.bplcon0 = value,
             0x102 => self.bplcon1 = value,
             0x106 => self.bplcon3 = value,
+            0x10E if live_collision_aga_decode(self.agnus_revision) => {
+                self.clxcon2 = value & 0x0FFF
+            }
             0x1E4 => self.diwhigh = DiwHigh::ecs_explicit(value),
             off @ 0x110..=0x11A => {
                 let plane = ((off - 0x110) / 2) as usize;
@@ -8923,6 +8942,7 @@ fn live_sprite_playfield_collision_bits_in_range(
                 control.bplcon0,
                 control.bplcon1,
                 control.clxcon,
+                control.clxcon2,
                 control.diwstrt,
                 control.diwstop,
                 control.diwhigh,
@@ -9031,11 +9051,13 @@ fn apply_live_bpldat_event(bpldat: &mut [u16; 8], offset: u16, value: u16) {
     }
 }
 
-/// Live collisions evaluate at most the classic 6 bitplanes. The rendered
-/// collision path already interprets the AGA CLXCON2 extensions for planes
-/// 7-8; extending the beam-timed path to match is an open gap (see
-/// docs/internals/chipset.md).
-const COLLISIONS_AGA_DECODE: bool = false;
+/// AGA extends the collision decode past the classic 6 bitplanes (Alice
+/// BPU3 displays eight planes, Lisa's CLXCON2 gates planes 7-8). The live
+/// path follows the same Alice-gated decode the renderer uses
+/// (`ControlState::aga`); OCS/ECS keeps the 6-plane decode.
+fn live_collision_aga_decode(agnus_revision: AgnusRevision) -> bool {
+    matches!(agnus_revision, AgnusRevision::AgaAlice)
+}
 
 fn live_manual_bpl_word_collision_bits(
     planes: [u16; 8],
@@ -9064,9 +9086,10 @@ fn live_manual_bpl_word_collision_bits(
         let hires = bitplane_hires(source_control.bplcon0);
         let pixel_repeat = if hires || shres { 1 } else { 2 };
         let native_step = if shres { 2 } else { 1 };
-        // Collision sampling stays on the pre-AGA 6-plane decode; see
-        // COLLISIONS_AGA_DECODE.
-        let mode = BitplaneMode::from_bplcon0(source_control.bplcon0, COLLISIONS_AGA_DECODE);
+        let mode = BitplaneMode::from_bplcon0(
+            source_control.bplcon0,
+            live_collision_aga_decode(source_control.agnus_revision),
+        );
         let nplanes = mode.display_planes().min(planes.len());
         let dual_playfield = source_control.bplcon0 & 0x0400 != 0;
         let mut idx = 0u8;
@@ -9109,8 +9132,12 @@ fn live_manual_bpl_word_collision_bits(
             }
         }
         if word_active {
-            let collision =
-                live_playfield_collision_pixel(idx, source_control.clxcon, dual_playfield);
+            let collision = live_playfield_collision_pixel(
+                idx,
+                source_control.clxcon,
+                source_control.clxcon2,
+                dual_playfield,
+            );
             for dx in 0..pixel_repeat {
                 let x = x_cursor + dx;
                 if x < x_start || x >= x_stop {
@@ -9191,6 +9218,7 @@ fn live_bitplane_collision_pixel_at(
     bplcon0: u16,
     bplcon1: u16,
     clxcon: u16,
+    clxcon2: u16,
     diwstrt: u16,
     diwstop: u16,
     diwhigh: DiwHigh,
@@ -9219,10 +9247,8 @@ fn live_bitplane_collision_pixel_at(
     let native_x = relative_native_x
         + live_fetch_origin_native_offset(agnus_revision, bplcon0, diwstrt, diwhigh, ddfstrt);
     let fetched_pixels = row.words_per_row * 16;
-    // Collision sampling stays on the pre-AGA 6-plane decode; see
-    // COLLISIONS_AGA_DECODE.
-    let mode = BitplaneMode::from_bplcon0(bplcon0, COLLISIONS_AGA_DECODE);
-    let nplanes = mode.display_planes().min(row.nplanes).min(6);
+    let mode = BitplaneMode::from_bplcon0(bplcon0, live_collision_aga_decode(agnus_revision));
+    let nplanes = mode.display_planes().min(row.nplanes);
     let dma_planes = mode.dma_planes().min(nplanes);
     let mut idx = 0u8;
     for plane in 0..nplanes {
@@ -9271,6 +9297,7 @@ fn live_bitplane_collision_pixel_at(
     Some(live_playfield_collision_pixel(
         idx,
         clxcon,
+        clxcon2,
         bplcon0 & 0x0400 != 0,
     ))
 }
@@ -9278,10 +9305,11 @@ fn live_bitplane_collision_pixel_at(
 fn live_playfield_collision_pixel(
     idx: u8,
     clxcon: u16,
+    clxcon2: u16,
     dual_playfield: bool,
 ) -> LivePlayfieldCollisionPixel {
-    let even_match = live_clxcon_planes_match(idx, clxcon, 1);
-    let odd_match_raw = live_clxcon_planes_match(idx, clxcon, 0);
+    let even_match = live_clxcon_planes_match(idx, clxcon, clxcon2, 1);
+    let odd_match_raw = live_clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     LivePlayfieldCollisionPixel {
         pf1: dual_playfield && idx & 0b010101 != 0,
@@ -9295,19 +9323,29 @@ fn live_playfield_collision_pixel(
     }
 }
 
-fn live_clxcon_planes_match(idx: u8, clxcon: u16, first_plane: usize) -> bool {
+fn live_clxcon_planes_match(idx: u8, clxcon: u16, clxcon2: u16, first_plane: usize) -> bool {
     let mut matches = true;
-    // Every CLXCON-enabled plane participates in the match, not just the planes
-    // the display currently fetches: a plane enabled beyond the BPU count reads
-    // as 0 and still gates the collision (vAmiga checkS2PCollisions compares
-    // `(dBuffer & enbp) == (mvbp & enbp)` over all six planes). Regression:
+    // Every CLXCON/CLXCON2-enabled plane participates in the match, not just
+    // the planes the display currently fetches: a plane enabled beyond the BPU
+    // count reads as 0 and still gates the collision (vAmiga checkS2PCollisions
+    // compares `(dBuffer & enbp) == (mvbp & enbp)` over all planes). Regression:
     // Denise/Sprites/collision/sprcoll* set CLXCON match bits for absent planes
-    // over a low-plane-count playfield.
-    for plane in (first_plane..6).step_by(2) {
-        if clxcon & (1 << (6 + plane)) == 0 {
+    // over a low-plane-count playfield. Planes 1-6 take their enable/match bits
+    // from CLXCON; the AGA planes 7-8 from CLXCON2 (ENBP7/ENBP8 in bits 6-7,
+    // MVBP7/MVBP8 in bits 0-1) -- with CLXCON2 zero the extra planes stay
+    // disabled and pre-AGA results are unchanged.
+    for plane in (first_plane..8).step_by(2) {
+        let (enabled, desired) = if plane < 6 {
+            (clxcon & (1 << (6 + plane)) != 0, clxcon & (1 << plane) != 0)
+        } else {
+            (
+                clxcon2 & (1 << plane) != 0,
+                clxcon2 & (1 << (plane - 6)) != 0,
+            )
+        };
+        if !enabled {
             continue;
         }
-        let desired = clxcon & (1 << plane) != 0;
         let actual = idx & (1 << plane) != 0;
         matches &= desired == actual;
     }
