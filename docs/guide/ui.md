@@ -413,6 +413,18 @@ Shown only when something is on the port.
   [Configuration](configuration.md)). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
+- **Run Ahead**: input-latency reduction for play. Each display refresh
+  retires a few emulated frames past the anchor, presents only the last one,
+  and rewinds the machine to the anchor boundary -- so the button press you
+  make now is already in the guest timeline of the frame you see next,
+  instead of arriving one to two frames later. Machine behaviour at any
+  frame boundary is unchanged. Level **1 frame** works for nearly all
+  software; higher levels need proportionally more host CPU (watch the
+  performance overlay) and eventually skip the guest's own animation frames,
+  which looks like rubber-banding. It is ignored while warp, RTG display, or
+  rewind/reverse history is active; the start-up value is
+  `[emulation] run_ahead_frames` or `--run-ahead` (see
+  [Configuration](configuration.md)).
 
 ### Warp Settings
 

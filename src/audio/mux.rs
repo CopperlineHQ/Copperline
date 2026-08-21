@@ -218,6 +218,10 @@ impl AudioMux {
         self.master.set_live_output_suspended(suspended);
     }
 
+    pub fn set_live_output_discard(&mut self, on: bool) {
+        self.master.set_live_output_discard(on);
+    }
+
     pub fn reset_live_output_after_timeline_jump(&mut self) {
         self.master.reset_live_output_after_timeline_jump();
     }

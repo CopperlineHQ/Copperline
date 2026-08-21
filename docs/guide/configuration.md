@@ -340,6 +340,7 @@ warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
+run_ahead_frames = 0       # run-ahead input-latency reduction, 0..4 (0 = off)
 ```
 
 The deterministic cycle-driven core is the only emulation timing. It is
@@ -396,6 +397,22 @@ carried no information.)
   Turning the menu item off releases the retained snapshots. The same
   determinism preconditions as reverse debugging apply -- a real-time clock
   and host disk writes are not rolled back.
+- `run_ahead_frames` reduces input latency by presenting a frame from a few
+  emulated frames in the future of the anchor each display refresh. Each
+  refresh retires `1 + run_ahead_frames` frames, presents only the last one,
+  then rewinds the machine to the anchor boundary; input sampled during the
+  iteration therefore reaches guest time up to `run_ahead_frames` frames
+  earlier relative to what is on screen. The machine state at any frame
+  boundary is identical with it on or off -- this is purely a presentation
+  policy. It costs a whole-machine snapshot per refresh and needs the host to
+  emulate at `(run_ahead_frames + 1)`x realtime inside one frame period, so
+  start at 1 (the setting that works for nearly all software) and only raise
+  it while the performance overlay shows headroom. Skipping too many frames
+  makes games visibly rubber-band through their own internal animation
+  frames. Run-ahead is ignored while warp is engaged, while an RTG board owns
+  the display, while reverse history/rewind is armed, and in headless runs;
+  the **Run Ahead** menu item (Emulation Settings) adjusts it live.
+  `--run-ahead FRAMES` overrides the config for one run.
 
 ## `[cpu]`
 

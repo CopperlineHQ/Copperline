@@ -2959,6 +2959,7 @@ fn panels_render_into_their_rects() {
         recording: false,
         input_recording: false,
         autofire_hz: 0,
+        run_ahead_frames: 0,
         joystick_input_mode: JoystickInputMode::Gamepad,
         keyboard_panel: false,
         port_devices: [

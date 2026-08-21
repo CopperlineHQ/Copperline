@@ -139,6 +139,25 @@ impl App {
         }
     }
 
+    /// The run-ahead level in effect for this burst, or 0 when the feature
+    /// is off or unavailable. Run-ahead needs real-time pacing (it paces one
+    /// wall-clock frame per presented frame), a live chipset display (RTG
+    /// scanout does not flow through the render snapshot), and no armed
+    /// reverse history (the constant anchor rewinds would fight the
+    /// snapshot ring's monotonic frame coordinate).
+    pub(super) fn runahead_effective_frames(&self) -> u8 {
+        if self.run_ahead_frames == 0
+            || !self.powered_on
+            || self.cpu_halted
+            || self.paused
+            || self.emu.time_travel_enabled()
+            || self.rtg_present_dims.is_some()
+        {
+            return 0;
+        }
+        self.run_ahead_frames
+    }
+
     /// How many emulated frames to retire before presenting the next frame, and
     /// an optional wall-clock budget that bounds that burst. Warp's output frame
     /// skip applies only while warp is engaged and not doing headless capture;

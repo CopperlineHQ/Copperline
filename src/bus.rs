@@ -4514,6 +4514,10 @@ impl Bus {
         self.paula.set_live_audio_suspended(suspended);
     }
 
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.paula.set_live_audio_discard(on);
+    }
+
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
         self.paula.reset_live_audio_after_timeline_jump();
     }

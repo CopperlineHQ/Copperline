@@ -919,6 +919,10 @@ impl Paula {
         self.audio.set_live_output_suspended(suspended);
     }
 
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.audio.set_live_output_discard(on);
+    }
+
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
         self.audio.reset_live_output_after_timeline_jump();
     }
