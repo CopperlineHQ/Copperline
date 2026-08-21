@@ -95,6 +95,12 @@ A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
 machine.
 
+The debugger, frame analyzer and console windows are deliberately not
+walked -- they are worked with the keyboard and mouse -- but `Esc`
+closes the focused one, and the pad's second button (or its Menu
+button) closes the top one, so a window opened from the menu can be put
+away again the same way.
+
 ## Status bar
 
 The status bar (44 pixels below the display) holds, left to right (it can
@@ -1100,6 +1106,12 @@ described under Keyboard and controller navigation above. While the menu
 or a panel is open, the pad stops driving the emulated port, just as the
 keyboard does. On the default database layout Select/Back and the guide
 button carry it; a calibration can put it anywhere (or skip it).
+
+Once every step is captured the bindings can be tested by pressing
+them, and *holding* any one of them for about a second hands the
+panel's own Save and Cancel buttons to the pad, which then walks them
+with the very controls it has just been taught. Without that, finishing
+a calibration needs the mouse.
 
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;

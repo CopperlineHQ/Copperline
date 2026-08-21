@@ -1173,6 +1173,10 @@ impl App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        // Paint it now rather than waiting for something to happen: a
+        // tool window opened and left alone showed an unpainted surface
+        // until the next mouse move or key press asked for a frame.
+        window.request_redraw();
         let inner = window.inner_size();
         *self.tool_window_slot(kind) = Some(ToolWindow {
             window,
@@ -1183,6 +1187,15 @@ impl App {
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
         self.request_redraw();
+    }
+
+    /// The open tool panel a "close this" means, when one is open at all.
+    /// The last in order, so a stack of them comes down one at a time.
+    pub(super) fn topmost_tool_panel(&self) -> Option<ToolPanelKind> {
+        ToolPanelKind::ALL
+            .into_iter()
+            .rev()
+            .find(|&kind| self.tool_panel_is_open(kind))
     }
 
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {

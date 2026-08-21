@@ -5615,6 +5615,12 @@ fn control_field(control: UiControl) -> Option<LauncherField> {
 /// dead button has always been harmless, and taking the hit away would
 /// change what the mouse does.
 pub(in crate::video) fn control_live(ui: &UiState, control: UiControl) -> bool {
+    // The calibration panel greys Skip until a step may be skipped, and
+    // Save until every step is captured, by the same rule it draws them
+    // with: a marker on either while it is dead would disappear.
+    if let Some(Panel::Calibration(session)) = ui.panel.as_ref() {
+        return cal_button_enabled(control, session);
+    }
     let Some(Panel::Launcher(state)) = ui.panel.as_ref() else {
         return true;
     };

@@ -694,12 +694,19 @@ pub struct CalibrationSession {
     /// Once every step is captured, the names of the bindings currently
     /// being pressed, so the user can test the calibration before saving.
     live_test: String,
+    /// The pad as the bindings just captured see it, kept while those
+    /// bindings are being tested. Holding one long enough hands the
+    /// panel's own buttons to the pad, which walks them with exactly the
+    /// controls it has just been taught -- so reaching Save proves the
+    /// calibration works rather than asking for a mouse to finish.
+    live_pad: PadState,
 }
 
 impl CalibrationSession {
     pub fn new() -> Self {
         Self {
             bindings: [None; CAL_STEPS.len()],
+            live_pad: PadState::default(),
             step: 0,
             phase: CalPhase::WaitNeutral,
             pad: None,
@@ -744,6 +751,28 @@ impl CalibrationSession {
     /// the session is done; used to test before saving).
     pub fn live_test(&self) -> &str {
         &self.live_test
+    }
+
+    /// The pad as the bindings under test see it. Meaningless before the
+    /// last step is captured, since there is nothing to resolve against.
+    pub fn live_pad(&self) -> PadState {
+        self.live_pad
+    }
+
+    /// A session with every step captured, for tests of what the panel
+    /// does once there is nothing left to capture.
+    #[cfg(test)]
+    pub(crate) fn finished_for_test() -> Self {
+        let mut session = Self::new();
+        session.step = CAL_STEPS.len();
+        session.connected = true;
+        session
+    }
+
+    /// Pretend the named bindings are being held, for the same tests.
+    #[cfg(test)]
+    pub(crate) fn hold_for_test(&mut self, held: &str) {
+        self.live_test = held.to_string();
     }
 
     /// Whether the current prompt may be skipped (optional CD32 extras).
@@ -820,6 +849,7 @@ impl CalibrationSession {
                 self.live_test = live_test;
                 changed = true;
             }
+            self.live_pad = self.to_calibration().resolve_pad(axes, buttons);
             return changed;
         }
         match self.phase {

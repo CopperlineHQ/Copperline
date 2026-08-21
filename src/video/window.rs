@@ -147,6 +147,11 @@ pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode
     }
 }
 
+/// How long a control must be held, once every calibration step is
+/// captured, to hand the panel's buttons to the pad. Long enough that
+/// testing a control by pressing it never trips it by accident.
+const CAL_PAD_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+
 /// How the pad moves the mouse in Gamepad Mouse mode, in quadrature
 /// counts per second: where a held direction starts, and where both a
 /// held direction and a fully deflected stick end up. The slow end is
@@ -1244,6 +1249,10 @@ pub struct App {
     /// When the pad's calibrated Quit hotkey started being held, if it is
     /// down right now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
+    /// Since when a control has been held on a finished calibration, and
+    /// whether that hold has completed and handed the panel to the pad.
+    cal_pad_hold: Option<Instant>,
+    cal_pad_drives: bool,
     /// When the pad last moved the mouse, and since when its held
     /// direction has been building speed. Both empty while the pad is
     /// not being spent on the mouse.
@@ -2065,6 +2074,8 @@ impl App {
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_quit_hold: None,
+            cal_pad_hold: None,
+            cal_pad_drives: false,
             pad_mouse_at: None,
             pad_mouse_held: None,
             pad_last: None,
@@ -2321,6 +2332,32 @@ impl App {
         }
     }
 
+    /// Whether the pad has been handed the calibration panel's buttons,
+    /// and the pad state to walk them with.
+    ///
+    /// `None` while a control is still being captured or tested, which is
+    /// what keeps a press meaning "test this" until a hold says otherwise.
+    fn calibration_pad_drives(&mut self) -> Option<crate::gamepad::PadState> {
+        let Some(Panel::Calibration(session)) = self.ui.panel.as_ref() else {
+            self.cal_pad_hold = None;
+            self.cal_pad_drives = false;
+            return None;
+        };
+        if !session.done() {
+            return None;
+        }
+        let live = session.live_pad();
+        if session.live_test().is_empty() {
+            self.cal_pad_hold = None;
+        } else {
+            let since = *self.cal_pad_hold.get_or_insert_with(Instant::now);
+            if since.elapsed() >= CAL_PAD_HOLD {
+                self.cal_pad_drives = true;
+            }
+        }
+        self.cal_pad_drives.then_some(live)
+    }
+
     /// Let the pad walk the interface, at the about_to_wait boundary
     /// where the event loop is at hand.
     ///
@@ -2339,6 +2376,17 @@ impl App {
         if pad.menu && !prev.menu {
             self.toggle_pad_interface();
             return;
+        }
+        // The tool windows are deliberately not walked -- a debugger is
+        // not a thing to step around with a d-pad -- but a pad must be
+        // able to put one away again, since opening one from the menu is
+        // something a pad can do.
+        if let Some(kind) = self.topmost_tool_panel() {
+            if pad.joystick.button2 && !prev.joystick.button2 {
+                self.close_tool_panel(kind);
+                self.request_redraw();
+                return;
+            }
         }
         // Everything a surface offers is walked the same way, whichever
         // hand is doing the walking: the pad's directions, its fire and
@@ -4545,7 +4593,12 @@ impl ApplicationHandler for App {
             // the pad; drop any hold in progress rather than resuming it,
             // and give the menu bridge nothing stale to act on.
             self.gamepad_quit_hold = None;
-            self.pad_last = None;
+            // Once every step is captured, a press still means "test this
+            // control" -- so it is a *hold* that hands the panel's own
+            // buttons over, and from then on the pad walks them with the
+            // very bindings it has just been taught. Without this,
+            // finishing a calibration needs a mouse.
+            self.pad_last = self.calibration_pad_drives();
             if !running {
                 // Nothing paces the loop while the machine is not stepping;
                 // don't busy-spin just to poll the pad.

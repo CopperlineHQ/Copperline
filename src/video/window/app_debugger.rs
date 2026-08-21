@@ -1246,7 +1246,7 @@ impl App {
             // Self-contained: the panel's own state is everything it draws.
             Panel::InputMap(_) => None,
             Panel::Calibration(session) => Some(ui::PanelViewData::Calibration(
-                build_calibration_view(session),
+                build_calibration_view(session, self.cal_pad_drives),
             )),
             Panel::Debugger(panel) => Some(ui::PanelViewData::Debugger(Box::new(
                 self.build_debugger_view(panel),

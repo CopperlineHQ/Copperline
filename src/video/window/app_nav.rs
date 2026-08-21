@@ -1201,6 +1201,11 @@ impl App {
             self.nav.clear();
         } else if self.ui.panel.is_some() {
             self.close_panel();
+        } else if let Some(kind) = self.topmost_tool_panel() {
+            // A tool window is what is up, so it is what the button puts
+            // away: opening the menu behind it would leave the thing in
+            // front of it still there.
+            self.close_tool_panel(kind);
         } else {
             // The menu is the way in. It opens with its own cursor on
             // the foot of its list -- the menu is a tree, and keeps that
