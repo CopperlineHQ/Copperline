@@ -628,7 +628,7 @@ fn input_mapping_panel_rebinds_only_on_save() {
     // only; the live map is untouched until Save.
     app.activate_ui_control(UiControl::RemapBind(fire_index));
     assert!(
-        app.ui_handle_key(KeyCode::KeyQ, None),
+        app.ui_handle_key(KeyCode::KeyQ, None, None),
         "capture eats the key"
     );
     assert_eq!(
@@ -675,10 +675,10 @@ fn input_mapping_panel_discards_edits_when_closed() {
     let before = app.keymap.clone();
     app.open_input_mapping();
     app.activate_ui_control(UiControl::RemapBind(0));
-    app.ui_handle_key(KeyCode::KeyP, None);
+    app.ui_handle_key(KeyCode::KeyP, None, None);
     // Escape while a row is armed cancels the binding, not the panel.
     app.activate_ui_control(UiControl::RemapBind(0));
-    assert!(app.ui_handle_key(KeyCode::Escape, None));
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
     assert!(app.ui.panel.is_some(), "Escape cancelled the capture only");
 
     app.activate_ui_control(UiControl::PanelClose);
@@ -742,6 +742,175 @@ fn pick_menu(app: &mut super::App, path: &[&str]) {
     }
 }
 
+/// The game page's walk, through the window's own rules rather than
+/// the geometry under them: a row is as wide as its box and its tick is
+/// drawn inside it, so every step across this page is one the window
+/// names, and each of them has been got wrong at least once.
+#[test]
+#[cfg(feature = "game-library")]
+fn the_game_page_walks_from_the_button_that_opens_it() {
+    use crate::video::launcher::LauncherTab;
+    use crate::video::nav::{Dir, NavTarget};
+    use crate::video::ui::UiControl;
+
+    let mut app = test_app();
+    app.open_launcher();
+    let state = app.launcher_state_mut().expect("the launcher is open");
+    state.tab = LauncherTab::WhdloadLibrary;
+    state.library.games =
+        crate::gamelib::Library::of_titles((0..40).map(|i| format!("Game {i:03}")));
+    for i in 0..3 {
+        let title = format!("Game {i:03}");
+        state.library.db.toggle_favourite(&title, &title);
+    }
+    app.nav.show(Some(NavTarget::Ui(UiControl::LauncherTab(
+        LauncherTab::WhdloadLibrary,
+    ))));
+    fn walk(app: &mut super::App, dir: Dir) -> Option<NavTarget> {
+        app.nav_move(dir, None);
+        app.nav.focus()
+    }
+    // Up and down inside a list are the list's own, so they go in by
+    // the same door a key does rather than straight to the focus.
+    fn press(app: &mut super::App, code: winit::keyboard::KeyCode) {
+        app.ui_handle_key(code, None, None);
+    }
+    let at = |control| Some(NavTarget::Ui(control));
+
+    // Right off the button opens the page on its letters, not on the
+    // row of sibling pages every other page opens on: this page is a
+    // list, and the letters are how a list is got about.
+    assert_eq!(
+        walk(&mut app, Dir::Right),
+        at(UiControl::LauncherLibraryJump(0)),
+        "right off the button lands on the first letter"
+    );
+    assert_eq!(
+        walk(&mut app, Dir::Down),
+        at(UiControl::LauncherLibraryPick(0))
+    );
+    // Across a row: its tick, and back off the tick to the row.
+    assert_eq!(
+        walk(&mut app, Dir::Right),
+        at(UiControl::LauncherLibraryFavourite(0))
+    );
+    assert_eq!(
+        walk(&mut app, Dir::Left),
+        at(UiControl::LauncherLibraryPick(0))
+    );
+    // And left off the row goes back up to the letters.
+    assert_eq!(
+        walk(&mut app, Dir::Left),
+        at(UiControl::LauncherLibraryJump(0))
+    );
+    // Down inside the list moves the list's own selection, and the
+    // marker goes with it: one chosen row, never two.
+    app.nav
+        .show(Some(NavTarget::Ui(UiControl::LauncherLibraryPick(0))));
+    for _ in 0..5 {
+        press(&mut app, winit::keyboard::KeyCode::ArrowDown);
+    }
+    assert_eq!(
+        app.launcher_state().map(|state| state.library.selected),
+        Some(5),
+        "the list scrolled"
+    );
+    assert_eq!(
+        app.nav.focus(),
+        at(UiControl::LauncherLibraryPick(5)),
+        "and the marker is on the row it chose"
+    );
+    // Marking a game is done from its tick, and hands the focus back to
+    // the game: what was being looked at is the row, not the tick.
+    assert_eq!(
+        walk(&mut app, Dir::Right),
+        at(UiControl::LauncherLibraryFavourite(5))
+    );
+    app.nav_press(None);
+    assert_eq!(
+        app.nav.focus(),
+        at(UiControl::LauncherLibraryPick(5)),
+        "marking a favourite leaves the tick"
+    );
+    assert!(
+        app.launcher_state()
+            .is_some_and(|state| state.library.db.favourite_count() == 4),
+        "and marked it"
+    );
+    // Right off a tick leaves the list for the buttons under it, and up
+    // off those comes back to the list rather than to the scroll arrow
+    // in the corner of the box.
+    app.nav
+        .show(Some(NavTarget::Ui(UiControl::LauncherLibraryFavourite(0))));
+    assert_eq!(
+        walk(&mut app, Dir::Right),
+        at(UiControl::LauncherLibraryRefresh)
+    );
+    assert!(matches!(
+        walk(&mut app, Dir::Up),
+        Some(NavTarget::Ui(UiControl::LauncherLibraryPick(_)))
+    ));
+    // Under the buttons are the favourites, which is the only way down
+    // to them, and right off one of those is Run.
+    app.nav
+        .show(Some(NavTarget::Ui(UiControl::LauncherLibraryRefresh)));
+    assert_eq!(
+        walk(&mut app, Dir::Down),
+        at(UiControl::LauncherLibraryFavouritePick(0))
+    );
+    assert_eq!(
+        walk(&mut app, Dir::Right),
+        at(UiControl::LauncherLibraryFavouriteRemove(0))
+    );
+    assert_eq!(walk(&mut app, Dir::Right), at(UiControl::LauncherRun));
+}
+
+/// A list longer than its box scrolls under the focus, and the focus
+/// keeps the column it was walking down.
+#[test]
+fn the_host_disk_list_scrolls_under_the_focus() {
+    use crate::video::launcher::LauncherTab;
+    use crate::video::nav::{Dir, NavTarget};
+    use crate::video::ui::{UiControl, HOST_DISK_VISIBLE_ROWS};
+
+    let mut app = test_app();
+    app.open_launcher();
+    let state = app.launcher_state_mut().expect("the launcher is open");
+    state.tab = LauncherTab::HostDisk;
+    state.setup.fake_host_disks(20);
+    let last = HOST_DISK_VISIBLE_ROWS - 1;
+    app.nav
+        .show(Some(NavTarget::Ui(UiControl::LauncherHostDiskSelect(last))));
+    // Off the last row it can show: the list moves, not the focus out
+    // of it.
+    app.nav_move(Dir::Down, None);
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherHostDiskSelect(last + 1))),
+        "the next disk down"
+    );
+    assert_eq!(
+        app.launcher_state()
+            .map(|state| state.setup.host_disk_scroll()),
+        Some(1),
+        "and the list scrolled to show it"
+    );
+    // Back up at the top of the window, the same in reverse.
+    for _ in 0..HOST_DISK_VISIBLE_ROWS {
+        app.nav_move(Dir::Up, None);
+    }
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherHostDiskSelect(0))),
+    );
+    assert_eq!(
+        app.launcher_state()
+            .map(|state| state.setup.host_disk_scroll()),
+        Some(0),
+        "and the list came back with it"
+    );
+}
+
 #[test]
 fn opening_the_menu_builds_it_and_closing_puts_it_away() {
     let mut app = test_app();
@@ -766,7 +935,14 @@ fn opening_the_menu_builds_it_and_closing_puts_it_away() {
     assert!(!app.ui.menu_open && app.ui.menu_rows.is_empty());
     app.activate_bar_control(super::BarControl::Menu);
     assert_eq!(app.ui.menu_nav.depth(), 0);
-    assert_eq!(app.ui.menu_nav.cursor(), None);
+    // A fresh open starts at the foot of the list, where the menu hangs
+    // from: a hand on the keyboard has somewhere to begin, and walking
+    // on down leaves the menu for the bar.
+    assert_eq!(
+        app.ui.menu_nav.cursor(),
+        Some(app.ui.menu_rows.len() - 1),
+        "the last row is chosen, not the one left over from before"
+    );
 }
 
 #[test]
@@ -5129,7 +5305,7 @@ fn modal_panel_swallows_amiga_key_presses() {
     app.ui.panel = Some(Panel::About);
 
     // Escape closes the panel.
-    assert!(app.ui_handle_key(KeyCode::Escape, None));
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
     assert!(app.ui.panel.is_none());
 
     // Hex entry arrives through the debugger's own tool window: digits
@@ -5173,11 +5349,11 @@ fn tool_windows_are_not_modal_over_the_main_window() {
         "tool panels must not gate main-window Amiga input"
     );
     assert!(
-        !app.ui_handle_key(KeyCode::KeyS, None),
+        !app.ui_handle_key(KeyCode::KeyS, None, None),
         "a main-window key is not claimed by a tool panel"
     );
     assert!(
-        !app.ui_handle_key(KeyCode::Escape, None),
+        !app.ui_handle_key(KeyCode::Escape, None, None),
         "a main-window Escape reaches the Amiga"
     );
     assert!(app.debugger_panel.is_some());
@@ -6731,7 +6907,7 @@ fn drop_chooser_escape_cancels_without_insert() {
     app.handle_dropped_files(vec![PathBuf::from("disk.adf")]);
     assert!(matches!(app.ui.panel, Some(Panel::DropChooser(_))));
 
-    assert!(app.ui_handle_key(KeyCode::Escape, None));
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
     assert!(app.ui.panel.is_none());
     assert!(!app.emu.bus().floppy.disk_inserted(0));
     assert!(!app.emu.bus().floppy.disk_inserted(1));
@@ -6750,7 +6926,7 @@ fn drop_chooser_digit_selects_listed_drive() {
     app.handle_dropped_files(vec![adf.clone()]);
     assert!(matches!(app.ui.panel, Some(Panel::DropChooser(_))));
 
-    assert!(app.ui_handle_key(KeyCode::Digit2, None));
+    assert!(app.ui_handle_key(KeyCode::Digit2, None, None));
     assert!(app.ui.panel.is_none());
     assert!(app.emu.bus().floppy.disk_inserted(2));
     std::fs::remove_file(&adf).unwrap();
