@@ -320,11 +320,17 @@ impl App {
             return true;
         }
         // Noted before the press, since a machine that starts takes the
-        // launcher down with it and the focus with that.
-        let starts_machine = matches!(
-            focus,
-            crate::video::nav::NavTarget::Ui(UiControl::LauncherRun)
-        ) || self.nav_focus_in_library();
+        // launcher down with it and the focus with that. A game chosen
+        // from the list starts one as surely as Run does.
+        #[cfg(feature = "game-library")]
+        let from_list = self.nav_focus_in_library();
+        #[cfg(not(feature = "game-library"))]
+        let from_list = false;
+        let starts_machine = from_list
+            || matches!(
+                focus,
+                crate::video::nav::NavTarget::Ui(UiControl::LauncherRun)
+            );
         if crate::video::nav::is_stepper(focus) {
             self.nav.toggle_open();
         } else {
