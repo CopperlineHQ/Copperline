@@ -523,6 +523,47 @@ fn a_gamepad_mouse_takes_the_pad_off_the_joystick() {
     );
 }
 
+/// The pad moves the mouse the machine already has: the counters move,
+/// and its buttons are the mouse's.
+#[test]
+fn a_gamepad_mouse_moves_the_mouse_it_is_plugged_into() {
+    use crate::bus::PortDevice;
+    use crate::gamepad::{JoystickState, PadState};
+
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::GamepadMouse);
+    let counters = |app: &super::App| {
+        let p = &app.emu.bus().input.ports[0];
+        (p.counter_x, p.counter_y)
+    };
+    let before = counters(&app);
+
+    // A stick held right, for two passes: the first only starts the
+    // clock, and the second is the one that has a span to move over.
+    let pad = PadState {
+        joystick: JoystickState {
+            fire: true,
+            ..Default::default()
+        },
+        stick: (1.0, 0.0),
+        ..Default::default()
+    };
+    app.apply_pad_mouse_state(0, pad);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    app.apply_pad_mouse_state(0, pad);
+    let after = counters(&app);
+    assert_ne!(after.0, before.0, "the pointer moved across");
+    assert_eq!(after.1, before.1, "and not down");
+    assert!(app.emu.bus().input.ports[0].fire, "fire is the left button");
+
+    // Let go, and the button goes with it.
+    app.release_pad_mouse(0);
+    assert!(!app.emu.bus().input.ports[0].fire);
+}
+
 #[test]
 fn numpad_mapping_stands_in_for_the_missing_gamepad() {
     use crate::bus::PortDevice;

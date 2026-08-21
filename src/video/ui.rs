@@ -2065,7 +2065,12 @@ fn lit(hover: Option<UiControl>, control: UiControl) -> f32 {
 
 /// Whether the focus is being shown at all, whatever it is standing on.
 fn nav_showing() -> bool {
-    NAV_LIGHT.with(|light| light.get().0.is_some())
+    nav_target().is_some()
+}
+
+/// What the focus is standing on, if it is being shown.
+fn nav_target() -> Option<UiControl> {
+    NAV_LIGHT.with(|light| light.get().0)
 }
 
 /// The face a control wears, given how lit it is: the pointer's grey,
@@ -6258,8 +6263,10 @@ fn draw_launcher_save_dialog(
         );
     }
     // Above the row, where a dialog's own words go, and never blank: with
-    // the pointer on none of the three it says what the dialog is for.
-    let help = save_dialog_help(hover.unwrap_or(UiControl::LauncherSaveAs));
+    // neither hand on any of the three it says what the dialog is for.
+    // The marker is asked first, as the lighting asks it -- what the
+    // keyboard is standing on is what the line should be about.
+    let help = save_dialog_help(nav_target().or(hover).unwrap_or(UiControl::LauncherSaveAs));
     let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
     for (i, line) in wrap_text(help, chars, chars)
         .into_iter()

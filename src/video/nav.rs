@@ -946,6 +946,32 @@ mod tests {
         );
     }
 
+    /// A panel with nothing on it but its close gadget still offers that:
+    /// a surface the focus cannot enter is a surface Escape is the only
+    /// way out of.
+    #[test]
+    fn every_panel_offers_its_close_gadget() {
+        use crate::video::menu::MenuNav;
+        use crate::video::ui::{Panel, UiState};
+        for panel in [Panel::About, Panel::Shortcuts] {
+            let ui = UiState {
+                menu_open: false,
+                menu_rows: Vec::new(),
+                menu_nav: MenuNav::default(),
+                panel: Some(panel),
+            };
+            let items = map(
+                &ui,
+                crate::video::window::texture_width(1),
+                crate::video::window::texture_height(1),
+            );
+            assert!(
+                find(&items, NavTarget::Ui(UiControl::PanelClose)).is_some(),
+                "the close gadget is a place to stand"
+            );
+        }
+    }
+
     /// A page's map, printed, for working out why a step goes where it
     /// does.
     #[test]

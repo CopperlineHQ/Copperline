@@ -948,13 +948,20 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             let device = p.str_req("device")?;
             let device = crate::bus::PortDevice::parse(&device).ok_or_else(|| {
                 CtlError::invalid_params(format!(
-                    "device must be mouse|joystick|cd32|analogue|none, got {device}"
+                    "device must be mouse|gamepad-mouse|joystick|cd32|analogue|none, got {device}"
                 ))
             })?;
-            host(HostOp::SetPortDevice {
-                port: parse_port_req(&p)?,
-                device,
-            })
+            let port = parse_port_req(&p)?;
+            // A mouse belongs in port 1, and a gamepad driving one is
+            // still a mouse. The launcher and the config both say so;
+            // saying it here too keeps the wire from being the one way
+            // into a wiring the GUI cannot show.
+            if device == crate::bus::PortDevice::GamepadMouse && port != 0 {
+                return Err(CtlError::invalid_params(
+                    "gamepad-mouse is port 1 only".to_string(),
+                ));
+            }
+            host(HostOp::SetPortDevice { port, device })
         }
         "input.get_ports" => core(CoreOp::InputPortsGet),
         "media.floppy.insert" => host(HostOp::FloppyInsert {

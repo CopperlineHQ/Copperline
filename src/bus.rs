@@ -2009,6 +2009,9 @@ pub enum PortDevice {
     /// Analogue paddles / proportional stick: positions present resistances
     /// on POTxX/POTxY; the two buttons ground the LEFT/RIGHT lines.
     Analogue,
+    /// Empty port: nothing drives the pins. Reads like an idle mouse (the
+    /// JOYxDAT counters hold, the pot pins float).
+    None,
     /// A quadrature mouse, driven by a gamepad as well as by the host's
     /// own mouse. Electrically this *is* [`PortDevice::Mouse`] -- the
     /// machine is given one mouse with two hands on it, not two mice --
@@ -2016,10 +2019,11 @@ pub enum PortDevice {
     /// pad's d-pad and left stick move the pointer and its two buttons
     /// click, and no joystick port hears from that pad while it does.
     /// Offered on port 1 alone, which is the port a mouse belongs in.
+    ///
+    /// Last on purpose: a save state encodes a variant by its position,
+    /// so a state written before this existed must still read an empty
+    /// port as empty. The pickers order themselves.
     GamepadMouse,
-    /// Empty port: nothing drives the pins. Reads like an idle mouse (the
-    /// JOYxDAT counters hold, the pot pins float).
-    None,
 }
 
 impl PortDevice {
