@@ -10,6 +10,11 @@ Port-only forms (`2345` or `:2345`) bind to `127.0.0.1`. Use an explicit
 address such as `0.0.0.0:2345` only on a trusted network: the remote
 protocol can read and write guest RAM and can resume the emulated machine.
 
+The stub is behind the `gdb` cargo feature, on by default in every normal
+build; a build compiled without it (publisher-kit player builds are, see
+[Publishing a game](../guide/publishing.md)) rejects `--gdb` with a clear
+message.
+
 Connect from GDB with the 68k architecture selected:
 
 ```gdb

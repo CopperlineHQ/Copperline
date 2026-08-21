@@ -36,7 +36,7 @@ use std::time::Duration;
 const PC_POLL_CHUNK: usize = 4096;
 
 pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
-    let bind = crate::gdbstub::normalize_listen_addr(&config.listen)?;
+    let bind = crate::debugger::normalize_listen_addr(&config.listen)?;
     let listener =
         TcpListener::bind(&bind).with_context(|| format!("binding control server {bind}"))?;
     let local = listener.local_addr().context("resolving control address")?;

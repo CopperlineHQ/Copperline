@@ -151,6 +151,51 @@ pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether this process is a publisher-kit player: a dedicated, launcher-free
+/// build of one game. Seeded once by the player's `main` before the window is
+/// built and never changed; the full build never sets it. It selects the
+/// trimmed player menu tree, disables the debug and capture shortcuts, and
+/// turns menu changes into settings that persist per game.
+static PLAYER_PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the player menu offers the quick save/load slots; the game's
+/// manifest decides. Meaningless outside the player profile.
+static PLAYER_SAVE_STATES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_player_profile(save_states: bool) {
+    PLAYER_PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
+    PLAYER_SAVE_STATES.store(save_states, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn player_profile() -> bool {
+    PLAYER_PROFILE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn player_save_states() -> bool {
+    PLAYER_SAVE_STATES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The window title and icon in force: Copperline's own for the emulator, the
+/// game's for a player build. Seeded once before the window is built, like
+/// [`PLAYER_PROFILE`]; `None` means the built-in branding.
+static BRANDING: std::sync::OnceLock<(String, Option<Vec<u8>>)> = std::sync::OnceLock::new();
+
+/// Adopt a window title and, optionally, PNG icon bytes to replace the
+/// built-in branding. Call before any window exists; a later call is
+/// ignored, like every other seed-once global here.
+pub fn set_branding(title: String, icon_png: Option<Vec<u8>>) {
+    let _ = BRANDING.set((title, icon_png));
+}
+
+pub fn branding_title() -> Option<&'static str> {
+    BRANDING.get().map(|(title, _)| title.as_str())
+}
+
+pub fn branding_icon_png() -> Option<&'static [u8]> {
+    BRANDING.get().and_then(|(_, icon)| icon.as_deref())
+}
+
 /// Whether the text caret is in the lit half of its blink.
 ///
 /// Set by the window each pass while something is being typed into, and

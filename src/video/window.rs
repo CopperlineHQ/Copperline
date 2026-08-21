@@ -422,6 +422,12 @@ pub(super) const STATUS_TEXT: u32 = rgba(174, 170, 154);
 const VOLUME_FILL: u32 = rgba(44, 178, 94);
 const VOLUME_FILL_HIGHLIGHT: u32 = rgba(128, 244, 150);
 const WINDOW_TITLE: &str = concat!("Copperline ", env!("COPPERLINE_DISPLAY_VERSION"));
+
+/// The title on the window: Copperline's own, unless a player build adopted
+/// the game's through [`crate::video::set_branding`].
+fn window_title() -> &'static str {
+    crate::video::branding_title().unwrap_or(WINDOW_TITLE)
+}
 const COPPERLINE_LOGO_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-logo.png");
 const COPPERLINE_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-icon.png");
 const MOUSE_MOTION_SCALE: f64 = 1.0;
@@ -548,7 +554,10 @@ fn gdb_reg_label(reg: usize) -> String {
 }
 
 fn window_title_mouse_captured() -> String {
-    format!("{WINDOW_TITLE} - Mouse captured ({HOST_SHORTCUT_MODIFIER_LABEL}+G releases)")
+    format!(
+        "{} - Mouse captured ({HOST_SHORTCUT_MODIFIER_LABEL}+G releases)",
+        window_title()
+    )
 }
 
 /// A transient on-screen overlay message drawn over the display (but not
@@ -1183,8 +1192,18 @@ pub struct App {
     /// When the pad's calibrated Quit hotkey started being held, if it is
     /// down right now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
-    /// The Quit hotkey hold completed; the next event-loop pass exits.
-    gamepad_quit_requested: bool,
+    /// The pad state the last input pump published, for the menu bridge.
+    /// `None` while no pad is connected or the calibration panel owns it.
+    pad_last: Option<crate::gamepad::PadState>,
+    /// What the bridge saw last pass, for edge detection: a held button
+    /// must not re-fire every poll.
+    pad_prev: crate::gamepad::PadState,
+    /// When a held d-pad direction may step the menu again, giving pad
+    /// navigation the scroll arrows' hold-to-repeat cadence.
+    pad_nav_repeat: Option<Instant>,
+    /// Quit was asked for -- the pad's Quit-hotkey hold completed, or the
+    /// player menu's Quit row was picked; the next event-loop pass exits.
+    quit_requested: bool,
     /// Host source policy for the emulated port-2 joystick/CD32 pad.
     joystick_input_mode: JoystickInputMode,
     /// Host mouse sensitivity, 0-100 ([input] mouse_sensitivity), and the speed
@@ -1987,7 +2006,10 @@ impl App {
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_quit_hold: None,
-            gamepad_quit_requested: false,
+            pad_last: None,
+            pad_prev: crate::gamepad::PadState::default(),
+            pad_nav_repeat: None,
+            quit_requested: false,
             joystick_input_mode,
             mouse_sensitivity,
             mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
@@ -2185,9 +2207,18 @@ impl App {
         // Quit hotkey is a host control and works regardless of routing.
         let pad = self.gamepad.poll();
         self.track_gamepad_quit_hold(pad.is_some_and(|state| state.quit));
+        // Published for the menu bridge, which runs at the about_to_wait
+        // boundary where the event loop is at hand.
+        self.pad_last = pad;
+        // While the menu or an overlay panel is up, the pad walks the UI
+        // rather than the game -- the same arbitration the keyboard gets
+        // from the modal overlay -- so the port lines are released rather
+        // than held mid-move.
+        let ui_owns_pad = self.modal_ui_active();
         if let Some(port) = r.gamepad {
             match pad {
-                Some(state) => self.apply_joystick_state(port, state.joystick),
+                Some(state) if !ui_owns_pad => self.apply_joystick_state(port, state.joystick),
+                Some(_) => self.release_joystick_lines(port),
                 // No physical pad but --joy-after scripting has fired: keep
                 // asserting the scripted state so it survives this release
                 // path and drives the upcoming scheduler quantum.
@@ -2219,6 +2250,78 @@ impl App {
         }
     }
 
+    /// Let the pad walk the open menu, at the about_to_wait boundary where
+    /// the event loop is at hand.
+    ///
+    /// The Menu control (a calibrated binding, or Select/guide on the
+    /// database's standard layout) toggles the menu -- or closes an open
+    /// overlay panel; while the menu is up, the d-pad steps rows with the
+    /// scroll arrows' hold-to-repeat cadence, right descends into a
+    /// category, left ascends, fire activates the row, and the second
+    /// button backs out a level at a time, closing from the top -- the
+    /// same walk the arrow keys and Escape do. All edges are detected
+    /// against the previous pass, so a held button acts once.
+    fn drive_menu_with_pad(&mut self, event_loop: &ActiveEventLoop) {
+        let pad = self.pad_last.unwrap_or_default();
+        let prev = std::mem::replace(&mut self.pad_prev, pad);
+        if pad.menu && !prev.menu {
+            if self.ui.panel.is_some() {
+                self.close_panel();
+                self.request_redraw();
+            } else {
+                self.toggle_menu();
+            }
+            return;
+        }
+        if !self.ui.menu_open {
+            self.pad_nav_repeat = None;
+            return;
+        }
+        let js = pad.joystick;
+        let prev_js = prev.joystick;
+        let now = Instant::now();
+        let vertical = match (js.up, js.down) {
+            (true, false) => Some(false),
+            (false, true) => Some(true),
+            _ => None,
+        };
+        match vertical {
+            Some(forward) => {
+                let first = if forward { !prev_js.down } else { !prev_js.up };
+                let due = self.pad_nav_repeat.is_some_and(|due| now >= due);
+                if first || due {
+                    self.ui.menu_nav.step(&self.ui.menu_rows, forward);
+                    self.pad_nav_repeat = Some(if first {
+                        now + SCROLL_HOLD_DELAY
+                    } else {
+                        now + SCROLL_HOLD_EVERY
+                    });
+                    self.request_redraw();
+                }
+            }
+            None => self.pad_nav_repeat = None,
+        }
+        if js.right && !prev_js.right {
+            self.ui.menu_nav.descend(&self.ui.menu_rows);
+            self.request_redraw();
+        }
+        if js.left && !prev_js.left {
+            self.ui.menu_nav.ascend();
+            self.request_redraw();
+        }
+        if js.fire && !prev_js.fire {
+            self.activate_menu_row(Some(event_loop));
+            self.ensure_tool_windows_for_open_panels(event_loop);
+            self.request_redraw();
+        }
+        if js.button2 && !prev_js.button2 {
+            if !self.ui.menu_nav.ascend() {
+                self.close_menu();
+            }
+            self.request_redraw();
+        }
+    }
+
     /// Track the pad's calibrated Quit hotkey across polls: a hold of
     /// [`GAMEPAD_QUIT_HOLD`] requests an application exit, with an OSD
     /// countdown while it is in progress. Releasing earlier cancels the
@@ -2246,7 +2349,7 @@ impl App {
         // it as an intermittent CI failure).
         let elapsed = start.elapsed();
         if elapsed >= GAMEPAD_QUIT_HOLD {
-            self.gamepad_quit_requested = true;
+            self.quit_requested = true;
         } else {
             self.show_osd(format!(
                 "{GAMEPAD_QUIT_OSD_PREFIX}{:.1}s",
@@ -3113,7 +3216,7 @@ impl ApplicationHandler for App {
         let fullscreen =
             (self.start_fullscreen && !headless_capture).then(|| Fullscreen::Borderless(None));
         let attrs = WindowAttributes::default()
-            .with_title(WINDOW_TITLE)
+            .with_title(window_title())
             .with_window_icon(copperline_window_icon())
             .with_visible(!headless_capture)
             .with_fullscreen(fullscreen)
@@ -3291,13 +3394,17 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.save_state_interactive()
+                        if self.save_states_allowed() {
+                            self.save_state_interactive()
+                        }
                     }
                     (KeyCode::KeyL, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.load_state_from_dialog(Some(event_loop))
+                        if self.save_states_allowed() {
+                            self.load_state_from_dialog(Some(event_loop))
+                        }
                     }
                     (KeyCode::KeyS, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -3326,46 +3433,66 @@ impl ApplicationHandler for App {
                     (KeyCode::KeyB, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.toggle_debugger();
-                        self.ensure_tool_windows_for_open_panels(event_loop);
+                        // A player build ships no debugging surface.
+                        if !crate::video::player_profile() {
+                            self.toggle_debugger();
+                            self.ensure_tool_windows_for_open_panels(event_loop);
+                        }
                     }
                     (KeyCode::KeyK, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.toggle_console();
-                        self.ensure_tool_windows_for_open_panels(event_loop);
+                        if !crate::video::player_profile() {
+                            self.toggle_console();
+                            self.ensure_tool_windows_for_open_panels(event_loop);
+                        }
                     }
                     (KeyCode::KeyJ, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.cycle_joystick_input_mode()
+                        self.cycle_joystick_input_mode();
+                        self.persist_player_prefs();
                     }
                     (KeyCode::KeyM, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.toggle_bezel()
+                        self.toggle_bezel();
+                        self.persist_player_prefs();
                     }
                     (KeyCode::KeyP, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.toggle_perf_overlay()
+                        if !crate::video::player_profile() {
+                            self.toggle_perf_overlay()
+                        }
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.toggle_status_bar()
+                        // The player has no status bar to bring back.
+                        if !crate::video::player_profile() {
+                            self.toggle_status_bar()
+                        }
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
-                        self.toggle_fullscreen()
+                        self.toggle_fullscreen();
+                        self.persist_player_prefs();
                     }
                     (KeyCode::KeyR, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.toggle_input_recording()
+                        // Input recordings are replay scripts, and the
+                        // player has no way to play one back: a diagnostic
+                        // surface, so off in shipped games. Screenshots
+                        // and video recording stay -- they are end-user
+                        // features, not debugging ones.
+                        if !crate::video::player_profile() {
+                            self.toggle_input_recording()
+                        }
                     }
                     (KeyCode::KeyR, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -3401,7 +3528,8 @@ impl ApplicationHandler for App {
                         // while a menu/panel is open, so it acts only on the
                         // running machine, not the config-screen placeholder.
                         if !self.modal_ui_active() {
-                            self.cycle_audio_output()
+                            self.cycle_audio_output();
+                            self.persist_player_prefs();
                         }
                     }
                     (KeyCode::KeyA, ElementState::Pressed)
@@ -3411,7 +3539,8 @@ impl ApplicationHandler for App {
                         // the counterpart to Cmd/Alt+Shift+A. Ignored while a
                         // menu or panel is open.
                         if !self.modal_ui_active() {
-                            self.cycle_audio_filter()
+                            self.cycle_audio_filter();
+                            self.persist_player_prefs();
                         }
                     }
                     // Quick save/load slots on the number row: the modifier
@@ -3424,10 +3553,12 @@ impl ApplicationHandler for App {
                             && !self.modal_ui_active() =>
                     {
                         let slot = save_slot_for_key(code).expect("guarded above");
-                        if self.modifiers.shift_key() {
-                            self.quick_load_state(slot, Some(event_loop));
-                        } else {
-                            self.quick_save_state(slot);
+                        if self.save_states_allowed() {
+                            if self.modifiers.shift_key() {
+                                self.quick_load_state(slot, Some(event_loop));
+                            } else {
+                                self.quick_save_state(slot);
+                            }
                         }
                     }
                     (KeyCode::Equal, ElementState::Pressed)
@@ -4230,11 +4361,12 @@ impl ApplicationHandler for App {
         // The calibration panel polls raw gamepad events, so it needs the
         // loop awake even while the machine is paused or powered off.
         let calibrating = matches!(self.ui.panel, Some(Panel::Calibration(_)));
-        // Likewise the pad's Quit hotkey: gilrs is polled, not evented, so
-        // pressing it cannot wake a waiting loop. While a calibrated pad
-        // with one is connected, a paused/powered-off loop keeps polling
-        // (paced to a human rate below) or the hold could never start.
-        let pad_quit_watch = !calibrating && self.gamepad.quit_hotkey_present();
+        // Likewise the pad's host-side controls (Quit hotkey, Menu
+        // button): gilrs is polled, not evented, so pressing one cannot
+        // wake a waiting loop. While a pad carrying one is connected, a
+        // paused/powered-off loop keeps polling (paced to a human rate
+        // below) or the press could never be seen.
+        let pad_hotkey_watch = !calibrating && self.gamepad.host_hotkey_present();
         // An image being written on a worker has to be collected, and the
         // launcher is up with the machine off -- nothing else would wake
         // the loop to notice it finished.
@@ -4297,7 +4429,7 @@ impl ApplicationHandler for App {
                 || scrolling
                 || typing
                 || about_open
-                || pad_quit_watch
+                || pad_hotkey_watch
             {
                 ControlFlow::Poll
             } else {
@@ -4310,7 +4442,7 @@ impl ApplicationHandler for App {
             std::thread::sleep(std::time::Duration::from_millis(16));
             self.request_redraw();
         }
-        if pad_quit_watch && !running && !writing_image {
+        if pad_hotkey_watch && !running && !writing_image {
             // Poll the pad at a human rate rather than spinning a core;
             // plenty of granularity inside the quit hotkey's 1.5 s hold.
             std::thread::sleep(std::time::Duration::from_millis(16));
@@ -4335,8 +4467,10 @@ impl ApplicationHandler for App {
                 self.release_joystick_lines(port);
             }
             // The Quit-hotkey hold cannot be observed while the panel owns
-            // the pad; drop any hold in progress rather than resuming it.
+            // the pad; drop any hold in progress rather than resuming it,
+            // and give the menu bridge nothing stale to act on.
             self.gamepad_quit_hold = None;
+            self.pad_last = None;
             if !running {
                 // Nothing paces the loop while the machine is not stepping;
                 // don't busy-spin just to poll the pad.
@@ -4345,7 +4479,8 @@ impl ApplicationHandler for App {
         } else {
             self.pump_joystick_input();
         }
-        if self.gamepad_quit_requested {
+        self.drive_menu_with_pad(event_loop);
+        if self.quit_requested {
             event_loop.exit();
             return;
         }
@@ -4662,14 +4797,20 @@ fn copperline_logo_image() -> Option<&'static EmbeddedRgbaImage> {
 
 fn copperline_icon_image() -> Option<&'static EmbeddedRgbaImage> {
     static ICON: OnceLock<Option<EmbeddedRgbaImage>> = OnceLock::new();
-    ICON.get_or_init(|| match decode_embedded_png(COPPERLINE_ICON_PNG) {
+    ICON.get_or_init(|| match decode_embedded_png(window_icon_png()) {
         Ok(image) => Some(image),
         Err(e) => {
-            warn!("embedded Copperline icon decode failed: {e:#}");
+            warn!("embedded window icon decode failed: {e:#}");
             None
         }
     })
     .as_ref()
+}
+
+/// The PNG behind the window and dock icon: Copperline's own, unless a
+/// player build adopted the game's through [`crate::video::set_branding`].
+fn window_icon_png() -> &'static [u8] {
+    crate::video::branding_icon_png().unwrap_or(COPPERLINE_ICON_PNG)
 }
 
 /// Set the macOS dock/application icon from the embedded PNG.
@@ -4694,7 +4835,7 @@ fn set_macos_dock_icon() {
             warn!("skipping macOS dock icon: not on the main thread");
             return;
         };
-        let data = NSData::with_bytes(COPPERLINE_ICON_PNG);
+        let data = NSData::with_bytes(window_icon_png());
         match NSImage::initWithData(NSImage::alloc(), &data) {
             Some(image) => {
                 let app = NSApplication::sharedApplication(mtm);
@@ -4930,7 +5071,7 @@ impl App {
             self.mouse_delta_remainder = (0.0, 0.0);
             self.release_mouse_buttons();
             window.set_cursor_visible(true);
-            window.set_title(WINDOW_TITLE);
+            window.set_title(window_title());
             info!("mouse released");
         }
     }
@@ -5200,6 +5341,80 @@ impl App {
     /// one is open (even mid-run), the main window keeps driving the Amiga.
     fn modal_ui_active(&self) -> bool {
         self.ui.active()
+    }
+
+    /// Whether this session offers save states: always in the full build; in
+    /// a player, only when the game's manifest opted in -- some titles treat
+    /// quick saves as part of the game and some as cheating.
+    fn save_states_allowed(&self) -> bool {
+        !crate::video::player_profile() || crate::video::player_save_states()
+    }
+
+    /// Write the player's end-user settings through to `settings.toml` in
+    /// the per-game config directory.
+    ///
+    /// The full build keeps its session-only menu semantics -- settings
+    /// belong to the config file the user points at. A player has no config
+    /// file for its user to edit, so what they set in the menu is what they
+    /// expect to find on the next launch. The file holds the complete set
+    /// of player-controlled settings as an ordinary configuration fragment,
+    /// which the player's startup layers over the manifest's defaults. A
+    /// no-op outside the player profile, and a write failure costs the
+    /// persistence, not the session.
+    fn persist_player_prefs(&self) {
+        if !crate::video::player_profile() {
+            return;
+        }
+        let Some(path) = crate::paths::config_file(crate::config::PLAYER_SETTINGS_FILE) else {
+            return;
+        };
+        let mut raw = crate::config::RawConfig::default();
+        raw.display.pixel_aspect =
+            Some(super::launcher::pixel_aspect_name(crate::video::pixel_aspect()).to_string());
+        raw.display.scaling = Some(
+            super::launcher::display_scaling_name(crate::video::display_scaling()).to_string(),
+        );
+        raw.display.menu_scale = Some(crate::video::menu_scale().label().to_string());
+        // A custom shader is named by its path, which the player menu never
+        // offers; skipping it keeps whatever the manifest said.
+        if self.crt_shader_kind != crate::config::ShaderKind::Custom {
+            raw.display.shader = Some(self.crt_shader_kind.label().to_string());
+        }
+        raw.display.shader_strength = Some(self.shader_strength);
+        raw.display.tint = Some(super::launcher::tint_name(self.tint).to_string());
+        raw.display.bezel = Some(crate::config::RawBezel::Named(self.bezel.label().into()));
+        raw.display.tv_h_centre = Some(self.tv_centre.h);
+        raw.display.tv_v_centre = Some(self.tv_centre.v);
+        raw.display.full_screen = Some(
+            self.render
+                .as_ref()
+                .is_some_and(|r| r.window.fullscreen().is_some()),
+        );
+        raw.input.port1 = Some(self.emu.bus().input.device(0).label().to_string());
+        raw.input.port2 = Some(self.emu.bus().input.device(1).label().to_string());
+        raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
+        raw.input.autofire_hz = Some(self.autofire_hz);
+        match &self.audio_output {
+            crate::audio::AudioOutput::Default => {}
+            crate::audio::AudioOutput::Device(name) => raw.audio.output_device = Some(name.clone()),
+            crate::audio::AudioOutput::Disabled => raw.audio.output_enabled = Some(false),
+        }
+        raw.audio.audio_filter = Some(
+            match self.emu.bus().paula.led_filter_mode() {
+                crate::config::AudioFilterMode::Auto => "auto",
+                crate::config::AudioFilterMode::On => "on",
+                crate::config::AudioFilterMode::Off => "off",
+            }
+            .to_string(),
+        );
+        let written = raw.to_toml_string().and_then(|text| {
+            crate::paths::ensure_parent(&path)?;
+            std::fs::write(&path, text)?;
+            Ok(())
+        });
+        if let Err(e) = written {
+            warn!("player settings not saved to {}: {e:#}", path.display());
+        }
     }
 
     /// Whether any UI surface has a claim on the host cursor: main-window
@@ -5625,6 +5840,9 @@ impl App {
 
         let save_slots = self.save_slot_stamps();
         let state = MenuState {
+            player: crate::video::player_profile(),
+            player_save_states: crate::video::player_save_states(),
+            paused: self.paused,
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
             bezel: self.bezel,
@@ -5645,6 +5863,7 @@ impl App {
             tv_centre: self.tv_centre,
             tv_centre_applies: self.overscan == Overscan::Tv,
             shader: self.crt_shader_kind,
+            shader_strength: self.shader_strength,
             custom_shader_available: self.custom_shader_path.is_some(),
             tint: self.tint,
             menu_scale: crate::video::menu_scale(),
@@ -6018,7 +6237,22 @@ impl App {
             A::LoadState => self.load_state_from_dialog(event_loop),
             A::QuickSave(slot) => self.quick_save_state(slot + 1),
             A::QuickLoad(slot) => self.quick_load_state(slot + 1, event_loop),
+            A::StepShaderStrength(dir) => {
+                let step = crate::video::menu::SHADER_STRENGTH_STEP;
+                self.shader_strength = (self.shader_strength + step * dir as f32).clamp(0.0, 1.0);
+                self.show_osd(format!(
+                    "Shader strength: {:.0}%",
+                    self.shader_strength * 100.0
+                ));
+                self.request_redraw();
+            }
+            A::TogglePause => self.toggle_pause(),
+            A::ResetMachine => self.reset_emulator(true),
+            A::Quit => self.quit_requested = true,
         }
+        // A player session persists what its user just set; the full build
+        // keeps the menu session-only (a no-op inside).
+        self.persist_player_prefs();
     }
 
     /// Put the menu cursor under the pointer. Returns true when it moved.
@@ -9418,14 +9652,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Move a scan along, and take its results as they arrive.
-    ///
-    /// Every message is acted on rather than only the newest: a poll that
-    /// catches up on several at once still carries the one that delivered
-    /// the metadata, and dropping it would lose a whole scan's work. Only
-    /// the last one's wording reaches the status line, which is the part
-    /// that genuinely only wants the newest.
-    #[cfg(feature = "game-library")]
     /// The rate the given list's scrolling runs at.
     fn scroll_rate_of(
         &mut self,
@@ -9488,6 +9714,14 @@ impl App {
         self.request_redraw();
     }
 
+    /// Move a scan along, and take its results as they arrive.
+    ///
+    /// Every message is acted on rather than only the newest: a poll that
+    /// catches up on several at once still carries the one that delivered
+    /// the metadata, and dropping it would lose a whole scan's work. Only
+    /// the last one's wording reaches the status line, which is the part
+    /// that genuinely only wants the newest.
+    #[cfg(feature = "game-library")]
     fn poll_library_scan(&mut self) {
         use crate::gamelib::Progress;
         let Some(scan) = &self.library_scan else {

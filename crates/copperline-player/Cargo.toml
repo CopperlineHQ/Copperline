@@ -1,0 +1,42 @@
+# The publisher-kit player: a dedicated, launcher-free build of one game on
+# the Copperline core. A game manifest (COPPERLINE_GAME_MANIFEST, see
+# game.example.toml) is baked in by build.rs; the game payload ships as a
+# sidecar file next to the binary, never inside it, so the GPLv3 player
+# binary stays pure and the game remains a separate work by mere
+# aggregation. See docs/guide/publishing.md.
+
+[package]
+name = "copperline-player"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+description = "Standalone single-game player built on the Copperline Amiga emulator"
+publish = false
+
+# Standalone: deliberately not a member of any workspace, so building this
+# crate never changes the root package's lockfile or native artifacts
+# (the same shape as crates/copperline-web).
+[workspace]
+
+[dependencies]
+# The interactive frontend and the CPU JIT, and nothing else: no control
+# server, no GDB stub, no launcher-library HTTP/TLS stack, no wasmtime, no
+# synthesizers -- a shipped game exposes no debugging surface and carries
+# no dependency it does not use.
+copperline = { path = "../..", default-features = false, features = [
+    "frontend",
+    "cpu-jit",
+] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

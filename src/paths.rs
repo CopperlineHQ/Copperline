@@ -49,14 +49,57 @@ fn portable_config_dir(
         .find_map(marked_program_dir)
 }
 
+/// The directory name host data lives under: "copperline" for the emulator
+/// itself, a game's own id for a publisher-kit player build. See
+/// [`set_app_identity`].
+static APP_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The resolved host-data directory, cached for the life of the process.
+static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Adopt a per-application identity, so host data lands under a directory of
+/// that name (`~/.config/<name>/`, `%APPDATA%\<name>\`) instead of
+/// `copperline`. Built for player builds, where each game keeps its own
+/// settings, saves, and gamepad calibration.
+///
+/// Must be called before anything resolves [`config_dir`]: the directory is
+/// cached on first use, so a late call would split host data across two
+/// homes. Call it first thing in `main`.
+pub fn set_app_identity(name: &str) {
+    // The leading character must be alphanumeric -- the same rule the game
+    // manifest enforces -- so "." and ".." cannot slip through and select
+    // the config base directory or its parent instead of a child.
+    assert!(
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "app identity must be a plain directory name: {name:?}"
+    );
+    debug_assert!(
+        DIR.get().is_none(),
+        "set_app_identity after config_dir was already resolved"
+    );
+    let _ = APP_IDENTITY.set(name.to_string());
+}
+
+fn app_identity() -> &'static str {
+    APP_IDENTITY
+        .get()
+        .map(String::as_str)
+        .unwrap_or("copperline")
+}
+
 /// Copperline's host-data directory. An empty `portable.txt` beside the
 /// executable or downloaded AppImage selects that directory; otherwise this is
 /// `$XDG_CONFIG_HOME/copperline`, `%APPDATA%\copperline`, or
-/// `$HOME/.config/copperline`, whichever the host offers first.
+/// `$HOME/.config/copperline`, whichever the host offers first. A player
+/// build's [`set_app_identity`] substitutes the game's id for `copperline`.
 ///
 /// Not created here -- writers call [`ensure_parent`].
 pub fn config_dir() -> Option<PathBuf> {
-    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(discover_config_dir).clone()
 }
 
@@ -71,10 +114,11 @@ fn discover_config_dir() -> Option<PathBuf> {
     }
     for var in ["XDG_CONFIG_HOME", "APPDATA"] {
         if let Some(dir) = crate::envcfg::var_os(var) {
-            return Some(PathBuf::from(dir).join("copperline"));
+            return Some(PathBuf::from(dir).join(app_identity()));
         }
     }
-    crate::envcfg::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("copperline"))
+    crate::envcfg::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config").join(app_identity()))
 }
 
 /// A named file directly inside [`config_dir`], e.g. `gamepads.toml`.

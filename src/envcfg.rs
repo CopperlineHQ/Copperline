@@ -23,9 +23,40 @@ use std::ffi::OsString;
 use std::sync::OnceLock;
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+static SNAPSHOT: OnceLock<HashMap<OsString, OsString>> = OnceLock::new();
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn snapshot() -> &'static HashMap<OsString, OsString> {
-    static SNAPSHOT: OnceLock<HashMap<OsString, OsString>> = OnceLock::new();
     SNAPSHOT.get_or_init(|| std::env::vars_os().collect())
+}
+
+/// Seal the snapshot with every `COPPERLINE_*` variable absent, so all
+/// diagnostic and debugging knobs read as unset for the life of the process.
+/// The rest of the environment (`HOME`, `APPDATA`, ...) is kept: `paths`
+/// resolves the host-data directory through this module.
+///
+/// Built for player builds, which call it first thing in `main` so a shipped
+/// game exposes no debugging surface. One-shot like the snapshot itself: a
+/// call after something has already read the environment is too late, which
+/// the debug assertion catches during development.
+pub fn seal() {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let sealed = SNAPSHOT
+            .set(
+                std::env::vars_os()
+                    .filter(|(key, _)| {
+                        !key.to_str()
+                            .is_some_and(|name| name.starts_with("COPPERLINE"))
+                    })
+                    .collect(),
+            )
+            .is_ok();
+        debug_assert!(
+            sealed,
+            "envcfg::seal after the environment was already read"
+        );
+    }
 }
 
 /// Whether any `COPPERLINE_*` variable is present at all. Every knob this

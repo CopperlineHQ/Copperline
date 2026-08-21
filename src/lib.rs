@@ -57,10 +57,15 @@ pub mod gamelib;
 pub mod gamepad;
 pub mod gary;
 pub mod gayle;
+// The remote GDB stub (`--gdb`). Gated so player builds -- shipped games
+// with no debugging surface -- can compile it out; everything else keeps it
+// through the default features.
+#[cfg(feature = "gdb")]
 pub mod gdbstub;
 pub mod graffity;
 pub(crate) mod gzip;
 pub mod harddrive;
+pub mod hash;
 pub mod heatmap;
 pub mod hostsocket;
 pub mod ide_a4000;

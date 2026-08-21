@@ -1382,7 +1382,7 @@ fn parse_custom_reg_param(p: &ParamReader) -> Result<u16, CtlError> {
         return Err(CtlError::invalid_params("needs reg (name or offset)"));
     };
     if let Some(s) = v.as_str() {
-        return crate::gdbstub::parse_custom_reg(&s.to_ascii_uppercase())
+        return crate::debugger::parse_custom_reg(&s.to_ascii_uppercase())
             .ok_or_else(|| CtlError::invalid_params(format!("unknown custom register: {s}")));
     }
     match value_as_u32(v) {

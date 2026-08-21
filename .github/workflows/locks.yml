@@ -49,3 +49,6 @@ jobs:
       - name: crates/hostsocket-plugin
         working-directory: crates/hostsocket-plugin
         run: cargo tree --locked > /dev/null
+      - name: crates/copperline-player
+        working-directory: crates/copperline-player
+        run: cargo tree --locked > /dev/null

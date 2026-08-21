@@ -336,6 +336,30 @@ jobs:
         working-directory: crates/copperline-web/www
         run: npm test
 
+  player:
+    name: Publisher-kit player crate
+    # Guards the feature combination the player builds against (frontend +
+    # cpu-jit; no control, gdb, or game-library) and the game-manifest
+    # baking in crates/copperline-player. Check-only: the full bundle build
+    # belongs to a publisher's own CI (docs/guide/publishing.md).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Frontend without the debug and library features
+        run: cargo check --no-default-features --features frontend,cpu-jit --locked
+      - name: Player crate (example manifest)
+        working-directory: crates/copperline-player
+        run: cargo check --locked
+      - name: Player crate formatting
+        # A standalone workspace, so the root Formatting step never
+        # reaches it.
+        working-directory: crates/copperline-player
+        run: cargo fmt --check
+
   docs:
     name: Docs build (HTML + PDF)
     # Independent of the Rust build: catches MyST/cross-reference breakage

@@ -28,6 +28,12 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 /// `rom = "..."` or the CLI argument) always replaces it.
 pub const BUNDLED_AROS_ROM: &str = "<bundled-aros>";
 
+/// The player build's persisted end-user settings, an ordinary
+/// configuration fragment under the per-game config directory. Written by
+/// the menu's write-through in player sessions and layered over the game
+/// manifest's defaults by the player's startup.
+pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
+
 /// Sentinel `[scsi] rom` for an A4091 fitted without a named ROM: resolve to
 /// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
@@ -2967,6 +2973,128 @@ impl RawConfig {
     /// the config-screen session audio without reaching into private raw fields.
     pub fn audio_output_enabled(&self) -> bool {
         self.audio.output_enabled.unwrap_or(true)
+    }
+
+    // --- programmatic construction for alternative frontends ------------
+    //
+    // The raw sections stay crate-private; the small surface a
+    // publisher-kit player (crates/copperline-player) needs to describe
+    // its baked machine and sidecar payload is named here instead, and
+    // everything still funnels through the one TryFrom validation.
+
+    /// Parse configuration TOML text into its raw form, exactly as
+    /// [`Config::load_raw`] would read it from a file.
+    pub fn parse(text: &str) -> Result<Self> {
+        toml::from_str(text).context("parsing configuration TOML")
+    }
+
+    /// `[machine] profile`, by name ("A500", "CD32", ...): the model whose
+    /// defaults the conversion to [`Config`] starts from.
+    pub fn set_machine_profile(&mut self, model: &str) {
+        self.machine.profile = Some(model.to_string());
+    }
+
+    /// `[memory]` size overrides on the profile ("2M", "8M", ...); `None`
+    /// keeps the profile's own figure.
+    pub fn set_memory_overrides(
+        &mut self,
+        chip: Option<&str>,
+        fast: Option<&str>,
+        slow: Option<&str>,
+    ) {
+        if let Some(size) = chip {
+            self.memory.chip = Some(size.to_string());
+        }
+        if let Some(size) = fast {
+            self.memory.fast = Some(size.to_string());
+        }
+        if let Some(size) = slow {
+            self.memory.slow = Some(size.to_string());
+        }
+    }
+
+    /// `[cd] image`: the disc in the machine's CD drive at power-on.
+    pub fn set_cd_image(&mut self, path: &Path) {
+        self.cd.image = Some(path.to_string_lossy().into_owned());
+    }
+
+    /// `[floppy.df0] path`: the disk in the internal drive at power-on.
+    pub fn set_boot_floppy(&mut self, path: &Path) {
+        self.floppy.df0 = Some(RawFloppyDrive {
+            path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+    }
+
+    /// The `[display]` defaults a game manifest carries: shader and bezel
+    /// by their config names, and whether the session opens fullscreen.
+    /// Only what is given is set, so a later overlay still wins.
+    pub fn set_display_defaults(
+        &mut self,
+        shader: Option<&str>,
+        bezel: Option<&str>,
+        fullscreen: Option<bool>,
+    ) {
+        if let Some(name) = shader {
+            self.display.shader = Some(name.to_string());
+        }
+        if let Some(name) = bezel {
+            self.display.bezel = Some(RawBezel::Named(name.to_string()));
+        }
+        if let Some(on) = fullscreen {
+            self.display.full_screen = Some(on);
+        }
+    }
+
+    /// Whether the session opens fullscreen, for a frontend's own
+    /// command-line override.
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.display.full_screen = Some(on);
+    }
+
+    /// `[display] status_bar`, for the player's permanently bar-less
+    /// presentation.
+    pub fn set_status_bar(&mut self, on: bool) {
+        self.display.status_bar = Some(on);
+    }
+
+    /// Layer a player settings file ([`PLAYER_SETTINGS_FILE`], written by
+    /// the menu's write-through) over this configuration: every field the
+    /// player persists that the overlay actually carries replaces the base
+    /// value, and anything else keeps the manifest's default -- so a
+    /// partial or hand-edited file still behaves.
+    pub fn merge_player_settings(&mut self, overlay: &RawConfig) {
+        fn take<T: Clone>(base: &mut Option<T>, over: &Option<T>) {
+            if over.is_some() {
+                *base = over.clone();
+            }
+        }
+        take(
+            &mut self.display.pixel_aspect,
+            &overlay.display.pixel_aspect,
+        );
+        take(&mut self.display.scaling, &overlay.display.scaling);
+        take(&mut self.display.menu_scale, &overlay.display.menu_scale);
+        take(&mut self.display.shader, &overlay.display.shader);
+        take(
+            &mut self.display.shader_strength,
+            &overlay.display.shader_strength,
+        );
+        take(&mut self.display.tint, &overlay.display.tint);
+        take(&mut self.display.bezel, &overlay.display.bezel);
+        take(&mut self.display.tv_h_centre, &overlay.display.tv_h_centre);
+        take(&mut self.display.tv_v_centre, &overlay.display.tv_v_centre);
+        take(&mut self.display.full_screen, &overlay.display.full_screen);
+        take(&mut self.input.port1, &overlay.input.port1);
+        take(&mut self.input.port2, &overlay.input.port2);
+        take(&mut self.input.joystick, &overlay.input.joystick);
+        take(&mut self.input.autofire_hz, &overlay.input.autofire_hz);
+        take(&mut self.audio.output_device, &overlay.audio.output_device);
+        take(
+            &mut self.audio.output_enabled,
+            &overlay.audio.output_enabled,
+        );
+        take(&mut self.audio.audio_filter, &overlay.audio.audio_filter);
     }
 }
 
@@ -6660,6 +6788,30 @@ mod tests {
     fn parse_config(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text)?;
         raw.try_into()
+    }
+
+    /// The player startup layers its settings file over the manifest's
+    /// defaults: what the overlay carries wins, what it omits keeps the
+    /// base, so a partial or hand-edited file still behaves.
+    #[test]
+    fn player_settings_overlay_field_by_field() -> Result<()> {
+        let mut base = RawConfig::default();
+        base.set_machine_profile("CD32");
+        base.set_display_defaults(Some("crt"), Some("1084"), Some(true));
+
+        let overlay = RawConfig::parse(
+            "[display]\nshader = \"scanlines\"\nfull_screen = false\n\
+             [input]\nport2 = \"cd32\"\n",
+        )?;
+        base.merge_player_settings(&overlay);
+
+        let cfg: Config = base.try_into()?;
+        assert_eq!(cfg.shader, ShaderMode::Scanlines, "overlay wins");
+        assert!(!cfg.full_screen, "overlay wins");
+        assert_eq!(cfg.bezel, BezelStyle::Model1084, "omitted keeps the base");
+        assert_eq!(cfg.port_devices[1], crate::bus::PortDevice::Cd32Pad);
+        assert_eq!(cfg.machine, Some(MachineModel::Cd32));
+        Ok(())
     }
 
     /// One medium cannot be two drives. Two slots pointed at the same disk

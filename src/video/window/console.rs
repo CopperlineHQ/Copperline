@@ -513,7 +513,7 @@ impl App {
             "RWATCH" | "RW" => {
                 let Some(off) = args
                     .first()
-                    .and_then(|t| crate::gdbstub::parse_custom_reg(&t.to_ascii_uppercase()))
+                    .and_then(|t| crate::debugger::parse_custom_reg(&t.to_ascii_uppercase()))
                 else {
                     return ConsoleOutcome::error("usage: RWATCH NAME|OFFSET (e.g. DMACON or 96)");
                 };

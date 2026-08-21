@@ -661,6 +661,50 @@ pub fn custom_reg_name(off: u16) -> String {
     fixed.to_string()
 }
 
+/// The inverse of [`custom_reg_name`]: a register name or a hex offset or
+/// address ($DFF000-relative addresses are accepted) to the word offset it
+/// names. Shared by the GDB stub's register watch commands, the control
+/// protocol, and the debugger console, so it lives here with the name table
+/// rather than behind any one server's feature gate.
+pub fn parse_custom_reg(input: &str) -> Option<u16> {
+    if let Some(value) = parse_hex(input) {
+        return Some(custom_offset_from_value(value));
+    }
+    let needle = input.trim().to_ascii_uppercase();
+    (0..=0x1FEu16)
+        .step_by(2)
+        .find(|&off| custom_reg_name(off).to_ascii_uppercase() == needle)
+}
+
+fn custom_offset_from_value(value: u32) -> u16 {
+    if (0x00DF_F000..=0x00DF_FFFF).contains(&value) {
+        (value - 0x00DF_F000) as u16 & 0x1FE
+    } else {
+        value as u16 & 0x1FE
+    }
+}
+
+/// Expand the listen-address shorthand shared by the debug servers
+/// (`--gdb`, `--control`, `--control-gui`): bare `PORT` and `:PORT` bind
+/// loopback; anything else is taken verbatim. Here rather than in the GDB
+/// stub because the control protocol shares it and either server can be
+/// compiled out.
+pub fn normalize_listen_addr(input: &str) -> anyhow::Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!(
+            "listen address requires ADDR, :PORT, or PORT"
+        ));
+    }
+    if trimmed.starts_with(':') {
+        return Ok(format!("127.0.0.1{trimmed}"));
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(format!("127.0.0.1:{trimmed}"));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// One operand in a breakpoint condition: a register, an immediate, or a
 /// 16-bit memory word. Memory and immediates are written in hex; the memory
 /// form is `M<hex>` (e.g. `MC00002`).

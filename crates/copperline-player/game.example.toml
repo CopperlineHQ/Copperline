@@ -1,0 +1,68 @@
+# The game manifest a player build is baked from.
+#
+# Point COPPERLINE_GAME_MANIFEST at your own copy of this file and build:
+#
+#   COPPERLINE_GAME_MANIFEST=/path/to/game.toml \
+#     cargo build --release --manifest-path crates/copperline-player/Cargo.toml
+#
+# Everything here is fixed at compile time: the machine, the RAM, the
+# payload's file name. The payload itself is NOT embedded -- the player
+# expects it as a sidecar file next to the binary at runtime (tools/publish
+# assembles the bundle). With the variable unset, this example manifest is
+# built, which is only useful for checking that the crate compiles.
+
+[game]
+# Window title, and the name the player identifies itself by.
+title = "Example Game"
+# Per-user save/settings directory name (~/.config/<id>/); also the bundle's
+# internal identity. Letters, digits, ".", "-", "_".
+id = "copperline-example"
+# Optional release version: shown by --version, names the published bundle,
+# and marks the per-user staged copy of adf/run payloads -- bump it when
+# shipping an update so the copy refreshes even if the new payload
+# preserves every file size and timestamp.
+# version = "1.0"
+
+[payload]
+# Exactly one payload kind:
+#
+# A CD32/CDTV disc image (iso/cue/chd), inserted at power-on:
+cd = "game.iso"
+# A plain Amiga executable, booted --run style: `files` is a directory of
+# game files beside the binary, copied per user on first launch (so guest
+# writes persist and survive updates), `executable` the program inside it:
+# run = { files = "amiga", executable = "MyGame", args = "" }
+# A floppy image in DF0 at power-on (copied per user, so writes persist):
+# adf = "game.adf"
+#
+# Optional integrity pin: the payload's SHA-256. The player refuses to start
+# when the sidecar does not match, so a bundle cannot be quietly retargeted.
+# Omit it to let the payload be patched without rebuilding the player.
+# Not supported for `run` payloads (a directory has no single digest).
+# sha256 = "0123456789abcdef..."
+
+[machine]
+# Any Copperline machine model: A500, A500+, A600, A1200, A3000, A4000,
+# A1000, CDTV, CD32.
+model = "CD32"
+# Optional RAM overrides on the model profile ("512K", "2M", "8M", ...).
+# chip = "2M"
+# fast = "8M"
+# slow = "512K"
+
+[display]
+# Defaults only; the end user can change all of these in the in-game menu,
+# and their choices persist per user.
+shader = "crt"          # none | scanlines | mask | crt
+bezel = "1084"          # off | 1084 | classic
+fullscreen = true
+
+[features]
+# Offer quick save/load slots in the player menu. Off by default: some
+# titles treat save states as part of the game, some as cheating.
+save_states = false
+
+[branding]
+# Window/dock icon PNG, relative to this manifest; replaces the Copperline
+# brand icon. Square, ideally 256x256 or larger.
+# icon = "icon.png"
