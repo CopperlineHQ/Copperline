@@ -10,6 +10,8 @@ pub mod font;
 pub mod launcher;
 #[cfg(feature = "frontend")]
 pub mod menu;
+#[cfg(feature = "frontend")]
+pub mod nav;
 pub mod present_common;
 #[cfg(feature = "frontend")]
 pub mod ui;

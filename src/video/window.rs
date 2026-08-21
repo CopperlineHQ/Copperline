@@ -1064,6 +1064,21 @@ pub struct App {
     /// starts the list running after a pause, the way a held key does. Any
     /// of the launcher's scrolling lists can be the one being held.
     scroll_hold: Option<(UiControl, Instant)>,
+    /// A launcher stepper held down: which control, when its next step is
+    /// due, and when the hold began -- the ramping fields read their pace
+    /// off how long they have been held.
+    cycle_hold: Option<(UiControl, Instant, Instant)>,
+    /// Where the keyboard's or the pad's focus stands on the interface,
+    /// and whether it is being shown. Empty until something asks for it.
+    nav: crate::video::nav::Nav,
+    /// When the focus was last shown, for its breath.
+    nav_shown_at: Instant,
+    /// The button the current page was entered by, so going back leaves
+    /// the page the way it was come into rather than closing the whole
+    /// launcher. Forgotten once it has been gone back to.
+    nav_entered_from: Option<crate::video::nav::NavTarget>,
+    /// The pad's walk across the interface, while a surface is open.
+    pad_nav: PadNav,
     /// When the text caret next changes between lit and dark. `None` when
     /// nothing is being typed into, which is also what puts it back to lit
     /// for whichever box opens next.
@@ -1198,9 +1213,6 @@ pub struct App {
     /// What the bridge saw last pass, for edge detection: a held button
     /// must not re-fire every poll.
     pad_prev: crate::gamepad::PadState,
-    /// When a held d-pad direction may step the menu again, giving pad
-    /// navigation the scroll arrows' hold-to-repeat cadence.
-    pad_nav_repeat: Option<Instant>,
     /// Quit was asked for -- the pad's Quit-hotkey hold completed, or the
     /// player menu's Quit row was picked; the next event-loop pass exits.
     quit_requested: bool,
@@ -1962,6 +1974,11 @@ impl App {
             last_cursor_phys: None,
             volume_dragging: false,
             scroll_hold: None,
+            cycle_hold: None,
+            nav: crate::video::nav::Nav::default(),
+            nav_shown_at: Instant::now(),
+            nav_entered_from: None,
+            pad_nav: PadNav::default(),
             caret_flip_at: None,
             analyzer_dragging: false,
             mouse_captured: false,
@@ -2008,7 +2025,6 @@ impl App {
             gamepad_quit_hold: None,
             pad_last: None,
             pad_prev: crate::gamepad::PadState::default(),
-            pad_nav_repeat: None,
             quit_requested: false,
             joystick_input_mode,
             mouse_sensitivity,
@@ -2250,75 +2266,35 @@ impl App {
         }
     }
 
-    /// Let the pad walk the open menu, at the about_to_wait boundary where
-    /// the event loop is at hand.
+    /// Let the pad walk the interface, at the about_to_wait boundary
+    /// where the event loop is at hand.
     ///
     /// The Menu control (a calibrated binding, or Select/guide on the
-    /// database's standard layout) toggles the menu -- or closes an open
-    /// overlay panel; while the menu is up, the d-pad steps rows with the
-    /// scroll arrows' hold-to-repeat cadence, right descends into a
-    /// category, left ascends, fire activates the row, and the second
-    /// button backs out a level at a time, closing from the top -- the
-    /// same walk the arrow keys and Escape do. All edges are detected
-    /// against the previous pass, so a held button acts once.
-    fn drive_menu_with_pad(&mut self, event_loop: &ActiveEventLoop) {
+    /// database's standard layout) is the way in: it opens the menu, or
+    /// closes an open overlay panel. From there the pad walks whatever
+    /// is up -- the menu, the status bar, the machine configuration and
+    /// the panels beyond it -- because its directions, its fire and its
+    /// second button mean to the focus exactly what the arrow keys,
+    /// Return and Escape mean. The press is edged against the previous
+    /// pass, so a held button acts once; the walk keeps its own
+    /// hold-to-repeat.
+    fn drive_interface_with_pad(&mut self, event_loop: &ActiveEventLoop) {
         let pad = self.pad_last.unwrap_or_default();
         let prev = std::mem::replace(&mut self.pad_prev, pad);
         if pad.menu && !prev.menu {
-            if self.ui.panel.is_some() {
-                self.close_panel();
-                self.request_redraw();
-            } else {
-                self.toggle_menu();
-            }
+            self.toggle_pad_interface();
             return;
         }
-        if !self.ui.menu_open {
-            self.pad_nav_repeat = None;
-            return;
-        }
-        let js = pad.joystick;
-        let prev_js = prev.joystick;
-        let now = Instant::now();
-        let vertical = match (js.up, js.down) {
-            (true, false) => Some(false),
-            (false, true) => Some(true),
-            _ => None,
-        };
-        match vertical {
-            Some(forward) => {
-                let first = if forward { !prev_js.down } else { !prev_js.up };
-                let due = self.pad_nav_repeat.is_some_and(|due| now >= due);
-                if first || due {
-                    self.ui.menu_nav.step(&self.ui.menu_rows, forward);
-                    self.pad_nav_repeat = Some(if first {
-                        now + SCROLL_HOLD_DELAY
-                    } else {
-                        now + SCROLL_HOLD_EVERY
-                    });
-                    self.request_redraw();
-                }
-            }
-            None => self.pad_nav_repeat = None,
-        }
-        if js.right && !prev_js.right {
-            self.ui.menu_nav.descend(&self.ui.menu_rows);
-            self.request_redraw();
-        }
-        if js.left && !prev_js.left {
-            self.ui.menu_nav.ascend();
-            self.request_redraw();
-        }
-        if js.fire && !prev_js.fire {
-            self.activate_menu_row(Some(event_loop));
-            self.ensure_tool_windows_for_open_panels(event_loop);
-            self.request_redraw();
-        }
-        if js.button2 && !prev_js.button2 {
-            if !self.ui.menu_nav.ascend() {
-                self.close_menu();
-            }
-            self.request_redraw();
+        // Everything a surface offers is walked the same way, whichever
+        // hand is doing the walking: the pad's directions, its fire and
+        // its second button are the arrow keys, Return and Escape, and
+        // the focus knows what each means where it is standing.
+        // Any surface being up is enough: the pad does not have to be
+        // told twice that it is driving the interface, and needing a
+        // keyboard arrow first to wake it is the wrong way round for a
+        // machine being played from a sofa.
+        if self.nav.showing() || self.modal_ui_active() {
+            self.pad_drives_interface(pad.joystick, Some(event_loop));
         }
     }
 
@@ -3600,7 +3576,7 @@ impl ApplicationHandler for App {
                     }
                     (other, state) => {
                         let pressed = state == ElementState::Pressed;
-                        if pressed && self.ui_handle_key(other, text.as_deref()) {
+                        if pressed && self.ui_handle_key(other, text.as_deref(), Some(event_loop)) {
                             return;
                         }
                         // Open panels are modal: key presses must not leak
@@ -3764,6 +3740,7 @@ impl ApplicationHandler for App {
                         self.volume_dragging = false;
                         self.analyzer_dragging = false;
                         self.scroll_hold = None;
+                        self.cycle_hold = None;
                         if was_volume_dragging {
                             return;
                         }
@@ -3774,6 +3751,11 @@ impl ApplicationHandler for App {
                         if let Some(control) =
                             self.cursor_pos.and_then(|p| self.main_ui_control_at(p))
                         {
+                            // The pointer takes the focus with it: the line
+                            // goes out, and coming back to the keyboard
+                            // resumes from whatever the hand last pressed.
+                            self.nav
+                                .follow_pointer(crate::video::nav::NavTarget::Ui(control));
                             // A scroll arrow keeps running while it is held,
                             // and a fresh press starts the ramp again rather
                             // than picking up the speed the last one reached.
@@ -3781,6 +3763,14 @@ impl ApplicationHandler for App {
                                 self.scroll_hold =
                                     Some((control, Instant::now() + SCROLL_HOLD_DELAY));
                                 self.reset_scroll_rate(control);
+                            }
+                            // Every stepper in the launcher runs on while
+                            // it is held, so a setting with a long list is
+                            // never a hundred clicks away.
+                            if let UiControl::LauncherCycle { field, .. } = control {
+                                let now = Instant::now();
+                                self.cycle_hold =
+                                    Some((control, now + cycle_hold_delay(field), now));
                             }
                             self.activate_ui_control_with_event_loop(control, Some(event_loop));
                             self.ensure_tool_windows_for_open_panels(event_loop);
@@ -3887,10 +3877,17 @@ impl ApplicationHandler for App {
                             let layout = bar_layout(&self.media_bar());
                             match control_at(pos, &layout) {
                                 Some(BarControl::Volume) => {
+                                    self.nav.follow_pointer(crate::video::nav::NavTarget::Bar(
+                                        BarControl::Volume,
+                                    ));
                                     self.volume_dragging = true;
                                     self.set_output_volume_from_pos(pos);
                                 }
-                                Some(control) => self.activate_bar_control(control),
+                                Some(control) => {
+                                    self.nav
+                                        .follow_pointer(crate::video::nav::NavTarget::Bar(control));
+                                    self.activate_bar_control(control)
+                                }
                                 None => {}
                             }
                         }
@@ -4009,6 +4006,11 @@ impl ApplicationHandler for App {
                 };
                 let osd = self.active_osd_text();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
+                // Decided out here: inside the render borrow the frame is
+                // the renderer's, and the focus is the window's business.
+                let (nav_target, nav_mix) = self.nav_light();
+                let nav_is_open = self.nav.open();
+                let (nav_bar_target, nav_bar_mix) = self.nav_bar_light();
                 let recording = self.recorder.is_some();
                 // The MT-32's panel reads its display live off the engine, so
                 // it is only gathered when the panel is actually up.
@@ -4127,7 +4129,11 @@ impl ApplicationHandler for App {
                         kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
                     }
                     if !super::status_bar_hidden() {
+                        // The bar lights its focus the way the
+                        // surfaces light theirs.
+                        statusbar::set_nav_light(nav_bar_target, nav_bar_mix);
                         draw_status_bar(frame, &view, r.texture_scale);
+                        statusbar::set_nav_light(None, 0.0);
                     }
                     // The picture loses its corners to a front's aperture
                     // and to a preset's bowed face; all three overlays live
@@ -4161,7 +4167,11 @@ impl ApplicationHandler for App {
                     if let Some((text, warning)) = &osd {
                         draw_osd(frame, text, *warning, r.texture_scale, corner);
                     }
+                    // The focus lights its control the way the pointer
+                    // does, breathing between the two.
+                    ui::set_nav_light(nav_target, nav_mix, nav_is_open);
                     ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
+                    ui::set_nav_light(None, 0.0, false);
                     // The drag hint sits on top of everything: the drop will
                     // land wherever the drag is released, panels or not. The
                     // launcher refuses drops, so no hint over it.
@@ -4378,6 +4388,7 @@ impl ApplicationHandler for App {
         #[cfg(feature = "game-library")]
         self.poll_library_scan();
         self.repeat_held_scroll();
+        self.repeat_held_cycle();
         #[cfg(feature = "game-library")]
         if self
             .launcher_state_mut()
@@ -4417,7 +4428,10 @@ impl ApplicationHandler for App {
         let typing = self.blink_caret();
         // A held scroll arrow has no event of its own to wake on: the button
         // went down once and the repeats are this loop's own doing.
-        let scrolling = self.scroll_hold.is_some();
+        let scrolling = self.scroll_hold.is_some() || self.cycle_hold.is_some();
+        // The focus breathes, which is the window's own doing: nothing
+        // else would wake the loop to draw the next step of it.
+        let focused = self.nav.showing();
         // The About panel animates on the clock, so it too must keep the
         // loop awake while it is up.
         let about_open = matches!(self.ui.panel, Some(Panel::About));
@@ -4429,6 +4443,7 @@ impl ApplicationHandler for App {
                 || scrolling
                 || typing
                 || about_open
+                || focused
                 || pad_hotkey_watch
             {
                 ControlFlow::Poll
@@ -4446,6 +4461,11 @@ impl ApplicationHandler for App {
             // Poll the pad at a human rate rather than spinning a core;
             // plenty of granularity inside the quit hotkey's 1.5 s hold.
             std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        if focused && !running && !writing_image {
+            // A human rate for the breath, not a spinning core.
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            self.request_redraw();
         }
         if about_open && !running && !writing_image {
             // The About animation likewise paces itself when the machine
@@ -4479,7 +4499,7 @@ impl ApplicationHandler for App {
         } else {
             self.pump_joystick_input();
         }
-        self.drive_menu_with_pad(event_loop);
+        self.drive_interface_with_pad(event_loop);
         if self.quit_requested {
             event_loop.exit();
             return;
@@ -5342,7 +5362,8 @@ impl App {
                     state.status = None;
                 }
             }
-            UiControl::LauncherTab(tab) => {
+            // Either way in goes to the same page.
+            UiControl::LauncherTab(tab) | UiControl::LauncherNavTab(tab) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.tab = tab;
                     // A message reports what the page just did, so it belongs
@@ -5619,7 +5640,7 @@ impl App {
                     state.status = None;
                 }
             }
-            UiControl::LauncherHostDiskSelect(index) => {
+            UiControl::LauncherHostDiskSelect(index) | UiControl::LauncherHostDiskEnable(index) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.select_host_disk(index);
                     // A refused tick reports itself on the status line, where
@@ -5936,6 +5957,8 @@ mod app_input;
 mod app_launcher;
 mod app_media;
 mod app_menus;
+mod app_nav;
+use app_nav::{cycle_hold_delay, PadNav};
 mod app_panels;
 mod app_session;
 mod bezel;
@@ -5951,7 +5974,7 @@ mod kbdpanel;
 mod mt32panel;
 mod present;
 mod rtg_texture;
-mod statusbar;
+pub(in crate::video) mod statusbar;
 mod stickers;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};

@@ -127,6 +127,25 @@ impl Library {
 
     /// Whether this list already covers `folder`, so a redraw need not
     /// read the directory again.
+    /// A library of made-up entries, for tests that need a list of a
+    /// given length without a folder of archives behind it.
+    #[cfg(test)]
+    pub(crate) fn of_titles(titles: impl IntoIterator<Item = String>) -> Library {
+        Library {
+            folder: None,
+            entries: titles
+                .into_iter()
+                .map(|title| Entry {
+                    path: PathBuf::from(&title),
+                    relative: title.clone(),
+                    file_name: title,
+                    game: None,
+                    duplicated: false,
+                })
+                .collect(),
+        }
+    }
+
     pub fn covers(&self, folder: &Path) -> bool {
         self.folder.as_deref() == Some(folder)
     }

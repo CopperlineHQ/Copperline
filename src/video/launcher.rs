@@ -779,6 +779,16 @@ const fn row(field: LauncherField, label: &'static str, kind: RowKind) -> Row {
     Row { field, label, kind }
 }
 
+/// Whether a field is one of the boot-priority steppers, whose range
+/// runs to hundreds and so wants the held ramp rather than the steady
+/// pace the shorter lists take.
+pub fn field_is_bootpri(field: LauncherField) -> bool {
+    BOOTPRI_ROWS
+        .iter()
+        .chain(LIDE_ROWS.iter())
+        .any(|r| r.field == field && r.kind == RowKind::Bootpri)
+}
+
 /// A non-interactive section heading row (see [`RowKind::SectionHeader`]).
 const fn section_header(label: &'static str) -> Row {
     Row {
@@ -5364,6 +5374,23 @@ impl MachineSetup {
     }
 
     /// The disks the Host Disk table is showing.
+    /// Fill the host-disk list with made-up rows, for tests that need
+    /// the page's list without the host having any disks to scan.
+    #[cfg(test)]
+    pub(crate) fn fake_host_disks(&mut self, rows: usize) {
+        self.host_disks = (0..rows)
+            .map(|i| HostDiskRow {
+                id: format!("disk{i}"),
+                fingerprint: None,
+                volume: format!("Volume {i}"),
+                size: "1.0 GB".to_string(),
+                mounted: Vec::new(),
+                writable: false,
+                attach: None,
+            })
+            .collect();
+    }
+
     pub fn host_disks(&self) -> &[HostDiskRow] {
         &self.host_disks
     }

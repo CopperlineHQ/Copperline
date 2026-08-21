@@ -641,23 +641,22 @@ impl App {
     /// closing the menu from the top, which is where Escape has nothing left
     /// to close.
     pub(super) fn handle_menu_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) -> bool {
-        let ui = &mut self.ui;
+        use crate::video::nav::Dir;
         match code {
-            KeyCode::ArrowUp => ui.menu_nav.step(&ui.menu_rows, false),
-            KeyCode::ArrowDown => ui.menu_nav.step(&ui.menu_rows, true),
-            KeyCode::ArrowRight => {
-                ui.menu_nav.descend(&ui.menu_rows);
-            }
-            KeyCode::ArrowLeft => {
-                ui.menu_nav.ascend();
-            }
+            // The menu is a surface like any other: the arrows go to the
+            // focus, which knows the menu keeps its own cursor and where
+            // walking off the foot of it leads.
+            KeyCode::ArrowUp => return self.nav_move(Dir::Up, Some(event_loop)),
+            KeyCode::ArrowDown => return self.nav_move(Dir::Down, Some(event_loop)),
+            KeyCode::ArrowRight => return self.nav_move(Dir::Right, Some(event_loop)),
+            KeyCode::ArrowLeft => return self.nav_move(Dir::Left, Some(event_loop)),
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 self.activate_menu_row(Some(event_loop));
                 self.ensure_tool_windows_for_open_panels(event_loop);
                 return true;
             }
             KeyCode::Escape => {
-                if !ui.menu_nav.ascend() {
+                if !self.ui.menu_nav.ascend() {
                     self.close_menu();
                 }
             }
@@ -712,7 +711,12 @@ impl App {
 
     /// Keys consumed by the open menu/panel (Escape, debugger hex entry).
     /// Returns true when the key was handled and must not reach the Amiga.
-    pub(super) fn ui_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
+    pub(super) fn ui_handle_key(
+        &mut self,
+        code: KeyCode,
+        text: Option<&str>,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> bool {
         if self.ui.active() {
             // An armed Input Mapping row eats the next key, including Escape
             // (which cancels the binding rather than closing the panel).
@@ -765,6 +769,15 @@ impl App {
                 return true;
             }
         }
+        // Nothing above wanted it: the focus takes the arrows and Return,
+        // so an open surface can be walked and worked without a pointer.
+        // A focus that is showing keeps them even with nothing modal up
+        // -- walking off the foot of the menu leaves the marker on the
+        // status bar, and the bar is meant to be walked from there.
+        // Escape hands the keyboard back to the guest.
+        if (self.modal_ui_active() || self.nav.showing()) && self.handle_nav_key(code, event_loop) {
+            return true;
+        }
         // Tool panels (debugger, frame analyzer, console) take their keys
         // through their own windows' events, never from the main window:
         // an unclaimed key here belongs to the Amiga.
@@ -784,6 +797,14 @@ impl App {
             .launcher_state()
             .is_none_or(|state| state.login.is_none())
         {
+            return false;
+        }
+        // A dialog is walked as well as typed into. Up and down are
+        // always the focus's -- they are how the boxes and the buttons
+        // under them are got between -- and while the marker is on a
+        // button so are left, right and Return. Inside a box those stay
+        // the caret's, which is what they mean while typing.
+        if self.nav_dialog_key_is_focus(code, &[UiControl::LoginOk, UiControl::LoginCancel]) {
             return false;
         }
         match code {
@@ -850,6 +871,22 @@ impl App {
             .launcher_state()
             .is_none_or(|state| state.meta.is_none())
         {
+            return false;
+        }
+        // A dialog is walked as well as typed into. Up and down are
+        // always the focus's -- they are how the boxes and the buttons
+        // under them are got between -- and while the marker is on a
+        // button so are left, right and Return. Inside a box those stay
+        // the caret's, which is what they mean while typing.
+        if self.nav_dialog_key_is_focus(
+            code,
+            &[
+                UiControl::MetaSave,
+                UiControl::MetaClear,
+                UiControl::MetaCancel,
+                UiControl::MetaArt,
+            ],
+        ) {
             return false;
         }
         match code {
@@ -946,6 +983,14 @@ impl App {
         {
             return false;
         }
+        // The list takes the arrows only while the focus is standing on
+        // a row of it, where up and down are what scrolling is. It used
+        // to take them for the whole page, so arriving here left the
+        // focus unable to move at all -- and the letters across the top
+        // are a strip to be walked, not a list to be scrolled.
+        if !self.nav_focus_in_library() {
+            return false;
+        }
         // Return launches what is chosen, which is what Run would do: on
         // this page the selection is the game, so the two are one action.
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
@@ -959,6 +1004,13 @@ impl App {
             KeyCode::End => isize::MAX,
             _ => return false,
         };
+        // At an end of the list the arrow is not the list's. It walks
+        // off instead -- up to the letters over the games, down to the
+        // buttons under them -- rather than pressing against a row that
+        // cannot move.
+        if step.abs() == 1 && self.library_at_end(step) {
+            return false;
+        }
         let whdload_entry = self
             .launcher_state()
             .is_some_and(|state| state.setup.whdload_enabled());
@@ -975,6 +1027,9 @@ impl App {
             };
             state.step_library_focus(rows, visible);
         }
+        // The row the list chose is the row the focus stands on.
+        self.nav_sync_library();
+        self.nav_sync_dialog();
         self.request_redraw();
         true
     }
@@ -1067,6 +1122,13 @@ impl App {
                 .as_ref()
                 .is_some_and(|r| r.window.fullscreen().is_some());
             self.ui.menu_rows = self.build_menu(fullscreen);
+            // The menu opens with its last row chosen -- the foot of
+            // the list is where it hangs from -- so a hand on the
+            // keyboard or a pad has somewhere to start, and walking on
+            // down leaves the menu for the bar. The pointer takes the
+            // cursor from it the moment it moves.
+            let ui = &mut self.ui;
+            ui.menu_nav.step(&ui.menu_rows, false);
         } else {
             self.ui.menu_rows = Vec::new();
             self.apply_auto_mouse_capture();
@@ -1078,6 +1140,10 @@ impl App {
     pub(super) fn close_panel(&mut self) {
         self.analyzer_dragging = false;
         self.ui.panel = None;
+        // The surface the focus was walking has gone with it, and so has
+        // the way back into the page it was on.
+        self.nav.clear();
+        self.nav_entered_from = None;
         self.request_redraw();
     }
 }

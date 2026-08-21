@@ -20,6 +20,11 @@ impl App {
             state.setup.refresh_host_disks();
         }
         self.ui.panel = Some(Panel::Launcher(Box::new(state)));
+        // Every open starts on System, wherever the focus was standing
+        // before -- on the status bar, or on the page this one replaced.
+        // The first page is where the eye starts, so it is where the
+        // first arrow key should find the marker.
+        self.nav.park(self.nav_home());
         self.request_redraw();
     }
 

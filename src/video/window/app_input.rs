@@ -156,6 +156,11 @@ impl App {
                 }) {
                 Ok(()) => {
                     self.mouse_captured = true;
+                    // The machine has the mouse, and with it the
+                    // keyboard: a marker left on the bar would keep
+                    // taking the guest's arrow keys and lighting
+                    // buttons behind its back.
+                    self.nav.clear();
                     self.cursor_pos = None;
                     self.last_display_cursor_pos = None;
                     self.mouse_delta_remainder = (0.0, 0.0);

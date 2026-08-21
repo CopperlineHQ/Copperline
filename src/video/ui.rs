@@ -11,8 +11,8 @@
 use super::launcher::{self, EditTarget, LauncherField, LauncherState, LauncherTab, RowKind};
 use super::menu;
 use super::window::{
-    draw_rect_bevel, fill_rect, fill_rect_blend, rgba, scale_rect, texture_height, texture_width,
-    Rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
+    draw_rect_bevel, fill_rect, fill_rect_blend, rgba, scale_rect, texture_width, Rect,
+    BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
 };
 use super::{font, present_height, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL};
 use crate::config::MachineModel;
@@ -48,7 +48,11 @@ const FS_VARIANTS: [crate::diskimage::Variant; 3] = [
     crate::diskimage::Variant::LongName,
 ];
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
-const SCRIM: u32 = rgba(0, 0, 0);
+/// The veil an overlay draws over what it covers: enough to throw the
+/// overlay forward and to say the machine is not listening, while
+/// leaving what is behind readable. One tint for the menu and every
+/// dialog alike -- two of them differing was a step you could see.
+const SCRIM: u32 = rgba(8, 9, 11);
 const SCRIM_ALPHA: f32 = 0.45;
 // Audio-tab oscilloscope trace colours for the four Paula channels.
 const AUDIO_SCOPE_COLORS: [u32; 4] = [
@@ -789,6 +793,11 @@ pub enum UiControl {
     LauncherModel(MachineModel),
     /// Configuration screen: switch the category tab.
     LauncherTab(LauncherTab),
+    /// The same page, reached from the row of sibling pages above the
+    /// settings rather than from the category column. It is a button
+    /// of its own -- somewhere else on the screen, lighting on its own
+    /// -- even though pressing it goes where the category button goes.
+    LauncherNavTab(LauncherTab),
     /// Configuration screen: step a cycle/stepper field one value.
     LauncherCycle {
         field: LauncherField,
@@ -903,6 +912,10 @@ pub enum UiControl {
     /// Give a real disk back to the host, from the drive row holding it.
     LauncherHostDiskUnmount(LauncherField),
     /// Move the disk list's window up or down one row.
+    /// The Enable tick at the end of a host-disk row: the same answer
+    /// as picking the row, given its own place so the focus can stand
+    /// on the box it ticks rather than on the whole row.
+    LauncherHostDiskEnable(usize),
     LauncherHostDiskScroll(isize),
     /// Look at the host's storage again.
     LauncherHostDiskRefresh,
@@ -1883,11 +1896,11 @@ fn draw_text_button(
     rect: Rect,
     label: &str,
     enabled: bool,
-    hover: bool,
+    hover: f32,
     texture_scale: usize,
 ) {
-    let face = if hover && enabled {
-        BUTTON_FACE_HOVER
+    let face = if enabled {
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover)
     } else {
         BUTTON_FACE
     };
@@ -1936,13 +1949,13 @@ fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, 
         frame,
         rect,
         panel_title(panel),
-        hover == Some(UiControl::PanelClose),
+        lit(hover, UiControl::PanelClose),
         scale,
     );
 }
 
 /// A panel's blue title bar, with its name and its close gadget.
-fn draw_title_bar(frame: &mut [u8], rect: Rect, title: &str, close_hover: bool, scale: usize) {
+fn draw_title_bar(frame: &mut [u8], rect: Rect, title: &str, close_hover: f32, scale: usize) {
     let bar = Rect {
         x: rect.x + 1,
         y: rect.y + 1,
@@ -1963,13 +1976,11 @@ fn draw_title_bar(frame: &mut [u8], rect: Rect, title: &str, close_hover: bool, 
 }
 
 /// The close gadget: a classic square with an inner square.
-fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: bool, scale: usize) {
+fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: f32, scale: usize) {
     let close = close_button_rect(rect);
-    let face = if close_hover {
-        BUTTON_FACE_HOVER
-    } else {
-        PANEL_TITLE_BG
-    };
+    // The gadget already wears the interface's blue, so the focus lifts
+    // it to the paler one rather than painting it the colour it is.
+    let face = light_face_to(PANEL_TITLE_BG, BUTTON_FACE_HOVER, NAV_FACE_ON, close_hover);
     let close_scaled = scale_rect(
         Rect {
             x: close.x + 1,
@@ -2001,6 +2012,159 @@ fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: bool, scale: usi
         h: 4,
     };
     fill_rect(frame, scale_rect(hole, scale), face, scale);
+}
+
+// Where the focus stands while a surface is being drawn, and how far
+// through its breath it is.
+//
+// The focus lights a control the way the pointer lights one -- there
+// is no second language to learn -- but in the interface's own blue
+// rather than the pointer's grey, and breathing rather than steady,
+// so the two hands never say the same thing. Drawing is one pass on
+// one thread, so the surface reads where the focus is from here
+// rather than every drawing function in the file carrying it through.
+thread_local! {
+    static NAV_LIGHT: std::cell::Cell<(Option<UiControl>, f32)> =
+        const { std::cell::Cell::new((None, 0.0)) };
+    /// Whether that control stands open for changing.
+    static NAV_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say where the focus is, and how far through its breath, for the
+/// drawing about to happen.
+pub(in crate::video) fn set_nav_light(target: Option<UiControl>, mix: f32, open: bool) {
+    NAV_LIGHT.with(|light| light.set((target, mix.clamp(0.0, 1.0))));
+    NAV_OPEN.with(|flag| flag.set(open));
+}
+
+/// How lit a control is: all the way under the pointer, and as far as
+/// the breath has come when the focus is standing on it.
+fn lit(hover: Option<UiControl>, control: UiControl) -> f32 {
+    // Negative says the focus has it rather than the pointer: the two
+    // light the same control differently, and one number carries both
+    // how far through the breath it is and whose it is. The focus is
+    // asked first, so a control the mouse happens to be resting on
+    // still breathes when the keyboard walks onto it.
+    let focused = nav_lit(control);
+    if focused != 0.0 {
+        return -focused;
+    }
+    // And while the marker is up at all, the keyboard is in charge: the
+    // pointer lights nothing, or a hand left resting on the mouse marks
+    // a second control wherever it happens to sit. Moving the mouse
+    // puts the marker away, and the pointer has it back.
+    if nav_showing() {
+        return 0.0;
+    }
+    if hover == Some(control) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Whether the focus is being shown at all, whatever it is standing on.
+fn nav_showing() -> bool {
+    NAV_LIGHT.with(|light| light.get().0.is_some())
+}
+
+/// The face a control wears, given how lit it is: the pointer's grey,
+/// or the focus's blue. The status bar draws its own buttons and uses
+/// this too, so the two surfaces cannot drift apart.
+pub(in crate::video) fn light_face(resting: u32, hovered: u32, light: f32) -> u32 {
+    light_face_to(resting, hovered, NAV_FACE, light)
+}
+
+/// The same, saying which blue the focus lifts a control toward.
+pub(in crate::video) fn light_face_to(resting: u32, hovered: u32, focused: u32, light: f32) -> u32 {
+    if light < 0.0 {
+        mix_colour(resting, focused, -light)
+    } else {
+        mix_colour(resting, hovered, light)
+    }
+}
+
+/// The face the focus lights a control with: the blue the interface
+/// already wears for a chosen page. The two hands say different
+/// things, so the focus takes the blue and the pointer keeps its grey.
+pub(in crate::video) const NAV_FACE: u32 = PANEL_TITLE_BG;
+/// A control already wearing that blue lifts toward this instead --
+/// the same colour again would say nothing about where the focus is.
+pub(in crate::video) const NAV_FACE_ON: u32 = rgba(120, 176, 236);
+
+/// How lit the focus alone has a control -- the pointer does not count.
+/// The value a stepper is about to change reads this: it should say
+/// which setting the focus is on, not which arrow the mouse is over.
+fn nav_lit(control: UiControl) -> f32 {
+    NAV_LIGHT.with(|light| {
+        let (target, mix) = light.get();
+        if target == Some(control) {
+            mix
+        } else {
+            0.0
+        }
+    })
+}
+
+/// What a tick box's outline says: green under the pointer, the
+/// focus's blue while it stands there, and nothing at all otherwise.
+/// A tick box is a box: filling its middle would read as a tick.
+/// The fill a row of a list takes while it is under the pointer or the
+/// focus, over `resting`.
+///
+/// A list is the one place the two hands would otherwise look alike: a
+/// whole row filled grey reads as a selection rather than as a marker,
+/// and the row that really is selected is already filled. So the
+/// keyboard keeps its blue here as everywhere else.
+#[cfg(feature = "game-library")]
+fn row_light(resting: u32, light: f32) -> Option<u32> {
+    (light != 0.0).then(|| light_face(resting, BUTTON_FACE_HOVER, light))
+}
+
+fn tick_outline(light: f32) -> Option<u32> {
+    if light == 0.0 {
+        return None;
+    }
+    Some(if light < 0.0 {
+        // Green, breathing up out of the box's own edge. A tick box is
+        // the one control small enough that the marker has to be its
+        // outline, and an outline in the focus's blue over a green tick
+        // read as a second state of the box rather than as a marker.
+        mix_colour(BUTTON_EDGE_LIGHT, PANEL_TEXT_HILIGHT, -light)
+    } else {
+        PANEL_TEXT_HILIGHT
+    })
+}
+
+/// How lit one end of a stepper is: the pointer's own light if it is
+/// over that end, and otherwise the focus's, which both ends share.
+fn stepper_light(hover: Option<UiControl>, end: UiControl, stepper: f32) -> f32 {
+    if hover == Some(end) {
+        1.0
+    } else {
+        -stepper
+    }
+}
+
+/// Whether the setting the focus is on stands open for changing.
+fn nav_open() -> bool {
+    NAV_OPEN.with(std::cell::Cell::get)
+}
+
+/// A colour part of the way to another.
+pub(in crate::video) fn mix_colour(from: u32, to: u32, t: f32) -> u32 {
+    if t <= 0.0 {
+        return from;
+    }
+    if t >= 1.0 {
+        return to;
+    }
+    let channel = |shift: u32| {
+        let a = ((from >> shift) & 0xFF) as f32;
+        let b = ((to >> shift) & 0xFF) as f32;
+        ((a + (b - a) * t) as u32) << shift
+    };
+    channel(0) | channel(8) | channel(16) | (from & 0xFF00_0000)
 }
 
 /// Word-wrap `text` so no panel line is cropped: the first line holds up to
@@ -2083,14 +2247,7 @@ fn draw_drop_chooser(
                 .collect();
             label.push_str("..");
         }
-        draw_text_button(
-            frame,
-            button_rect,
-            &label,
-            true,
-            hover == Some(control),
-            scale,
-        );
+        draw_text_button(frame, button_rect, &label, true, lit(hover, control), scale);
     }
     let hint = format!("1-{} selects - Esc cancels", state.drives.len());
     draw_panel_text(
@@ -2340,7 +2497,7 @@ fn draw_input_map(
                     *button_rect,
                     label,
                     set == panel.mapping,
-                    hover == Some(*control),
+                    lit(hover, *control),
                     false,
                     scale,
                 );
@@ -2353,7 +2510,7 @@ fn draw_input_map(
                     *button_rect,
                     label,
                     true,
-                    hover == Some(*control),
+                    lit(hover, *control),
                     scale,
                 );
             }
@@ -2364,7 +2521,7 @@ fn draw_input_map(
                     *button_rect,
                     "Clear",
                     bound,
-                    hover == Some(*control),
+                    lit(hover, *control),
                     scale,
                 );
             }
@@ -2373,7 +2530,7 @@ fn draw_input_map(
                 *button_rect,
                 "Defaults",
                 true,
-                hover == Some(*control),
+                lit(hover, *control),
                 scale,
             ),
             UiControl::RemapSave => draw_text_button(
@@ -2381,7 +2538,7 @@ fn draw_input_map(
                 *button_rect,
                 "Save",
                 true,
-                hover == Some(*control),
+                lit(hover, *control),
                 scale,
             ),
             _ => {}
@@ -2492,7 +2649,7 @@ fn draw_calibration(
             button_rect,
             label,
             cal_button_enabled(control, session),
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -2521,13 +2678,11 @@ fn draw_debugger(
     for (index, tab) in DEBUG_TABS.iter().enumerate() {
         let tab_rect = debug_tab_rect(rect, index);
         let selected = panel.tab == *tab;
-        let hovered = hover == Some(UiControl::DebugTab(*tab));
+        let hovered = lit(hover, UiControl::DebugTab(*tab));
         let face = if selected {
-            ENTRY_BG
-        } else if hovered {
-            BUTTON_FACE_HOVER
+            light_face_to(ENTRY_BG, ENTRY_BG, NAV_FACE_ON, hovered)
         } else {
-            BUTTON_FACE
+            light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hovered)
         };
         let scaled = scale_rect(tab_rect, scale);
         fill_rect(frame, scaled, face, scale);
@@ -2567,7 +2722,7 @@ fn draw_debugger(
                 button_rect,
                 label,
                 enabled,
-                hover == Some(control),
+                lit(hover, control),
                 scale,
             );
         }
@@ -2588,7 +2743,7 @@ fn draw_debugger(
                 button_rect,
                 label,
                 enabled,
-                hover == Some(control),
+                lit(hover, control),
                 scale,
             );
         }
@@ -2606,7 +2761,7 @@ fn draw_debugger(
                 button_rect,
                 label,
                 enabled,
-                hover == Some(control),
+                lit(hover, control),
                 scale,
             );
         }
@@ -2625,7 +2780,7 @@ fn draw_debugger(
                 button_rect,
                 label,
                 enabled,
-                hover == Some(control),
+                lit(hover, control),
                 scale,
             );
         }
@@ -2740,7 +2895,7 @@ fn draw_debugger(
                     button_rect,
                     label,
                     enabled,
-                    hover == Some(control),
+                    lit(hover, control),
                     scale,
                 );
             }
@@ -2925,7 +3080,7 @@ fn draw_video_tab(
             button_rect,
             &label,
             shown,
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -3026,7 +3181,7 @@ fn draw_audio_tab(
     for (idx, row, color) in rows.filter(|(idx, ..)| *idx < AUDIO_MAX_ROWS) {
         let (mute_rect, scope_rect) = audio_row_geom(rect, idx);
         let control = UiControl::DebugAudioMute(idx);
-        draw_mute_button(frame, mute_rect, row.muted, hover == Some(control), scale);
+        draw_mute_button(frame, mute_rect, row.muted, lit(hover, control), scale);
         // Text detail lines to the right of the mute button.
         for (line, dbg) in row.text.iter().enumerate() {
             let color = if dbg.highlight {
@@ -3049,13 +3204,11 @@ fn draw_audio_tab(
 }
 
 /// A single mute toggle button: red-tinted face and "Muted" label when active.
-fn draw_mute_button(frame: &mut [u8], rect: Rect, muted: bool, hover: bool, scale: usize) {
+fn draw_mute_button(frame: &mut [u8], rect: Rect, muted: bool, hover: f32, scale: usize) {
     let face = if muted {
         AUDIO_MUTE_FACE
-    } else if hover {
-        BUTTON_FACE_HOVER
     } else {
-        BUTTON_FACE
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover)
     };
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, face, scale);
@@ -3683,7 +3836,7 @@ fn draw_analyzer_checkboxes(
             control_rect,
             label,
             checked,
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -3695,7 +3848,7 @@ fn draw_analyzer_checkbox(
     control: Rect,
     label: &str,
     checked: bool,
-    hover: bool,
+    hover: f32,
     scale: usize,
 ) {
     let box_rect = Rect {
@@ -3707,7 +3860,7 @@ fn draw_analyzer_checkbox(
     fill_rect(
         frame,
         scale_rect(box_rect, scale),
-        if hover { BUTTON_FACE_HOVER } else { ENTRY_BG },
+        light_face(ENTRY_BG, BUTTON_FACE_HOVER, hover),
         scale,
     );
     draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
@@ -3732,7 +3885,7 @@ fn draw_analyzer_checkbox(
         box_rect.x + 18,
         control.y + (control.h - 8) / 2,
         label,
-        if hover { BUTTON_TEXT } else { PANEL_TEXT },
+        light_face(PANEL_TEXT, BUTTON_TEXT, hover),
         1,
         scale,
     );
@@ -3773,14 +3926,7 @@ fn draw_frame_analyzer(
             UiControl::AnalyzerFrame => "Frame",
             _ => "To slot",
         };
-        draw_text_button(
-            frame,
-            button_rect,
-            label,
-            true,
-            hover == Some(control),
-            scale,
-        );
+        draw_text_button(frame, button_rect, label, true, lit(hover, control), scale);
     }
     if panel.tab == AnalyzerTab::Beam {
         draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
@@ -3798,13 +3944,11 @@ fn draw_analyzer_tabs(
     for (index, tab) in ANALYZER_TABS.iter().enumerate() {
         let tab_rect = analyzer_tab_rect(rect, index);
         let active = selected == *tab;
-        let hovered = hover == Some(UiControl::AnalyzerTab(*tab));
+        let hovered = lit(hover, UiControl::AnalyzerTab(*tab));
         let face = if active {
-            ENTRY_BG
-        } else if hovered {
-            BUTTON_FACE_HOVER
+            light_face_to(ENTRY_BG, ENTRY_BG, NAV_FACE_ON, hovered)
         } else {
-            BUTTON_FACE
+            light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hovered)
         };
         let scaled = scale_rect(tab_rect, scale);
         fill_rect(frame, scaled, face, scale);
@@ -4204,7 +4348,7 @@ fn draw_analyzer_presets(
             button,
             &preset.label,
             true,
-            active || hover == Some(control),
+            lit(hover, control).max(f32::from(u8::from(active))),
             scale,
         );
     }
@@ -4571,6 +4715,53 @@ fn indefinite_article(size: &str) -> &'static str {
     }
 }
 
+/// Which control a free-text value box is. The same widget serves two
+/// stores -- a Create Image word and a serial address on the machine --
+/// so both the hit-test and the drawing ask here rather than each
+/// keeping its own copy of the rule.
+fn value_box_control(field: LauncherField) -> UiControl {
+    if field == LauncherField::RamPattern {
+        UiControl::LauncherRamPatternEdit
+    } else if LauncherState::is_serial_addr(field) {
+        UiControl::LauncherSerialAddrEdit(field)
+    } else {
+        UiControl::LauncherNewImageEdit(field)
+    }
+}
+
+/// Light a text box the focus is standing on.
+///
+/// A box takes the same blue as every other control, so walking onto
+/// one looks like walking onto anything else. Opening it to type hands
+/// the box back its own colours: what to watch then is the caret
+/// blinking in the value, and a lit box behind it would fight that.
+/// Only the focus lights these -- the pointer has never coloured them,
+/// and a box that changed under the mouse would read as a button.
+fn light_edit_box(
+    frame: &mut [u8],
+    box_rect: Rect,
+    control: UiControl,
+    editing: bool,
+    scale: usize,
+) {
+    let light = lit(None, control);
+    if light == 0.0 || editing {
+        return;
+    }
+    let inner = Rect {
+        x: box_rect.x + 1,
+        y: box_rect.y + 1,
+        w: box_rect.w.saturating_sub(2),
+        h: box_rect.h.saturating_sub(2),
+    };
+    fill_rect(
+        frame,
+        scale_rect(inner, scale),
+        light_face(PANEL_BG, NAV_FACE, light),
+        scale,
+    );
+}
+
 /// Draw a free-text/number value box: what the setting holds, or what is
 /// being typed into it, with a caret while it has the focus. Used by the
 /// Create Image pages and by the Serial section's TCP address boxes, so it
@@ -4589,6 +4780,13 @@ fn draw_launcher_value_box(
         scale_rect(box_rect, scale),
         BUTTON_EDGE_DARK,
         BUTTON_EDGE_LIGHT,
+        scale,
+    );
+    light_edit_box(
+        frame,
+        box_rect,
+        value_box_control(field),
+        state.typing_in_value_box(field),
         scale,
     );
     let avail = box_rect.w.saturating_sub(8);
@@ -4659,21 +4857,23 @@ fn draw_launcher_tick_choice(
     label: &str,
     set: bool,
     disabled: bool,
-    hot: bool,
+    hot: f32,
     scale: usize,
 ) {
     let colour = if disabled { PANEL_TEXT_DIM } else { TICK_GREEN };
     draw_tick_box(frame, at.x, at.y, set, colour, scale);
-    if hot && !disabled {
-        draw_outline(
-            frame,
-            Rect {
-                w: LAUNCH_TICK_BOX,
-                ..at
-            },
-            PANEL_TEXT_HILIGHT,
-            scale,
-        );
+    if !disabled {
+        if let Some(edge) = tick_outline(hot) {
+            draw_outline(
+                frame,
+                Rect {
+                    w: LAUNCH_TICK_BOX,
+                    ..at
+                },
+                edge,
+                scale,
+            );
+        }
     }
     draw_panel_text(
         frame,
@@ -5144,26 +5344,23 @@ fn draw_az_button(
     rect: Rect,
     label: &str,
     live: bool,
-    hovered: bool,
+    hovered: f32,
     scale: usize,
 ) {
     let scaled = scale_rect(rect, scale);
     fill_rect(
         frame,
         scaled,
-        if hovered {
-            MENU_HILIGHT_BG
-        } else {
-            BUTTON_FACE
-        },
+        light_face(BUTTON_FACE, MENU_HILIGHT_BG, hovered),
         scale,
     );
     draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-    let colour = match (live, hovered) {
-        (_, true) => MENU_HILIGHT_TEXT,
-        (true, false) => BUTTON_TEXT,
-        (false, false) => BUTTON_TEXT_DISABLED,
+    let resting = if live {
+        BUTTON_TEXT
+    } else {
+        BUTTON_TEXT_DISABLED
     };
+    let colour = light_face(resting, MENU_HILIGHT_TEXT, hovered);
     let text_w = label.chars().count() * font::GLYPH_W;
     let x = rect.x + rect.w.saturating_sub(text_w) / 2;
     let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
@@ -5303,16 +5500,16 @@ fn draw_scroll_arrow(
     arrow: Rect,
     up: bool,
     live: bool,
-    hovered: bool,
+    hovered: f32,
     scale: usize,
 ) {
     let scaled = scale_rect(arrow, scale);
     fill_rect(frame, scaled, BUTTON_FACE, scale);
     draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-    let colour = match (live, hovered) {
-        (false, _) => BUTTON_TEXT_DISABLED,
-        (true, true) => PANEL_TEXT_HILIGHT,
-        (true, false) => BUTTON_TEXT,
+    let colour = if live {
+        light_face(BUTTON_TEXT, PANEL_TEXT_HILIGHT, hovered)
+    } else {
+        BUTTON_TEXT_DISABLED
     };
     // Three rows is enough to read as an arrow at this size. Widening
     // downwards is an up arrow (narrow tip at the top); widening upwards is
@@ -5365,8 +5562,106 @@ fn host_disk_writable_cell(rect: Rect, index: usize) -> Rect {
     }
 }
 
+/// The Enable cell: the last column, and the rest of the row with it.
+fn host_disk_enable_cell(rect: Rect, index: usize) -> Rect {
+    let row = host_disk_row_rect(rect, index);
+    Rect {
+        x: row.x + HOST_DISK_COL_TICK,
+        y: row.y,
+        w: row.w.saturating_sub(HOST_DISK_COL_TICK),
+        h: row.h,
+    }
+}
+
 /// The buttons under the table, left to right: the two acts on the ticked
 /// disks first, then Refresh, which only looks.
+/// The setting a control belongs to, where it belongs to one.
+///
+/// A greyed row greys everything on it -- its arrows, its box, its
+/// Browse -- so this is how the focus knows to step over the lot
+/// rather than standing on a control that cannot light or answer.
+fn control_field(control: UiControl) -> Option<LauncherField> {
+    Some(match control {
+        UiControl::LauncherCycle { field, .. }
+        | UiControl::LauncherFsFamily { field, .. }
+        | UiControl::LauncherFsVariant { field, .. }
+        | UiControl::LauncherToggle(field)
+        | UiControl::LauncherBrowse(field)
+        | UiControl::LauncherClear(field)
+        | UiControl::LauncherDriveNameEdit(field)
+        | UiControl::LauncherDriveFilesystemToggle(field)
+        | UiControl::LauncherNewImageEdit(field)
+        | UiControl::LauncherSerialAddrEdit(field)
+        | UiControl::LauncherNewImageCreate(field)
+        | UiControl::LauncherDriveBootpriEdit(field)
+        | UiControl::LauncherDriveBootToggle(field) => field,
+        #[cfg(feature = "game-library")]
+        UiControl::LauncherWhdloadDownload(field) => field,
+        _ => return None,
+    })
+}
+
+/// Whether a control can be worked at all.
+///
+/// The drawing greys what cannot be answered and, having greyed it,
+/// refuses it any light: a marker standing on one is a marker that has
+/// disappeared, which reads as the arrow key having done nothing. So
+/// the focus is not offered them. The pointer still is -- clicking a
+/// dead button has always been harmless, and taking the hit away would
+/// change what the mouse does.
+pub(in crate::video) fn control_live(ui: &UiState, control: UiControl) -> bool {
+    let Some(Panel::Launcher(state)) = ui.panel.as_ref() else {
+        return true;
+    };
+    if let UiControl::LauncherHostDiskAttach(at) = control {
+        // Blank until the disk is ticked, and a blank cell is nothing
+        // to stand on: ticking is what gives a disk a place to go.
+        return state
+            .setup
+            .host_disks()
+            .get(at)
+            .is_some_and(|disk| state.setup.host_disk_is_selected(&disk.id));
+    }
+    // A dialog answers for the whole panel while it is up, and what it
+    // answers with everywhere else is "put me away". That is a click
+    // anywhere, not a place on the screen, so it is nowhere for the
+    // marker to stand -- and standing on it, covering the panel, there
+    // was nothing beyond it to step to.
+    if state.save_dialog && control == UiControl::LauncherSave {
+        return false;
+    }
+    if state.confirm_reset && control == UiControl::LauncherCancelReset {
+        return false;
+    }
+    let Some(field) = control_field(control) else {
+        return true;
+    };
+    // A workshop row greys on its own terms -- there is no machine
+    // setting behind it to explain itself -- so it is asked directly,
+    // as the drawing asks it.
+    if LauncherState::is_workshop(field) {
+        return state.workshop_applies(field);
+    }
+    state.setup.disabled_reason(field).is_none()
+}
+
+/// Whether one of the buttons under the host-disk list can be pressed.
+///
+/// Mount needs a disk to mount; Unmount a ticked disk the machine
+/// actually has; Refresh only ever looks, so it stays live. Asked by
+/// the hit-test as well as the drawing, so a dead button is no more a
+/// place for the focus to stand than it is a thing to click.
+fn host_disk_button_live(setup: &launcher::MachineSetup, control: UiControl) -> bool {
+    match control {
+        UiControl::LauncherHostDiskMount => !setup.host_disks_selected().is_empty(),
+        UiControl::LauncherHostDiskUnmountSelected => setup
+            .host_disks_selected()
+            .iter()
+            .any(|id| setup.host_disk_is_attached(id)),
+        _ => true,
+    }
+}
+
 fn host_disk_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let table = host_disk_table_rect(rect);
     let y = table.y + table.h + 10;
@@ -5799,7 +6094,7 @@ fn draw_launcher_confirm(
         frame,
         dialog,
         "Reset default",
-        hover == Some(UiControl::LauncherDialogClose),
+        lit(hover, UiControl::LauncherDialogClose),
         scale,
     );
     // The title bar has already said which default, and the buttons say
@@ -5820,7 +6115,7 @@ fn draw_launcher_confirm(
         yes,
         "Yes",
         true,
-        hover == Some(UiControl::LauncherConfirmReset),
+        lit(hover, UiControl::LauncherConfirmReset),
         scale,
     );
     draw_text_button(
@@ -5828,7 +6123,7 @@ fn draw_launcher_confirm(
         cancel,
         "Cancel",
         true,
-        hover == Some(UiControl::LauncherCancelReset),
+        lit(hover, UiControl::LauncherCancelReset),
         scale,
     );
 }
@@ -5848,7 +6143,7 @@ fn launcher_action_label(control: UiControl) -> &'static str {
 
 /// What the Save dialog offers, left to right. The one that deletes
 /// something sits furthest from where the pointer comes in.
-const SAVE_ACTIONS: [UiControl; 3] = [
+pub(in crate::video) const SAVE_ACTIONS: [UiControl; 3] = [
     UiControl::LauncherSaveAs,
     UiControl::LauncherSaveDefault,
     UiControl::LauncherResetDefault,
@@ -5949,7 +6244,7 @@ fn draw_launcher_save_dialog(
         frame,
         dialog,
         "Save configuration...",
-        hover == Some(UiControl::LauncherDialogClose),
+        lit(hover, UiControl::LauncherDialogClose),
         scale,
     );
     for (control, item) in launcher_save_dialog_rects(rect) {
@@ -5958,7 +6253,7 @@ fn draw_launcher_save_dialog(
             item,
             launcher_action_label(control),
             true,
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -6131,13 +6426,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
                         // word, and a serial address on the machine.
-                        return Some(if r.field == LauncherField::RamPattern {
-                            UiControl::LauncherRamPatternEdit
-                        } else if LauncherState::is_serial_addr(r.field) {
-                            UiControl::LauncherSerialAddrEdit(r.field)
-                        } else {
-                            UiControl::LauncherNewImageEdit(r.field)
-                        });
+                        return Some(value_box_control(r.field));
                     }
                 }
                 RowKind::Size => {
@@ -6474,13 +6763,16 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 if host_disk_writable_cell(rect, slot).contains(pos) {
                     return Some(UiControl::LauncherHostDiskWritable(i));
                 }
+                if host_disk_enable_cell(rect, slot).contains(pos) {
+                    return Some(UiControl::LauncherHostDiskEnable(i));
+                }
                 if host_disk_row_rect(rect, slot).contains(pos) {
                     return Some(UiControl::LauncherHostDiskSelect(i));
                 }
             }
         }
         for (control, button) in host_disk_button_rects(rect) {
-            if button.contains(pos) {
+            if button.contains(pos) && host_disk_button_live(&state.setup, control) {
                 return Some(control);
             }
         }
@@ -6491,13 +6783,13 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     let mut slot = 0;
     if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
-            return Some(UiControl::LauncherTab(parent));
+            return Some(UiControl::LauncherNavTab(parent));
         }
         slot = 1;
     }
     for (i, &(_, target)) in state.tab.nav_options().iter().enumerate() {
         if launcher_nav_button_rect(rect, slot + i).contains(pos) {
-            return Some(UiControl::LauncherTab(target));
+            return Some(UiControl::LauncherNavTab(target));
         }
     }
     for (control, button_rect) in launcher_action_rects(rect) {
@@ -6547,7 +6839,11 @@ fn draw_library_page(
             .enumerate()
         {
             let live = present.get(bucket).copied().unwrap_or(false);
-            let hovered = live && hover == Some(UiControl::LauncherLibraryJump(bucket));
+            let hovered = if live {
+                lit(hover, UiControl::LauncherLibraryJump(bucket))
+            } else {
+                0.0
+            };
             draw_az_button(frame, at, launcher::az_label(bucket), live, hovered, scale);
         }
     }
@@ -6621,8 +6917,10 @@ fn draw_library_page(
             && state.library.scroll + drawn == state.library.selected;
         if chosen {
             fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
-        } else if hover == Some(UiControl::LauncherLibraryPick(drawn)) {
-            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE_HOVER, scale);
+        } else if let Some(face) =
+            row_light(ENTRY_BG, lit(hover, UiControl::LauncherLibraryPick(drawn)))
+        {
+            fill_rect(frame, scale_rect(row, scale), face, scale);
         }
         let colour = if chosen {
             MENU_HILIGHT_TEXT
@@ -6652,8 +6950,8 @@ fn draw_library_page(
             TICK_GREEN,
             scale,
         );
-        if hover == Some(UiControl::LauncherLibraryFavourite(drawn)) {
-            draw_outline(frame, tick, PANEL_TEXT_HILIGHT, scale);
+        if let Some(edge) = tick_outline(lit(hover, UiControl::LauncherLibraryFavourite(drawn))) {
+            draw_outline(frame, tick, edge, scale);
         }
     }
 
@@ -6665,7 +6963,7 @@ fn draw_library_page(
                 true => state.library.scroll > 0,
                 false => state.library.scroll + visible < entries.len(),
             };
-            draw_scroll_arrow(frame, at, up, live, hover == Some(control), scale);
+            draw_scroll_arrow(frame, at, up, live, lit(hover, control), scale);
         }
     }
 
@@ -6704,8 +7002,11 @@ fn draw_library_page(
             && state.library.favourite_scroll + drawn == state.library.favourite_selected;
         if chosen {
             fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
-        } else if hover == Some(UiControl::LauncherLibraryFavouritePick(drawn)) {
-            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE_HOVER, scale);
+        } else if let Some(face) = row_light(
+            ENTRY_BG,
+            lit(hover, UiControl::LauncherLibraryFavouritePick(drawn)),
+        ) {
+            fill_rect(frame, scale_rect(row, scale), face, scale);
         }
         // One no longer in the library is dimmed: still listed, still
         // removable, but there is nothing to launch.
@@ -6729,8 +7030,10 @@ fn draw_library_page(
         );
         let tick = library_remove_box(rect, whdload_entry, drawn);
         draw_tick_box(frame, tick.x, tick.y, false, TICK_GREEN, scale);
-        if hover == Some(UiControl::LauncherLibraryFavouriteRemove(drawn)) {
-            draw_outline(frame, tick, PANEL_TEXT_HILIGHT, scale);
+        if let Some(edge) =
+            tick_outline(lit(hover, UiControl::LauncherLibraryFavouriteRemove(drawn)))
+        {
+            draw_outline(frame, tick, edge, scale);
         }
     }
 
@@ -6742,7 +7045,7 @@ fn draw_library_page(
                 true => state.library.favourite_scroll > 0,
                 false => state.library.favourite_scroll + favourite_rows < starred,
             };
-            draw_scroll_arrow(frame, at, up, live, hover == Some(control), scale);
+            draw_scroll_arrow(frame, at, up, live, lit(hover, control), scale);
         }
     }
 
@@ -6775,7 +7078,7 @@ fn draw_library_page(
             buttons[at],
             label,
             enabled,
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -7196,11 +7499,16 @@ fn draw_host_disk_page(
         // A disk the machine has keeps the highlight whether or not it is
         // ticked right now: in a long list, what is in use should be
         // findable at a glance.
-        if ticked
-            || setup.host_disk_is_attached(&disk.id)
-            || hover == Some(UiControl::LauncherHostDiskSelect(i))
-        {
-            fill_rect(frame, scale_rect(row, scale), BUTTON_FACE, scale);
+        let light = lit(hover, UiControl::LauncherHostDiskSelect(i));
+        if ticked || setup.host_disk_is_attached(&disk.id) || light != 0.0 {
+            // The pointer's own highlight here is the same face a disk
+            // in use keeps, so only the focus changes the colour.
+            fill_rect(
+                frame,
+                scale_rect(row, scale),
+                light_face(BUTTON_FACE, BUTTON_FACE, light),
+                scale,
+            );
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
         // A disk the host has mounted is not dimmed: mounting takes it from
@@ -7230,22 +7538,53 @@ fn draw_host_disk_page(
         // to this disk, and is it going to the machine at all. Writing is on
         // by default -- a disk given to a machine is normally meant to be
         // used -- so unticking R/W is what protects it.
-        draw_tick_box(
-            frame,
-            row.x + HOST_DISK_COL_WRITABLE + 6,
-            row.y + 2,
-            disk.writable,
-            PANEL_TEXT,
-            scale,
-        );
-        draw_tick_box(
-            frame,
-            row.x + HOST_DISK_COL_TICK + 12,
-            row.y + 2,
-            ticked,
-            PANEL_TEXT_HILIGHT,
-            scale,
-        );
+        for (x, set, colour, control) in [
+            (
+                HOST_DISK_COL_WRITABLE + 6,
+                disk.writable,
+                PANEL_TEXT,
+                UiControl::LauncherHostDiskWritable(i),
+            ),
+            (
+                HOST_DISK_COL_TICK + 12,
+                ticked,
+                PANEL_TEXT_HILIGHT,
+                UiControl::LauncherHostDiskEnable(i),
+            ),
+        ] {
+            let at = Rect {
+                x: row.x + x,
+                y: row.y + 2,
+                w: TICK_BOX,
+                h: TICK_BOX,
+            };
+            draw_tick_box(frame, at.x, at.y, set, colour, scale);
+            if let Some(edge) = tick_outline(lit(hover, control)) {
+                draw_outline(frame, at, edge, scale);
+            }
+        }
+        // The attach column is blank until the disk is ticked, so the
+        // focus standing on it has nothing of its own to light: it
+        // takes the face a button under the pointer would.
+        let attach_light = lit(hover, UiControl::LauncherHostDiskAttach(i));
+        if attach_light != 0.0 {
+            let cell = host_disk_attach_cell(rect, slot);
+            fill_rect(
+                frame,
+                scale_rect(cell, scale),
+                light_face(BUTTON_FACE, BUTTON_FACE_HOVER, attach_light),
+                scale,
+            );
+            draw_panel_text(
+                frame,
+                cell.x,
+                text_y,
+                &disk.attach.map(|a| a.label()).unwrap_or_default(),
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
     }
 
     // Arrows only when there is somewhere to go, and each greys at its end
@@ -7258,7 +7597,7 @@ fn draw_host_disk_page(
             } else {
                 scroll + HOST_DISK_VISIBLE_ROWS < disks.len()
             };
-            draw_scroll_arrow(frame, arrow, up, live, hover == Some(control), scale);
+            draw_scroll_arrow(frame, arrow, up, live, lit(hover, control), scale);
         }
     }
 
@@ -7268,22 +7607,13 @@ fn draw_host_disk_page(
             UiControl::LauncherHostDiskUnmountSelected => "Unmount",
             _ => "Refresh",
         };
-        // Mount needs a disk to mount; Unmount a ticked disk the machine
-        // actually has; Refresh only ever looks, so it stays live.
-        let enabled = match control {
-            UiControl::LauncherHostDiskMount => !setup.host_disks_selected().is_empty(),
-            UiControl::LauncherHostDiskUnmountSelected => setup
-                .host_disks_selected()
-                .iter()
-                .any(|id| setup.host_disk_is_attached(id)),
-            _ => true,
-        };
+        let enabled = host_disk_button_live(setup, control);
         draw_text_button(
             frame,
             button,
             label,
             enabled,
-            enabled && hover == Some(control),
+            if enabled { lit(hover, control) } else { 0.0 },
             scale,
         );
     }
@@ -7388,8 +7718,16 @@ fn draw_host_disk_page(
 
 /// A small square box, filled when set. The fill colour distinguishes what
 /// is being answered: one page can carry more than one kind of tick.
+/// A tick box is this square, wherever one is drawn.
+const TICK_BOX: usize = 10;
+
 fn draw_tick_box(frame: &mut [u8], x: usize, y: usize, set: bool, colour: u32, scale: usize) {
-    let outer = Rect { x, y, w: 10, h: 10 };
+    let outer = Rect {
+        x,
+        y,
+        w: TICK_BOX,
+        h: TICK_BOX,
+    };
     fill_rect(frame, scale_rect(outer, scale), ENTRY_BG, scale);
     draw_outline(frame, outer, BUTTON_EDGE_LIGHT, scale);
     if set {
@@ -7552,16 +7890,14 @@ fn draw_launcher_chip(
     rect: Rect,
     label: &str,
     active: bool,
-    hover: bool,
+    hover: f32,
     align_left: bool,
     scale: usize,
 ) {
     let face = if active {
-        PANEL_TITLE_BG
-    } else if hover {
-        BUTTON_FACE_HOVER
+        light_face_to(PANEL_TITLE_BG, PANEL_TITLE_BG, NAV_FACE_ON, hover)
     } else {
-        BUTTON_FACE
+        light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover)
     };
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, face, scale);
@@ -7820,7 +8156,7 @@ fn draw_launcher_row(
                 unit.x,
                 unit.y + 6,
                 state.workshop.size_unit.label(),
-                if hover == Some(UiControl::LauncherNewImageUnit) {
+                if lit(hover, UiControl::LauncherNewImageUnit) != 0.0 {
                     PANEL_TEXT_HILIGHT
                 } else {
                     PANEL_TEXT
@@ -7852,11 +8188,13 @@ fn draw_launcher_row(
                     family.label(),
                     state.workshop_fs_family_set(r.field, family),
                     disabled,
-                    hover
-                        == Some(UiControl::LauncherFsFamily {
+                    lit(
+                        hover,
+                        UiControl::LauncherFsFamily {
                             field: r.field,
                             family,
-                        }),
+                        },
+                    ),
                     scale,
                 );
             }
@@ -7876,27 +8214,35 @@ fn draw_launcher_row(
                     variant.label(),
                     state.workshop_fs_variant_set(r.field, variant),
                     disabled || !state.workshop_fs_variant_enabled(r.field, variant),
-                    hover
-                        == Some(UiControl::LauncherFsVariant {
+                    lit(
+                        hover,
+                        UiControl::LauncherFsVariant {
                             field: r.field,
                             variant,
-                        }),
+                        },
+                    ),
                     scale,
                 );
             }
         }
         RowKind::Stepper => {
             let (prev, value, next) = launcher_geometry_stepper_rects(rect, row_y);
+            // Both ends light together, as on any other stepper.
+            let back = UiControl::LauncherCycle {
+                field: r.field,
+                forward: false,
+            };
+            let forward = UiControl::LauncherCycle {
+                field: r.field,
+                forward: true,
+            };
+            let stepper = nav_lit(back);
             draw_text_button(
                 frame,
                 prev,
                 "<",
                 !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: false,
-                    }),
+                stepper_light(hover, back, stepper),
                 scale,
             );
             draw_text_button(
@@ -7904,11 +8250,7 @@ fn draw_launcher_row(
                 next,
                 ">",
                 !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: true,
-                    }),
+                stepper_light(hover, forward, stepper),
                 scale,
             );
             draw_launcher_value_box(frame, value, state, r.field, disabled, true, scale);
@@ -7924,7 +8266,7 @@ fn draw_launcher_row(
                 auto,
                 "Auto",
                 !by_hand,
-                hover == Some(UiControl::LauncherGeometryAuto),
+                lit(hover, UiControl::LauncherGeometryAuto),
                 false,
                 scale,
             );
@@ -7933,7 +8275,7 @@ fn draw_launcher_row(
                 custom,
                 "Custom",
                 by_hand,
-                hover == Some(UiControl::LauncherGeometryCustom),
+                lit(hover, UiControl::LauncherGeometryCustom),
                 false,
                 scale,
             );
@@ -7943,7 +8285,7 @@ fn draw_launcher_row(
                     configure,
                     "Configure",
                     true,
-                    hover == Some(UiControl::LauncherTab(LauncherTab::CreateGeometry)),
+                    lit(hover, UiControl::LauncherTab(LauncherTab::CreateGeometry)),
                     scale,
                 );
             }
@@ -7955,7 +8297,7 @@ fn draw_launcher_row(
                 launcher_action_rect(rect, row_y),
                 &label,
                 !disabled,
-                hover == Some(UiControl::LauncherNewImageCreate(r.field)),
+                lit(hover, UiControl::LauncherNewImageCreate(r.field)),
                 scale,
             );
             // The geometry editor commits with Save, and fills itself in
@@ -7967,26 +8309,34 @@ fn draw_launcher_row(
                     launcher_action2_rect(rect, row_y),
                     &auto,
                     true,
-                    hover
-                        == Some(UiControl::LauncherNewImageCreate(
-                            LauncherField::NewGeomAuto,
-                        )),
+                    lit(
+                        hover,
+                        UiControl::LauncherNewImageCreate(LauncherField::NewGeomAuto),
+                    ),
                     scale,
                 );
             }
         }
         RowKind::Cycle => {
             let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+            // Both ends light together: the focus is on the setting,
+            // and the setting is the pair of them. The pointer still
+            // lights only the one it is over.
+            let back = UiControl::LauncherCycle {
+                field: r.field,
+                forward: false,
+            };
+            let forward = UiControl::LauncherCycle {
+                field: r.field,
+                forward: true,
+            };
+            let stepper = nav_lit(back);
             draw_text_button(
                 frame,
                 prev,
                 "<",
                 !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: false,
-                    }),
+                stepper_light(hover, back, stepper),
                 scale,
             );
             draw_text_button(
@@ -7994,11 +8344,7 @@ fn draw_launcher_row(
                 next,
                 ">",
                 !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: true,
-                    }),
+                stepper_light(hover, forward, stepper),
                 scale,
             );
             // Clip a long value (e.g. a wordy MIDI device name) to the box so
@@ -8013,7 +8359,14 @@ fn draw_launcher_row(
             let color = if disabled {
                 PANEL_TEXT_DIM
             } else {
-                PANEL_TEXT_HILIGHT
+                // Green while the focus is merely on it; white once it
+                // stands open, which is the difference between choosing
+                // a setting and changing it.
+                if nav_open() && stepper != 0.0 {
+                    PANEL_TITLE_TEXT
+                } else {
+                    PANEL_TEXT_HILIGHT
+                }
             };
             draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
         }
@@ -8030,16 +8383,25 @@ fn draw_launcher_row(
             let disabled = disabled || setup.drive_boot_off(r.field);
             let (prev, value, next) = launcher_bootpri_rects(rect, row_y);
             if !no_drive {
+                // Both ends light together, as on any other stepper:
+                // the focus is on the setting, and the setting is the
+                // pair of them with its box between. The pointer still
+                // lights only the one it is over.
+                let back = UiControl::LauncherCycle {
+                    field: r.field,
+                    forward: false,
+                };
+                let forward = UiControl::LauncherCycle {
+                    field: r.field,
+                    forward: true,
+                };
+                let stepper = nav_lit(back);
                 draw_text_button(
                     frame,
                     prev,
                     "<",
                     !disabled,
-                    hover
-                        == Some(UiControl::LauncherCycle {
-                            field: r.field,
-                            forward: false,
-                        }),
+                    stepper_light(hover, back, stepper),
                     scale,
                 );
                 draw_text_button(
@@ -8047,11 +8409,7 @@ fn draw_launcher_row(
                     next,
                     ">",
                     !disabled,
-                    hover
-                        == Some(UiControl::LauncherCycle {
-                            field: r.field,
-                            forward: true,
-                        }),
+                    stepper_light(hover, forward, stepper),
                     scale,
                 );
                 draw_rect_bevel(
@@ -8063,6 +8421,13 @@ fn draw_launcher_row(
                 );
             }
             let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
+            light_edit_box(
+                frame,
+                value,
+                UiControl::LauncherDriveBootpriEdit(r.field),
+                editing,
+                scale,
+            );
             let text = if let Some(reason) = reason.filter(|_| greyed_shows_reason) {
                 reason.to_string()
             } else {
@@ -8120,14 +8485,17 @@ fn draw_launcher_row(
                 scale,
             );
             let box_rect = launcher_bootable_box(cell);
-            let hovered = hover == Some(UiControl::LauncherDriveBootToggle(r.field));
-            fill_rect(
+            let hovered = lit(hover, UiControl::LauncherDriveBootToggle(r.field));
+            fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+            // Green on its edge, like every other tick box: this one is
+            // drawn by hand rather than by draw_tick_box, and lighting
+            // its whole face was the one box that did not match.
+            draw_outline(
                 frame,
-                scale_rect(box_rect, scale),
-                if hovered { BUTTON_FACE_HOVER } else { ENTRY_BG },
+                box_rect,
+                tick_outline(hovered).unwrap_or(BUTTON_EDGE_LIGHT),
                 scale,
             );
-            draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
             if !disabled {
                 fill_rect(
                     frame,
@@ -8160,7 +8528,7 @@ fn draw_launcher_row(
                     button,
                     "Configure",
                     true,
-                    hover == Some(UiControl::LauncherBridgeConfigure(bay)),
+                    lit(hover, UiControl::LauncherBridgeConfigure(bay)),
                     scale,
                 );
             } else {
@@ -8172,7 +8540,7 @@ fn draw_launcher_row(
                     browse,
                     "Browse",
                     true,
-                    hover == Some(UiControl::LauncherBrowse(r.field)),
+                    lit(hover, UiControl::LauncherBrowse(r.field)),
                     scale,
                 );
                 draw_text_button(
@@ -8180,7 +8548,7 @@ fn draw_launcher_row(
                     clear,
                     "Clear",
                     launcher_clear_enabled(setup, r.field),
-                    hover == Some(UiControl::LauncherClear(r.field)),
+                    lit(hover, UiControl::LauncherClear(r.field)),
                     scale,
                 );
             }
@@ -8190,16 +8558,19 @@ fn draw_launcher_row(
             let bay = launcher::MachineSetup::drive_protect_bay(r.field);
             #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let (protect_cell, bridge_cell) = launcher_floppy_flag_rects(rect, row_y);
-            let mut tick = |cell: Rect, label: &str, on: bool, hot: bool| {
+            let mut tick = |cell: Rect, label: &str, on: bool, hot: f32| {
                 draw_panel_text(frame, cell.x, cell.y + 6, label, PANEL_TEXT, 1, scale);
                 let box_rect = launcher_flag_box(cell, label);
-                fill_rect(
+                // The box keeps its own face: a tick box says what it
+                // says with its outline, and a filled middle reads as
+                // a tick that is not there.
+                fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+                draw_outline(
                     frame,
-                    scale_rect(box_rect, scale),
-                    if hot { BUTTON_FACE_HOVER } else { ENTRY_BG },
+                    box_rect,
+                    tick_outline(hot).unwrap_or(BUTTON_EDGE_LIGHT),
                     scale,
                 );
-                draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
                 if on {
                     fill_rect(
                         frame,
@@ -8221,7 +8592,7 @@ fn draw_launcher_row(
                 protect_cell,
                 WRITE_PROTECT_LABEL,
                 setup.toggle_value(r.field),
-                hover == Some(UiControl::LauncherToggle(r.field)),
+                lit(hover, UiControl::LauncherToggle(r.field)),
             );
             // Only drawn where a physical drive can actually be attached; a
             // build without the feature leaves the write-protect box alone on
@@ -8232,7 +8603,7 @@ fn draw_launcher_row(
                     bridge_cell,
                     PHYSICAL_DRIVE_LABEL,
                     setup.drive_bridged(bay),
-                    hover == Some(UiControl::LauncherDriveBridgeToggle(bay)),
+                    lit(hover, UiControl::LauncherDriveBridgeToggle(bay)),
                 );
             }
         }
@@ -8241,7 +8612,7 @@ fn draw_launcher_row(
             // list of choices about one thing, and ticks read as a list.
             let button = launcher_toggle_rect(rect, row_y);
             let on = state.row_toggle(r.field);
-            let hot = hover == Some(UiControl::LauncherToggle(r.field));
+            let hot = lit(hover, UiControl::LauncherToggle(r.field));
             let box_rect = Rect {
                 x: button.x,
                 y: row_y + (LAUNCH_ROW_H - 10) / 2,
@@ -8258,8 +8629,10 @@ fn draw_launcher_row(
                 if disabled { PANEL_TEXT_DIM } else { TICK_GREEN },
                 scale,
             );
-            if hot && !disabled {
-                draw_outline(frame, box_rect, PANEL_TEXT_HILIGHT, scale);
+            if !disabled {
+                if let Some(edge) = tick_outline(hot) {
+                    draw_outline(frame, box_rect, edge, scale);
+                }
             }
         }
         RowKind::Toggle => {
@@ -8274,7 +8647,7 @@ fn draw_launcher_row(
                 button,
                 label,
                 true,
-                hover == Some(UiControl::LauncherToggle(r.field)),
+                lit(hover, UiControl::LauncherToggle(r.field)),
                 scale,
             );
         }
@@ -8327,7 +8700,7 @@ fn draw_launcher_row(
                     browse,
                     "Browse",
                     true,
-                    hover == Some(UiControl::LauncherBrowse(r.field)),
+                    lit(hover, UiControl::LauncherBrowse(r.field)),
                     scale,
                 );
             }
@@ -8345,7 +8718,7 @@ fn draw_launcher_row(
                     clear,
                     label,
                     enabled,
-                    hover == Some(UiControl::LauncherClear(r.field)),
+                    lit(hover, UiControl::LauncherClear(r.field)),
                     scale,
                 );
             }
@@ -8374,7 +8747,7 @@ fn draw_launcher_row(
                 button,
                 if signed_in { "Log out" } else { "Log in" },
                 true,
-                hover == Some(UiControl::LauncherOpenRetroLogin),
+                lit(hover, UiControl::LauncherOpenRetroLogin),
                 scale,
             );
         }
@@ -8407,7 +8780,7 @@ fn draw_launcher_row(
                     unmount,
                     "Unmount",
                     true,
-                    hover == Some(UiControl::LauncherHostDiskUnmount(r.field)),
+                    lit(hover, UiControl::LauncherHostDiskUnmount(r.field)),
                     scale,
                 );
                 return;
@@ -8448,6 +8821,13 @@ fn draw_launcher_row(
                     scale,
                 );
                 let editing = state.editing() == Some(EditTarget::DriveName(r.field));
+                light_edit_box(
+                    frame,
+                    name_box,
+                    UiControl::LauncherDriveNameEdit(r.field),
+                    editing,
+                    scale,
+                );
                 let (label, color) = if let Some(name) = setup.drive_name(r.field) {
                     (name.to_string(), PANEL_TEXT)
                 } else {
@@ -8489,7 +8869,7 @@ fn draw_launcher_row(
                     fs_box,
                     label,
                     true,
-                    hover == Some(UiControl::LauncherDriveFilesystemToggle(r.field)),
+                    lit(hover, UiControl::LauncherDriveFilesystemToggle(r.field)),
                     scale,
                 );
             }
@@ -8498,7 +8878,7 @@ fn draw_launcher_row(
                 browse,
                 "Browse",
                 true,
-                hover == Some(UiControl::LauncherBrowse(r.field)),
+                lit(hover, UiControl::LauncherBrowse(r.field)),
                 scale,
             );
             draw_text_button(
@@ -8506,7 +8886,7 @@ fn draw_launcher_row(
                 clear,
                 "Clear",
                 launcher_clear_enabled(setup, r.field),
-                hover == Some(UiControl::LauncherClear(r.field)),
+                lit(hover, UiControl::LauncherClear(r.field)),
                 scale,
             );
             // A support archive with nothing chosen offers to fetch its
@@ -8519,7 +8899,7 @@ fn draw_launcher_row(
                     launcher_download_rect(rect, row_y),
                     "Download",
                     true,
-                    hover == Some(UiControl::LauncherWhdloadDownload(r.field)),
+                    lit(hover, UiControl::LauncherWhdloadDownload(r.field)),
                     scale,
                 );
             }
@@ -8543,7 +8923,7 @@ fn draw_launcher_zorro(
         launcher_zorro_add_rect(rect),
         "Add board...",
         true,
-        hover == Some(UiControl::LauncherZorroAdd),
+        lit(hover, UiControl::LauncherZorroAdd),
         scale,
     );
     if setup.zorro_boards().is_empty() {
@@ -8570,7 +8950,7 @@ fn draw_launcher_zorro(
                     remove,
                     "Remove",
                     true,
-                    hover == Some(UiControl::LauncherZorroRemove(i)),
+                    lit(hover, UiControl::LauncherZorroRemove(i)),
                     scale,
                 );
             }
@@ -8613,7 +8993,7 @@ fn draw_launcher_board_option(
                 launcher_toggle_rect(rect, row_y),
                 if on { "On" } else { "Off" },
                 true,
-                hover == Some(UiControl::LauncherBoardToggle { board, opt }),
+                lit(hover, UiControl::LauncherBoardToggle { board, opt }),
                 scale,
             );
         }
@@ -8624,12 +9004,14 @@ fn draw_launcher_board_option(
                 prev,
                 "<",
                 true,
-                hover
-                    == Some(UiControl::LauncherBoardCycle {
+                lit(
+                    hover,
+                    UiControl::LauncherBoardCycle {
                         board,
                         opt,
                         forward: false,
-                    }),
+                    },
+                ),
                 scale,
             );
             let shown = truncate_to_width(&value, val.w.saturating_sub(8));
@@ -8647,12 +9029,14 @@ fn draw_launcher_board_option(
                 next,
                 ">",
                 true,
-                hover
-                    == Some(UiControl::LauncherBoardCycle {
+                lit(
+                    hover,
+                    UiControl::LauncherBoardCycle {
                         board,
                         opt,
                         forward: true,
-                    }),
+                    },
+                ),
                 scale,
             );
         }
@@ -8682,7 +9066,7 @@ fn draw_launcher_board_option(
                 browse,
                 "Browse",
                 true,
-                hover == Some(UiControl::LauncherBoardBrowse { board, opt }),
+                lit(hover, UiControl::LauncherBoardBrowse { board, opt }),
                 scale,
             );
             draw_text_button(
@@ -8690,7 +9074,7 @@ fn draw_launcher_board_option(
                 clear,
                 "Clear",
                 !value.is_empty(),
-                hover == Some(UiControl::LauncherBoardClear { board, opt }),
+                lit(hover, UiControl::LauncherBoardClear { board, opt }),
                 scale,
             );
         }
@@ -8702,6 +9086,13 @@ fn draw_launcher_board_option(
                 scale_rect(vbox, scale),
                 BUTTON_EDGE_DARK,
                 BUTTON_EDGE_LIGHT,
+                scale,
+            );
+            light_edit_box(
+                frame,
+                vbox,
+                UiControl::LauncherBoardEdit { board, opt },
+                editing,
                 scale,
             );
             if editing {
@@ -8746,7 +9137,7 @@ fn draw_launcher(
             launcher_model_rect(rect, i),
             launcher::model_label(model),
             selected_model == model,
-            hover == Some(UiControl::LauncherModel(model)),
+            lit(hover, UiControl::LauncherModel(model)),
             false,
             scale,
         );
@@ -8783,7 +9174,7 @@ fn draw_launcher(
             launcher_tab_rect(rect, i),
             tab.label(),
             state.tab.strip_tab() == tab,
-            hover == Some(UiControl::LauncherTab(tab)),
+            lit(hover, UiControl::LauncherTab(tab)),
             true,
             scale,
         );
@@ -8825,7 +9216,7 @@ fn draw_launcher(
             launcher_back_button_rect(rect),
             "< Back",
             true,
-            hover == Some(UiControl::LauncherTab(parent)),
+            lit(hover, UiControl::LauncherNavTab(parent)),
             scale,
         );
         slot = 1;
@@ -8836,7 +9227,7 @@ fn draw_launcher(
             launcher_nav_button_rect(rect, slot + i),
             label,
             target == state.tab,
-            hover == Some(UiControl::LauncherTab(target)),
+            lit(hover, UiControl::LauncherNavTab(target)),
             false,
             scale,
         );
@@ -9042,14 +9433,17 @@ fn draw_launcher(
     // flash on every hover in the dialog -- the button stays unlit until
     // the dialog is gone.
     for (control, button_rect) in launcher_action_rects(rect) {
-        let lit =
-            hover == Some(control) && !(control == UiControl::LauncherSave && state.save_dialog);
+        let light = if control == UiControl::LauncherSave && state.save_dialog {
+            0.0
+        } else {
+            lit(hover, control)
+        };
         draw_text_button(
             frame,
             button_rect,
             launcher_action_label(control),
             true,
-            lit,
+            light,
             scale,
         );
     }
@@ -9091,7 +9485,7 @@ fn draw_meta_dialog(
         frame,
         dialog,
         "Update metadata",
-        hover == Some(UiControl::MetaCancel),
+        lit(hover, UiControl::MetaCancel),
         scale,
     );
 
@@ -9140,8 +9534,11 @@ fn draw_meta_dialog(
         BUTTON_EDGE_LIGHT,
         scale,
     );
-    if hover == Some(UiControl::MetaArt) {
-        draw_outline(frame, art, PANEL_TEXT_HILIGHT, scale);
+    // The same green edge a tick box takes, breathing under the focus:
+    // the art is answered by choosing a picture, so it is a thing to
+    // press rather than a value to change.
+    if let Some(edge) = tick_outline(lit(hover, UiControl::MetaArt)) {
+        draw_outline(frame, art, edge, scale);
     }
 
     for field in launcher::MetaField::ALL {
@@ -9208,7 +9605,7 @@ fn draw_meta_dialog(
             meta_button_rects(rect)[at],
             label,
             true,
-            hover == Some(control),
+            lit(hover, control),
             scale,
         );
     }
@@ -9247,7 +9644,7 @@ fn draw_login_dialog(
         frame,
         dialog,
         "Log in to OpenRetro",
-        hover == Some(UiControl::LoginCancel),
+        lit(hover, UiControl::LoginCancel),
         scale,
     );
     for field in [LoginField::User, LoginField::Pass] {
@@ -9309,7 +9706,7 @@ fn draw_login_dialog(
         ok,
         "OK",
         !login.sending,
-        hover == Some(UiControl::LoginOk),
+        lit(hover, UiControl::LoginOk),
         scale,
     );
     draw_text_button(
@@ -9317,7 +9714,7 @@ fn draw_login_dialog(
         cancel,
         "Cancel",
         true,
-        hover == Some(UiControl::LoginCancel),
+        lit(hover, UiControl::LoginCancel),
         scale,
     );
 }
@@ -9381,11 +9778,13 @@ pub fn draw(
 // The pop-up menu
 // ---------------------------------------------------------------------------
 
-/// How much of the picture the open menu veils. Enough to throw the menu
-/// forward and to say the machine is not listening, while leaving what is
-/// behind readable.
-const MENU_VEIL: u32 = rgba(8, 9, 11);
-const MENU_VEIL_ALPHA: f32 = 0.45;
+/// The menu's own ground: the status bar's colour, since the menu is
+/// the bar's.
+const MENU_BG: u32 = super::window::STATUS_BG;
+
+/// The open menu wears the same veil as every other overlay.
+const MENU_VEIL: u32 = SCRIM;
+const MENU_VEIL_ALPHA: f32 = SCRIM_ALPHA;
 
 /// A tick, drawn rather than typed: the font stops at ASCII, and a mark built
 /// from the text scale grows with it.
@@ -9418,16 +9817,18 @@ fn draw_check(frame: &mut [u8], x: usize, y: usize, color: u32, px: usize, scale
 /// Draw the menu: a veil over everything behind, then one column per open
 /// level from the hamburger button upward.
 fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scale: usize) {
-    // The veil goes over the whole presentation, panels included: the menu
-    // takes precedence over anything it is opened on top of. It is painted
-    // into the presentation texture, so it never reaches a recording.
+    // The veil goes over the display, panels included: the menu takes
+    // precedence over anything it is opened on top of. The status bar
+    // below is left alight -- it is still live while the menu is up,
+    // and a dialog does not dim it either. It is painted into the
+    // presentation texture, so it never reaches a recording.
     fill_rect_blend(
         frame,
         Rect {
             x: 0,
             y: 0,
             w: texture_width(scale),
-            h: texture_height(scale),
+            h: super::present_height() * scale,
         },
         MENU_VEIL,
         MENU_VEIL_ALPHA,
@@ -9447,7 +9848,9 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
             w: column.w,
             h: column.h,
         };
-        fill_rect(frame, scale_rect(panel, scale), PANEL_BG, scale);
+        // The menu wears the status bar's own colour: it belongs to the
+        // bar it hangs from, not to the panels it opens over.
+        fill_rect(frame, scale_rect(panel, scale), MENU_BG, scale);
         draw_rect_bevel(
             frame,
             scale_rect(panel, scale),
