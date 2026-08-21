@@ -246,7 +246,7 @@ impl InputRecorder {
                 self.close_port_holds(port, secs);
             }
             match cur.device {
-                PortDevice::Mouse => {
+                PortDevice::Mouse | PortDevice::GamepadMouse => {
                     let dx = cur.counter_x.wrapping_sub(old.counter_x) as i8;
                     let dy = cur.counter_y.wrapping_sub(old.counter_y) as i8;
                     if dx != 0 || dy != 0 {

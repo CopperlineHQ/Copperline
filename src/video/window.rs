@@ -82,6 +82,10 @@ pub(crate) struct HostRouting {
     pub(crate) mouse: Option<usize>,
     /// Port the physical gamepad drives (joystick/CD32 devices only).
     pub(crate) gamepad: Option<usize>,
+    /// Port the gamepad drives as a mouse, in Gamepad Mouse mode: the
+    /// same port the host mouse has, since the machine is given one
+    /// mouse and two hands on it rather than two mice.
+    pub(crate) gamepad_mouse: Option<usize>,
     /// Port keyboard mapping 0 (cursor keys) drives; the device there may
     /// be a joystick/pad or a mouse (keyboard mouse emulation).
     pub(crate) keyboard: Option<usize>,
@@ -95,12 +99,15 @@ pub(crate) struct HostRouting {
 /// launcher's Input-tab summary, so what the GUI promises is exactly what
 /// the pump does. The rules are documented on [`App::host_routing`].
 pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode) -> HostRouting {
-    let mouse = devices.iter().position(|&d| d == PortDevice::Mouse);
+    let mouse = devices.iter().position(|&d| d.is_mouse());
     let mut remaining = (0..2).filter(|&p| {
         Some(p) != mouse
             && matches!(
                 devices[p],
-                PortDevice::Mouse | PortDevice::Joystick | PortDevice::Cd32Pad
+                PortDevice::Mouse
+                    | PortDevice::GamepadMouse
+                    | PortDevice::Joystick
+                    | PortDevice::Cd32Pad
             )
     });
     let first = remaining.next();
@@ -108,7 +115,7 @@ pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode
     let (gamepad, keyboard, keyboard2) = match (first, second, mode) {
         (None, _, _) => (None, None, None),
         (Some(p), None, JoystickInputMode::Gamepad) => {
-            if devices[p] == PortDevice::Mouse {
+            if devices[p].is_mouse() {
                 (None, None, None)
             } else {
                 (Some(p), None, None)
@@ -119,14 +126,44 @@ pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode
         // would itself have been claimed as the mouse port.
         (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q), Some(p)),
         (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p), Some(q)),
+        // The pad is spent on the mouse, so no joystick port hears from
+        // it: what is left over goes to the keyboard, which keeps its
+        // joystick on the other port rather than losing it to the mode.
+    };
+    // A pad spent on the mouse is not also a joystick: whatever port it
+    // would have driven goes to the keyboard instead, which keeps its
+    // own joystick rather than losing it to the choice of mouse.
+    let pad_mouse = devices.iter().position(|&d| d == PortDevice::GamepadMouse);
+    let (gamepad, keyboard) = match (pad_mouse, gamepad) {
+        (Some(_), Some(p)) => (None, keyboard.or(Some(p))),
+        _ => (gamepad, keyboard),
     };
     HostRouting {
         mouse,
         gamepad,
+        gamepad_mouse: pad_mouse,
         keyboard,
         keyboard2,
     }
 }
+
+/// How the pad moves the mouse in Gamepad Mouse mode, in quadrature
+/// counts per second: where a held direction starts, and where both a
+/// held direction and a fully deflected stick end up. The slow end is
+/// about half the keyboard's mouse emulation, slow enough to place a
+/// pointer on a gadget; the fast end crosses a PAL screen in about a
+/// second.
+const PAD_MOUSE_SLOW: f64 = 80.0;
+const PAD_MOUSE_FAST: f64 = 640.0;
+/// How long a held direction takes to reach the top speed.
+const PAD_MOUSE_RAMP: std::time::Duration = std::time::Duration::from_millis(650);
+/// How far a stick must be pushed before it is being pushed at all.
+/// Smaller than the threshold the digital directions use: a mouse wants
+/// the slow part of the throw that a switch has no use for.
+const PAD_MOUSE_DEADZONE: f64 = 0.15;
+/// The longest step the pointer is moved for in one pass, however long
+/// the loop was away. A pause or a stall should not fling it.
+const PAD_MOUSE_MAX_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Quadrature counter steps per scheduler quantum (~one frame) while a
 /// keyboard-mouse direction key is held: ~150 counts/second at PAL frame
@@ -1207,6 +1244,11 @@ pub struct App {
     /// When the pad's calibrated Quit hotkey started being held, if it is
     /// down right now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
+    /// When the pad last moved the mouse, and since when its held
+    /// direction has been building speed. Both empty while the pad is
+    /// not being spent on the mouse.
+    pad_mouse_at: Option<Instant>,
+    pad_mouse_held: Option<Instant>,
     /// The pad state the last input pump published, for the menu bridge.
     /// `None` while no pad is connected or the calibration panel owns it.
     pad_last: Option<crate::gamepad::PadState>,
@@ -2023,6 +2065,8 @@ impl App {
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_quit_hold: None,
+            pad_mouse_at: None,
+            pad_mouse_held: None,
             pad_last: None,
             pad_prev: crate::gamepad::PadState::default(),
             quit_requested: false,
@@ -2184,7 +2228,7 @@ impl App {
             .input
             .ports
             .iter()
-            .position(|p| p.device == PortDevice::Mouse)
+            .position(|p| p.device.is_mouse())
     }
 
     /// Which port each host input source drives this quantum. The host
@@ -2248,8 +2292,19 @@ impl App {
                 None => self.release_joystick_lines(port),
             }
         }
+        // In Gamepad Mouse mode the pad is spent on the mouse port
+        // instead of a joystick one: the routing has already taken it
+        // off the joysticks, so this is the only place it is heard.
+        if let Some(port) = r.gamepad_mouse {
+            match pad {
+                Some(state) if !ui_owns_pad => self.apply_pad_mouse_state(port, state),
+                // The UI has it, or it has gone: let go of the buttons
+                // rather than leaving one down over the guest.
+                _ => self.release_pad_mouse(port),
+            }
+        }
         if let Some(port) = r.keyboard {
-            if self.emu.bus().input.device(port) == PortDevice::Mouse {
+            if self.emu.bus().input.device(port).is_mouse() {
                 self.apply_keyboard_mouse_state(port);
             } else if self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);

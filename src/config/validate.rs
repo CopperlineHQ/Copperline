@@ -1250,12 +1250,21 @@ pub(crate) fn parse_menu_scale(s: &str) -> Result<MenuScale> {
 }
 
 pub(crate) fn parse_port_device(s: &str, key: &str) -> Result<PortDevice> {
-    PortDevice::parse(s).ok_or_else(|| {
+    let device = PortDevice::parse(s).ok_or_else(|| {
         anyhow!(
-            "[input] {key} must be \"mouse\", \"joystick\", \"cd32\", \
-             \"analogue\", or \"none\", got {s:?}"
+            "[input] {key} must be \"mouse\", \"gamepad-mouse\", \"joystick\", \
+             \"cd32\", \"analogue\", or \"none\", got {s:?}"
         )
-    })
+    })?;
+    // A mouse belongs in port 1, and a gamepad driving one is still a
+    // mouse: Workbench and nearly every game read the pointer there, so
+    // port 2 is told plainly rather than left to behave oddly.
+    if device == PortDevice::GamepadMouse && key != "port1" {
+        bail!(
+            "[input] {key} cannot be \"gamepad-mouse\": only port 1 takes a mouse a gamepad drives"
+        );
+    }
+    Ok(device)
 }
 
 /// Display label for a mouse sensitivity value: the neutral midpoint shows as

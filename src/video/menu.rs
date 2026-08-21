@@ -807,8 +807,11 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 fn input_rows(s: &MenuState) -> Vec<MenuRow> {
-    const DEVICES: [PortDevice; 5] = [
+    const DEVICES: [PortDevice; 6] = [
         PortDevice::Mouse,
+        // A mouse a gamepad can move as well as the hand on the desk,
+        // offered on port 1 alone: that is where a mouse belongs.
+        PortDevice::GamepadMouse,
         PortDevice::Joystick,
         PortDevice::Cd32Pad,
         PortDevice::Analogue,
@@ -817,6 +820,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
     let port = |n: usize| -> Vec<MenuRow> {
         DEVICES
             .iter()
+            .filter(|d| n == 0 || **d != PortDevice::GamepadMouse)
             .map(|d| {
                 MenuRow::choice(
                     d.menu_label(),

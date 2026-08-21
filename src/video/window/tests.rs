@@ -427,6 +427,7 @@ fn host_routing_assigns_sources_by_device_and_mode() {
         HostRouting {
             mouse,
             gamepad,
+            gamepad_mouse: None,
             keyboard,
             keyboard2,
         }
@@ -478,6 +479,48 @@ fn host_routing_assigns_sources_by_device_and_mode() {
     app.joystick_input_mode = JoystickInputMode::Keyboard;
     assert_eq!(app.host_routing(), routing(Some(0), None, None, None));
     assert!(!app.keyboard_mapping_active(0));
+}
+
+/// A gamepad spent on the mouse is not also a joystick, and the mode it
+/// displaces is only displaced while it is chosen.
+#[test]
+fn a_gamepad_mouse_takes_the_pad_off_the_joystick() {
+    use crate::bus::PortDevice;
+    use crate::video::window::{host_routing_for, HostRouting};
+
+    let routing = |devices, mode| host_routing_for(devices, mode);
+    let devices = [PortDevice::GamepadMouse, PortDevice::Joystick];
+    // The pad drives the mouse in port 1; port 2's joystick falls to the
+    // keyboard rather than being left with nothing.
+    assert_eq!(
+        routing(devices, JoystickInputMode::Gamepad),
+        HostRouting {
+            mouse: Some(0),
+            gamepad: None,
+            gamepad_mouse: Some(0),
+            keyboard: Some(1),
+            keyboard2: None,
+        }
+    );
+    // The mode itself is untouched: it is what the ports go back to the
+    // moment the mouse stops being a gamepad's.
+    assert_eq!(
+        routing(devices, JoystickInputMode::Keyboard),
+        routing(devices, JoystickInputMode::Gamepad),
+        "with the pad on the mouse, both modes leave the joystick to the keyboard"
+    );
+    let plain = [PortDevice::Mouse, PortDevice::Joystick];
+    assert_eq!(
+        routing(plain, JoystickInputMode::Gamepad),
+        HostRouting {
+            mouse: Some(0),
+            gamepad: Some(1),
+            gamepad_mouse: None,
+            keyboard: None,
+            keyboard2: None,
+        },
+        "and switching the mouse back hands the pad its joystick again"
+    );
 }
 
 #[test]

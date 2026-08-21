@@ -935,7 +935,8 @@ either direction.
 
 An Amiga has two game ports, and either accepts any controller. Copperline
 models that: each port carries a device -- `mouse`, `joystick`, `cd32` pad,
-`analogue` paddles, or `none` -- set with `[input] port1`/`port2` in the
+`analogue` paddles, or `none`, and port 1 additionally `gamepad-mouse` --
+set with `[input] port1`/`port2` in the
 config (or `--port1`/`--port2`, or the launcher's *Input* tab). The default
 is the stock wiring, a mouse in port 1 and a joystick in port 2 (a CD32 pad
 on the CD32 profile). The runtime menu's **Port 1 Device** / **Port 2
@@ -981,6 +982,20 @@ protocol instead, including the red/blue/green/yellow and transport
 buttons, on either port. An `analogue` device presents pot resistances on
 the POTxX/POTxY pins; no live host device maps to it yet -- drive it with
 `--pot-after` scripting or the control protocol's `input.analogue`.
+
+A `gamepad-mouse` device is the same quadrature mouse the machine always
+sees, moved by a gamepad as well as by the host's own mouse -- one mouse
+with two hands on it, not two mice. The pad's d-pad moves the pointer,
+gathering speed while a direction is held; its left stick moves it
+proportionally where the pad has one, so a slight deflection creeps and a
+full one crosses the screen. Fire is the left button and the second
+button is the right, and the
+[mouse sensitivity](configuration.md#mouse-sensitivity) setting scales it
+along with the host mouse. It is offered on port 1 alone, which is where
+a mouse belongs. While it is chosen that pad drives no joystick port --
+one pad cannot be both -- and whichever port it would have driven falls
+to the keyboard until the device is changed back; the joystick input mode
+itself is untouched, so switching away restores it.
 
 Copperline can also emulate the joystick from the host keyboard. There are
 two explicit input modes, and the active one is always shown by the gamepad

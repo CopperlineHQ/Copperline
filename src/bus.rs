@@ -2009,6 +2009,14 @@ pub enum PortDevice {
     /// Analogue paddles / proportional stick: positions present resistances
     /// on POTxX/POTxY; the two buttons ground the LEFT/RIGHT lines.
     Analogue,
+    /// A quadrature mouse, driven by a gamepad as well as by the host's
+    /// own mouse. Electrically this *is* [`PortDevice::Mouse`] -- the
+    /// machine is given one mouse with two hands on it, not two mice --
+    /// and it differs only in where the host looks for movement: the
+    /// pad's d-pad and left stick move the pointer and its two buttons
+    /// click, and no joystick port hears from that pad while it does.
+    /// Offered on port 1 alone, which is the port a mouse belongs in.
+    GamepadMouse,
     /// Empty port: nothing drives the pins. Reads like an idle mouse (the
     /// JOYxDAT counters hold, the pot pins float).
     None,
@@ -2022,8 +2030,16 @@ impl PortDevice {
             PortDevice::Joystick => "joystick",
             PortDevice::Cd32Pad => "cd32",
             PortDevice::Analogue => "analogue",
+            PortDevice::GamepadMouse => "gamepad-mouse",
             PortDevice::None => "none",
         }
+    }
+
+    /// Whether this port presents a quadrature mouse to the machine.
+    /// True of both mouse devices: they differ in what moves them on the
+    /// host, not in anything the Amiga can tell apart.
+    pub fn is_mouse(self) -> bool {
+        matches!(self, PortDevice::Mouse | PortDevice::GamepadMouse)
     }
 
     /// What a picker shows the user, as against the config name [`label`]
@@ -2034,8 +2050,9 @@ impl PortDevice {
         match self {
             PortDevice::Mouse => "Mouse",
             PortDevice::Joystick => "Joystick",
-            PortDevice::Cd32Pad => "CD32 pad",
+            PortDevice::Cd32Pad => "CD32 Pad",
             PortDevice::Analogue => "Analogue",
+            PortDevice::GamepadMouse => "Gamepad Mouse",
             PortDevice::None => "None",
         }
     }
@@ -2047,6 +2064,7 @@ impl PortDevice {
             "joystick" | "joy" => Some(PortDevice::Joystick),
             "cd32" | "cd32pad" | "pad" => Some(PortDevice::Cd32Pad),
             "analogue" | "analog" | "paddle" => Some(PortDevice::Analogue),
+            "gamepad-mouse" | "gamepad_mouse" | "padmouse" => Some(PortDevice::GamepadMouse),
             "none" | "off" => Some(PortDevice::None),
             _ => None,
         }
@@ -2128,7 +2146,9 @@ impl ControllerPort {
     /// The JOYxDAT word this port's device presents.
     pub fn joydat(&self) -> u16 {
         match self.device {
-            PortDevice::Mouse | PortDevice::None => mouse_joydat(self.counter_x, self.counter_y),
+            PortDevice::Mouse | PortDevice::GamepadMouse | PortDevice::None => {
+                mouse_joydat(self.counter_x, self.counter_y)
+            }
             PortDevice::Joystick | PortDevice::Cd32Pad => {
                 digital_joydat(self.up, self.down, self.left, self.right)
             }
@@ -2315,7 +2335,7 @@ impl InputState {
         button2: bool,
     ) {
         let idx = Self::port_index(port);
-        if matches!(self.ports[idx].device, PortDevice::Mouse | PortDevice::None) {
+        if self.ports[idx].device.is_mouse() || self.ports[idx].device == PortDevice::None {
             self.set_port_device(port, PortDevice::Joystick);
         }
         let p = &mut self.ports[idx];

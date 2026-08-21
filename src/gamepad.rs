@@ -136,7 +136,7 @@ pub struct JoystickState {
 
 /// One poll of a calibrated pad: the emulated joystick lines plus the
 /// host-side controls, which never reach the emulated port.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PadState {
     pub joystick: JoystickState,
     /// The calibrated Quit hotkey is currently held. Host-side only: the
@@ -145,6 +145,14 @@ pub struct PadState {
     /// The Menu button is currently held. Host-side only: a press opens
     /// (or closes) the pop-up menu, and the pad walks it while it is up.
     pub menu: bool,
+    /// The left stick, each axis in [-1, 1], right and up positive.
+    ///
+    /// The joystick lines above are what a digital port can hear, so
+    /// they are all a calibration records; this is the deflection behind
+    /// them, which only a pad the controller database knows can report.
+    /// Gamepad Mouse spends it on how fast the pointer moves, where a
+    /// switch could only say whether it moves at all.
+    pub stick: (f32, f32),
 }
 
 impl GamepadCalibration {
@@ -153,6 +161,10 @@ impl GamepadCalibration {
             joystick: self.resolve(axes, buttons),
             quit: self.quit.is_some_and(|i| i.active(axes, buttons)),
             menu: self.menu.is_some_and(|i| i.active(axes, buttons)),
+            // A calibration binds raw inputs one at a time and has no
+            // notion of an axis pair, so a calibrated pad reports no
+            // deflection and its d-pad moves the pointer instead.
+            stick: (0.0, 0.0),
         }
     }
 
@@ -619,6 +631,7 @@ impl GamepadReader {
                     joystick: raw.mapped.resolve(),
                     quit: false,
                     menu: raw.mapped.select || raw.mapped.mode,
+                    stick: (raw.mapped.left_x, raw.mapped.left_y),
                 })
             }
             None => {
