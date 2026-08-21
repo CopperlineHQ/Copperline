@@ -1017,6 +1017,9 @@ fn receive_disks(
         iov_base: text.as_mut_ptr().cast(),
         iov_len: text.len(),
     };
+    // Safety: CMSG_SPACE is a pure size computation. Sizing the control
+    // buffer with it guarantees the kernel room for `most` descriptors,
+    // which is what bounds every later walk of that buffer.
     let space =
         unsafe { libc::CMSG_SPACE((most * std::mem::size_of::<libc::c_int>()) as u32) } as usize;
     let mut control = vec![0u8; space];
@@ -1026,6 +1029,10 @@ fn receive_disks(
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen = control.len();
 
+    // Safety: `stream.as_raw_fd()` is a valid open descriptor for the
+    // duration of the call; `message` borrows `iov` (which points into
+    // `text`) and `control`, both stack/heap allocations that outlive the
+    // call and are not otherwise accessed while recvmsg runs.
     let received =
         unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC) };
     if received < 0 {
@@ -1037,8 +1044,15 @@ fn receive_disks(
     // Every descriptor is taken ownership of first and judged afterwards, so
     // that no path out of here leaves one installed but unowned.
     let mut raw = Vec::new();
+    // Safety: on return from recvmsg the control buffer named by `message`
+    // holds kernel-written cmsghdr records; CMSG_FIRSTHDR/CMSG_NXTHDR walk
+    // exactly those records, and each header pointer they yield is valid
+    // (within `control`, aligned as the kernel wrote it) up to the next
+    // walker call.
     let mut header = unsafe { libc::CMSG_FIRSTHDR(&message) };
     while !header.is_null() {
+        // Safety: `header` is a record yielded by the walk above, so
+        // dereferencing its fixed-layout fields is in-bounds.
         let (level, kind, len) = unsafe {
             (
                 (*header).cmsg_level,
@@ -1047,8 +1061,13 @@ fn receive_disks(
             )
         };
         if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
+            // The payload length is kernel-authored for this record kind and
+            // always a whole number of descriptors past the CMSG_LEN(0)
+            // header proper, so the division below is exact.
             let count =
                 (len - unsafe { libc::CMSG_LEN(0) } as usize) / std::mem::size_of::<libc::c_int>();
+            // Safety: CMSG_DATA(header) points at the record's payload,
+            // `count` c_ints long; `index` stays below `count`.
             let data = unsafe { libc::CMSG_DATA(header) };
             for index in 0..count {
                 raw.push(unsafe {
@@ -1058,6 +1077,10 @@ fn receive_disks(
         }
         header = unsafe { libc::CMSG_NXTHDR(&message, header) };
     }
+    // Safety: each fd came from the kernel's SCM_RIGHTS payload, which
+    // transfers ownership of an installed descriptor to this process; taking
+    // it into a File here is the single act of ownership, and negative
+    // placeholders are filtered out first.
     let files: Vec<std::fs::File> = raw
         .iter()
         .filter(|fd| **fd >= 0)

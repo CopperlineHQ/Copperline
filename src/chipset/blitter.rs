@@ -645,10 +645,12 @@ impl Blitter {
     }
 
     pub fn tick_scheduled_slot(&mut self, ram: &mut [u8]) -> bool {
-        if self.pending.is_none() || !self.busy {
+        if !self.busy {
             return false;
         }
-        let mut pending = self.pending.take().unwrap();
+        let Some(mut pending) = self.pending.take() else {
+            return false;
+        };
         match &mut pending {
             PendingBlit::Normal(state) => {
                 let phase_before = state.phase;

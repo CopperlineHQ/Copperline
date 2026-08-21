@@ -7167,13 +7167,13 @@ impl Bus {
                 .filter(|(_, &c)| c > 0)
                 .map(|(v, _)| v)
                 .collect();
-            if !lines.is_empty() {
+            if let (Some((&first, _)), Some((&last, _))) = (lines.split_first(), lines.split_last())
+            {
                 let total: u32 = self.dbg_bpl_cck.iter().sum();
-                let first = *lines.first().unwrap();
-                let last = *lines.last().unwrap();
-                let per_line: Vec<u32> = lines.iter().map(|&v| self.dbg_bpl_cck[v]).collect();
-                let min = *per_line.iter().min().unwrap();
-                let max = *per_line.iter().max().unwrap();
+                let (min, max) = lines
+                    .iter()
+                    .map(|&v| self.dbg_bpl_cck[v])
+                    .fold((u32::MAX, 0), |(lo, hi), c| (lo.min(c), hi.max(c)));
                 let anomalous: Vec<usize> = lines
                     .iter()
                     .copied()
