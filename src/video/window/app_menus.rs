@@ -983,11 +983,9 @@ impl App {
         {
             return false;
         }
-        // The list takes the arrows only while the focus is standing on
-        // a row of it, where up and down are what scrolling is. It used
-        // to take them for the whole page, so arriving here left the
-        // focus unable to move at all -- and the letters across the top
-        // are a strip to be walked, not a list to be scrolled.
+        // The list takes these only while the focus is standing on a row
+        // of it: the letters across the top are a strip to be walked,
+        // not a list to be scrolled.
         if !self.nav_focus_in_library() {
             return false;
         }
@@ -997,40 +995,16 @@ impl App {
             self.launcher_run();
             return true;
         }
+        // Up and down belong to the focus, not to the keyboard: they are
+        // how the list is walked by either hand, and are spent on it in
+        // `nav_move`. Only the jumps to either end are the keyboard's
+        // own, having no direction a pad could give them.
         let step = match code {
-            KeyCode::ArrowUp => -1,
-            KeyCode::ArrowDown => 1,
             KeyCode::Home => isize::MIN,
             KeyCode::End => isize::MAX,
             _ => return false,
         };
-        // At an end of the list the arrow is not the list's. It walks
-        // off instead -- up to the letters over the games, down to the
-        // buttons under them -- rather than pressing against a row that
-        // cannot move.
-        if step.abs() == 1 && self.library_at_end(step) {
-            return false;
-        }
-        let whdload_entry = self
-            .launcher_state()
-            .is_some_and(|state| state.setup.whdload_enabled());
-        let visible = crate::video::ui::launcher_panel_rect(&self.ui)
-            .map(|rect| crate::video::ui::library_visible_rows(rect, whdload_entry))
-            .unwrap_or(1);
-        if let Some(state) = self.launcher_state_mut() {
-            let rows = match step {
-                isize::MIN | isize::MAX => step,
-                _ => {
-                    let rate = state.library.scroll_rate.rows_for_step(Instant::now());
-                    step * rate.max(1) as isize
-                }
-            };
-            state.step_library_focus(rows, visible);
-        }
-        // The row the list chose is the row the focus stands on.
-        self.nav_sync_library();
-        self.nav_sync_dialog();
-        self.request_redraw();
+        self.step_library_list(step);
         true
     }
 

@@ -205,6 +205,9 @@ impl App {
         // A list longer than its box scrolls under the focus: stepping
         // off the last row it can show brings the next one into view
         // rather than leaving the list for the buttons under it.
+        if !dir.horizontal() && self.nav_library_step(dir) {
+            return true;
+        }
         if !dir.horizontal() {
             if let Some(next) = self.nav_host_disk_scroll(dir) {
                 self.nav_show(Some(next));
@@ -753,6 +756,63 @@ impl App {
             UiControl::LauncherHostDiskEnable(at) => UiControl::LauncherHostDiskWritable(at),
             _ => return None,
         }))
+    }
+
+    /// Spend a step on the game list the focus is standing in.
+    ///
+    /// Up and down in a list are what scrolling is, and they belong to
+    /// the focus rather than to the keyboard: a pad walking the same
+    /// list means the same thing by them. At an end of the list the
+    /// step is not the list's -- it walks off instead, up to the letters
+    /// over the games and down to the buttons under them, rather than
+    /// pressing against a row that cannot move.
+    #[cfg(feature = "game-library")]
+    fn nav_library_step(&mut self, dir: crate::video::nav::Dir) -> bool {
+        use crate::video::nav::Dir;
+        if !self.nav_focus_in_library() {
+            return false;
+        }
+        let step = match dir {
+            Dir::Up => -1,
+            Dir::Down => 1,
+            _ => return false,
+        };
+        if self.library_at_end(step) {
+            return false;
+        }
+        self.step_library_list(step);
+        true
+    }
+
+    #[cfg(not(feature = "game-library"))]
+    fn nav_library_step(&mut self, _dir: crate::video::nav::Dir) -> bool {
+        false
+    }
+
+    /// Move the game list's own selection, scrolling it into view, and
+    /// bring the marker with it. A held step gathers speed the way the
+    /// list's scroll arrows do; the jumps to either end are absolute.
+    #[cfg(feature = "game-library")]
+    pub(super) fn step_library_list(&mut self, step: isize) {
+        let whdload_entry = self
+            .launcher_state()
+            .is_some_and(|state| state.setup.whdload_enabled());
+        let visible = crate::video::ui::launcher_panel_rect(&self.ui)
+            .map(|rect| crate::video::ui::library_visible_rows(rect, whdload_entry))
+            .unwrap_or(1);
+        if let Some(state) = self.launcher_state_mut() {
+            let rows = match step {
+                isize::MIN | isize::MAX => step,
+                _ => {
+                    let rate = state.library.scroll_rate.rows_for_step(Instant::now());
+                    step * rate.max(1) as isize
+                }
+            };
+            state.step_library_focus(rows, visible);
+        }
+        // The row the list chose is the row the focus stands on.
+        self.nav_sync_library();
+        self.request_redraw();
     }
 
     /// Scroll the host-disk list under the focus, where the step would

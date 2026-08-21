@@ -820,6 +820,21 @@ fn the_game_page_walks_from_the_button_that_opens_it() {
         at(UiControl::LauncherLibraryPick(5)),
         "and the marker is on the row it chose"
     );
+    // The same step by the other hand: a pad walks the list through the
+    // focus, which is where the walk lives, rather than through the
+    // keyboard's own handling of it.
+    walk(&mut app, Dir::Down);
+    assert_eq!(
+        app.launcher_state().map(|state| state.library.selected),
+        Some(6),
+        "the list moves for a pad too"
+    );
+    assert_eq!(app.nav.focus(), at(UiControl::LauncherLibraryPick(6)));
+    walk(&mut app, Dir::Up);
+    assert_eq!(
+        app.launcher_state().map(|state| state.library.selected),
+        Some(5)
+    );
     // Marking a game is done from its tick, and hands the focus back to
     // the game: what was being looked at is the row, not the tick.
     assert_eq!(
