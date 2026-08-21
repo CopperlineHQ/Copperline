@@ -4503,6 +4503,10 @@ impl ApplicationHandler for App {
         // Run one scheduler quantum. Rebuild the host framebuffer only
         // when Agnus has crossed into a new frame; the expensive renderer
         // reconstructs a completed hardware frame, not an instruction slice.
+        // Set when a run-ahead burst already presented its final frame this
+        // pass (before the anchor rewind), so the generic render below must
+        // not run again against the rewound bus.
+        let mut runahead_presented = false;
         if running {
             // If the live output device vanished (unplugged), reopen on the
             // current default so sound continues.
@@ -4557,8 +4561,16 @@ impl ApplicationHandler for App {
                     match self.emu.runahead_snapshot() {
                         Ok(blob) => anchor_snapshot = Some(blob),
                         Err(e) => {
-                            warn!("run-ahead snapshot failed, continuing without: {e:?}");
+                            // Without an anchor there is nothing to rewind
+                            // to, so continuing the burst would commit
+                            // speculative frames. Stop for this pass and
+                            // give up on run-ahead for the session: a
+                            // serialization failure here will not get
+                            // better on the next iteration.
+                            warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
+                            self.run_ahead_frames = 0;
                             burst_complete = false;
+                            break;
                         }
                     }
                 }
@@ -4595,6 +4607,11 @@ impl ApplicationHandler for App {
             self.emu.set_runahead_phase(false);
             if runahead > 0 {
                 self.emu.bus_mut().set_live_audio_discard(false);
+                // Present the final speculative frame BEFORE rewinding: the
+                // render snapshots the live bus, so it must run at post-burst
+                // state or it would capture the anchor frame instead of the
+                // one this iteration is meant to show.
+                runahead_presented = self.render_emulated_frame_if_needed();
                 // One wall-clock frame period per presented frame even
                 // though the burst retired more: pace against the anchor
                 // frame's end, which advances one frame per iteration.
@@ -4604,7 +4621,13 @@ impl ApplicationHandler for App {
                 if burst_complete {
                     if let Some(blob) = &anchor_snapshot {
                         if let Err(e) = self.emu.runahead_restore(blob) {
-                            error!("run-ahead restore failed: {e:?}");
+                            // The machine is now at the burst's final frame
+                            // rather than the anchor. That is a valid frame
+                            // boundary, but continuing would silently drift
+                            // from the promised timeline, so run-ahead is
+                            // done for this session.
+                            error!("run-ahead disabled: anchor restore failed: {e:?}");
+                            self.run_ahead_frames = 0;
                         }
                     }
                 }
@@ -4664,7 +4687,8 @@ impl ApplicationHandler for App {
         }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
-        let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
+        let mut rendered =
+            self.powered_on && (runahead_presented || self.render_emulated_frame_if_needed());
         if self.recorder.is_some() && self.powered_on {
             rendered |= self.finish_render_for_current_frame();
         }

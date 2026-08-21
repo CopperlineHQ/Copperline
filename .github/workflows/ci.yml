@@ -87,6 +87,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install build dependencies
+        # Same ALSA/udev headers the linux-tests job needs; cpal and gilrs
+        # are unconditional dependencies of the crate.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
       - name: Install MSRV toolchain
         # Read the declared version rather than duplicating it here.
         run: |
@@ -119,6 +125,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install build dependencies
+        # The fuzz crate links the emulator, which links cpal (ALSA) and
+        # gilrs (udev) unconditionally.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:

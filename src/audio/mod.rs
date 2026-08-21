@@ -77,7 +77,8 @@ pub trait AudioSink {
     /// bursts use this for speculative skipped frames: their guest times are
     /// re-emulated on a later iteration, so the audio never existed on the
     /// audible timeline and must not reach the speakers. Offline sinks
-    /// (WAV capture, stems) ignore this and stay complete.
+    /// (WAV capture, stems) ignore this; run-ahead switches itself off while
+    /// an offline capture is attached so nothing speculative reaches them.
     fn set_live_output_discard(&mut self, _on: bool) {}
     /// Discard host-side live-output frames that belong to an abandoned
     /// emulated timeline. The emulated Paula/CD/floppy audio state is not
@@ -94,6 +95,12 @@ pub trait AudioSink {
     /// sink; loading a state over that machine detects it here so the restored
     /// machine can be given a real host output instead of staying silent.
     fn is_null_sink(&self) -> bool {
+        false
+    }
+    /// True for sinks that record to a host file rather than playing live
+    /// (the WAV capture). Presentation policies that re-emit guest time use
+    /// this to keep speculative frames out of offline recordings.
+    fn is_offline_sink(&self) -> bool {
         false
     }
     /// True once the live output device has gone away (e.g. unplugged) and the
@@ -884,6 +891,10 @@ impl AudioSink for WavSink {
 
     fn flush(&mut self) {
         let _ = self.writer.flush();
+    }
+
+    fn is_offline_sink(&self) -> bool {
+        true
     }
 }
 

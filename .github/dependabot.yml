@@ -18,6 +18,15 @@ updates:
       patch-updates:
         update-types:
           - "patch"
+  # The fuzz harnesses are a standalone workspace with their own lockfile.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
   # GitHub Actions versions.
   - package-ecosystem: github-actions
     directory: /

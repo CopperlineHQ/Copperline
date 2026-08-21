@@ -1722,16 +1722,16 @@ impl FloppyController {
         // life exactly as on hardware. (The read and write tick paths idle
         // while `!motor_on || cached.is_empty()`, and the turbo burst
         // refuses drives that are not ready, so nothing completes early.)
-        if !self.drives[idx].has_media() || !self.drives[idx].motor_on {
-            if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
-                log::info!(
-                    "disk-dma armed against an idle mechanism: df{idx} media={} motor_on={} \
-                     motor_cck={} (transfer will pend until the mechanism delivers)",
-                    self.drives[idx].has_media(),
-                    self.drives[idx].motor_on,
-                    self.drives[idx].motor_cck,
-                );
-            }
+        if (!self.drives[idx].has_media() || !self.drives[idx].motor_on)
+            && crate::envcfg::flag("COPPERLINE_DIAG_DISK")
+        {
+            log::info!(
+                "disk-dma armed against an idle mechanism: df{idx} media={} motor_on={} \
+                 motor_cck={} (transfer will pend until the mechanism delivers)",
+                self.drives[idx].has_media(),
+                self.drives[idx].motor_on,
+                self.drives[idx].motor_cck,
+            );
         }
 
         let track = self.track_for_drive(idx);

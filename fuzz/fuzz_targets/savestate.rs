@@ -29,6 +29,12 @@ fuzz_target!(|data: &[u8]| {
             .expect("the factory configuration boots without external assets")
         });
         // Errors are fine; panics, hangs, and over-allocation are not.
-        let _ = emulator.load_state_bytes(data);
+        let outcome = emulator.load_state_bytes(data);
+        // A successful load replaces the machine, so the next input must
+        // not inherit this input's state: reset to the deterministic
+        // factory machine every iteration starts from.
+        if outcome.is_ok() {
+            let _ = emulator.power_on_reset();
+        }
     });
 });

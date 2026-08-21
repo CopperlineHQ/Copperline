@@ -13,7 +13,9 @@ static ITERATION: AtomicU64 = AtomicU64::new(0);
 
 fn load_as(data: &[u8], extension: &str) {
     let n = ITERATION.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("copperline-fuzz-cd-{n}"));
+    // The process id keeps parallel -jobs/-workers processes out of each
+    // other's temporary directories.
+    let dir = std::env::temp_dir().join(format!("copperline-fuzz-cd-{}-{n}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -35,4 +37,5 @@ fn load_as(data: &[u8], extension: &str) {
 fuzz_target!(|data: &[u8]| {
     load_as(data, "cue");
     load_as(data, "iso");
+    load_as(data, "chd");
 });

@@ -230,6 +230,14 @@ impl AudioMux {
         self.master.is_null_sink()
     }
 
+    /// Whether any file-backed capture path is attached (stem writers, or a
+    /// master sink that records to disk). Presentation policies that rewind
+    /// the machine need to know: speculative frames must not reach an
+    /// offline recording twice.
+    pub fn offline_capture_active(&self) -> bool {
+        self.stems.is_some() || self.master.is_offline_sink()
+    }
+
     pub fn device_lost(&self) -> bool {
         self.master.device_lost()
     }

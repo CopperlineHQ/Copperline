@@ -16,10 +16,14 @@ ignore = [
     # winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser. Revisit when
     # the winit stack moves to the skrifa-based font crates.
     "RUSTSEC-2026-0192",
-    # 2026-08-21: unmaintained warning on bincode 1.x, which the snapshot
-    # layer uses for same-process in-memory blobs only (never a disk
-    # interchange format; see src/emulator.rs snapshot_blob). Migrating to
-    # bincode 2 is a deliberate follow-up, not an advisory response.
+    # 2026-08-21: unmaintained warning on bincode 1.x, which decodes both
+    # the descriptor and the component stream of .clstate save states --
+    # files this project itself treats as untrusted input (see
+    # src/savestate.rs and the savestate fuzz target). The format is
+    # length-prefixed and bounds-checked, no known vulnerability is
+    # published against it, and migrating to bincode 2 changes the on-disk
+    # format, so that is a deliberate follow-up rather than an advisory
+    # response. The fuzz target keeps the decoder under continuous input.
     "RUSTSEC-2025-0141",
 ]
 

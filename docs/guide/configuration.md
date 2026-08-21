@@ -410,9 +410,15 @@ carried no information.)
   it while the performance overlay shows headroom. Skipping too many frames
   makes games visibly rubber-band through their own internal animation
   frames. Run-ahead is ignored while warp is engaged, while an RTG board owns
-  the display, while reverse history/rewind is armed, and in headless runs;
-  the **Run Ahead** menu item (Emulation Settings) adjusts it live.
-  `--run-ahead FRAMES` overrides the config for one run.
+  the display, while reverse history/rewind is armed, while a video or audio
+  capture is active, and while the serial port has a live host sink (MIDI,
+  stdout, TCP): speculative frames would reach those outputs and then be
+  issued again by the replayed timeline. For the same reason, a guest that
+  writes to a disk image mid-burst can issue the same write twice; the
+  replayed write converges to the same sectors, but host-side observers
+  watching the image file may see both passes. The **Run Ahead** menu item
+  (Emulation Settings) adjusts it live. `--run-ahead FRAMES` overrides the
+  config for one run.
 
 ## `[cpu]`
 
