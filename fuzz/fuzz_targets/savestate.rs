@@ -30,11 +30,12 @@ fuzz_target!(|data: &[u8]| {
         });
         // Errors are fine; panics, hangs, and over-allocation are not.
         let outcome = emulator.load_state_bytes(data);
-        // A successful load replaces the machine, so the next input must
-        // not inherit this input's state: reset to the deterministic
-        // factory machine every iteration starts from.
+        // A successful load replaces the machine -- possibly with a
+        // different shape (RAM sizes, chipset, CPU), which power_on_reset
+        // would keep. Drop it so the next iteration rebuilds the factory
+        // machine and inherits nothing from this input.
         if outcome.is_ok() {
-            let _ = emulator.power_on_reset();
+            *slot = None;
         }
     });
 });

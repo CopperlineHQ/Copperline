@@ -27,6 +27,53 @@ updates:
       patch-updates:
         update-types:
           - "patch"
+  # The publisher player shell: a shipped standalone workspace.
+  - package-ecosystem: cargo
+    directory: /crates/copperline-player
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # The cputest harness runner.
+  - package-ecosystem: cargo
+    directory: /crates/cputest-runner
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # The WASM Zorro plugin examples, each a standalone workspace.
+  - package-ecosystem: cargo
+    directory: /crates/hostsocket-plugin
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  - package-ecosystem: cargo
+    directory: /crates/zz9k-plugin
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # The bezel-preview tool.
+  - package-ecosystem: cargo
+    directory: /tools/bezel-preview
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+  # (crates/m68k is the vendored CPU-core fork: its lockfile exists for
+  # standalone development and follows the fork's own upstream cadence, so
+  # dependabot leaves it alone.)
   # GitHub Actions versions.
   - package-ecosystem: github-actions
     directory: /

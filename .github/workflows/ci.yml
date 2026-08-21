@@ -115,6 +115,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # The publisher player shell ships as its own workspace with its own
+      # lockfile, so it needs its own advisory pass against the root policy.
+      - name: Player shell workspace
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features --manifest-path crates/copperline-player/Cargo.toml --config deny.toml
 
   fuzz-build:
     name: Fuzz harnesses build
