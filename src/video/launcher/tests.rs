@@ -1600,6 +1600,7 @@ fn the_whdload_entry_sits_between_zorro_and_av() {
 }
 
 #[test]
+#[cfg(feature = "game-library")]
 fn whdload_is_its_own_strip_entry_and_opens_on_the_library() {
     // It left Storage: the nav row there no longer offers it, and
     // neither page returns to it.

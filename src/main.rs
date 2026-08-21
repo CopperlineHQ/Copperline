@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use copperline::gdbstub;
 use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
 use log::{info, warn};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use copperline::audio::{AudioSink, CpalSink, NullSink, WavSink};
