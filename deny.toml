@@ -1,0 +1,71 @@
+# cargo-deny configuration: dependency advisories, licences, and duplicate
+# versions. Run with `cargo deny check` (see the ci.yml job).
+
+[graph]
+# The web crate has its own workspace; the root manifest is what ships.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# No blanket ignores. A vulnerable dependency gets upgraded or gets a
+# dated, reasoned entry here.
+ignore = [
+    # 2026-08-21: unmaintained warning, not a vulnerability, and there is
+    # no safe upgrade -- it arrives transitively through
+    # winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser. Revisit when
+    # the winit stack moves to the skrifa-based font crates.
+    "RUSTSEC-2026-0192",
+    # 2026-08-21: unmaintained warning on bincode 1.x, which the snapshot
+    # layer uses for same-process in-memory blobs only (never a disk
+    # interchange format; see src/emulator.rs snapshot_blob). Migrating to
+    # bincode 2 is a deliberate follow-up, not an advisory response.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+allow = [
+    "GPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "bzip2-1.0.6",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+    "CC0-1.0",
+    "MIT-0",
+    "0BSD",
+    "Unlicense",
+]
+# Copperline itself is GPL-3.0-or-later; everything it vendors or links
+# must be compatible with that. Anything outside the allow list fails the
+# check and needs an explicit, reviewed exception here.
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+# The three CopperlineHQ git dependencies are rev-pinned forks, not
+# wildcard version requirements; cargo-deny still counts them as
+# wildcards, so warn rather than fail on them.
+wildcards = "warn"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The project's own rev-pinned forks (see Cargo.toml).
+allow-git = [
+    "https://github.com/CopperlineHQ/mt32-rs",
+    "https://github.com/CopperlineHQ/Coppersynth",
+    "https://github.com/CopperlineHQ/FluxBridge",
+]

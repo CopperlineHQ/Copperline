@@ -1,4 +1,7 @@
 /target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
 
 # Maintainer-local AI-assistant instruction files: kept locally, not part of
 # the repo. The committed AGENTS.md (and its CLAUDE.md symlink) points agents

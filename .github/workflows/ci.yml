@@ -79,6 +79,56 @@ jobs:
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  msrv:
+    name: MSRV (rust-version)
+    # Cargo.toml declares `rust-version`; this proves the declared minimum
+    # actually builds and passes the unit suites, so a dependency bump or a
+    # new language feature cannot silently raise the real requirement.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install MSRV toolchain
+        # Read the declared version rather than duplicating it here.
+        run: |
+          msrv="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "copperline") | .rust_version')"
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Build (MSRV)
+        run: cargo +"$MSRV" build --locked
+      - name: Unit tests (MSRV)
+        run: cargo +"$MSRV" test --locked --lib
+
+  cargo-deny:
+    name: Dependency advisories and licences
+    # RUSTSEC advisories, licence compatibility with GPL-3.0-or-later, and
+    # duplicate-version drift, gated on every push (see deny.toml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  fuzz-build:
+    name: Fuzz harnesses build
+    # The fuzz/ harnesses are the front line for the untrusted-media
+    # parsers (fuzz/README.md); building them on every push keeps them
+    # compiling against parser changes. Sustained campaigns run locally or
+    # on a schedule, not here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build all targets
+        working-directory: fuzz
+        run: cargo fuzz build
+
   unit-tests:
     name: Unit tests
     needs: build
