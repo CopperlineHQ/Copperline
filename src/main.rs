@@ -12,7 +12,11 @@ use anyhow::{anyhow, Result};
 use copperline::gdbstub;
 use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
 use log::{info, warn};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// Only the Linux net-helper setup and the Windows disk broker build
+// PathBuf values; other targets would carry an unused-import warning.
+#[cfg(any(windows, target_os = "linux"))]
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use copperline::audio::{AudioSink, CpalSink, NullSink, WavSink};
