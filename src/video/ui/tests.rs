@@ -194,6 +194,37 @@ fn clip_path_keeps_the_file_name() {
 
 /// The shortcuts panel is sized from its row count, so adding a row must
 /// not push the table (or the notes under it) off the display.
+/// The calibration prompt says what to do next, so it has to be
+/// readable: wrapped inside the panel, and clear of the buttons under
+/// it however many lines it takes.
+#[test]
+fn the_calibration_prompt_wraps_inside_its_panel() {
+    let rect = panel_rect(&Panel::Calibration(
+        crate::gamepad::CalibrationSession::new(),
+    ));
+    let chars = rect.w.saturating_sub(32) / font::GLYPH_W;
+    let status =
+        "All steps captured. Push controls to test, hold any button then hit save to finish.";
+    let lines = wrap_text(status, chars, chars);
+    assert!(lines.len() > 1, "this one needs more than a line");
+    for line in &lines {
+        assert!(
+            line.chars().count() <= chars,
+            "{line:?} runs past the panel's edge"
+        );
+    }
+    // Where the rows leave off, plus the wrapped prompt, still above the
+    // buttons along the bottom.
+    let rows = crate::gamepad::CalibrationSession::step_count();
+    let y = rect.y + 64 + rows * 18 + 6 + lines.len() * (font::GLYPH_H + 2);
+    let buttons = cal_button_rects(rect)[0].1;
+    assert!(
+        y <= buttons.y,
+        "the prompt reaches {y}, the buttons start at {}",
+        buttons.y
+    );
+}
+
 #[test]
 fn the_shortcuts_panel_fits_on_screen() {
     let h = shortcuts_panel_height();

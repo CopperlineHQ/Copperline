@@ -574,8 +574,22 @@ fn a_held_control_hands_the_calibration_panel_to_the_pad() {
     app.ui.panel = Some(Panel::Calibration(
         crate::gamepad::CalibrationSession::finished_for_test(),
     ));
-    // Nothing held: the panel keeps the pad, and the buttons are not
-    // being walked.
+    // Held from the moment the last step was captured -- a binding that
+    // reads active at rest looks exactly like this -- hands nothing
+    // over, however long it lasts: the pad has not been seen at rest.
+    if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
+        session.hold_for_test("Fire");
+    }
+    app.calibration_pad_drives();
+    app.cal_pad_hold = Some(std::time::Instant::now() - super::CAL_PAD_HOLD);
+    assert!(
+        app.calibration_pad_drives().is_none(),
+        "a control held since the end is not a hold anyone made"
+    );
+    // At rest, and the panel keeps the pad.
+    if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {
+        session.hold_for_test("");
+    }
     assert!(app.calibration_pad_drives().is_none());
     // Held, but not for long enough yet.
     if let Some(Panel::Calibration(session)) = app.ui.panel.as_mut() {

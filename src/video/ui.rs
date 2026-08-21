@@ -2634,15 +2634,13 @@ fn draw_calibration(
         y += 18;
     }
     y += 6;
-    draw_panel_text(
-        frame,
-        rect.x + 16,
-        y,
-        &view.status,
-        PANEL_TEXT_ACCENT,
-        1,
-        scale,
-    );
+    // Wrapped to the panel: the prompt says what to do next and a line
+    // that ran off the edge would be saying it to nobody.
+    let chars = (rect.w.saturating_sub(32)) / font::GLYPH_W;
+    for line in wrap_text(&view.status, chars, chars) {
+        draw_panel_text(frame, rect.x + 16, y, &line, PANEL_TEXT_ACCENT, 1, scale);
+        y += font::GLYPH_H + 2;
+    }
     for (control, button_rect) in cal_button_rects(rect) {
         let label = match control {
             UiControl::CalSkip => "Skip",
