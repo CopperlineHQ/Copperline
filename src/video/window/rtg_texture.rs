@@ -298,9 +298,16 @@ impl RtgTexture {
         }
         let bytes =
             unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, (w * h * 4) as usize) };
+        // The block above just created the texture when it was missing, so
+        // this is Some in practice; skip the frame rather than panic if a
+        // future change ever breaks that.
+        let Some(texture) = self.texture.as_ref() else {
+            log::warn!("rtg texture missing at upload; skipping frame");
+            return;
+        };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: self.texture.as_ref().unwrap(),
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,

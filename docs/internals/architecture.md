@@ -9,10 +9,12 @@ This chapter is the map; the following chapters zoom into the
 
 ```
 src/
-  main.rs           # thin CLI binary: arg parse, config load, boot
+  main.rs           # thin CLI binary: config load, boot
+  cli.rs            # binary-local command-line parser
   bin/bench.rs      # copperline-bench headless benchmark (native + wasm32-wasip1)
   lib.rs            # the copperline library crate all of src/ lives in
-  config.rs         # TOML config + validation + machine profiles
+  config/           # TOML config + validation + machine profiles
+                    #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs, tests.rs)
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
   debugger.rs       # env-driven headless debugger
@@ -36,7 +38,8 @@ src/
   zorro_device.rs   # the functional-Zorro-board boundary (ZorroDevice trait)
   wasmboard.rs      # WASM plugin boards under wasmtime (wasm-boards feature)
   wasm_manifest.rs  # plugin manifest types shared with wasmtime-less builds
-  floppy.rs         # disk images + timed disk DMA controller
+  floppy/           # timed disk DMA controller + disk image decoding
+                    #   (mod.rs controller/drive core, formats.rs images, tests.rs)
   dms.rs            # DMS archive decompression
   gzip.rs           # gzip member loop behind ADZ/HDZ (multi-member, padding-tolerant)
   drive_sounds.rs   # synthesized floppy-drive sound effects
@@ -88,8 +91,10 @@ src/
     deinterlace.rs  # motion-adaptive deinterlacer
     present_common.rs # frontend-independent post-processing + TV apertures
     window.rs       # winit ApplicationHandler + render worker + main/tool pixels surfaces + status bar
-    window/         # size-split window submodules + its test suite
-                    #   (statusbar.rs, present.rs, host_input.rs, console.rs, tests.rs)
+    window/         # size-split App impl blocks + window submodules + its test suite
+                    #   (app_input.rs, app_menus.rs, app_debugger.rs, app_launcher.rs,
+                    #    app_session.rs, app_display.rs, app_panels.rs, app_media.rs,
+                    #    statusbar.rs, present.rs, host_input.rs, console.rs, tests.rs)
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
     launcher.rs     # machine-configuration (launcher) screen
     font.rs         # 8x8 overlay font

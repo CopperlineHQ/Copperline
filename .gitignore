@@ -21,6 +21,10 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
+# Local development checkout of the m68k core crate (the root build uses
+# the crates.io release; this tree is for working on the crate itself).
+/crates/m68k/
+
 # Standalone cputest runner build output.
 /crates/cputest-runner/target
 # Standalone HostSocket plugin build output (the committed artifact is
@@ -64,6 +68,9 @@ copperline-video-*.avi
 
 # Python bytecode from the tools/ helper scripts.
 __pycache__/
+
+# Local vAmigaTS comparison reports (tools/vamigats-*.py output).
+/vamigats-reports/
 
 # Default linker output, from compiling a scratch C probe in the tree.
 /a.out

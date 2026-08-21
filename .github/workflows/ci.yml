@@ -169,6 +169,41 @@ jobs:
         working-directory: crates/hostsocket-plugin
         run: cargo test --locked
 
+  zz9k-plugin:
+    name: ZZ9K plugin (wasm32)
+    # The bundled ZZ9000 crypto board (crates/zz9k-plugin) ships as a
+    # committed artifact (assets/zz9k/zz9k_plugin.wasm, the blob a plain
+    # cargo build embeds), built by that crate's Makefile from its own
+    # standalone workspace. This job mirrors the hostsocket-plugin one
+    # above: keep the source buildable for its real target, hold it to the
+    # same fmt/clippy standard as the root workspace, and run its native
+    # unit suite. Like hostsocket, it deliberately does not byte-compare
+    # the artifact against a fresh build: rustc upgrades change wasm
+    # output, and the artifact is only expected to be refreshed when the
+    # crate itself changes (like the guest ROMs under assets/).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/zz9k-plugin
+      - name: Formatting
+        working-directory: crates/zz9k-plugin
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: crates/zz9k-plugin
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Build (wasm32-unknown-unknown)
+        working-directory: crates/zz9k-plugin
+        run: cargo build --release --locked --target wasm32-unknown-unknown
+      - name: Native unit tests
+        working-directory: crates/zz9k-plugin
+        run: cargo test --locked
+
   diagrom-smoke:
     name: DiagROM boot smoke
     needs: build
@@ -270,6 +305,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends iproute2 libasound2-dev libudev-dev
       - name: Unit tests and probe golden renders
         run: cargo test --release --locked
+      - name: Audio stems determinism
+        # tests/audio_stems_determinism.rs needs no external assets (the
+        # bundled AROS ROM booting with an empty DF0 is enough), but like
+        # every emulator-driving test it is #[ignore]d so ordinary cargo
+        # test runs stay fast; it is invoked explicitly here instead.
+        run: cargo test --release --locked --test audio_stems_determinism -- --ignored
       - name: A2065 bridge round trip over a veth pair
         # The ordinary suite covers the platform-independent bridge worker
         # with an in-memory Ethernet adapter. This privileged Linux-only

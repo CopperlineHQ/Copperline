@@ -1,0 +1,56 @@
+name: cputest conformance
+
+# Nightly m68k instruction conformance: crates/cputest-runner drives the
+# WinUAE cputest-generated test sets (every opcode of a CPU model,
+# hundreds of state combinations each) against the published m68k core.
+# The crate is wired into no push/pull-request workflow because the .dat
+# sets are generated locally (~25MB per CPU model) by its
+# tools/cputest-gen.sh -- but that script is fully self-contained on a
+# hosted x86-64 Linux runner: it clones emoon/m68k_cpu_tester_api pinned
+# to the commit the vendored runner sources were taken from, builds the
+# generator chain with the preinstalled g++/python3, and emits the data.
+# So the nightly runs the full 68000 suite rather than stopping at a
+# compile check. A workflow_dispatch trigger allows running it manually
+# on any ref.
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cputest-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cputest:
+    name: WinUAE cputest conformance (68000)
+    runs-on: ubuntu-latest
+    # Generating the test set and executing every opcode's tests is the
+    # slow part; cap the job so a hung generator fails fast instead of
+    # idling for the default 6h.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/cputest-runner
+      - name: Install build dependencies
+        # zlib headers for the generator's -lz link; g++, git, and python3
+        # are preinstalled on the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zlib1g-dev
+      - name: Compile check
+        working-directory: crates/cputest-runner
+        run: cargo check --locked
+      - name: Generate the 68000 test set
+        run: crates/cputest-runner/tools/cputest-gen.sh "$RUNNER_TEMP/cputest-data" 68000
+      - name: Run the conformance suite
+        # The runner exits nonzero on any mismatch (continue_on_error is
+        # only so one bad opcode does not hide the rest of the report).
+        working-directory: crates/cputest-runner
+        run: cargo run --release --locked -- "$RUNNER_TEMP/cputest-data" all 68000

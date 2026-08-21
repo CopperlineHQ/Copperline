@@ -108,7 +108,9 @@ pub struct M68kMachine {
     /// Last CACR value pushed into the cache models, so the per-instruction
     /// sync is a single compare when nothing changed.
     last_cacr: u32,
-    dbg_pc_hist: std::collections::HashMap<u32, u64>,
+    // BTreeMap, not HashMap: the diagnostic dumps sort by count only, so
+    // equal-count entries must fall back to a deterministic PC order.
+    dbg_pc_hist: std::collections::BTreeMap<u32, u64>,
     dbg_pc_cyc: std::collections::HashMap<u32, u64>,
     dbg_pc_on: bool,
     dbg_in_window: bool,
@@ -185,7 +187,7 @@ pub struct M68kMachine {
     // Histogram of PCs executed during the render-done -> task-B-return span, to
     // see what the second cooperative task does while the window overruns.
     dbg_sched_capturing: bool,
-    dbg_sched_bhist: std::collections::HashMap<u32, u64>,
+    dbg_sched_bhist: std::collections::BTreeMap<u32, u64>,
     dbg_sched_bhist_dumped: bool,
     dbg_sched_loop_dumped: bool,
     // Interrupt handler-duration probe: per-IPL-level entry state (index =
@@ -390,7 +392,7 @@ impl M68kMachine {
             dbg_ipl_main_cyc: 0,
             dbg_ipl_irq_cyc: 0,
             dbg_ipl_last_frame: 0,
-            dbg_pc_hist: std::collections::HashMap::new(),
+            dbg_pc_hist: std::collections::BTreeMap::new(),
             dbg_pc_cyc: std::collections::HashMap::new(),
             dbg_in_window: false,
             dbg_pc_on: crate::envcfg::flag("COPPERLINE_DIAG_PCHIST"),
@@ -423,7 +425,7 @@ impl M68kMachine {
             dbg_sched_b8_vpos: 0,
             dbg_sched_b8_frame: 0,
             dbg_sched_capturing: false,
-            dbg_sched_bhist: std::collections::HashMap::new(),
+            dbg_sched_bhist: std::collections::BTreeMap::new(),
             dbg_sched_bhist_dumped: false,
             dbg_sched_loop_dumped: false,
             dbg_sched_vec_return_pc: [0; 8],
