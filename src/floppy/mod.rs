@@ -1378,7 +1378,10 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // A bridged bay retains a filler track while its physical drive is
+        // empty. No media still means no cells reach Paula, regardless of
+        // what is cached for the bridge transport.
+        if !self.drive_can_transfer_cells(idx) {
             return false;
         }
         // Free-running comparator mode comes from the mirrored ADKCON; an
@@ -1520,7 +1523,9 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // Match the read path: a bridge filler track must not make an empty
+        // physical drive accept a write.
+        if !self.drive_can_transfer_cells(idx) {
             return false;
         }
         let Some(mut dma) = self.dma.take() else {
@@ -1539,6 +1544,14 @@ impl FloppyController {
                 break;
             }
             self.drives[idx].rotation_acc_cck -= word_cck;
+            if dma.write_start_pending {
+                // A start position sampled while the mechanism was idle is
+                // not meaningful (inserting media resets rotation). Latch
+                // the actual head position when the first word is consumed.
+                dma.write_start_pending = false;
+                dma.write_start_word = self.drives[idx].rotation_bit / 16;
+                dma.write_start_bit = (self.drives[idx].rotation_bit % 16) as u8;
+            }
             let word = read_chip_word(chip_ram, self.dskpt);
             dma.write_words.push(word);
             self.advance_dskpt();
@@ -1607,7 +1620,7 @@ impl FloppyController {
 
     fn next_completion_cck_raw(&self, dmacon: u16) -> Option<u32> {
         let dma = self.dma.as_ref()?;
-        if !self.dma_enabled(dmacon) || dma.wait_sync {
+        if !self.dma_enabled(dmacon) || dma.wait_sync || !self.drive_can_transfer_cells(dma.drive) {
             return None;
         }
         let drive = &self.drives[dma.drive];
@@ -1625,6 +1638,15 @@ impl FloppyController {
             drive.head_cck_for_bits(bits.max(1))
         };
         Some((cck.min(u64::from(u32::MAX)) as u32).max(1))
+    }
+
+    /// Whether the active track can currently deliver cells to Paula. Keep
+    /// the completion predictor on the same boundary as the read/write
+    /// engines: an armed transfer over an idle or empty mechanism remains
+    /// pending, but has no completion event for STOP-state pacing to chase.
+    fn drive_can_transfer_cells(&self, drive_idx: usize) -> bool {
+        let drive = &self.drives[drive_idx];
+        drive.motor_on && drive.has_media() && !drive.cached.is_empty()
     }
 
     pub fn next_sync_irq_cck(&self, dmacon: u16) -> Option<u32> {
@@ -1731,22 +1753,27 @@ impl FloppyController {
         // arming enters the transfer state regardless, and data starts
         // flowing once the mechanism delivers stable cells. A drive that is
         // still spinning up must therefore arm normally instead of faking an
-        // instant, dataless completion -- trackloaders (Gods, Shadow of the
-        // Beast disk 2) issue the read within the spin-up window and poll the
-        // buffer for arriving data, dead-spinning if it never fills.
-        // TODO: media-less and motor-off drives should also arm and idle
-        // (real Paula would wait for sync forever); they keep the instant
-        // completion until the software relying on it is characterized.
-        if !self.drives[idx].has_media() || !self.drives[idx].motor_on {
-            if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
-                log::info!(
-                    "disk-dma refused: df{idx} media={} motor_on={} motor_cck={}",
-                    self.drives[idx].has_media(),
-                    self.drives[idx].motor_on,
-                    self.drives[idx].motor_cck,
-                );
-            }
-            return self.no_drive_completion();
+        // instant, dataless completion. A trackloader may arm within the
+        // spin-up window and poll its buffer for the data that arrives later.
+        //
+        // The same honesty covers a drive with no media or a stopped
+        // platter: the transfer arms and then idles, because no cells pass
+        // under the head for the shifter to drain. Real Paula waits for
+        // sync forever in that state; the guest's own timeout governs, and
+        // a media insert or motor start mid-transfer brings the transfer to
+        // life exactly as on hardware. The read and write tick paths idle
+        // without motor, media, and cached cells, and the turbo burst refuses
+        // drives that are not ready, so nothing completes early.
+        if (!self.drives[idx].has_media() || !self.drives[idx].motor_on)
+            && crate::envcfg::flag("COPPERLINE_DIAG_DISK")
+        {
+            log::info!(
+                "disk-dma armed against an idle mechanism: df{idx} media={} motor_on={} \
+                 motor_cck={} (transfer will pend until the mechanism delivers)",
+                self.drives[idx].has_media(),
+                self.drives[idx].motor_on,
+                self.drives[idx].motor_cck,
+            );
         }
 
         let track = self.track_for_drive(idx);
@@ -1776,6 +1803,8 @@ impl FloppyController {
             write_words: Vec::new(),
             write_start_word,
             write_start_bit,
+            write_start_pending: write
+                && (!self.drives[idx].has_media() || !self.drives[idx].motor_on),
         });
         if self.turbo() {
             self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
@@ -1841,6 +1870,8 @@ impl FloppyController {
         dma.track = new_track;
         dma.write_start_word = self.drives[drive_idx].rotation_bit / 16;
         dma.write_start_bit = (self.drives[drive_idx].rotation_bit % 16) as u8;
+        dma.write_start_pending =
+            !self.drives[drive_idx].has_media() || !self.drives[drive_idx].motor_on;
         self.dma = Some(dma);
     }
 
@@ -3673,6 +3704,9 @@ struct DiskDma {
     write_words: Vec<u16>,
     write_start_word: usize,
     write_start_bit: u8,
+    /// Set when a write arms without a delivering mechanism. The rotational
+    /// start is re-latched from the first word actually consumed.
+    write_start_pending: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

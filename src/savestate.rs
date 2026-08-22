@@ -212,7 +212,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      byte length (WAVE/MP3 audio tracks, reopened and re-indexed on
 //      load) and its extents gained a storage tag (file bytes or an
 //      unstored PREGAP/POSTGAP).
-pub const STATE_VERSION: u32 = 62;
+//  63: DiskDma gained `write_start_pending`, so a write armed against an
+//      idle floppy mechanism re-latches its rotational start when cells
+//      first arrive.
+pub const STATE_VERSION: u32 = 63;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
