@@ -1531,8 +1531,9 @@ A `unitN` path ending in `.cue`, `.iso`, or `.chd` attaches a **SCSI
 CD-ROM drive** at that ID instead of a hard disk: a read-only removable
 SCSI-2 target (INQUIRY device type 5) serving 2048-byte blocks, with the
 full READ TOC / READ CD / mode-page surface CD filesystems expect.
-Cue/bin and CHD images may mix data and audio tracks; a bare `.iso` is a
-single data track. The drive answers on the host adapter's `scsi.device` like any
+Cue sheets and CHD images may mix data and audio tracks (a cue sheet's
+audio tracks may be `WAVE` or `MP3` files, as described under `[cd]`
+below); a bare `.iso` is a single data track. The drive answers on the host adapter's `scsi.device` like any
 other unit, so mount it the way you would on real hardware: a
 `DOSDrivers` mount entry (or MountList) pointing `CDFileSystem` --
 CacheCDFS, AsimCDFS, and AmiCDROM work the same way -- at the controller's
@@ -1735,16 +1736,48 @@ it. It is CLI-only by design (no config section) and is covered in
 profile = "CD32"
 
 [cd]
-image = "disc.cue"        # BIN/CUE cue sheet (MODE1/2048, MODE1/2352, AUDIO)
+image = "disc.cue"        # cue sheet (BINARY/WAVE/MP3 files; MODE1/2048, MODE1/2352, AUDIO)
 insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file (default)
 ```
 
-`image` takes a BIN/CUE cue sheet, a bare `.iso` (single data track), or
-a `.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
+`image` takes a cue sheet, a bare `.iso` (single data track), or a
+`.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
 writes: LZMA/Deflate/FLAC-compressed hunks with data and audio tracks).
 The disc mounts on the machine's CD controller: Akiko on CD32, the DMAC on
-CDTV. `insert_delay` inserts the disc some emulated seconds after power-on
+CDTV.
+
+A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
+multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a
+disc's audio tracks often come in, one file per track:
+
+```text
+FILE "game.bin" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+FILE "game (Track 02).mp3" MP3
+  TRACK 02 AUDIO
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+FILE "game (Track 03).wav" WAVE
+  TRACK 03 AUDIO
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+```
+
+Audio files are decoded to CD-DA as the drive reads them, not up front,
+so a disc with an hour of MP3 audio loads as fast as a BIN/CUE and never
+holds its decoded audio in memory. Any WAV PCM layout is accepted
+(8/16/24/32-bit or float, mono or stereo, any rate); MP3 covers
+MPEG-1/2/2.5 Layer III at any bitrate, constant or variable, with ID3
+tags skipped and a LAME tag's encoder delay trimmed so the track is
+sample-exact against the WAV it was encoded from. Sources not at 44.1 kHz
+are resampled. `PREGAP`/`POSTGAP` lines add the gap sectors such files
+cannot hold (they read as silence, and the TOC points past them), as does
+an `INDEX 00` inside a file. Data tracks must be in `BINARY` files;
+`MOTOROLA` and `AIFF` files are not supported. MP3 decoding is the
+default-on `cd-mp3` Cargo feature; a build without it loads WAVE tracks
+and rejects MP3 ones with a message saying so. `insert_delay` inserts the disc some emulated seconds after power-on
 with the proper media-change notification; some CDTV discs only boot when
 inserted after the boot screen appears. CD32 NVRAM
 persists to `cd32-nvram.bin` in the `[paths]` nvram folder unless
