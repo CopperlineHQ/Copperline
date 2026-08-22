@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.17.0" date="2026-08-22">
+      <description>
+        <p>An audio release: Coppersynth, a built-in SoundFont General MIDI sound module in the style of a Roland Sound Canvas with an MT-32 translation layer and SC-55 front panel, a MacroSystem Toccata AD1848 sound board for AHI, an MHI MPEG audio decoder board, per-source audio stem capture and a per-source Audio tab in the debugger. Also: CD32 discs boot on the bundled AROS ROM with no Kickstart (Akiko drive-protocol and DMA fixes plus three upstream AROS series), a publisher kit that builds standalone single-game players, gamepads that work out of the box from a bundled controller database with keyboard and gamepad navigation of the whole UI, a redesigned About page and launcher sweep, Graffity RTG boards, a ZZ9000 SDK crypto accelerator board, a Zorro IDE activity LED, and Denise horizontal display-window and raster-centring accuracy fixes.</p>
+      </description>
+    </release>
     <release version="0.16.0" date="2026-08-15">
       <description>
         <p>Direct WHDLoad boot with a launcher game library, a --run flag that warp-boots a host Amiga executable for development work, a Create Image workshop for fresh ADF and HDF images, a built-in lide.device-compatible IDE board with ATAPI CD-ROM support, OFS directory-mounted hard drives, configurable output paths with an opt-in portable mode and a saved default config, Kickstart ROM identification, gzip-compressed hardfiles, an on-screen keyboard and picture centring controls on the desktop, bezel sticker decals and a refined 1084 front on desktop and web, IPF images in the browser build, and AGA, Agnus and chip-bus accuracy fixes driven by real-hardware feedback.</p>
