@@ -193,8 +193,9 @@ Palette (32 12-bit entries as seen by OCS/ECS; the store is the AGA
 the genlock transparency (T) bit, with Lisa COLORxx writes routed through
 BPLCON3 BANK/LOCT banking), BPLCON0-4,
 display window (DIWSTRT/DIWSTOP, ECS DIWHIGH), sprite
-position/control/data registers, and CLXCON/CLXDAT collision detection
-(CLXCON2 extends it to planes 7-8 on Lisa). Denise revisions: OCS 8362,
+position/control/data registers, and CLXCON/CLXDAT collision detection.
+On Lisa, CLXCON2 extends the plane match to planes 7-8 in both the rendered
+and live beam-timed collision paths. Denise revisions: OCS 8362,
 ECS 8373, AGA Lisa (DENISEID $00F8). The AGA decode adds 8 bitplanes,
 HAM8, the BPLCON4 BPLAM pixel-index XOR mask, and the OSPRM/ESPRM sprite
 palette banks. The two BPLCON4 fields are on different Lisa timing paths:
@@ -346,9 +347,6 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- **Live (beam-timed) collisions** stay on the 6-plane decode: CLXCON2 is
-  interpreted in the rendered collision path but not yet in the beam-timed
-  `COLLISIONS_AGA_DECODE` path.
 - **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
   sprite resolution, but the compositor does not place sprites on the SHRES
   pixel grid.
