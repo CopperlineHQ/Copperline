@@ -530,7 +530,8 @@ fn mouse_sensitivity_factor(sensitivity: u8) -> f64 {
 /// disk swapped) stays visible.
 const OSD_DURATION: std::time::Duration = std::time::Duration::from_millis(2500);
 
-/// How long the pad's calibrated Quit hotkey must be held before the
+/// How long the pad's Quit hotkey (Select on the standard layout, a
+/// calibrated Quit or Menu control otherwise) must be held before the
 /// application exits: long enough that a stray press cannot end the
 /// session, short enough to feel immediate.
 const GAMEPAD_QUIT_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -1241,8 +1242,8 @@ pub struct App {
     /// input backend is available (e.g. headless CI) or the pad is not yet
     /// calibrated.
     gamepad: crate::gamepad::GamepadReader,
-    /// When the pad's calibrated Quit hotkey started being held, if it is
-    /// down right now. Cleared by a release before the hold completes.
+    /// When the pad's Quit hotkey started being held, if it is down right
+    /// now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
     /// The tool window last given the keyboard, which is the one in
     /// front and so the one a "close this" means. `None` until one has
@@ -2272,8 +2273,8 @@ impl App {
     /// state on its port, as it always has.
     fn pump_joystick_input(&mut self) {
         let r = self.host_routing();
-        // Poll the pad whether or not it drives a port: the calibrated
-        // Quit hotkey is a host control and works regardless of routing.
+        // Poll the pad whether or not it drives a port: the Quit hotkey
+        // and Menu button are host controls and work regardless of routing.
         let pad = self.gamepad.poll();
         self.track_gamepad_quit_hold(pad.is_some_and(|state| state.quit));
         // Published for the menu bridge, which runs at the about_to_wait
@@ -2405,10 +2406,13 @@ impl App {
         }
     }
 
-    /// Track the pad's calibrated Quit hotkey across polls: a hold of
+    /// Track the pad's Quit hotkey across polls: a hold of
     /// [`GAMEPAD_QUIT_HOLD`] requests an application exit, with an OSD
     /// countdown while it is in progress. Releasing earlier cancels the
-    /// hold and withdraws the countdown.
+    /// hold and withdraws the countdown. On the standard layout the hotkey
+    /// is Select, which also opens the menu on its press edge: the menu
+    /// is up while the countdown runs, and an early release leaves it
+    /// there, which is what a tap would have done anyway.
     fn track_gamepad_quit_hold(&mut self, held: bool) {
         if !held {
             if self.gamepad_quit_hold.take().is_some()

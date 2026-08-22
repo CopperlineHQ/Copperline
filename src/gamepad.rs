@@ -9,7 +9,8 @@
 //! a fixed standard layout: d-pad and left stick drive the directions,
 //! South is fire/CD32 red, East blue, West green, North yellow, Start
 //! play/pause, and the left/right shoulders and triggers are reverse and
-//! forward. The default layout binds no Quit hotkey.
+//! forward. Select/Back and the guide button, which no emulated control
+//! uses, open the menu; Select held is the Quit hotkey.
 //!
 //! A saved calibration always wins over the database. That keeps unknown
 //! pads working and broken database entries fixable the same way (many
@@ -21,9 +22,11 @@
 //! direction, it needs no axis-sign or axis-order assumptions -- inversion
 //! and layout fall out automatically.
 //!
-//! Besides the emulated controls, calibration can optionally bind one pad
-//! input as a host-side Quit hotkey. That binding never reaches the emulated
-//! port; the window turns a sustained hold of it into an application exit.
+//! Besides the emulated controls, calibration can optionally bind a Menu
+//! button and a Quit hotkey. Neither reaches the emulated port: a press of
+//! the Menu button opens the menu, and the window turns a sustained hold of
+//! the Quit hotkey -- or of the Menu button, when no separate Quit control
+//! was bound -- into an application exit.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -165,7 +168,15 @@ impl GamepadCalibration {
     fn resolve_pad(&self, axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> PadState {
         PadState {
             joystick: self.resolve(axes, buttons),
-            quit: self.quit.is_some_and(|i| i.active(axes, buttons)),
+            // The Quit hotkey is whichever host-side control was bound
+            // for it; with none, the Menu button stands in -- held, it
+            // quits, the same as Select on the standard layout -- so a
+            // pad that skipped the Quit step is not left without a way
+            // out. A bound Quit control takes the hold back to itself.
+            quit: self
+                .quit
+                .or(self.menu)
+                .is_some_and(|i| i.active(axes, buttons)),
             menu: self.menu.is_some_and(|i| i.active(axes, buttons)),
             // A calibration binds raw inputs one at a time and has no
             // notion of an axis pair, so a calibrated pad reports no
@@ -325,6 +336,24 @@ impl MappedPadState {
             play: self.start,
             rwd: self.left_shoulder || self.left_trigger,
             ffw: self.right_shoulder || self.right_trigger,
+        }
+    }
+
+    /// The standard layout's whole report: the emulated lines above plus
+    /// the host-side controls. Select/Back and the guide button, which no
+    /// emulated control uses, open the menu -- harmless and dismissible.
+    /// Select is also the Quit hotkey: the window only acts on a
+    /// sustained hold, with a countdown that an early release cancels,
+    /// which is the guard that makes a default binding safe. The guide
+    /// button is left out of that on purpose: the platform often claims
+    /// it, and on several pads holding it is the controller's own
+    /// power-off or system-menu gesture.
+    fn resolve_pad(&self) -> PadState {
+        PadState {
+            joystick: self.resolve(),
+            quit: self.select,
+            menu: self.select || self.mode,
+            stick: (self.left_x, self.left_y),
         }
     }
 }
@@ -629,16 +658,7 @@ impl GamepadReader {
                         pad.name()
                     );
                 }
-                // The default layout binds no Quit hotkey: exiting is
-                // destructive, so only an explicit calibration may arm it.
-                // The menu is harmless and dismissible, so the layout's
-                // otherwise-unused Select/Back and guide buttons open it.
-                Some(PadState {
-                    joystick: raw.mapped.resolve(),
-                    quit: false,
-                    menu: raw.mapped.select || raw.mapped.mode,
-                    stick: (raw.mapped.left_x, raw.mapped.left_y),
-                })
+                Some(raw.mapped.resolve_pad())
             }
             None => {
                 if !self.warned_uncalibrated {
@@ -1314,6 +1334,31 @@ mod tests {
     }
 
     #[test]
+    fn default_layout_host_controls_ride_on_select_and_guide() {
+        // Select opens the menu and, held, is the Quit hotkey; the guide
+        // button opens the menu only (the platform often claims it, and
+        // holding it is several pads' own power gesture). Neither reaches
+        // the emulated lines, and nothing else arms a quit.
+        let mut mapped = MappedPadState::default();
+        mapped.set_button(gilrs::Button::Select, true);
+        let pad = mapped.resolve_pad();
+        assert!(pad.menu && pad.quit);
+        assert_eq!(pad.joystick, JoystickState::default());
+
+        mapped = MappedPadState::default();
+        mapped.set_button(gilrs::Button::Mode, true);
+        let pad = mapped.resolve_pad();
+        assert!(pad.menu && !pad.quit);
+
+        mapped = MappedPadState::default();
+        mapped.set_button(gilrs::Button::Start, true);
+        mapped.set_button(gilrs::Button::South, true);
+        let pad = mapped.resolve_pad();
+        assert!(!pad.menu && !pad.quit);
+        assert!(pad.joystick.play && pad.joystick.fire);
+    }
+
+    #[test]
     fn default_layout_directions_from_stick_dpad_buttons_and_hat_axes() {
         // gilrs's named-axis convention is up/right positive; a deflection
         // must pass the activity threshold, and d-pad buttons, hat-style
@@ -1501,8 +1546,9 @@ mod tests {
         assert!(pad.quit);
         assert_eq!(pad.joystick, JoystickState::default());
 
-        // Fire alone drives the port and leaves quit inactive; an unbound
-        // quit (older calibration files) never activates.
+        // Fire alone drives the port and leaves quit inactive; with
+        // neither host control bound (older calibration files) nothing
+        // ever arms a quit.
         buttons.clear();
         buttons.insert(0x90001, true);
         let pad = cal.resolve_pad(&BTreeMap::new(), &buttons);
@@ -1512,6 +1558,36 @@ mod tests {
             ..Default::default()
         };
         assert!(!unbound.resolve_pad(&BTreeMap::new(), &buttons).quit);
+    }
+
+    #[test]
+    fn menu_binding_stands_in_for_an_unbound_quit() {
+        // A calibration that bound a Menu button but skipped Quit still
+        // has a way out: the Menu button is the Quit hotkey too (the
+        // window only acts on a hold), the same as Select on the
+        // standard layout.
+        let menu_only = GamepadCalibration {
+            menu: button(0x9000B),
+            ..Default::default()
+        };
+        let mut buttons = BTreeMap::new();
+        buttons.insert(0x9000B, true);
+        let pad = menu_only.resolve_pad(&BTreeMap::new(), &buttons);
+        assert!(pad.menu && pad.quit);
+
+        // Binding a separate Quit control takes the hold to itself: the
+        // Menu button then only opens the menu.
+        let both = GamepadCalibration {
+            menu: button(0x9000B),
+            quit: button(0x9000A),
+            ..Default::default()
+        };
+        let pad = both.resolve_pad(&BTreeMap::new(), &buttons);
+        assert!(pad.menu && !pad.quit);
+        buttons.clear();
+        buttons.insert(0x9000A, true);
+        let pad = both.resolve_pad(&BTreeMap::new(), &buttons);
+        assert!(!pad.menu && pad.quit);
     }
 
     #[test]

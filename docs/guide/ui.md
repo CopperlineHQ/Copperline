@@ -90,7 +90,8 @@ away again.
 
 A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
-machine.
+machine, and the way out too: held, it quits, and the menu's last row
+is **Quit**.
 
 The debugger, frame analyzer and console windows are not navigated this
 way, but `Esc` closes the focused one and the pad's second button closes
@@ -1054,9 +1055,9 @@ face button (A / Cross) is fire / CD32 red, east (B / Circle) is blue,
 west (X / Square) is green, north (Y / Triangle) is yellow, Start is
 play/pause, and the left and right shoulders or triggers are reverse and
 forward. Select/Back and the guide button -- which no emulated control
-uses -- open the pop-up menu (below). Personal SDL mapping strings in the
-standard `SDL_GAMECONTROLLERCONFIG` environment variable are honoured
-too.
+uses -- open the pop-up menu, and Select *held* quits (both below).
+Personal SDL mapping strings in the standard `SDL_GAMECONTROLLERCONFIG`
+environment variable are honoured too.
 
 Calibration is the per-pad override, and the only path for controllers
 the database does not cover: push each control when prompted. This
@@ -1089,9 +1090,13 @@ it must be *held* for about a second and a half -- an on-screen countdown
 shows the hold in progress, and releasing early cancels it. It works
 whenever the pad is connected -- even while the keyboard or another
 device drives the joystick ports, and while the machine is paused or
-powered off. Skip the step to leave quitting to the keyboard shortcut.
-The default database layout never binds a Quit hotkey; only a
-calibration can arm one.
+powered off. On the default database layout Select/Back carries it: a
+tap opens the menu and keeping it held quits, with the countdown drawn
+over the menu; let go early and the menu simply stays open, where
+**Quit** is the last row. A calibrated pad's Menu button works the same
+way unless a separate Quit control was bound, which then takes the hold
+to itself. Skip both steps to leave quitting to the menu row and the
+keyboard shortcut.
 
 The Menu button is the other host-side control: a press opens the pop-up
 menu (or closes an open overlay panel), and from there the pad walks
@@ -1100,7 +1105,7 @@ whatever is up, as described under
 above. While the menu or a panel is open the pad stops driving the
 emulated port, just as the keyboard does. On the default database layout
 Select/Back and the guide button carry it; a calibration can put it
-anywhere (or skip it).
+anywhere (or skip it). Held, it doubles as the Quit hotkey, as above.
 
 Once every step is captured, pushing a control tests its binding and
 holding one hands the panel's Save and Cancel buttons to the pad, so a
