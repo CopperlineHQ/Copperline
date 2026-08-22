@@ -1431,6 +1431,11 @@ impl FloppyController {
             let storing = read_dma.as_ref().is_some_and(|d| !d.wait_sync);
             self.read_shifter.sample_bit(bit, dsksync, storing);
 
+            // The DSKSYN interrupt is edge-triggered, but the comparator
+            // itself answers on every cell: a DSKSYNC that a same-bit run
+            // keeps matching (0x0000, 0xFFFF) holds the match for the whole
+            // run.
+            let comparator_match = self.read_shifter.sync_matched();
             if self.read_shifter.take_sync_irq() && sync_enabled {
                 self.record_sync_match();
                 if let Some(dma) = read_dma.as_mut() {
@@ -1442,14 +1447,21 @@ impl FloppyController {
                             irq = true;
                             break 'outer;
                         }
-                    } else if self.adkcon & ADK_WORDSYNC != 0 {
+                    }
+                }
+            }
+            if comparator_match && sync_enabled && self.adkcon & ADK_WORDSYNC != 0 {
+                if let Some(dma) = read_dma.as_mut() {
+                    if !dma.wait_sync {
                         // With WORDSYNC set, Paula re-frames the word boundary
                         // on every DSKSYNC match, not only on the one that
                         // starts the transfer. A revolution whose cell count
                         // is not a multiple of 16 otherwise leaves every
                         // sector after the index wrap off the word grid, and
                         // a reader that scans its buffer on that grid (AROS
-                        // trackdisk.device) never finds them.
+                        // trackdisk.device) never finds them. Re-framing on
+                        // every matching cell of a run parks the framing at
+                        // the run's end, where the first word after it starts.
                         self.read_shifter.reframe();
                     }
                 }
@@ -3847,6 +3859,12 @@ impl PaulaDiskReadDpllFifo {
     /// the sync interrupted is dropped, as on the hardware.
     fn reframe(&mut self) {
         self.bit_offset = 0;
+    }
+
+    /// Whether the cell just sampled completed a DSKSYNC match: the
+    /// comparator's level, where `take_sync_irq` reports only its edge.
+    fn sync_matched(&self) -> bool {
+        self.word_equal
     }
 
     #[cfg(test)]

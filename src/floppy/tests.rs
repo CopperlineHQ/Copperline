@@ -2200,6 +2200,64 @@ fn wordsync_read_reframes_at_every_sync_across_odd_length_index_wrap() -> Result
 }
 
 #[test]
+fn wordsync_reframes_on_every_cell_of_a_run_matching_dsksync() -> Result<()> {
+    // A DSKSYNC that a same-bit run keeps matching (0xFFFF here) re-frames
+    // on every cell of the run, so the first word transferred starts where
+    // the run ends rather than 16 cells after its first match. 44 ones end
+    // four cells into word 3; the words after them are 0x0456 (those four
+    // zeros plus the top of 0x4567) and 0x789A.
+    let raw_words = [0x1234u16, 0xFFFF, 0xFFFF, 0xFFF0, 0x4567, 0x89AB, 0x0000];
+    let path = temp_ext2_raw(&raw_words)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: true,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    let mut chip_ram = vec![0u8; 8];
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    // The head may already sit in the run of ones when DSKSYNC changes;
+    // that immediate match is not the one under test.
+    let _ = ctrl.write_dsksync(0xFFFF);
+    let _ = ctrl.take_sync_irq();
+    ctrl.ensure_track(0, 0);
+    ctrl.drives[0].set_rotation_bit(0);
+    ctrl.drives[0].rotation_acc_cck = 0;
+
+    ctrl.set_adkcon(ADK_WORDSYNC);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | 2;
+    assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+    assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+
+    let mut done = false;
+    for _ in 0..raw_words.len() * 3 {
+        if ctrl.tick(word_cck, dmacon, &mut chip_ram) {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "read past a run matching DSKSYNC should complete");
+    assert!(ctrl.take_sync_irq());
+    assert_eq!(read_chip_word(&chip_ram, 0), 0x0456);
+    assert_eq!(read_chip_word(&chip_ram, 2), 0x789A);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
 fn read_dma_sync_irq_deadline_tracks_next_sync_word() -> Result<()> {
     let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
     let path = temp_ext2_raw(&raw_words)?;
