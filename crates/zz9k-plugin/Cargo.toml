@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 sha1 = { version = "0.10", default-features = false }
 # "oid" gives sha2's digests AssociatedOid, which rsa's Pkcs1v15Sign::new
 # needs to build the DigestInfo prefix for signature verification.
-sha2 = { version = "0.10", default-features = false, features = ["oid"] }
+sha2 = { version = "0.11", default-features = false, features = ["oid"] }
 blake2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 poly1305 = { version = "0.8", default-features = false }
