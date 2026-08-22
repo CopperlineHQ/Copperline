@@ -178,7 +178,7 @@ symphonia-core = { version = "0.6.1", default-features = false, optional = true 
 # defaults to a different wire format, so moving would invalidate every
 # existing .clstate for no functional gain. Migrate only as part of a
 # planned savestate::STATE_VERSION bump.
-bincode = "1"
+bincode = "3"
 toml = "0.9"
 png = "0.18"
 flate2 = "1"
