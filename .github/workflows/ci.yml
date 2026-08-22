@@ -79,6 +79,34 @@ jobs:
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  fuzz-build:
+    name: Fuzz harnesses build
+    # Build every untrusted-input harness on each change so parser API
+    # refactors cannot silently leave the fuzz workspace stale. Sustained
+    # campaigns remain a local or scheduled workload.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Verify the fuzz lockfile and build all targets
+        working-directory: fuzz
+        run: |
+          # cargo-fuzz 0.13.2 does not expose Cargo's --locked flag. Resolve
+          # the workspace under --locked first, then prove the build left the
+          # committed lockfile unchanged.
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo fuzz build
+          git diff --exit-code -- Cargo.lock
+
   unit-tests:
     name: Unit tests
     needs: build
