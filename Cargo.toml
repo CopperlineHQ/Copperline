@@ -179,7 +179,7 @@ symphonia-core = { version = "0.6.1", default-features = false, optional = true 
 # existing .clstate for no functional gain. Migrate only as part of a
 # planned savestate::STATE_VERSION bump.
 bincode = "1"
-toml = "0.9"
+toml = "1.1"
 png = "0.18"
 flate2 = "1"
 cpal = { version = "0.18", optional = true }
