@@ -1485,7 +1485,7 @@ fn dskbytr_dmaon_waits_for_double_dsklen_arm() -> Result<()> {
 }
 
 #[test]
-fn dskbytr_dmaon_stays_clear_when_armed_dma_cannot_start() -> Result<()> {
+fn dskbytr_dmaon_stays_set_while_armed_dma_waits_for_the_motor() -> Result<()> {
     let raw_words = [0x1234, 0x5678];
     let path = temp_ext2_raw(&raw_words)?;
     let cfg = FloppyConfig {
@@ -1503,15 +1503,114 @@ fn dskbytr_dmaon_stays_clear_when_armed_dma_cannot_start() -> Result<()> {
     };
     let mut ctrl = FloppyController::from_config(&cfg)?;
 
-    // Selected drive with media but the motor line off: the armed DSKLEN
-    // still takes the instant-completion path and DMAON stays clear.
+    // Selected drive with media but the motor line off: the transfer arms
+    // and pends -- real Paula waits for data forever -- so DMAON stays set
+    // and nothing completes until the platter turns.
     ctrl.write_prb(!CIAB_DSKSEL0);
 
     let len = DSKLEN_DMAEN | 1;
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     assert!(!ctrl.write_dsklen(len, 0));
-    assert!(ctrl.write_dsklen(len, 0));
-    assert_eq!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_eq!(ctrl.next_completion_cck(dmacon), None);
+    let mut chip_ram = vec![0u8; 4];
+    assert!(!ctrl.tick(MOTOR_READY_CCK * 4, dmacon, &mut chip_ram));
+    assert_eq!(read_chip_word(&chip_ram, 0), 0);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn read_dma_with_no_media_arms_and_pends_until_media_arrives() -> Result<()> {
+    let raw_words = [0x1234, 0x5678];
+    let path = temp_ext2_raw(&raw_words)?;
+    let mut ctrl = FloppyController::default();
+    let mut chip_ram = vec![0u8; 4];
+
+    // DF0 selected, motor spinning, but the bay is empty: the transfer
+    // arms and idles -- no cells pass under the head, so no completion
+    // interrupt ever fires and the guest's own timeout governs.
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    let len = DSKLEN_DMAEN | 1;
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_eq!(ctrl.next_completion_cck(dmacon), None);
+
+    // Several revolutions of waiting deliver nothing.
+    for _ in 0..8 {
+        assert!(!ctrl.tick(
+            FloppyController::word_cck_for_track_words(raw_words.len()) * 125,
+            dmacon,
+            &mut chip_ram
+        ));
+    }
+    assert_eq!(read_chip_word(&chip_ram, 0), 0);
+
+    // Inserting media mid-transfer brings it to life exactly as sliding a
+    // disk into a real drive would.
+    ctrl.insert_disk_image(0, path.clone(), true)?;
+    ctrl.ensure_track(0, 0);
+    assert!(ctrl.next_completion_cck(dmacon).is_some());
+    assert!(ctrl.tick(
+        FloppyController::word_cck_for_track_words(raw_words.len()),
+        dmacon,
+        &mut chip_ram
+    ));
+    assert_eq!(read_chip_word(&chip_ram, 0), raw_words[0]);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn read_dma_with_motor_off_pends_until_the_motor_starts() -> Result<()> {
+    let raw_words = [0x1234, 0x5678];
+    let path = temp_ext2_raw(&raw_words)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: true,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    let mut chip_ram = vec![0u8; 4];
+    let len = DSKLEN_DMAEN | 1;
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+
+    // Media present, drive selected, motor line off: the read arms and
+    // pends through several spin-up windows without completing.
+    ctrl.write_prb(!CIAB_DSKSEL0);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert_eq!(ctrl.next_completion_cck(dmacon), None);
+    assert!(!ctrl.tick(MOTOR_READY_CCK * 3, dmacon, &mut chip_ram));
+    assert_eq!(read_chip_word(&chip_ram, 0), 0);
+
+    // Starting the motor spins the platter up and the pending transfer
+    // completes with the track data.
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    let mut completed = false;
+    for _ in 0..(MOTOR_READY_CCK / word_cck + 4) {
+        if ctrl.tick(word_cck, dmacon, &mut chip_ram) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "the transfer completes after the motor starts");
+    assert_eq!(read_chip_word(&chip_ram, 0), raw_words[0]);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -1864,24 +1963,40 @@ fn motor_off_blocks_read_dma_until_next_spinup() -> Result<()> {
 
     ctrl.set_dskpt_low(0);
     let len = DSKLEN_DMAEN | 1;
-    assert!(!ctrl.write_dsklen(len, 0));
-    assert!(ctrl.write_dsklen(len, 0));
     let dmacon = DMACON_DMAEN | DMACON_DISK;
-    assert_eq!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    // Arming against the stopped platter enters the transfer state and
+    // pends: no cells pass under the head, so nothing completes.
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
 
     // Leave the motor off long enough for the platter to spin down fully,
-    // so the drive must spin back up before the next read can run.
+    // so the drive must spin back up before data can flow.
     ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    assert!(!ctrl.tick(MOTOR_READY_CCK, dmacon, &mut chip_ram));
     ctrl.write_prb(0xFF);
     ctrl.write_prb(selected_motor_on);
     assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
     assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
 
-    let len = DSKLEN_DMAEN | 1;
-    assert!(!ctrl.write_dsklen(len, 0));
-    assert!(!ctrl.write_dsklen(len, 0));
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    // The pending transfer completes once the platter is turning again.
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    let mut completed = false;
+    for _ in 0..(MOTOR_READY_CCK / word_cck + 4) {
+        if ctrl.tick(word_cck, dmacon, &mut chip_ram) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "the transfer completes after the spin-up");
+    // The platter kept its rotation position across the motor-off window,
+    // so the pending read resumes wherever the head now is on the track.
+    let word = read_chip_word(&chip_ram, 0);
+    assert!(
+        raw_words.contains(&word),
+        "resumed read delivers real track data, got {word:#06x}"
+    );
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -3519,6 +3634,62 @@ fn raw_track_write_dma_uses_raw_index_timing() -> Result<()> {
     tick_index_flag_sync(&mut ctrl);
     assert!(ctrl.take_index_pulse());
     assert_eq!(ctrl.drives[0].rotation_word_index(), 0);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn write_dma_armed_without_media_starts_at_inserted_disks_rotation() -> Result<()> {
+    let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+    let path = temp_ext2_raw(&raw_words)?;
+    let mut ctrl = FloppyController::default();
+    let mut chip_ram = vec![0xAB, 0xCD];
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+
+    // Arm a write with DF0 selected and its motor running, but no media.
+    // The controller's old rotational position must not decide where data
+    // lands after a disk is inserted.
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    ctrl.drives[0].set_rotation_word(2);
+    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | 1;
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert_eq!(ctrl.next_completion_cck(dmacon), None);
+
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    assert!(!ctrl.tick(word_cck * 125, dmacon, &mut chip_ram));
+
+    // Insertion starts the platter at index. The pending write therefore
+    // begins at word zero, where cells first become available, rather than
+    // at the stale pre-insert position.
+    ctrl.insert_disk_image(0, path.clone(), false)?;
+    ctrl.ensure_track(0, 0);
+    assert!(ctrl.next_completion_cck(dmacon).is_some());
+    assert!(ctrl.tick(word_cck, dmacon, &mut chip_ram));
+
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: false,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut reloaded = FloppyController::from_config(&cfg)?;
+    reloaded.ensure_track(0, 0);
+    assert_eq!(
+        reloaded.drives[0].cached_words(),
+        [0xABC9, 0x2222, 0x3333, 0x4444]
+    );
 
     let _ = fs::remove_file(path);
     Ok(())
