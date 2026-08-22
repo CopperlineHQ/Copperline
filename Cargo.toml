@@ -134,7 +134,7 @@ m68k = { version = "0.10", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
-coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "823fb7cf50cf08fbac2b1cf9d5fc648240c95886", optional = true }
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "38873e283aa9f2e6d2574d6c71e9a2cf9d0b42a2", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

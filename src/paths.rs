@@ -457,7 +457,7 @@ pub fn akiko_nvram_file() -> PathBuf {
 /// Coppersynth's battery-backed memory, kept with the machines' other
 /// batteries.
 pub fn coppersynth_nvram_file() -> PathBuf {
-    battery_ram("copperline.nvram")
+    battery_ram("coppersynth.nvram")
 }
 
 // --- where a dialog opens ------------------------------------------------
