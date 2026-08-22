@@ -30,7 +30,7 @@ chacha20 = { version = "0.9", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "precomputed-tables", "alloc", "zeroize"] }
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "alloc"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "alloc"] }
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 # rand_core (a transitive dependency of p256/rsa) enables getrandom, which
 # has no wasm32-unknown-unknown backend by default. "custom" compiles a
