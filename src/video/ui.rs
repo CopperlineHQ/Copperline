@@ -983,7 +983,7 @@ fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 450),
         Panel::Shortcuts => (600, shortcuts_panel_height()),
-        Panel::Calibration(_) => (620, 372),
+        Panel::Calibration(_) => (620, calibration_panel_height()),
         Panel::InputMap(_) => (INPUT_MAP_W, input_map_panel_height()),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
@@ -1052,6 +1052,17 @@ fn close_button_rect(rect: Rect) -> Rect {
 // Calibration buttons along the panel's bottom edge.
 const CAL_BUTTON_W: usize = 96;
 const CAL_BUTTON_H: usize = 22;
+/// Vertical pitch of one calibration step row.
+const CAL_ROW_H: usize = 18;
+/// What the calibration panel holds besides its step rows: title bar, the
+/// controller line, the prompt, and the button row.
+const CAL_FIXED_H: usize = 138;
+
+/// Panel height that exactly holds every calibration step, so adding a
+/// step never pushes the prompt or the buttons off the bottom.
+fn calibration_panel_height() -> usize {
+    CAL_FIXED_H + crate::gamepad::CalibrationSession::step_count() * CAL_ROW_H
+}
 
 fn cal_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let y = rect.y + rect.h - CAL_BUTTON_H - 8;
@@ -2641,7 +2652,7 @@ fn draw_calibration(
         draw_panel_text(frame, rect.x + 16, y, marker, PANEL_TEXT_HILIGHT, 2, scale);
         draw_panel_text(frame, rect.x + 36, y, row.label, color, 2, scale);
         draw_panel_text(frame, rect.x + 388, y, &row.binding, color, 2, scale);
-        y += 18;
+        y += CAL_ROW_H;
     }
     y += 6;
     // Wrapped to the panel: the prompt says what to do next and a line

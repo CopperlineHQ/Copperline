@@ -99,11 +99,14 @@ pub enum MenuAction {
     QuickSave(usize),
     QuickLoad(usize),
 
-    // The player build's session rows. The full build reaches these through
-    // the status bar and shortcuts; a player session has neither, so the
+    // The player build's session rows. The full build reaches pause and
+    // reset through the status bar; a player session has none, so the
     // menu is where they live.
     TogglePause,
     ResetMachine,
+    // Both builds: the way out that a controller or keyboard walking the
+    // menu can reach without a host-side Quit binding or the Cmd/Alt+Q
+    // chord.
     Quit,
 }
 
@@ -595,6 +598,10 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::action("Load Kickstart ROM...", MenuAction::LoadRom),
         MenuRow::action("Keyboard Shortcuts...", MenuAction::OpenShortcuts),
         MenuRow::action("About...", MenuAction::OpenAbout),
+        // Last, under everything else: a pad or keyboard walking the
+        // list reaches it on purpose, and walking off the foot of the
+        // menu closes the menu rather than landing on it.
+        MenuRow::action("Quit", MenuAction::Quit),
     ]);
     rows
 }
@@ -1352,15 +1359,24 @@ mod tests {
         assert!(find(&rows, "Parallel Port").is_some());
     }
 
-    /// About is the last thing on the list, wherever the dynamic rows land.
+    /// Quit is the last thing on the list, under About, wherever the
+    /// dynamic rows land: a controller walking the menu finds it at the
+    /// foot, with nothing below it to pick by mistake.
     #[test]
-    fn about_is_always_last() {
+    fn quit_is_always_last_under_about() {
         let slots = empty_slots();
         let none: [String; 0] = [];
         let midi = ["IAC Bus 1".to_string()];
         for (a, m) in [(&none[..], &none[..]), (&none[..], &midi[..])] {
             let rows = build(&state(a, m, m, &none, &slots));
-            assert_eq!(rows.last().expect("rows").label, "About...");
+            let tail: Vec<&str> = rows
+                .iter()
+                .rev()
+                .take(2)
+                .map(|r| r.label.as_str())
+                .collect();
+            assert_eq!(tail, ["Quit", "About..."]);
+            assert!(find(&rows, "Quit").expect("quit").closes_menu());
         }
     }
 
