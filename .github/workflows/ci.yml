@@ -135,6 +135,31 @@ jobs:
         # host-network runtime tests whose timing is unrelated to the MSRV.
         run: cargo +"$MSRV" test --locked --lib --no-run
 
+  cargo-deny:
+    name: Dependency policy (${{ matrix.name }})
+    # The browser and publisher player are standalone workspaces with their
+    # own lockfiles, so check all three shipped dependency graphs explicitly.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            manifest: Cargo.toml
+          - name: browser
+            manifest: crates/copperline-web/Cargo.toml
+          - name: player
+            manifest: crates/copperline-player/Cargo.toml
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          arguments: --all-features --locked --config deny.toml
+          command-arguments: --hide-inclusion-graph
+          # Duplicate-version and git-wildcard findings are deliberate
+          # warnings; hide only their verbose dependency inclusion graphs.
+
   unit-tests:
     name: Unit tests
     needs: build
