@@ -483,8 +483,30 @@ resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
 included, which is where AROS places its `MEMF_24BITDMA` allocations when
 fast RAM exists -- not just chip RAM.
 
-`cdrom.rs` parses BIN/CUE cue sheets (single- or multi-file;
-MODE1/2048, MODE1/2352, and AUDIO tracks) for both machines.
+`cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
+MODE1/2352, and AUDIO tracks; `PREGAP`/`POSTGAP` as unstored zero-fill
+extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
+and lays every `FILE` out as a run of extents over a byte-addressed
+source. A `BINARY` source is the file itself; a `WAVE` or `MP3` source
+(`cdrom/audio.rs`) presents the decoded audio as CD-DA sectors --
+588 stereo frames per sector, the last sector zero-padded, other sample
+rates linearly interpolated in integer arithmetic -- so the layout code
+sees only sector bytes. Decoding is on demand: a WAV is random access
+(`cdrom/wav.rs`, via `hound`); an MP3 (`cdrom/mp3.rs`, Symphonia's
+decoder behind the `cd-mp3` feature) is indexed at load without decoding
+(frames located by header, ID3v2 skipped, a Xing/Info frame dropped, a
+LAME tag's encoder delay and padding trimmed) and then decoded by a
+cursor that follows sequential reads. A jump warms a fresh decoder up on
+as many earlier frames as it takes to refill the Layer III bit reservoir
+(511 bytes of main data for MPEG-1, 255 for MPEG-2/2.5 -- sized in bytes
+from the frame index, since a frame at the bottom of the MPEG-2 range
+carries only a byte or two of main data) plus the one-frame-deep
+overlap-add and synthesis state, so a sector decodes to the same bytes
+whichever way the cursor reached it; that is what keeps a run resumed
+from a save state byte-identical to an uninterrupted one, and a unit
+test holds it to that down to 8 kbps streams.
+A save state records each file's path, format, and sector byte length and
+reopens (re-indexes) it on load.
 
 ## RTC (`rtc.rs`)
 

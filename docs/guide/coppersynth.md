@@ -136,7 +136,7 @@ To build without it:
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi,cd-mp3"
 ```
 
 This is the normal desktop feature set with only `coppersynth` omitted.

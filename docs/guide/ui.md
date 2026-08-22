@@ -869,8 +869,8 @@ not silently mixed in. Two caveats:
   hard drive *after* the snapshot are still visible after restoring --
   treat a state as a CPU/chipset snapshot, not a disk backup. In-memory
   volumes (directory-as-HDD) and floppy images are embedded whole.
-- CD images are likewise reopened by path; keep the cue/bin (or CHD)
-  where it was.
+- CD images are likewise reopened by path; keep the cue sheet and its
+  files (or the CHD) where they were.
 
 ### Quick-save slots
 

@@ -20,13 +20,15 @@ publish = false
 [workspace]
 
 [dependencies]
-# The interactive frontend and the CPU JIT, and nothing else: no control
-# server, no GDB stub, no launcher-library HTTP/TLS stack, no wasmtime, no
-# synthesizers -- a shipped game exposes no debugging surface and carries
-# no dependency it does not use.
+# The interactive frontend, the CPU JIT, and MP3 cue-sheet tracks (a
+# bundled CD image may package its audio that way), and nothing else: no
+# control server, no GDB stub, no launcher-library HTTP/TLS stack, no
+# wasmtime, no synthesizers -- a shipped game exposes no debugging surface
+# and carries no dependency it does not use.
 copperline = { path = "../..", default-features = false, features = [
     "frontend",
     "cpu-jit",
+    "cd-mp3",
 ] }
 anyhow = "1"
 log = "0.4"

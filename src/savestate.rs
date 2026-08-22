@@ -208,7 +208,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  61: PortDevice gained the GamepadMouse variant (a mouse a gamepad can
 //      move as well as the host's own, `[input] port1`), appended at the
 //      end of the enum.
-pub const STATE_VERSION: u32 = 61;
+//  62: CdImage's cue-sheet shadow records each FILE's format and sector
+//      byte length (WAVE/MP3 audio tracks, reopened and re-indexed on
+//      load) and its extents gained a storage tag (file bytes or an
+//      unstored PREGAP/POSTGAP).
+pub const STATE_VERSION: u32 = 62;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

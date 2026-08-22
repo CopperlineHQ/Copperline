@@ -195,9 +195,10 @@ model = "68000"
 # extended_rom = "cdtv-extended.rom"
 
 
-# CD image (BIN/CUE, single- or multi-file, with MODE1/2048, MODE1/2352,
-# and AUDIO tracks; a bare .iso; or a chdman v5 .chd), mounted on the
-# machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
+# CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,
+# and AUDIO tracks -- audio tracks may be BINARY, WAVE, or MP3 files, with
+# PREGAP/POSTGAP lines honoured; a bare .iso; or a chdman v5 .chd), mounted on
+# the machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
 # emulated seconds after power-on instead of at boot: some CDTV discs
 # (e.g. Xenon II) only boot when inserted after the boot screen, on
 # real hardware too.

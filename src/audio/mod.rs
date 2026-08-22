@@ -5,6 +5,8 @@
 //! plus several concrete implementations chosen at startup time based
 //! on CLI flags.
 
+#[cfg(any(feature = "mhi", feature = "cd-mp3"))]
+pub(crate) mod mpeg;
 pub mod mux;
 pub(crate) mod resample;
 
