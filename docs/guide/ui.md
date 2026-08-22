@@ -90,8 +90,9 @@ away again.
 
 A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
-machine, and the way out too: held, it quits, and the menu's last row
-is **Quit**.
+machine, and the way out too: the menu's last row is **Quit**, and the
+Menu button *held* quits -- unless the pad's calibration bound a
+separate Quit control, which then owns the hold instead.
 
 The debugger, frame analyzer and console windows are not navigated this
 way, but `Esc` closes the focused one and the pad's second button closes

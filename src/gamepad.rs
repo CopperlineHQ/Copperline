@@ -153,19 +153,23 @@ pub struct JoystickState {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PadState {
     pub joystick: JoystickState,
-    /// The calibrated Quit hotkey is currently held. Host-side only: the
-    /// window turns a sustained hold into an application exit.
+    /// The Quit hotkey is currently held: Select on the standard layout,
+    /// or a calibration's Quit control -- its Menu button when no Quit
+    /// was bound. Host-side only: the window turns a sustained hold into
+    /// an application exit.
     pub quit: bool,
     /// The Menu button is currently held. Host-side only: a press opens
     /// (or closes) the pop-up menu, and the pad walks it while it is up.
     pub menu: bool,
-    /// The left stick, each axis in [-1, 1], right and up positive.
+    /// The stick, each axis in [-1, 1], right and up positive.
     ///
-    /// The joystick lines above are what a digital port can hear, so
-    /// they are all a calibration records; this is the deflection behind
-    /// them, which only a pad the controller database knows can report.
-    /// Gamepad Mouse spends it on how fast the pointer moves, where a
-    /// switch could only say whether it moves at all.
+    /// The joystick lines above are what a digital port can hear; this
+    /// is the deflection behind them. The standard layout reports the
+    /// left stick; a calibration reports a stick only where it can see
+    /// one -- a direction pair bound to the two ends of one raw axis --
+    /// and zero for a d-pad. Gamepad Mouse spends it on how fast the
+    /// pointer moves, where a switch could only say whether it moves at
+    /// all.
     pub stick: (f32, f32),
 }
 
