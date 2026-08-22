@@ -1263,7 +1263,7 @@ pub struct App {
     /// must not re-fire every poll.
     pad_prev: crate::gamepad::PadState,
     /// Quit was asked for -- the pad's Quit-hotkey hold completed, or the
-    /// player menu's Quit row was picked; the next event-loop pass exits.
+    /// menu's Quit row was picked; the next event-loop pass exits.
     quit_requested: bool,
     /// Host source policy for the emulated port-2 joystick/CD32 pad.
     joystick_input_mode: JoystickInputMode,

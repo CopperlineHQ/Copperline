@@ -10,7 +10,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 
 | macOS | Linux/Windows | Action |
 |---|---|---|
-| `Cmd+Q` | `Alt+Q` | Quit (a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
+| `Cmd+Q` | `Alt+Q` | Quit (also the [menu's](#and-last) last row; a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
 | `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
@@ -508,6 +508,11 @@ Shown only when something is on the port.
   `CREDITS.md`). Builds
   made from an untagged git commit append the short commit ID to the version
   shown in the window title and About panel.
+- **Quit** (also `Cmd+Q` / `Alt+Q`): exits Copperline. It is the last row
+  so that a [controller or keyboard walking the
+  menu](#keyboard-and-controller-navigation) finds it at the foot, with
+  nothing below it to pick by mistake; there is no confirmation, as with
+  the shortcut.
 
 ```{figure} ../images/ui-preview-shortcuts.png
 :alt: The keyboard shortcuts window
