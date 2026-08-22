@@ -1769,7 +1769,8 @@ Audio files are decoded to CD-DA as the drive reads them, not up front,
 so a disc with an hour of MP3 audio loads as fast as a BIN/CUE and never
 holds its decoded audio in memory. Any WAV PCM layout is accepted
 (8/16/24/32-bit or float, mono or stereo, any rate); MP3 covers
-MPEG-1/2/2.5 Layer III at any bitrate, constant or variable, with ID3
+MPEG-1/2/2.5 Layer III at the standard bitrates, constant or variable
+(free-format streams are not read), with ID3
 tags skipped and a LAME tag's encoder delay trimmed so the track is
 sample-exact against the WAV it was encoded from. Sources not at 44.1 kHz
 are resampled. `PREGAP`/`POSTGAP` lines add the gap sectors such files

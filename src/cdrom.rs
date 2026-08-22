@@ -579,13 +579,25 @@ impl CdImage {
                     },
                 });
                 let index1_offset = index1 - region_start;
+                let region_start_disc = disc;
+                advance(&mut disc, region_sectors)?;
+                // The region fits the address space, so INDEX 01 (inside
+                // it) does too; the track's length still has to absorb
+                // its postgap, which the cue sheet sizes freely.
+                let sector_count = (region_sectors - index1_offset)
+                    .checked_add(track.postgap)
+                    .with_context(|| {
+                        format!(
+                            "{}: cue layout exceeds the disc address space",
+                            cue_path.display()
+                        )
+                    })?;
                 tracks.push(CdTrack {
                     number: track.number,
                     kind: track.kind,
-                    start_sector: disc + index1_offset,
-                    sector_count: region_sectors - index1_offset + track.postgap,
+                    start_sector: region_start_disc + index1_offset,
+                    sector_count,
                 });
-                advance(&mut disc, region_sectors)?;
                 byte_offset += u64::from(region_sectors) * track.kind.sector_bytes() as u64;
                 if track.postgap > 0 {
                     extents.push(Extent {
@@ -1253,6 +1265,23 @@ mod tests {
     }
 
     #[test]
+    fn resampled_padding_past_the_declared_length_is_silent() {
+        // Two frames at 48 kHz are one frame at 44.1 kHz: output frame 1
+        // would interpolate between the last real sample and the zero
+        // fill, but it lies past the declared length and must be silent.
+        let wav = temp_path("48k-tail.wav");
+        write_wav16(&wav, 48_000, &[(20_000, -20_000), (20_000, -20_000)]);
+        let cue = single_audio_track_cue(&wav, "WAVE");
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(image.total_sectors(), 1);
+        let got = audio_sector(&mut image, 0);
+        assert_eq!(got[0], (20_000, -20_000));
+        assert!(got[1..].iter().all(|&s| s == (0, 0)), "{:?}", &got[..3]);
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_file(&cue);
+    }
+
+    #[test]
     fn pregap_and_postgap_occupy_zero_filled_disc_sectors() {
         let cue = temp_path("gaps.cue");
         let bin = temp_path("gaps.bin");
@@ -1347,6 +1376,39 @@ mod tests {
     }
 
     #[test]
+    fn gaps_that_overflow_the_disc_address_space_are_rejected_not_a_panic() {
+        // An 800-sector audio file with a POSTGAP sized so that the
+        // track's sector count (region + postgap) passes u32::MAX, and a
+        // PREGAP that pushes INDEX 01 of the region past it.
+        let cue = temp_path("bigap.cue");
+        let bin = temp_path("biggap.bin");
+        write_file(&bin, &vec![0u8; 800 * RAW_SECTOR_BYTES]);
+        for (name, lines) in [
+            (
+                "postgap",
+                "    INDEX 01 00:00:00\n    POSTGAP 954437:00:00\n",
+            ),
+            (
+                "pregap",
+                "    PREGAP 954437:00:00\n    INDEX 00 00:00:00\n    INDEX 01 00:10:46\n",
+            ),
+        ] {
+            std::fs::write(
+                &cue,
+                format!("{}  TRACK 01 AUDIO\n{lines}", file_line(&bin, "BINARY")),
+            )
+            .unwrap();
+            let err = CdImage::load(&cue).unwrap_err().to_string();
+            assert!(
+                err.contains("exceeds the disc address space"),
+                "{name}: {err}"
+            );
+        }
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
     fn msf_times_that_overflow_are_rejected_not_a_panic() {
         assert!(parse_msf("99999999:00:00").is_err());
         assert!(parse_msf("4294967295:59:74").is_err());
@@ -1375,6 +1437,32 @@ mod tests {
     /// (VBR, mono, Xing frame) for the seek-consistency check.
     #[cfg(feature = "cd-mp3")]
     const MONO_VBR_MP3: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/mhi/vbr_sweep.mp3");
+
+    /// Three seconds of stereo tones (440 Hz left, 660 Hz right) at the
+    /// bottom of the MPEG-2 range: 8 kbps CBR at 16 kHz and at 24 kHz,
+    /// stereo, CRC-protected. A 16 kHz frame is 36 bytes with 13 bytes of
+    /// main data; a 24 kHz frame is 24 bytes with a single main-data
+    /// byte, so `main_data_begin` can reach back hundreds of frames --
+    /// the seek warm-up has to be sized in reservoir bytes, not frames.
+    ///
+    /// ```text
+    /// ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=16000:duration=3" \
+    ///   -f lavfi -i "sine=frequency=660:sample_rate=16000:duration=3" \
+    ///   -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo,volume=4[a]" \
+    ///   -map "[a]" tones.wav
+    /// lame -b 8 --resample 16 -m s -p tones.wav stereo_440l_660r_mpeg2_16k_cbr8_crc.mp3
+    /// lame -b 8 --resample 24 -m s -p tones.wav stereo_440l_660r_mpeg2_24k_cbr8_crc.mp3
+    /// ```
+    #[cfg(feature = "cd-mp3")]
+    const LOW_RATE_16K_MP3: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/cdrom/stereo_440l_660r_mpeg2_16k_cbr8_crc.mp3"
+    );
+    #[cfg(feature = "cd-mp3")]
+    const LOW_RATE_24K_MP3: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/cdrom/stereo_440l_660r_mpeg2_24k_cbr8_crc.mp3"
+    );
 
     /// A cue sheet in the temp dir naming `media` by absolute path as one
     /// AUDIO track (a FILE path may be absolute).
@@ -1429,13 +1517,21 @@ mod tests {
     #[cfg(feature = "cd-mp3")]
     #[test]
     fn mp3_seek_decode_matches_linear_decode() {
+        // The LAME-tagged fixtures are sample-exact (0.6 s and 3 s); the
+        // 8 kbps ones carry no gapless tag, so only their playback is
+        // checked.
         for (name, media, sectors) in [
-            ("lin-stereo.cue", STEREO_TONES_MP3, 45),
-            ("lin-mono.cue", MONO_VBR_MP3, 225),
+            ("lin-stereo.cue", STEREO_TONES_MP3, Some(45)),
+            ("lin-mono.cue", MONO_VBR_MP3, Some(225)),
+            ("lin-16k.cue", LOW_RATE_16K_MP3, None),
+            ("lin-24k.cue", LOW_RATE_24K_MP3, None),
         ] {
             let cue = absolute_media_cue(name, media, "MP3");
             let mut linear = CdImage::load(&cue).unwrap();
-            assert_eq!(linear.total_sectors(), sectors, "{media}");
+            if let Some(sectors) = sectors {
+                assert_eq!(linear.total_sectors(), sectors, "{media}");
+            }
+            let sectors = linear.total_sectors();
             let reference: Vec<Vec<(i16, i16)>> =
                 (0..sectors).map(|s| audio_sector(&mut linear, s)).collect();
             assert!(

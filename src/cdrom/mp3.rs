@@ -16,15 +16,18 @@
 //!
 //! Reading keeps a cursor: sequential reads (CD audio playing through a
 //! track) decode one frame after another, holding only the last decoded
-//! frame. A jump re-seeks: a fresh decoder is warmed up on the
-//! [`WARMUP_FRAMES`] frames before the target, which refills the Layer
-//! III bit reservoir (`main_data_begin` reaches back at most 511 bytes,
-//! a handful of frames at the lowest bitrates) and the overlap-add and
-//! synthesis-filter state (one frame deep), so the samples a position
-//! decodes to do not depend on how the cursor got there. That is what
-//! keeps a run resumed from a save state byte-identical to one that
-//! played the track from its start; `seek_decode_matches_linear_decode`
-//! in the parent module's tests holds it to that.
+//! frame. A jump re-seeks: a fresh decoder is warmed up on the frames
+//! before the target (see `Mp3Pcm::seek`), enough of them to refill the
+//! Layer III bit reservoir -- `main_data_begin` reaches back up to 511
+//! bytes (255 for MPEG-2/2.5) of earlier frames' main data, which is a
+//! couple of frames at 128 kbps but hundreds at the bottom of the MPEG-2
+//! range, where a 24-byte frame carries a single main-data byte -- and
+//! the overlap-add and synthesis-filter state (one frame deep), so the
+//! samples a position decodes to do not depend on how the cursor got
+//! there. That is what keeps a run resumed from a save state
+//! byte-identical to one that played the track from its start;
+//! `mp3_seek_decode_matches_linear_decode` in the parent module's tests
+//! holds it to that, down to 8 kbps MPEG-2 streams.
 //!
 //! The decoder is Symphonia's pure-Rust `MpaDecoder`, the one the MHI
 //! board uses (see `Cargo.toml` on why); it is packet-based, so the frame
@@ -42,24 +45,23 @@ use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDec
 use symphonia_core::packet::PacketRef;
 use symphonia_core::units::{Duration, Timestamp};
 
-/// Frames decoded and discarded ahead of a seek target. The reservoir
-/// needs at most 511 bytes of earlier main data -- six 96-byte frames at
-/// MPEG-1's lowest bitrate, fewer elsewhere -- and the frame before the
-/// target must itself have decoded from a full reservoir for its overlap
-/// to be right; sixteen covers that with margin for about a millisecond
-/// of decoding per seek.
-const WARMUP_FRAMES: usize = 16;
+/// Frames decoded and discarded ahead of the reservoir refill a seek
+/// needs (see `Mp3Pcm::seek`): margin against the warm-up's own
+/// arithmetic, not a requirement of the format.
+const WARMUP_MARGIN_FRAMES: usize = 1;
 
 /// The Layer III decoder's own delay in samples, which a LAME tag's
 /// encoder-delay field does not include (the convention gapless players
 /// and Symphonia's demuxer apply).
 const DECODER_DELAY: u32 = 529;
 
-/// Where one audio frame lies in the file.
+/// Where one audio frame lies in the file, and how much main data it
+/// feeds the bit reservoir.
 #[derive(Debug, Clone, Copy)]
 struct FrameSpan {
     offset: u64,
     len: u16,
+    main_data: u16,
 }
 
 /// Samples a LAME tag says to drop at each end of the decoded stream.
@@ -77,6 +79,8 @@ pub(super) struct Mp3Pcm {
     spf: u32,
     rate: u32,
     mono: bool,
+    /// Bytes of earlier main data a frame can reach back for.
+    reservoir: usize,
     /// Decoded samples dropped at the front: encoder plus decoder delay.
     delay: u64,
     /// Stereo sample frames the stream yields after trimming.
@@ -134,6 +138,7 @@ impl Mp3Pcm {
             spf,
             rate: spec.rate,
             mono: spec.mono,
+            reservoir: spec.reservoir_reach(),
             delay: u64::from(trim.delay),
             out_frames,
             decoder: new_decoder(),
@@ -182,9 +187,24 @@ impl Mp3Pcm {
 
     /// Start over at the frame holding absolute sample `pos`, warmed up
     /// on the frames before it (see the module doc comment).
+    ///
+    /// The frame before the target supplies the overlap-add and
+    /// synthesis state the target's output starts from, so it must
+    /// itself decode from a full reservoir: the frames before *it* have
+    /// to hold at least `reservoir` bytes of main data, the furthest its
+    /// `main_data_begin` can reach. Symphonia appends every warm-up
+    /// frame's main data whether or not it could decode the frame, so
+    /// once that many bytes are in, the reservoir holds exactly what a
+    /// linear decode's would.
     fn seek(&mut self, pos: u64) -> Result<()> {
         let target = (pos / u64::from(self.spf)) as usize;
-        let start = target.saturating_sub(WARMUP_FRAMES);
+        let mut start = target.saturating_sub(1);
+        let mut bytes = 0usize;
+        while start > 0 && bytes < self.reservoir {
+            start -= 1;
+            bytes += usize::from(self.frames[start].main_data);
+        }
+        let start = start.saturating_sub(WARMUP_MARGIN_FRAMES);
         self.decoder = new_decoder();
         self.next = start;
         for _ in start..=target {
@@ -288,6 +308,7 @@ fn index_frames(data: &[u8]) -> Result<(Vec<FrameSpan>, FrameHeader, Trim)> {
         spans.push(FrameSpan {
             offset: pos as u64,
             len: header.len as u16,
+            main_data: header.main_data_len() as u16,
         });
         pos = end;
     }

@@ -22,8 +22,13 @@ pub(crate) struct FrameHeader {
     pub mono: bool,
     /// MPEG-1, as opposed to the MPEG-2/2.5 low-sample-rate extensions.
     pub mpeg1: bool,
+    /// A 16-bit CRC follows the header (protection bit clear).
+    pub crc: bool,
 }
 
+// Only the cue-sheet MP3 backend sizes frames and reservoirs; the MHI
+// board packetizes by `len` alone.
+#[cfg_attr(not(feature = "cd-mp3"), allow(dead_code))]
 impl FrameHeader {
     /// PCM samples per channel the frame decodes to: 1152 for MPEG-1
     /// Layer III, 576 for the MPEG-2/2.5 half-rate frames.
@@ -44,6 +49,27 @@ impl FrameHeader {
             (true, true) => 17,
             (false, false) => 17,
             (false, true) => 9,
+        }
+    }
+
+    /// Bytes of main data (scale factors and Huffman-coded spectra) the
+    /// frame carries: everything after the header, CRC, and side
+    /// information. This is what a frame contributes to the Layer III
+    /// bit reservoir, which later frames reach back into.
+    pub fn main_data_len(&self) -> usize {
+        let crc = if self.crc { 2 } else { 0 };
+        self.len
+            .saturating_sub(HEADER_LEN + crc + self.side_info_len())
+    }
+
+    /// The furthest a frame's `main_data_begin` can reach back into the
+    /// reservoir, in bytes: a 9-bit field for MPEG-1, 8-bit for
+    /// MPEG-2/2.5.
+    pub fn reservoir_reach(&self) -> usize {
+        if self.mpeg1 {
+            511
+        } else {
+            255
         }
     }
 }
@@ -91,11 +117,13 @@ pub(crate) fn parse_frame_header(hdr: [u8; HEADER_LEN]) -> Option<FrameHeader> {
     let factor: u32 = if mpeg1 { 144 } else { 72 };
     let len = (factor * (kbps * 1000) / rate + padding) as usize;
     let mono = (h >> 6) & 0x3 == 0b11;
+    let crc = (h >> 16) & 1 == 0;
     Some(FrameHeader {
         len,
         rate,
         mono,
         mpeg1,
+        crc,
     })
 }
 
@@ -114,6 +142,13 @@ mod tests {
         assert!(h.mpeg1);
         assert_eq!(h.samples(), 1152);
         assert_eq!(h.side_info_len(), 32);
+        assert!(!h.crc);
+        assert_eq!(h.main_data_len(), 417 - 4 - 32);
+        assert_eq!(h.reservoir_reach(), 511);
+        // The protection bit clear: a CRC word precedes the side info.
+        let protected = parse_frame_header([0xFF, 0xFA, 0x90, 0x40]).unwrap();
+        assert!(protected.crc);
+        assert_eq!(protected.main_data_len(), 417 - 4 - 2 - 32);
         // The padding bit adds one slot.
         assert_eq!(
             parse_frame_header([0xFF, 0xFB, 0x92, 0x40]).unwrap().len,
@@ -131,6 +166,13 @@ mod tests {
         assert_eq!(h.samples(), 576);
         assert_eq!(h.side_info_len(), 9);
         assert_eq!(h.len, 72 * 64_000 / 22_050);
+        assert_eq!(h.reservoir_reach(), 255);
+        // The smallest MPEG-2 frame: 8 kbps stereo at 24 kHz with CRC is
+        // 24 bytes, of which a single byte is main data.
+        let tiny = parse_frame_header([0xFF, 0xF2, 0x14, 0x00]).unwrap();
+        assert_eq!(tiny.len, 24);
+        assert!(tiny.crc && !tiny.mono);
+        assert_eq!(tiny.main_data_len(), 1);
     }
 
     #[test]

@@ -202,7 +202,14 @@ impl AudioSource {
                 self.pcm.fill(src0, &mut self.src_buf[..have])?;
             }
             for (f, bytes) in buf.chunks_exact_mut(4).enumerate() {
-                let pos = (out0 + f as u64) * rate;
+                let frame = out0 + f as u64;
+                if frame >= self.out_frames {
+                    // Padding past the declared length: silence, not the
+                    // last real sample fading into the zero fill.
+                    bytes.fill(0);
+                    continue;
+                }
+                let pos = frame * rate;
                 let i = (pos / cdda - src0) as usize;
                 let frac = (pos % cdda) as i64;
                 let (a, b) = (self.src_buf[i], self.src_buf[i + 1]);
