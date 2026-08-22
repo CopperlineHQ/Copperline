@@ -24,7 +24,7 @@ sha1 = { version = "0.10", default-features = false }
 # needs to build the DigestInfo prefix for signature verification.
 sha2 = { version = "0.10", default-features = false, features = ["oid"] }
 blake2 = { version = "0.10", default-features = false }
-hmac = { version = "0.12", default-features = false }
+hmac = { version = "0.13", default-features = false }
 poly1305 = { version = "0.8", default-features = false }
 chacha20 = { version = "0.9", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
