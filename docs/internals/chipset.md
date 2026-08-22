@@ -295,7 +295,12 @@ the 11-sector AmigaDOS track layout; DSKSYNC matching, word-at-a-time
 DSKDAT, and DMA into chip RAM behave as Paula documents. Non-WORDSYNC read
 DMA drains Paula's recovered 16-bit disk word phase even when DSKLEN is
 armed between disk-word boundaries; WORDSYNC is the explicit mode that
-realigns framing to a matched sync word before transfer. Supported image
+realigns framing to a matched sync word before transfer and again on every
+later DSKSYNC match during it, so the sectors after an index wrap on a track
+whose cell count is not a multiple of 16 still land word-aligned (AROS's
+trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
+word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
+Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
 images.

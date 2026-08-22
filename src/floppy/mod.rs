@@ -1442,6 +1442,15 @@ impl FloppyController {
                             irq = true;
                             break 'outer;
                         }
+                    } else if self.adkcon & ADK_WORDSYNC != 0 {
+                        // With WORDSYNC set, Paula re-frames the word boundary
+                        // on every DSKSYNC match, not only on the one that
+                        // starts the transfer. A revolution whose cell count
+                        // is not a multiple of 16 otherwise leaves every
+                        // sector after the index wrap off the word grid, and
+                        // a reader that scans its buffer on that grid (AROS
+                        // trackdisk.device) never finds them.
+                        self.read_shifter.reframe();
                     }
                 }
             }
@@ -3786,7 +3795,8 @@ impl<'a> DiskBitStream<'a> {
 // DSKBYT each assembled byte, compares the running 16-bit window to DSKSYNC
 // every bit (so sync is detected bit-aligned, not on a fixed word grid), and
 // frames read-DMA words into a 3-word FIFO. Word framing realigns to the sync
-// bit phase so the post-sync word stream matches the disk's framing.
+// bit phase so the post-sync word stream matches the disk's framing, and with
+// WORDSYNC set it does so again at every later match.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PaulaDiskReadDpllFifo {
     shift_word: u16,
@@ -3830,6 +3840,13 @@ impl PaulaDiskReadDpllFifo {
         self.bit_offset = 0;
         self.fifo_len = 0;
         self.fifo_overflow = false;
+    }
+
+    /// Restart word framing at the cell after a sync match made mid-transfer,
+    /// keeping the words already framed and queued for DMA. The partial word
+    /// the sync interrupted is dropped, as on the hardware.
+    fn reframe(&mut self) {
+        self.bit_offset = 0;
     }
 
     #[cfg(test)]
