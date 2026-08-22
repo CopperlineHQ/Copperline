@@ -420,6 +420,28 @@ capture paths call `finish_render_for_current_frame` so screenshots, frame
 dumps, recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
 
+Run-ahead (`[emulation] run_ahead_frames`) sits above this pipeline. A burst
+first retires one committed anchor frame, snapshots the machine, and then
+retires `n` speculative frames with per-frame pacing suppressed. Every
+speculative frame is silent: `AudioMux` drops all master/source/channel fanout,
+and Paula withholds completed serial words from both its sink and observer.
+The final future frame is synchronously rendered while its Bus is still live;
+only then is the anchor restored. Rendering after restore would present the
+past, and merely submitting a worker job before restore would race the
+fallback renderer. One `pace_runahead_burst` call at the end uses the anchor's
+emulated time, so snapshot, speculation, rendering, and restore all share one
+display-period budget. Speculative frames contribute host busy time but not
+the committed-frame counter.
+
+The eligibility gate is deliberately conservative. It excludes any device or
+observer with host state that `M68kMachine::write_state` cannot rewind; the
+user guide lists the current set. A snapshot or restore failure disables
+run-ahead for the session instead of silently advancing by extra frames. If
+stepping or rendering interrupts a burst after speculation has started, the
+anchor restore is still attempted before run-ahead is disabled: output from
+those abandoned future frames was suppressed and they cannot become the
+committed timeline.
+
 Progressive frames have two exact reuse checks. First, two consecutive
 renders with identical lightweight inputs arm a pre-render key containing
 every captured bitplane row, sprite line/latch, register/event stream,

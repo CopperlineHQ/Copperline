@@ -115,6 +115,7 @@ impl App {
             recording: self.recorder.is_some(),
             input_recording: self.input_recorder.is_some(),
             autofire_hz: self.autofire_hz,
+            run_ahead_frames: self.run_ahead_frames,
             joystick_input_mode: self.joystick_input_mode,
             port_devices: [
                 self.emu.bus().input.device(0),
@@ -343,6 +344,25 @@ impl App {
                 let label = crate::config::autofire_label(hz);
                 info!("autofire: {label}");
                 self.show_osd(format!("Autofire: {label}"));
+                self.request_redraw();
+            }
+            A::SetRunAhead(frames) => {
+                self.run_ahead_frames = frames;
+                let label = if frames == 0 {
+                    "off".to_string()
+                } else {
+                    format!("{frames} frame{}", if frames == 1 { "" } else { "s" })
+                };
+                match (frames > 0).then(|| self.runahead_block_reason()).flatten() {
+                    Some(reason) => {
+                        info!("run-ahead: {label} (inactive: {reason})");
+                        self.show_osd(format!("Run Ahead: {label} (inactive: {reason})"));
+                    }
+                    None => {
+                        info!("run-ahead: {label}");
+                        self.show_osd(format!("Run Ahead: {label}"));
+                    }
+                }
                 self.request_redraw();
             }
             A::ToggleKeyboardPanel => self.toggle_keyboard_panel(),

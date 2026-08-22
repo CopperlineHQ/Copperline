@@ -2274,6 +2274,9 @@ pub struct MachineSetup {
     pacing_budget: PacingBudget,
     realtime_priority: bool,
     warp: WarpSpeed,
+    /// The config screen has no control for run-ahead yet, but must preserve
+    /// a value loaded from TOML or the CLI when it rebuilds RawConfig.
+    run_ahead_frames: u8,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2542,6 +2545,7 @@ impl MachineSetup {
             pacing_budget: cfg.emulation.pacing_budget,
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
+            run_ahead_frames: cfg.emulation.run_ahead_frames,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -3046,6 +3050,9 @@ impl MachineSetup {
         if self.warp != base.emulation.warp_speed {
             raw.emulation.warp_speed = Some(self.warp.label().to_ascii_lowercase());
         }
+        if self.run_ahead_frames != base.emulation.run_ahead_frames {
+            raw.emulation.run_ahead_frames = Some(self.run_ahead_frames);
+        }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
@@ -3318,6 +3325,7 @@ impl MachineSetup {
         self.pacing_budget = base.emulation.pacing_budget;
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
+        self.run_ahead_frames = base.emulation.run_ahead_frames;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;

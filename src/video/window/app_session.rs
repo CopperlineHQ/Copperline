@@ -139,6 +139,93 @@ impl App {
         }
     }
 
+    /// The run-ahead level in effect for this burst, or zero while the
+    /// machine is transiently stopped or has a host-side incompatibility.
+    pub(super) fn runahead_effective_frames(&self) -> u8 {
+        if self.run_ahead_frames == 0
+            || !self.powered_on
+            || self.cpu_halted
+            || self.paused
+            || self.runahead_block_reason().is_some()
+        {
+            return 0;
+        }
+        self.run_ahead_frames
+    }
+
+    /// Why speculative execution is unsafe for the current session. A
+    /// configured level stays selected while blocked, and the menu/log can
+    /// surface this reason instead of silently pretending it is active.
+    pub(super) fn runahead_block_reason(&self) -> Option<&'static str> {
+        if !self.emu.paced() {
+            return Some("warp active");
+        }
+        if self.emu.time_travel_enabled() {
+            return Some("rewind/reverse history armed");
+        }
+        if self.rtg_present_dims.is_some() || self.emu.bus().rtg_active() {
+            return Some("RTG display active");
+        }
+        if self.recorder.is_some() {
+            return Some("video recording active");
+        }
+        if self.serial_is_midi {
+            return Some("MIDI device on the serial port");
+        }
+        if !self.emu.bus().paula.serial.runahead_safe() {
+            return Some("live serial host endpoint");
+        }
+        if self.control_client_attached() {
+            return Some("control client attached");
+        }
+        if let Some(reason) = self.emu.machine.runahead_debug_block_reason() {
+            return Some(reason);
+        }
+        self.runahead_machine_block
+            .or_else(|| self.emu.bus().runahead_host_block_reason())
+    }
+
+    /// Restore the committed boundary after any speculative execution. An
+    /// incomplete burst is not presentable and disables run-ahead for the
+    /// session, but it is still an abandoned timeline whose host output was
+    /// suppressed, so it must never be promoted by skipping the restore.
+    pub(super) fn restore_runahead_anchor(
+        &mut self,
+        anchor_snapshot: Option<&[u8]>,
+        burst_complete: bool,
+        speculated: bool,
+    ) {
+        if !speculated {
+            return;
+        }
+        match anchor_snapshot {
+            Some(blob) => {
+                if let Err(e) = self.emu.runahead_restore(blob) {
+                    error!("run-ahead disabled: anchor restore failed: {e:?}");
+                    self.run_ahead_frames = 0;
+                }
+            }
+            None => {
+                error!("run-ahead disabled: speculative burst has no anchor snapshot");
+                self.run_ahead_frames = 0;
+            }
+        }
+        if !burst_complete {
+            self.run_ahead_frames = 0;
+        }
+    }
+
+    fn control_client_attached(&self) -> bool {
+        #[cfg(feature = "control")]
+        {
+            self.control.as_ref().is_some_and(|c| c.handle.connected())
+        }
+        #[cfg(not(feature = "control"))]
+        {
+            false
+        }
+    }
+
     /// How many emulated frames to retire before presenting the next frame, and
     /// an optional wall-clock budget that bounds that burst. Warp's output frame
     /// skip applies only while warp is engaged and not doing headless capture;
@@ -158,6 +245,22 @@ impl App {
                 .time_budget_ms()
                 .map(std::time::Duration::from_millis),
         )
+    }
+
+    /// Combine warp output-frame skipping with run-ahead without allowing
+    /// either policy to collapse the other's frame cap. Scheduled capture is
+    /// unthrottled and archives committed frames, so it uses neither.
+    pub(super) fn burst_frames(
+        &self,
+        headless_capture: bool,
+    ) -> (usize, u8, Option<std::time::Duration>) {
+        let (frame_cap, time_budget) = self.warp_burst_plan(headless_capture);
+        let runahead = if frame_cap == 1 && time_budget.is_none() && !headless_capture {
+            self.runahead_effective_frames()
+        } else {
+            0
+        };
+        (frame_cap + usize::from(runahead), runahead, time_budget)
     }
 
     /// Cycle the warp/turbo output frame-skip level (2x -> 4x -> 8x -> 16x ->
@@ -307,6 +410,10 @@ impl App {
                 let restoring_over_placeholder = self.restoring_over_placeholder();
                 self.powered_on = true;
                 self.cpu_halted = false;
+                // A state can carry host-coupled hardware that is unrelated
+                // to the session's remembered config. Keep the conservative
+                // gate until a freshly resolved machine is launched.
+                self.runahead_machine_block = Some("loaded save state");
                 // Force a fresh presentation: the restored frame counter
                 // may equal (or precede) the last rendered one.
                 self.reset_render_pipeline();

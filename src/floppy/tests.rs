@@ -12,6 +12,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn runahead_gate_tracks_the_inserted_images_write_protection() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    assert_eq!(ctrl.runahead_block_reason(), None);
+
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("readonly.adf"), true)?;
+    assert_eq!(ctrl.runahead_block_reason(), None);
+
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("writable.adf"), false)?;
+    assert_eq!(ctrl.runahead_block_reason(), Some("writable floppy image"));
+    Ok(())
+}
+
 /// A write reaches a real platter a revolution after it is handed over,
 /// and until it does the drive still holds the recording from *before*
 /// it. Reading in that window would show the guest a disk that no longer

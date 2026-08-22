@@ -340,6 +340,7 @@ warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
+run_ahead_frames = 0       # run-ahead input-latency reduction, 0..4 (0 = off)
 ```
 
 The deterministic cycle-driven core is the only emulation timing. It is
@@ -396,6 +397,29 @@ carried no information.)
   Turning the menu item off releases the retained snapshots. The same
   determinism preconditions as reverse debugging apply -- a real-time clock
   and host disk writes are not rolled back.
+- `run_ahead_frames` reduces input latency in compatible windowed sessions.
+  Each refresh commits one ordinary frame, snapshots the machine, executes
+  the requested number of future frames, presents the last future image, and
+  restores the snapshot. Audio, serial output, and control events come only
+  from the committed frame; speculative output is discarded. The committed
+  machine timeline is therefore unchanged. This costs one whole-machine
+  snapshot per refresh and roughly `(run_ahead_frames + 1)`x realtime host
+  performance, so start at 1 and raise it only while the performance overlay
+  shows comfortable headroom. Large values also skip visible intermediate
+  animation.
+
+  Run-ahead stays inactive when a speculative frame could observe or change
+  host state that the snapshot cannot restore. This includes warp and
+  headless capture, RTG output, rewind/reverse debugging, debugger stops,
+  injected faults, validation/SMC/heat-map/frame-analyzer observers,
+  instruction or waveform traces, a connected control client, video recording, loaded
+  save states, live serial or parallel devices, writable or physical floppy
+  media, mounted CDs, hard-drive and host-directory storage, host networking
+  or plugin boards, MHI decoding, and a live or persistent RTC/NVRAM. Offline
+  WAV and stem capture are supported: speculative audio is discarded at the
+  mixer before any sink receives it. The **Run Ahead** item under Emulation
+  Settings adjusts the level live and reports the current blocking reason.
+  `--run-ahead FRAMES` overrides the config for one run.
 
 ## `[cpu]`
 

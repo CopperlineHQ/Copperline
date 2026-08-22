@@ -458,6 +458,16 @@ Shown only when something is on the port.
   [Configuration](configuration.md)). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
+- **Run Ahead**: input-latency reduction for play. Each display refresh
+  commits one frame, runs a few silent future frames, presents the last future
+  image, and rewinds to the committed boundary. Level **1 frame** is the best
+  starting point; higher levels need proportionally more host CPU (watch the
+  performance overlay) and skip more intermediate animation. When a live
+  device, writable medium, debugger, capture, or other host coupling makes
+  speculation unsafe, selecting a level keeps it configured but the OSD says
+  why it is inactive. The start-up value is
+  `[emulation] run_ahead_frames` or `--run-ahead`; the full compatibility list
+  is in [Configuration](configuration.md).
 
 ### Warp Settings
 

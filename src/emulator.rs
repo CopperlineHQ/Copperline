@@ -65,6 +65,13 @@ pub struct Emulator {
     /// (headless screenshot/frame-dump runs). The emulated result is
     /// identical either way.
     paced: bool,
+    /// Run-ahead burst phase (see `set_runahead_phase`): while set, the
+    /// per-frame pacing sleep inside `step_real` is suppressed.
+    runahead_phase: bool,
+    /// Whether the frame currently being stepped is speculative. Host audio
+    /// and serial output are withheld, and committed-frame statistics do not
+    /// count work that the next burst will re-emulate.
+    runahead_speculative: bool,
     cpu_cycles_per_instruction: f64,
     real_pacing_budget_mode: RealPacingBudgetMode,
     /// Fast batch/trace-JIT CPU execution (`[cpu] jit`). The run loop then
@@ -448,6 +455,8 @@ impl Emulator {
             machine,
             stats: EmuStats::default(),
             paced,
+            runahead_phase: false,
+            runahead_speculative: false,
             cpu_cycles_per_instruction,
             real_pacing_budget_mode,
             cpu_jit: false,
@@ -806,6 +815,66 @@ impl Emulator {
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
         Ok(())
+    }
+
+    /// Enter or leave the run-ahead burst phase. While in the phase, the
+    /// per-frame pacing sleep inside `step_real` is suppressed; the caller
+    /// paces once per burst against the anchor frame's end time instead
+    /// (`pace_runahead_burst`).
+    pub fn set_runahead_phase(&mut self, on: bool) {
+        self.runahead_phase = on;
+    }
+
+    pub fn runahead_phase(&self) -> bool {
+        self.runahead_phase
+    }
+
+    /// Mark subsequent emulation as speculative. The machine still executes
+    /// normally, but output that cannot be rewound is withheld until the same
+    /// guest time is executed as the next committed anchor.
+    pub fn set_runahead_speculative(&mut self, on: bool) {
+        self.runahead_speculative = on;
+        let bus = self.bus_mut();
+        bus.set_live_audio_discard(on);
+        bus.paula.set_speculative_host_quiet(on);
+    }
+
+    /// Serialize the machine at a run-ahead anchor boundary. Same-process
+    /// bincode like the reverse-debug ring (no framing), taken at a frame
+    /// boundary where `M68kMachine::write_state` is consistent.
+    pub fn runahead_snapshot(&self) -> Result<Vec<u8>> {
+        self.snapshot_blob()
+    }
+
+    /// Restore an anchor snapshot produced by [`Self::runahead_snapshot`].
+    /// Unlike [`Self::restore_blob`] this deliberately does NOT reset the
+    /// live audio stream or re-anchor real-time pacing: the audible
+    /// timeline continues uninterrupted across the rewind, and the pacing
+    /// coordinate keeps marching forward while emulated time oscillates
+    /// within the burst. Host-side Paula settings survive as usual.
+    pub fn runahead_restore(&mut self, blob: &[u8]) -> Result<()> {
+        let mono = self.bus_mut().paula.mono_output();
+        let separation = self.bus_mut().paula.stereo_separation();
+        let filter = self.bus_mut().paula.led_filter_mode();
+        let mut cursor = std::io::Cursor::new(blob);
+        self.machine.apply_state(&mut cursor)?;
+        self.bus_mut().paula.set_mono_output(mono);
+        self.bus_mut().paula.set_stereo_separation(separation);
+        self.bus_mut().paula.set_led_filter_mode(filter);
+        self.reset_realtime_quantum();
+        Ok(())
+    }
+
+    /// Pace a completed run-ahead burst. `anchor_end_seconds` is the
+    /// emulated time at the end of the iteration's anchor (first) frame:
+    /// presented frames advance one per iteration, so wall-clock budget per
+    /// iteration is one frame period even though the burst retired more.
+    /// No-op when unpaced (warp/headless).
+    pub fn pace_runahead_burst(&mut self, anchor_end_seconds: f64) {
+        if !self.paced {
+            return;
+        }
+        self.pace_to_emulated_target(anchor_end_seconds);
     }
 
     /// Capture a snapshot into the ring if one is due at the current frame.
@@ -1567,7 +1636,9 @@ impl Emulator {
             self.stats.started_at = Some(crate::timebase::Instant::now());
         }
         self.step_real()?;
-        self.stats.frames += 1;
+        if !self.runahead_speculative {
+            self.stats.frames += 1;
+        }
         // Capture a reverse-debug snapshot at this frame boundary when one is
         // due (no-op unless reverse mode is armed). Frame boundaries are the
         // only safe capture points -- mid-frame the renderer capture buffers
@@ -1576,7 +1647,10 @@ impl Emulator {
         // Evaluate a time-targeted reverse watchpoint when its target is
         // reached (no-op unless armed).
         self.tt_poll_reverse_watch()?;
-        if crate::envcfg::flag("COPPERLINE_DIAG_PCSAMPLE") && self.stats.frames.is_multiple_of(50) {
+        if !self.runahead_speculative
+            && crate::envcfg::flag("COPPERLINE_DIAG_PCSAMPLE")
+            && self.stats.frames.is_multiple_of(50)
+        {
             log::info!(
                 "pcsample frame={} pc={:#010X} sr={:#06X}",
                 self.stats.frames,
@@ -1619,8 +1693,10 @@ impl Emulator {
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
         // Pace presentation to wall-clock only for the interactive window;
-        // headless runs advance the deterministic core unthrottled.
-        let slept = if self.paced {
+        // headless runs advance the deterministic core unthrottled. During a
+        // run-ahead burst the sleep is deferred to the burst's anchor target
+        // (`pace_runahead_burst`), so speculative frames retire unpaced.
+        let slept = if self.paced && !self.runahead_phase {
             self.sleep_until_realtime_device_time()
         } else {
             Duration::ZERO
@@ -1802,17 +1878,21 @@ impl Emulator {
     /// Returns the host time actually slept, so the caller can subtract it
     /// from the frame's busy-time accounting.
     fn sleep_until_realtime_device_time(&mut self) -> Duration {
+        let emulated_now = self.bus().emulated_seconds();
+        self.pace_to_emulated_target(emulated_now)
+    }
+
+    /// Sleep until wall-clock reaches `emulated_now` minus the live-audio
+    /// lead. Shared by the per-frame pacer and the run-ahead burst pacer
+    /// (which passes an anchor-frame target instead of the current time).
+    fn pace_to_emulated_target(&mut self, emulated_now: f64) -> Duration {
         let Some(started_at) = self.stats.started_at else {
             return Duration::ZERO;
         };
         let mut slept = Duration::ZERO;
         let now = Instant::now();
         let live_audio_lead_seconds = self.bus().live_audio_output_lead_seconds();
-        let target = realtime_device_time_target(
-            started_at,
-            self.bus().emulated_seconds(),
-            live_audio_lead_seconds,
-        );
+        let target = realtime_device_time_target(started_at, emulated_now, live_audio_lead_seconds);
         if let Some(wait) = target.and_then(|target| target.checked_duration_since(now)) {
             let sleep_started = Instant::now();
             std::thread::sleep(wait);
@@ -4131,5 +4211,83 @@ mod tests {
 
         assert_eq!(*resets.borrow(), 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[derive(Default)]
+    struct RunaheadProbe {
+        pushed: std::cell::Cell<u64>,
+    }
+
+    struct RunaheadProbeSink(std::rc::Rc<RunaheadProbe>);
+
+    impl crate::audio::AudioSink for RunaheadProbeSink {
+        fn push(&mut self, _left: f32, _right: f32) {
+            self.0.pushed.set(self.0.pushed.get() + 1);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn runahead_restore_rewinds_machine_state_and_keeps_positions_monotonic() {
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(std::rc::Rc::new(
+            RunaheadProbe::default(),
+        ))));
+        emu.step_frame().unwrap();
+        let retired_at_anchor = emu.retired_instructions;
+        let blob = emu.runahead_snapshot().unwrap();
+
+        // Advance past the anchor and leave a marker in chip RAM.
+        emu.step_frame().unwrap();
+        assert!(emu.retired_instructions > retired_at_anchor);
+        emu.bus_mut().mem.chip_ram[0x2000] = 0xAB;
+
+        emu.runahead_restore(&blob).unwrap();
+        assert_eq!(
+            emu.bus().mem.chip_ram[0x2000],
+            0,
+            "writes after the anchor are rolled back by the restore"
+        );
+        assert!(
+            emu.retired_instructions >= retired_at_anchor,
+            "the position coordinate stays monotonic across an anchor restore"
+        );
+    }
+
+    #[test]
+    fn speculative_audio_is_withheld_from_the_sink() {
+        let probe = std::rc::Rc::new(RunaheadProbe::default());
+        let mut emu = emulator_with_audio(Box::new(RunaheadProbeSink(probe.clone())));
+        emu.set_runahead_speculative(true);
+        emu.step_frame().unwrap();
+        assert_eq!(probe.pushed.get(), 0);
+
+        emu.set_runahead_speculative(false);
+        emu.step_frame().unwrap();
+        assert!(probe.pushed.get() > 0, "committed output flows again");
+    }
+
+    #[test]
+    fn speculative_frames_do_not_inflate_committed_frame_statistics() {
+        let mut emu = emulator_with_audio(Box::new(crate::audio::NullSink));
+        emu.step_frame().unwrap();
+        let committed = emu.stats.frames;
+
+        emu.set_runahead_speculative(true);
+        emu.step_frame().unwrap();
+        assert_eq!(emu.stats.frames, committed);
+
+        emu.set_runahead_speculative(false);
+        emu.step_frame().unwrap();
+        assert_eq!(emu.stats.frames, committed + 1);
+    }
+
+    #[test]
+    fn audio_debug_taps_survive_a_runahead_restore() {
+        let mut emu = emulator_with_audio(Box::new(crate::audio::NullSink));
+        emu.step_frame().unwrap();
+        let blob = emu.runahead_snapshot().unwrap();
+        emu.bus_mut().paula.toggle_channel_muted(2);
+        emu.runahead_restore(&blob).unwrap();
+        assert!(emu.bus().paula.channel_muted(2));
     }
 }
