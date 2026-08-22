@@ -211,7 +211,7 @@ socket2 = { version = "0.6", optional = true }
 # guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
 # sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets
 # only (DHCP/DNS/UDP/ICMP are handled at frame level with the wire parsers).
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",
