@@ -1,0 +1,68 @@
+version: 2
+updates:
+  # Native emulator and command-line tools.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+
+  # Standalone browser and publisher frontends.
+  - package-ecosystem: cargo
+    directory: /crates/copperline-web
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+  - package-ecosystem: cargo
+    directory: /crates/copperline-player
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+
+  # Development, plugin, and fuzz workspaces with independent lockfiles.
+  - package-ecosystem: cargo
+    directory: /crates/cputest-runner
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+  - package-ecosystem: cargo
+    directory: /crates/hostsocket-plugin
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+  - package-ecosystem: cargo
+    directory: /crates/zz9k-plugin
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+  - package-ecosystem: cargo
+    directory: /tools/bezel-preview
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
