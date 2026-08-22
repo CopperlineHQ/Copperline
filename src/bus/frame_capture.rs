@@ -1531,7 +1531,11 @@ impl Bus {
         if is_live_collision_relevant_custom_write(offset) {
             self.current_frame_collision_events.push(event);
         }
-        if is_live_collision_control_custom_write(offset) {
+        // CLXCON2 joins the control replay only where the register exists:
+        // Lisa latches $10E, so pre-AGA machines keep today's event stream.
+        if is_live_collision_control_custom_write(offset)
+            || ((offset & 0x01FE) == 0x10E && self.denise_is_lisa())
+        {
             self.current_frame_collision_control_events.push(event);
             self.current_frame_collision_control_index = None;
         }

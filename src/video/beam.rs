@@ -108,7 +108,7 @@ impl BeamLineEvents {
                 self.dmacon_writes.push(event);
                 self.video_control_writes.push(event);
             }
-            0x098 => {
+            0x098 | 0x10E => {
                 self.clxcon_writes.push(event);
                 self.video_control_writes.push(event);
             }
@@ -265,6 +265,7 @@ mod tests {
             reg(0x2D, 0x23, 0x008E),
             reg(0x2D, 0x24, 0x0096),
             reg(0x2D, 0x25, 0x0098),
+            reg(0x2D, 0x25, 0x010E),
             reg(0x2D, 0x26, 0x0180),
             reg(0x2E, 0x27, 0x0120),
             reg(0x2E, 0x28, 0x0140),
@@ -281,7 +282,7 @@ mod tests {
         assert_eq!(line1.ddf_writes().len(), 1);
         assert_eq!(line1.diw_writes().len(), 1);
         assert_eq!(line1.dmacon_writes().len(), 1);
-        assert_eq!(line1.clxcon_writes().len(), 1);
+        assert_eq!(line1.clxcon_writes().len(), 2);
         assert_eq!(line1.palette_writes().len(), 1);
         assert_eq!(line1.chip_ram_writes().len(), 1);
 
