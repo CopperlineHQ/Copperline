@@ -1078,10 +1078,20 @@ live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
 the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, and an optional **Quit Copperline** hotkey. Push a
-control to bind it, or hold any control for about a second to skip a step
-the pad has no control for; the four directions and fire cannot be
-skipped.
+**Open menu** button, an optional **Quit Copperline** hotkey, and finally
+the four directions again as optional **alternates**. Push a control to
+bind it, or hold any control for about a second to skip a step the pad
+has no control for; the four directions and fire cannot be skipped.
+
+The alternates are for a pad with both a stick and a d-pad: bind the
+stick to the first four steps and the d-pad to the alternates (or the
+other way round) and either steers, as on the standard layout. Each
+alternate simply ORs with its primary, so a pad with one set of
+directions skips them and loses nothing. When a direction pair is bound
+to the two ends of one stick axis, the stick's deflection is known too,
+and a [`gamepad-mouse`](#controller-ports) device on that pad moves the
+pointer at a speed that follows the stick rather than at the d-pad's
+fixed pace.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can

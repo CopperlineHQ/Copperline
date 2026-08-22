@@ -549,7 +549,11 @@ feed the JOY0DAT quadrature counters. Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad
 resolves through a fixed standard layout, overridden per-UUID by the
 calibration described in [](../guide/ui), which records raw event codes
-and is the only path for unrecognised pads. On CD32 machines the pad
+(one per control, plus an optional alternate per direction so a stick
+and a d-pad can both steer) and is the only path for unrecognised pads.
+A direction pair recorded on the two ends of one raw axis is reported
+as that stick's deflection as well, which is what the gamepad-mouse
+device paces the pointer by. On CD32 machines the pad
 output is serialized through the CD32 pad protocol instead of the plain
 digital joystick lines, modelled after the pad's 4021 shift register:
 in load mode the register's output follows Blue continuously (which is

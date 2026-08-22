@@ -114,6 +114,17 @@ pub struct GamepadCalibration {
     // port). Opens the pop-up menu, which the d-pad then walks.
     #[serde(default)]
     menu: Option<RawInput>,
+    // A second control per direction (optional), so a pad with both a
+    // stick and a d-pad steers with either, as the database layout does.
+    // Each ORs with its primary; files without them lose nothing.
+    #[serde(default)]
+    up_alt: Option<RawInput>,
+    #[serde(default)]
+    down_alt: Option<RawInput>,
+    #[serde(default)]
+    left_alt: Option<RawInput>,
+    #[serde(default)]
+    right_alt: Option<RawInput>,
     /// [`CALIBRATION_FORMAT`] at recording time; 0 for files written before
     /// the bundled controller mappings were enabled.
     #[serde(default)]
@@ -178,20 +189,60 @@ impl GamepadCalibration {
                 .or(self.menu)
                 .is_some_and(|i| i.active(axes, buttons)),
             menu: self.menu.is_some_and(|i| i.active(axes, buttons)),
-            // A calibration binds raw inputs one at a time and has no
-            // notion of an axis pair, so a calibrated pad reports no
-            // deflection and its d-pad moves the pointer instead.
-            stick: (0.0, 0.0),
+            // A calibration binds raw inputs one at a time, but a stick
+            // still shows through it: a direction pair bound to the two
+            // ends of one raw axis is that axis, and its deflection is
+            // the stick's. A pad with both pairs on sticks reports the
+            // one pushed further; d-pad-only bindings report none, and
+            // the d-pad moves the pointer instead.
+            stick: (
+                Self::deflection(
+                    [(self.right, self.left), (self.right_alt, self.left_alt)],
+                    axes,
+                ),
+                Self::deflection([(self.up, self.down), (self.up_alt, self.down_alt)], axes),
+            ),
         }
+    }
+
+    /// The deflection behind the direction pairs, signed so the first
+    /// direction of a pair is positive: only a pair bound to the two
+    /// signs of one raw axis has one, and of several the strongest wins.
+    fn deflection(
+        pairs: [(Option<RawInput>, Option<RawInput>); 2],
+        axes: &BTreeMap<u32, f32>,
+    ) -> f32 {
+        pairs
+            .into_iter()
+            .filter_map(|(toward, away)| match (toward?, away?) {
+                (
+                    RawInput::Axis { code, positive },
+                    RawInput::Axis {
+                        code: other,
+                        positive: opposite,
+                    },
+                ) if code == other && positive != opposite => {
+                    let value = axes.get(&code).copied().unwrap_or(0.0);
+                    Some(if positive { value } else { -value })
+                }
+                _ => None,
+            })
+            .fold(0.0_f32, |best, value| {
+                if value.abs() > best.abs() {
+                    value
+                } else {
+                    best
+                }
+            })
     }
 
     fn resolve(&self, axes: &BTreeMap<u32, f32>, buttons: &BTreeMap<u32, bool>) -> JoystickState {
         let active = |input: &Option<RawInput>| input.is_some_and(|i| i.active(axes, buttons));
         JoystickState {
-            up: active(&self.up),
-            down: active(&self.down),
-            left: active(&self.left),
-            right: active(&self.right),
+            up: active(&self.up) || active(&self.up_alt),
+            down: active(&self.down) || active(&self.down_alt),
+            left: active(&self.left) || active(&self.left_alt),
+            right: active(&self.right) || active(&self.right_alt),
             fire: active(&self.fire),
             button2: active(&self.button2),
             green: active(&self.green),
@@ -680,8 +731,11 @@ impl GamepadReader {
 // ---------------------------------------------------------------------------
 
 /// The calibration prompts in order: label and whether the step may be
-/// skipped (pads without CD32 extras skip the optional ones).
-const CAL_STEPS: [(&str, bool); 13] = [
+/// skipped (pads without CD32 extras skip the optional ones). The
+/// alternate directions come last so that the familiar flow -- and the
+/// step numbers every saved file and test rely on -- stay where they
+/// were; a pad with one set of directions holds through four skips.
+const CAL_STEPS: [(&str, bool); 17] = [
     ("Up", true),
     ("Down", true),
     ("Left", true),
@@ -695,6 +749,10 @@ const CAL_STEPS: [(&str, bool); 13] = [
     ("CD32 forward", false),
     ("Open menu", false),
     ("Quit Copperline", false),
+    ("Up (alternate)", false),
+    ("Down (alternate)", false),
+    ("Left (alternate)", false),
+    ("Right (alternate)", false),
 ];
 
 /// A guided calibration in progress: which step is being prompted, what
@@ -993,6 +1051,10 @@ impl CalibrationSession {
             ffw: b[10],
             menu: b[11],
             quit: b[12],
+            up_alt: b[13],
+            down_alt: b[14],
+            left_alt: b[15],
+            right_alt: b[16],
             format: CALIBRATION_FORMAT,
         }
     }
@@ -1091,6 +1153,26 @@ pub fn run_calibration() -> Result<()> {
         quit: capture(
             &mut raw,
             "the Quit Copperline hotkey (or wait to skip)",
+            false,
+        )?,
+        up_alt: capture(
+            &mut raw,
+            "UP on the other stick or d-pad (or wait to skip)",
+            false,
+        )?,
+        down_alt: capture(
+            &mut raw,
+            "DOWN on the other stick or d-pad (or wait to skip)",
+            false,
+        )?,
+        left_alt: capture(
+            &mut raw,
+            "LEFT on the other stick or d-pad (or wait to skip)",
+            false,
+        )?,
+        right_alt: capture(
+            &mut raw,
+            "RIGHT on the other stick or d-pad (or wait to skip)",
             false,
         )?,
         format: CALIBRATION_FORMAT,
@@ -1472,6 +1554,112 @@ mod tests {
     }
 
     #[test]
+    fn alternate_directions_or_with_their_primaries() {
+        // A stick on the primary steps and a d-pad on the alternates:
+        // either steers, and releasing one while the other is held
+        // keeps the line asserted.
+        let cal = GamepadCalibration {
+            up: axis(1, false),
+            down: axis(1, true),
+            left: axis(0, false),
+            right: axis(0, true),
+            up_alt: button(0x9000),
+            down_alt: button(0x9001),
+            left_alt: button(0x9002),
+            right_alt: button(0x9003),
+            ..Default::default()
+        };
+        let mut axes = BTreeMap::new();
+        let mut buttons = BTreeMap::new();
+        assert_eq!(cal.resolve(&axes, &buttons), JoystickState::default());
+
+        buttons.insert(0x9003, true);
+        let s = cal.resolve(&axes, &buttons);
+        assert!(s.right && !s.left && !s.up && !s.down);
+
+        axes.insert(1, -0.9);
+        let s = cal.resolve(&axes, &buttons);
+        assert!(s.up && s.right);
+
+        buttons.clear();
+        let s = cal.resolve(&axes, &buttons);
+        assert!(s.up && !s.right);
+
+        // A calibration without alternates (every file before them) is
+        // unchanged: the primaries alone decide.
+        let primaries_only = GamepadCalibration {
+            up_alt: None,
+            down_alt: None,
+            left_alt: None,
+            right_alt: None,
+            ..cal
+        };
+        buttons.insert(0x9003, true);
+        let s = primaries_only.resolve(&axes, &buttons);
+        assert!(s.up && !s.right);
+    }
+
+    #[test]
+    fn stick_deflection_shows_through_an_axis_pair() {
+        // A direction pair bound to the two ends of one raw axis is a
+        // stick, and its deflection is reported (up and right positive)
+        // for Gamepad Mouse to pace the pointer by. Anything else -- a
+        // d-pad, or two different axes -- reports none.
+        let stick = GamepadCalibration {
+            up: axis(1, false),
+            down: axis(1, true),
+            left: axis(0, false),
+            right: axis(0, true),
+            ..Default::default()
+        };
+        let mut axes = BTreeMap::new();
+        assert_eq!(stick.resolve_pad(&axes, &BTreeMap::new()).stick, (0.0, 0.0));
+        axes.insert(1, -0.25); // raw negative = the end bound to Up
+        axes.insert(0, 0.75);
+        assert_eq!(
+            stick.resolve_pad(&axes, &BTreeMap::new()).stick,
+            (0.75, 0.25)
+        );
+        // An inverted recording (up on the positive end) still reads up
+        // as positive: the sign follows the binding, not the axis.
+        let inverted = GamepadCalibration {
+            up: axis(1, true),
+            down: axis(1, false),
+            ..stick.clone()
+        };
+        assert_eq!(
+            inverted.resolve_pad(&axes, &BTreeMap::new()).stick,
+            (0.75, -0.25)
+        );
+
+        let dpad = GamepadCalibration {
+            up: button(0x9000),
+            down: button(0x9001),
+            left: axis(0, false),
+            right: axis(2, true), // two different axes are not a pair
+            ..Default::default()
+        };
+        axes.insert(2, 1.0);
+        assert_eq!(dpad.resolve_pad(&axes, &BTreeMap::new()).stick, (0.0, 0.0));
+
+        // With a stick on both the primaries and the alternates, the one
+        // pushed further is the deflection reported.
+        let two_sticks = GamepadCalibration {
+            up_alt: axis(3, true),
+            down_alt: axis(3, false),
+            left_alt: axis(2, false),
+            right_alt: axis(2, true),
+            ..stick
+        };
+        axes.insert(3, 0.9);
+        axes.insert(2, -0.5);
+        assert_eq!(
+            two_sticks.resolve_pad(&axes, &BTreeMap::new()).stick,
+            (0.75, 0.9)
+        );
+    }
+
+    #[test]
     fn calibration_session_walks_steps_with_neutral_gating() {
         let mut session = CalibrationSession::new();
         let pad = Some(("Pad".to_string(), "abc123".to_string()));
@@ -1591,40 +1779,59 @@ mod tests {
     }
 
     #[test]
-    fn calibration_session_captures_optional_quit_step() {
+    fn calibration_session_captures_optional_quit_and_alternate_steps() {
         let mut session = CalibrationSession::new();
         let pad = Some(("Pad".to_string(), "abc123".to_string()));
         let axes = BTreeMap::new();
         let mut buttons = BTreeMap::new();
         session.advance(pad.clone(), &axes, &buttons);
-
-        // Capture the required steps, then skip the CD32 extras to land
-        // on the final (optional) Quit step.
-        for step in 0..5 {
+        let mut press = |session: &mut CalibrationSession, code: u32| {
             // Down, then up: a control is captured by being pressed,
             // which is only known once it comes back up.
-            buttons.insert(0x9000 + step as u32, true);
+            buttons.insert(code, true);
             session.advance(pad.clone(), &axes, &buttons);
             buttons.clear();
-            session.advance(pad.clone(), &axes, &buttons);
+            session.advance(pad.clone(), &axes, &buttons)
+        };
+
+        // Capture the required steps, then skip the CD32 extras and the
+        // Menu button to land on the optional Quit step.
+        for step in 0..5 {
+            press(&mut session, 0x9000 + step as u32);
         }
-        while session.can_skip() && session.current_step() != Some(CAL_STEPS.len() - 1) {
+        const QUIT: usize = 12;
+        assert_eq!(CAL_STEPS[QUIT].0, "Quit Copperline");
+        while session.can_skip() && session.current_step() != Some(QUIT) {
             session.skip_current();
         }
-        assert_eq!(session.current_step(), Some(CAL_STEPS.len() - 1));
+        assert_eq!(session.current_step(), Some(QUIT));
         assert!(session.can_skip());
-
-        buttons.insert(0x900FF, true);
-        session.advance(pad.clone(), &axes, &buttons);
-        buttons.clear();
-        assert!(session.advance(pad.clone(), &axes, &buttons));
-        assert!(session.done());
+        assert!(press(&mut session, 0x900FF));
         assert_eq!(session.to_calibration().quit, button(0x900FF));
 
-        // The post-capture live test reports the held quit binding by name.
+        // The alternate directions come last, each optional: a second
+        // Up is bound, the other three are skipped.
+        assert_eq!(session.current_step(), Some(QUIT + 1));
+        assert_eq!(CAL_STEPS[QUIT + 1].0, "Up (alternate)");
+        assert!(press(&mut session, 0x90010));
+        while session.can_skip() {
+            session.skip_current();
+        }
+        assert!(session.done());
+        let cal = session.to_calibration();
+        assert_eq!(cal.up_alt, button(0x90010));
+        assert_eq!(cal.down_alt, None);
+        assert_eq!(cal.left_alt, None);
+        assert_eq!(cal.right_alt, None);
+
+        // The post-capture live test reports the held bindings by name,
+        // alternates included, and the alternate drives its line.
+        let mut buttons = BTreeMap::new();
         buttons.insert(0x900FF, true);
+        buttons.insert(0x90010, true);
         assert!(session.advance(pad, &axes, &buttons));
-        assert_eq!(session.live_test(), "Quit Copperline");
+        assert_eq!(session.live_test(), "Quit Copperline, Up (alternate)");
+        assert!(session.live_pad().joystick.up && session.live_pad().quit);
     }
 
     #[test]
@@ -1668,6 +1875,7 @@ mod tests {
                 up: axis(5, false),
                 fire: button(9),
                 quit: button(11),
+                up_alt: button(12),
                 ..Default::default()
             },
         );
@@ -1676,6 +1884,19 @@ mod tests {
         assert_eq!(back.get("abc123").unwrap().up, axis(5, false));
         assert_eq!(back.get("abc123").unwrap().fire, button(9));
         assert_eq!(back.get("abc123").unwrap().quit, button(11));
+        assert_eq!(back.get("abc123").unwrap().up_alt, button(12));
         assert!(back.get("abc123").unwrap().down.is_none());
+        assert!(back.get("abc123").unwrap().down_alt.is_none());
+
+        // A file written before the alternates existed carries none of
+        // their keys and loads with every alternate unbound.
+        let older: CalibrationStore = toml::from_str(
+            "[gamepads.0123]\nup = { kind = \"axis\", code = 49, positive = false }\n\
+             down = { kind = \"axis\", code = 49, positive = true }\n",
+        )
+        .unwrap();
+        let cal = older.get("0123").unwrap();
+        assert_eq!(cal.down, axis(49, true));
+        assert!(cal.up_alt.is_none() && cal.right_alt.is_none());
     }
 }
