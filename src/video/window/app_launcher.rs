@@ -1350,6 +1350,7 @@ impl App {
             self.serial_is_midi = self.emu.bus_mut().midi_serial_mut().is_some();
         }
         self.machine_config = raw;
+        self.runahead_machine_block = cfg.runahead_machine_block_reason();
         // Re-derive the sampler from the launcher's parallel config and attach it
         // to the fresh machine (the printer attaches inside build_machine, since
         // its byte sink is Send).
@@ -1387,6 +1388,16 @@ impl App {
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
         self.mouse_capture = cfg.mouse_capture;
         self.autofire_hz = cfg.autofire_hz;
+        self.run_ahead_frames = cfg
+            .emulation
+            .run_ahead_frames
+            .min(crate::config::RUN_AHEAD_MAX_FRAMES);
+        if let (true, Some(reason)) = (self.run_ahead_frames > 0, self.runahead_block_reason()) {
+            warn!(
+                "run-ahead ({} frames) configured but inactive: {reason}",
+                self.run_ahead_frames
+            );
+        }
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
         self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;

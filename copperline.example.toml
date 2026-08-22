@@ -89,6 +89,15 @@ pacing_budget = "cycles"
 # rewind_budget_mb = 256
 # rewind_interval_frames = 25
 
+# Run-ahead input-latency reduction. In a compatible windowed session, each
+# refresh commits one frame, snapshots it, executes this many silent future
+# frames, presents the last, then restores the snapshot. The host therefore
+# needs roughly (run_ahead_frames + 1)x realtime headroom; start with 1.
+# Host-coupled devices and diagnostics that cannot be rewound make the setting
+# temporarily inactive, with the reason shown in the Run Ahead menu's OSD.
+# 0..4; adjust live from Emulation Settings > Run Ahead.
+# run_ahead_frames = 0
+
 
 [cpu]
 

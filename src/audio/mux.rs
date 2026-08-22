@@ -88,6 +88,10 @@ struct StemWriters {
 pub struct AudioMux {
     master: Box<dyn AudioSink>,
     stems: Option<StemWriters>,
+    /// Host-output policy for speculative run-ahead frames. Kept at the
+    /// fan-out point so neither the live sink nor any offline stem observes
+    /// guest time that will immediately be rewound.
+    discard_output: bool,
 }
 
 impl AudioMux {
@@ -95,6 +99,7 @@ impl AudioMux {
         Self {
             master,
             stems: None,
+            discard_output: false,
         }
     }
 
@@ -182,6 +187,9 @@ impl AudioMux {
     /// same value every mixed-master sink (live or `--audio-wav`) has
     /// always received. Also feeds the `master` stem writer, if enabled.
     pub fn push_master(&mut self, left: f32, right: f32) {
+        if self.discard_output {
+            return;
+        }
         self.master.push(left, right);
         if let Some(stems) = &mut self.stems {
             if let Some(writer) = &mut stems.master {
@@ -218,6 +226,10 @@ impl AudioMux {
         self.master.set_live_output_suspended(suspended);
     }
 
+    pub fn set_live_output_discard(&mut self, on: bool) {
+        self.discard_output = on;
+    }
+
     pub fn reset_live_output_after_timeline_jump(&mut self) {
         self.master.reset_live_output_after_timeline_jump();
     }
@@ -234,6 +246,9 @@ impl AudioMux {
     /// "mt32", "drivesounds") for `Source`-granularity stem capture.
     /// A no-op unless stems are enabled and this source was registered.
     pub fn push_source(&mut self, source: &'static str, left: f32, right: f32) {
+        if self.discard_output {
+            return;
+        }
         if let Some(stems) = &mut self.stems {
             if let Some(writer) = stems.sources.get_mut(source) {
                 let _ = writer.write_sample(left);
@@ -252,6 +267,9 @@ impl AudioMux {
         channel: &'static str,
         sample: f32,
     ) {
+        if self.discard_output {
+            return;
+        }
         if let Some(stems) = &mut self.stems {
             if let Some(writer) = stems.channels.get_mut(&(source, channel)) {
                 let _ = writer.write_sample(sample);

@@ -60,6 +60,8 @@ pub enum MenuAction {
     SetPortDevice(usize, PortDevice),
     SetJoystickInput(JoystickInputMode),
     SetAutofire(u8),
+    /// Run-ahead input-latency reduction level in frames (0 = off).
+    SetRunAhead(u8),
     /// Show or hide the on-screen Amiga keyboard.
     ToggleKeyboardPanel,
 
@@ -458,6 +460,7 @@ pub struct MenuState<'a> {
     pub recording: bool,
     pub input_recording: bool,
     pub autofire_hz: u8,
+    pub run_ahead_frames: u8,
     pub joystick_input_mode: JoystickInputMode,
     /// Whether the on-screen Amiga keyboard is up.
     pub keyboard_panel: bool,
@@ -1061,7 +1064,31 @@ fn emulation_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu("Floppy Speed", speeds).available(s.floppy_speed_applies),
         MenuRow::toggle("Rewind", MenuAction::ToggleRewind, s.rewind),
+        MenuRow::submenu("Run Ahead", run_ahead_rows(s)),
     ]
+}
+
+/// Run-ahead levels offered by the menu; 0 is off. Mirrors
+/// `RUN_AHEAD_MAX_FRAMES` from the config.
+fn run_ahead_rows(s: &MenuState) -> Vec<MenuRow> {
+    let label = |n: u8| {
+        if n == 0 {
+            "Off".to_string()
+        } else if n == 1 {
+            "1 frame".to_string()
+        } else {
+            format!("{n} frames")
+        }
+    };
+    (0..=crate::config::RUN_AHEAD_MAX_FRAMES)
+        .map(|n| {
+            MenuRow::choice(
+                &label(n),
+                MenuAction::SetRunAhead(n),
+                s.run_ahead_frames == n,
+            )
+        })
+        .collect()
 }
 
 fn warp_rows(s: &MenuState) -> Vec<MenuRow> {
@@ -1297,6 +1324,7 @@ mod tests {
             recording: false,
             input_recording: false,
             autofire_hz: 0,
+            run_ahead_frames: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             keyboard_panel: false,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],

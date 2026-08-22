@@ -688,6 +688,25 @@ impl FloppyController {
         self.drives.iter().any(|d| d.bridge.is_some())
     }
 
+    /// Why this controller cannot be replayed speculatively. A physical
+    /// mechanism cannot rewind, and a writable image flushes completed guest
+    /// writes to its host file. Read-only image media is fully serialized.
+    pub fn runahead_block_reason(&self) -> Option<&'static str> {
+        #[cfg(feature = "fluxbridge")]
+        if self.drives.iter().any(FloppyDrive::is_bridged) {
+            return Some("physical floppy drive");
+        }
+        if self.drives.iter().any(|drive| {
+            drive
+                .image
+                .as_ref()
+                .is_some_and(|image| !image.write_protected)
+        }) {
+            return Some("writable floppy image");
+        }
+        None
+    }
+
     /// Whether any fitted bay serves from an image. Drive speed only shapes
     /// how fast a track is served from one: a real drive's data rate is the
     /// disk's own, so with every fitted bay physical there is nothing for the

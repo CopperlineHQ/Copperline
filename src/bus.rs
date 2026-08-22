@@ -4354,10 +4354,76 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
+        self.paula.adopt_host_taps(&mut live.paula);
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
         Ok(())
+    }
+
+    /// Why the live machine cannot safely execute frames that are then
+    /// rewound. This covers dynamic host couplings that a static config
+    /// cannot: mounted media, persistent clock/NVRAM storage, peripherals,
+    /// and active trace writers.
+    pub fn runahead_host_block_reason(&self) -> Option<&'static str> {
+        if let Some(reason) = self.floppy.runahead_block_reason() {
+            return Some(reason);
+        }
+        if self.cd_disc_inserted() {
+            // CdImage deserialization reopens its source files. Keeping that
+            // out of a per-refresh restore also avoids replaying host-backed
+            // decoder state for audio tracks.
+            return Some("CD image mounted");
+        }
+        if self
+            .akiko
+            .as_ref()
+            .is_some_and(crate::akiko::Akiko::persistent_nvram)
+        {
+            return Some("persistent CD32 NVRAM");
+        }
+        if self.rtc_present && !self.rtc.runahead_safe() {
+            return Some("live or persistent real-time clock");
+        }
+        if !self.parallel_port.runahead_safe() {
+            return Some("parallel host peripheral");
+        }
+        if self.wave_on {
+            return Some("waveform capture");
+        }
+        if self.blitter_trace.is_some()
+            || crate::envcfg::var_os("COPPERLINE_DUMP_BLITMEM").is_some()
+        {
+            return Some("file-backed hardware trace");
+        }
+        None
+    }
+
+    /// Why transient debugger state makes speculative execution unsafe.
+    /// These observers are deliberately absent from save states, and restore
+    /// carries some of them forward from the abandoned Bus. Letting them run
+    /// speculatively would consume one-shot faults, record discarded accesses,
+    /// or silently disarm the frame analyzer on every anchor restore.
+    pub fn runahead_debug_block_reason(&self) -> Option<&'static str> {
+        if !self.ui_beam_traps.is_empty() || !self.ui_copper_breaks.is_empty() {
+            return Some("debugger stop conditions armed");
+        }
+        if self.bus_faults_armed() {
+            return Some("injected bus fault armed");
+        }
+        if self.chipset_validation_armed() {
+            return Some("chipset validation armed");
+        }
+        if self.smc_detection_armed() {
+            return Some("SMC detection armed");
+        }
+        if self.heat_map_armed() {
+            return Some("memory heat map armed");
+        }
+        if self.frame_analyzer_enabled {
+            return Some("frame analyzer armed");
+        }
+        None
     }
 
     /// Acquire physical disks named by a fully decoded state. Deserialization
@@ -4536,6 +4602,10 @@ impl Bus {
 
     pub fn set_live_audio_suspended(&mut self, suspended: bool) {
         self.paula.set_live_audio_suspended(suspended);
+    }
+
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.paula.set_live_audio_discard(on);
     }
 
     pub fn reset_live_audio_after_timeline_jump(&mut self) {

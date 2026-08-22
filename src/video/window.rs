@@ -1354,6 +1354,13 @@ pub struct App {
     /// host input policy, not machine state: it gates a *held* fire button
     /// into a pulse train, so nothing changes unless the user holds fire.
     autofire_hz: u8,
+    /// Run-ahead frames for input-latency reduction, 0 = off (see
+    /// `[emulation] run_ahead_frames`). A presentation policy: the machine
+    /// state at every committed frame boundary is identical with it on or off.
+    run_ahead_frames: u8,
+    /// Static incompatibility derived from the resolved machine config.
+    /// Dynamic media/peripheral checks live on the Bus.
+    runahead_machine_block: Option<&'static str>,
     /// Pop-up menu and main-window overlay state. Debugger and frame
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
@@ -1879,6 +1886,7 @@ impl App {
         mouse_capture: crate::config::MouseCapture,
         about_machine_lines: Vec<String>,
         machine_config: RawConfig,
+        runahead_machine_block: Option<&'static str>,
         // Effective live-audio state for this machine: for a real machine the
         // caller's --audio/--noaudio-resolved value; for the config-screen
         // placeholder the config intent (so a state loaded over it gets sound).
@@ -1939,6 +1947,11 @@ impl App {
             .autofire_hz
             .unwrap_or(0)
             .min(crate::config::AUTOFIRE_MAX_HZ);
+        let run_ahead_frames = machine_config
+            .emulation
+            .run_ahead_frames
+            .unwrap_or(0)
+            .min(crate::config::RUN_AHEAD_MAX_FRAMES);
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -2105,6 +2118,8 @@ impl App {
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
+            run_ahead_frames,
+            runahead_machine_block,
             ui: UiState::default(),
             menu_hover_arm: None,
             about_opened_at: Instant::now(),
@@ -2126,6 +2141,15 @@ impl App {
         app.attach_session_sampler();
         if app.rewind_armed {
             app.arm_rewind_ring();
+        }
+        if let (true, Some(reason)) = (
+            app.run_ahead_frames > 0 && app.powered_on,
+            app.runahead_block_reason(),
+        ) {
+            warn!(
+                "run-ahead ({} frames) configured but inactive: {reason}",
+                app.run_ahead_frames
+            );
         }
         app
     }
@@ -4636,6 +4660,11 @@ impl ApplicationHandler for App {
         // frame must be rendered, so warp's output frame-skip burst must not
         // apply there.
         let headless_capture = !self.auto_shot.is_empty() || self.frame_dump.is_some();
+        // A completed run-ahead burst renders its future frame before the
+        // anchor is restored. Suppress the generic post-step render in that
+        // case or it would immediately replace the future image with the
+        // rewound anchor.
+        let mut runahead_presented = false;
         // Run one scheduler quantum. Rebuild the host framebuffer only
         // when Agnus has crossed into a new frame; the expensive renderer
         // reconstructs a completed hardware frame, not an instruction slice.
@@ -4651,43 +4680,100 @@ impl ApplicationHandler for App {
             // effective speed is the warp level times the refresh rate, host
             // CPU permitting. Real-time pacing and headless capture stay at one
             // frame per loop.
-            let (frame_cap, time_budget) = self.warp_burst_plan(headless_capture);
+            // Run-ahead retires one extra speculative frame per configured
+            // level on top of the presented frame: input sampled this pass
+            // lands up to that many frames earlier relative to what is on
+            // screen. The committed anchor supplies audio and host output;
+            // later frames are silent speculation, with only the last image
+            // presented before the anchor snapshot restores machine state.
+            let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
             let burst_start = Instant::now();
             let mut frames_done = 0usize;
+            let mut anchor_end_seconds: Option<f64> = None;
+            let mut anchor_snapshot: Option<Vec<u8>> = None;
+            let mut burst_complete = true;
+            self.emu.set_runahead_phase(runahead > 0);
             loop {
+                let speculative = runahead > 0 && frames_done > 0;
+                self.emu.set_runahead_speculative(speculative);
                 if let Err(e) = self.emu.step_frame() {
                     error!("emulator step halted: {e:?}");
                     self.cpu_halted = true;
                     self.sync_live_audio_suspension();
+                    burst_complete = false;
                     break;
                 }
                 #[cfg(feature = "control")]
-                self.control_emit_events();
+                if !speculative {
+                    self.control_emit_events();
+                }
                 frames_done += 1;
+                if runahead > 0 && frames_done == 1 {
+                    anchor_end_seconds = Some(self.emu.bus().emulated_seconds());
+                    match self.emu.runahead_snapshot() {
+                        Ok(blob) => anchor_snapshot = Some(blob),
+                        Err(e) => {
+                            warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
+                            self.run_ahead_frames = 0;
+                            burst_complete = false;
+                            break;
+                        }
+                    }
+                }
                 // The warp-launch gate ends its warp the frame the guest
                 // loads the target program.
                 if self.poll_warp_launch() {
+                    burst_complete = false;
                     break;
                 }
                 // A breakpoint/watchpoint hit pauses the machine and brings
                 // the debugger window up with the reason; end the burst so the
                 // stop surfaces at the frame where it happened.
                 if self.surface_debug_stop() {
+                    burst_complete = false;
                     break;
                 }
                 // A remote run_until frame/cck target completes the
                 // pending resume and pauses at its boundary.
                 #[cfg(feature = "control")]
                 if self.control_run_target_reached() {
+                    burst_complete = false;
                     break;
                 }
-                if frames_done >= frame_cap {
+                if frames_done >= total_frames {
                     break;
                 }
                 if let Some(budget) = time_budget {
                     if burst_start.elapsed() >= budget {
+                        burst_complete = false;
                         break;
                     }
+                }
+            }
+            self.emu.set_runahead_phase(false);
+            self.emu.set_runahead_speculative(false);
+            if runahead > 0 {
+                let speculated = frames_done > 1;
+                if burst_complete && speculated {
+                    // Rendering must finish while the future Bus is still
+                    // live. The worker otherwise races the restore and the
+                    // generic renderer below can present the anchor instead.
+                    runahead_presented = self.finish_render_for_current_frame();
+                    if !runahead_presented {
+                        error!("run-ahead disabled: speculative frame was not renderable");
+                        self.run_ahead_frames = 0;
+                        burst_complete = false;
+                    }
+                }
+                self.restore_runahead_anchor(
+                    anchor_snapshot.as_deref(),
+                    burst_complete,
+                    speculated,
+                );
+                // Include snapshot, render, and restore cost in the same
+                // display-period budget by pacing last against the anchor.
+                if let Some(anchor_end) = anchor_end_seconds {
+                    self.emu.pace_runahead_burst(anchor_end);
                 }
             }
             self.refresh_tool_windows_paced(event_loop);
@@ -4745,7 +4831,8 @@ impl ApplicationHandler for App {
         }
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
-        let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
+        let mut rendered =
+            self.powered_on && (runahead_presented || self.render_emulated_frame_if_needed());
         if self.recorder.is_some() && self.powered_on {
             rendered |= self.finish_render_for_current_frame();
         }

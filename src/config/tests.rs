@@ -4777,3 +4777,48 @@ fn toml_path(path: &Path) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
 }
+
+#[test]
+fn emulation_run_ahead_frames_parses_and_rejects_out_of_range() -> Result<()> {
+    assert_eq!(parse_config("")?.emulation.run_ahead_frames, 0);
+    let cfg = parse_config(
+        r#"
+            [emulation]
+            run_ahead_frames = 2
+            "#,
+    )?;
+    assert_eq!(cfg.emulation.run_ahead_frames, 2);
+    assert!(parse_config("[emulation]\nrun_ahead_frames = 5").is_err());
+    Ok(())
+}
+
+#[test]
+fn runahead_machine_gate_rejects_host_coupled_storage() -> Result<()> {
+    assert_eq!(parse_config("")?.runahead_machine_block_reason(), None);
+
+    let cfg = parse_config(
+        r#"
+            [[filesys]]
+            path = "shared"
+        "#,
+    )?;
+    assert_eq!(
+        cfg.runahead_machine_block_reason(),
+        Some("host directory volume")
+    );
+
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A600"
+
+            [ide]
+            master = "disk.hdf"
+        "#,
+    )?;
+    assert_eq!(
+        cfg.runahead_machine_block_reason(),
+        Some("hard-drive or ATAPI image")
+    );
+    Ok(())
+}

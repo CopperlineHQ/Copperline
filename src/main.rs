@@ -1047,6 +1047,11 @@ fn main() -> Result<()> {
         cfg.mouse_capture,
         config::about_machine_lines(&cfg),
         raw_cfg,
+        if cli.load_state.is_some() {
+            Some("loaded save state")
+        } else {
+            cfg.runahead_machine_block_reason()
+        },
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
@@ -1180,6 +1185,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::MouseCapture::default(),
         vec![config::ABOUT_PLACEHOLDER_LINE.to_string()],
         raw_cfg,
+        None,
         audio_output_enabled,
         // The placeholder runs no sampler; run_machine attaches it on Run.
         copperline::sampler::SamplerRequest::default(),

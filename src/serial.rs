@@ -105,6 +105,16 @@ pub trait SerialSink: Send {
         false
     }
 
+    /// Whether this host endpoint can remain attached during run-ahead.
+    /// Speculative transmissions are withheld until their committed
+    /// re-emulation, so an output-only byte stream is safe when it has no
+    /// host-timing or connection state. Endpoints that can feed bytes back
+    /// into the guest, schedule MIDI, or own a live connection keep the
+    /// conservative default.
+    fn runahead_safe(&self) -> bool {
+        false
+    }
+
     /// Update the emulated-to-host time mapping (see [`SerialTimeAnchor`]).
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
@@ -666,6 +676,10 @@ impl SerialSink for NullSerialSink {
     fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
 
     fn flush(&mut self) {}
+
+    fn runahead_safe(&self) -> bool {
+        true
+    }
 }
 
 pub struct StdoutSink {
@@ -704,6 +718,10 @@ impl SerialSink for StdoutSink {
             let _ = stdout.flush();
             self.buf.clear();
         }
+    }
+
+    fn runahead_safe(&self) -> bool {
+        true
     }
 }
 
