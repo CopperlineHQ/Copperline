@@ -174,12 +174,13 @@ serde-big-array = "0.5"
 symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp3"], optional = true }
 symphonia-core = { version = "0.6.1", default-features = false, optional = true }
 # Save-state and snapshot serialization (src/savestate.rs and friends).
-# Held on the 1.x serde API on purpose: bincode 2+/3 replaces the API and
-# defaults to a different wire format, so moving would invalidate every
-# existing .clstate for no functional gain. Migrate only as part of a
-# planned savestate::STATE_VERSION bump.
+# Held on the 1.x serde API on purpose: bincode 2 replaces the API and its
+# defaults use a different wire format, while bincode 3 is an intentionally
+# non-functional tombstone release. Moving serializers would invalidate every
+# existing .clstate for no functional gain. Migrate only as part of a planned
+# savestate::STATE_VERSION bump with an explicit compatibility story.
 bincode = "1"
-toml = "0.9"
+toml = "1.1"
 png = "0.18"
 flate2 = "1"
 cpal = { version = "0.18", optional = true }
@@ -211,7 +212,7 @@ socket2 = { version = "0.6", optional = true }
 # guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
 # sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets
 # only (DHCP/DNS/UDP/ICMP are handled at frame level with the wire parsers).
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",

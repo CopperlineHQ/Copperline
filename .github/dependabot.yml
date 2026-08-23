@@ -8,6 +8,9 @@ updates:
     groups:
       patch-updates:
         update-types: ["patch"]
+    ignore:
+      # Save states deliberately remain on bincode 1.x; see Cargo.toml.
+      - dependency-name: bincode
 
   # Standalone browser and publisher frontends.
   - package-ecosystem: cargo
@@ -17,6 +20,8 @@ updates:
     groups:
       patch-updates:
         update-types: ["patch"]
+    ignore:
+      - dependency-name: bincode
   - package-ecosystem: cargo
     directory: /crates/copperline-player
     schedule:
@@ -24,6 +29,8 @@ updates:
     groups:
       patch-updates:
         update-types: ["patch"]
+    ignore:
+      - dependency-name: bincode
 
   # Development, plugin, and fuzz workspaces with independent lockfiles.
   - package-ecosystem: cargo
@@ -61,6 +68,8 @@ updates:
     groups:
       patch-updates:
         update-types: ["patch"]
+    ignore:
+      - dependency-name: bincode
 
   - package-ecosystem: github-actions
     directory: /

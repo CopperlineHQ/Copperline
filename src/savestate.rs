@@ -215,7 +215,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  63: DiskDma gained `write_start_pending`, so a write armed against an
 //      idle floppy mechanism re-latches its rotational start when cells
 //      first arrive.
-pub const STATE_VERSION: u32 = 63;
+//  64: the bundled HostSocket WASM module moved from smoltcp 0.13 to 0.14.
+//      Its TCP/IP stack lives as Rust values in the plugin's snapshotted
+//      linear memory, whose internal layout is replayed against the current
+//      module on load; reject old snapshots rather than interpret that memory
+//      with the new dependency's layout.
+pub const STATE_VERSION: u32 = 64;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

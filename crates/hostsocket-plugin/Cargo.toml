@@ -30,7 +30,7 @@ crate-type = ["cdylib", "rlib"]
 # net = "loopback", which bounces the request straight back to this same
 # interface) would never get a reply at all, since nothing else in this
 # plugin ever answers on the stack's behalf.
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",
