@@ -2124,13 +2124,19 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Pty => Err(anyhow!(
             "[serial] mode = \"pty\" is only available on Unix hosts"
         )),
-        SerialMode::Modem => Ok(Box::new(crate::modem::ModemSerialSink::new_tcp(
-            crate::modem::ModemOptions {
+        SerialMode::Modem => {
+            let options = crate::modem::ModemOptions {
                 listen: cfg.serial.listen.clone(),
                 telnet: cfg.serial.telnet,
                 phonebook: cfg.serial.phonebook.clone(),
-            },
-        )?)),
+            };
+            match cfg.serial.session.as_deref() {
+                Some(path) => Ok(Box::new(crate::modem::ModemSerialSink::new_scripted(
+                    path, options,
+                )?)),
+                None => Ok(Box::new(crate::modem::ModemSerialSink::new_tcp(options)?)),
+            }
+        }
     }
 }
 

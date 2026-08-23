@@ -578,6 +578,12 @@ pub(crate) struct RawSerial {
     /// default port). Modem mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) phonebook: Option<std::collections::BTreeMap<String, String>>,
+    /// A scripted session file to replay instead of dialing out over TCP
+    /// (`docs/guide/modem.md`'s "Scripted sessions" section has the file
+    /// format). Modem mode only; incompatible with `listen` (the scripted
+    /// transport has no inbound side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.

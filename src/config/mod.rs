@@ -888,6 +888,10 @@ pub struct SerialConfig {
     /// `[serial.phonebook]` entries, number -> "host:port" (or a bare host),
     /// sorted by number. [`SerialMode::Modem`] only.
     pub phonebook: Vec<(String, String)>,
+    /// `[serial] session`: a scripted session file the modem replays
+    /// instead of dialing out over TCP. [`SerialMode::Modem`] only; `None`
+    /// means the ordinary TCP transport.
+    pub session: Option<PathBuf>,
 }
 
 /// Where [`SerialMode::Tcp`] listens with no `[serial] listen` of its own:
@@ -2468,6 +2472,9 @@ pub struct ConfigOverrides {
     /// Remote host:port the serial port dials (`--serial-connect`),
     /// implying `--serial tcp-connect`.
     pub serial_connect: Option<String>,
+    /// A scripted session file to replay (`--serial-session`), implying
+    /// `--serial modem`. Same as `[serial] session`.
+    pub serial_session: Option<String>,
     /// Host MIDI output endpoint (`--midi-out`), implying `--serial midi`.
     pub midi_out: Option<String>,
     /// Host MIDI input endpoint (`--midi-in`), implying `--serial midi`.
@@ -2591,6 +2598,7 @@ impl ConfigOverrides {
             && self.autofire_hz.is_none()
             && self.serial.is_none()
             && self.serial_connect.is_none()
+            && self.serial_session.is_none()
             && self.midi_out.is_none()
             && self.midi_in.is_none()
             && self.parallel.is_none()
@@ -2750,6 +2758,9 @@ impl ConfigOverrides {
         if let Some(addr) = &self.serial_connect {
             raw.serial.connect = Some(addr.clone());
         }
+        if let Some(path) = &self.serial_session {
+            raw.serial.session = Some(path.clone());
+        }
         if let Some(out) = &self.midi_out {
             raw.serial.midi_out = Some(out.clone());
         }
@@ -2767,6 +2778,14 @@ impl ConfigOverrides {
             && self.serial_connect.is_some()
         {
             raw.serial.mode = Some(SerialMode::TcpConnect.label().to_string());
+        }
+        if self.serial.is_none()
+            && self.midi_out.is_none()
+            && self.midi_in.is_none()
+            && self.serial_connect.is_none()
+            && self.serial_session.is_some()
+        {
+            raw.serial.mode = Some(SerialMode::Modem.label().to_string());
         }
         if let Some(device) = &self.parallel {
             raw.parallel.device = Some(device.clone());

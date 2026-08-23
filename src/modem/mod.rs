@@ -14,11 +14,16 @@
 //! inbound calls (RING, busy-line handling for a second caller), the
 //! WiModem232 `AT*` extended set, the `[serial.phonebook]` lookup, the
 //! `telnet.rs` NVT layer (engaged when `AT*T1`/`[serial] telnet` is on),
-//! `S9`'s host-time connect delay, and `AT&W`'s stored-profile sidecar
-//! (`profile.rs`). ATD's connect attempt still blocks the calling thread
-//! for up to five seconds; a background dial is future work.
+//! `S9`'s host-time connect delay, `AT&W`'s stored-profile sidecar
+//! (`profile.rs`), and the scripted-session transport (`session.rs`) that
+//! replays a canned dial-out from a file for reproducible headless runs.
+//! ATD's connect attempt still blocks the calling thread for up to five
+//! seconds against the real TCP transport; a background dial is future
+//! work (the scripted transport's own `dial` is synchronous but never
+//! blocks -- there is no socket underneath it).
 
 pub mod profile;
+mod session;
 mod telnet;
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
@@ -27,6 +32,7 @@ use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -104,6 +110,16 @@ pub(crate) trait ModemTransport: Send {
     fn answer(&mut self) -> bool;
     /// Drop the waiting caller without answering.
     fn reject(&mut self);
+    /// Emulated-time tick, called from [`SerialSink::poll`] and once more
+    /// from [`ModemSerialSink::enter_online`] with the connect moment's own
+    /// `at_cck` (so a call-opening transport sees "now" immediately rather
+    /// than waiting for the next poll). [`TcpModemTransport`] has nothing
+    /// to time off emulated ticks (its pacing is real host time via
+    /// [`SerialTimeAnchor`], like the rest of the network-backed sinks) and
+    /// keeps the default no-op; [`session::ScriptedTransport`] is the one
+    /// implementation that uses this, to gate its `delay` directives on the
+    /// same clock `Settings::s12`'s guard time already uses.
+    fn advance(&mut self, _at_cck: u64) {}
 }
 
 /// Spawn the background reader shared by every connected/accepted
@@ -591,6 +607,25 @@ impl ModemSerialSink {
         Ok(sink)
     }
 
+    /// The determinism-story constructor: replays `path` (see
+    /// `src/modem/session.rs`'s module doc comment for the file format)
+    /// instead of dialing out over TCP, so a headless run driving this
+    /// modem is byte-for-byte reproducible. `options.listen` is not
+    /// consulted -- the scripted transport has no inbound side (see
+    /// [`session::ScriptedTransport::listen`]) -- but `phonebook` and
+    /// `telnet` behave exactly as they do for [`Self::new_tcp`], since an
+    /// `ATD<number>` or `AT*T1` in the script's `expect` text still has to
+    /// resolve/engage the same way a real session's would.
+    pub fn new_scripted(path: &Path, options: ModemOptions) -> anyhow::Result<Self> {
+        let transport = session::ScriptedTransport::load(path)?;
+        let sidecar = profile::ModemProfile::load();
+        let mut sink = Self::with_transport(Box::new(transport));
+        sink.phonebook = options.phonebook;
+        sink.telnet_config_explicit = options.telnet;
+        sink.settings = settings_from_sidecar(sidecar.as_ref(), sink.telnet_config_explicit);
+        Ok(sink)
+    }
+
     pub(crate) fn with_transport(transport: Box<dyn ModemTransport>) -> Self {
         Self {
             transport,
@@ -781,6 +816,11 @@ impl ModemSerialSink {
         self.connect_delay_until = self.time_anchor.map(|anchor| {
             anchor.host_time(at_cck) + Duration::from_millis(u64::from(self.settings.s9) * 100)
         });
+        // Gives a transport that times itself off emulated ticks (the
+        // scripted session) the connect moment right away, rather than
+        // waiting for the next `SerialSink::poll` -- see
+        // `ModemTransport::advance`'s doc comment.
+        self.transport.advance(at_cck);
         self.queue_result(ResultCode::Connect);
     }
 
@@ -1465,6 +1505,7 @@ impl SerialSink for ModemSerialSink {
     /// [`Self::handle_online_byte`] and [`Self::poll_ring`] for the two
     /// halves' own reasoning.
     fn poll(&mut self, at_cck: u64) {
+        self.transport.advance(at_cck);
         if self.mode == Mode::Online {
             if let Some(e) = self.escape {
                 if e.awaiting_trail && at_cck.saturating_sub(e.last_cck) >= self.guard_ccks() {

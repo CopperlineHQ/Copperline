@@ -436,6 +436,7 @@ impl TryFrom<RawConfig> for Config {
                 .unwrap_or_default()
                 .into_iter()
                 .collect(),
+            session: raw.serial.session.as_ref().map(PathBuf::from),
         };
         if serial.mode == SerialMode::Modem && raw.serial.connect.is_some() {
             bail!(
@@ -455,6 +456,19 @@ impl TryFrom<RawConfig> for Config {
                 "[serial] phonebook is for mode = \"modem\" (a guest's ATD looks numbers up \
                  there); got mode = {:?}",
                 serial.mode.label()
+            );
+        }
+        if raw.serial.session.is_some() && serial.mode != SerialMode::Modem {
+            bail!(
+                "[serial] session is for mode = \"modem\" (it replays a canned dial-out \
+                 session instead of dialing out over TCP); got mode = {:?}",
+                serial.mode.label()
+            );
+        }
+        if serial.session.is_some() && raw.serial.listen.is_some() {
+            bail!(
+                "[serial] session and [serial] listen cannot be combined: the scripted \
+                 transport has no inbound-call support (dial-out replay only)"
             );
         }
         if let Some(phonebook) = raw.serial.phonebook.as_ref() {
