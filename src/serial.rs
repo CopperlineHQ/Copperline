@@ -109,6 +109,24 @@ pub trait SerialSink: Send {
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
 
+    /// Modem-driven RS-232 status inputs for CIA-B PA3-5, as wire levels:
+    /// bit 3 = /DSR, bit 4 = /CTS, bit 5 = /CD. The pins are active-low,
+    /// so an asserted signal reads as a 0 bit. `None` means nothing is
+    /// attached and the CIA's own pull-ups win (today's behaviour).
+    fn control_lines(&self) -> Option<u8> {
+        None
+    }
+
+    /// Guest-driven RS-232 outputs, as logical assertions (true = asserted).
+    /// The bus decodes them from CIA-B PA7 (/DTR) and PA6 (/RTS) wire
+    /// levels, which are active-low; the decode happens there, once.
+    fn set_control_outputs(&mut self, _dtr: bool, _rts: bool) {}
+
+    /// The guest reprogrammed SERPER; `bps` is the resulting line rate.
+    /// Pacing stays Paula's job -- this only informs a sink whose protocol
+    /// text quotes the rate (a modem's CONNECT message).
+    fn baud_changed(&mut self, _bps: u32) {}
+
     /// Discard host-side state tied to an emulated timeline that has just
     /// been abandoned by save-state load or rewind.
     ///

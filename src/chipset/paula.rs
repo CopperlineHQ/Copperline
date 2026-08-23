@@ -954,6 +954,17 @@ impl Paula {
         v
     }
 
+    /// SERPER write: bits 14..0 are the bit period (in Paula clocks minus
+    /// one) and bit 15 selects the long/9-bit word format (`SERPER_LONG`).
+    /// Pacing reads `serper` directly at shift time; this also tells the
+    /// sink the resulting line rate, for a sink whose protocol text quotes
+    /// a baud figure (a modem's CONNECT message).
+    pub fn write_serper(&mut self, val: u16) {
+        self.serper = val;
+        let divisor = u32::from(val & 0x7FFF).saturating_add(1).max(1);
+        self.serial.baud_changed(PAULA_CLOCK_HZ / divisor);
+    }
+
     /// INTENA writes use SET/CLR semantics on bit 15.
     pub fn write_intena(&mut self, val: u16) {
         let bits = val & 0x7FFF;

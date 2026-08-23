@@ -4347,6 +4347,14 @@ impl Bus {
         // timeline-jump boundary after it moves, so it cannot retain data
         // from the abandoned future.
         self.paula.serial.reset_after_timeline_jump();
+        // The sink just moved onto this deserialized CIA-B's PRA/DDRA, whose
+        // /DTR and /RTS levels it never saw a write for (the swap bypasses
+        // `cia_b_write`). Push them once so a resumed machine's DTR/RTS reach
+        // the sink exactly as if the guest had just written them.
+        let pra = self.cia_b.port_a_pins();
+        self.paula
+            .serial
+            .set_control_outputs(pra & 0x80 == 0, pra & 0x40 == 0);
         std::mem::swap(
             &mut self.paula.serial_observer,
             &mut live.paula.serial_observer,
@@ -6555,6 +6563,14 @@ impl Bus {
                 let inputs = !self.cia_b.port_a_ddr() & 0x07;
                 v = (v & !inputs) | (lines & inputs);
             }
+            // CIA-B PA3-5 are the RS-232 status inputs (/DSR, /CTS, /CD),
+            // pulled up when nothing drives them. An attached modem holds
+            // them at its own levels; pins the guest has switched to
+            // outputs stay CIA-driven.
+            if let Some(lines) = self.paula.serial.control_lines() {
+                let inputs = !self.cia_b.port_a_ddr() & 0x38;
+                v = (v & !inputs) | (lines & inputs);
+            }
         }
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_b", reg);
@@ -6585,6 +6601,12 @@ impl Bus {
         if reg == REG_PRB || reg == REG_DDRB {
             let prb = self.cia_b.port_b_pins();
             self.floppy.write_prb(prb);
+        }
+        if reg == REG_PRA || reg == REG_DDRA {
+            let pra = self.cia_b.port_a_pins();
+            self.paula
+                .serial
+                .set_control_outputs(pra & 0x80 == 0, pra & 0x40 == 0);
         }
         eff
     }
