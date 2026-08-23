@@ -235,7 +235,7 @@ fn deserialize_component<R: std::io::Read, T: serde::de::DeserializeOwned>(
     r: &mut R,
     what: &str,
 ) -> Result<T> {
-    bincode::deserialize_from(r).map_err(|e| anyhow!("reading {what}: {e}"))
+    crate::savestate::deserialize_from_state(r).map_err(|e| anyhow!("reading {what}: {e}"))
 }
 
 /// Machine-level runtime state outside `CpuCore` and `Bus` that a save
