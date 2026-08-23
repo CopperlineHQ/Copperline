@@ -16,6 +16,9 @@
 //! ATD's connect attempt also still blocks the calling thread for up to
 //! five seconds; a background dial is future work.
 
+pub mod profile;
+mod telnet;
+
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::serial::SerialSink;
 use std::collections::VecDeque;

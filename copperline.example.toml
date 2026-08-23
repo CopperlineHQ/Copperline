@@ -754,6 +754,19 @@ floppy_sounds_volume = 100
 #   "pty"     serial in/out is bridged to a host pseudo-terminal (Unix only).
 #             The slave path (/dev/pts/N) is logged at startup; attach a
 #             terminal with e.g. `minicom -D`, `screen`, or `cu -l`.
+#   "modem"   a Hayes/AT-command modem: the guest dials out with
+#             "ATD host:port" rather than the port being wired to a peer at
+#             startup, so there is no connect key here. listen means
+#             something different from tcp mode: it is the address the
+#             modem answers incoming calls on; a connection there rings the
+#             guest (RING) rather than being bridged straight through, and
+#             ATA (or S0 auto-answer) picks it up. telnet turns on AT*T1's
+#             telnet NVT translation (RFC 854 option negotiation and CR
+#             handling) by default at power-on -- needed for a real telnet
+#             server (a BBS), not a raw TCP byte service. [serial.phonebook]
+#             maps a dialable number to a host:port (or a bare host, which
+#             dials the modem's default port); config-file only, no
+#             launcher row.
 # With an AUX: shell on the Amiga side, "tcp"/"pty" give a remote AmigaDOS
 # console. --serial MODE overrides this per run; --serial-connect HOST:PORT
 # implies "tcp-connect"; --midi-out/--midi-in NAME imply "midi".
@@ -762,6 +775,12 @@ floppy_sounds_volume = 100
 # midi_out = "USB MIDI Interface"
 # midi_in = "USB MIDI Interface"
 # listen = "127.0.0.1:1234"
+#
+# Modem mode's own keys (see "modem" above).
+# telnet = false                     # AT*T1 telnet translation at power-on
+# [serial.phonebook]
+# "5551234" = "bbs.example.com:23"
+# "5555678" = "bbs2.example.com"
 #
 # The emulated MT-32 (docs/guide/mt32.md). midi_out = "mt32" plays to it
 # instead of a host endpoint; both ROM images are needed, and are yours to

@@ -882,6 +882,12 @@ pub struct SerialConfig {
     /// Remote `host:port` for [`SerialMode::TcpConnect`]. Required in that
     /// mode (there is no sensible default host to dial).
     pub connect: Option<String>,
+    /// `AT*T1`/`AT*T0` default at power-on: telnet NVT translation on by
+    /// default. [`SerialMode::Modem`] only; defaults to false.
+    pub telnet: bool,
+    /// `[serial.phonebook]` entries, number -> "host:port" (or a bare host),
+    /// sorted by number. [`SerialMode::Modem`] only.
+    pub phonebook: Vec<(String, String)>,
 }
 
 /// Where [`SerialMode::Tcp`] listens with no `[serial] listen` of its own:

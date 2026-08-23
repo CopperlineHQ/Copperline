@@ -3852,6 +3852,88 @@ fn serial_section_selects_tcp_connect_and_address() -> Result<()> {
 }
 
 #[test]
+fn serial_section_selects_modem_mode_and_telnet_default() -> Result<()> {
+    let cfg = parse_config("[serial]\nmode = \"modem\"\ntelnet = true\n")?;
+    assert_eq!(cfg.serial.mode, SerialMode::Modem);
+    assert!(cfg.serial.telnet);
+    // Off by default.
+    let cfg = parse_config("[serial]\nmode = \"modem\"\n")?;
+    assert!(!cfg.serial.telnet);
+    Ok(())
+}
+
+#[test]
+fn serial_telnet_and_phonebook_are_rejected_outside_modem_mode() -> Result<()> {
+    let err = parse_config("[serial]\nmode = \"stdout\"\ntelnet = true\n").unwrap_err();
+    assert!(err.to_string().contains("mode = \"modem\""), "{err:#}");
+
+    let err = parse_config(
+        "[serial]\nmode = \"tcp\"\n[serial.phonebook]\n\"555-1234\" = \"bbs.example.com:23\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("mode = \"modem\""), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_parses_and_sorts_by_number() -> Result<()> {
+    let text = "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\
+                \"555-2000\" = \"bbs2.example.com:2323\"\n\
+                \"555-1000\" = \"bbs1.example.com\"\n";
+    let cfg = parse_config(text)?;
+    assert_eq!(
+        cfg.serial.phonebook,
+        vec![
+            ("555-1000".to_string(), "bbs1.example.com".to_string()),
+            ("555-2000".to_string(), "bbs2.example.com:2323".to_string()),
+        ]
+    );
+
+    // Round-trips through a Save.
+    let raw: RawConfig = toml::from_str(text)?;
+    let written = raw.to_toml_string()?;
+    assert!(written.contains("555-1000"), "{written}");
+    let reloaded = parse_config(&written)?;
+    assert_eq!(reloaded.serial.phonebook, cfg.serial.phonebook);
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_rejects_a_bad_number() -> Result<()> {
+    let err = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"call mom\" = \"host:23\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("call mom"), "{err:#}");
+    assert!(err.to_string().contains("phonebook"), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_rejects_a_bad_host_port() -> Result<()> {
+    let err = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"host:not-a-port\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not-a-port"), "{err:#}");
+
+    // A bare host with no colon is fine (the modem's default port applies).
+    let cfg = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"bbs.example.com\"\n",
+    )?;
+    assert_eq!(
+        cfg.serial.phonebook,
+        vec![("555-1234".to_string(), "bbs.example.com".to_string())]
+    );
+
+    // An empty value is rejected too.
+    let err = parse_config("[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"\"\n")
+        .unwrap_err();
+    assert!(err.to_string().contains("empty"), "{err:#}");
+    Ok(())
+}
+
+#[test]
 fn cli_serial_connect_implies_tcp_connect_mode() -> Result<()> {
     // Like --midi-out implying midi mode: naming a dial-out address is
     // enough, unless --serial explicitly chose another mode.
