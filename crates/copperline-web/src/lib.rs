@@ -961,6 +961,17 @@ impl WebEmu {
         self.emu.bus().cia_b.port_a_pins() & 0x80 == 0
     }
 
+    /// Raise or drop the serial port's carrier-detect input (CIA-B PA5, /CD)
+    /// as the page's far end connects and hangs up. The bridge always
+    /// presents itself as a present, ready device (DSR and CTS asserted);
+    /// carrier is the one line a byte-stream bridge knows the state of, and
+    /// it is what a guest terminal or BBS watches to notice a hang-up. Call
+    /// with `true` when the socket opens and `false` when it closes; a page
+    /// that never calls it leaves the guest seeing a modem with no call up.
+    pub fn serial_set_carrier(&mut self, connected: bool) {
+        self.serial.set_carrier(connected);
+    }
+
     /// Snapshot the whole emulated machine (RAM, ROM, chipset, CPU, the
     /// floppy images themselves) into a `.clstate` blob, the same format the
     /// desktop builds write, so a state saved here loads there and back. The

@@ -728,8 +728,10 @@ fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
     let addr = |reg: usize| (reg as u64) << 8;
 
     // An empty port: BUSY, POUT, and SEL float high on the pull-ups, like
-    // the serial handshake lines on PA3-7. parallel.device reads this as a
-    // busy offline printer and never sends a byte, as on a real machine.
+    // the serial handshake inputs on PA3-5 with nothing on the serial port
+    // (the test bus's sink is an unplugged cable). parallel.device reads
+    // this as a busy offline printer and never sends a byte, as on a real
+    // machine.
     assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFF);
 
     // A printer holds SEL high with BUSY and POUT low, so the guest reads
@@ -749,6 +751,64 @@ fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
     assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFD);
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn serial_device_drives_cia_b_handshake_inputs() {
+    use crate::serial::{SerialControlLines, CIAB_PA_CD, CIAB_PA_CTS, CIAB_PA_DSR};
+
+    struct LinesSerial(SerialControlLines);
+    impl SerialSink for LinesSerial {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn control_lines(&self) -> SerialControlLines {
+            self.0
+        }
+    }
+
+    let mut bus = empty_bus();
+    let addr = |reg: usize| (reg as u64) << 8;
+
+    // Nothing on the serial port: /DSR, /CTS, and /CD float high, so a
+    // 7-wire guest waits for CTS forever, as on a real machine with no
+    // cable.
+    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFF);
+
+    // A present device with no carrier asserts DSR and CTS; the 1489
+    // receivers invert them, so the guest reads those pins low and /CD
+    // still high.
+    bus.paula.serial = Box::new(LinesSerial(SerialControlLines::READY));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0xFF & !(CIAB_PA_DSR | CIAB_PA_CTS) as u64
+    );
+
+    // Carrier up: all three low. This is the byte serial.device hands back
+    // in SDCMD_QUERY's io_Status low byte.
+    bus.paula.serial = Box::new(LinesSerial(SerialControlLines::CONNECTED));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0xFF & !(CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD) as u64
+    );
+
+    // The CIA's own outputs are untouched: dropping /DTR (PA7) and raising
+    // /RTS (PA6) reads back exactly as written.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0xC0);
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x40);
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0x7F & !(CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD) as u64
+    );
+
+    // A handshake pin the guest switches to an output stays CIA-driven even
+    // while the device asserts the line: /CTS written high as an output
+    // reads back high.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, u64::from(0xC0 | CIAB_PA_CTS));
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, u64::from(0x40 | CIAB_PA_CTS));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0x7F & !(CIAB_PA_DSR | CIAB_PA_CD) as u64
+    );
 }
 
 #[test]

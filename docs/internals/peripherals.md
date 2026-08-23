@@ -620,6 +620,8 @@ Default live-audio warnings are emitted from the producer side at the same
 one-second cadence, and only when an underrun, overrun, or stale-frame
 counter is nonzero.
 
+(serial-sink)=
+
 ## Serial (`serial.rs`)
 
 Paula's SERDAT transmit path lands on a `SerialSink`. The default
@@ -639,6 +641,28 @@ A `SerialSink` that can *produce* input must override
 Paula's per-tick UART step takes an idle fast path that skips the receiver
 entirely while it reports false -- the TCP and pty sinks poll a counter
 there, never a syscall.
+
+The sink is also the device on the far end of the RS-232 cable, so it owns
+the handshake inputs. `SerialSink::control_lines` reports DSR, CTS, and
+carrier detect as asserted-or-not (`SerialControlLines`); the bus samples
+it on every guest read of CIA-B PRA and overlays PA3-5 with the levels the
+motherboard's inverting 1489 receivers would present (asserted = pin low,
+undriven = pulled high), leaving pins the guest has switched to outputs
+CIA-driven -- the same shape as the Centronics status overlay on PA0-2.
+The guest's `/DTR` (PA7) and `/RTS` (PA6) outputs are the CIA's own pins,
+readable by a host bridge through `Cia::port_a_pins`. The default is an
+unplugged cable (every input high), which is what the inert and MIDI sinks
+keep; `StdoutSink` is a ready device with no carrier; `TcpSerialSink`
+is a modem whose carrier follows the live connection (an atomic flag the
+acceptor/reader thread maintains, so the PRA read never touches the
+writer lock); `PtySerialSink` is a null-modem peer with its port open;
+`ChannelSerialSink` starts ready-without-carrier and lets the frontend set
+the lines (`ChannelSerialHandle::set_carrier`, exported to the browser as
+`serial_set_carrier`). The lines are host-side state like the bytes
+themselves -- never serialized, never part of the deterministic timeline.
+Paula has no framing-error or parity hardware: a received word always
+carries its stop bit(s) set, and `serial.device` computes parity in
+software, so neither needs a model here.
 
 CCP serial observability is a host-side tap beside `SerialSink`, not another
 serial device. When a control connection subscribes, each successfully

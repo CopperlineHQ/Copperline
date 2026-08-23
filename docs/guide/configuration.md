@@ -1240,6 +1240,21 @@ Paula's serial in/out is connected:
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
 
+Every mode also drives the port's RS-232 handshake inputs, which the guest
+reads on CIA-B port A (`/DSR`, `/CTS`, `/CD`) and `serial.device` reports
+through `SDCMD_QUERY` and honours in 7-wire mode. `off` (and `midi`, whose
+interface only uses the data lines) is an unplugged cable: every input
+floats high, so a guest waiting for CTS or carrier waits forever, as on a
+real machine with nothing attached. `stdout` is a ready device with no
+call behind it: DSR and CTS asserted, no carrier. `tcp` and `tcp-connect`
+behave as a modem: DSR and CTS asserted from startup, and carrier only
+while a client is connected (or the dial-out is up) -- so a guest BBS sees
+the caller hang up as carrier loss, and a terminal program sees the remote
+drop the same way. `pty` reports a host terminal with the port open (all
+three asserted), since a null-modem cable crosses its DTR and RTS to
+these inputs and the terminal's side cannot be observed from here. The
+guest's own `/DTR` and `/RTS` outputs are the CIA's pins as written.
+
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
