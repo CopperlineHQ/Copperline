@@ -2,8 +2,8 @@
 # Generate a vAmiga reference screenshot for a single ADF, for cross-checking
 # Copperline against vAmiga on demand.
 #
-# vAmiga is an OCS/ECS emulator only (no AGA); use it for A500/A1000/A500+
-# behaviour. It runs the ADF headless via a RetroShell "regression" script and
+# vAmiga 5.0 also provides the A1200_2MB AGA setup. It runs the ADF headless
+# via a RetroShell "regression" script and
 # dumps a 716x285 RGB raw framebuffer (the same format tools/vamigats-compare.py
 # and tools/vamigats-diffview.py expect as <stem>.vamiga.raw).
 #
@@ -11,7 +11,8 @@
 #   tools/vamiga-ref.sh <adf> [seconds] [setup] [out.vamiga.raw] [kick.rom]
 #
 #   seconds  wall-clock emulated time before the shot   (default 9)
-#   setup    A500_OCS_1MB | A500_ECS_1MB | A500_PLUS_1MB | A1000_OCS_1MB
+#   setup    A500_OCS_1MB | A500_ECS_1MB | A500_PLUS_1MB | A1000_OCS_1MB |
+#            A1200_2MB
 #            (default A500_OCS_1MB)
 #   out      where to write the raw                       (default /tmp/<stem>.vamiga.raw)
 #   kick     Kickstart ROM                                (default test-assets/kick13.rom)

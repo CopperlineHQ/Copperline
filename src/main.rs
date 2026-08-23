@@ -843,7 +843,7 @@ fn main() -> Result<()> {
 
     if matches!(cfg.chipset, Chipset::Aga) {
         info!(
-            "chipset AGA: bitplanes/palette/FMODE fetch, sprites (wide fetch, manual \
+            "chipset AGA: bitplanes/palette/RDRAM/FMODE fetch, sprites (wide fetch, manual \
              wide, SSCAN2/BSCAN2 scan doubling, BPLCON4 offsets) and CLXCON2 collisions \
              are implemented; residual gaps: 35 ns SHRES sprite output, AGA DDF fine \
              granularity, live collisions on the 6-plane decode (docs/internals/chipset.md)"

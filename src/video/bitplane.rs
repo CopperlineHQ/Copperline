@@ -16,7 +16,8 @@ use crate::bus::{
     CapturedSpriteLine, HeldSpriteLine, RenderRegisterSnapshot, VideoRenderFrameTiming,
 };
 use crate::chipset::agnus::{
-    ddf_hard_bounds, sprite_dma_disabled_by_bitplane_ddf, AgnusRevision, COLORCLOCKS_PER_LINE,
+    bitplane_dma_planes_for_fmode, ddf_hard_bounds, sprite_dma_disabled_by_bitplane_ddf,
+    AgnusRevision, COLORCLOCKS_PER_LINE,
 };
 #[cfg(test)]
 use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
@@ -117,9 +118,9 @@ const COPPER_WAIT_HPOS_FB0: i32 = 0x28;
 /// OCS/ECS colour-path difference is the OCS 12-bit value mask -- so this
 /// anchor is revision-independent across OCS/ECS.
 ///
-/// TODO: AGA Lisa delays colour changes by one hires pixel relative to
-/// OCS/ECS (WinUAE: "AGA color changes are 1 hires pixel delayed"). That
-/// sub-colour-clock offset is not yet modelled here.
+/// AGA Lisa delays colour changes by one hires pixel relative to OCS/ECS.
+/// The renderer's framebuffer is hires-granularity, so the revision-specific
+/// delay is applied as one output sample after this common beam anchor.
 ///
 /// STOP before retuning this. If a scene's colours or copper-driven picture
 /// look horizontally shifted, the cause is usually bitplane fetch/DDF
@@ -945,7 +946,7 @@ impl ControlState {
     }
 
     fn dma_planes(&self) -> usize {
-        self.bitplane_mode().dma_planes()
+        bitplane_dma_planes_for_fmode(self.bplcon0, self.fmode, self.aga())
     }
 
     fn bitplane_dma_enabled(&self) -> bool {
@@ -2679,7 +2680,7 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
             let line = (event.vpos as i32 - visible_line0 - 1) as usize;
             (
                 line.min(base_palettes.len().saturating_sub(1)),
-                color_write_wrapped_framebuffer_x(event.hpos),
+                color_write_wrapped_framebuffer_x(event.hpos, control.aga()),
             )
         } else {
             beam_to_framebuffer_pos_with_visible_line0(
@@ -2720,7 +2721,7 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
             } else if before_visible_lines {
                 0
             } else {
-                color_write_framebuffer_x(event.hpos)
+                color_write_framebuffer_x(event.hpos, control.aga())
             };
             if palette_row_diag().is_some_and(|spec| spec.contains(event.vpos)) {
                 log::info!(
@@ -2909,17 +2910,18 @@ fn manual_bpl_serializer_load_x(hpos: u32, control: &ControlState) -> i32 {
     landing_x + (anchor - landing_x).rem_euclid(word_px)
 }
 
-fn color_write_framebuffer_x(hpos: u32) -> usize {
-    ((hpos as i32 - COLOR_WRITE_HPOS_FB0) * 4).clamp(0, FB_WIDTH as i32) as usize
+fn color_write_framebuffer_x(hpos: u32, aga: bool) -> usize {
+    let x = (hpos as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    x.clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn color_write_wraps_to_previous_output_line(hpos: u32) -> bool {
     hpos < DENISE_HBLANK_START_HPOS
 }
 
-fn color_write_wrapped_framebuffer_x(hpos: u32) -> usize {
-    ((hpos as i32 + COLORCLOCKS_PER_LINE as i32 - COLOR_WRITE_HPOS_FB0) * 4)
-        .clamp(0, FB_WIDTH as i32) as usize
+fn color_write_wrapped_framebuffer_x(hpos: u32, aga: bool) -> usize {
+    let x = (hpos as i32 + COLORCLOCKS_PER_LINE as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    x.clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn sprite_palette_control_framebuffer_x(hpos: u32) -> usize {

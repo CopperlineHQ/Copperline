@@ -56,10 +56,17 @@ and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
-timing). FMODE's BSCAN2 and SSCAN2 bits repeat bitplane and sprite data on
-successive display lines. SSCAN2 also masks the high bit of Lisa's sprite
-horizontal comparator: HSTART `$100..$1FF` aliases `$000..$0FF` while the bit
-is active. DblPAL/DblNTSC modes rely on that alias for the Workbench pointer.
+timing). The fetch phase supplies the low pointer bits: 32/64-bit fetches
+therefore alias words when BPLxPT/SPRxPT is not naturally aligned, and the
+FMODE `10` page mode duplicates the first 16-bit word while advancing the
+pointer by the full 32-bit width. Fetch bandwidth also bounds valid AGA plane
+counts: FMODE0 permits 8/4/2 planes in lo-res/hi-res/SHRES, FMODE1-2 permits
+8/8/4, and FMODE3 permits eight in every resolution. An overprogrammed count
+fetches no bitplanes rather than clamping. FMODE's BSCAN2 and SSCAN2 bits
+repeat bitplane and sprite data on successive display lines. SSCAN2 also masks
+the high bit of Lisa's sprite horizontal comparator: HSTART `$100..$1FF`
+aliases `$000..$0FF` while the bit is active. DblPAL/DblNTSC modes rely on that
+alias for the Workbench pointer.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
@@ -361,8 +368,9 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
   sprite resolution, but the compositor does not place sprites on the SHRES
   pixel grid.
-- The vAmigaTS ECS register-readback sweep has not been run against a local
-  checkout; readback is pinned by unit tests meanwhile.
+- AGA palette reads through BPLCON2.RDRAM are modelled, including BANK/LOCT
+  selection and the read-only COLORxx window. Other ECS register readback is
+  pinned by unit tests and the vAmigaTS sweep.
 
 Deliberate non-goals, recorded so they are not re-investigated: A2024 /
 UHRES dual-scan display (a one-time "not emulated" warning is kept),

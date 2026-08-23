@@ -1032,7 +1032,7 @@ impl Bus {
             return None;
         }
         let bplcon0 = key.bplcon0;
-        let nplanes = BitplaneMode::from_bplcon0(bplcon0, self.aga_enabled()).dma_planes();
+        let nplanes = bitplane_dma_planes_for_fmode(bplcon0, key.fmode, self.aga_enabled());
         if nplanes == 0 {
             return None;
         }
