@@ -71,6 +71,15 @@ const STATE_FILL_CHUNK: usize = 1 << 20;
 /// error. Found by the `savestate` fuzz target. Reads that are not
 /// length-prefixed pass straight through, so the reader never consumes
 /// more of the underlying stream than the value being decoded.
+///
+/// The guarantee is deliberately "memory tracks bytes actually present in
+/// the stream", not an absolute cap: state components arrive through a
+/// zlib decoder, and a state's legitimate decompressed size is unbounded
+/// by design (memory-backed disk images -- HDZ, directory mounts -- ride
+/// in the payload), so any fixed limit would refuse real states. A
+/// crafted stream that really supplies gigabytes therefore costs
+/// gigabytes to load, the same deal as opening any large image the user
+/// points the emulator at.
 pub(crate) struct StateReader<R> {
     inner: R,
     buf: Vec<u8>,
@@ -778,20 +787,30 @@ mod tests {
     fn state_reader_matches_bincode_wire_format_across_chunk_boundaries() {
         #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
         struct Sample {
+            // A String is the type that actually reaches
+            // `BincodeRead::get_byte_buffer` in bincode 1 (`Vec<u8>` goes
+            // through serde's element-wise sequence path); longer than two
+            // fill chunks, so the buffer is assembled from several reads.
             name: String,
             ram: Vec<u8>,
             words: Vec<u16>,
             tail: u32,
         }
         let sample = Sample {
-            name: "A1200".into(),
-            // Longer than one fill chunk, so a byte vector is assembled
-            // from several reads.
-            ram: (0..STATE_FILL_CHUNK * 2 + 777).map(|i| i as u8).collect(),
+            name: "A1200-"
+                .chars()
+                .cycle()
+                .take(STATE_FILL_CHUNK * 2 + 777)
+                .collect(),
+            ram: (0..4096).map(|i| i as u8).collect(),
             words: vec![1, 2, 3],
             tail: 0xDEAD_BEEF,
         };
         let bytes = bincode::serialize(&sample).unwrap();
+        assert!(
+            bytes.len() > STATE_FILL_CHUNK * 2,
+            "string must span chunks"
+        );
         let back: Sample = deserialize_from_state(&bytes[..]).unwrap();
         assert_eq!(back, sample);
     }
