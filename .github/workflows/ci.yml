@@ -107,6 +107,34 @@ jobs:
           cargo fuzz build
           git diff --exit-code -- Cargo.lock
 
+  msrv:
+    name: MSRV (rust-version)
+    # Prove that Cargo.toml's declared minimum remains truthful when source
+    # or dependency updates land.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - name: Install the declared Rust version
+        run: |
+          msrv="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "copperline") | .rust_version')"
+          test -n "$msrv" && test "$msrv" != "null"
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Build with MSRV
+        run: cargo +"$MSRV" build --locked
+      - name: Compile unit tests with MSRV
+        # The ordinary Linux job executes these tests. This gate owns source
+        # compatibility, so compile the test targets without duplicating
+        # host-network runtime tests whose timing is unrelated to the MSRV.
+        run: cargo +"$MSRV" test --locked --lib --no-run
+
   unit-tests:
     name: Unit tests
     needs: build
