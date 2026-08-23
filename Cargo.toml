@@ -202,7 +202,7 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # changing this is a savestate::STATE_VERSION bump, not a routine update.
 # Track an LTS line (24.x, 36.x, 48.x, ...): those keep receiving security
 # backports, which the line this was previously pinned to (27.x) did not.
-wasmtime = { version = "=36.0.13", default-features = false, features = ["cranelift", "runtime"], optional = true }
+wasmtime = { version = "=47.0.3", default-features = false, features = ["cranelift", "runtime"], optional = true }
 # Non-blocking connect + cross-platform socket options for the `host_sockets`
 # wasm-plugin capability (src/wasmboard.rs): the host-socket backend for the
 # bundled HostSocket board (`[hostsocket] net = "host"`). Pure Rust wrapper
