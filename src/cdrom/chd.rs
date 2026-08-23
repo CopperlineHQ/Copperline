@@ -98,7 +98,7 @@ struct RawTrack {
 /// fields needed for the bounds are decoded; everything else is left to the
 /// crate, which re-reads the header from offset 0.
 fn bound_raw_header(reader: &mut BufReader<File>, path: &Path) -> Result<()> {
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
 
     const MAGIC: &[u8; 8] = b"MComprHD";
     const HEADER_BYTES: usize = 124;
@@ -164,6 +164,38 @@ fn bound_raw_header(reader: &mut BufReader<File>, path: &Path) -> Result<()> {
             bail!(
                 "{}: CHD describes {count} hunks of {hunk_bytes} bytes, more than any CD \
                  holds",
+                path.display()
+            );
+        }
+    }
+    // A v5 compressed hunk map carries its own byte count as a u32 at the
+    // map offset, and the chd crate allocates that many bytes before
+    // reading them -- up to 4 GiB from one word of a hostile file. The map
+    // is stored verbatim, so it must fit inside the file; refuse one that
+    // does not before the crate sizes a buffer from it.
+    if version == 5 && be32(&raw, 16) != 0 {
+        let map_offset = be64(&raw, 40);
+        let file_len = reader
+            .seek(SeekFrom::End(0))
+            .map_err(|e| anyhow!("{}: reading CHD map header: {e}", path.display()))?;
+        let mut map_head = [0u8; 4];
+        let map_bytes = map_offset
+            .checked_add(16)
+            .filter(|&end| end <= file_len)
+            .and_then(|_| {
+                reader.seek(SeekFrom::Start(map_offset)).ok()?;
+                reader.read_exact(&mut map_head).ok()?;
+                Some(u64::from(u32::from_be_bytes(map_head)))
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "{}: CHD map offset {map_offset} lies past the end of the file",
+                    path.display()
+                )
+            })?;
+        if map_offset + 16 + map_bytes > file_len {
+            bail!(
+                "{}: CHD compressed map claims {map_bytes} bytes, past the end of the file",
                 path.display()
             );
         }
@@ -790,6 +822,20 @@ mod tests {
         );
         let err = CdImage::load(&path).unwrap_err();
         assert!(err.to_string().contains("not a CD-ROM CHD"), "{err:#}");
+
+        // A compressed image's map carries its own u32 byte count at the
+        // map offset, and the crate allocates it before reading it: claim
+        // 2 GiB of map in a 100 KB file. The codec tag (offset 16) marks
+        // the image compressed; the map offset is the u64 at offset 40
+        // (124 in this builder's layout).
+        patch_header(&path, 56, &(HUNK_BYTES).to_be_bytes());
+        patch_header(&path, 16, b"cdlz");
+        patch_header(&path, 124, &0x8000_0000u32.to_be_bytes());
+        let err = CdImage::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("past the end of the file"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
