@@ -5,13 +5,16 @@
 //! [`ModemSerialSink`] implements [`crate::serial::SerialSink`] the same way
 //! [`crate::serial::TcpSerialSink`] does: Paula paces every byte at the
 //! SERPER rate and this sink never paces, sleeps, or blocks. It adds an AT
-//! command interpreter and a dialed TCP transport on top of that contract.
+//! command interpreter and a TCP transport, dialed or answered, on top of
+//! that contract.
 //!
-//! Scope is milestone M1 only: command-mode AT parsing, ATD/ATH/ATO, basic
-//! S-register stubs, the `+++` escape sequence, and RS-232 control-line
-//! wiring (/DSR, /CTS, /CD, /DTR, /RTS). There is no RING/ATA/S0
-//! auto-answer, no telnet NVT negotiation, no phonebook, and no AT&W
-//! persistence -- those are later milestones.
+//! Covered: command-mode AT parsing, ATD/ATH/ATO/ATA, S-register storage
+//! (including S0 auto-answer and the S1 ring counter), the `+++` escape
+//! sequence, RS-232 control-line wiring (/DSR, /CTS, /CD, /DTR, /RTS), and
+//! inbound calls (RING, busy-line handling for a second caller). There is
+//! still no telnet NVT negotiation, no phonebook, and no AT&W persistence.
+//! ATD's connect attempt also still blocks the calling thread for up to
+//! five seconds; a background dial is future work.
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::serial::SerialSink;
@@ -44,6 +47,17 @@ pub(crate) enum DialError {
     Unreachable,
 }
 
+/// Construction-time options for [`ModemSerialSink::new_tcp`] -- what the
+/// host configuration decides once, as opposed to AT-settable state a guest
+/// program controls at runtime.
+#[derive(Default, Clone)]
+pub struct ModemOptions {
+    /// Bind and answer inbound calls on "host:port". `None`: dial-out only,
+    /// same as milestone M1 -- nothing ever RINGs, ATA always reports NO
+    /// CARRIER.
+    pub listen: Option<String>,
+}
+
 /// The byte transport a [`ModemSerialSink`] dials out on. Abstracted so the
 /// state machine can be exercised in tests without opening real sockets;
 /// [`TcpModemTransport`] is the production implementation.
@@ -62,6 +76,17 @@ pub(crate) trait ModemTransport: Send {
     fn carrier(&self) -> bool;
     /// Idempotent: drop the connection if one is up.
     fn hangup(&mut self);
+    /// Accept incoming calls on `addr` ("host:port"). Replaces any previous
+    /// listener.
+    fn listen(&mut self, addr: &str) -> io::Result<()>;
+    /// An inbound caller is waiting, unanswered.
+    fn ringing(&self) -> bool;
+    /// Promote the waiting caller to the live connection. False when none
+    /// is waiting (nobody is calling, or the caller hung up before being
+    /// answered).
+    fn answer(&mut self) -> bool;
+    /// Drop the waiting caller without answering.
+    fn reject(&mut self);
 }
 
 /// Spawn the background reader shared by every connected/accepted
@@ -117,6 +142,17 @@ pub(crate) struct TcpModemTransport {
     /// `carrier()` is a plain atomic load rather than a mutex lock on
     /// Paula-facing hot paths (`control_lines`, `has_pending_input`).
     carrier: Arc<AtomicBool>,
+    /// Inbound connection accepted by the `listen()` thread and parked here
+    /// until `answer()` promotes it or `reject()` drops it. `None` when
+    /// nobody is calling in.
+    pending: Arc<Mutex<Option<TcpStream>>>,
+    /// Mirrors "`pending` is occupied", kept as its own flag for the same
+    /// atomic-load-only reason as `carrier`: `ringing()` is on the same
+    /// Paula-facing footing as `carrier()`.
+    ringing: Arc<AtomicBool>,
+    /// The address `listen()` actually bound (a port of 0 resolves here).
+    /// Test-only accessor, mirroring `TcpSerialSink::local_addr`.
+    listen_addr: Option<SocketAddr>,
 }
 
 impl TcpModemTransport {
@@ -128,51 +164,18 @@ impl TcpModemTransport {
             writer: Arc::new(Mutex::new(None)),
             buffered: Arc::new(AtomicIsize::new(0)),
             carrier: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(Mutex::new(None)),
+            ringing: Arc::new(AtomicBool::new(false)),
+            listen_addr: None,
         }
     }
 
-    /// Test-only counterpart of [`TcpModemTransport::dial`]: bind `addr`,
-    /// accept exactly one inbound connection in the background, and raise
-    /// carrier when a peer connects. Exists so a test can wire two
-    /// [`ModemSerialSink`]s together over a real socket; guest-facing
-    /// listen/RING (auto-answer) is a later milestone, not this.
+    /// The address [`ModemTransport::listen`] actually bound. Test-only:
+    /// production callers pass an explicit port (or accept the default),
+    /// only tests bind port 0 and need to learn what they got.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn listening(addr: &str) -> io::Result<(Self, SocketAddr)> {
-        let listener = TcpListener::bind(addr)?;
-        let local_addr = listener.local_addr()?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let writer = Arc::new(Mutex::new(None));
-        let buffered = Arc::new(AtomicIsize::new(0));
-        let carrier = Arc::new(AtomicBool::new(false));
-        let (accept_writer, accept_buffered, accept_carrier) = (
-            Arc::clone(&writer),
-            Arc::clone(&buffered),
-            Arc::clone(&carrier),
-        );
-        thread::Builder::new()
-            .name("modem-tcp-listen".into())
-            .spawn(move || {
-                let Ok((stream, _peer)) = listener.accept() else {
-                    return;
-                };
-                let _ = stream.set_nodelay(true);
-                let Ok(clone) = stream.try_clone() else {
-                    return;
-                };
-                *accept_writer.lock().unwrap() = Some(clone);
-                accept_carrier.store(true, Ordering::Release);
-                let _ =
-                    spawn_modem_reader(stream, tx, accept_buffered, accept_writer, accept_carrier);
-            })?;
-        Ok((
-            Self {
-                rx: Some(rx),
-                writer,
-                buffered,
-                carrier,
-            },
-            local_addr,
-        ))
+    pub(crate) fn listen_addr(&self) -> Option<SocketAddr> {
+        self.listen_addr
     }
 }
 
@@ -240,6 +243,97 @@ impl ModemTransport for TcpModemTransport {
         }
         self.carrier.store(false, Ordering::Release);
     }
+
+    fn listen(&mut self, addr: &str) -> io::Result<()> {
+        let listener = TcpListener::bind(addr)?;
+        let local_addr = listener.local_addr()?;
+        let pending = Arc::new(Mutex::new(None));
+        let ringing = Arc::new(AtomicBool::new(false));
+        let (accept_pending, accept_ringing, accept_carrier) = (
+            Arc::clone(&pending),
+            Arc::clone(&ringing),
+            Arc::clone(&self.carrier),
+        );
+        thread::Builder::new()
+            .name("modem-tcp-listen".into())
+            .spawn(move || {
+                loop {
+                    let Ok((stream, _peer)) = listener.accept() else {
+                        return;
+                    };
+                    // The phone-line-busy analogue: a call is live, or an
+                    // earlier caller is still parked unanswered, so this
+                    // one gets connection-then-close -- the fast-busy tone
+                    // an auto-dialer reads as BUSY, never a ring.
+                    if accept_carrier.load(Ordering::Acquire)
+                        || accept_ringing.load(Ordering::Acquire)
+                    {
+                        drop(stream);
+                        continue;
+                    }
+                    let _ = stream.set_nodelay(true);
+                    *accept_pending.lock().unwrap() = Some(stream);
+                    accept_ringing.store(true, Ordering::Release);
+                }
+            })?;
+        // Replaces whatever `listen()` bound before: a previous listener
+        // thread (if any) is left running against its own now-orphaned
+        // `pending`/`ringing`, harmless since nothing reads them anymore.
+        self.pending = pending;
+        self.ringing = ringing;
+        self.listen_addr = Some(local_addr);
+        Ok(())
+    }
+
+    fn ringing(&self) -> bool {
+        self.ringing.load(Ordering::Acquire)
+    }
+
+    fn answer(&mut self) -> bool {
+        let Some(stream) = self.pending.lock().unwrap().take() else {
+            return false;
+        };
+        self.ringing.store(false, Ordering::Release);
+        // A caller that hung up while waiting leaves a closed socket
+        // parked; a zero-length peek reads EOF without consuming any real
+        // data, so a dead parked stream is caught here instead of handing
+        // the guest a CONNECT that drops on the next byte.
+        let _ = stream.set_nonblocking(true);
+        let mut probe = [0u8; 1];
+        let dead = matches!(stream.peek(&mut probe), Ok(0));
+        let _ = stream.set_nonblocking(false);
+        if dead {
+            return false;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return false;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.writer.lock().unwrap() = Some(clone);
+        self.rx = Some(rx);
+        self.carrier.store(true, Ordering::Release);
+        if spawn_modem_reader(
+            stream,
+            tx,
+            Arc::clone(&self.buffered),
+            Arc::clone(&self.writer),
+            Arc::clone(&self.carrier),
+        )
+        .is_err()
+        {
+            *self.writer.lock().unwrap() = None;
+            self.carrier.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    fn reject(&mut self) {
+        if let Some(stream) = self.pending.lock().unwrap().take() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        self.ringing.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -270,6 +364,9 @@ struct Settings {
     verbose: bool,
     /// ATQn: suppress all result codes.
     quiet: bool,
+    /// S0: rings to wait through before auto-answering an inbound call; 0
+    /// (default) disables auto-answer, ATA is then the only way to answer.
+    s0: u8,
     /// S2: the `+++` escape character.
     s2: u8,
     /// S12: escape guard time, in fiftieths of a second.
@@ -280,7 +377,7 @@ struct Settings {
     /// AT&Dn: only 2 (default) and 3 are modeled -- both hang up on a
     /// DTR true->false transition. 0 and 1 are accepted but ignored (no
     /// auto-answer to disable, and &D1's escape-to-command-without-hangup
-    /// behaviour is out of M1's scope).
+    /// behaviour is not modeled).
     dtr_action: u8,
 }
 
@@ -290,6 +387,7 @@ impl Default for Settings {
             echo: true,
             verbose: true,
             quiet: false,
+            s0: 0,
             s2: b'+',
             s12: 50,
             dcd_always: false,
@@ -335,13 +433,40 @@ pub struct ModemSerialSink {
     /// first call, so the very first report (whatever it says) is never
     /// itself treated as a drop.
     dtr_prev: Option<bool>,
+    /// A call is up (dialed, answered, or parked in command mode behind a
+    /// `+++` escape with the line still connected) and this sink has not
+    /// yet told the guest it dropped. Set on every transition into
+    /// [`ModemSerialSink::enter_online`], cleared the moment NO CARRIER is
+    /// reported for it (by [`SerialSink::poll`] catching a silent drop in
+    /// command mode, by the online-mode remote-close path in
+    /// [`SerialSink::read_byte`], or by [`ModemSerialSink::hangup_internal`]
+    /// ending the call locally).
+    carrier_expected: bool,
+    /// S1: rings answered by RING since the last decay or hangup, readable
+    /// and writable via ATS1. Real Hayes modems drift it back to 0 eight
+    /// seconds after the last ring even with no call resolved either way;
+    /// [`ModemSerialSink::poll`] applies that decay from `last_ring_cck`.
+    s1: u8,
+    /// `at_cck` of the most recently sent RING, `None` when nothing is
+    /// currently ringing and S1 has already decayed. The reference point
+    /// for both the ring cadence and the S1 decay timer.
+    last_ring_cck: Option<u64>,
 }
 
 impl ModemSerialSink {
-    /// The emulator's constructor: nothing connects at startup, dial is
-    /// on-demand via ATD.
-    pub fn new_tcp() -> Self {
-        Self::with_transport(Box::new(TcpModemTransport::new()))
+    /// The emulator's constructor: dial is always on-demand via ATD;
+    /// `options.listen` additionally binds an answering side at startup, so
+    /// inbound calls can RING and be picked up (ATA, or S0 auto-answer).
+    /// Propagates a bind failure with `?`, the same convention
+    /// [`crate::serial::TcpSerialSink::listen`] uses -- a modem that was
+    /// asked to answer calls and silently cannot is worse than a config
+    /// error at startup.
+    pub fn new_tcp(options: ModemOptions) -> anyhow::Result<Self> {
+        let mut transport = TcpModemTransport::new();
+        if let Some(addr) = options.listen.as_deref() {
+            transport.listen(addr)?;
+        }
+        Ok(Self::with_transport(Box::new(transport)))
     }
 
     pub(crate) fn with_transport(transport: Box<dyn ModemTransport>) -> Self {
@@ -355,6 +480,9 @@ impl ModemSerialSink {
             escape: None,
             last_online_activity_cck: None,
             dtr_prev: None,
+            carrier_expected: false,
+            s1: 0,
+            last_ring_cck: None,
         }
     }
 
@@ -407,6 +535,8 @@ impl ModemSerialSink {
 
     fn queue_s_read(&mut self, reg: u8) {
         let val = match reg {
+            0 => self.settings.s0,
+            1 => self.s1,
             2 => self.settings.s2,
             12 => self.settings.s12,
             _ => 0,
@@ -418,6 +548,8 @@ impl ModemSerialSink {
 
     fn set_s_register(&mut self, reg: u8, val: u8) {
         match reg {
+            0 => self.settings.s0 = val,
+            1 => self.s1 = val,
             2 => self.settings.s2 = val,
             12 => self.settings.s12 = val,
             // Every other S register is a stub: no state, no error, just an
@@ -432,11 +564,16 @@ impl ModemSerialSink {
 
     /// Idempotent hangup: drops the transport connection and, if a call was
     /// in progress, returns to command mode. Shared by ATH, ATZ/AT&F, and a
-    /// DTR-drop with AT&D2/3.
+    /// DTR-drop with AT&D2/3. Also the one place S1/ring state resets on
+    /// "the call is over", per Hayes convention (the other is the 8-second
+    /// decay in [`ModemSerialSink::poll`]).
     fn hangup_internal(&mut self) {
         self.transport.hangup();
         self.escape = None;
         self.mode = Mode::Command;
+        self.carrier_expected = false;
+        self.s1 = 0;
+        self.last_ring_cck = None;
     }
 
     /// Guard time in color clocks: S12 is in fiftieths of a second, and one
@@ -445,17 +582,28 @@ impl ModemSerialSink {
         u64::from(self.settings.s12) * u64::from(PAULA_CLOCK_HZ) / 50
     }
 
-    /// Enter online (relay) mode after a successful ATD or an ATO with
-    /// carrier up. `at_cck` becomes the escape lead-guard's reference point
-    /// -- an escape cannot start until S12 of silence has passed since.
+    /// Enter online (relay) mode after a successful ATD, an answered
+    /// inbound call (ATA or S0 auto-answer), or an ATO with carrier up.
+    /// `at_cck` becomes the escape lead-guard's reference point -- an
+    /// escape cannot start until S12 of silence has passed since.
     fn enter_online(&mut self, at_cck: u64) {
         self.mode = Mode::Online;
         self.escape = None;
         self.last_online_activity_cck = Some(at_cck);
+        self.carrier_expected = true;
+        self.s1 = 0;
+        self.last_ring_cck = None;
         self.queue_result(ResultCode::Connect);
     }
 
     fn do_dial(&mut self, target: &[u8], at_cck: u64) {
+        if self.transport.carrier() {
+            // A guest that escaped to command mode with a call still up
+            // and then dials again means "hang up and place a new call" --
+            // the old line does not stay parked in the background while a
+            // second one is placed.
+            self.transport.hangup();
+        }
         let target = String::from_utf8_lossy(target);
         let target = target.trim();
         let host_port = if target.contains(':') {
@@ -467,6 +615,70 @@ impl ModemSerialSink {
             Ok(()) => self.enter_online(at_cck),
             Err(DialError::Refused) => self.queue_result(ResultCode::Busy),
             Err(DialError::Unreachable) => self.queue_result(ResultCode::NoCarrier),
+        }
+    }
+
+    fn do_answer(&mut self, at_cck: u64) {
+        if self.transport.carrier() {
+            // Same reasoning as `do_dial`: answering while a call is
+            // already up drops it first rather than leaving it parked.
+            self.transport.hangup();
+        }
+        if self.transport.answer() {
+            self.enter_online(at_cck);
+        } else {
+            self.queue_result(ResultCode::NoCarrier);
+        }
+    }
+
+    /// Ring cadence and RING/S0/S1 bookkeeping, driven by [`Self::poll`].
+    /// Real Hayes modems ring roughly every four seconds of line time and
+    /// give S1 the same eight-second decay a real line's ring-counter
+    /// register carries between calls.
+    fn poll_ring(&mut self, at_cck: u64) {
+        const RING_CADENCE_CCKS: u64 = 4 * PAULA_CLOCK_HZ as u64;
+        const S1_DECAY_CCKS: u64 = 8 * PAULA_CLOCK_HZ as u64;
+        const RING_ABANDON_COUNT: u8 = 10;
+
+        if self.mode == Mode::Command && self.transport.ringing() {
+            let due = match self.last_ring_cck {
+                None => true,
+                Some(last) => at_cck.saturating_sub(last) >= RING_CADENCE_CCKS,
+            };
+            if due {
+                self.queue_ring();
+                self.last_ring_cck = Some(at_cck);
+                self.s1 = self.s1.saturating_add(1);
+                if self.s1 >= RING_ABANDON_COUNT {
+                    // The exchange gives up on a call nobody picked up,
+                    // same as a real line timing out an unanswered ring.
+                    self.transport.reject();
+                } else if self.settings.s0 > 0 && self.s1 >= self.settings.s0 {
+                    self.do_answer(at_cck);
+                }
+            }
+        }
+        // S1 drifts back to 0 eight seconds after the last ring whether or
+        // not that call was ever picked up.
+        if let Some(last) = self.last_ring_cck {
+            if at_cck.saturating_sub(last) >= S1_DECAY_CCKS {
+                self.s1 = 0;
+                self.last_ring_cck = None;
+            }
+        }
+    }
+
+    fn queue_ring(&mut self) {
+        if self.settings.quiet {
+            return;
+        }
+        let bytes: &[u8] = if self.settings.verbose {
+            b"\r\nRING\r\n"
+        } else {
+            b"2\r"
+        };
+        for &b in bytes {
+            self.queue_out_byte(b);
         }
     }
 
@@ -535,6 +747,11 @@ impl ModemSerialSink {
                     let (_v, ni) = read_digit_default(bytes, i + 1, 0);
                     self.queue_identity();
                     i = ni;
+                }
+                'A' => {
+                    self.do_answer(at_cck);
+                    terminal_result = true;
+                    i += 1;
                 }
                 'D' => {
                     let mut j = i + 1;
@@ -654,16 +871,15 @@ impl ModemSerialSink {
     /// either window -- forwards the withheld escape characters plus the
     /// offending byte and the relay continues.
     ///
-    /// M1 limitation: `has_pending_input`/`read_byte` are polled constantly
-    /// with no `at_cck`, so they cannot evaluate the trailing guard on
-    /// their own. The trailing guard is instead checked here, on the next
-    /// `at_cck`-stamped guest byte after the guard has elapsed -- so the
-    /// mode switch is decided just before that byte would otherwise have
-    /// been relayed, and it becomes the first character of a new command
-    /// line rather than being relayed. A guest that goes silent forever
-    /// right after `+++` never completes the escape; a real modem has the
-    /// same edge case bounded by a dedicated timer, which Paula's
-    /// `at_cck`-only sink hook does not provide.
+    /// The trailing guard is normally completed by [`Self::poll`], which is
+    /// driven purely by elapsed `at_cck` and needs no further guest byte to
+    /// notice the guard has expired -- a guest that falls silent right
+    /// after `+++` still drops to command mode on schedule. This method's
+    /// own `awaiting_trail` branch stays as a same-call fallback for direct
+    /// callers that drive `write_byte` without ever calling `poll` (this
+    /// module's own unit tests): a guest byte landing after the guard has
+    /// elapsed is itself treated as the first character of a new command
+    /// line rather than being relayed.
     fn handle_online_byte(&mut self, b: u8, at_cck: u64) {
         if let Some(e) = self.escape.take() {
             let guard = self.guard_ccks();
@@ -763,8 +979,7 @@ impl SerialSink for ModemSerialSink {
                 // The remote end closed the connection: surface it to the
                 // guest and fall back to command mode, same as a real modem
                 // losing carrier mid-call.
-                self.mode = Mode::Command;
-                self.escape = None;
+                self.hangup_internal();
                 self.queue_result(ResultCode::NoCarrier);
                 return self.out_queue.pop_front();
             }
@@ -789,25 +1004,49 @@ impl SerialSink for ModemSerialSink {
         true
     }
 
+    /// Escape trailing-guard completion, a dropped-carrier NO CARRIER in
+    /// command mode, and RING/S0/S1 bookkeeping -- everything this sink
+    /// times off elapsed line time rather than a guest byte. See
+    /// [`Self::handle_online_byte`] and [`Self::poll_ring`] for the two
+    /// halves' own reasoning.
+    fn poll(&mut self, at_cck: u64) {
+        if self.mode == Mode::Online {
+            if let Some(e) = self.escape {
+                if e.awaiting_trail && at_cck.saturating_sub(e.last_cck) >= self.guard_ccks() {
+                    self.mode = Mode::Command;
+                    self.escape = None;
+                    self.queue_result(ResultCode::Ok);
+                }
+            }
+        }
+        if self.mode == Mode::Command && self.carrier_expected && !self.transport.carrier() {
+            // A call parked in command mode behind a `+++` escape whose
+            // remote end drops: nothing else polls the transport while
+            // idle in command mode, so without this the guest would never
+            // learn the line went away short of trying ATO.
+            self.carrier_expected = false;
+            self.queue_result(ResultCode::NoCarrier);
+        }
+        self.poll_ring(at_cck);
+    }
+
     fn reset_after_timeline_jump(&mut self) {
         // The line dropped, but the modem itself was not reset: settings
         // are retained, only the call and any in-flight state go away.
-        self.transport.hangup();
-        self.mode = Mode::Command;
+        self.transport.reject();
+        self.hangup_internal();
         self.line.clear();
         self.out_queue.clear();
-        self.escape = None;
         self.last_online_activity_cck = None;
     }
 
     fn machine_reset(&mut self) {
         // A full ATZ: settings back to defaults, call dropped.
         self.reset_defaults();
-        self.transport.hangup();
-        self.mode = Mode::Command;
+        self.transport.reject();
+        self.hangup_internal();
         self.line.clear();
         self.out_queue.clear();
-        self.escape = None;
         self.last_online_activity_cck = None;
         self.dtr_prev = None;
     }
@@ -852,6 +1091,13 @@ mod tests {
         from_guest: Vec<u8>,
         carrier: bool,
         hangups: u32,
+        listen_addr: Option<String>,
+        ringing: bool,
+        reject_count: u32,
+        /// A test simulating a caller who hung up before being answered:
+        /// `answer()` reports failure exactly once, the same as
+        /// `TcpModemTransport` catching a dead parked stream.
+        pending_dead: bool,
     }
 
     struct FakeTransport(Arc<Mutex<FakeState>>);
@@ -893,6 +1139,37 @@ mod tests {
             let mut s = self.0.lock().unwrap();
             s.carrier = false;
             s.hangups += 1;
+        }
+
+        fn listen(&mut self, addr: &str) -> io::Result<()> {
+            self.0.lock().unwrap().listen_addr = Some(addr.to_string());
+            Ok(())
+        }
+
+        fn ringing(&self) -> bool {
+            self.0.lock().unwrap().ringing
+        }
+
+        fn answer(&mut self) -> bool {
+            let mut s = self.0.lock().unwrap();
+            if !s.ringing {
+                return false;
+            }
+            s.ringing = false;
+            if s.pending_dead {
+                s.pending_dead = false;
+                return false;
+            }
+            s.carrier = true;
+            true
+        }
+
+        fn reject(&mut self) {
+            let mut s = self.0.lock().unwrap();
+            if s.ringing {
+                s.ringing = false;
+                s.reject_count += 1;
+            }
         }
     }
 
@@ -1318,6 +1595,154 @@ mod tests {
         assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
     }
 
+    // ---- 10. Inbound calls -------------------------------------------------
+
+    const RING_CADENCE: u64 = 4 * PAULA_CLOCK_HZ as u64;
+
+    #[test]
+    fn ring_cadence_and_s1_counting() {
+        let (mut sink, state) = fake_no_echo();
+        state.lock().unwrap().ringing = true;
+        sink.poll(0);
+        assert_eq!(drain_str(&mut sink), "\r\nRING\r\n");
+        // Too soon for a second ring.
+        sink.poll(RING_CADENCE - 1);
+        assert!(drain(&mut sink).is_empty());
+        sink.poll(RING_CADENCE);
+        assert_eq!(drain_str(&mut sink), "\r\nRING\r\n");
+
+        type_line(&mut sink, "ATS1?", RING_CADENCE);
+        assert_eq!(drain_str(&mut sink), "\r\n2\r\n\r\nOK\r\n");
+    }
+
+    #[test]
+    fn ata_answers_and_reports_connect() {
+        let (mut sink, state) = fake_no_echo();
+        state.lock().unwrap().ringing = true;
+        sink.poll(0);
+        drain(&mut sink);
+        type_line(&mut sink, "ATA", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+        assert!(state.lock().unwrap().carrier);
+        assert_eq!(sink.control_lines(), Some(0));
+    }
+
+    #[test]
+    fn ata_with_no_caller_reports_no_carrier() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "ATA", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nNO CARRIER\r\n");
+    }
+
+    #[test]
+    fn s0_auto_answers_on_the_nth_ring() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATS0=2", 0);
+        drain(&mut sink);
+        state.lock().unwrap().ringing = true;
+        sink.poll(0); // ring 1
+        assert_eq!(drain_str(&mut sink), "\r\nRING\r\n");
+        sink.poll(RING_CADENCE); // ring 2: S1 reaches S0, auto-answers
+        assert_eq!(drain_str(&mut sink), "\r\nRING\r\n\r\nCONNECT\r\n");
+        assert!(state.lock().unwrap().carrier);
+    }
+
+    #[test]
+    fn unanswered_caller_is_rejected_after_ten_rings() {
+        let (mut sink, state) = fake_no_echo();
+        state.lock().unwrap().ringing = true;
+        let mut cck = 0u64;
+        for _ in 0..10 {
+            sink.poll(cck);
+            drain(&mut sink);
+            cck += RING_CADENCE;
+        }
+        assert_eq!(state.lock().unwrap().reject_count, 1);
+        assert!(!state.lock().unwrap().ringing);
+    }
+
+    #[test]
+    fn ring_text_honours_v0_and_q1() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATV0", 0);
+        drain(&mut sink);
+        state.lock().unwrap().ringing = true;
+        sink.poll(0);
+        assert_eq!(drain_str(&mut sink), "2\r");
+
+        type_line(&mut sink, "ATV1Q1", 0);
+        drain(&mut sink);
+        state.lock().unwrap().ringing = true;
+        sink.poll(RING_CADENCE * 10); // a fresh ring, well past the cadence
+        assert!(drain(&mut sink).is_empty());
+    }
+
+    // ---- 11. Escape completion / NO CARRIER via poll -----------------------
+
+    #[test]
+    fn escape_completes_via_poll_with_no_guest_byte() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        let g = guard_ccks(50);
+        let t0 = g + 1;
+        sink.write_byte(b'+', t0);
+        sink.write_byte(b'+', t0 + 10);
+        sink.write_byte(b'+', t0 + 20);
+        assert!(state.lock().unwrap().from_guest.is_empty());
+        // No further guest byte at all -- poll alone, once the trailing
+        // guard has elapsed, completes the escape.
+        sink.poll(t0 + 20 + g + 1);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        type_line(&mut sink, "ATO", t0 + 20 + g + 1);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+    }
+
+    #[test]
+    fn no_carrier_surfaced_in_command_mode_after_escape() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        let g = guard_ccks(50);
+        let t0 = g + 1;
+        sink.write_byte(b'+', t0);
+        sink.write_byte(b'+', t0 + 10);
+        sink.write_byte(b'+', t0 + 20);
+        sink.poll(t0 + 20 + g + 1);
+        drain(&mut sink);
+        // Remote drops while parked in command mode: nothing else polls
+        // the transport while idle there, so this is the only place that
+        // notices.
+        state.lock().unwrap().carrier = false;
+        sink.poll(t0 + 20 + g + 2);
+        assert_eq!(drain_str(&mut sink), "\r\nNO CARRIER\r\n");
+        // Reported once, not on every subsequent poll.
+        sink.poll(t0 + 20 + g + 3);
+        assert!(drain(&mut sink).is_empty());
+    }
+
+    #[test]
+    fn atd_with_a_call_up_hangs_up_first() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        let g = guard_ccks(50);
+        let t0 = g + 1;
+        sink.write_byte(b'+', t0);
+        sink.write_byte(b'+', t0 + 10);
+        sink.write_byte(b'+', t0 + 20);
+        sink.poll(t0 + 20 + g + 1);
+        drain(&mut sink);
+        assert_eq!(state.lock().unwrap().hangups, 0);
+        type_line(&mut sink, "ATD127.0.0.1:24", t0 + 20 + g + 1);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+        assert_eq!(state.lock().unwrap().hangups, 1);
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("127.0.0.1:24")
+        );
+    }
+
     // ---- Real TCP tests ---------------------------------------------------
 
     #[test]
@@ -1379,26 +1804,33 @@ mod tests {
 
     #[test]
     fn two_modems_talk_over_real_tcp() {
-        let (listening_transport, addr) = TcpModemTransport::listening("127.0.0.1:0").unwrap();
-        let mut answering = ModemSerialSink::with_transport(Box::new(listening_transport));
+        let mut answering_transport = TcpModemTransport::new();
+        answering_transport.listen("127.0.0.1:0").unwrap();
+        let addr = answering_transport.listen_addr().unwrap();
+        let mut answering = ModemSerialSink::with_transport(Box::new(answering_transport));
         let mut dialing = ModemSerialSink::with_transport(Box::new(TcpModemTransport::new()));
 
         type_line(&mut dialing, &format!("ATD{addr}"), 0);
         let out = drain_str(&mut dialing);
         assert!(out.contains("CONNECT"), "{out:?}");
 
-        // Wait for the listening side's carrier to come up, then bring it
-        // online too (no auto-answer in M1: ATO does it once carrier
-        // exists, exactly like recovering from an escape).
+        // Wait for the caller to reach the listener thread and for a poll
+        // (Paula's job in production) to notice and send RING.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while answering.control_lines() != Some(0) {
-            assert!(
-                Instant::now() < deadline,
-                "answering side never saw carrier"
-            );
+        let mut cck = 0u64;
+        let mut saw_ring = false;
+        while Instant::now() < deadline {
+            answering.poll(cck);
+            if drain_str(&mut answering).contains("RING") {
+                saw_ring = true;
+                break;
+            }
+            cck += 1;
             thread::yield_now();
         }
-        type_line(&mut answering, "ATO", 0);
+        assert!(saw_ring, "answering side never saw RING");
+
+        type_line(&mut answering, "ATA", cck);
         let out = drain_str(&mut answering);
         assert!(out.contains("CONNECT"), "{out:?}");
 

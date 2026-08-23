@@ -1176,6 +1176,11 @@ impl Paula {
     /// color-clock count at the end of this span; a byte that finishes mid-span
     /// is stamped with its emit time from it for a timing-sensitive sink.
     pub fn tick_serial(&mut self, cck: u32, end_cck: u64) -> u16 {
+        // The sink's once-per-span heartbeat, ahead of the idle fast path
+        // below so a sink with its own elapsed-time timers (an escape
+        // guard, a ring cadence) still gets a beat while nothing is
+        // shifting.
+        self.serial.poll(end_cck);
         // Idle fast path: nothing shifting, nothing queued in either
         // direction. Equivalent to the full path, which would only advance
         // the RX synchronizer (the pin level cannot change while idle).

@@ -127,6 +127,16 @@ pub trait SerialSink: Send {
     /// text quotes the rate (a modem's CONNECT message).
     fn baud_changed(&mut self, _bps: u32) {}
 
+    /// Once-per-span heartbeat: Paula calls this on every `tick_serial`,
+    /// stamped with that span's end color clock, whether or not any byte
+    /// moved in either direction. Most sinks have nothing to do with it and
+    /// keep the default. It exists for a sink whose protocol runs its own
+    /// timers off elapsed emulated time rather than guest traffic -- an
+    /// escape-sequence trailing guard that must complete even if the guest
+    /// falls silent right after it, or a ring cadence with nothing on the
+    /// wire to pace it.
+    fn poll(&mut self, _at_cck: u64) {}
+
     /// Discard host-side state tied to an emulated timeline that has just
     /// been abandoned by save-state load or rewind.
     ///
