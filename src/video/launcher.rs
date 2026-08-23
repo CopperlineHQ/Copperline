@@ -4265,6 +4265,7 @@ impl MachineSetup {
                 SerialMode::Tcp => "TCP".to_string(),
                 SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
+                SerialMode::Modem => "Modem".to_string(),
             },
             // The dial-out address has no default -- there is no host to
             // guess -- so an empty box says what it wants instead.

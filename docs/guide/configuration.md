@@ -1177,7 +1177,7 @@ button.
 
 ```toml
 [serial]
-mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
+mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, or modem
 # midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
@@ -1215,6 +1215,10 @@ Paula's serial in/out is connected:
 - `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
+- `modem` -- a Hayes/AT-command modem personality: the guest dials out with
+  `ATD host:port` rather than the port being wired to a peer at startup, so
+  (unlike `tcp-connect`) there is no `connect` address in the config; carrier
+  presence drives /CD.
 
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,

@@ -694,7 +694,7 @@ where
             }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
-                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty)")
+                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty/modem)")
                 })?);
             }
             "--serial-connect" => {
@@ -1435,7 +1435,7 @@ fn print_help() {
          --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
          --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
-         \x20                            tcp-connect, or pty\n  \
+         \x20                            tcp-connect, pty, or modem\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
          \x20                            serial port (implies --serial tcp-connect)\n  \
          --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, nat,\n  \

@@ -429,6 +429,12 @@ impl TryFrom<RawConfig> for Config {
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
         };
+        if serial.mode == SerialMode::Modem && raw.serial.connect.is_some() {
+            bail!(
+                "[serial] connect is for mode = \"tcp-connect\"; in modem mode the guest \
+                 dials with ATD<host:port>"
+            );
+        }
         if let Some(mode) = serial.coppersynth_mt32_mode.as_deref() {
             let m = mode.trim();
             if !(m.eq_ignore_ascii_case("auto")
@@ -1313,9 +1319,10 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "tcp" => Ok(SerialMode::Tcp),
         "tcp-connect" => Ok(SerialMode::TcpConnect),
         "pty" => Ok(SerialMode::Pty),
+        "modem" => Ok(SerialMode::Modem),
         _ => Err(anyhow!(
             "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", \
-             \"tcp-connect\", or \"pty\"",
+             \"tcp-connect\", \"pty\", or \"modem\"",
             s
         )),
     }

@@ -2124,6 +2124,7 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Pty => Err(anyhow!(
             "[serial] mode = \"pty\" is only available on Unix hosts"
         )),
+        SerialMode::Modem => Ok(Box::new(crate::modem::ModemSerialSink::new_tcp())),
     }
 }
 

@@ -824,6 +824,14 @@ pub enum SerialMode {
     /// allocates a pty and logs the slave path (`/dev/pts/N`); a terminal
     /// program (`minicom`, `screen`, `cu`) attaches to it. Unix hosts only.
     Pty,
+    /// Hayes AT-command modem personality over TCP: the guest dials out
+    /// with `ATD` rather than the port being wired to a peer at startup,
+    /// so unlike [`Tcp`]/[`TcpConnect`] there is no connect address in the
+    /// config.
+    ///
+    /// [`Tcp`]: SerialMode::Tcp
+    /// [`TcpConnect`]: SerialMode::TcpConnect
+    Modem,
 }
 
 impl SerialMode {
@@ -836,6 +844,7 @@ impl SerialMode {
             Self::Tcp => "tcp",
             Self::TcpConnect => "tcp-connect",
             Self::Pty => "pty",
+            Self::Modem => "modem",
         }
     }
 }
