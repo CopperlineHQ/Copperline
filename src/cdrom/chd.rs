@@ -25,6 +25,16 @@ use std::path::{Path, PathBuf};
 const FRAME_BYTES: usize = RAW_SECTOR_BYTES + 96;
 /// chdman pads each track's frames to this boundary in the hunk stream.
 const TRACK_PADDING: u32 = 4;
+/// The largest hunk MAME's own header validation accepts (`chd.cpp`:
+/// `hunkbytes >= 65536 * 256` is rejected). The `chd` crate applies the
+/// same bound to v1-v4 headers but skips v5 validation entirely.
+const MAX_HUNK_BYTES: u32 = 65536 * 256;
+/// The most frames a CD-ROM CHD can describe: a 100-minute disc at 75
+/// frames per second, comfortably past the 99:59:74 Red Book limit and
+/// the overburned 99-minute media that exist. The header's logical size
+/// is what the hunk map is allocated from, so it is bounded by what a
+/// disc can physically hold before the map is touched.
+const MAX_DISC_FRAMES: u64 = 100 * 60 * 75;
 
 pub(super) struct ChdImage {
     chd: Chd<BufReader<File>>,
@@ -73,12 +83,102 @@ struct RawTrack {
     postgap: u32,
 }
 
+/// Refuse a CHD whose header describes more than a CD can hold, before the
+/// `chd` crate acts on it. `Chd::open` sizes the whole hunk map
+/// (`hunk_count * 12` bytes, then walks it) and the codecs' hunk-sized
+/// buffers straight from the header's words, computes the hunk count with
+/// unchecked arithmetic, and performs no bounds checks at all on a v5
+/// header -- the only kind chdman has written since 2012 -- so a 124-byte
+/// file claiming a terabyte disc would otherwise take the process down in
+/// the allocator (or an overflow panic) instead of being refused. Both were
+/// found by the `cd_image` fuzz target.
+///
+/// The layout read here is MAME's: magic and version, then per version the
+/// logical size and hunk size, which together fix the hunk count. Only the
+/// fields needed for the bounds are decoded; everything else is left to the
+/// crate, which re-reads the header from offset 0.
+fn bound_raw_header(reader: &mut BufReader<File>, path: &Path) -> Result<()> {
+    use std::io::Read;
+
+    const MAGIC: &[u8; 8] = b"MComprHD";
+    const HEADER_BYTES: usize = 124;
+    let be32 = |raw: &[u8], at: usize| u32::from_be_bytes(raw[at..at + 4].try_into().unwrap());
+    let be64 = |raw: &[u8], at: usize| u64::from_be_bytes(raw[at..at + 8].try_into().unwrap());
+
+    let mut raw = [0u8; HEADER_BYTES];
+    reader.read_exact(&mut raw).map_err(|_| {
+        anyhow!(
+            "{}: not a readable CHD image: header truncated",
+            path.display()
+        )
+    })?;
+    if &raw[..8] != MAGIC {
+        bail!("{}: not a readable CHD image: bad magic", path.display());
+    }
+    let length = be32(&raw, 8) as usize;
+    let version = be32(&raw, 12);
+    // (logical bytes, hunk bytes, hunk count) as the header states them.
+    let (logical_bytes, hunk_bytes, hunk_count) = match (version, length) {
+        // v3 and v4 carry an explicit hunk count; the hunk size sits after
+        // the MD5s in v3 and directly after the metadata offset in v4.
+        (3, 120) => (be64(&raw, 28), be32(&raw, 76), Some(be32(&raw, 24))),
+        (4, 108) => (be64(&raw, 28), be32(&raw, 44), Some(be32(&raw, 24))),
+        // v5 derives the hunk count from the logical size.
+        (5, 124) => (be64(&raw, 32), be32(&raw, 56), None),
+        // v1/v2 are hard-disk-only formats with no CD track metadata.
+        (1 | 2, _) => bail!("{}: not a CD-ROM CHD (v{version} image)", path.display()),
+        _ => bail!(
+            "{}: not a readable CHD image: unknown version {version} (header {length} bytes)",
+            path.display()
+        ),
+    };
+    if hunk_bytes == 0
+        || hunk_bytes >= MAX_HUNK_BYTES
+        || !(hunk_bytes as usize).is_multiple_of(FRAME_BYTES)
+    {
+        bail!(
+            "{}: not a CD-ROM CHD (hunk {hunk_bytes} bytes; expected hunks of whole \
+             {FRAME_BYTES}-byte CD frames)",
+            path.display()
+        );
+    }
+    if version == 5 && be32(&raw, 60) as usize != FRAME_BYTES {
+        bail!(
+            "{}: not a CD-ROM CHD (unit {} bytes; expected {FRAME_BYTES}-byte CD frames)",
+            path.display(),
+            be32(&raw, 60)
+        );
+    }
+    let max_bytes = MAX_DISC_FRAMES * FRAME_BYTES as u64;
+    if logical_bytes > max_bytes {
+        bail!(
+            "{}: CHD describes {logical_bytes} bytes, more than any CD holds \
+             ({MAX_DISC_FRAMES} frames of {FRAME_BYTES} bytes)",
+            path.display()
+        );
+    }
+    // Every hunk of a CD image holds at least one frame, so the stated
+    // hunk count is bounded by the frame count too.
+    if let Some(count) = hunk_count {
+        if u64::from(count) * u64::from(hunk_bytes) > max_bytes + u64::from(hunk_bytes) {
+            bail!(
+                "{}: CHD describes {count} hunks of {hunk_bytes} bytes, more than any CD \
+                 holds",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 impl ChdImage {
     /// Open a CHD CD image and lay its tracks out on the logical disc.
     pub(super) fn load(path: &Path) -> Result<(Self, Vec<CdTrack>, u32)> {
         let file =
             File::open(path).with_context(|| format!("opening CD image {}", path.display()))?;
-        let mut chd = Chd::open(BufReader::new(file), None)
+        let mut reader = BufReader::new(file);
+        bound_raw_header(&mut reader, path)?;
+        let mut chd = Chd::open(reader, None)
             .map_err(|e| anyhow!("{}: not a readable CHD image: {e}", path.display()))?;
         if chd.header().has_parent() {
             bail!(
@@ -89,7 +189,8 @@ impl ChdImage {
         let unit_bytes = chd.header().unit_bytes();
         let hunk_bytes = chd.header().hunk_size();
         // The zero-hunk check guards the frames_per_hunk divisions below;
-        // the chd crate also rejects such headers, but do not rely on it.
+        // `bound_raw_header` already refused such files, but the values
+        // used from here on are the crate's, so check those.
         if unit_bytes as usize != FRAME_BYTES
             || hunk_bytes == 0
             || !(hunk_bytes as usize).is_multiple_of(FRAME_BYTES)
@@ -630,6 +731,65 @@ mod tests {
         write_chd_v5(&path, 0, FRAME_BYTES as u32, &[], &[]);
         let err = CdImage::load(&path).unwrap_err();
         assert!(format!("{err:#}").contains("CHD"), "{err:#}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Rewrite one big-endian field of an on-disk CHD v5 header in place.
+    fn patch_header(path: &Path, offset: usize, value: &[u8]) {
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[offset..offset + value.len()].copy_from_slice(value);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn header_claiming_more_than_a_disc_holds_is_rejected_before_the_map_is_allocated() {
+        // A valid one-frame image whose header is then edited to describe a
+        // terabyte of CD frames. The chd crate sizes the hunk map from that
+        // word alone (hunk_count * 12 bytes, then walks it), so without the
+        // pre-check a corrupt or hostile 124-byte header takes the process
+        // down in the allocator instead of producing an error. Found by the
+        // cd_image fuzz target.
+        let path = temp_path("terabyte.chd");
+        let data = track_frames(&[frame(&[0u8; DATA_SECTOR_BYTES])]);
+        write_chd_v5(
+            &path,
+            HUNK_BYTES,
+            FRAME_BYTES as u32,
+            &data,
+            &[cht2(
+                "TRACK:1 TYPE:MODE1 SUBTYPE:NONE FRAMES:1 PREGAP:0 PGTYPE:MODE1 \
+                 PGSUB:NONE POSTGAP:0",
+            )],
+        );
+        // logical_bytes is the u64 at offset 32 of the v5 header.
+        patch_header(&path, 32, &(1u64 << 40).to_be_bytes());
+        let err = CdImage::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("more than any CD holds"),
+            "{err:#}"
+        );
+        // Near u64::MAX the crate's own hunk-count arithmetic
+        // (`logical + hunk - 1`) overflows before it validates anything;
+        // the raw-header bound has to come first.
+        patch_header(&path, 32, &u64::MAX.to_be_bytes());
+        let err = CdImage::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("more than any CD holds"),
+            "{err:#}"
+        );
+
+        // The hunk size (u32 at offset 56) is bounded the same way: MAME
+        // refuses hunks of 16 MiB and up, and the codecs allocate
+        // hunk-sized buffers before any data is read.
+        patch_header(&path, 32, &(data.len() as u64).to_be_bytes());
+        patch_header(
+            &path,
+            56,
+            &(MAX_HUNK_BYTES + FRAME_BYTES as u32 - MAX_HUNK_BYTES % FRAME_BYTES as u32)
+                .to_be_bytes(),
+        );
+        let err = CdImage::load(&path).unwrap_err();
+        assert!(err.to_string().contains("not a CD-ROM CHD"), "{err:#}");
         let _ = std::fs::remove_file(&path);
     }
 
