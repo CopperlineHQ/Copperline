@@ -1241,6 +1241,21 @@ Paula's serial in/out is connected:
   ```
   The phonebook is config-file-only; there is no launcher row for it.
 
+  The command set is the Hayes base plus the WiModem232 `AT*` extensions
+  most Amiga BBS/terminal guides are written against: `AT*B<baud>` (stored
+  for CONNECT text only -- pacing always follows the guest's own SERPER
+  rate), `AT*T0`/`AT*T1` (this session's telnet translation), `AT*L<port>`/
+  `AT*P<port>` (listen/default outgoing port), `AT*N`/`AT*NS<n>,<pass>`
+  (a stubbed network scan/join, so a guide's Wi-Fi setup steps do not error
+  out), and `AT*REBOOT` (resets the state machine, like `ATZ`). `S9`
+  (tenths of a second) is the WiModem connect-delay register: CONNECT
+  fires immediately but remote output is withheld for `S9` of *host* time
+  first, the pause older terminal software expects before BBS output
+  starts. `AT&W` persists the active settings to a sidecar file beside the
+  machine's other batteries; `ATZ` reloads it (an explicit `[serial]
+  telnet` always wins over what was stored); `AT&F` is a hardcoded factory
+  reset that ignores both.
+
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies

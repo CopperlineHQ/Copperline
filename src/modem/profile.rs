@@ -11,11 +11,7 @@
 //! is what a person wrote down on purpose, a stored profile is only what a
 //! previous session happened to leave behind.
 
-// Nothing calls load()/save() yet (integration is a later milestone); only
-// the unit tests below exercise the type until then.
-#![cfg_attr(not(test), allow(dead_code))]
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Whether the profile is read and written this run. Off until a frontend
 /// asks for it (see [`crate::csynth::set_persistence`]'s twin), so tests and
@@ -76,8 +72,16 @@ impl ModemProfile {
         if !PERSIST.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
-        let path = state_path();
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&state_path())
+    }
+
+    /// The read half of [`Self::load`], split out so a test can point it at
+    /// a throwaway directory instead of the process-global, `PERSIST`-gated
+    /// battery path -- the same reason [`crate::csynth`]'s NVRAM tests stop
+    /// short of exercising real save/load (see this module's own test doc
+    /// comment).
+    fn load_from(path: &Path) -> Option<Self> {
+        match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(profile) => Some(profile),
                 Err(e) => {
@@ -100,7 +104,12 @@ impl ModemProfile {
         if !PERSIST.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        let path = state_path();
+        self.save_to(&state_path());
+    }
+
+    /// The write half of [`Self::save`], split out for the same
+    /// temp-dir-testability reason as [`Self::load_from`].
+    fn save_to(&self, path: &Path) {
         let text = match toml::to_string(self) {
             Ok(text) => text,
             Err(e) => {
@@ -108,8 +117,7 @@ impl ModemProfile {
                 return;
             }
         };
-        if let Err(e) =
-            crate::paths::ensure_parent(&path).and_then(|()| std::fs::write(&path, text))
+        if let Err(e) = crate::paths::ensure_parent(path).and_then(|()| std::fs::write(path, text))
         {
             log::warn!("modem: writing {}: {e}", path.display());
         }
@@ -193,5 +201,90 @@ mod tests {
             default_port: 23,
         };
         profile.save();
+    }
+
+    /// A throwaway directory under the OS temp path, unique per test run
+    /// (the process id keeps parallel `cargo test` runs of this file from
+    /// colliding with each other or with a stale directory from a previous
+    /// run).
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-modem-profile-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// [`ModemProfile::save_to`]/[`ModemProfile::load_from`] round trip
+    /// through a real file in a throwaway directory -- unlike `load`/`save`,
+    /// these take an explicit path rather than consulting the process-global
+    /// `PERSIST` flag and [`crate::paths::modem_profile_file`], so the test
+    /// touches nothing outside its own temp directory.
+    #[test]
+    fn save_to_and_load_from_round_trip_through_a_real_file() {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("modem.profile");
+        let profile = ModemProfile {
+            echo: false,
+            verbose: false,
+            quiet: true,
+            s0: 3,
+            s2: b'+',
+            s9: 5,
+            s12: 20,
+            dcd_always: true,
+            dtr_action: 0,
+            telnet: true,
+            listen_port: Some(6400),
+            default_port: 1541,
+        };
+        profile.save_to(&path);
+        assert!(path.is_file());
+        let reloaded = ModemProfile::load_from(&path).expect("sidecar file should parse back");
+        assert_eq!(reloaded, profile);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing sidecar file is an ordinary first run, not an error: `None`
+    /// with nothing logged as a failure.
+    #[test]
+    fn load_from_missing_file_is_none() {
+        let dir = temp_dir("missing");
+        let path = dir.join("does-not-exist.profile");
+        assert!(ModemProfile::load_from(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `save_to` a second time overwrites the first, exactly as `AT&W`
+    /// issued twice in a session should: the sidecar reflects the last
+    /// settings written, not every one that was ever written.
+    #[test]
+    fn save_to_overwrites_a_previous_write() {
+        let dir = temp_dir("overwrite");
+        let path = dir.join("modem.profile");
+        let mut profile = ModemProfile {
+            echo: true,
+            verbose: true,
+            quiet: false,
+            s0: 0,
+            s2: b'+',
+            s9: 0,
+            s12: 50,
+            dcd_always: false,
+            dtr_action: 2,
+            telnet: false,
+            listen_port: None,
+            default_port: 23,
+        };
+        profile.save_to(&path);
+        profile.s0 = 2;
+        profile.telnet = true;
+        profile.save_to(&path);
+        let reloaded = ModemProfile::load_from(&path).unwrap();
+        assert_eq!(reloaded.s0, 2);
+        assert!(reloaded.telnet);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -10,17 +10,20 @@
 //!
 //! Covered: command-mode AT parsing, ATD/ATH/ATO/ATA, S-register storage
 //! (including S0 auto-answer and the S1 ring counter), the `+++` escape
-//! sequence, RS-232 control-line wiring (/DSR, /CTS, /CD, /DTR, /RTS), and
-//! inbound calls (RING, busy-line handling for a second caller). There is
-//! still no telnet NVT negotiation, no phonebook, and no AT&W persistence.
-//! ATD's connect attempt also still blocks the calling thread for up to
-//! five seconds; a background dial is future work.
+//! sequence, RS-232 control-line wiring (/DSR, /CTS, /CD, /DTR, /RTS),
+//! inbound calls (RING, busy-line handling for a second caller), the
+//! WiModem232 `AT*` extended set, the `[serial.phonebook]` lookup, the
+//! `telnet.rs` NVT layer (engaged when `AT*T1`/`[serial] telnet` is on),
+//! `S9`'s host-time connect delay, and `AT&W`'s stored-profile sidecar
+//! (`profile.rs`). ATD's connect attempt still blocks the calling thread
+//! for up to five seconds; a background dial is future work.
 
 pub mod profile;
 mod telnet;
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
-use crate::serial::SerialSink;
+use crate::serial::{SerialSink, SerialTimeAnchor};
+use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -55,10 +58,21 @@ pub(crate) enum DialError {
 /// program controls at runtime.
 #[derive(Default, Clone)]
 pub struct ModemOptions {
-    /// Bind and answer inbound calls on "host:port". `None`: dial-out only,
-    /// same as milestone M1 -- nothing ever RINGs, ATA always reports NO
-    /// CARRIER.
+    /// Bind and answer inbound calls on "host:port". `None`: dial-out only
+    /// unless a stored profile's `AT*L` port takes over (see
+    /// [`ModemSerialSink::new_tcp`]) -- nothing ever RINGs, ATA always
+    /// reports NO CARRIER.
     pub listen: Option<String>,
+    /// `[serial] telnet`: an explicit `true` here always wins over whatever
+    /// a stored profile's `AT*T` says (see `profile.rs`'s doc comment); a
+    /// `false` cannot be told apart from "unset", so it defers to the
+    /// profile -- the same limitation [`crate::config::SerialConfig::telnet`]
+    /// already has (its default and its explicit-off both read `false`).
+    pub telnet: bool,
+    /// `[serial.phonebook]`: dialable numbers an `ATD`/`ATDT` with an
+    /// all-digit target resolves through, number -> "host:port" (or a bare
+    /// host, which dials the modem's default port).
+    pub phonebook: Vec<(String, String)>,
 }
 
 /// The byte transport a [`ModemSerialSink`] dials out on. Abstracted so the
@@ -372,6 +386,12 @@ struct Settings {
     s0: u8,
     /// S2: the `+++` escape character.
     s2: u8,
+    /// S9 (WiModem232 extra): connect-detect response time, tenths of a
+    /// second of *host* time -- [`ModemSerialSink::enter_online`] withholds
+    /// remote-to-guest bytes until this long after CONNECT, the pause
+    /// dialer-era terminal software (Terminate and kin) expects before BBS
+    /// output starts. 0 (default) withholds nothing.
+    s9: u8,
     /// S12: escape guard time, in fiftieths of a second.
     s12: u8,
     /// AT&Cn: n=0 means /CD reports asserted regardless of carrier state
@@ -382,6 +402,14 @@ struct Settings {
     /// auto-answer to disable, and &D1's escape-to-command-without-hangup
     /// behaviour is not modeled).
     dtr_action: u8,
+    /// AT*T0/AT*T1 (WiModem232 extra): telnet NVT translation, engaged in
+    /// [`ModemSerialSink::enter_online`] when true. 0/false is the default,
+    /// matching the manual and leaving raw byte services untouched.
+    telnet: bool,
+    /// AT*P (WiModem232 extra): the port `ATD`/`ATDT` appends to a bare
+    /// host (or a phonebook entry) with no `:port` of its own. Also the
+    /// hardcoded M1 fallback, so the default (23) matches that unchanged.
+    default_port: u16,
 }
 
 impl Default for Settings {
@@ -392,12 +420,23 @@ impl Default for Settings {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s9: 0,
             s12: 50,
             dcd_always: false,
             dtr_action: 2,
+            telnet: false,
+            default_port: 23,
         }
     }
 }
+
+/// Baud values `AT*B` accepts, per the WiModem232 manual; anything else is
+/// ERROR. Real hardware would retarget its own UART to this rate -- ours
+/// cannot (Paula's SERPER always governs the wire), so the value only ever
+/// reaches [`ModemSerialSink::queue_result`]'s CONNECT text.
+const STAR_B_BAUDS: [u32; 15] = [
+    75, 110, 150, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 230400,
+];
 
 enum ResultCode {
     Ok,
@@ -454,6 +493,58 @@ pub struct ModemSerialSink {
     /// currently ringing and S1 has already decayed. The reference point
     /// for both the ring cadence and the S1 decay timer.
     last_ring_cck: Option<u64>,
+    /// `AT*B<baud>`'s stored value, quoted in CONNECT text ahead of
+    /// `last_baud` when set (see [`Self::queue_result`]); `None` means
+    /// nothing overrides the guest's own SERPER-derived rate. Not part of
+    /// [`Settings`] because it is not part of the stored profile either
+    /// (`profile::ModemProfile` has no baud field) and `AT&F` clears it
+    /// while `ATZ` leaves it alone, the opposite of every `Settings` field.
+    star_baud: Option<u32>,
+    /// `[serial.phonebook]`, carried in from [`ModemOptions`] at
+    /// construction: an all-digit `ATD`/`ATDT` target is looked up here
+    /// before falling back to NO CARRIER (see [`Self::do_dial`]).
+    phonebook: Vec<(String, String)>,
+    /// Whether [`ModemOptions::telnet`] was `true` -- the only value that
+    /// unambiguously means "the config explicitly turned telnet on" (see
+    /// [`ModemOptions::telnet`]'s doc comment). Reapplied over a reloaded
+    /// profile on every `ATZ`, alongside [`Self::new_tcp`]'s construction-time
+    /// use of it, so the config keeps winning across a soft reset too.
+    telnet_config_explicit: bool,
+    /// The host half of whatever address inbound calls are (or were)
+    /// answered on, so `AT*L<port>` can rebind to the same interface with
+    /// just a new port. `"0.0.0.0"` when nothing has bound yet -- a guest
+    /// that issues `AT*L` on a modem with no configured `[serial] listen`
+    /// still gets to become answerable, the same as a real modem is always
+    /// answerable given a phone line.
+    listen_host: String,
+    /// The port inbound calls are currently answered on, `None` if the
+    /// modem has never listened. Persisted by `AT&W` as
+    /// `profile::ModemProfile::listen_port`; changed at runtime by `AT*L`.
+    listen_port: Option<u16>,
+    /// The emulated-to-host time mapping ([`crate::serial::SerialTimeAnchor`]),
+    /// last published by the emulator's own re-anchoring. `None` in tests
+    /// that never call [`SerialSink::set_time_anchor`] -- S9's delay is then
+    /// simply never enforced, the safe default for a fake transport with no
+    /// host clock to speak of.
+    time_anchor: Option<SerialTimeAnchor>,
+    /// The host [`Instant`] before which remote-to-guest bytes stay
+    /// withheld after CONNECT (S9's delay); `None` once elapsed, hangup, or
+    /// while offline. See [`Self::connect_delay_pending`].
+    connect_delay_until: Option<Instant>,
+    /// The telnet NVT layer for the current call, present only while
+    /// `Settings::telnet` was true at the moment [`Self::enter_online`] ran
+    /// (`AT*T1`/`[serial] telnet` engages it; `AT*T0` bypasses it entirely
+    /// rather than merely disabling translation mid-call). `None` means
+    /// every byte crosses the wire unmodified.
+    telnet: Option<telnet::TelnetNvt>,
+    /// Decoded remote bytes ready for the guest, staged by
+    /// [`Self::pump_telnet_input`] so a telnet negotiation exchange (which
+    /// can consume several wire bytes to produce zero, or produce a reply
+    /// that goes back out on the wire rather than to the guest) fits
+    /// [`SerialSink::read_byte`]'s one-byte-at-a-time contract. With no
+    /// telnet layer engaged this is just a one-hop relay of raw transport
+    /// bytes, so the same pump serves both cases.
+    telnet_out_to_guest: VecDeque<u8>,
 }
 
 impl ModemSerialSink {
@@ -466,10 +557,38 @@ impl ModemSerialSink {
     /// error at startup.
     pub fn new_tcp(options: ModemOptions) -> anyhow::Result<Self> {
         let mut transport = TcpModemTransport::new();
-        if let Some(addr) = options.listen.as_deref() {
+        let sidecar = profile::ModemProfile::load();
+        let listen_host = options
+            .listen
+            .as_deref()
+            .and_then(|addr| addr.rsplit_once(':'))
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let configured_port = options
+            .listen
+            .as_deref()
+            .and_then(|addr| addr.rsplit_once(':'))
+            .and_then(|(_, port)| port.parse().ok());
+        // An explicit `[serial] listen` address always wins (it names both
+        // host and port); with none, a stored `AT*L` port from a previous
+        // session still makes the modem answerable -- the sidecar cannot
+        // know a host, so it gets every interface.
+        let listen_port = configured_port.or_else(|| sidecar.as_ref().and_then(|p| p.listen_port));
+        let bind_addr = match (&options.listen, listen_port) {
+            (Some(addr), _) => Some(addr.clone()),
+            (None, Some(port)) => Some(format!("{listen_host}:{port}")),
+            (None, None) => None,
+        };
+        if let Some(addr) = bind_addr.as_deref() {
             transport.listen(addr)?;
         }
-        Ok(Self::with_transport(Box::new(transport)))
+        let mut sink = Self::with_transport(Box::new(transport));
+        sink.phonebook = options.phonebook;
+        sink.telnet_config_explicit = options.telnet;
+        sink.listen_host = listen_host;
+        sink.listen_port = listen_port;
+        sink.settings = settings_from_sidecar(sidecar.as_ref(), sink.telnet_config_explicit);
+        Ok(sink)
     }
 
     pub(crate) fn with_transport(transport: Box<dyn ModemTransport>) -> Self {
@@ -486,6 +605,15 @@ impl ModemSerialSink {
             carrier_expected: false,
             s1: 0,
             last_ring_cck: None,
+            star_baud: None,
+            phonebook: Vec::new(),
+            telnet_config_explicit: false,
+            listen_host: "0.0.0.0".to_string(),
+            listen_port: None,
+            time_anchor: None,
+            connect_delay_until: None,
+            telnet: None,
+            telnet_out_to_guest: VecDeque::new(),
         }
     }
 
@@ -503,7 +631,11 @@ impl ModemSerialSink {
         let bytes = if self.settings.verbose {
             let s = match code {
                 ResultCode::Ok => "OK".to_string(),
-                ResultCode::Connect => match self.last_baud {
+                // AT*B's stored value quotes the CONNECT text first, since
+                // it is the guest's explicit statement of what it thinks
+                // the line runs at; the SERPER-derived last_baud is only a
+                // fallback for a guest that never set it.
+                ResultCode::Connect => match self.star_baud.or(self.last_baud) {
                     Some(bps) => format!("CONNECT {bps}"),
                     None => "CONNECT".to_string(),
                 },
@@ -541,6 +673,7 @@ impl ModemSerialSink {
             0 => self.settings.s0,
             1 => self.s1,
             2 => self.settings.s2,
+            9 => self.settings.s9,
             12 => self.settings.s12,
             _ => 0,
         };
@@ -554,6 +687,7 @@ impl ModemSerialSink {
             0 => self.settings.s0 = val,
             1 => self.s1 = val,
             2 => self.settings.s2 = val,
+            9 => self.settings.s9 = val,
             12 => self.settings.s12 = val,
             // Every other S register is a stub: no state, no error, just an
             // accepted write (real modems have dozens few programs touch).
@@ -561,8 +695,46 @@ impl ModemSerialSink {
         }
     }
 
+    /// `AT&F`: hardcoded factory defaults, ignoring both the stored profile
+    /// and any config override -- stock Hayes `AT&F` semantics, no
+    /// exceptions. Also resets `AT*B`'s stored baud (the manual: "Baud rate
+    /// is reset to 300"); ours has nothing to reset it *to* (Paula's SERPER
+    /// still governs the wire), so it clears the override back to "defer to
+    /// the guest's own rate" instead.
     fn reset_defaults(&mut self) {
         self.settings = Settings::default();
+        self.star_baud = None;
+    }
+
+    /// `ATZ`: reload the stored profile (an explicit `[serial] telnet =
+    /// true` still wins, same as at construction -- see
+    /// [`ModemOptions::telnet`]'s doc comment), or hardcoded defaults with
+    /// nothing stored. Deliberately leaves `star_baud` untouched: the
+    /// manual is explicit that `ATZ` does not change the baud rate.
+    fn reload_profile_settings(&mut self) {
+        let sidecar = profile::ModemProfile::load();
+        self.settings = settings_from_sidecar(sidecar.as_ref(), self.telnet_config_explicit);
+    }
+
+    /// `AT&W`: persist the currently active settings as the stored profile.
+    /// A no-op on disk when persistence is off ([`profile::set_persistence`]),
+    /// same as `profile::ModemProfile::save`'s own contract.
+    fn save_profile(&self) {
+        profile::ModemProfile {
+            echo: self.settings.echo,
+            verbose: self.settings.verbose,
+            quiet: self.settings.quiet,
+            s0: self.settings.s0,
+            s2: self.settings.s2,
+            s9: self.settings.s9,
+            s12: self.settings.s12,
+            dcd_always: self.settings.dcd_always,
+            dtr_action: self.settings.dtr_action,
+            telnet: self.settings.telnet,
+            listen_port: self.listen_port,
+            default_port: self.settings.default_port,
+        }
+        .save();
     }
 
     /// Idempotent hangup: drops the transport connection and, if a call was
@@ -577,6 +749,9 @@ impl ModemSerialSink {
         self.carrier_expected = false;
         self.s1 = 0;
         self.last_ring_cck = None;
+        self.telnet = None;
+        self.telnet_out_to_guest.clear();
+        self.connect_delay_until = None;
     }
 
     /// Guard time in color clocks: S12 is in fiftieths of a second, and one
@@ -596,6 +771,16 @@ impl ModemSerialSink {
         self.carrier_expected = true;
         self.s1 = 0;
         self.last_ring_cck = None;
+        // AT*T1 (or [serial] telnet's power-on default) engages the NVT
+        // layer for this call only; AT*T0 leaves every byte untouched.
+        self.telnet = self.settings.telnet.then(|| telnet::TelnetNvt::new(true));
+        self.telnet_out_to_guest.clear();
+        // S9, in host time: nothing withheld with no time anchor published
+        // yet (tests with a fake transport that never calls
+        // set_time_anchor) or with S9 at its default of 0.
+        self.connect_delay_until = self.time_anchor.map(|anchor| {
+            anchor.host_time(at_cck) + Duration::from_millis(u64::from(self.settings.s9) * 100)
+        });
         self.queue_result(ResultCode::Connect);
     }
 
@@ -609,10 +794,20 @@ impl ModemSerialSink {
         }
         let target = String::from_utf8_lossy(target);
         let target = target.trim();
-        let host_port = if target.contains(':') {
+        // An all-digit target is a "phone number": WiModem232's phonebook
+        // convention, resolved through [serial.phonebook] rather than
+        // dialed literally (there is no DNS entry for a phone number).
+        // Hayes has no notion of a phonebook to conflict with here.
+        let host_port = if !target.is_empty() && target.bytes().all(|b| b.is_ascii_digit()) {
+            let Some((_, addr)) = self.phonebook.iter().find(|(number, _)| number == target) else {
+                self.queue_result(ResultCode::NoCarrier);
+                return;
+            };
+            resolve_dial_addr(addr, self.settings.default_port)
+        } else if target.contains(':') {
             target.to_string()
         } else {
-            format!("{target}:23")
+            format!("{target}:{}", self.settings.default_port)
         };
         match self.transport.dial(&host_port) {
             Ok(()) => self.enter_online(at_cck),
@@ -727,7 +922,7 @@ impl ModemSerialSink {
                 }
                 'Z' => {
                     let (_v, ni) = read_digit_default(bytes, i + 1, 0);
-                    self.reset_defaults();
+                    self.reload_profile_settings();
                     self.hangup_internal();
                     i = ni;
                 }
@@ -787,6 +982,11 @@ impl ModemSerialSink {
                             self.settings.dtr_action = v;
                             i = ni;
                         }
+                        'W' => {
+                            let (_v, ni) = read_digit_default(bytes, i + 2, 0);
+                            self.save_profile();
+                            i = ni;
+                        }
                         _ => {
                             self.queue_result(ResultCode::Error);
                             return;
@@ -831,6 +1031,46 @@ impl ModemSerialSink {
                         return;
                     }
                 }
+                // The WiModem232 extended set. Each `AT*` command here takes
+                // the rest of the line (like 'D' above): `AT*NS<n>,<pass>`'s
+                // password has no other delimiter, and a guide always issues
+                // one `AT*` command per line in practice, so there is
+                // nothing real to chain after it. Every arm either queues
+                // its own output before falling through, or just updates
+                // `self.settings`/state and lets the trailing OK below speak
+                // for it, matching the '&' block's convention.
+                '*' => {
+                    let rest = &bytes[i + 1..];
+                    let ok = match rest.first().copied().map(|c| c as char) {
+                        Some('B') => self.set_star_baud(&rest[1..]),
+                        Some('T') => self.set_star_telnet(&rest[1..]),
+                        Some('L') => self.set_star_listen_port(&rest[1..]),
+                        Some('P') => self.set_star_default_port(&rest[1..]),
+                        Some('N') if rest.get(1).map(|b| *b as char) == Some('S') => {
+                            self.star_ns(&rest[2..])
+                        }
+                        Some('N') => {
+                            self.queue_star_n();
+                            true
+                        }
+                        Some('R') if rest == b"REBOOT" => {
+                            // Resets the state machine like ATZ (reload the
+                            // stored profile, drop any call); meaningless
+                            // under emulation otherwise, present so a
+                            // WiModem232 guide's setup script does not error
+                            // out mid-run when it issues this for real.
+                            self.reload_profile_settings();
+                            self.hangup_internal();
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !ok {
+                        self.queue_result(ResultCode::Error);
+                        return;
+                    }
+                    i = bytes.len();
+                }
                 _ => {
                     self.queue_result(ResultCode::Error);
                     return;
@@ -839,6 +1079,100 @@ impl ModemSerialSink {
         }
         if !terminal_result {
             self.queue_result(ResultCode::Ok);
+        }
+    }
+
+    /// `AT*B<baud>[,<config>]`: stores the value for CONNECT text only (see
+    /// `Settings::default_port`'s sibling `star_baud` field's doc comment);
+    /// the manual's optional data-bits/parity/stop-bits `<config>` suffix is
+    /// accepted and ignored -- there is no serial line configuration here
+    /// beyond what Paula's SERPER already dictates.
+    fn set_star_baud(&mut self, arg: &[u8]) -> bool {
+        let baud_part = match arg.iter().position(|&b| b == b',') {
+            Some(comma) => &arg[..comma],
+            None => arg,
+        };
+        let Some(baud) = parse_all_digits::<u32>(baud_part) else {
+            return false;
+        };
+        if !STAR_B_BAUDS.contains(&baud) {
+            return false;
+        }
+        self.star_baud = Some(baud);
+        true
+    }
+
+    /// `AT*T0`/`AT*T1`: telnet NVT translation, engaged for the next call
+    /// [`Self::enter_online`] makes (not the one already up, if any --
+    /// matches the manual's own "no re-negotiation mid-call" silence on the
+    /// point). Any nonzero digit counts as 1, matching every other Hayes
+    /// boolean argument in this module.
+    fn set_star_telnet(&mut self, arg: &[u8]) -> bool {
+        let Some(v) = parse_all_digits::<u32>(arg) else {
+            return false;
+        };
+        self.settings.telnet = v != 0;
+        true
+    }
+
+    /// `AT*L<port>`: rebinds inbound calls to the same host
+    /// [`Self::listen_host`] already answers on (or `0.0.0.0` if it never
+    /// has) with the new port. A bind failure (port already in use, no
+    /// permission) is ERROR, not a silent no-op -- a sysop who mistypes a
+    /// port should hear about it immediately, not discover it when nothing
+    /// ever rings.
+    fn set_star_listen_port(&mut self, arg: &[u8]) -> bool {
+        let Some(port) = parse_all_digits::<u16>(arg) else {
+            return false;
+        };
+        if self
+            .transport
+            .listen(&format!("{}:{port}", self.listen_host))
+            .is_err()
+        {
+            return false;
+        }
+        self.listen_port = Some(port);
+        true
+    }
+
+    /// `AT*P<port>`: the port `ATD`/`ATDT` (and a portless phonebook entry)
+    /// appends to a bare host from now on.
+    fn set_star_default_port(&mut self, arg: &[u8]) -> bool {
+        let Some(port) = parse_all_digits::<u16>(arg) else {
+            return false;
+        };
+        self.settings.default_port = port;
+        true
+    }
+
+    /// `AT*NS<n>,<passphrase>`: "join network `n` from the last `AT*N`
+    /// scan". There is no real Wi-Fi to join, so this only validates the
+    /// syntax (a present, all-digit `n`) and succeeds -- plausible enough
+    /// that a guide script that issues it does not error out mid-run, per
+    /// the proposal's "WiFi-management commands stubbed plausibly" rule.
+    fn star_ns(&mut self, arg: &[u8]) -> bool {
+        let number_part = match arg.iter().position(|&b| b == b',') {
+            Some(comma) => &arg[..comma],
+            None => arg,
+        };
+        parse_all_digits::<u32>(number_part).is_some()
+    }
+
+    /// `AT*N`: lists the networks "in range". Real hardware scans Wi-Fi;
+    /// there is nothing to scan under emulation, so this reports exactly
+    /// one synthetic network in the manual's own listing format, enough for
+    /// a guide script's `AT*N` step to see plausible output rather than an
+    /// empty list.
+    fn queue_star_n(&mut self) {
+        for line in [
+            "\r\nScanning available networks:\r\n",
+            "\r\nNetworks available: 1\r\n",
+            "\r\n0 - Copperline (-50 dBm), WPA2\r\n",
+        ] {
+            for b in line.bytes() {
+                self.queue_out_byte(b);
+            }
         }
     }
 
@@ -861,8 +1195,58 @@ impl ModemSerialSink {
 
     fn forward_escape_chars(&mut self, count: u8) {
         for _ in 0..count {
-            self.transport.write_byte(self.settings.s2);
+            self.transport_send(self.settings.s2);
         }
+    }
+
+    /// One guest byte outbound: through the telnet NVT layer (IAC-escaping
+    /// it, among other things) when `AT*T1` engaged one for this call,
+    /// otherwise straight to the transport untouched.
+    fn transport_send(&mut self, b: u8) {
+        match self.telnet.as_mut() {
+            Some(nvt) => {
+                let mut out = Vec::new();
+                nvt.send(b, &mut out);
+                for ob in out {
+                    self.transport.write_byte(ob);
+                }
+            }
+            None => self.transport.write_byte(b),
+        }
+    }
+
+    /// Drain every wire byte currently available from the transport through
+    /// the telnet layer (if one is engaged), staging decoded data in
+    /// [`Self::telnet_out_to_guest`] and writing negotiation replies
+    /// straight back out. A no-op call when nothing is pending, so callers
+    /// can run it unconditionally before checking the queue.
+    fn pump_telnet_input(&mut self) {
+        while self.transport.has_pending() {
+            let Some(b) = self.transport.read_byte() else {
+                break;
+            };
+            match self.telnet.as_mut() {
+                Some(nvt) => {
+                    let mut data = Vec::new();
+                    let mut reply = Vec::new();
+                    nvt.receive(b, &mut data, &mut reply);
+                    self.telnet_out_to_guest.extend(data);
+                    for r in reply {
+                        self.transport.write_byte(r);
+                    }
+                }
+                None => self.telnet_out_to_guest.push_back(b),
+            }
+        }
+    }
+
+    /// S9's connect delay, in host time: true while remote-to-guest bytes
+    /// must stay withheld. Always false with no time anchor published (a
+    /// fake-transport test that never called `set_time_anchor`) -- the
+    /// delay is host-clock-driven by design (see `Settings::s9`'s doc
+    /// comment), so it has nothing to measure against otherwise.
+    fn connect_delay_pending(&self) -> bool {
+        matches!(self.connect_delay_until, Some(until) if Instant::now() < until)
     }
 
     /// The `+++` escape state machine. Deterministic and `at_cck`-only --
@@ -894,7 +1278,7 @@ impl ModemSerialSink {
                     self.command_mode_write(b, at_cck);
                 } else {
                     self.forward_escape_chars(e.count);
-                    self.transport.write_byte(b);
+                    self.transport_send(b);
                     self.last_online_activity_cck = Some(at_cck);
                 }
                 return;
@@ -920,7 +1304,7 @@ impl ModemSerialSink {
                 });
             } else {
                 self.forward_escape_chars(e.count);
-                self.transport.write_byte(b);
+                self.transport_send(b);
             }
             self.last_online_activity_cck = Some(at_cck);
             return;
@@ -938,10 +1322,66 @@ impl ModemSerialSink {
                 awaiting_trail: false,
             });
         } else {
-            self.transport.write_byte(b);
+            self.transport_send(b);
         }
         self.last_online_activity_cck = Some(at_cck);
     }
+}
+
+/// The `Settings` a sidecar profile (or its absence) and the config's own
+/// telnet key resolve to, per `profile.rs`'s documented precedence: an
+/// explicit `[serial] telnet = true` always wins, everything else is the
+/// sidecar's value if one loaded, else `Settings::default()`. A pure
+/// function (no disk, no `PERSIST`) so it is directly unit-testable, unlike
+/// `profile::ModemProfile::load`/`save` themselves (see `profile.rs`'s own
+/// test doc comment for why those stay untested at the file level here).
+fn settings_from_sidecar(
+    sidecar: Option<&profile::ModemProfile>,
+    telnet_explicit: bool,
+) -> Settings {
+    let mut settings = match sidecar {
+        Some(p) => Settings {
+            echo: p.echo,
+            verbose: p.verbose,
+            quiet: p.quiet,
+            s0: p.s0,
+            s2: p.s2,
+            s9: p.s9,
+            s12: p.s12,
+            dcd_always: p.dcd_always,
+            dtr_action: p.dtr_action,
+            telnet: p.telnet,
+            default_port: p.default_port,
+        },
+        None => Settings::default(),
+    };
+    if telnet_explicit {
+        settings.telnet = true;
+    }
+    settings
+}
+
+/// A phonebook entry's address, filled out with the modem's default
+/// outgoing port (`AT*P`) when the entry itself named no port -- the same
+/// convention the manual's `AT&Z`/`AT&SN` phone-book-and-spoof entries use.
+fn resolve_dial_addr(addr: &str, default_port: u16) -> String {
+    if addr.contains(':') {
+        addr.to_string()
+    } else {
+        format!("{addr}:{default_port}")
+    }
+}
+
+/// A run of ASCII digits filling the whole slice; `None` if it is empty or
+/// holds anything else. Used for the WiModem232 `AT*` numeric arguments
+/// (`AT*B<baud>`, `AT*L<port>`, `AT*P<port>`), which -- unlike the base
+/// Hayes single-digit arguments `read_digit_default` covers -- can be more
+/// than one digit and have no sensible zero-argument default.
+fn parse_all_digits<T: std::str::FromStr>(bytes: &[u8]) -> Option<T> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// Read an optional run of ASCII digits starting at `i`; `default` when
@@ -981,12 +1421,18 @@ impl SerialSink for ModemSerialSink {
             if !self.transport.carrier() {
                 // The remote end closed the connection: surface it to the
                 // guest and fall back to command mode, same as a real modem
-                // losing carrier mid-call.
+                // losing carrier mid-call. Not gated by S9 -- that delay is
+                // about withholding a live line's output, not about hiding
+                // that the line went away.
                 self.hangup_internal();
                 self.queue_result(ResultCode::NoCarrier);
                 return self.out_queue.pop_front();
             }
-            return self.transport.read_byte();
+            if self.connect_delay_pending() {
+                return None;
+            }
+            self.pump_telnet_input();
+            return self.telnet_out_to_guest.pop_front();
         }
         None
     }
@@ -998,7 +1444,13 @@ impl SerialSink for ModemSerialSink {
         if self.mode == Mode::Online {
             // A dropped carrier also counts as "pending": the next
             // `read_byte` call turns it into a queued NO CARRIER.
-            return !self.transport.carrier() || self.transport.has_pending();
+            if !self.transport.carrier() {
+                return true;
+            }
+            if self.connect_delay_pending() {
+                return false;
+            }
+            return !self.telnet_out_to_guest.is_empty() || self.transport.has_pending();
         }
         false
     }
@@ -1044,8 +1496,11 @@ impl SerialSink for ModemSerialSink {
     }
 
     fn machine_reset(&mut self) {
-        // A full ATZ: settings back to defaults, call dropped.
-        self.reset_defaults();
+        // A full ATZ: the stored profile reloads (or hardcoded defaults
+        // with nothing stored), call dropped -- same as the guest typing
+        // ATZ itself, since a real modem cannot tell "the terminal program
+        // sent ATZ" apart from "the host computer's reset button was hit".
+        self.reload_profile_settings();
         self.transport.reject();
         self.hangup_internal();
         self.line.clear();
@@ -1055,6 +1510,10 @@ impl SerialSink for ModemSerialSink {
     }
 
     fn flush(&mut self) {}
+
+    fn set_time_anchor(&mut self, anchor: SerialTimeAnchor) {
+        self.time_anchor = Some(anchor);
+    }
 
     fn control_lines(&self) -> Option<u8> {
         // /DSR and /CTS are always asserted (this sink never models flow
@@ -1863,5 +2322,452 @@ mod tests {
             thread::yield_now();
         }
         assert_eq!(got, Some(b'R'));
+    }
+
+    // ---- 12. AT* extended (WiModem232) set ---------------------------------
+
+    #[test]
+    fn star_b_sets_connect_text_and_validates_baud() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*B2400", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT 2400\r\n");
+    }
+
+    #[test]
+    fn star_b_invalid_baud_is_error() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*B1234", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nERROR\r\n");
+    }
+
+    #[test]
+    fn star_b_accepts_and_ignores_serial_config_suffix() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*B1200,7E2", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+    }
+
+    #[test]
+    fn star_t_toggles_telnet_setting() {
+        let (mut sink, _state) = fake_no_echo();
+        assert!(!sink.settings.telnet);
+        type_line(&mut sink, "AT*T1", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        assert!(sink.settings.telnet);
+        type_line(&mut sink, "AT*T0", 0);
+        drain(&mut sink);
+        assert!(!sink.settings.telnet);
+    }
+
+    #[test]
+    fn star_l_rebinds_listen_port() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "AT*L6400", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        assert_eq!(
+            state.lock().unwrap().listen_addr.as_deref(),
+            Some("0.0.0.0:6400")
+        );
+        assert_eq!(sink.listen_port, Some(6400));
+    }
+
+    #[test]
+    fn star_p_changes_default_outgoing_port() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "AT*P1541", 0);
+        drain(&mut sink);
+        // The command line is uppercased end to end by execute_line (a
+        // pre-existing M1 quirk this test works with, not around).
+        type_line(&mut sink, "ATDTBBS.EXAMPLE.COM", 0);
+        drain(&mut sink);
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("BBS.EXAMPLE.COM:1541")
+        );
+    }
+
+    #[test]
+    fn star_n_lists_a_synthetic_network() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*N", 0);
+        let out = drain_str(&mut sink);
+        assert!(out.contains("Networks available: 1"), "{out:?}");
+        assert!(out.ends_with("OK\r\n"), "{out:?}");
+    }
+
+    #[test]
+    fn star_ns_accepts_number_and_password() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*NS0,MYPASSWORD", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+    }
+
+    #[test]
+    fn star_ns_without_a_number_is_error() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*NS", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nERROR\r\n");
+    }
+
+    #[test]
+    fn star_reboot_resets_settings_and_hangs_up() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        assert!(state.lock().unwrap().carrier);
+        // AT*REBOOT is a command-mode command: escape the call first, the
+        // same `+++` sequence `ath_after_escape_hangs_up_and_deasserts_cd`
+        // uses, rather than typing it straight into the live relay.
+        let g = guard_ccks(50);
+        let t0 = g + 1;
+        sink.write_byte(b'+', t0);
+        sink.write_byte(b'+', t0 + 10);
+        sink.write_byte(b'+', t0 + 20);
+        sink.write_byte(0x0D, t0 + 20 + g + 1);
+        drain(&mut sink);
+        type_line(&mut sink, "AT*REBOOT", t0 + 20 + g + 1);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        assert!(!state.lock().unwrap().carrier);
+        assert_eq!(state.lock().unwrap().hangups, 1);
+    }
+
+    #[test]
+    fn unknown_star_command_is_error() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*ZZZ", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nERROR\r\n");
+    }
+
+    // ---- 13. S9 connect delay (host time) ----------------------------------
+
+    #[test]
+    fn s9_register_default_and_write() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "ATS9?", 0);
+        assert_eq!(drain_str(&mut sink), "\r\n0\r\n\r\nOK\r\n");
+        type_line(&mut sink, "ATS9=7", 0);
+        drain(&mut sink);
+        type_line(&mut sink, "ATS9?", 0);
+        assert_eq!(drain_str(&mut sink), "\r\n7\r\n\r\nOK\r\n");
+    }
+
+    #[test]
+    fn s9_delay_withholds_remote_output_until_elapsed() {
+        let (mut sink, state) = fake_no_echo();
+        // A time anchor whose epoch is still in the future: however small
+        // S9 is, the delay has not elapsed yet.
+        sink.set_time_anchor(SerialTimeAnchor {
+            host_epoch: Instant::now() + Duration::from_secs(100),
+            cck_per_second: 1.0,
+        });
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().to_guest.push_back(b'z');
+        assert!(
+            !sink.has_pending_input(),
+            "S9 must withhold remote output before the delay elapses"
+        );
+        assert_eq!(sink.read_byte(), None);
+    }
+
+    #[test]
+    fn s9_delay_elapsed_relays_immediately() {
+        let (mut sink, state) = fake_no_echo();
+        // An anchor whose epoch is well in the past: even a nonzero S9's
+        // delay has already elapsed by the time CONNECT is queued.
+        sink.set_time_anchor(SerialTimeAnchor {
+            host_epoch: Instant::now() - Duration::from_secs(100),
+            cck_per_second: 1.0,
+        });
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().to_guest.push_back(b'z');
+        assert!(sink.has_pending_input());
+        assert_eq!(sink.read_byte(), Some(b'z'));
+    }
+
+    #[test]
+    fn s9_never_gates_a_dropped_carrier() {
+        let (mut sink, state) = fake_no_echo();
+        sink.set_time_anchor(SerialTimeAnchor {
+            host_epoch: Instant::now() + Duration::from_secs(100),
+            cck_per_second: 1.0,
+        });
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().carrier = false;
+        assert!(sink.has_pending_input());
+        assert_eq!(drain_str(&mut sink), "\r\nNO CARRIER\r\n");
+    }
+
+    // ---- 14. AT&W / ATZ / AT&F profile lifecycle ---------------------------
+    //
+    // `profile::ModemProfile::save_to`/`load_from` are exercised against a
+    // real temp-dir file in `profile.rs`'s own tests; `load`/`save`
+    // themselves depend on the process-global `PERSIST` flag and
+    // `crate::paths`'s process-global adopted configuration, neither of
+    // which a test in this binary can sandbox per-test (see profile.rs's
+    // "neither of which a unit test can sandbox per-test" test doc comment
+    // for the same limitation applied to that module). What these tests pin
+    // instead: `settings_from_sidecar`'s precedence logic in isolation, and
+    // -- with persistence left off, this binary's default -- that ATZ,
+    // AT&F, and AT&W dispatch to the right places and draw the right line
+    // between "reload the stored profile" and "hardcoded factory".
+
+    fn sidecar_stub() -> profile::ModemProfile {
+        profile::ModemProfile {
+            echo: true,
+            verbose: true,
+            quiet: false,
+            s0: 0,
+            s2: b'+',
+            s9: 0,
+            s12: 50,
+            dcd_always: false,
+            dtr_action: 2,
+            telnet: false,
+            listen_port: None,
+            default_port: 23,
+        }
+    }
+
+    #[test]
+    fn settings_from_sidecar_uses_stored_values_when_present() {
+        let profile = profile::ModemProfile {
+            echo: false,
+            verbose: false,
+            quiet: true,
+            s0: 3,
+            s2: b'$',
+            s9: 4,
+            s12: 30,
+            dcd_always: true,
+            dtr_action: 0,
+            telnet: true,
+            listen_port: Some(6400),
+            default_port: 1541,
+        };
+        let settings = settings_from_sidecar(Some(&profile), false);
+        assert!(!settings.echo);
+        assert!(!settings.verbose);
+        assert!(settings.quiet);
+        assert_eq!(settings.s0, 3);
+        assert_eq!(settings.s2, b'$');
+        assert_eq!(settings.s9, 4);
+        assert_eq!(settings.s12, 30);
+        assert!(settings.dcd_always);
+        assert_eq!(settings.dtr_action, 0);
+        assert!(settings.telnet);
+        assert_eq!(settings.default_port, 1541);
+    }
+
+    #[test]
+    fn settings_from_sidecar_falls_back_to_defaults_with_none() {
+        let settings = settings_from_sidecar(None, false);
+        assert!(settings.echo);
+        assert_eq!(settings.default_port, 23);
+        assert!(!settings.telnet);
+    }
+
+    #[test]
+    fn settings_from_sidecar_config_telnet_true_always_wins_over_a_stored_false() {
+        let profile = profile::ModemProfile {
+            telnet: false,
+            ..sidecar_stub()
+        };
+        let settings = settings_from_sidecar(Some(&profile), true);
+        assert!(
+            settings.telnet,
+            "an explicit [serial] telnet = true must win over a stored false"
+        );
+    }
+
+    #[test]
+    fn atz_honours_config_telnet_override_even_with_nothing_persisted() {
+        let (mut sink, _state) = fake_no_echo();
+        sink.telnet_config_explicit = true;
+        type_line(&mut sink, "AT*T0", 0);
+        drain(&mut sink);
+        assert!(!sink.settings.telnet);
+        type_line(&mut sink, "ATZ", 0);
+        drain(&mut sink);
+        assert!(
+            sink.settings.telnet,
+            "ATZ must reapply an explicit [serial] telnet = true"
+        );
+    }
+
+    #[test]
+    fn at_ampersand_f_ignores_config_telnet_override() {
+        let (mut sink, _state) = fake_no_echo();
+        sink.telnet_config_explicit = true;
+        sink.settings.telnet = true;
+        type_line(&mut sink, "AT&F", 0);
+        drain(&mut sink);
+        assert!(
+            !sink.settings.telnet,
+            "AT&F is a hardcoded factory reset, config override included"
+        );
+    }
+
+    #[test]
+    fn at_ampersand_f_clears_star_b_but_atz_leaves_it_alone() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT*B2400", 0);
+        drain(&mut sink);
+        assert_eq!(sink.star_baud, Some(2400));
+        type_line(&mut sink, "ATZ", 0);
+        drain(&mut sink);
+        assert_eq!(
+            sink.star_baud,
+            Some(2400),
+            "the manual: ATZ does not change the baud rate"
+        );
+        type_line(&mut sink, "AT&F", 0);
+        drain(&mut sink);
+        assert_eq!(
+            sink.star_baud, None,
+            "the manual: AT&F resets the baud rate"
+        );
+    }
+
+    #[test]
+    fn at_ampersand_w_is_accepted_with_persistence_off() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "AT&W", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+    }
+
+    // ---- 15. Phonebook ------------------------------------------------------
+
+    #[test]
+    fn phonebook_hit_dials_resolved_address() {
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("5551234".to_string(), "bbs.example.com:23".to_string())];
+        type_line(&mut sink, "ATD5551234", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("bbs.example.com:23")
+        );
+    }
+
+    #[test]
+    fn phonebook_entry_without_a_port_uses_the_default_port() {
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("5555678".to_string(), "bbs2.example.com".to_string())];
+        type_line(&mut sink, "ATDT5555678", 0);
+        drain(&mut sink);
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("bbs2.example.com:23")
+        );
+    }
+
+    #[test]
+    fn phonebook_miss_reports_no_carrier_and_never_dials() {
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("5551234".to_string(), "bbs.example.com:23".to_string())];
+        type_line(&mut sink, "ATD9999999", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nNO CARRIER\r\n");
+        assert!(
+            state.lock().unwrap().dialed.is_none(),
+            "an unmapped number must never reach the transport"
+        );
+    }
+
+    // ---- 16. Telnet relay (AT*T1) -------------------------------------------
+
+    #[test]
+    fn telnet_off_relays_raw_bytes_including_0xff_unmodified() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().to_guest.extend([b'a', 0xFF, b'b']);
+        assert_eq!(sink.read_byte(), Some(b'a'));
+        assert_eq!(sink.read_byte(), Some(0xFF));
+        assert_eq!(sink.read_byte(), Some(b'b'));
+        sink.write_byte(0xFF, 100);
+        assert_eq!(state.lock().unwrap().from_guest, vec![0xFF]);
+    }
+
+    #[test]
+    fn telnet_on_negotiates_binary_and_round_trips_iac_data_both_directions() {
+        let (mut sink, state) = fake_no_echo();
+        sink.settings.telnet = true;
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+
+        // The server offers BINARY; the NVT layer must accept it on the
+        // wire (IAC DO BINARY back), producing no guest-visible byte of its
+        // own from a pure negotiation exchange.
+        state.lock().unwrap().to_guest.extend([255, 251, 0]); // IAC WILL BINARY
+        assert!(sink.has_pending_input());
+        assert_eq!(sink.read_byte(), None);
+        assert_eq!(state.lock().unwrap().from_guest, vec![255, 253, 0]); // IAC DO BINARY
+
+        // A literal 0xFF from the remote arrives doubled (IAC IAC) on the
+        // wire and must reach the guest as a single undoubled byte.
+        state
+            .lock()
+            .unwrap()
+            .to_guest
+            .extend([b'x', 255, 255, b'y']);
+        assert_eq!(sink.read_byte(), Some(b'x'));
+        assert_eq!(sink.read_byte(), Some(0xFF));
+        assert_eq!(sink.read_byte(), Some(b'y'));
+
+        // Outbound: the guest's own literal 0xFF must be doubled going out,
+        // surviving binary transfers (ZModem) through the NVT layer intact.
+        state.lock().unwrap().from_guest.clear();
+        sink.write_byte(0xFF, 200);
+        assert_eq!(state.lock().unwrap().from_guest, vec![255, 255]);
+    }
+
+    // ---- 17. The verbatim WiModem232 guide test ------------------------------
+
+    /// A realistic WiModem232 community setup sequence, issued exactly as a
+    /// guide would write it: set the baud text, silence local echo, force
+    /// DCD always on, join a stored network, turn on telnet translation,
+    /// persist it all, then dial. Every response is asserted in full, not
+    /// substring-matched, so a change that alters wording anywhere along
+    /// this path breaks CI rather than merely "looking right" in a REPL.
+    #[test]
+    fn wimodem232_guide_setup_sequence_is_followed_verbatim() {
+        let (mut sink, state) = fake();
+
+        type_line(&mut sink, "AT*B300", 0);
+        assert_eq!(drain_str(&mut sink), "AT*B300\r\r\nOK\r\n");
+
+        type_line(&mut sink, "ATE0", 0);
+        assert_eq!(drain_str(&mut sink), "ATE0\r\r\nOK\r\n");
+
+        type_line(&mut sink, "AT&C0", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        assert!(sink.settings.dcd_always);
+
+        type_line(&mut sink, "AT*NS0,MYWIFIPASSWORD", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+
+        type_line(&mut sink, "AT*T1", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+        assert!(sink.settings.telnet);
+
+        type_line(&mut sink, "AT&W", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+
+        type_line(&mut sink, "ATDTBBS.EXAMPLE.COM:23", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT 300\r\n");
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("BBS.EXAMPLE.COM:23")
+        );
+        assert_eq!(
+            sink.control_lines(),
+            Some(0),
+            "AT&C0 must report /CD asserted for the rest of the call"
+        );
     }
 }

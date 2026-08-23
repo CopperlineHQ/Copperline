@@ -2127,6 +2127,8 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Modem => Ok(Box::new(crate::modem::ModemSerialSink::new_tcp(
             crate::modem::ModemOptions {
                 listen: cfg.serial.listen.clone(),
+                telnet: cfg.serial.telnet,
+                phonebook: cfg.serial.phonebook.clone(),
             },
         )?)),
     }

@@ -26,10 +26,6 @@
 //! inbound; in non-binary mode a bare outbound CR becomes CR NUL (the RFC
 //! form, servers strip the NUL) and an inbound CR NUL becomes CR.
 
-// Nothing calls this module yet (integration is a later milestone); only
-// the unit tests below exercise it until then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 const IAC: u8 = 255;
 const DONT: u8 = 254;
 const DO: u8 = 253;
