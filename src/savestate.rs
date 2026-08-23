@@ -41,6 +41,92 @@ use std::path::Path;
 use crate::config::MachineDescriptor;
 use crate::cpu::M68kMachine;
 
+/// Deserialize one bincode value from a save-state stream, on the wire
+/// format `bincode::deserialize_from` uses (fixed-width integers, trailing
+/// bytes allowed), but through [`StateReader`] so that no allocation is
+/// sized from the stream's own length prefixes.
+pub(crate) fn deserialize_from_state<R: Read, T: serde::de::DeserializeOwned>(
+    reader: R,
+) -> bincode::Result<T> {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .deserialize_from_custom(StateReader::new(reader))
+}
+
+/// How much a byte buffer grows per read while a length-prefixed string or
+/// byte vector is being filled: the most a state can over-allocate past the
+/// data it actually holds.
+const STATE_FILL_CHUNK: usize = 1 << 20;
+
+/// A bincode reader for untrusted state streams. bincode's own `IoReader`
+/// sizes every string and byte-vector buffer from the stream's length
+/// prefix before reading a byte of it, so a corrupt or hostile `.clstate`
+/// naming a multi-gigabyte chip RAM takes the process down in the
+/// allocator (capacity overflow, or an abort) instead of failing the load.
+/// This reader fills such buffers in [`STATE_FILL_CHUNK`] steps, so a bogus
+/// length runs into the end of the stream having allocated no more than one
+/// chunk beyond the bytes that exist, and the load fails with an ordinary
+/// error. Found by the `savestate` fuzz target. Reads that are not
+/// length-prefixed pass straight through, so the reader never consumes
+/// more of the underlying stream than the value being decoded.
+pub(crate) struct StateReader<R> {
+    inner: R,
+    buf: Vec<u8>,
+}
+
+impl<R: Read> StateReader<R> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buf: Vec::new(),
+        }
+    }
+
+    fn fill(&mut self, length: usize) -> bincode::Result<()> {
+        self.buf.clear();
+        while self.buf.len() < length {
+            let start = self.buf.len();
+            let want = (length - start).min(STATE_FILL_CHUNK);
+            self.buf.resize(start + want, 0);
+            self.inner.read_exact(&mut self.buf[start..])?;
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for StateReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(out)
+    }
+}
+
+impl<'a, R: Read> bincode::BincodeRead<'a> for StateReader<R> {
+    fn forward_read_str<V>(&mut self, length: usize, visitor: V) -> bincode::Result<V::Value>
+    where
+        V: serde::de::Visitor<'a>,
+    {
+        self.fill(length)?;
+        let string = std::str::from_utf8(&self.buf)
+            .map_err(|e| Box::new(bincode::ErrorKind::InvalidUtf8Encoding(e)))?;
+        visitor.visit_str(string)
+    }
+
+    fn get_byte_buffer(&mut self, length: usize) -> bincode::Result<Vec<u8>> {
+        self.fill(length)?;
+        Ok(std::mem::take(&mut self.buf))
+    }
+
+    fn forward_read_bytes<V>(&mut self, length: usize, visitor: V) -> bincode::Result<V::Value>
+    where
+        V: serde::de::Visitor<'a>,
+    {
+        self.fill(length)?;
+        visitor.visit_bytes(&self.buf)
+    }
+}
+
 const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 
 /// Save-state format version. The payload is bincode of the live state
@@ -331,7 +417,7 @@ pub fn load_from_reader<R: Read>(
     }
     // Read the descriptor straight from the reader; bincode consumes exactly
     // its encoded bytes, leaving the reader positioned at the zlib stream.
-    let descriptor: MachineDescriptor = bincode::deserialize_from(&mut reader)
+    let descriptor: MachineDescriptor = deserialize_from_state(&mut reader)
         .map_err(|e| anyhow!("reading machine descriptor: {e}"))?;
     let mut decoder = ZlibDecoder::new(reader);
     machine.apply_state(&mut decoder)?;
@@ -686,6 +772,50 @@ mod tests {
         let err = load(&mut machine, &path).unwrap_err();
         assert!(format!("{err:#}").contains("format version"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn state_reader_matches_bincode_wire_format_across_chunk_boundaries() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Sample {
+            name: String,
+            ram: Vec<u8>,
+            words: Vec<u16>,
+            tail: u32,
+        }
+        let sample = Sample {
+            name: "A1200".into(),
+            // Longer than one fill chunk, so a byte vector is assembled
+            // from several reads.
+            ram: (0..STATE_FILL_CHUNK * 2 + 777).map(|i| i as u8).collect(),
+            words: vec![1, 2, 3],
+            tail: 0xDEAD_BEEF,
+        };
+        let bytes = bincode::serialize(&sample).unwrap();
+        let back: Sample = deserialize_from_state(&bytes[..]).unwrap();
+        assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn state_reader_refuses_length_prefixes_past_the_stream_without_allocating_them() {
+        // A byte vector claiming u64::MAX bytes, then nothing. bincode's own
+        // reader resizes its buffer to that length first (capacity
+        // overflow); this reader runs into the end of the stream instead.
+        let bogus = [0xFFu8; 8];
+        let err = deserialize_from_state::<_, Vec<u8>>(&bogus[..]).unwrap_err();
+        assert!(
+            matches!(*err, bincode::ErrorKind::Io(_)),
+            "expected an end-of-stream error, got {err}"
+        );
+        let err = deserialize_from_state::<_, String>(&bogus[..]).unwrap_err();
+        assert!(matches!(*err, bincode::ErrorKind::Io(_)), "{err}");
+        // A plausible but oversized length (a claimed 1 GiB chip RAM in a
+        // 16-byte stream) is refused the same way, having allocated no more
+        // than one chunk.
+        let mut oversized = (1u64 << 30).to_le_bytes().to_vec();
+        oversized.extend_from_slice(&[0u8; 8]);
+        let err = deserialize_from_state::<_, Vec<u8>>(&oversized[..]).unwrap_err();
+        assert!(matches!(*err, bincode::ErrorKind::Io(_)), "{err}");
     }
 
     #[test]
