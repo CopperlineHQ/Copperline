@@ -10,7 +10,7 @@ publish = false
 # a one-second run, where the real build embeds the same file with
 # include_str! and would relink the whole emulator.
 [dependencies]
-wgpu = "29.0.4"
+wgpu = "30.0.1"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
