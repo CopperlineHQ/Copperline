@@ -732,6 +732,7 @@ async function boot() {
     machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
     window.__emu = emu; // for debugging/automation
+    serialApplyCarrier(); // a socket opened before (or across) this boot
     lastFddTrack = null; // a new machine starts the track latch over
     // Nothing is held down in a machine that has just been built, so the
     // on-screen keyboard forgets rather than sending release codes into it.
@@ -1257,9 +1258,19 @@ function setSerialStatus(text) {
 }
 
 // The far end's carrier, as the guest sees it on CIA-B /CD: up while the
-// socket is open, down otherwise. Older wasm bundles have no setter.
+// socket is open, down otherwise. The desired state lives here rather than
+// only in the machine, because the socket and the machine have independent
+// lifetimes: a raw-mode socket can open before boot, and a crashed machine
+// is discarded and rebuilt while the socket stays up. Every new machine
+// gets the cached state applied (serialApplyCarrier below, called after
+// `emu` is installed). Older wasm bundles have no setter.
+let serialCarrier = false;
 function serialSetCarrier(connected) {
-  if (emu && typeof emu.serial_set_carrier === 'function') emu.serial_set_carrier(connected);
+  serialCarrier = connected;
+  serialApplyCarrier();
+}
+function serialApplyCarrier() {
+  if (emu && typeof emu.serial_set_carrier === 'function') emu.serial_set_carrier(serialCarrier);
 }
 
 function serialTeardown() {

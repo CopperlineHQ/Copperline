@@ -118,6 +118,20 @@ impl SerialControlLines {
         cd: true,
     };
 
+    /// Pack into a bitmask for lock-free mirrors (bit 0 = DSR, 1 = CTS,
+    /// 2 = CD). Round-trips through [`from_bits`](Self::from_bits).
+    fn to_bits(self) -> u8 {
+        u8::from(self.dsr) | u8::from(self.cts) << 1 | u8::from(self.cd) << 2
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        Self {
+            dsr: bits & 1 != 0,
+            cts: bits & 2 != 0,
+            cd: bits & 4 != 0,
+        }
+    }
+
     /// The pin levels CIA-B port A samples on PA3-5, inverted through the
     /// 1489 receivers: bit clear where a line is asserted, set where it is
     /// not. Other bits are zero.
@@ -664,6 +678,7 @@ pub const CHANNEL_OUTPUT_CAPACITY: usize = 256 * 1024;
 
 /// Queues shared between a [`ChannelSerialSink`] (owned by Paula) and the
 /// [`ChannelSerialHandle`] the host frontend keeps.
+#[derive(Default)]
 struct ChannelSerialShared {
     /// Host -> guest bytes waiting for Paula's receiver.
     input: VecDeque<u8>,
@@ -671,21 +686,6 @@ struct ChannelSerialShared {
     output: VecDeque<u8>,
     /// Output bytes evicted because the frontend stopped draining.
     output_dropped: u64,
-    /// What the frontend's far end is driving at the handshake inputs.
-    control_lines: SerialControlLines,
-}
-
-impl Default for ChannelSerialShared {
-    fn default() -> Self {
-        Self {
-            input: VecDeque::new(),
-            output: VecDeque::new(),
-            output_dropped: 0,
-            // A bridge is present and accepting data from the start; the
-            // frontend raises carrier once its own connection is up.
-            control_lines: SerialControlLines::READY,
-        }
-    }
 }
 
 /// Bidirectional in-process serial bridge with no host I/O of its own: the
@@ -701,6 +701,12 @@ pub struct ChannelSerialSink {
     /// Signed for the same transient-debt reason as
     /// [`TcpSerialSink::buffered`].
     buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    /// The handshake lines the frontend's far end is driving, as
+    /// [`SerialControlLines`] bits. An atomic for the same reason as
+    /// `buffered`: the bus samples `control_lines` on every guest CIA-B
+    /// PRA read, which must never wait on the frontend holding the queue
+    /// mutex in `push_input`/`take_output`.
+    lines: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl ChannelSerialSink {
@@ -709,11 +715,24 @@ impl ChannelSerialSink {
     pub fn pair() -> (Self, ChannelSerialHandle) {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(ChannelSerialShared::default()));
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        // A bridge is present and accepting data from the start; the
+        // frontend raises carrier once its own connection is up.
+        let lines = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            SerialControlLines::READY.to_bits(),
+        ));
         let handle = ChannelSerialHandle {
             shared: std::sync::Arc::clone(&shared),
             buffered: std::sync::Arc::clone(&buffered),
+            lines: std::sync::Arc::clone(&lines),
         };
-        (Self { shared, buffered }, handle)
+        (
+            Self {
+                shared,
+                buffered,
+                lines,
+            },
+            handle,
+        )
     }
 }
 
@@ -745,7 +764,7 @@ impl SerialSink for ChannelSerialSink {
     }
 
     fn control_lines(&self) -> SerialControlLines {
-        self.shared.lock().unwrap().control_lines
+        SerialControlLines::from_bits(self.lines.load(std::sync::atomic::Ordering::Acquire))
     }
 
     fn flush(&mut self) {}
@@ -756,6 +775,7 @@ impl SerialSink for ChannelSerialSink {
 pub struct ChannelSerialHandle {
     shared: std::sync::Arc<std::sync::Mutex<ChannelSerialShared>>,
     buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    lines: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl ChannelSerialHandle {
@@ -806,7 +826,8 @@ impl ChannelSerialHandle {
     /// raises carrier when that connection opens and drops it when it
     /// closes, which is how a guest BBS or terminal notices the hang-up.
     pub fn set_control_lines(&self, lines: SerialControlLines) {
-        self.shared.lock().unwrap().control_lines = lines;
+        self.lines
+            .store(lines.to_bits(), std::sync::atomic::Ordering::Release);
     }
 
     /// Raise or drop carrier detect alone, keeping DSR and CTS asserted:
@@ -821,7 +842,7 @@ impl ChannelSerialHandle {
 
     /// The control inputs currently presented to the guest.
     pub fn control_lines(&self) -> SerialControlLines {
-        self.shared.lock().unwrap().control_lines
+        SerialControlLines::from_bits(self.lines.load(std::sync::atomic::Ordering::Acquire))
     }
 }
 
