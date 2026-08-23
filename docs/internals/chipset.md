@@ -263,8 +263,12 @@ creating another access, forwards one strobe to the attached parallel
 peripheral, and feeds an accepted byte's `/ACK` edge back through CIA-A
 FLAG. With no peripheral attached the line remains unacknowledged, like an
 unplugged cable. CIA-B carries the floppy control lines (motor, select,
-side, step), the FLAG input pulsed by the disk index, and the parallel
-status lines (BUSY/POUT/SEL on port A bits 0-2). PB6/PB7 pulse-output mode
+side, step), the FLAG input pulsed by the disk index, the parallel
+status lines (BUSY/POUT/SEL on port A bits 0-2), and the RS-232 control
+lines: /DSR, /CTS, and /CD inputs on port A bits 3-5, driven through the
+inverting 1489 receivers by whatever the serial port is wired to on the
+host (see [peripherals](peripherals.md#serial-sink)), and the /RTS and
+/DTR outputs on bits 6-7. PB6/PB7 pulse-output mode
 holds the selected pin low for one E-clock; reading PRB observes the pulse
 without shortening it.
 

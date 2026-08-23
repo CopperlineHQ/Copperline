@@ -6621,9 +6621,23 @@ impl Bus {
             // (BUSY, POUT, SEL), pulled up when nothing drives them. An
             // attached peripheral holds them at its own levels; pins the
             // guest has switched to outputs stay CIA-driven.
+            let ddr = self.cia_b.port_a_ddr();
             if let Some(lines) = self.parallel_port.control_lines() {
-                let inputs = !self.cia_b.port_a_ddr() & 0x07;
+                let inputs = !ddr & 0x07;
                 v = (v & !inputs) | (lines & inputs);
+            }
+            // CIA-B PA3-5 are the RS-232 handshake inputs /DSR, /CTS, and
+            // /CD, arriving through the motherboard's inverting 1489
+            // receivers: a line the far-end device asserts reads as a low
+            // pin, and an unasserted (or unplugged) line is pulled up.
+            // serial.device's 7-wire handshake and SDCMD_QUERY status read
+            // them here. The levels come from whatever the serial port is
+            // wired to on the host; pins the guest has switched to outputs
+            // stay CIA-driven, like the Centronics inputs above.
+            let inputs = !ddr & crate::serial::CIAB_PA_SERIAL_INPUTS;
+            if inputs != 0 {
+                let levels = self.paula.serial.control_lines().cia_b_pa_levels();
+                v = (v & !inputs) | (levels & inputs);
             }
         }
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);

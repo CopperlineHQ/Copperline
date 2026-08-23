@@ -633,7 +633,8 @@ the selected drive's head or `undefined` when no drive is selected (latch
 the last value so a counter does not flicker), and `drive_connected(n)` /
 `disk_name(n)` describe DF0-DF3 -- a `disk_name` of `undefined` means the
 drive is empty. `serial_send(bytes)`,
-`serial_take()`, `serial_input_backlog()` and `serial_dtr()` bridge
+`serial_take()`, `serial_input_backlog()`, `serial_dtr()` and
+`serial_set_carrier(bool)` bridge
 Paula's serial port to whatever byte stream the page likes (see
 [the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
 valid until the next `run` call -- rebuild the typed-array view every frame,
@@ -935,6 +936,13 @@ telnet BBS, with a terminal program running on the guest. Three calls:
   set the CIA bit themselves -- and drops it on exit and at reset, so this
   is the "a terminal is actually listening" signal, exactly what a real
   modem keys off.
+- `serial_set_carrier(connected)` drives the port's carrier-detect input
+  (CIA-B PA5, `/CD`) the other way: call it with `true` when the page's
+  socket opens and `false` when it closes. The bridge always presents
+  itself to the guest as a present, ready device (DSR and CTS asserted);
+  carrier is what a guest terminal or BBS watches to notice a hang-up. A
+  page that never calls it leaves the guest seeing a modem with no call
+  up, which 3-wire software ignores.
 
 Browsers cannot open raw TCP, so the page's transport is a WebSocket to a
 gateway that forwards to the real service --

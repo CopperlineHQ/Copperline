@@ -1256,6 +1256,12 @@ function setSerialStatus(text) {
   if (serialStatus) serialStatus.textContent = text;
 }
 
+// The far end's carrier, as the guest sees it on CIA-B /CD: up while the
+// socket is open, down otherwise. Older wasm bundles have no setter.
+function serialSetCarrier(connected) {
+  if (emu && typeof emu.serial_set_carrier === 'function') emu.serial_set_carrier(connected);
+}
+
 function serialTeardown() {
   if (serialWs) {
     // Neuter the handlers first: close() fires onclose asynchronously, and
@@ -1264,6 +1270,7 @@ function serialTeardown() {
     serialWs.close();
     serialWs = null;
   }
+  serialSetCarrier(false);
   serialTelnet = null;
   serialDtrGated = false;
   serialRxQueue = [];
@@ -1309,7 +1316,10 @@ function serialOpen() {
   serialRxQueue = [];
   if (serialConnectBtn) serialConnectBtn.textContent = 'Disconnect';
   setSerialStatus('connecting...');
-  ws.onopen = () => setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  ws.onopen = () => {
+    serialSetCarrier(true);
+    setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  };
   ws.onclose = () => serialDisconnect('disconnected');
   ws.onerror = () => setSerialStatus('connection failed');
   ws.onmessage = (e) => {
