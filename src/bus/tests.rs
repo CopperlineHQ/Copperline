@@ -32,6 +32,7 @@ use crate::chipset::cia::{
     REG_TBLO, REG_TODHI, REG_TODLO, REG_TODMID,
 };
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
+use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
 use crate::chipset::paula::{
     Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER, INT_PORTS,
@@ -10668,6 +10669,35 @@ fn denise_write_only_reads_use_zero_bus_approximation() {
     assert_eq!(bus.custom_read(0x1BE, 2), 0);
     assert_eq!(bus.custom_read(0x099, 1), 0);
     assert_eq!(bus.custom_read(0x181, 1), 0);
+}
+
+#[test]
+fn aga_rdram_reads_banked_palette_nibbles_and_blocks_writes() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+
+    // Bank 2, COLOR05: write independently distinguishable high/low nibbles.
+    assert!(!bus.custom_write(0x106, 2, 0x4000));
+    assert!(!bus.custom_write(0x18A, 2, 0x8123));
+    assert!(!bus.custom_write(0x106, 2, 0x4200));
+    assert!(!bus.custom_write(0x18A, 2, 0x0456));
+
+    assert!(!bus.custom_write(0x104, 2, u64::from(BPLCON2_RDRAM)));
+    assert!(!bus.custom_write(0x106, 2, 0x4000));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x8123);
+    assert!(!bus.custom_write(0x106, 2, 0x4200));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x0456);
+
+    // The COLOR window is read-only while RDRAM is active.
+    assert!(!bus.custom_write(0x18A, 2, 0x0FFF));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x0456);
+    assert_eq!(bus.denise.palette.read_banked(2, 5, false), 0x8123);
+    assert_eq!(bus.denise.palette.read_banked(2, 5, true), 0x0456);
+
+    // Clearing RDRAM restores writes immediately.
+    assert!(!bus.custom_write(0x104, 2, 0));
+    assert!(!bus.custom_write(0x18A, 2, 0x0789));
+    assert_eq!(bus.denise.palette.read_banked(2, 5, true), 0x0789);
 }
 
 #[test]

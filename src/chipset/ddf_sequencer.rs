@@ -101,7 +101,9 @@ pub struct DdfFetch {
 }
 
 fn plane_count(bplcon0: u16, aga: bool) -> u8 {
-    crate::chipset::agnus::bitplane_dma_planes(bplcon0, aga) as u8
+    // The flop walker is the FMODE=0 path. Alice's narrow HIRES/SHRES tables
+    // therefore use the mode-0 bandwidth ceilings here as well.
+    crate::chipset::agnus::bitplane_dma_planes_for_fmode(bplcon0, 0, aga) as u8
 }
 
 /// Per-unit fetch layout: `slots[counter]` = Some(plane) when a DMA slot for
@@ -809,6 +811,23 @@ mod tests {
         );
         assert_eq!(words_for_plane(&fetches, 6), 20, "plane 7 fetches");
         assert_eq!(words_for_plane(&fetches, 7), 0, "no plane 8 stream");
+    }
+
+    #[test]
+    fn aga_fmode_zero_rejects_overprogrammed_hires_and_shres_counts() {
+        let signals = line_signals(0x38, 0xD0, LINE, &[]);
+
+        let mut hires4 = ready_state(0xC200);
+        let fetches = walk_line(true, true, &signals, &mut hires4);
+        assert!(fetches.iter().any(|fetch| fetch.plane == 3));
+        let mut hires5 = ready_state(0xD200);
+        assert!(walk_line(true, true, &signals, &mut hires5).is_empty());
+
+        let mut shres2 = ready_state(0x2241);
+        let fetches = walk_line(true, true, &signals, &mut shres2);
+        assert!(fetches.iter().any(|fetch| fetch.plane == 1));
+        let mut shres3 = ready_state(0x3241);
+        assert!(walk_line(true, true, &signals, &mut shres3).is_empty());
     }
 
     #[test]

@@ -1181,16 +1181,24 @@ fn denise_horizontal_delay_aligns_copper_beam_and_display_fetch_domains() {
 
 #[test]
 fn color_register_writes_use_final_output_position() {
-    assert_eq!(color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32), 0);
     assert_eq!(
-        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 + 4) as u32),
+        color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32, false),
+        0
+    );
+    assert_eq!(
+        color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32, true),
+        1
+    );
+    assert_eq!(
+        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 + 4) as u32, false),
         16
     );
     assert!(color_write_wraps_to_previous_output_line(2));
     assert!(!color_write_wraps_to_previous_output_line(
         DENISE_HBLANK_START_HPOS
     ));
-    assert_eq!(color_write_wrapped_framebuffer_x(2), 704);
+    assert_eq!(color_write_wrapped_framebuffer_x(2, false), 704);
+    assert_eq!(color_write_wrapped_framebuffer_x(2, true), 705);
     assert_eq!(
         beam_to_framebuffer_x_unclamped(COLOR_WRITE_HPOS_FB0 as u32),
         52
@@ -7529,8 +7537,8 @@ fn color00_overscan_write_does_not_backfill_row_start() {
         &mut manual_bpl_segments,
     );
 
-    let x_on = color_write_framebuffer_x(68);
-    let x_off = color_write_framebuffer_x(76);
+    let x_on = color_write_framebuffer_x(68, false);
+    let x_off = color_write_framebuffer_x(76, false);
     assert_eq!(palette_segments[0][0].x, x_on);
     assert_eq!(palette_segments[0][0].value, 0x087A);
     assert_eq!(palette_segments[0][1].x, x_off);
@@ -7580,7 +7588,7 @@ fn pre_hblank_color_write_updates_previous_row_tail_and_next_row_base() {
     assert_eq!(palette_segments[0].len(), 1);
     assert_eq!(
         palette_segments[0][0].x,
-        color_write_wrapped_framebuffer_x(2)
+        color_write_wrapped_framebuffer_x(2, false)
     );
     assert_eq!(palette_segments[0][0].value, 0x0123);
 
@@ -7593,7 +7601,7 @@ fn pre_hblank_color_write_updates_previous_row_tail_and_next_row_base() {
         &control_segments,
     );
 
-    let wrapped_x = color_write_wrapped_framebuffer_x(2);
+    let wrapped_x = color_write_wrapped_framebuffer_x(2, false);
     assert_eq!(fb[wrapped_x - 1], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[wrapped_x], rgb12_to_rgba8(0x0123));
     assert_eq!(fb[FB_WIDTH], rgb12_to_rgba8(0x0123));
@@ -7655,7 +7663,10 @@ fn aga_bplcon4_splits_sprite_base_from_bitplane_xor_timing() {
 
     let line = (0x50 - 0x2C) as usize;
     let sprite_x = sprite_palette_control_framebuffer_x(hpos);
-    assert_eq!(sprite_x, color_write_framebuffer_x(hpos).saturating_sub(4));
+    assert_eq!(
+        sprite_x,
+        color_write_framebuffer_x(hpos, true).saturating_sub(5)
+    );
     let beam_x = beam_to_framebuffer_x_unclamped(hpos) as usize;
     assert!(sprite_x < beam_x);
     assert_eq!(control_segments[line].len(), 2);
@@ -7746,7 +7757,7 @@ fn display_plan_events_record_beam_timed_palette_control_and_bpldat_writes() {
     assert!(
         display_line_events[line].contains(&DisplayLinePlanEvent::PaletteChange {
             hpos: 0x0040,
-            x: color_write_framebuffer_x(0x0040),
+            x: color_write_framebuffer_x(0x0040, false),
             palette: {
                 let mut palette = Palette::from_ocs([0x0103; 32]);
                 palette.write_ocs(0, 0x0ABC);

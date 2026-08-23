@@ -381,7 +381,8 @@ impl Bus {
             if dmacon & (DMACON_DMAEN | DMACON_BPLEN) != (DMACON_DMAEN | DMACON_BPLEN) {
                 continue;
             }
-            let nplanes = BitplaneMode::from_bplcon0(bplcon0, self.aga_enabled()).dma_planes();
+            let nplanes =
+                bitplane_dma_planes_for_fmode(bplcon0, self.agnus.fmode(), self.aga_enabled());
             if nplanes == 0 {
                 continue;
             }
@@ -799,7 +800,9 @@ impl Bus {
         if self.mem.chip_ram.is_empty() {
             return None;
         }
-        let quantum = sprite_fetch_quantum(self.agnus.fmode());
+        let fmode = self.agnus.fmode();
+        let mode = (fmode >> 2) & 0x0003;
+        let quantum = sprite_fetch_quantum(fmode);
         let ptr = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
         if self.mem_watches_armed() {
             self.note_dma_read(
@@ -810,7 +813,8 @@ impl Bus {
         }
         let mut words = [0u16; 4];
         for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
-            *word = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * w as u32));
+            let addr = wide_fetch_word_address(ptr, mode, w);
+            *word = read_chip_word_wrapping(&self.mem.chip_ram, addr);
         }
         self.display_dma_sprpt[sprite] = ptr.wrapping_add(2 * quantum) & self.chip_dma_mask & !1;
         Some(words)
@@ -1074,8 +1078,8 @@ impl Bus {
         let anchor_bplcon0 = ddfstart_cck
             .map(|cck| self.bitplane_bplcon0_for_block(cck))
             .unwrap_or(display_bplcon0);
-        let anchor_mode = BitplaneMode::from_bplcon0(anchor_bplcon0, self.aga_enabled());
-        let anchor_dma_planes = anchor_mode.dma_planes();
+        let anchor_dma_planes =
+            bitplane_dma_planes_for_fmode(anchor_bplcon0, fmode, self.aga_enabled());
         let period = static_plan.map_or_else(
             || bitplane_fetch_period(anchor_bplcon0, fmode),
             |plan| plan.period,
@@ -1176,7 +1180,8 @@ impl Bus {
                 let block_start_cck = i128::from(hpos_emulated_cck);
                 let block_bplcon0 = self.bitplane_bplcon0_for_block(block_start_cck);
                 let block_mode = BitplaneMode::from_bplcon0(block_bplcon0, self.aga_enabled());
-                let block_dma_planes = block_mode.dma_planes();
+                let block_dma_planes =
+                    bitplane_dma_planes_for_fmode(block_bplcon0, fmode, self.aga_enabled());
                 if block_dma_planes == 0 {
                     continue;
                 }
@@ -1185,9 +1190,11 @@ impl Bus {
                     if plane == 0 {
                         self.record_sprite_display_enable_for_bitplane_dma(vpos);
                     }
-                    for w in 0..quantum.min(words_per_row - word_base) {
+                    let fetch_ptr = self.display_dma_bplpt[plane];
+                    let fetch_words = quantum.min(words_per_row - word_base);
+                    for w in 0..fetch_words {
                         let word_idx = word_base + w;
-                        let addr = self.display_dma_bplpt[plane] & addr_mask;
+                        let addr = wide_fetch_word_address(fetch_ptr, fmode, w) & addr_mask;
                         if self.mem_watches_armed() {
                             self.note_dma_read(
                                 crate::debugger::WatchSource::Bitplane(plane as u8),
@@ -1209,13 +1216,14 @@ impl Bus {
                             rows_started += 1;
                         }
                         self.denise.write_bpldat(plane, fetched);
-                        self.display_dma_bplpt[plane] =
-                            self.display_dma_bplpt[plane].wrapping_add(2) & addr_mask;
                         if word_idx == last_word_idx {
                             line_complete = true;
                             line_complete_plane_mask = plane_mask_for_count(block_dma_planes);
                         }
                     }
+                    self.display_dma_bplpt[plane] = self.display_dma_bplpt[plane]
+                        .wrapping_add((2 * fetch_words) as u32)
+                        & addr_mask;
                     slots += 1;
                 }
             } else {
@@ -1231,7 +1239,8 @@ impl Bus {
                 let block_start_cck = i128::from(hpos_emulated_cck) - i128::from(unit_off);
                 let block_bplcon0 = self.bitplane_bplcon0_for_block(block_start_cck);
                 let block_mode = BitplaneMode::from_bplcon0(block_bplcon0, self.aga_enabled());
-                let block_dma_planes = block_mode.dma_planes();
+                let block_dma_planes =
+                    bitplane_dma_planes_for_fmode(block_bplcon0, fmode, self.aga_enabled());
                 if block_dma_planes == 0 {
                     continue;
                 }
@@ -1247,9 +1256,11 @@ impl Bus {
                     if plane == 0 {
                         self.record_sprite_display_enable_for_bitplane_dma(vpos);
                     }
-                    for w in 0..quantum.min(words_per_row - word_base) {
+                    let fetch_ptr = self.display_dma_bplpt[plane];
+                    let fetch_words = quantum.min(words_per_row - word_base);
+                    for w in 0..fetch_words {
                         let word_idx = word_base + w;
-                        let addr = self.display_dma_bplpt[plane] & addr_mask;
+                        let addr = wide_fetch_word_address(fetch_ptr, fmode, w) & addr_mask;
                         if self.mem_watches_armed() {
                             self.note_dma_read(
                                 crate::debugger::WatchSource::Bitplane(plane as u8),
@@ -1271,13 +1282,14 @@ impl Bus {
                             rows_started += 1;
                         }
                         self.denise.write_bpldat(plane, fetched);
-                        self.display_dma_bplpt[plane] =
-                            self.display_dma_bplpt[plane].wrapping_add(2) & addr_mask;
                         if word_idx == last_word_idx && order == block_last_order {
                             line_complete = true;
                             line_complete_plane_mask = plane_mask_for_count(block_dma_planes);
                         }
                     }
+                    self.display_dma_bplpt[plane] = self.display_dma_bplpt[plane]
+                        .wrapping_add((2 * fetch_words) as u32)
+                        & addr_mask;
                     slots += 1;
                 }
             }

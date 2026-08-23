@@ -22,8 +22,8 @@ struct VAmigaTsCase {
     /// vAmiga regression setup from the shipped .retrosh (machine model);
     /// mirrored onto the Copperline config's chipset revision.
     setup: String,
-    /// CPU revision from the script's `cpu set revision` line (68000 when
-    /// absent); mirrored onto both emulators.
+    /// CPU revision from the script's `cpu set revision` line (otherwise the
+    /// selected machine setup's default); mirrored onto both emulators.
     cpu: String,
     /// `wait N seconds` from the shipped script (COPPERLINE_VAMIGATS_SECONDS
     /// still overrides globally when set).
@@ -284,14 +284,7 @@ fn run_vamiga_reference(
 }
 
 fn copperline_config(kick13: &Path, adf: &Path, setup: &str, cpu: &str) -> String {
-    // Mirror the vAmiga regression setup: *_ECS_*/*_PLUS_* machines use the
-    // ECS chipset, everything else OCS; the CPU revision comes from the
-    // shipped script's `cpu set revision` line.
-    let revision = if setup.contains("_ECS_") || setup.contains("_PLUS_") {
-        "ECS"
-    } else {
-        "OCS"
-    };
+    let machine = machine_for_setup(setup);
     format!(
         r#"rom = {}
 
@@ -310,12 +303,12 @@ model = "{cpu}"
 fpu = false
 
 [memory]
-chip = "512K"
+chip = "{}"
 fast = "0"
-slow = "512K"
+slow = "{}"
 
 [chipset]
-revision = "{revision}"
+{}
 video = "PAL"
 
 [floppy.df0]
@@ -323,8 +316,53 @@ path = {}
 write_protected = false
 "#,
         toml_string(&kick13.to_string_lossy()),
+        machine.chip,
+        machine.slow,
+        machine.chipset,
         toml_string(&adf.to_string_lossy())
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VAmigaMachine {
+    default_cpu: &'static str,
+    chip: &'static str,
+    slow: &'static str,
+    chipset: &'static str,
+}
+
+fn machine_for_setup(setup: &str) -> VAmigaMachine {
+    match setup {
+        "A1200_2MB" => VAmigaMachine {
+            default_cpu: "68EC020",
+            chip: "2M",
+            slow: "0",
+            chipset: "revision = \"AGA\"\n",
+        },
+        // vAmiga's A500 ECS scheme pairs the 8372A Agnus with the original
+        // OCS Denise; using the broad ECS preset would silently change Lisa's
+        // side of many register/display tests.
+        "A500_ECS_1MB" => VAmigaMachine {
+            default_cpu: "68000",
+            chip: "512K",
+            slow: "512K",
+            chipset: "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
+        },
+        "A500_PLUS_1MB" => VAmigaMachine {
+            default_cpu: "68000",
+            chip: "512K",
+            slow: "512K",
+            chipset: "revision = \"ECS\"\nagnus = \"8375\"\ndenise = \"ECS\"\n",
+        },
+        // A1000_OCS_1MB and A500_OCS_1MB differ in early Agnus details that
+        // Copperline currently represents with the same OCS revision.
+        _ => VAmigaMachine {
+            default_cpu: "68000",
+            chip: "512K",
+            slow: "512K",
+            chipset: "revision = \"OCS\"\n",
+        },
+    }
 }
 
 fn discover_adf_cases(root: &Path) -> TestResult<Vec<VAmigaTsCase>> {
@@ -413,12 +451,14 @@ fn collect_adf_cases(root: &Path, dir: &Path, cases: &mut Vec<VAmigaTsCase>) -> 
                     .collect::<Vec<String>>()
                     .join("/");
                 adfs_with_scripts.push(adf_path.clone());
+                let setup = setup.unwrap_or_else(|| "A500_OCS_1MB".to_owned());
+                let cpu = cpu.unwrap_or_else(|| machine_for_setup(&setup).default_cpu.to_owned());
                 cases.push(VAmigaTsCase {
                     name,
                     rel_path: rel_path.with_extension("adf"),
                     adf_path,
-                    setup: setup.unwrap_or_else(|| "A500_OCS_1MB".to_owned()),
-                    cpu: cpu.unwrap_or_else(|| "68000".to_owned()),
+                    setup,
+                    cpu,
                     seconds,
                 });
             }
@@ -460,7 +500,7 @@ fn vamiga_retroshell_script(
     // vAmiga 4.4's RetroShell registers option setters under the option's
     // uppercase key: `cpu set REVISION 68010` (the suite's shipped scripts
     // use an older lowercase syntax).
-    let cpu_line = if cpu == "68000" {
+    let cpu_line = if cpu == machine_for_setup(setup).default_cpu {
         String::new()
     } else {
         format!("cpu set REVISION {cpu}\n")
@@ -654,6 +694,43 @@ fn vamiga_retroshell_script_uses_temp_paths_and_setup() {
     assert!(script.contains("regression run /tmp/bbusy0.adf"));
     assert!(script.contains("wait 9 seconds"));
     assert!(script.contains("screenshot save bbusy0"));
+}
+
+#[test]
+fn a1200_setup_selects_aga_ec020_and_two_megabytes_of_chip_ram() {
+    let config = copperline_config(
+        Path::new("/tmp/kick13.rom"),
+        Path::new("/tmp/fmode10.adf"),
+        "A1200_2MB",
+        machine_for_setup("A1200_2MB").default_cpu,
+    );
+
+    assert!(config.contains("model = \"68EC020\""));
+    assert!(config.contains("chip = \"2M\""));
+    assert!(config.contains("slow = \"0\""));
+    assert!(config.contains("revision = \"AGA\""));
+    assert!(!config.contains("revision = \"OCS\""));
+}
+
+#[test]
+fn a1200_script_without_cpu_override_uses_machine_default() -> TestResult {
+    let root = unique_temp_dir("copperline-vamigats-a1200-discovery-test");
+    let case_dir = root.join("Agnus/Registers/FMODE/fmode10");
+    fs::create_dir_all(&case_dir)?;
+    fs::write(case_dir.join("fmode10.adf"), [])?;
+    fs::write(
+        case_dir.join("fmode10.retrosh"),
+        "regression setup A1200_2MB /tmp/kick13.rom\n\
+         regression run /tmp/fmode10.adf\n\
+         wait 9 seconds\n",
+    )?;
+
+    let cases = discover_adf_cases(&root)?;
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(cases.len(), 1);
+    assert_eq!(cases[0].setup, "A1200_2MB");
+    assert_eq!(cases[0].cpu, "68EC020");
+    Ok(())
 }
 
 #[test]

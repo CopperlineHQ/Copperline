@@ -5,9 +5,9 @@
 //! typed read/write methods for memory-mapped devices.
 
 use crate::chipset::agnus::{
-    sprite_dma_disabled_by_bitplane_ddf, Agnus, AgnusRevision, AgnusTick, VideoStandard,
-    BEAMCON0_DUAL, BEAMCON0_HARDDIS, COLORCLOCKS_PER_LINE, NTSC_LINES,
-    NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+    bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
+    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS,
+    COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::blitter::Blitter;
 use crate::chipset::cia::{
@@ -15,7 +15,7 @@ use crate::chipset::cia::{
 };
 use crate::chipset::copper::{Copper, CopperSlotAction, CopperWait, DMACON_COPEN};
 use crate::chipset::denise::{
-    color_register_value, BitplaneMode, Denise, DeniseRevision, DiwHigh, Palette,
+    color_register_value, BitplaneMode, Denise, DeniseRevision, DiwHigh, Palette, BPLCON2_RDRAM,
 };
 use crate::chipset::keyboard::KeyboardMcu;
 use crate::chipset::paula::{

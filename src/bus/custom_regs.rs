@@ -86,6 +86,16 @@ impl Bus {
                 self.flush_audio();
                 self.paula.intreq // INTREQR
             }
+            off @ 0x180..=0x1BE
+                if self.denise_is_lisa() && self.denise.bplcon2 & BPLCON2_RDRAM != 0 =>
+            {
+                let idx = ((off - 0x180) / 2) as usize;
+                self.denise.palette.read_banked(
+                    Palette::bank_from_bplcon3(self.denise.bplcon3),
+                    idx,
+                    Palette::loct_from_bplcon3(self.denise.bplcon3),
+                )
+            }
             off @ 0x0A0..=0x0DF => {
                 self.flush_audio();
                 self.paula.read_audio_reg(off - 0x0A0)
@@ -1265,6 +1275,11 @@ impl Bus {
             off @ 0x180..=0x1BE => {
                 let idx = ((off - 0x180) / 2) as usize;
                 if idx < 32 {
+                    // AGA RDRAM turns the COLORxx window into a read port.
+                    // Writes issue no palette or render event while it is set.
+                    if self.denise_is_lisa() && self.denise.bplcon2 & BPLCON2_RDRAM != 0 {
+                        return false;
+                    }
                     let color = color_register_value(val);
                     let render_source = if matches!(source, BeamWriteSource::Cpu)
                         && matches!(self.cpu_palette_target, CpuPaletteTarget::Bottom)
