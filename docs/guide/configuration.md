@@ -1183,6 +1183,7 @@ mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, or modem
 # listen = "127.0.0.1:1234"  # tcp mode: bind address; modem mode: incoming-call address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 # telnet = false           # modem mode: AT*T1 telnet NVT translation, on by default
+# session = "bbs-demo.session"  # modem mode: replay a scripted session instead of TCP
 ```
 
 The Amiga serial port doubles as the MIDI port. `mode` selects where
@@ -1216,10 +1217,12 @@ Paula's serial in/out is connected:
 - `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
-- `modem` -- a Hayes/AT-command modem personality: the guest dials out with
-  `ATD host:port` rather than the port being wired to a peer at startup, so
-  (unlike `tcp-connect`) there is no `connect` address in the config; carrier
-  presence drives /CD. `listen` here means something different from `tcp`
+- `modem` -- a Hayes/AT-command modem personality (see
+  [the modem chapter](modem.md) for a BBS quick-start and the full command
+  set): the guest dials out with `ATD host:port` rather than the port being
+  wired to a peer at startup, so (unlike `tcp-connect`) there is no `connect`
+  address in the config; carrier presence drives /CD. `listen` here means
+  something different from `tcp`
   mode's bind address: it is the address the modem answers incoming calls
   on, and an incoming connection produces `RING` on the guest's serial port
   rather than being bridged straight through -- the guest (or its S0
@@ -1256,11 +1259,21 @@ Paula's serial in/out is connected:
   telnet` always wins over what was stored); `AT&F` is a hardcoded factory
   reset that ignores both.
 
+  `session = "path"` replays a scripted dial-out session from a file
+  instead of dialing out over TCP -- the determinism story for a
+  modem-using headless run or test case, since live network traffic (like
+  MIDI, like a camera) is otherwise outside Copperline's replay
+  guarantees. See [the modem chapter](modem.md#scripted-sessions) for the
+  file format; `session` cannot be combined with `listen` (the scripted
+  transport plays back outbound calls only, with no inbound side).
+
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
-`mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial Port page) sets all
+`mode = "tcp-connect"`), `--serial-session FILE` replays a scripted modem
+session (and implies `mode = "modem"`), and `--midi-out NAME`/
+`--midi-in NAME` imply `mode = "midi"`. The launcher's **I/O Ports** tab
+(Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows

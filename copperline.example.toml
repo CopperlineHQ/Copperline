@@ -766,10 +766,16 @@ floppy_sounds_volume = 100
 #             server (a BBS), not a raw TCP byte service. [serial.phonebook]
 #             maps a dialable number to a host:port (or a bare host, which
 #             dials the modem's default port); config-file only, no
-#             launcher row.
+#             launcher row. session replays a scripted dial-out session
+#             from a file instead of dialing out over TCP -- the
+#             determinism story for a modem-using headless run or test
+#             case (docs/guide/modem.md#scripted-sessions has the file
+#             format); cannot be combined with listen.
+# See docs/guide/modem.md for the full command set and a BBS quick-start.
 # With an AUX: shell on the Amiga side, "tcp"/"pty" give a remote AmigaDOS
 # console. --serial MODE overrides this per run; --serial-connect HOST:PORT
-# implies "tcp-connect"; --midi-out/--midi-in NAME imply "midi".
+# implies "tcp-connect"; --serial-session FILE implies "modem"; --midi-out/
+# --midi-in NAME imply "midi".
 # mode = "stdout"
 # connect = "bbs.example.com:1337"
 # midi_out = "USB MIDI Interface"
@@ -778,6 +784,7 @@ floppy_sounds_volume = 100
 #
 # Modem mode's own keys (see "modem" above).
 # telnet = false                     # AT*T1 telnet translation at power-on
+# session = "bbs-demo.session"       # replay a scripted session instead of TCP
 # [serial.phonebook]
 # "5551234" = "bbs.example.com:23"
 # "5555678" = "bbs2.example.com"
