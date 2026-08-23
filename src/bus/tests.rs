@@ -6125,6 +6125,41 @@ fn fmode_wide_sprite_dma_captures_extension_words() {
     assert_eq!(lines[0].datb_ext, [0xB001, 0xB002, 0xB003]);
 }
 
+#[test]
+fn fmode_page_sprite_dma_observer_reports_only_driven_addresses() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0008); // SPAGEM: both words alias to the group base.
+
+    let sprite_ptr = 0x0100usize;
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    write_chip_word(&mut bus, sprite_ptr, pos);
+    write_chip_word(&mut bus, sprite_ptr + 4, ctl);
+    write_chip_word(&mut bus, sprite_ptr + 8, 0xAAAA);
+    write_chip_word(&mut bus, sprite_ptr + 12, 0xBBBB);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.denise.sprpt[0] = sprite_ptr as u32;
+    bus.display_dma_sprpt[0] = sprite_ptr as u32;
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    assert_eq!(bus.display_dma_sprpt[0], sprite_ptr as u32 + 8);
+
+    // SPAGEM drives +8 twice, then advances to +12. It never drives +10,
+    // even though the logical 32-bit fetch consumes that pointer width.
+    bus.set_ui_mem_watches(&[(sprite_ptr + 10) as u32]);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+    bus.advance_chipset(4);
+
+    assert!(bus.take_ui_dma_hit().is_none());
+    let lines = bus.frame_captured_sprite_lines();
+    assert_eq!(lines.len(), 1, "the watched data fetch must have run");
+    assert_eq!(lines[0].data, 0xAAAA);
+    assert_eq!(lines[0].data_ext[0], 0xAAAA);
+    assert_eq!(lines[0].datb, 0xBBBB);
+    assert_eq!(lines[0].datb_ext[0], 0xBBBB);
+}
+
 /// FMODE SSCAN2 doubles each fetched sprite data line across two display
 /// lines, and a chained descriptor starts after the halved data block.
 #[test]

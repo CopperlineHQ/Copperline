@@ -2911,8 +2911,8 @@ fn manual_bpl_serializer_load_x(hpos: u32, control: &ControlState) -> i32 {
 }
 
 fn color_write_framebuffer_x(hpos: u32, aga: bool) -> usize {
-    let x = ((hpos as i32 - COLOR_WRITE_HPOS_FB0) * 4).clamp(0, FB_WIDTH as i32) as usize;
-    x.saturating_add(usize::from(aga)).min(FB_WIDTH)
+    let x = (hpos as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    x.clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn color_write_wraps_to_previous_output_line(hpos: u32) -> bool {
@@ -2920,9 +2920,8 @@ fn color_write_wraps_to_previous_output_line(hpos: u32) -> bool {
 }
 
 fn color_write_wrapped_framebuffer_x(hpos: u32, aga: bool) -> usize {
-    let x = ((hpos as i32 + COLORCLOCKS_PER_LINE as i32 - COLOR_WRITE_HPOS_FB0) * 4)
-        .clamp(0, FB_WIDTH as i32) as usize;
-    x.saturating_add(usize::from(aga)).min(FB_WIDTH)
+    let x = (hpos as i32 + COLORCLOCKS_PER_LINE as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    x.clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn sprite_palette_control_framebuffer_x(hpos: u32) -> usize {

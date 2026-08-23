@@ -804,16 +804,12 @@ impl Bus {
         let mode = (fmode >> 2) & 0x0003;
         let quantum = sprite_fetch_quantum(fmode);
         let ptr = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
-        if self.mem_watches_armed() {
-            self.note_dma_read(
-                crate::debugger::WatchSource::Sprite(sprite as u8),
-                ptr,
-                2 * quantum,
-            );
-        }
         let mut words = [0u16; 4];
         for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
             let addr = wide_fetch_word_address(ptr, mode, w);
+            if self.mem_watches_armed() {
+                self.note_dma_read(crate::debugger::WatchSource::Sprite(sprite as u8), addr, 2);
+            }
             *word = read_chip_word_wrapping(&self.mem.chip_ram, addr);
         }
         self.display_dma_sprpt[sprite] = ptr.wrapping_add(2 * quantum) & self.chip_dma_mask & !1;

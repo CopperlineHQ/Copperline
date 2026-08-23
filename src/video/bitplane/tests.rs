@@ -1190,6 +1190,11 @@ fn color_register_writes_use_final_output_position() {
         1
     );
     assert_eq!(
+        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 - 1) as u32, true),
+        0,
+        "Lisa's one-pixel delay applies before the left-edge clamp"
+    );
+    assert_eq!(
         color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 + 4) as u32, false),
         16
     );
