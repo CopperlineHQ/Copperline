@@ -266,6 +266,15 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             );
         }
     }
+    if let Some(e) = by_key("scsidevice_disable") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(on) => {
+                table(&mut doc, &["machine"])["rom_scsi_device_disable"] = toml_edit::value(on)
+            }
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
 
     // --- FPU ------------------------------------------------------------
     if let Some(e) = by_key("fpu_model") {
