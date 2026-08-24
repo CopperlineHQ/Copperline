@@ -294,7 +294,7 @@ impl WebEmu {
     pub fn new(
         model: Option<String>,
         video: Option<String>,
-        floppy_drives: Option<u8>,
+        floppy_drives: Option<f64>,
     ) -> Result<WebEmu, JsValue> {
         let mut cfg = match model.as_deref().map(str::trim) {
             None | Some("") => Config::default(),
@@ -305,12 +305,13 @@ impl WebEmu {
             Some(name) => cfg.video_standard = parse_video_standard(name).map_err(js_err)?,
         }
         if let Some(count) = floppy_drives {
-            if !(1..=4).contains(&count) {
+            if !count.is_finite() || count.fract() != 0.0 || !(1.0..=4.0).contains(&count) {
                 return Err(JsValue::from_str(&format!(
-                    "floppy drive count must be between 1 and 4, got {count}"
+                    "floppy drive count must be a finite integer between 1 and 4, got {count}"
                 )));
             }
-            cfg.floppy_connected = std::array::from_fn(|drive| drive < usize::from(count));
+            let count = count as usize;
+            cfg.floppy_connected = std::array::from_fn(|drive| drive < count);
         }
         let audio = Rc::new(RefCell::new(Vec::new()));
         let sink = WebAudioSink { buf: audio.clone() };
