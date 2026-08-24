@@ -17,11 +17,21 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-22 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit b7d5605d
-(the merge of the dosboot stale-IORequest fix, pull request 1051).
+Built from source on 2026-08-24 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit 4df19140.
 Fixes Copperline contributed or depends on, all in master:
 
+- the ciab.resource port-direction fix of pull request 1063
+  (https://github.com/aros-development-team/AROS/pull/1063, merged
+  2026-08-24): cia_init programmed CIA-B DDRA to 0xff, driving all
+  eight port A pins as outputs, where only /DTR and /RTS are outputs
+  on the machine. PA0-2 are the parallel port's Centronics status
+  inputs and PA3-5 the serial port's /DSR, /CTS and /CD, so an AROS
+  guest could never read printer status or see a serial control line
+  change -- under Copperline's serial bridges, which drive those lines
+  (carrier follows the TCP connection), every input read back 1. DDRA
+  is now 0xc0, matching Kickstart, and the same guest probe reads the
+  same values under this ROM as under Kickstart 3.1.
 - the dosboot stale-IORequest fix of pull request 1051
   (https://github.com/aros-development-team/AROS/pull/1051, merged
   2026-08-22): dosboot closed the trackdisk request and deleted it and
