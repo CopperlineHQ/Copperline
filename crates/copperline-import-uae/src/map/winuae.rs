@@ -616,6 +616,42 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- SCSI host adapter -----------------------------------------------
+    // Same shape as the lide keys below: Amiberry has a separate ROM-file
+    // key per controller rather than Copperline's single [scsi] controller
+    // = "..." selector, and only one adapter can be fitted at once.
+    let a2091 = by_key("a2091_rom_file");
+    let a4091 = by_key("a4091_rom_file");
+    match (a2091, a4091) {
+        (Some(a), Some(b)) => {
+            seen.insert(&a.key, ());
+            seen.insert(&b.key, ());
+            report.unsupported(
+                &a.key,
+                &a.value,
+                "both a2091_rom_file and a4091_rom_file are set, but Copperline's [scsi] \
+                 controller can only be one adapter at a time; pick one by hand",
+            );
+            report.unsupported(
+                &b.key,
+                &b.value,
+                "both a2091_rom_file and a4091_rom_file are set, but Copperline's [scsi] \
+                 controller can only be one adapter at a time; pick one by hand",
+            );
+        }
+        (Some(e), None) | (None, Some(e)) => {
+            seen.insert(&e.key, ());
+            let controller = if e.key == "a2091_rom_file" {
+                "a2091"
+            } else {
+                "a4091"
+            };
+            set_str(&mut doc, &["scsi"], "controller", controller);
+            set_str(&mut doc, &["scsi"], "rom", &e.value);
+        }
+        (None, None) => {}
+    }
+
     // --- lide.device-compatible IDE board --------------------------------
     // Amiberry has a separate ROM-file key per board personality rather
     // than Copperline's single [lide] board = "..." selector; each key
