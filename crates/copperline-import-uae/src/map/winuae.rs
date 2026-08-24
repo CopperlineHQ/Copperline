@@ -77,6 +77,13 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         seen.insert(&e.key, ());
         report.unsupported(&e.key, &e.value, "no Copperline equivalent");
     }
+    if let Some(e) = by_key("cpu_data_cache") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(on) => table(&mut doc, &["cpu"])["dcache"] = toml_edit::value(on),
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
 
     // --- Memory ------------------------------------------------------
     // WinUAE's memory-size keys have changed units across major versions
