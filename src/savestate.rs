@@ -315,7 +315,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      linear memory, whose internal layout is replayed against the current
 //      module on load; reject old snapshots rather than interpret that memory
 //      with the new dependency's layout.
-pub const STATE_VERSION: u32 = 64;
+//  65: floppy images record whether writable changes go to a host file or
+//      remain in serialized memory for filesystem-free hosts such as WASM.
+pub const STATE_VERSION: u32 = 65;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

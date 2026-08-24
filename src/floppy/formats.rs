@@ -19,6 +19,13 @@ pub(super) struct FloppyImage {
     pub(super) data: FloppyImageData,
     pub(super) write_protected: bool,
     pub(super) legacy_extended_adf: bool,
+    pub(super) backing: FloppyImageBacking,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) enum FloppyImageBacking {
+    File,
+    Memory,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -44,18 +51,38 @@ impl FloppyImage {
     pub(super) fn load(config: &FloppyDriveConfig) -> Result<Self> {
         let packed = std::fs::read(&config.path)
             .with_context(|| format!("reading floppy image {}", config.path.display()))?;
-        Self::from_bytes(packed, config.path.clone(), config.write_protected)
+        Self::from_bytes_with_backing(
+            packed,
+            config.path.clone(),
+            config.write_protected,
+            FloppyImageBacking::File,
+        )
     }
 
     /// Decode an already-loaded image (the byte-for-byte file contents:
     /// ADF/extended ADF/DMS/SCP/IPF, optionally gzip- or zip-packed) without
-    /// touching the filesystem. `path` is the display/write-back label; hosts
-    /// with no filesystem (the browser build) must insert write-protected so
-    /// the extended-ADF write-back path never fires.
+    /// touching the filesystem. `path` is the display/write-back label.
     pub(crate) fn from_bytes(
         packed: Vec<u8>,
         path: PathBuf,
         write_protected: bool,
+    ) -> Result<Self> {
+        Self::from_bytes_with_backing(packed, path, write_protected, FloppyImageBacking::File)
+    }
+
+    pub(super) fn from_memory_bytes(
+        packed: Vec<u8>,
+        path: PathBuf,
+        write_protected: bool,
+    ) -> Result<Self> {
+        Self::from_bytes_with_backing(packed, path, write_protected, FloppyImageBacking::Memory)
+    }
+
+    fn from_bytes_with_backing(
+        packed: Vec<u8>,
+        path: PathBuf,
+        write_protected: bool,
+        backing: FloppyImageBacking,
     ) -> Result<Self> {
         let (data, write_protected, legacy_extended_adf) = if packed.starts_with(GZIP_SIGNATURE) {
             let unpacked = decode_gzip_floppy_image(&packed)?;
@@ -72,6 +99,7 @@ impl FloppyImage {
             data,
             write_protected,
             legacy_extended_adf,
+            backing,
         })
     }
 

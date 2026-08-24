@@ -11,7 +11,7 @@ use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::gzip;
 use anyhow::{bail, ensure, Context, Result};
-use formats::{FloppyImage, FloppyImageData, FloppyTrackImage};
+use formats::{FloppyImage, FloppyImageBacking, FloppyImageData, FloppyTrackImage};
 use log::{debug, warn};
 // The bridge's retry path traces, and its media reporting is worth an info
 // line; both are compiled out with the feature.
@@ -549,6 +549,45 @@ impl FloppyController {
         )
     }
 
+    /// Whether the image in DFn presents a closed write-protect tab.
+    pub fn disk_image_write_protected(&self, drive_idx: usize) -> Option<bool> {
+        Some(self.drives.get(drive_idx)?.image.as_ref()?.write_protected)
+    }
+
+    /// Encode the current in-memory image as a standalone ADF. Standard ADFs
+    /// stay byte-for-byte standard; track images become the same UAE extended
+    /// ADF variant they were loaded as. Container formats such as ADZ and DMS
+    /// deliberately export their decoded disk rather than recompressing it.
+    pub fn export_disk_image(&self, drive_idx: usize) -> Result<Vec<u8>> {
+        let image = self
+            .drives
+            .get(drive_idx)
+            .with_context(|| format!("invalid floppy drive df{drive_idx}"))?
+            .image
+            .as_ref()
+            .with_context(|| format!("floppy.df{drive_idx} is empty"))?;
+        match &image.data {
+            FloppyImageData::StandardAdf(data) => Ok(data.clone()),
+            FloppyImageData::Tracks(tracks) if image.legacy_extended_adf => {
+                encode_uae_legacy_extended_adf(tracks)
+            }
+            FloppyImageData::Tracks(tracks) => encode_uae_extended_adf(tracks),
+        }
+    }
+
+    /// A host without a writable filesystem adopts every restored image into
+    /// memory. This is intentionally called after browser save-state loads:
+    /// desktop states may name writable host files which do not exist there.
+    pub fn make_disk_images_memory_backed(&mut self) {
+        for image in self
+            .drives
+            .iter_mut()
+            .filter_map(|drive| drive.image.as_mut())
+        {
+            image.backing = FloppyImageBacking::Memory;
+        }
+    }
+
     pub fn insert_disk_image(
         &mut self,
         drive_idx: usize,
@@ -586,10 +625,9 @@ impl FloppyController {
         Ok(())
     }
 
-    /// Insert a disk from in-memory image bytes (any format
-    /// [`FloppyImage::from_bytes`] accepts). `label` stands in for the file
-    /// path in logs and the UI; hosts without a filesystem should pass
-    /// `write_protected = true` (see `from_bytes`).
+    /// Insert a disk from already-loaded image bytes while retaining ordinary
+    /// host-file write-through semantics. `label` is both its UI name and the
+    /// path updated by a writable image.
     pub fn insert_disk_image_bytes(
         &mut self,
         drive_idx: usize,
@@ -616,6 +654,45 @@ impl FloppyController {
         );
         let image = FloppyImage::from_bytes(bytes, label, write_protected)
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
+        self.idle_cache = false;
+        self.drives[drive_idx].insert_image(image);
+        if self.selected_drive() == Some(drive_idx) {
+            self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
+        }
+        Ok(())
+    }
+
+    /// Insert a disk whose writable backing lives entirely in this controller.
+    /// Guest writes update the serialized image data and never touch `label`;
+    /// [`Self::export_disk_image`] snapshots the current bytes for its host.
+    /// Formats without a writable representation (compressed containers,
+    /// DMS, IPF and SCP) reject a writable request instead of silently
+    /// presenting a write-protected disk.
+    pub fn insert_memory_disk_image_bytes(
+        &mut self,
+        drive_idx: usize,
+        bytes: Vec<u8>,
+        label: PathBuf,
+        write_protected: bool,
+    ) -> Result<()> {
+        ensure!(
+            drive_idx < self.drives.len(),
+            "invalid floppy drive df{}",
+            drive_idx
+        );
+        #[cfg(feature = "fluxbridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
+        let image = FloppyImage::from_memory_bytes(bytes, label, write_protected)
+            .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
+        ensure!(
+            write_protected || !image.write_protected,
+            "floppy image {} uses a read-only format; use an uncompressed ADF or UAE extended ADF for writable media",
+            image.path.display()
+        );
         self.idle_cache = false;
         self.drives[drive_idx].insert_image(image);
         if self.selected_drive() == Some(drive_idx) {
@@ -689,18 +766,18 @@ impl FloppyController {
     }
 
     /// Why this controller cannot be replayed speculatively. A physical
-    /// mechanism cannot rewind, and a writable image flushes completed guest
-    /// writes to its host file. Read-only image media is fully serialized.
+    /// mechanism cannot rewind, and a file-backed writable image flushes
+    /// completed guest writes to its host file. Read-only and memory-backed
+    /// image media are fully serialized.
     pub fn runahead_block_reason(&self) -> Option<&'static str> {
         #[cfg(feature = "fluxbridge")]
         if self.drives.iter().any(FloppyDrive::is_bridged) {
             return Some("physical floppy drive");
         }
         if self.drives.iter().any(|drive| {
-            drive
-                .image
-                .as_ref()
-                .is_some_and(|image| !image.write_protected)
+            drive.image.as_ref().is_some_and(|image| {
+                !image.write_protected && image.backing == FloppyImageBacking::File
+            })
         }) {
             return Some("writable floppy image");
         }
@@ -2047,11 +2124,17 @@ impl FloppyController {
         }
         let path = image.path.clone();
         let legacy_extended_adf = image.legacy_extended_adf;
+        let backing = image.backing;
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
                 decode_non_empty_track_write(track, write_words).and_then(|sectors| {
                     apply_standard_adf_sectors(image_data, track, &sectors);
-                    write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                    match backing {
+                        FloppyImageBacking::File => {
+                            write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                        }
+                        FloppyImageBacking::Memory => Ok(()),
+                    }
                 })
             }
             FloppyImageData::Tracks(tracks) => apply_extended_adf_write(
@@ -2063,16 +2146,19 @@ impl FloppyController {
                 legacy_extended_adf,
                 lose_tail_bits,
             )
-            .and_then(|encoded| {
-                std::fs::write(&path, encoded).context("writing extended ADF image")
+            .and_then(|encoded| match backing {
+                FloppyImageBacking::File => {
+                    std::fs::write(&path, encoded).context("writing extended ADF image")
+                }
+                FloppyImageBacking::Memory => Ok(()),
             }),
         };
         match write_result {
             Ok(()) => {
                 drive.cached_track = None;
-                debug!("floppy.df{} write-through complete", drive_idx);
+                debug!("floppy.df{} image write complete", drive_idx);
             }
-            Err(e) => warn!("floppy.df{} write-through failed: {e:#}", drive_idx),
+            Err(e) => warn!("floppy.df{} image write failed: {e:#}", drive_idx),
         }
     }
 

@@ -22,6 +22,25 @@ fn runahead_gate_tracks_the_inserted_images_write_protection() -> Result<()> {
 
     ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("writable.adf"), false)?;
     assert_eq!(ctrl.runahead_block_reason(), Some("writable floppy image"));
+
+    ctrl.make_disk_images_memory_backed();
+    assert_eq!(ctrl.runahead_block_reason(), None);
+    Ok(())
+}
+
+#[test]
+fn compressed_image_rejects_a_writable_memory_backing() -> Result<()> {
+    let mut packed = GzEncoder::new(Vec::new(), Compression::default());
+    packed.write_all(&vec![0; ADF_SIZE])?;
+    let packed = packed.finish()?;
+    let mut ctrl = FloppyController::default();
+
+    let err = ctrl
+        .insert_memory_disk_image_bytes(0, packed, PathBuf::from("disk.adz"), false)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("read-only format"));
+    assert!(!ctrl.disk_inserted(0));
     Ok(())
 }
 
@@ -4699,6 +4718,39 @@ fn write_dma_decodes_and_persists_track() -> Result<()> {
     let persisted = fs::read(&path)?;
     assert_eq!(&persisted[0..BYTES_PER_SECTOR], &[0xA5; BYTES_PER_SECTOR]);
     let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn memory_backed_write_dma_exports_without_touching_the_label_path() -> Result<()> {
+    let label = temp_path("browser.adf");
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, vec![0u8; ADF_SIZE], label.clone(), false)?;
+    assert_eq!(ctrl.disk_image_write_protected(0), Some(false));
+    assert_eq!(ctrl.runahead_block_reason(), None);
+
+    let mut source = vec![0u8; ADF_SIZE];
+    source[0..BYTES_PER_SECTOR].fill(0xA5);
+    let words = encode_adf_track(0, &source);
+    let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+    for (i, word) in words.iter().copied().enumerate() {
+        let [hi, lo] = word.to_be_bytes();
+        chip_ram[i * 2] = hi;
+        chip_ram[i * 2 + 1] = lo;
+    }
+
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
+
+    let exported = ctrl.export_disk_image(0)?;
+    assert_eq!(&exported[0..BYTES_PER_SECTOR], &[0xA5; BYTES_PER_SECTOR]);
+    assert!(!label.exists());
     Ok(())
 }
 
