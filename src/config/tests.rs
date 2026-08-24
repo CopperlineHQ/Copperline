@@ -2353,6 +2353,77 @@ fn scsi_section_parses_units_and_requires_the_boot_rom() -> Result<()> {
 }
 
 #[test]
+fn lide_named_drive_keys_allow_holes_and_beat_the_legacy_array() -> Result<()> {
+    // A slot filled with the one before it empty -- the whole point of the
+    // named keys, and impossible to express with the positional `drives`
+    // array that predates them.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drive1 = "ch0-slave.hdf"
+            drive3 = "ch1-slave.hdf"
+            "#,
+    )?;
+    assert!(cfg.lide.drives[0].is_none());
+    assert_eq!(
+        cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("ch0-slave.hdf"))
+    );
+    assert!(cfg.lide.drives[2].is_none());
+    assert_eq!(
+        cfg.lide.drives[3].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("ch1-slave.hdf"))
+    );
+
+    // The deprecated array still loads, so configs written before the named
+    // keys existed keep working unchanged.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["dh0.hdf", "dh1.hdf"]
+            "#,
+    )?;
+    assert_eq!(
+        cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("dh0.hdf"))
+    );
+    assert_eq!(
+        cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("dh1.hdf"))
+    );
+
+    // A named key wins over the same slot in the legacy array, so a config
+    // carrying both is unambiguous rather than order-dependent.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["from-array.hdf"]
+            drive0 = "from-named.hdf"
+            "#,
+    )?;
+    assert_eq!(
+        cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("from-named.hdf"))
+    );
+
+    // A named key naming a channel the board does not have is an error, and
+    // says which slot rather than just counting entries.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ride"
+            drive2 = "ch1-master.hdf"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("drive2"), "{err:#}");
+    Ok(())
+}
+
+#[test]
 fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     let cfg = parse_config(
         r#"

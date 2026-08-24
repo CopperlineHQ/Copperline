@@ -1616,12 +1616,27 @@ CDTV-RAM-IDE, Zorro-LAN-IDE), one register model covering the whole family,
 one channel, no ROM banking. None of the three wire an interrupt line --
 `lide.device` is a purely polling driver.
 
-`drives` takes the same bare-path/table form as `[ide]`/`[scsi]` (RDB images,
-bare partition hardfiles, `.hdz`, host directories, and the `{ path = "...",
-name = "...", bootpri = N, filesystem = "..." }` table), in (channel,
-master/slave) order:
-entries 0 and 1 are channel 0's master and slave, entries 2 and 3 are channel
-1's (`"ripple"` only -- `"ride"` and `"atbus2008"` have one channel).
+`drive0`..`drive3` take the same bare-path/table form as `[ide]`/`[scsi]`
+(RDB images, bare partition hardfiles, `.hdz`, host directories, and the
+`{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table), one
+key per slot in (channel, master/slave) order: `drive0` and `drive1` are
+channel 0's master and slave, `drive2` and `drive3` are channel 1's
+(`"ripple"` only -- `"ride"` and `"atbus2008"` have one channel). Each is
+independent, so any slot can be filled or left empty on its own, the same way
+`[ide]`'s `master`/`slave` and `[scsi]`'s `unit0`..`unit6` are:
+
+```toml
+[lide]
+board = "ripple"
+rom = "lide.rom"
+drive1 = "ch0-slave.hdf"   # channel 0 slave, with no master fitted
+```
+
+An older `drives = [...]` array is still read, so configs written before the
+named keys existed keep working. It is positional and cannot express a gap
+(the first empty entry ends the list), which is why the named keys replaced
+it; a named key wins over the same slot in the array, and saving from the
+launcher rewrites a config to the named form.
 
 `rom` is **always user-supplied**, never bundled: fetch a release from
 [lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases)

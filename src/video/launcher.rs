@@ -2307,6 +2307,11 @@ impl MachineSetup {
     /// "no boot ROM = AROS" distinction, and the `[[zorro]]` board paths.
     pub fn from_raw(raw: &RawConfig) -> Result<Self> {
         let cfg: Config = raw.clone().try_into()?;
+        // Boot priority is read from the raw form (the validated
+        // `DriveImage` resolves it to a number, losing "unset"), so this
+        // needs the same named-key-over-legacy-array merge validation used
+        // rather than the positional array alone.
+        let lide_raw_slots = raw.lide.drive_slots();
         // One tick box governs both kinds of bay, so read it from whichever
         // of the two a bay actually has.
         let df_write_protected = std::array::from_fn(|i| {
@@ -2437,10 +2442,10 @@ impl MachineSetup {
                 cfg.lide.drives[i].as_ref().is_some_and(|d| d.path.is_dir())
             }),
             lide_drive_bootpri: std::array::from_fn(|i| {
-                boot_priority_of(raw.lide.drives.get(i).and_then(|d| d.bootpri))
+                boot_priority_of(lide_raw_slots[i].as_ref().and_then(|d| d.bootpri))
             }),
             lide_drive_boot_off: std::array::from_fn(|i| {
-                boot_is_off(raw.lide.drives.get(i).and_then(|d| d.bootpri))
+                boot_is_off(lide_raw_slots[i].as_ref().and_then(|d| d.bootpri))
             }),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
@@ -2882,26 +2887,34 @@ impl MachineSetup {
             raw.lide.rom_bank2 = (board != LidePersonality::AtBus2008)
                 .then(|| self.lide_rom_bank2.as_deref().map(path_string))
                 .flatten();
-            // `[lide] drives` is a positional list in the config file -- a hole
-            // cannot be represented -- so this stops at the first empty slot
-            // rather than filtering, trusting `clear_path`'s cascade to keep
-            // the array itself always gap-free.
+            // One named `driveN` key per slot, so an empty slot before a
+            // filled one round-trips: each is emitted independently rather
+            // than as a positional array that could not express the hole.
+            // The deprecated `drives` array is never written back -- reading
+            // one and saving migrates the config to the named form.
             const LIDE_DRIVE_BOOT_FIELDS: [LauncherField; 4] = [
                 F::LideDrive0Boot,
                 F::LideDrive1Boot,
                 F::LideDrive2Boot,
                 F::LideDrive3Boot,
             ];
-            raw.lide.drives = (0..board.max_drives())
-                .map_while(|i| {
-                    drive_raw(
-                        self.lide_drives[i].as_deref(),
-                        self.lide_drive_names[i].as_deref(),
-                        self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
-                        self.lide_drive_fs[i],
-                    )
-                })
-                .collect();
+            let slot_raw = |i: usize| {
+                (i < board.max_drives())
+                    .then(|| {
+                        drive_raw(
+                            self.lide_drives[i].as_deref(),
+                            self.lide_drive_names[i].as_deref(),
+                            self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
+                            self.lide_drive_fs[i],
+                        )
+                    })
+                    .flatten()
+            };
+            raw.lide.drives = Vec::new();
+            raw.lide.drive0 = slot_raw(0);
+            raw.lide.drive1 = slot_raw(1);
+            raw.lide.drive2 = slot_raw(2);
+            raw.lide.drive3 = slot_raw(3);
         }
         // Host FS mounts: the edited slots (empty ones drop out), then any
         // hand-written extras beyond what the GUI shows.
@@ -3435,16 +3448,15 @@ impl MachineSetup {
             F::LideRomBank2 => self
                 .lide_board
                 .is_none_or(|b| b == LidePersonality::AtBus2008),
-            // `[lide] drives` is a positional list in the config file -- a
-            // hole cannot be represented -- so a slot beyond the board's
-            // channel count (RIDE/AT-Bus 2008 have one; RIPPLE has two) or
-            // beyond the first empty slot stays hidden: it is not just
-            // inapplicable, filling it would be unrepresentable.
+            // Only a slot the fitted board does not have stays hidden
+            // (RIDE/AT-Bus 2008 have one channel, RIPPLE two). Every slot
+            // the board *does* have is always editable, the same way
+            // `[ide]`'s master/slave and `[scsi]`'s units are: each is its
+            // own `driveN` key, so filling one without the one before it is
+            // representable.
             F::LideDrive0 | F::LideDrive1 | F::LideDrive2 | F::LideDrive3 => {
-                lide_drive_index(field).is_some_and(|i| {
-                    self.lide_board.is_none_or(|b| b.max_drives() <= i)
-                        || (i > 0 && self.lide_drives[i - 1].is_none())
-                })
+                lide_drive_index(field)
+                    .is_some_and(|i| self.lide_board.is_none_or(|b| b.max_drives() <= i))
             }
             _ => false,
         }
@@ -5095,17 +5107,6 @@ impl MachineSetup {
             self.clear_drive_bootpri(field);
             self.refresh_drive_is_dir(field);
         }
-        // `[lide] drives` is a positional list in the config file -- a hole
-        // cannot be represented -- so clearing a slot also clears every slot
-        // after it, keeping the array always representable as a config.
-        if let Some(i) = lide_drive_index(field) {
-            for slot in i + 1..self.lide_drives.len() {
-                self.lide_drives[slot] = None;
-                self.lide_drive_names[slot] = None;
-                self.lide_drive_bootpri[slot] = None;
-                self.lide_drive_boot_off[slot] = false;
-            }
-        }
     }
 
     /// Reset a hard-disk drive's boot priority to unset (shown as 0) and its
@@ -5750,18 +5751,6 @@ impl MachineSetup {
                 }
                 if let Some(name) = self.lide_drive_names.get_mut(idx) {
                     *name = None;
-                }
-                // `[lide] drives` is a positional list -- a hole cannot be
-                // represented -- so a host disk taking over this slot must
-                // cascade-clear every later slot too, exactly like
-                // `clear_path` does for the image case, or `to_raw`'s
-                // `map_while` would silently stop emitting at this slot and
-                // drop any image still sitting in a later one.
-                for slot in idx + 1..self.lide_drives.len() {
-                    self.lide_drives[slot] = None;
-                    self.lide_drive_names[slot] = None;
-                    self.lide_drive_bootpri[slot] = None;
-                    self.lide_drive_boot_off[slot] = false;
                 }
             }
             crate::config::HostDiskAttach::Scsi(unit) => {

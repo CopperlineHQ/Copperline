@@ -591,9 +591,12 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
         };
+        let raw_lide_slots = raw.lide.drive_slots();
         let mut lide_drives: [Option<DriveImage>; 4] = Default::default();
-        for (slot, raw_drive) in raw.lide.drives.iter().enumerate().take(4) {
-            lide_drives[slot] = Some(drive_image(raw_drive.clone())?);
+        for (slot, raw_drive) in raw_lide_slots.iter().enumerate() {
+            if let Some(raw_drive) = raw_drive {
+                lide_drives[slot] = Some(drive_image(raw_drive.clone())?);
+            }
         }
         let lide = LideConfig {
             board: lide_board,
@@ -610,7 +613,23 @@ impl TryFrom<RawConfig> for Config {
         // "rom_bank2 needs rom" instead of the whole table being silently
         // accepted as a no-op.
         let max_drives = lide_board.max_drives();
-        if raw.lide.drives.len() > max_drives {
+        if raw.lide.has_named_drives() {
+            // Named keys are checked per slot rather than by count: with
+            // holes now expressible, "how many are set" no longer says
+            // which ones, and `drive2` on a one-channel board is the error
+            // worth naming.
+            for (slot, raw_drive) in raw_lide_slots.iter().enumerate() {
+                if raw_drive.is_some() && slot >= max_drives {
+                    errors.push(anyhow!(
+                        "[lide] drive{slot} is on channel {}; {} only has {max_drives} drive(s)",
+                        slot / 2,
+                        lide_board.name()
+                    ));
+                }
+            }
+        } else if raw.lide.drives.len() > max_drives {
+            // The deprecated positional array keeps its own length message,
+            // which names the real problem for a config written that way.
             errors.push(anyhow!(
                 "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
                 raw.lide.drives.len(),
