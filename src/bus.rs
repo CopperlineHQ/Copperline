@@ -7832,17 +7832,28 @@ fn push_live_sprite_collision_source_if_visible(
     }
 }
 
-fn sprite_pixel_repeat_for_control(bplcon0: u16, bplcon3: u16) -> i32 {
+fn sprite_pixel_repeat_subpixels_for_control(
+    agnus_revision: AgnusRevision,
+    bplcon0: u16,
+    bplcon3: u16,
+) -> i32 {
     match bplcon3 & BPLCON3_SPRES_MASK {
         0 => {
             if bplcon0 & BPLCON0_SHRES != 0 {
+                2
+            } else {
+                4
+            }
+        }
+        BPLCON3_SPRES_LORES => 4,
+        BPLCON3_SPRES_HIRES => 2,
+        BPLCON3_SPRES_SHRES => {
+            if matches!(agnus_revision, AgnusRevision::AgaAlice) {
                 1
             } else {
                 2
             }
         }
-        BPLCON3_SPRES_LORES => 2,
-        BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES => 1,
         _ => unreachable!(),
     }
 }
@@ -8549,30 +8560,34 @@ fn live_sprite_source_pixel_presence(
     if x < sprite_base_x || x >= sprite_stop_x {
         return LiveSpritePixelPresence::default();
     }
-    let mut x_cursor = sprite_base_x;
+    let target_start = x * 2;
+    let target_stop = target_start + 2;
+    let mut subpixel_cursor = sprite_base_x * 2;
+    let mut presence = LiveSpritePixelPresence::default();
     for bit in (0..16).rev() {
-        let sprite_control = control_replay.control_for_x(x_cursor);
-        let sprite_pixel_repeat =
-            sprite_pixel_repeat_for_control(sprite_control.bplcon0, sprite_control.bplcon3);
-        let x_stop = x_cursor + sprite_pixel_repeat;
-        if x >= x_cursor && x < x_stop {
+        let sprite_control = control_replay.control_for_x(subpixel_cursor.div_euclid(2));
+        let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
+            sprite_control.agnus_revision,
+            sprite_control.bplcon0,
+            sprite_control.bplcon3,
+        );
+        let subpixel_stop = subpixel_cursor + sprite_pixel_repeat;
+        if subpixel_cursor < target_stop && subpixel_stop > target_start {
             let low = source.words[0] & (1 << bit) != 0 || source.words[1] & (1 << bit) != 0;
             let high = source.words[2] & (1 << bit) != 0 || source.words[3] & (1 << bit) != 0;
-            return if source.requires_odd_enable {
-                LiveSpritePixelPresence {
-                    even: false,
-                    odd: low,
-                }
+            if source.requires_odd_enable {
+                presence.odd |= low;
             } else {
-                LiveSpritePixelPresence {
-                    even: low,
-                    odd: high,
-                }
-            };
+                presence.even |= low;
+                presence.odd |= high;
+            }
         }
-        x_cursor = x_stop;
+        subpixel_cursor = subpixel_stop;
+        if subpixel_cursor >= target_stop {
+            break;
+        }
     }
-    LiveSpritePixelPresence::default()
+    presence
 }
 
 fn live_sprite_source_pixel_presence_with_control(
@@ -8582,30 +8597,33 @@ fn live_sprite_source_pixel_presence_with_control(
 ) -> LiveSpritePixelPresence {
     let sprite_base_x = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(source.hsub_70ns);
-    let sprite_pixel_repeat = sprite_pixel_repeat_for_control(control.bplcon0, control.bplcon3);
-    let offset = x - sprite_base_x;
+    let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
+        control.agnus_revision,
+        control.bplcon0,
+        control.bplcon3,
+    );
+    let offset = x * 2 - sprite_base_x * 2;
     if offset < 0 {
         return LiveSpritePixelPresence::default();
     }
-    let bit_offset = offset / sprite_pixel_repeat;
-    if !(0..16).contains(&bit_offset) {
-        return LiveSpritePixelPresence::default();
-    }
-    let bit = 15 - bit_offset;
-    let mask = 1 << bit;
-    let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
-    let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
-    if source.requires_odd_enable {
-        LiveSpritePixelPresence {
-            even: false,
-            odd: low,
+    let mut presence = LiveSpritePixelPresence::default();
+    for subpixel in offset..offset + 2 {
+        let bit_offset = subpixel / sprite_pixel_repeat;
+        if !(0..16).contains(&bit_offset) {
+            continue;
         }
-    } else {
-        LiveSpritePixelPresence {
-            even: low,
-            odd: high,
+        let bit = 15 - bit_offset;
+        let mask = 1 << bit;
+        let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
+        let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
+        if source.requires_odd_enable {
+            presence.odd |= low;
+        } else {
+            presence.even |= low;
+            presence.odd |= high;
         }
     }
+    presence
 }
 
 fn live_sprite_source_collision_matches(

@@ -1003,20 +1003,31 @@ impl ControlState {
         (border && self.border_blank_enabled()) || color_key || bitplane_key
     }
 
-    fn sprite_pixel_repeat(&self) -> i32 {
+    /// Sprite pixel width in 35 ns (SuperHires) samples.
+    ///
+    /// The ordinary framebuffer coordinate is 70 ns, so using this finer
+    /// unit is what keeps AGA SPRES=11 distinct from SPRES=10. The renderer
+    /// either emits those samples directly on a doubled SHRES canvas or
+    /// combines each pair for the classic canvas.
+    fn sprite_pixel_repeat_subpixels(&self) -> i32 {
         match self.bplcon3 & BPLCON3_SPRES_MASK {
             0 => {
-                if self.bplcon0 & BPLCON0_SHRES != 0 {
+                if self.shres() {
+                    2
+                } else {
+                    4
+                }
+            }
+            BPLCON3_SPRES_LORES => 4,
+            BPLCON3_SPRES_HIRES => 2,
+            // ECS Super Denise accepts the SPRES encoding but retains its
+            // 70 ns sprite serializer; Lisa adds the final 35 ns rate.
+            BPLCON3_SPRES_SHRES => {
+                if self.aga() {
                     1
                 } else {
                     2
                 }
-            }
-            BPLCON3_SPRES_LORES => 2,
-            BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES => {
-                // TODO: A true SHRES output path should emit 35 ns sprite
-                // samples; the current framebuffer resolves 70 ns.
-                1
             }
             _ => unreachable!(),
         }
@@ -4262,6 +4273,7 @@ struct RenderScratch {
     current_cpu_copper_palette_events: Vec<BeamRegisterWrite>,
     merged_render_events: Vec<BeamRegisterWrite>,
     playfield_mask: Vec<u8>,
+    sprite_subpixels: SpriteSubpixelState,
     collision_pixels: Vec<CollisionPixel>,
     sprite_group_mask: Vec<u8>,
     sprite_lines: [Vec<SpriteLine>; 8],
@@ -4269,6 +4281,52 @@ struct RenderScratch {
     dma_output_start_x_by_line: Vec<Option<usize>>,
     h_window_rows: Vec<HWindowRow>,
     ham_select_pixels: Vec<u8>,
+}
+
+/// The two 35 ns halves underlying every classic 70 ns framebuffer column.
+///
+/// The main framebuffer intentionally stays at its established 70 ns pitch
+/// on standard scans, but Lisa sprite priority and composition still happen
+/// independently in each half. Keeping the pre-downsampled playfield masks
+/// and RGBA values here lets sprites replace one half without losing the
+/// other half to an already-blended framebuffer pixel.
+#[derive(Default)]
+struct SpriteSubpixelState {
+    playfield_masks: Vec<[u8; 2]>,
+    pixels: Vec<[u32; 2]>,
+}
+
+impl SpriteSubpixelState {
+    fn prepare(&mut self, fb: &[u32], logical_len: usize, canvas_scale: usize) {
+        self.playfield_masks.resize(logical_len, [0; 2]);
+        self.playfield_masks.fill([0; 2]);
+        self.pixels.resize(logical_len, [0; 2]);
+        for (idx, pair) in self.pixels.iter_mut().enumerate() {
+            let out = idx * canvas_scale;
+            *pair = if canvas_scale == 2 {
+                [fb[out], fb[out + 1]]
+            } else {
+                [fb[out]; 2]
+            };
+        }
+    }
+
+    fn from_collapsed(fb: &[u32], playfield_mask: &[u8]) -> Self {
+        let canvas_scale = active_canvas_scale();
+        Self {
+            playfield_masks: playfield_mask.iter().map(|&mask| [mask; 2]).collect(),
+            pixels: (0..playfield_mask.len())
+                .map(|idx| {
+                    let out = idx * canvas_scale;
+                    if canvas_scale == 2 {
+                        [fb[out], fb[out + 1]]
+                    } else {
+                        [fb[out]; 2]
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Paint the just-finished frame through the synchronous compatibility path.
@@ -4813,6 +4871,8 @@ fn render_from_input_with_scratch(
         &h_window_rows,
         visible_line0,
     );
+    let mut sprite_subpixels = std::mem::take(&mut scratch.sprite_subpixels);
+    sprite_subpixels.prepare(fb, collision_len, canvas_scale);
     render_timing.background_nanos = render_timing_elapsed(background_started);
 
     let any_bitplane_control = any_control_matching(&base_controls, &control_segments, |control| {
@@ -5208,10 +5268,11 @@ fn render_from_input_with_scratch(
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
             last_playfield_line = Some(y);
-            render_planned_playfield_line(
+            render_planned_playfield_line_with_subpixels(
                 &line_plan,
                 fb,
                 &mut playfield_mask,
+                &mut sprite_subpixels,
                 &mut collision_pixels,
                 &mut collision_lookup,
                 &mut indexed_output_cache,
@@ -5293,6 +5354,7 @@ fn render_from_input_with_scratch(
         &manual_bpl_segments,
         fb,
         &mut playfield_mask,
+        &mut sprite_subpixels,
         &mut collision_pixels,
         &mut clxdat,
         &base_palettes,
@@ -5333,6 +5395,7 @@ fn render_from_input_with_scratch(
         &control_segments,
         sprite_display_enable_x_by_y,
         &playfield_mask,
+        &mut sprite_subpixels,
         &mut collision_pixels,
         &mut sprite_group_mask,
         &mut sprite_lines,
@@ -5415,6 +5478,7 @@ fn render_from_input_with_scratch(
     scratch.current_cpu_copper_palette_events = current_cpu_copper_palette_events;
     scratch.merged_render_events = merged_render_events;
     scratch.playfield_mask = playfield_mask;
+    scratch.sprite_subpixels = sprite_subpixels;
     scratch.collision_pixels = collision_pixels;
     scratch.sprite_group_mask = sprite_group_mask;
     scratch.sprite_lines = sprite_lines;
@@ -5616,6 +5680,7 @@ fn render_fast_playfield_run(
     collision_table: &[CollisionPixel; 256],
     fb: &mut [u32],
     playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     clxdat: &mut u16,
     ham_color: &mut u32,
@@ -5647,16 +5712,73 @@ fn render_fast_playfield_run(
                 playfield_mask[fb_idx + dx] = pf;
             }
             fb[out_base + dx] = pixel;
+            sprite_subpixels.playfield_masks[fb_idx + dx] = [pf; 2];
+            sprite_subpixels.pixels[fb_idx + dx] = [pixel; 2];
         }
     }
     *clxdat = clx;
     *ham_color = last_color;
 }
 
+#[cfg(test)]
 fn render_planned_playfield_line(
     plan: &DenisePlannedPlayfieldLine<'_>,
     fb: &mut [u32],
     playfield_mask: &mut [u8],
+    collision_pixels: &mut [CollisionPixel],
+    collision_lookup: &mut CollisionLookup,
+    indexed_output_cache: &mut IndexedOutputCache,
+    clxdat: &mut u16,
+    palette: Palette,
+    palette_segments: &[PaletteSegment],
+    segment_idx: usize,
+    pixel_control: ControlState,
+    control_segments: &[ControlSegment],
+    control_segment_idx: usize,
+    base_scroll_bplcon1: u16,
+    base_ham_bplcon0: u16,
+    suppress_prefetch_scroll_fill: bool,
+    bpl_output_start_x: usize,
+    carried_open_ext_fb: usize,
+    h_row: &HWindowRow,
+    visible_line0: i32,
+    emulated_seconds: f64,
+    emulated_frames: u64,
+) {
+    let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(fb, playfield_mask);
+    render_planned_playfield_line_with_subpixels(
+        plan,
+        fb,
+        playfield_mask,
+        &mut sprite_subpixels,
+        collision_pixels,
+        collision_lookup,
+        indexed_output_cache,
+        clxdat,
+        palette,
+        palette_segments,
+        segment_idx,
+        pixel_control,
+        control_segments,
+        control_segment_idx,
+        base_scroll_bplcon1,
+        base_ham_bplcon0,
+        suppress_prefetch_scroll_fill,
+        bpl_output_start_x,
+        carried_open_ext_fb,
+        h_row,
+        visible_line0,
+        emulated_seconds,
+        emulated_frames,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_planned_playfield_line_with_subpixels(
+    plan: &DenisePlannedPlayfieldLine<'_>,
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     collision_lookup: &mut CollisionLookup,
     indexed_output_cache: &mut IndexedOutputCache,
@@ -5682,6 +5804,7 @@ fn render_planned_playfield_line(
         plan,
         fb,
         playfield_mask,
+        sprite_subpixels,
         collision_pixels,
         collision_lookup,
         indexed_output_cache,
@@ -5731,11 +5854,13 @@ fn render_planned_playfield_line_scalar(
     emulated_seconds: f64,
     emulated_frames: u64,
 ) {
+    let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(fb, playfield_mask);
     render_planned_playfield_line_impl(
         false,
         plan,
         fb,
         playfield_mask,
+        &mut sprite_subpixels,
         collision_pixels,
         collision_lookup,
         indexed_output_cache,
@@ -5763,6 +5888,7 @@ fn render_planned_playfield_line_impl(
     plan: &DenisePlannedPlayfieldLine<'_>,
     fb: &mut [u32],
     playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     collision_lookup: &mut CollisionLookup,
     indexed_output_cache: &mut IndexedOutputCache,
@@ -5969,6 +6095,7 @@ fn render_planned_playfield_line_impl(
                         collision_table,
                         fb,
                         playfield_mask,
+                        sprite_subpixels,
                         collision_pixels,
                         clxdat,
                         &mut ham_color,
@@ -6045,7 +6172,7 @@ fn render_planned_playfield_line_impl(
                 }
                 continue;
             }
-            let (sample, output, shres_pair) = if shres {
+            let (sample, output, shres_pair, shres_sample_pair) = if shres {
                 let left = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
                 let (left_out, right_out) = if let Some(outputs) = indexed_outputs {
@@ -6067,6 +6194,7 @@ fn render_planned_playfield_line_impl(
                     shres_composite_sample(left, right),
                     blend_shres_outputs(left_out, right_out),
                     Some((left_out, right_out)),
+                    Some((left, right)),
                 )
             } else {
                 let sample = plan.sample_prepared_with_final_fetch_hold(
@@ -6116,7 +6244,7 @@ fn render_planned_playfield_line_impl(
                         );
                     }
                 }
-                (sample, output, None)
+                (sample, output, None, None)
             };
             if ham_mode || !shres {
                 // The SHRES pair path consumes native_per_pixel samples and
@@ -6146,26 +6274,44 @@ fn render_planned_playfield_line_impl(
                 }
                 collision_pixels[fb_idx] = collision;
                 let out_base = plan.y * out_w + pixel_x * canvas_scale;
-                if let (2, Some((left_out, right_out))) = (canvas_scale, shres_pair) {
-                    // 35 ns canvas: each half of the SHRES pair is its own
-                    // output pixel with its own genlock transparency.
+                if let (Some((left_out, right_out)), Some((left_sample, right_sample))) =
+                    (shres_pair, shres_sample_pair)
+                {
+                    let left_collision = collision_table[left_sample.idx as usize];
+                    let right_collision = collision_table[right_sample.idx as usize];
+                    sprite_subpixels.playfield_masks[fb_idx] = [
+                        left_collision.playfield_mask(),
+                        right_collision.playfield_mask(),
+                    ];
                     let left_transparent = pixel_control.genlock_transparent(
                         left_out.color_latch,
-                        Some(sample),
+                        Some(left_sample),
                         false,
                     );
                     let right_transparent = pixel_control.genlock_transparent(
                         right_out.color_latch,
-                        Some(sample),
+                        Some(right_sample),
                         false,
                     );
-                    fb[out_base] = rgb24_to_rgba8_alpha(left_out.color, !left_transparent);
-                    fb[out_base + 1] = rgb24_to_rgba8_alpha(right_out.color, !right_transparent);
+                    let pair = [
+                        rgb24_to_rgba8_alpha(left_out.color, !left_transparent),
+                        rgb24_to_rgba8_alpha(right_out.color, !right_transparent),
+                    ];
+                    sprite_subpixels.pixels[fb_idx] = pair;
+                    if canvas_scale == 2 {
+                        // 35 ns canvas: each half of the SHRES pair is its
+                        // own output pixel.
+                        fb[out_base..out_base + 2].copy_from_slice(&pair);
+                    } else {
+                        fb[out_base] = rgba8_blend_halves(pair[0], pair[1]);
+                    }
                     continue;
                 }
                 let transparent =
                     pixel_control.genlock_transparent(output.color_latch, Some(sample), false);
                 let pixel = rgb24_to_rgba8_alpha(output.color, !transparent);
+                sprite_subpixels.playfield_masks[fb_idx] = [pf_mask; 2];
+                sprite_subpixels.pixels[fb_idx] = [pixel; 2];
                 if canvas_scale == 1 {
                     fb[out_base] = pixel;
                 } else {
@@ -6382,10 +6528,12 @@ fn render_manual_bpl_segments_with_visible_line0(
     emulated_frames: u64,
 ) {
     let mut ham_select_pixels = Vec::new();
+    let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(fb, playfield_mask);
     render_manual_bpl_segments_with_visible_line0_and_scratch(
         segments,
         fb,
         playfield_mask,
+        &mut sprite_subpixels,
         collision_pixels,
         clxdat,
         base_palettes,
@@ -6405,6 +6553,7 @@ fn render_manual_bpl_segments_with_visible_line0_and_scratch(
     segments: &[ManualBplSegment],
     fb: &mut [u32],
     playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     clxdat: &mut u16,
     base_palettes: &[Palette],
@@ -6443,6 +6592,7 @@ fn render_manual_bpl_segments_with_visible_line0_and_scratch(
             seg,
             fb,
             playfield_mask,
+            sprite_subpixels,
             collision_pixels,
             clxdat,
             base_palettes,
@@ -6503,6 +6653,7 @@ fn draw_manual_bpl_word(
     seg: &ManualBplSegment,
     fb: &mut [u32],
     playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     clxdat: &mut u16,
     base_palettes: &[Palette],
@@ -6545,14 +6696,14 @@ fn draw_manual_bpl_word(
             native_idx += native_step;
             continue;
         };
-        let sample = if source_control.shres() {
-            let right_sample = shifter
+        let right_sample = source_control.shres().then(|| {
+            shifter
                 .sample(source_control, native_idx + 1)
-                .unwrap_or_default();
-            shres_composite_sample(left_sample, right_sample)
-        } else {
-            left_sample
-        };
+                .unwrap_or_default()
+        });
+        let sample = right_sample
+            .map(|right| shres_composite_sample(left_sample, right))
+            .unwrap_or(left_sample);
         let source_palette = palette_at_x(
             base_palettes[seg.line],
             &palette_segments[seg.line],
@@ -6594,9 +6745,7 @@ fn draw_manual_bpl_word(
             masked_idx
         };
         let (source_output, manual_shres_pair) = if source_control.shres() {
-            let right_sample = shifter
-                .sample(source_control, native_idx + 1)
-                .unwrap_or_default();
+            let right_sample = right_sample.expect("SHRES right sample");
             let (left_out, right_out) = denise_shres_playfield_output_pair(
                 source_control,
                 &source_palette,
@@ -6645,6 +6794,26 @@ fn draw_manual_bpl_word(
                 sample,
                 pixel_control,
             );
+            if let Some(right_sample) = right_sample {
+                let left_collision = collision_pixel(
+                    left_sample.idx,
+                    pixel_control.clxcon,
+                    pixel_control.clxcon2,
+                    pixel_control.dual_playfield(),
+                );
+                let right_collision = collision_pixel(
+                    right_sample.idx,
+                    pixel_control.clxcon,
+                    pixel_control.clxcon2,
+                    pixel_control.dual_playfield(),
+                );
+                sprite_subpixels.playfield_masks[fb_idx] = [
+                    left_collision.playfield_mask(),
+                    right_collision.playfield_mask(),
+                ];
+            } else {
+                sprite_subpixels.playfield_masks[fb_idx] = [playfield_mask[fb_idx]; 2];
+            }
             if !source_control.shres() {
                 ham_select_pixels[fb_idx] = masked_idx;
             }
@@ -6705,18 +6874,35 @@ fn draw_manual_bpl_word(
                 };
             *ham_color = pixel_color;
             let out_base = seg.line * out_w + x * canvas_scale;
-            if let (2, Some((left_out, right_out))) = (canvas_scale, manual_shres_pair) {
-                let left_transparent =
-                    pixel_control.genlock_transparent(left_out.color_latch, Some(sample), false);
-                let right_transparent =
-                    pixel_control.genlock_transparent(right_out.color_latch, Some(sample), false);
-                fb[out_base] = rgb24_to_rgba8_alpha(left_out.color, !left_transparent);
-                fb[out_base + 1] = rgb24_to_rgba8_alpha(right_out.color, !right_transparent);
+            if let (Some((left_out, right_out)), Some(right_sample)) =
+                (manual_shres_pair, right_sample)
+            {
+                let left_transparent = pixel_control.genlock_transparent(
+                    left_out.color_latch,
+                    Some(left_sample),
+                    false,
+                );
+                let right_transparent = pixel_control.genlock_transparent(
+                    right_out.color_latch,
+                    Some(right_sample),
+                    false,
+                );
+                let pair = [
+                    rgb24_to_rgba8_alpha(left_out.color, !left_transparent),
+                    rgb24_to_rgba8_alpha(right_out.color, !right_transparent),
+                ];
+                sprite_subpixels.pixels[fb_idx] = pair;
+                if canvas_scale == 2 {
+                    fb[out_base..out_base + 2].copy_from_slice(&pair);
+                } else {
+                    fb[out_base] = rgba8_blend_halves(pair[0], pair[1]);
+                }
                 continue;
             }
             let transparent =
                 pixel_control.genlock_transparent(pixel_color_latch, Some(sample), false);
             let pixel = rgb24_to_rgba8_alpha(pixel_color, !transparent);
+            sprite_subpixels.pixels[fb_idx] = [pixel; 2];
             fb[out_base..out_base + canvas_scale].fill(pixel);
         }
         x_cursor += pixel_repeat as i32;
