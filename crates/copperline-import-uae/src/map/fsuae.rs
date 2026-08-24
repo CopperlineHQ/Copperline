@@ -5,7 +5,7 @@
 //! separately. An explicit `chipset`/`cpu_type`/`*_memory` always overrides
 //! the preset, matching FS-UAE's own precedence.
 
-use super::{annotate, set_str, table, MapOutcome};
+use super::{annotate, clamp_chip_mb, set_str, table, MapOutcome};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
@@ -106,7 +106,17 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
                     } else {
                         format!("{kb}K")
                     };
-                    set_str(&mut doc, &["memory"], section, &size);
+                    let clamp_note = if section == "chip" {
+                        let (clamped, clamp_note) = clamp_chip_mb(&size);
+                        set_str(&mut doc, &["memory"], section, &clamped);
+                        clamp_note
+                    } else {
+                        set_str(&mut doc, &["memory"], section, &size);
+                        None
+                    };
+                    if let Some(clamp_note) = clamp_note {
+                        annotate(&mut doc, &["memory"], section, &clamp_note);
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => report.unsupported(&e.key, &e.value, "expected a KB integer"),

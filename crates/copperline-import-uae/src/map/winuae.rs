@@ -4,7 +4,7 @@
 //! analogue (or vice versa) would need per-flavour branching, and none of
 //! the core axes below have that split.
 
-use super::{annotate, set_str, table, MapOutcome};
+use super::{annotate, clamp_chip_mb, set_str, table, MapOutcome};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
@@ -91,17 +91,22 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             seen.insert(&e.key, ());
             match guess_memory_size(&e.value) {
                 Some(size) => {
-                    set_str(&mut doc, &["memory"], section, &size);
-                    annotate(
-                        &mut doc,
-                        &["memory"],
-                        section,
-                        &format!(
-                            "from {uae_key}={} as literal MB -- if this source config predates WinUAE 2.x, \
-                             it may instead be a doubling index; verify against your source's actual {note} size",
-                            e.value
-                        ),
+                    let mut comment = format!(
+                        "from {uae_key}={} as literal MB -- if this source config predates WinUAE 2.x, \
+                         it may instead be a doubling index; verify against your source's actual {note} size",
+                        e.value
                     );
+                    let size = if section == "chip" {
+                        let (clamped, clamp_note) = clamp_chip_mb(&size);
+                        if let Some(clamp_note) = clamp_note {
+                            comment = format!("{comment}; {clamp_note}");
+                        }
+                        clamped
+                    } else {
+                        size
+                    };
+                    set_str(&mut doc, &["memory"], section, &size);
+                    annotate(&mut doc, &["memory"], section, &comment);
                 }
                 None => report.approximated(
                     &e.key,
@@ -137,6 +142,15 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         match e.value.parse::<i64>() {
             Ok(speed) => table(&mut doc, &["floppy"])["speed"] = toml_edit::value(speed),
             Err(_) => report.unsupported(&e.key, &e.value, "unrecognized floppy speed"),
+        }
+    }
+    if let Some(e) = by_key("floppy_volume") {
+        seen.insert(&e.key, ());
+        match e.value.trim().parse::<i64>() {
+            Ok(vol) if (0..=100).contains(&vol) => {
+                table(&mut doc, &["audio"])["floppy_sounds_volume"] = toml_edit::value(vol);
+            }
+            _ => report.unsupported(&e.key, &e.value, "expected an integer 0-100"),
         }
     }
 

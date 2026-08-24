@@ -61,6 +61,24 @@ pub(crate) fn set_str(doc: &mut DocumentMut, path: &[&str], key: &str, value: &s
     table(doc, path)[key] = toml_edit::value(value);
 }
 
+/// Copperline's chip RAM ceiling for the common ECS/AGA case (OCS caps
+/// lower still, at 512K, which validation catches separately). A source
+/// config claiming more chip RAM than real hardware ever carried is
+/// clamped down rather than passed through to fail validation with no
+/// path forward; the caller folds the returned note into its own comment
+/// so the original value stays visible.
+pub(crate) fn clamp_chip_mb(size: &str) -> (String, Option<String>) {
+    match size.strip_suffix('M').and_then(|n| n.parse::<u64>().ok()) {
+        Some(mb) if mb > 2 => (
+            "2M".to_string(),
+            Some(format!(
+                "source specified {size} of chip RAM; clamped to Copperline's 2M ceiling"
+            )),
+        ),
+        _ => (size.to_string(), None),
+    }
+}
+
 /// Attach a comment directly above `doc[path...][key]`, for a value that
 /// was set but is only an approximation of the source setting. Comments
 /// live in the *key's* leading decor (the text before the key token on its
