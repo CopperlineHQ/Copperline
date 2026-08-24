@@ -616,6 +616,46 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- lide.device-compatible IDE board --------------------------------
+    // Amiberry has a separate ROM-file key per board personality rather
+    // than Copperline's single [lide] board = "..." selector; each key
+    // implies both the ROM path and which personality is fitted. Only one
+    // board can be fitted at once, so if a source config somehow has both
+    // (hand-edited, or two emulator versions' settings merged), that's a
+    // real conflict worth flagging rather than letting the second key
+    // silently win.
+    let alfapower = by_key("alfapower_rom_file");
+    let ripple = by_key("ripple_rom_file");
+    match (alfapower, ripple) {
+        (Some(a), Some(r)) => {
+            seen.insert(&a.key, ());
+            seen.insert(&r.key, ());
+            report.unsupported(
+                &a.key,
+                &a.value,
+                "both alfapower_rom_file and ripple_rom_file are set, but Copperline's \
+                 [lide] board can only be one personality at a time; pick one by hand",
+            );
+            report.unsupported(
+                &r.key,
+                &r.value,
+                "both alfapower_rom_file and ripple_rom_file are set, but Copperline's \
+                 [lide] board can only be one personality at a time; pick one by hand",
+            );
+        }
+        (Some(e), None) | (None, Some(e)) => {
+            seen.insert(&e.key, ());
+            let board = if e.key == "alfapower_rom_file" {
+                "atbus2008"
+            } else {
+                "ripple"
+            };
+            set_str(&mut doc, &["lide"], "board", board);
+            set_str(&mut doc, &["lide"], "rom", &e.value);
+        }
+        (None, None) => {}
+    }
+
     // --- Toccata sound board --------------------------------------------
     // Amiberry's toccata_rom_file doubles as the board's fit switch: a
     // literal ":ENABLED" sentinel means the board is fitted with no ROM
