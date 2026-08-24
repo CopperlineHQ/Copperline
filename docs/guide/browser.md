@@ -15,7 +15,7 @@ locally, and how to embed the emulator in your own page.
 AROS ROM or a loaded Kickstart. Changing it before boot just changes what
 the boot button builds, and changing it while a machine runs rebuilds the
 machine and powers it up again -- the model is the board itself, not a
-knob on it -- keeping the chosen ROM and the inserted disk. A link can
+knob on it -- keeping the chosen ROM and the inserted disks. A link can
 preset the model with `?machine=A1200`, and a
 [save state](#browser-save-states) carries its own machine, so loading
 one switches the select to whatever the state brings back. The **Video**
@@ -24,8 +24,10 @@ desktop's `[chipset] video` key) -- the standard is the Agnus crystal,
 so changing it rebuilds a running machine exactly like the model select,
 and `?video=NTSC` presets it per link. The
 page fetches the open-source AROS ROM while it loads, so the boot button
-works with no files of your own; the **Kickstart ROM** and **DF0 disk**
-pickers load local images instead. Both work before or after boot: a
+works with no files of your own; the **Kickstart ROM**, **DF0 disk** and
+**DF1 disk** pickers load local images instead. The hosted machine fits both
+floppy drives, so a multi-disk title can keep its second disk in DF1 instead
+of swapping DF0. The pickers work before or after boot: a
 pre-boot choice is stashed and applied when the machine starts (the boot
 button relabels to show which ROM it will use), and a post-boot pick swaps
 the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, IPF,
@@ -111,10 +113,11 @@ restores a [save state](#browser-save-states), and anything else inserts
 into DF0 like the disk picker -- dropped before boot it queues and inserts
 when the machine starts. The same 64 MiB cap as URL fetches applies.
 
-A disk can also come from a link: `/try/?df0=<url>` fetches the image while
-the emulator loads and inserts it at boot, so a bootable demo is one
-shareable URL, and the **DF0 from URL** button does the same for a pasted
-address, inserting live when the machine is already running. The fetch
+A disk can also come from a link: `/try/?df0=<url>&df1=<url>` fetches either
+or both images while the emulator loads and inserts them at boot, so a
+multi-disk demo is one shareable URL. The **DF0 from URL** button does the
+same for a pasted boot-disk address, inserting live when the machine is
+already running. The fetch
 happens in the visitor's browser and nothing is proxied, so the image's
 host must allow cross-origin GETs (same-origin always works; archive.org
 does too). Only http(s) URLs are accepted, capped at 64 MiB (SCP flux
@@ -314,7 +317,7 @@ does not place them:
   restarts.
 - **Quick load** restores that slot. It is enabled only when the browser
   holds a quick state, and its tooltip says when the state was taken,
-  what was in DF0, and how far the machine had run.
+  what was in DF0/DF1, and how far the machine had run.
 - **Saved states...** opens the panel over everything the browser
   remembers: the stored Kickstart (with its **Forget** button), the quick
   slot, and *named* states -- type a name and **Save new** keeps the
@@ -496,6 +499,7 @@ import init, { WebEmu } from './pkg/copperline_web.js';
 const wasm = await init();
 const emu = new WebEmu();          // default A500 machine, placeholder ROM
 // ...or pick a machine model: new WebEmu('A1200')
+// ...or fit DF0 + DF1: new WebEmu('A500', 'PAL', 2)
 emu.load_rom(romBytes, extBytes);  // Kickstart or AROS bytes; cold reset
 emu.insert_floppy(0, adfBytes, 'game.adf');
 
@@ -526,7 +530,11 @@ second optional argument picks the video standard on top of the profile
 (`new WebEmu('A500', 'NTSC')`), the desktop's `[chipset] video` key;
 omitted, the profile keeps its own (PAL for every offered profile).
 `WebEmu.video_standards()` lists the accepted names and is the matching
-feature test. `machine_model()` returns the running machine's profile name
+feature test. The third optional argument fits one to four floppy drives,
+the browser equivalent of `[floppy] drives`; it must be an integer. When
+omitted, the chosen profile's default remains for backward compatibility.
+`machine_model()` returns the
+running machine's profile name
 (`undefined` for a shape no profile describes, such as a state saved
 from a custom desktop config) and follows `load_state`, so a page can
 re-point its machine select at what a state brought back;
@@ -662,6 +670,10 @@ elements, and pages without them are untouched:
 
 - `#df0url` / `#kickurl` (buttons): prompt for a disk / same-origin ROM
   URL, as described above.
+- `#df1` (file input) / `#eject1` (button): place the hosted page's second
+  drive controls. An older shell with only `#df0` and `#eject` gets the DF1
+  picker and eject button inserted beside them automatically; in that case
+  the original eject button is relabelled **Eject DF0** for clarity.
 - `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.
@@ -865,7 +877,7 @@ elements, and pages without them are untouched:
 A site can set its defaults in one hand-editable file instead of editing
 the shell: `copperline.json`, served next to the page. Every key is
 optional, a missing or invalid file means no defaults, link parameters
-(`?df0=`, `?kick=`, `?machine=`, `?joy=`, `?fdspeed=`) override the file
+(`?df0=`, `?df1=`, `?kick=`, `?machine=`, `?joy=`, `?fdspeed=`) override the file
 per URL, and anything the visitor changes by hand wins as usual:
 
 ```json
@@ -874,6 +886,7 @@ per URL, and anything the visitor changes by hand wins as usual:
   "video": "NTSC",
   "kick": "roms/kick31.rom",
   "df0": "adf/demo.adf",
+  "df1": "adf/demo-disk2.adf",
   "floppy_sounds": false,
   "mono_audio": true,
   "floppy_speed": 800,
@@ -891,8 +904,8 @@ per URL, and anything the visitor changes by hand wins as usual:
 `machine` picks the machine model, like `?machine=`; `video` the PAL/NTSC
 standard, like `?video=`; `kick` follows the
 same-origin rule as `?kick=` (the file can only name a ROM the site
-already serves); `df0` is any URL the visitor's browser may fetch, like
-`?df0=`. `floppy_sounds`, `mono_audio`, and
+already serves); `df0` and `df1` are URLs the visitor's browser may fetch,
+like `?df0=` / `?df1=`. `floppy_sounds`, `mono_audio`, and
 `floppy_speed` reach the machine whether or not the shell has their
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
