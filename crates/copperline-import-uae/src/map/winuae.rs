@@ -227,6 +227,138 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- RTC / battery clock --------------------------------------------
+    // `[machine] battmem` backs only the RP5C01's battery RAM (the
+    // A3000/A4000 part) -- the MSM6242 (the common A500+/A600/A1200 part)
+    // has no battery RAM of its own in Copperline's model, so rtc_file is
+    // only translated when cs_rtc says RP5C01 is actually fitted.
+    let mut rtc_chip_is_rp5c01 = false;
+    if let Some(e) = by_key("cs_rtc") {
+        seen.insert(&e.key, ());
+        let lower = e.value.trim().to_ascii_lowercase();
+        if lower == "none" || lower == "0" {
+            table(&mut doc, &["machine"])["rtc"] = toml_edit::value(false);
+        } else if lower.starts_with("msm6242") {
+            table(&mut doc, &["machine"])["rtc"] = toml_edit::value(true);
+            set_str(&mut doc, &["machine"], "rtc_chip", "MSM6242");
+        } else if lower.starts_with("rp5c01") {
+            table(&mut doc, &["machine"])["rtc"] = toml_edit::value(true);
+            set_str(&mut doc, &["machine"], "rtc_chip", "RP5C01");
+            rtc_chip_is_rp5c01 = true;
+        } else {
+            report.unsupported(&e.key, &e.value, "unrecognized RTC chip");
+        }
+    }
+    if let Some(e) = by_key("rtc_file") {
+        seen.insert(&e.key, ());
+        if e.value.trim().is_empty() {
+            // nothing to translate
+        } else if rtc_chip_is_rp5c01 {
+            set_str(&mut doc, &["machine"], "battmem", &e.value);
+        } else {
+            report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline's battmem only backs the RP5C01 (A3000/A4000); the MSM6242 \
+                 (the common case) has no battery RAM of its own to restore this into",
+            );
+        }
+    }
+
+    // --- FPU ------------------------------------------------------------
+    if let Some(e) = by_key("fpu_model") {
+        seen.insert(&e.key, ());
+        let lower = e.value.trim().to_ascii_lowercase();
+        let has_fpu = !(lower.is_empty() || lower == "0" || lower == "none");
+        table(&mut doc, &["cpu"])["fpu"] = toml_edit::value(has_fpu);
+    }
+
+    // --- Audio ------------------------------------------------------
+    if let Some(e) = by_key("sound_stereo_separation") {
+        seen.insert(&e.key, ());
+        match e.value.trim().parse::<i64>() {
+            Ok(sep) => table(&mut doc, &["audio"])["stereo_separation"] = toml_edit::value(sep),
+            Err(_) => report.unsupported(&e.key, &e.value, "expected an integer"),
+        }
+    }
+
+    // --- Display ----------------------------------------------------
+    if let Some(e) = by_key("gfx_fullscreen_amiga") {
+        seen.insert(&e.key, ());
+        let lower = e.value.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "fullscreen" | "fullwindow" => {
+                table(&mut doc, &["display"])["full_screen"] = toml_edit::value(true)
+            }
+            "window" => table(&mut doc, &["display"])["full_screen"] = toml_edit::value(false),
+            _ => report.unsupported(&e.key, &e.value, "unrecognized fullscreen mode"),
+        }
+    }
+    if let Some(e) = by_key("show_leds") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(on) => table(&mut doc, &["display"])["status_bar"] = toml_edit::value(on),
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
+
+    // --- Floppies (write-protect, drive count) ---------------------------
+    for (uae_key, drive) in [
+        ("floppy0wp", "df0"),
+        ("floppy1wp", "df1"),
+        ("floppy2wp", "df2"),
+        ("floppy3wp", "df3"),
+    ] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            match parse_bool(&e.value) {
+                Some(on) => {
+                    table(&mut doc, &["floppy", drive])["write_protected"] = toml_edit::value(on)
+                }
+                None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+            }
+        }
+    }
+    if let Some(e) = by_key("nr_floppies") {
+        seen.insert(&e.key, ());
+        match e.value.trim().parse::<i64>() {
+            Ok(n) if (1..=4).contains(&n) => {
+                table(&mut doc, &["floppy"])["drives"] = toml_edit::value(n)
+            }
+            _ => report.unsupported(&e.key, &e.value, "expected an integer 1-4"),
+        }
+    }
+
+    // --- known settings with no Copperline equivalent, for visibility ---
+    // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
+    // concepts Copperline genuinely doesn't have a knob for, called out by
+    // name rather than falling into the generic "not recognized" bucket
+    // below so a reader can tell "considered and skipped" from "converter
+    // doesn't know this key yet".
+    for (uae_key, why) in [
+        (
+            "turbo_emulation",
+            "no \"turbo boot\" concept distinct from [emulation] warp_speed",
+        ),
+        (
+            "turbo_boot",
+            "no \"turbo boot\" concept distinct from [emulation] warp_speed",
+        ),
+        (
+            "sound_volume",
+            "no master output-volume field ([audio] only has floppy_sounds_volume)",
+        ),
+        (
+            "sound_volume_master",
+            "no master output-volume field ([audio] only has floppy_sounds_volume)",
+        ),
+    ] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            report.unsupported(&e.key, &e.value, why);
+        }
+    }
+
     // --- everything else --------------------------------------------
     for e in entries {
         if seen.contains_key(e.key.as_str()) {
@@ -252,4 +384,14 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
 fn guess_memory_size(value: &str) -> Option<String> {
     let n: u64 = value.trim().parse().ok()?;
     Some(format!("{n}M"))
+}
+
+/// WinUAE/Amiberry booleans are spelled `true`/`false`, `yes`/`no`, or
+/// `1`/`0` depending on the key's age.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => Some(true),
+        "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
