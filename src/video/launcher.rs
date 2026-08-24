@@ -1070,12 +1070,12 @@ const LIDE_ROWS: [Row; 11] = [
     row(F::LideRom, "Boot ROM", PathRow),
     row(F::LideRomBank2, "Boot ROM bank 2", PathRow),
     row(F::LideDrive0, "Drive 0", Drive),
-    row(F::LideDrive1, "Drive 1", Drive),
-    row(F::LideDrive2, "Drive 2", Drive),
-    row(F::LideDrive3, "Drive 3", Drive),
     row(F::LideDrive0Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive1, "Drive 1", Drive),
     row(F::LideDrive1Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive2, "Drive 2", Drive),
     row(F::LideDrive2Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive3, "Drive 3", Drive),
     row(F::LideDrive3Boot, "  Boot priority", Bootpri),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
@@ -3436,11 +3436,16 @@ impl MachineSetup {
                         .and_then(|drive| self.drive_holds(drive))
                         .is_none()
             }
+            // Each sits directly under the drive it belongs to, and stays
+            // on the page when that drive is empty -- greyed with "No
+            // drive" (see `disabled_reason`) rather than vanishing, so the
+            // rows do not reshuffle under the cursor as slots are filled
+            // and the indented label always has its own drive above it.
+            // Only a slot the board does not have goes, along with the
+            // drive row itself.
             F::LideDrive0Boot | F::LideDrive1Boot | F::LideDrive2Boot | F::LideDrive3Boot => {
-                self.lide_board.is_none()
-                    || Self::boot_field_drive(field)
-                        .and_then(|drive| self.drive_holds(drive))
-                        .is_none()
+                lide_drive_index(field)
+                    .is_some_and(|i| self.lide_board.is_none_or(|b| b.max_drives() <= i))
             }
             // Nothing to configure without a board fitted.
             F::LideRom => self.lide_board.is_none(),

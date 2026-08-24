@@ -3457,10 +3457,18 @@ fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
     assert!(!s.has_boot_priority_rows());
     assert_eq!(s.value_label(F::LideDrive0Boot), "5");
     assert_eq!(s.disabled_reason(F::LideDrive1Boot), None);
-    assert!(
-        s.row_hidden(F::LideDrive2Boot),
-        "an empty slot has nothing to prioritise, so its boot row stays off"
-    );
+    // An empty slot keeps its boot row, greyed rather than hidden, so the
+    // page does not reshuffle as slots are filled.
+    assert!(!s.row_hidden(F::LideDrive2Boot));
+    assert_eq!(s.disabled_reason(F::LideDrive2Boot), Some("No drive"));
+    // A slot the fitted board does not have goes entirely, drive row and
+    // boot row together.
+    s.cycle(F::LideBoard, true); // RIDE: one channel
+    assert!(s.row_hidden(F::LideDrive2));
+    assert!(s.row_hidden(F::LideDrive2Boot));
+    s.cycle(F::LideBoard, true); // AT-Bus 2008
+    s.cycle(F::LideBoard, true); // None
+    s.cycle(F::LideBoard, true); // back to RIPPLE for the round trip below
 
     let raw = s.to_raw();
     assert_eq!(raw.lide.board.as_deref(), Some("ripple"));
