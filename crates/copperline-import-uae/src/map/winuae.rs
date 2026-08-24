@@ -529,6 +529,20 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Identification board -------------------------------------------
+    // uae_hide_autoconfig hides UAE's own identification autoconfig
+    // device; the equivalent Copperline knob is a top-level key, not
+    // under any section (src/config/raw.rs RawConfig.identify: "false
+    // drops the Copperline identification board from the autoconfig
+    // chain").
+    if let Some(e) = by_key("uae_hide_autoconfig") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(hide) => doc["identify"] = toml_edit::value(!hide),
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
+
     // --- Serial port ---------------------------------------------------
     // Amiberry's serial_port is a free-form target string; only the
     // TCP://host:port form has a clean Copperline equivalent ([serial]
