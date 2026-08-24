@@ -286,9 +286,16 @@ impl WebEmu {
     /// `video` picks the video standard ("PAL" or "NTSC", the desktop's
     /// `[chipset] video` key) on top of whatever the profile chose; omitted
     /// or empty keeps the profile's own standard (PAL for every offered
-    /// profile). An unknown name throws, like an unknown model.
+    /// profile). `floppy_drives` fits one to four drives, matching the
+    /// desktop's `[floppy] drives` setting; omitted, the profile default stays
+    /// in place (one drive for the offered models). An unknown name or invalid
+    /// drive count throws.
     #[wasm_bindgen(constructor)]
-    pub fn new(model: Option<String>, video: Option<String>) -> Result<WebEmu, JsValue> {
+    pub fn new(
+        model: Option<String>,
+        video: Option<String>,
+        floppy_drives: Option<u8>,
+    ) -> Result<WebEmu, JsValue> {
         let mut cfg = match model.as_deref().map(str::trim) {
             None | Some("") => Config::default(),
             Some(name) => machine_profile_defaults(parse_machine_model(name).map_err(js_err)?),
@@ -296,6 +303,14 @@ impl WebEmu {
         match video.as_deref().map(str::trim) {
             None | Some("") => {}
             Some(name) => cfg.video_standard = parse_video_standard(name).map_err(js_err)?,
+        }
+        if let Some(count) = floppy_drives {
+            if !(1..=4).contains(&count) {
+                return Err(JsValue::from_str(&format!(
+                    "floppy drive count must be between 1 and 4, got {count}"
+                )));
+            }
+            cfg.floppy_connected = std::array::from_fn(|drive| drive < usize::from(count));
         }
         let audio = Rc::new(RefCell::new(Vec::new()));
         let sink = WebAudioSink { buf: audio.clone() };

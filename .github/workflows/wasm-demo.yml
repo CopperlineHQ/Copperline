@@ -89,7 +89,10 @@ jobs:
           import { readFileSync } from 'fs';
           import init, { WebEmu } from './pkg-smoke-glue.mjs';
           await init({ module_or_path: readFileSync('./pkg/copperline_web_bg.wasm') });
-          const emu = new WebEmu('A500', 'PAL');
+          const emu = new WebEmu('A500', 'PAL', 2);
+          if (!emu.drive_connected(0) || !emu.drive_connected(1) || emu.drive_connected(2)) {
+            throw new Error('browser floppy drive count was not applied');
+          }
           if (emu.presentation_revision() !== 0) {
             throw new Error('fresh presentation revision is not zero');
           }
