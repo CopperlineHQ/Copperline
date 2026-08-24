@@ -183,6 +183,50 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Amiberry scaling_method: -1 Auto, 0 Nearest, 1 Linear, 2
+    // Integer, 3 Stretch (BlitterStudio/amiberry src/osdep/imgui/display.cpp).
+    // Copperline only has two [display] scaling modes: "smooth" (filtered,
+    // aspect-preserving) and "integer" (pixel-perfect). 1 (Linear) and 2
+    // (Integer) match those exactly; 0 (Nearest) and -1 (Auto) have no
+    // exact equivalent -- Copperline's "smooth" is always filtered, and it
+    // has no per-mode auto-integer switch -- so those are approximated to
+    // the closest behavior and flagged; 3 (Stretch) ignores aspect ratio
+    // entirely, which nothing in Copperline does, so it's left unset and
+    // flagged unsupported rather than silently picking something else.
+    if let Some(e) = by_key("amiberry.scaling_method") {
+        seen.insert(&e.key, ());
+        match e.value.trim() {
+            "2" => set_str(&mut doc, &["display"], "scaling", "integer"),
+            "1" => set_str(&mut doc, &["display"], "scaling", "smooth"),
+            "0" => {
+                set_str(&mut doc, &["display"], "scaling", "smooth");
+                annotate(
+                    &mut doc,
+                    &["display"],
+                    "scaling",
+                    "from amiberry.scaling_method=0 (Nearest) -- Copperline's \"smooth\" mode \
+                     is always filtered; there's no non-integer nearest-neighbor mode",
+                );
+            }
+            "-1" => {
+                set_str(&mut doc, &["display"], "scaling", "smooth");
+                annotate(
+                    &mut doc,
+                    &["display"],
+                    "scaling",
+                    "from amiberry.scaling_method=-1 (Auto) -- Copperline has no equivalent \
+                     per-mode auto-integer switch; verify \"smooth\" gives the look you want",
+                );
+            }
+            "3" => report.unsupported(
+                &e.key,
+                &e.value,
+                "Stretch (ignores aspect ratio) has no Copperline equivalent",
+            ),
+            _ => report.unsupported(&e.key, &e.value, "unrecognized scaling_method value"),
+        }
+    }
+
     // --- everything else --------------------------------------------
     for e in entries {
         if seen.contains_key(e.key.as_str()) {
