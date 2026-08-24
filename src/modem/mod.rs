@@ -402,6 +402,14 @@ struct Settings {
     s0: u8,
     /// S2: the `+++` escape character.
     s2: u8,
+    /// S3: the command-line terminator [`ModemSerialSink::command_mode_write`]
+    /// waits for. Default 13 (CR) -- almost nothing reprograms this, but a
+    /// real modem honours it, so this one does too.
+    s3: u8,
+    /// S4: the response linefeed character, paired with S3 as the `<CR><LF>`
+    /// every result code, S-register readback, and RING is framed in
+    /// (verbose mode); numeric mode uses S3 alone. Default 10 (LF).
+    s4: u8,
     /// S9 (WiModem232 extra): connect-detect response time, tenths of a
     /// second of *host* time -- [`ModemSerialSink::enter_online`] withholds
     /// remote-to-guest bytes until this long after CONNECT, the pause
@@ -436,6 +444,8 @@ impl Default for Settings {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 0,
             s12: 50,
             dcd_always: false,
@@ -659,6 +669,14 @@ impl ModemSerialSink {
         self.out_queue.push_back(b);
     }
 
+    /// S3/S4 as a two-byte `<CR><LF>` pair, the line break every verbose
+    /// response, S-register readback, RING, and the identity banner is
+    /// framed in -- default `\r\n`, but a guest that reprograms S3/S4 (rare,
+    /// but real hardware honours it) changes what actually goes out here.
+    fn crlf(&self) -> [u8; 2] {
+        [self.settings.s3, self.settings.s4]
+    }
+
     fn queue_result(&mut self, code: ResultCode) {
         if self.settings.quiet {
             return;
@@ -678,7 +696,8 @@ impl ModemSerialSink {
                 ResultCode::Error => "ERROR".to_string(),
                 ResultCode::Busy => "BUSY".to_string(),
             };
-            format!("\r\n{s}\r\n").into_bytes()
+            let crlf = self.crlf();
+            [&crlf[..], s.as_bytes(), &crlf[..]].concat()
         } else {
             let n = match code {
                 ResultCode::Ok => "0",
@@ -687,7 +706,9 @@ impl ModemSerialSink {
                 ResultCode::Error => "4",
                 ResultCode::Busy => "7",
             };
-            format!("{n}\r").into_bytes()
+            // Numeric mode terminates with S3 alone, no S4 -- meant for
+            // machine parsing, never carried a linefeed on real hardware.
+            [n.as_bytes(), &[self.settings.s3]].concat()
         };
         for b in bytes {
             self.queue_out_byte(b);
@@ -698,7 +719,9 @@ impl ModemSerialSink {
         // ATIn: an identity banner. Real modems vary it by n; M1 has no
         // product line to differentiate, so every digit gets the same
         // short string. Not a "result code", so not gated by ATQ1.
-        for b in "\r\nCopperline modem\r\n".bytes() {
+        let crlf = self.crlf();
+        let bytes: Vec<u8> = [&crlf[..], b"Copperline modem", &crlf[..]].concat();
+        for b in bytes {
             self.queue_out_byte(b);
         }
     }
@@ -708,11 +731,15 @@ impl ModemSerialSink {
             0 => self.settings.s0,
             1 => self.s1,
             2 => self.settings.s2,
+            3 => self.settings.s3,
+            4 => self.settings.s4,
             9 => self.settings.s9,
             12 => self.settings.s12,
             _ => 0,
         };
-        for b in format!("\r\n{val}\r\n").into_bytes() {
+        let crlf = self.crlf();
+        let bytes: Vec<u8> = [&crlf[..], val.to_string().as_bytes(), &crlf[..]].concat();
+        for b in bytes {
             self.queue_out_byte(b);
         }
     }
@@ -722,6 +749,8 @@ impl ModemSerialSink {
             0 => self.settings.s0 = val,
             1 => self.s1 = val,
             2 => self.settings.s2 = val,
+            3 => self.settings.s3 = val,
+            4 => self.settings.s4 = val,
             9 => self.settings.s9 = val,
             12 => self.settings.s12 = val,
             // Every other S register is a stub: no state, no error, just an
@@ -761,6 +790,8 @@ impl ModemSerialSink {
             quiet: self.settings.quiet,
             s0: self.settings.s0,
             s2: self.settings.s2,
+            s3: self.settings.s3,
+            s4: self.settings.s4,
             s9: self.settings.s9,
             s12: self.settings.s12,
             dcd_always: self.settings.dcd_always,
@@ -910,12 +941,13 @@ impl ModemSerialSink {
         if self.settings.quiet {
             return;
         }
-        let bytes: &[u8] = if self.settings.verbose {
-            b"\r\nRING\r\n"
+        let bytes: Vec<u8> = if self.settings.verbose {
+            let crlf = self.crlf();
+            [&crlf[..], b"RING", &crlf[..]].concat()
         } else {
-            b"2\r"
+            vec![b'2', self.settings.s3]
         };
-        for &b in bytes {
+        for b in bytes {
             self.queue_out_byte(b);
         }
     }
@@ -1220,7 +1252,7 @@ impl ModemSerialSink {
         if self.settings.echo {
             self.queue_out_byte(b);
         }
-        if b == 0x0D {
+        if b == self.settings.s3 {
             let line = std::mem::take(&mut self.line);
             self.execute_line(&line, at_cck);
             return;
@@ -1386,6 +1418,8 @@ fn settings_from_sidecar(
             quiet: p.quiet,
             s0: p.s0,
             s2: p.s2,
+            s3: p.s3,
+            s4: p.s4,
             s9: p.s9,
             s12: p.s12,
             dcd_always: p.dcd_always,
@@ -1809,6 +1843,66 @@ mod tests {
         assert_eq!(drain_str(&mut sink), "\r\n0\r\n\r\nOK\r\n");
         type_line(&mut sink, "ATS99=5", 0);
         assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
+    }
+
+    #[test]
+    fn s3_and_s4_default_to_cr_and_lf() {
+        let (mut sink, _state) = fake_no_echo();
+        type_line(&mut sink, "ATS3?", 0);
+        assert_eq!(drain_str(&mut sink), "\r\n13\r\n\r\nOK\r\n");
+        type_line(&mut sink, "ATS4?", 0);
+        assert_eq!(drain_str(&mut sink), "\r\n10\r\n\r\nOK\r\n");
+    }
+
+    /// S3/S4 are not just readable state (the test above) but live: S3 is
+    /// the byte [`ModemSerialSink::command_mode_write`] actually waits for
+    /// to end a line, and both bytes drive every response's framing from
+    /// the moment they change -- including, per real Hayes behaviour, the
+    /// very `OK` that confirms the change itself. Once S3 stops being CR,
+    /// [`type_line`]'s hardcoded CR terminator no longer applies, so this
+    /// test switches to writing bytes directly.
+    #[test]
+    fn s3_and_s4_are_live_and_take_effect_immediately() {
+        let (mut sink, _state) = fake_no_echo();
+
+        // ATS3=10 is itself submitted under the still-CR terminator, but
+        // its own OK is framed with the new S3 (LF) doubled for S4
+        // (unchanged at 10/LF too, coincidentally the same byte).
+        type_line(&mut sink, "ATS3=10", 0);
+        assert_eq!(drain_str(&mut sink), "\n\nOK\n\n");
+
+        // From here the terminator is LF; submit manually. This OK is
+        // framed S3=LF, S4=CR (13) -- the value ATS4=13 just set.
+        for b in b"ATS4=13" {
+            sink.write_byte(*b, 0);
+        }
+        sink.write_byte(0x0A, 0);
+        assert_eq!(drain_str(&mut sink), "\n\rOK\n\r");
+
+        // The old CR terminator is now inert -- a real modem reprogrammed
+        // this way stops responding to Enter until told otherwise. The CR
+        // is not discarded either: it becomes an ordinary buffered
+        // character (exactly what a stray non-terminator byte always is),
+        // so the line the eventual LF submits is "ATE0\r", not "ATE0" --
+        // invalid syntax, same as any other embedded control character.
+        for b in b"ATE0" {
+            sink.write_byte(*b, 0);
+        }
+        sink.write_byte(0x0D, 0);
+        assert!(
+            drain(&mut sink).is_empty(),
+            "CR must not terminate a command line once S3 = LF"
+        );
+        sink.write_byte(0x0A, 0);
+        assert_eq!(drain_str(&mut sink), "\n\rERROR\n\r");
+
+        // A clean line, properly terminated with the live S3, executes as
+        // normal and still carries the reprogrammed framing.
+        for b in b"ATE0" {
+            sink.write_byte(*b, 0);
+        }
+        sink.write_byte(0x0A, 0);
+        assert_eq!(drain_str(&mut sink), "\n\rOK\n\r");
     }
 
     // ---- 3. Dial --------------------------------------------------------
@@ -2564,6 +2658,8 @@ mod tests {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 0,
             s12: 50,
             dcd_always: false,
@@ -2582,6 +2678,8 @@ mod tests {
             quiet: true,
             s0: 3,
             s2: b'$',
+            s3: b'\n',
+            s4: b'\r',
             s9: 4,
             s12: 30,
             dcd_always: true,
@@ -2596,6 +2694,8 @@ mod tests {
         assert!(settings.quiet);
         assert_eq!(settings.s0, 3);
         assert_eq!(settings.s2, b'$');
+        assert_eq!(settings.s3, b'\n');
+        assert_eq!(settings.s4, b'\r');
         assert_eq!(settings.s9, 4);
         assert_eq!(settings.s12, 30);
         assert!(settings.dcd_always);

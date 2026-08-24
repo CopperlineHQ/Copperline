@@ -138,6 +138,8 @@ config override and the stored profile.
 | `S0` | Rings to wait through before auto-answering; `0` disables auto-answer | `0` |
 | `S1` | Rings answered since the last call (read-only in practice; decays to 0 eight seconds after the last ring) | `0` |
 | `S2` | The `+++` escape character | `43` (`+`) |
+| `S3` | Command-line terminator | `13` (CR) |
+| `S4` | Response linefeed character (paired with `S3` as every result code's `<CR><LF>` framing; numeric-mode responses use `S3` alone) | `10` (LF) |
 | `S9` | WiModem connect-delay, tenths of a second of host time | `0` |
 | `S12` | `+++` escape guard time, fiftieths of a second | `50` (one second) |
 

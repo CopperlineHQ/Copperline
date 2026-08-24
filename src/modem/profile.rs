@@ -46,6 +46,10 @@ pub(crate) struct ModemProfile {
     pub(crate) s0: u8,
     /// S2: the `+++` escape character.
     pub(crate) s2: u8,
+    /// S3: the command-line terminator.
+    pub(crate) s3: u8,
+    /// S4: the response linefeed character.
+    pub(crate) s4: u8,
     /// S9: carrier-detect response time, in tenths of a second.
     pub(crate) s9: u8,
     /// S12: escape guard time, in fiftieths of a second.
@@ -142,6 +146,8 @@ mod tests {
             quiet: false,
             s0: 1,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 6,
             s12: 50,
             dcd_always: true,
@@ -163,6 +169,8 @@ mod tests {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 6,
             s12: 50,
             dcd_always: false,
@@ -192,6 +200,8 @@ mod tests {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 6,
             s12: 50,
             dcd_always: false,
@@ -232,6 +242,8 @@ mod tests {
             quiet: true,
             s0: 3,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 5,
             s12: 20,
             dcd_always: true,
@@ -270,6 +282,8 @@ mod tests {
             quiet: false,
             s0: 0,
             s2: b'+',
+            s3: b'\r',
+            s4: b'\n',
             s9: 0,
             s12: 50,
             dcd_always: false,
