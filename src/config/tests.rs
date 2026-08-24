@@ -3855,10 +3855,14 @@ fn serial_section_selects_tcp_connect_and_address() -> Result<()> {
 fn serial_section_selects_modem_mode_and_telnet_default() -> Result<()> {
     let cfg = parse_config("[serial]\nmode = \"modem\"\ntelnet = true\n")?;
     assert_eq!(cfg.serial.mode, SerialMode::Modem);
-    assert!(cfg.serial.telnet);
-    // Off by default.
+    assert_eq!(cfg.serial.telnet, Some(true));
+    // An explicit off stays distinguishable from unset, so it can beat a
+    // stored profile's own AT*T rather than being read as "no opinion".
+    let cfg = parse_config("[serial]\nmode = \"modem\"\ntelnet = false\n")?;
+    assert_eq!(cfg.serial.telnet, Some(false));
+    // Unset by default.
     let cfg = parse_config("[serial]\nmode = \"modem\"\n")?;
-    assert!(!cfg.serial.telnet);
+    assert_eq!(cfg.serial.telnet, None);
     Ok(())
 }
 

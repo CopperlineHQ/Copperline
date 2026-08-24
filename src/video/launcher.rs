@@ -2501,7 +2501,7 @@ impl MachineSetup {
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
             serial_connect: cfg.serial.connect.clone(),
-            serial_telnet: cfg.serial.telnet,
+            serial_telnet: cfg.serial.telnet.unwrap_or(false),
             parallel_device: cfg.parallel.device,
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
@@ -3096,7 +3096,7 @@ impl MachineSetup {
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
         raw.serial.connect = self.serial_connect.clone();
-        if self.serial_telnet != base.serial.telnet {
+        if Some(self.serial_telnet) != base.serial.telnet {
             raw.serial.telnet = Some(self.serial_telnet);
         }
         // Parallel port. Carry each peripheral's settings whenever they are set

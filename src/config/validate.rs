@@ -440,7 +440,7 @@ impl TryFrom<RawConfig> for Config {
                 .unwrap_or(defaults.serial.coppersynth_panel),
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
-            telnet: raw.serial.telnet.unwrap_or(defaults.serial.telnet),
+            telnet: raw.serial.telnet.or(defaults.serial.telnet),
             phonebook: raw
                 .serial
                 .phonebook
@@ -486,13 +486,14 @@ impl TryFrom<RawConfig> for Config {
         if let Some(phonebook) = raw.serial.phonebook.as_ref() {
             for (number, target) in phonebook {
                 if number.is_empty()
-                    || !number
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || matches!(c, '-' | ' ' | '#' | '*'))
+                    || !number.chars().all(|c| {
+                        c.is_ascii_digit() || matches!(c, '-' | ' ' | '(' | ')' | '#' | '*')
+                    })
                 {
                     errors.push(anyhow!(
                         "[serial.phonebook] {number:?} is not a valid phone number: only \
-                         digits and the separators a dialer sends (-, space, #, *) are allowed"
+                         digits, the DTMF symbols # and *, and the separators a dialer sends \
+                         (-, space, parentheses) are allowed"
                     ));
                 }
                 let trimmed = target.trim();

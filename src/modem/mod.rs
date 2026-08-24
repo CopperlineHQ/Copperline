@@ -33,7 +33,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -50,6 +50,16 @@ const MAX_LINE_LEN: usize = 255;
 /// practice; it exists only so a guest that stops reading altogether cannot
 /// make this queue grow forever.
 const OUT_QUEUE_CAPACITY: usize = 4096;
+
+/// Interface a guest-initiated `AT*L` binds when the host configuration
+/// never named one. Loopback, deliberately: `AT*L` (and an `AT&W`-stored
+/// port replayed at startup) comes from guest software, so defaulting to
+/// every interface would let a program running inside the emulated machine
+/// publish an unauthenticated serial endpoint across the user's network
+/// without the user ever asking for it. Exposing it wider stays possible,
+/// but only as an explicit `[serial] listen = "0.0.0.0:..."` decision the
+/// user makes on the host side.
+const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 
 /// Errors ATD reports as distinct result codes: a refused connection is
 /// BUSY, anything else NO CARRIER.
@@ -69,12 +79,11 @@ pub struct ModemOptions {
     /// [`ModemSerialSink::new_tcp`]) -- nothing ever RINGs, ATA always
     /// reports NO CARRIER.
     pub listen: Option<String>,
-    /// `[serial] telnet`: an explicit `true` here always wins over whatever
-    /// a stored profile's `AT*T` says (see `profile.rs`'s doc comment); a
-    /// `false` cannot be told apart from "unset", so it defers to the
-    /// profile -- the same limitation [`crate::config::SerialConfig::telnet`]
-    /// already has (its default and its explicit-off both read `false`).
-    pub telnet: bool,
+    /// `[serial] telnet`: an explicit value here, either way, always wins
+    /// over whatever a stored profile's `AT*T` says (see `profile.rs`'s doc
+    /// comment). `None` -- the config never mentioned it -- is what defers
+    /// to the profile. See [`crate::config::SerialConfig::telnet`].
+    pub telnet: Option<bool>,
     /// `[serial.phonebook]`: dialable numbers an `ATD`/`ATDT` with an
     /// all-digit target resolves through, number -> "host:port" (or a bare
     /// host, which dials the modem's default port).
@@ -127,12 +136,23 @@ pub(crate) trait ModemTransport: Send {
 /// so the owning transport's `has_pending` stays a cheap atomic load, then
 /// clears `writer` and `carrier` on EOF or error so the owner's next probe
 /// sees the connection is gone.
+///
+/// `my_generation` is the connection this reader belongs to. `ATH`
+/// immediately followed by `ATD` can shut the old socket down and install
+/// the new one before the old reader has even observed EOF; without the
+/// generation check that stale thread would then clear the *new*
+/// connection's writer and carrier, reporting a spurious carrier loss on a
+/// call that is actually up. The check happens while holding the `writer`
+/// lock, and `dial`/`answer` likewise bump the generation while holding it,
+/// so the two cannot interleave.
 fn spawn_modem_reader(
     mut stream: TcpStream,
     tx: std::sync::mpsc::Sender<u8>,
     buffered: Arc<AtomicIsize>,
     writer: Arc<Mutex<Option<TcpStream>>>,
     carrier: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    my_generation: u64,
 ) -> io::Result<()> {
     thread::Builder::new()
         .name("modem-tcp".into())
@@ -151,10 +171,29 @@ fn spawn_modem_reader(
                     }
                 }
             }
-            *writer.lock().unwrap() = None;
-            carrier.store(false, Ordering::Release);
+            let mut guard = writer.lock().unwrap();
+            if generation.load(Ordering::Acquire) == my_generation {
+                *guard = None;
+                drop(guard);
+                carrier.store(false, Ordering::Release);
+            }
         })?;
     Ok(())
+}
+
+/// Wake a blocked `TcpListener::accept` on `addr` so its thread can observe
+/// a stop flag and exit. A listener bound to an unspecified address
+/// (`0.0.0.0`) is reachable on loopback, which is what this dials.
+fn poke_listener(addr: SocketAddr) {
+    let target = if addr.ip().is_unspecified() {
+        match addr {
+            SocketAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], addr.port())),
+            SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port())),
+        }
+    } else {
+        addr
+    };
+    let _ = TcpStream::connect_timeout(&target, Duration::from_millis(250));
 }
 
 /// The modem's real transport: dials out over TCP, reusing
@@ -184,8 +223,19 @@ pub(crate) struct TcpModemTransport {
     /// Paula-facing footing as `carrier()`.
     ringing: Arc<AtomicBool>,
     /// The address `listen()` actually bound (a port of 0 resolves here).
-    /// Test-only accessor, mirroring `TcpSerialSink::local_addr`.
+    /// Also what [`poke_listener`] dials to retire that listener on a
+    /// rebind; test code reads it back through `listen_addr()`.
     listen_addr: Option<SocketAddr>,
+    /// Bumped every time a new connection is installed, so a reader thread
+    /// outliving its own call cannot tear down its successor's state. See
+    /// [`spawn_modem_reader`].
+    generation: Arc<AtomicU64>,
+    /// Stop flag and join handle for the current `listen()` accept thread.
+    /// `AT*L` rebinding is a replace, not an add: without these the old
+    /// thread stays blocked in `accept()` forever, keeping the previous
+    /// port bound and answering-then-dropping callers for the lifetime of
+    /// the process, leaking a thread and a descriptor per rebind.
+    listener: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
 }
 
 impl TcpModemTransport {
@@ -200,7 +250,44 @@ impl TcpModemTransport {
             pending: Arc::new(Mutex::new(None)),
             ringing: Arc::new(AtomicBool::new(false)),
             listen_addr: None,
+            generation: Arc::new(AtomicU64::new(0)),
+            listener: None,
         }
+    }
+
+    /// Install a freshly connected socket as the live call, returning the
+    /// generation stamped on it. The generation bump and the writer install
+    /// happen under one lock so a previous call's reader thread, which
+    /// checks the generation while holding the same lock, either sees the
+    /// old value (and tears down nothing, because it no longer owns the
+    /// slot) or the new one (and skips) -- never a torn view where it
+    /// clears a connection it does not own.
+    fn install_connection(&mut self, writer_clone: TcpStream) -> u64 {
+        let mut guard = self.writer.lock().unwrap();
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *guard = Some(writer_clone);
+        generation
+    }
+
+    /// Retire the current `listen()` thread, releasing its port. Sets the
+    /// stop flag, wakes the blocked `accept()` so the thread observes it,
+    /// then joins so the port is definitely free before a rebind tries to
+    /// take it (or the same one) again.
+    fn stop_listener(&mut self) {
+        let Some((stop, handle)) = self.listener.take() else {
+            return;
+        };
+        stop.store(true, Ordering::Release);
+        if let Some(addr) = self.listen_addr {
+            poke_listener(addr);
+        }
+        let _ = handle.join();
+        // A caller parked on the old listener has nowhere to go now: its
+        // socket belongs to a port that is no longer ours.
+        if let Some(stream) = self.pending.lock().unwrap().take() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        self.ringing.store(false, Ordering::Release);
     }
 
     /// The address [`ModemTransport::listen`] actually bound. Test-only:
@@ -229,7 +316,7 @@ impl ModemTransport for TcpModemTransport {
         let _ = stream.set_nodelay(true);
         let writer_clone = stream.try_clone().map_err(|_| DialError::Unreachable)?;
         let (tx, rx) = std::sync::mpsc::channel();
-        *self.writer.lock().unwrap() = Some(writer_clone);
+        let generation = self.install_connection(writer_clone);
         self.carrier.store(true, Ordering::Release);
         self.rx = Some(rx);
         spawn_modem_reader(
@@ -238,6 +325,8 @@ impl ModemTransport for TcpModemTransport {
             Arc::clone(&self.buffered),
             Arc::clone(&self.writer),
             Arc::clone(&self.carrier),
+            Arc::clone(&self.generation),
+            generation,
         )
         .map_err(|_| DialError::Unreachable)?;
         Ok(())
@@ -278,22 +367,39 @@ impl ModemTransport for TcpModemTransport {
     }
 
     fn listen(&mut self, addr: &str) -> io::Result<()> {
+        // Retire the previous listener before binding: `AT*L` replaces the
+        // listening port rather than adding one, and the old thread would
+        // otherwise stay blocked in `accept()` holding its port open (and
+        // answering-then-dropping callers) for the rest of the run. Doing
+        // this first also means rebinding to the *same* port works, rather
+        // than failing on an address still in use.
+        self.stop_listener();
         let listener = TcpListener::bind(addr)?;
         let local_addr = listener.local_addr()?;
         let pending = Arc::new(Mutex::new(None));
         let ringing = Arc::new(AtomicBool::new(false));
-        let (accept_pending, accept_ringing, accept_carrier) = (
+        let stop = Arc::new(AtomicBool::new(false));
+        let (accept_pending, accept_ringing, accept_carrier, accept_stop) = (
             Arc::clone(&pending),
             Arc::clone(&ringing),
             Arc::clone(&self.carrier),
+            Arc::clone(&stop),
         );
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("modem-tcp-listen".into())
             .spawn(move || {
                 loop {
                     let Ok((stream, _peer)) = listener.accept() else {
                         return;
                     };
+                    // Retired by a rebind (or shutdown): the connection
+                    // that just woke us is `poke_listener`'s, not a real
+                    // caller. Dropping `listener` on the way out is what
+                    // actually frees the port.
+                    if accept_stop.load(Ordering::Acquire) {
+                        drop(stream);
+                        return;
+                    }
                     // The phone-line-busy analogue: a call is live, or an
                     // earlier caller is still parked unanswered, so this
                     // one gets connection-then-close -- the fast-busy tone
@@ -309,12 +415,10 @@ impl ModemTransport for TcpModemTransport {
                     accept_ringing.store(true, Ordering::Release);
                 }
             })?;
-        // Replaces whatever `listen()` bound before: a previous listener
-        // thread (if any) is left running against its own now-orphaned
-        // `pending`/`ringing`, harmless since nothing reads them anymore.
         self.pending = pending;
         self.ringing = ringing;
         self.listen_addr = Some(local_addr);
+        self.listener = Some((stop, handle));
         Ok(())
     }
 
@@ -342,7 +446,7 @@ impl ModemTransport for TcpModemTransport {
             return false;
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        *self.writer.lock().unwrap() = Some(clone);
+        let generation = self.install_connection(clone);
         self.rx = Some(rx);
         self.carrier.store(true, Ordering::Release);
         if spawn_modem_reader(
@@ -351,6 +455,8 @@ impl ModemTransport for TcpModemTransport {
             Arc::clone(&self.buffered),
             Arc::clone(&self.writer),
             Arc::clone(&self.carrier),
+            Arc::clone(&self.generation),
+            generation,
         )
         .is_err()
         {
@@ -366,6 +472,15 @@ impl ModemTransport for TcpModemTransport {
             let _ = stream.shutdown(Shutdown::Both);
         }
         self.ringing.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for TcpModemTransport {
+    /// Retire the accept thread with the transport, so a dropped modem (a
+    /// reconfigured machine, or a test that built one) does not leave a
+    /// bound port and a parked thread behind it.
+    fn drop(&mut self) {
+        self.stop_listener();
     }
 }
 
@@ -530,18 +645,19 @@ pub struct ModemSerialSink {
     /// construction: an all-digit `ATD`/`ATDT` target is looked up here
     /// before falling back to NO CARRIER (see [`Self::do_dial`]).
     phonebook: Vec<(String, String)>,
-    /// Whether [`ModemOptions::telnet`] was `true` -- the only value that
-    /// unambiguously means "the config explicitly turned telnet on" (see
-    /// [`ModemOptions::telnet`]'s doc comment). Reapplied over a reloaded
-    /// profile on every `ATZ`, alongside [`Self::new_tcp`]'s construction-time
-    /// use of it, so the config keeps winning across a soft reset too.
-    telnet_config_explicit: bool,
+    /// [`ModemOptions::telnet`] as the config gave it: `Some` either way
+    /// means the config spoke and beats a stored profile's `AT*T`, `None`
+    /// means it did not. Reapplied over a reloaded profile on every `ATZ`,
+    /// alongside [`Self::new_tcp`]'s construction-time use of it, so the
+    /// config keeps winning across a soft reset too.
+    telnet_config_explicit: Option<bool>,
     /// The host half of whatever address inbound calls are (or were)
     /// answered on, so `AT*L<port>` can rebind to the same interface with
-    /// just a new port. `"0.0.0.0"` when nothing has bound yet -- a guest
-    /// that issues `AT*L` on a modem with no configured `[serial] listen`
-    /// still gets to become answerable, the same as a real modem is always
-    /// answerable given a phone line.
+    /// just a new port. [`DEFAULT_LISTEN_HOST`] when nothing has bound yet
+    /// -- a guest that issues `AT*L` on a modem with no configured
+    /// `[serial] listen` still gets to become answerable, the same as a
+    /// real modem is always answerable given a phone line, but only to
+    /// this host until the user says otherwise.
     listen_host: String,
     /// The port inbound calls are currently answered on, `None` if the
     /// modem has never listened. Persisted by `AT&W` as
@@ -589,7 +705,7 @@ impl ModemSerialSink {
             .as_deref()
             .and_then(|addr| addr.rsplit_once(':'))
             .map(|(host, _)| host.to_string())
-            .unwrap_or_else(|| "0.0.0.0".to_string());
+            .unwrap_or_else(|| DEFAULT_LISTEN_HOST.to_string());
         let configured_port = options
             .listen
             .as_deref()
@@ -652,8 +768,8 @@ impl ModemSerialSink {
             last_ring_cck: None,
             star_baud: None,
             phonebook: Vec::new(),
-            telnet_config_explicit: false,
-            listen_host: "0.0.0.0".to_string(),
+            telnet_config_explicit: None,
+            listen_host: DEFAULT_LISTEN_HOST.to_string(),
             listen_port: None,
             time_anchor: None,
             connect_delay_until: None,
@@ -865,12 +981,19 @@ impl ModemSerialSink {
         }
         let target = String::from_utf8_lossy(target);
         let target = target.trim();
-        // An all-digit target is a "phone number": WiModem232's phonebook
-        // convention, resolved through [serial.phonebook] rather than
-        // dialed literally (there is no DNS entry for a phone number).
-        // Hayes has no notion of a phonebook to conflict with here.
-        let host_port = if !target.is_empty() && target.bytes().all(|b| b.is_ascii_digit()) {
-            let Some((_, addr)) = self.phonebook.iter().find(|(number, _)| number == target) else {
+        // A phone-number-shaped target ([`looks_like_phone_number`]:
+        // digits and DTMF symbols, separators ignored the way a real
+        // dialer ignores them) resolves through [serial.phonebook] rather
+        // than being dialed literally -- WiModem232's convention, and
+        // there is no DNS entry for a phone number anyway. Hayes has no
+        // notion of a phonebook to conflict with here.
+        let host_port = if looks_like_phone_number(target) {
+            let dialed = normalize_phone_number(target);
+            let Some((_, addr)) = self
+                .phonebook
+                .iter()
+                .find(|(number, _)| normalize_phone_number(number) == dialed)
+            else {
                 self.queue_result(ResultCode::NoCarrier);
                 return;
             };
@@ -1188,8 +1311,8 @@ impl ModemSerialSink {
     }
 
     /// `AT*L<port>`: rebinds inbound calls to the same host
-    /// [`Self::listen_host`] already answers on (or `0.0.0.0` if it never
-    /// has) with the new port. A bind failure (port already in use, no
+    /// [`Self::listen_host`] already answers on (or
+    /// [`DEFAULT_LISTEN_HOST`] if it never has) with the new port. A bind failure (port already in use, no
     /// permission) is ERROR, not a silent no-op -- a sysop who mistypes a
     /// port should hear about it immediately, not discover it when nothing
     /// ever rings.
@@ -1409,7 +1532,7 @@ impl ModemSerialSink {
 /// test doc comment for why those stay untested at the file level here).
 fn settings_from_sidecar(
     sidecar: Option<&profile::ModemProfile>,
-    telnet_explicit: bool,
+    telnet_explicit: Option<bool>,
 ) -> Settings {
     let mut settings = match sidecar {
         Some(p) => Settings {
@@ -1429,10 +1552,44 @@ fn settings_from_sidecar(
         },
         None => Settings::default(),
     };
-    if telnet_explicit {
-        settings.telnet = true;
+    if let Some(telnet) = telnet_explicit {
+        settings.telnet = telnet;
     }
     settings
+}
+
+/// Punctuation a dialer may send inside a phone number purely for
+/// readability, which a real modem's tone generator ignores. Notably *not*
+/// `.`: stripping that would turn a dotted-quad target like `192.168.1.5`
+/// into an all-digit string and send it to the phonebook instead of the
+/// network.
+fn is_dial_separator(c: char) -> bool {
+    matches!(c, '-' | ' ' | '(' | ')')
+}
+
+/// A phone number reduced to what actually identifies it, so a configured
+/// `"555-1234"` and a guest's `ATD5551234` (or vice versa) are the same
+/// entry. Applied to both sides of the [`ModemSerialSink::phonebook`]
+/// lookup; the configured key keeps its readable form in the file.
+fn normalize_phone_number(s: &str) -> String {
+    s.chars().filter(|c| !is_dial_separator(*c)).collect()
+}
+
+/// Whether a dial target is a phone number to resolve through the
+/// phonebook rather than a host to dial directly. Anything holding `.` or
+/// `:` is a hostname, an IP, or a host:port -- never a phone number -- which
+/// is what keeps dotted quads and `bbs.example.com:23` out of the phonebook
+/// path; what remains counts if it is digits and DTMF symbols once the
+/// separators above are taken out.
+fn looks_like_phone_number(s: &str) -> bool {
+    if s.contains('.') || s.contains(':') {
+        return false;
+    }
+    let normalized = normalize_phone_number(s);
+    !normalized.is_empty()
+        && normalized
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '#' | '*'))
 }
 
 /// A phonebook entry's address, filled out with the modem's default
@@ -2527,7 +2684,7 @@ mod tests {
         assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
         assert_eq!(
             state.lock().unwrap().listen_addr.as_deref(),
-            Some("0.0.0.0:6400")
+            Some("127.0.0.1:6400")
         );
         assert_eq!(sink.listen_port, Some(6400));
     }
@@ -2712,7 +2869,7 @@ mod tests {
             listen_port: Some(6400),
             default_port: 1541,
         };
-        let settings = settings_from_sidecar(Some(&profile), false);
+        let settings = settings_from_sidecar(Some(&profile), None);
         assert!(!settings.echo);
         assert!(!settings.verbose);
         assert!(settings.quiet);
@@ -2730,7 +2887,7 @@ mod tests {
 
     #[test]
     fn settings_from_sidecar_falls_back_to_defaults_with_none() {
-        let settings = settings_from_sidecar(None, false);
+        let settings = settings_from_sidecar(None, None);
         assert!(settings.echo);
         assert_eq!(settings.default_port, 23);
         assert!(!settings.telnet);
@@ -2742,7 +2899,7 @@ mod tests {
             telnet: false,
             ..sidecar_stub()
         };
-        let settings = settings_from_sidecar(Some(&profile), true);
+        let settings = settings_from_sidecar(Some(&profile), Some(true));
         assert!(
             settings.telnet,
             "an explicit [serial] telnet = true must win over a stored false"
@@ -2750,9 +2907,29 @@ mod tests {
     }
 
     #[test]
+    fn settings_from_sidecar_config_telnet_false_always_wins_over_a_stored_true() {
+        let profile = profile::ModemProfile {
+            telnet: true,
+            ..sidecar_stub()
+        };
+        let settings = settings_from_sidecar(Some(&profile), Some(false));
+        assert!(
+            !settings.telnet,
+            "an explicit [serial] telnet = false must win over a stored true"
+        );
+        // ...and "the config said nothing" still defers to the profile,
+        // which is the case `Some(false)` used to be indistinguishable from.
+        let settings = settings_from_sidecar(Some(&profile), None);
+        assert!(
+            settings.telnet,
+            "an unset [serial] telnet must defer to the stored profile"
+        );
+    }
+
+    #[test]
     fn atz_honours_config_telnet_override_even_with_nothing_persisted() {
         let (mut sink, _state) = fake_no_echo();
-        sink.telnet_config_explicit = true;
+        sink.telnet_config_explicit = Some(true);
         type_line(&mut sink, "AT*T0", 0);
         drain(&mut sink);
         assert!(!sink.settings.telnet);
@@ -2767,7 +2944,7 @@ mod tests {
     #[test]
     fn at_ampersand_f_ignores_config_telnet_override() {
         let (mut sink, _state) = fake_no_echo();
-        sink.telnet_config_explicit = true;
+        sink.telnet_config_explicit = Some(true);
         sink.settings.telnet = true;
         type_line(&mut sink, "AT&F", 0);
         drain(&mut sink);
@@ -2840,6 +3017,45 @@ mod tests {
         assert!(
             state.lock().unwrap().dialed.is_none(),
             "an unmapped number must never reach the transport"
+        );
+    }
+
+    #[test]
+    fn phonebook_separators_match_on_either_side() {
+        // A configured key with separators, dialed bare.
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("555-1234".to_string(), "bbs.example.com:23".to_string())];
+        type_line(&mut sink, "ATD5551234", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("bbs.example.com:23")
+        );
+
+        // ...and the same key dialed the way it is written, which used to
+        // miss the phonebook entirely and get sent to DNS as "555-1234".
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("555-1234".to_string(), "bbs.example.com:23".to_string())];
+        type_line(&mut sink, "ATD555-1234", 0);
+        assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("bbs.example.com:23")
+        );
+    }
+
+    #[test]
+    fn a_dotted_quad_is_dialed_directly_not_treated_as_a_phone_number() {
+        // Stripping "." as a separator would make this all-digit and send
+        // it to the phonebook; it must stay a literal address.
+        let (mut sink, state) = fake_no_echo();
+        sink.phonebook = vec![("19216815".to_string(), "wrong.example.com:23".to_string())];
+        type_line(&mut sink, "ATD192.168.1.5", 0);
+        drain(&mut sink);
+        assert_eq!(
+            state.lock().unwrap().dialed.as_deref(),
+            Some("192.168.1.5:23"),
+            "a dotted quad must be dialed as an address, never resolved as a number"
         );
     }
 

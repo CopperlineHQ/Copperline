@@ -883,8 +883,13 @@ pub struct SerialConfig {
     /// mode (there is no sensible default host to dial).
     pub connect: Option<String>,
     /// `AT*T1`/`AT*T0` default at power-on: telnet NVT translation on by
-    /// default. [`SerialMode::Modem`] only; defaults to false.
-    pub telnet: bool,
+    /// default. [`SerialMode::Modem`] only. Tri-state on purpose: `None` is
+    /// "the config never said", which defers to a stored `AT&W` profile's
+    /// own `AT*T`, while `Some(false)` is an explicit off that overrides
+    /// that profile the same way `Some(true)` overrides it -- collapsing
+    /// the two here would silently let a profile's `telnet = true` win over
+    /// a config that plainly asked for it off.
+    pub telnet: Option<bool>,
     /// `[serial.phonebook]` entries, number -> "host:port" (or a bare host),
     /// sorted by number. [`SerialMode::Modem`] only.
     pub phonebook: Vec<(String, String)>,
