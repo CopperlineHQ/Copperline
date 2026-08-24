@@ -276,6 +276,27 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Boot straight into the emulation --------------------------------
+    // Amiberry's use_gui=no skips its own launcher and boots directly, the
+    // same shape as Copperline's [emulation] power_on = true (machine runs
+    // immediately rather than sitting powered off on a test screen).
+    // use_gui=yes doesn't have a comparable equivalent -- whether
+    // Copperline shows its own launcher is a matter of which CLI flags are
+    // passed, not a config-file setting -- so that direction is flagged.
+    if let Some(e) = by_key("use_gui") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(false) => table(&mut doc, &["emulation"])["power_on"] = toml_edit::value(true),
+            Some(true) => report.unsupported(
+                &e.key,
+                &e.value,
+                "whether Copperline shows its own launcher depends on which CLI flags are \
+                 passed, not a config setting; there's nothing to translate this to",
+            ),
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
+
     // --- FPU ------------------------------------------------------------
     if let Some(e) = by_key("fpu_model") {
         seen.insert(&e.key, ());
