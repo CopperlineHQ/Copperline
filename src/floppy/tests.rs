@@ -25,6 +25,10 @@ fn runahead_gate_tracks_the_inserted_images_write_protection() -> Result<()> {
 
     ctrl.make_disk_images_memory_backed();
     assert_eq!(ctrl.runahead_block_reason(), None);
+    assert_eq!(
+        ctrl.drives[0].image.as_ref().unwrap().backing,
+        FloppyImageBacking::Memory
+    );
     Ok(())
 }
 
@@ -3926,6 +3930,44 @@ fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> 
 }
 
 #[test]
+fn memory_backed_extended_adf_write_exports_updated_track() -> Result<()> {
+    let label = temp_path("browser.ext.adf");
+    let track_data = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let image = ext2_track_image(0, (track_data.len() * 8) as u32, 1, &track_data);
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, image, label.clone(), false)?;
+
+    let mut source = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    source[0..BYTES_PER_SECTOR].fill(0xA5);
+    let words = encode_amigados_track(0, &source);
+    let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+    for (i, word) in words.iter().copied().enumerate() {
+        let [hi, lo] = word.to_be_bytes();
+        chip_ram[i * 2] = hi;
+        chip_ram[i * 2 + 1] = lo;
+    }
+
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
+
+    assert!(!label.exists());
+    let exported = ctrl.export_disk_image(0)?;
+    assert_eq!(&exported[0..8], UAE_EXT2_SIGNATURE);
+    let payload_off = 8 + 4 + 12;
+    assert_eq!(
+        &exported[payload_off..payload_off + BYTES_PER_SECTOR],
+        &[0xA5; BYTES_PER_SECTOR]
+    );
+    Ok(())
+}
+
+#[test]
 fn writable_extended_adf_preserves_multi_revolution_raw_track_payload() -> Result<()> {
     let raw_words: [u16; 4] = [0x1111, 0x2222, 0x3333, 0x4444];
     let raw_payload: Vec<u8> = raw_words
@@ -4722,7 +4764,7 @@ fn write_dma_decodes_and_persists_track() -> Result<()> {
 }
 
 #[test]
-fn memory_backed_write_dma_exports_without_touching_the_label_path() -> Result<()> {
+fn memory_backed_write_and_state_round_trip_preserve_bytes_without_host_io() -> Result<()> {
     let label = temp_path("browser.adf");
     let mut ctrl = FloppyController::default();
     ctrl.insert_memory_disk_image_bytes(0, vec![0u8; ADF_SIZE], label.clone(), false)?;
@@ -4750,6 +4792,21 @@ fn memory_backed_write_dma_exports_without_touching_the_label_path() -> Result<(
 
     let exported = ctrl.export_disk_image(0)?;
     assert_eq!(&exported[0..BYTES_PER_SECTOR], &[0xA5; BYTES_PER_SECTOR]);
+    assert!(!label.exists());
+
+    let state = bincode::serialize(&ctrl)?;
+    let restored: FloppyController = bincode::deserialize(&state)?;
+    assert_eq!(
+        restored.drives[0].image.as_ref().unwrap().backing,
+        FloppyImageBacking::Memory
+    );
+    assert_eq!(restored.disk_image_write_protected(0), Some(false));
+    assert_eq!(restored.runahead_block_reason(), None);
+    let restored_export = restored.export_disk_image(0)?;
+    assert_eq!(
+        &restored_export[0..BYTES_PER_SECTOR],
+        &[0xA5; BYTES_PER_SECTOR]
+    );
     assert!(!label.exists());
     Ok(())
 }

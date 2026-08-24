@@ -2146,8 +2146,13 @@ impl FloppyController {
                 legacy_extended_adf,
                 lose_tail_bits,
             )
-            .and_then(|encoded| match backing {
+            .and_then(|()| match backing {
                 FloppyImageBacking::File => {
+                    let encoded = if legacy_extended_adf {
+                        encode_uae_legacy_extended_adf(tracks)
+                    } else {
+                        encode_uae_extended_adf(tracks)
+                    }?;
                     std::fs::write(&path, encoded).context("writing extended ADF image")
                 }
                 FloppyImageBacking::Memory => Ok(()),
@@ -3380,7 +3385,7 @@ fn apply_extended_adf_write(
     write_start_bit: u8,
     legacy_extended_adf: bool,
     lose_tail_bits: bool,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
     let Some(Some(image_track)) = tracks.get_mut(track) else {
         bail!("target track {track} is empty");
     };
@@ -3388,11 +3393,6 @@ fn apply_extended_adf_write(
         FloppyTrackImage::AmigaDos(track_data) => {
             let sectors = decode_non_empty_track_write(track, write_words)?;
             apply_amigados_track_sectors(track_data, track, &sectors)?;
-            if legacy_extended_adf {
-                encode_uae_legacy_extended_adf(tracks)
-            } else {
-                encode_uae_extended_adf(tracks)
-            }
         }
         FloppyTrackImage::RawMfm {
             words,
@@ -3415,7 +3415,6 @@ fn apply_extended_adf_write(
                     write_start_bit,
                     lose_tail_bits,
                 )?;
-                encode_uae_legacy_extended_adf(tracks)
             } else {
                 apply_raw_mfm_write(
                     words,
@@ -3427,10 +3426,10 @@ fn apply_extended_adf_write(
                     write_start_bit,
                     lose_tail_bits,
                 )?;
-                encode_uae_extended_adf(tracks)
             }
         }
     }
+    Ok(())
 }
 
 fn decode_non_empty_track_write(
