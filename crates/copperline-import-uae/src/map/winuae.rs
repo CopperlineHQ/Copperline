@@ -529,6 +529,24 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Serial port ---------------------------------------------------
+    // Amiberry's serial_port is a free-form target string; only the
+    // TCP://host:port form has a clean Copperline equivalent ([serial]
+    // mode = "tcp", listen = the host:port). Real hardware device paths
+    // (e.g. "/dev/ttyUSB0", "COM1") and other schemes have no translation
+    // and are left to the generic unrecognized-key fallback below.
+    if let Some(e) = by_key("serial_port") {
+        let value = e.value.trim();
+        if let Some(addr) = value
+            .strip_prefix("TCP://")
+            .or_else(|| value.strip_prefix("tcp://"))
+        {
+            seen.insert(&e.key, ());
+            set_str(&mut doc, &["serial"], "mode", "tcp");
+            set_str(&mut doc, &["serial"], "listen", addr);
+        }
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
