@@ -350,9 +350,12 @@ fan out. The sprite serializer keeps its own 35 ns sample coordinate:
 BPLCON3 SPRES=11 emits one sample per doubled-canvas pixel, SPRES=10 emits
 two, and the lo-res encodings emit four. Standard 15 kHz scans keep the
 classic single-width canvas byte-identical; their SHRES playfield and
-sprite subpixel pairs are blended into each 70 ns pixel. Sprite comparator
-positions remain at hi-res resolution on either canvas, as on Lisa; SPRES
-changes pixel width, not the comparator's positional granularity.
+sprite subpixel pairs are blended into each 70 ns pixel. The renderer keeps
+the two playfield colours and priority masks separate until sprite
+composition, while CLXDAT keeps its 70 ns column pitch and combines adjacent
+35 ns sprite samples. Sprite comparator positions remain at hi-res resolution
+on either canvas, as on Lisa; SPRES changes pixel width, not the comparator's
+positional granularity.
 
 Two vertical edge cases the replay honours:
 

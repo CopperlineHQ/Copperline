@@ -17,10 +17,10 @@ use super::{
     LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot,
     BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF,
     BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
-    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
-    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    BPLCON3_SPRES_SHRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
+    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -7726,6 +7726,61 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
     assert_eq!(
         clxdat_after_visible_sprite_pixels(BPLCON3_SPRES_HIRES),
         0x8000
+    );
+}
+
+#[test]
+fn aga_spres_shres_combines_adjacent_sprite_samples_for_live_clxdat() {
+    let clxdat_after_visible_sprite_pixels = |bplcon3| {
+        let mut bus = empty_bus();
+        bus.set_agnus_revision(AgnusRevision::AgaAlice);
+        let (pos0, ctl0) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let (pos2, ctl2) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let sprite0_ptr = 0x0100usize;
+        let sprite2_ptr = 0x0200usize;
+
+        write_chip_word(&mut bus, sprite0_ptr, pos0);
+        write_chip_word(&mut bus, sprite0_ptr + 2, ctl0);
+        write_chip_word(&mut bus, sprite0_ptr + 4, 0x4000);
+        write_chip_word(&mut bus, sprite0_ptr + 6, 0);
+        write_chip_word(&mut bus, sprite0_ptr + 8, 0);
+        write_chip_word(&mut bus, sprite0_ptr + 10, 0);
+        write_chip_word(&mut bus, sprite2_ptr, pos2);
+        write_chip_word(&mut bus, sprite2_ptr + 2, ctl2);
+        write_chip_word(&mut bus, sprite2_ptr + 4, 0x8000);
+        write_chip_word(&mut bus, sprite2_ptr + 6, 0);
+        write_chip_word(&mut bus, sprite2_ptr + 8, 0);
+        write_chip_word(&mut bus, sprite2_ptr + 10, 0);
+
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+        bus.denise.bplcon0 = 0x8000;
+        bus.denise.bplcon3 = bplcon3;
+        bus.denise.sprpt[0] = sprite0_ptr as u32;
+        bus.denise.sprpt[2] = sprite2_ptr as u32;
+        bus.display_dma_sprpt[0] = sprite0_ptr as u32;
+        bus.display_dma_sprpt[2] = sprite2_ptr as u32;
+        bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
+
+        let remaining = 0x3A - bus.agnus.hpos;
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+        bus.advance_chipset(remaining);
+
+        bus.custom_read(0x00E, 2)
+    };
+
+    // At 70 ns, bit 14 follows bit 15 into the next collision column.
+    assert_eq!(
+        clxdat_after_visible_sprite_pixels(BPLCON3_SPRES_HIRES),
+        0x8000
+    );
+    // At 35 ns, those adjacent bits share one collision column.
+    assert_eq!(
+        clxdat_after_visible_sprite_pixels(BPLCON3_SPRES_SHRES),
+        0x8200
     );
 }
 

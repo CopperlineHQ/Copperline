@@ -580,9 +580,9 @@ The ECS preset picks an 8372A for up to 1M chip RAM and an 8375 above; the
 A600 profile always uses the 8375 as the real machine did. The AGA preset
 resolves to Alice and Lisa: 8 bitplanes, the 256-entry 25-bit palette with
 BPLCON3 BANK/LOCT banking, HAM8, FMODE wide bitplane and sprite fetch
-(DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, BPLCON4, and
-CLXCON2 (remaining gaps, such as true 35 ns SuperHires sprite output, are
-recorded in [](../internals/chipset)).
+(DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, 35 ns BPLCON3
+SPRES output, BPLCON4, and CLXCON2. Remaining gaps are recorded in
+[](../internals/chipset).
 
 ## `[display]`
 

@@ -2816,6 +2816,97 @@ fn aga_bplcon3_spres_shres_packs_two_samples_into_one_70ns_pixel() {
 }
 
 #[test]
+fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
+    let render = |attached: bool| {
+        let mut state = RenderState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            dmacon: DMACON_DMAEN | DMACON_SPREN,
+            bplcon3: BPLCON3_PF2OF_DEFAULT | BPLCON3_SPRES_SHRES,
+            ..blank_state()
+        };
+        state.palette.write_ocs(17, 0x0FF0);
+        let base_palettes = [state.palette; FB_HEIGHT];
+        let palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let control_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut playfield_mask = vec![0u8; FB_PIXELS];
+        playfield_mask[0] = 2;
+        let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+        let blue = rgb12_to_rgba8(0x000F);
+        let black = rgb12_to_rgba8(0);
+        let mut fb = vec![black; FB_PIXELS];
+        fb[0] = rgba8_blend_halves(blue, black);
+        let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(&fb, &playfield_mask);
+        sprite_subpixels.playfield_masks[0] = [2, 0];
+        sprite_subpixels.pixels[0] = [blue, black];
+        let mut captured = vec![CapturedSpriteLine {
+            sprite: 0,
+            hstart: SPRITE_HSTART_FB0,
+            hsub_70ns: false,
+            beam_y: PAL_VISIBLE_LINE0,
+            data: 0xC000,
+            datb: 0,
+            attached: false,
+            data_ext: [0; 3],
+            datb_ext: [0; 3],
+            width_words: 1,
+        }];
+        if attached {
+            captured.push(CapturedSpriteLine {
+                sprite: 1,
+                hstart: SPRITE_HSTART_FB0,
+                hsub_70ns: false,
+                beam_y: PAL_VISIBLE_LINE0,
+                data: 0,
+                datb: 0,
+                attached: true,
+                data_ext: [0; 3],
+                datb_ext: [0; 3],
+                width_words: 1,
+            });
+        }
+        let mut sprite_group_mask = Vec::new();
+        let mut sprite_lines = std::array::from_fn(|_| Vec::new());
+        let mut attached_beams = std::array::from_fn(|_| Vec::new());
+        render_sprites_with_manual_lines_and_writes_reusing_mask(
+            &state,
+            &[0; 64],
+            &mut fb,
+            SpriteClip {
+                x_start: 0,
+                x_stop: FB_WIDTH,
+                y_start: 0,
+                y_stop: FB_HEIGHT,
+            },
+            &base_palettes,
+            &palette_segments,
+            &base_controls,
+            &control_segments,
+            &sprite_display_enabled_from_line_start(),
+            &playfield_mask,
+            &mut sprite_subpixels,
+            &mut collision_pixels,
+            &mut sprite_group_mask,
+            &mut sprite_lines,
+            &mut attached_beams,
+            &captured,
+            true,
+            None,
+            PAL_VISIBLE_LINE0,
+        );
+        (fb, sprite_subpixels)
+    };
+
+    let yellow = rgb12_to_rgba8(0x0FF0);
+    let blue = rgb12_to_rgba8(0x000F);
+    for attached in [false, true] {
+        let (fb, subpixels) = render(attached);
+        assert_eq!(subpixels.pixels[0], [blue, yellow]);
+        assert_eq!(fb[0], rgba8_blend_halves(blue, yellow));
+    }
+}
+
+#[test]
 fn shres_sprite_control_bit4_adds_70ns_horizontal_offset() {
     let (pos, ctl) = sprite_control_words(PAL_VISIBLE_LINE0 as u16, 0x2D, DIW_HSTART_FB0 as u16);
     let mut state = RenderState {

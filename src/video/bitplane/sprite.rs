@@ -968,6 +968,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     let mut sprite_group_mask = Vec::new();
     let mut sprite_lines = std::array::from_fn(|_| Vec::new());
     let mut attached_beams = std::array::from_fn(|_| Vec::new());
+    let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(fb, playfield_mask);
     render_sprites_with_manual_lines_and_writes_reusing_mask(
         state,
         ram,
@@ -979,6 +980,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
         control_segments,
         sprite_display_enable_x_by_y,
         playfield_mask,
+        &mut sprite_subpixels,
         collision_pixels,
         &mut sprite_group_mask,
         &mut sprite_lines,
@@ -1002,6 +1004,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
     control_segments: &[Vec<ControlSegment>],
     sprite_display_enable_x_by_y: &[Option<usize>],
     playfield_mask: &[u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     sprite_group_mask: &mut Vec<u8>,
     sprite_lines: &mut [Vec<SpriteLine>; 8],
@@ -1059,6 +1062,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
             control_segments,
             sprite_display_enable_x_by_y,
             playfield_mask,
+            sprite_subpixels,
             collision_pixels,
             sprite_group_mask,
             visible_line0,
@@ -1076,6 +1080,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
             control_segments,
             sprite_display_enable_x_by_y,
             playfield_mask,
+            sprite_subpixels,
             collision_pixels,
             sprite_group_mask,
             visible_line0,
@@ -1118,6 +1123,7 @@ pub(super) fn render_unattached_sprite_pair_lines(
     control_segments: &[Vec<ControlSegment>],
     sprite_display_enable_x_by_y: &[Option<usize>],
     playfield_mask: &[u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     sprite_group_mask: &mut [u8],
     visible_line0: i32,
@@ -1136,6 +1142,7 @@ pub(super) fn render_unattached_sprite_pair_lines(
         control_segments,
         sprite_display_enable_x_by_y,
         playfield_mask,
+        sprite_subpixels,
         collision_pixels,
         sprite_group_mask,
         visible_line0,
@@ -1155,6 +1162,7 @@ pub(super) fn render_unattached_sprite_pair_lines(
             control_segments,
             sprite_display_enable_x_by_y,
             playfield_mask,
+            sprite_subpixels,
             collision_pixels,
             sprite_group_mask,
             visible_line0,
@@ -1175,6 +1183,7 @@ pub(super) fn render_collected_sprite_lines<F>(
     control_segments: &[Vec<ControlSegment>],
     sprite_display_enable_x_by_y: &[Option<usize>],
     playfield_mask: &[u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     sprite_group_mask: &mut [u8],
     visible_line0: i32,
@@ -1198,6 +1207,7 @@ where
             control_segments,
             sprite_display_enable_x_by_y,
             playfield_mask,
+            sprite_subpixels,
             collision_pixels,
             sprite_group_mask,
             visible_line0,
@@ -1219,6 +1229,7 @@ pub(super) fn render_attached_sprite_pair_lines(
     control_segments: &[Vec<ControlSegment>],
     sprite_display_enable_x_by_y: &[Option<usize>],
     playfield_mask: &[u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     sprite_group_mask: &mut [u8],
     visible_line0: i32,
@@ -1291,7 +1302,12 @@ pub(super) fn render_attached_sprite_pair_lines(
                 collision_pixels,
                 playfield_mask,
             );
-            if !sprite_has_priority(even_sprite, playfield_mask[fb_idx], control) {
+            let subpixel_masks = sprite_subpixels.playfield_masks[fb_idx];
+            let left_visible =
+                left_idx != 0 && sprite_has_priority(even_sprite, subpixel_masks[0], control);
+            let right_visible =
+                right_idx != 0 && sprite_has_priority(even_sprite, subpixel_masks[1], control);
+            if !left_visible && !right_visible {
                 continue;
             }
             // Debugger layer isolation: an attached pair's pixels use both
@@ -1307,18 +1323,25 @@ pub(super) fn render_attached_sprite_pair_lines(
                     palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
                 sprite_pixel_rgba(control, entry)
             };
-            let (left, right) = if left_idx == right_idx {
+            let (left, right) = if left_visible && right_visible && left_idx == right_idx {
                 let pixel = resolve(left_idx);
                 (Some(pixel), Some(pixel))
             } else {
                 (
-                    (left_idx != 0).then(|| resolve(left_idx)),
-                    (right_idx != 0).then(|| resolve(right_idx)),
+                    left_visible.then(|| resolve(left_idx)),
+                    right_visible.then(|| resolve(right_idx)),
                 )
             };
             let canvas_scale = super::active_canvas_scale();
             let out_base = y * FB_WIDTH * canvas_scale + x_usize * canvas_scale;
-            paint_sprite_subpixel_pair(fb, out_base, canvas_scale, left, right);
+            paint_sprite_subpixel_pair(
+                fb,
+                out_base,
+                canvas_scale,
+                &mut sprite_subpixels.pixels[fb_idx],
+                left,
+                right,
+            );
         }
     }
     clxdat
@@ -1420,36 +1443,29 @@ pub(super) fn clip_sprite_lines_around_register_lines(
 }
 
 #[inline]
-fn blend_sprite_subpixels(left: u32, right: u32) -> u32 {
-    // Blend every RGBA channel independently. This is the same pairwise
-    // average used by the SHRES playfield path, extended to alpha so a
-    // genlock-transparent half remains representable on the 70 ns canvas.
-    (left & right) + (((left ^ right) & 0xFEFE_FEFE) >> 1)
-}
-
-#[inline]
 fn paint_sprite_subpixel_pair(
     fb: &mut [u32],
     out_base: usize,
     canvas_scale: usize,
+    composite: &mut [u32; 2],
     left: Option<u32>,
     right: Option<u32>,
 ) {
-    if canvas_scale == 2 {
-        if let Some(pixel) = left {
-            fb[out_base] = pixel;
-        }
-        if let Some(pixel) = right {
-            fb[out_base + 1] = pixel;
-        }
+    if let Some(pixel) = left {
+        composite[0] = pixel;
+    }
+    if let Some(pixel) = right {
+        composite[1] = pixel;
+    }
+    if left.is_none() && right.is_none() {
         return;
     }
 
-    fb[out_base] = match (left, right) {
-        (Some(left), Some(right)) => blend_sprite_subpixels(left, right),
-        (Some(sprite), None) | (None, Some(sprite)) => blend_sprite_subpixels(sprite, fb[out_base]),
-        (None, None) => return,
-    };
+    if canvas_scale == 2 {
+        fb[out_base..out_base + 2].copy_from_slice(composite);
+    } else {
+        fb[out_base] = rgba8_blend_halves(composite[0], composite[1]);
+    }
 }
 
 #[inline]
@@ -1476,6 +1492,7 @@ pub(super) fn draw_sprite_line(
     control_segments: &[Vec<ControlSegment>],
     sprite_display_enable_x_by_y: &[Option<usize>],
     playfield_mask: &[u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
     collision_pixels: &mut [CollisionPixel],
     sprite_group_mask: &mut [u8],
     visible_line0: i32,
@@ -1522,7 +1539,11 @@ pub(super) fn draw_sprite_line(
             collision_pixels,
             playfield_mask,
         );
-        if !sprite_has_priority(sprite, playfield_mask[fb_idx], control) {
+        let subpixel_masks = sprite_subpixels.playfield_masks[fb_idx];
+        let left_visible = left_idx != 0 && sprite_has_priority(sprite, subpixel_masks[0], control);
+        let right_visible =
+            right_idx != 0 && sprite_has_priority(sprite, subpixel_masks[1], control);
+        if !left_visible && !right_visible {
             continue;
         }
         // Debugger layer isolation: output only, after the collision bits
@@ -1535,18 +1556,25 @@ pub(super) fn draw_sprite_line(
             let entry = palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
             sprite_pixel_rgba(control, entry)
         };
-        let (left, right) = if left_idx == right_idx {
+        let (left, right) = if left_visible && right_visible && left_idx == right_idx {
             let pixel = resolve(left_idx);
             (Some(pixel), Some(pixel))
         } else {
             (
-                (left_idx != 0).then(|| resolve(left_idx)),
-                (right_idx != 0).then(|| resolve(right_idx)),
+                left_visible.then(|| resolve(left_idx)),
+                right_visible.then(|| resolve(right_idx)),
             )
         };
         let canvas_scale = super::active_canvas_scale();
         let out_base = y * FB_WIDTH * canvas_scale + x * canvas_scale;
-        paint_sprite_subpixel_pair(fb, out_base, canvas_scale, left, right);
+        paint_sprite_subpixel_pair(
+            fb,
+            out_base,
+            canvas_scale,
+            &mut sprite_subpixels.pixels[fb_idx],
+            left,
+            right,
+        );
     }
     clxdat
 }
