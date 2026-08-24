@@ -663,6 +663,12 @@ pub struct ModemSerialSink {
     /// modem has never listened. Persisted by `AT&W` as
     /// `profile::ModemProfile::listen_port`; changed at runtime by `AT*L`.
     listen_port: Option<u16>,
+    /// The port named by an explicit `[serial] listen`, if there was one.
+    /// Kept so `ATZ` can restore the same precedence construction used --
+    /// host configuration over stored profile -- rather than letting a
+    /// soft reset hand the machine back to a profile the user's own config
+    /// was meant to override.
+    configured_listen_port: Option<u16>,
     /// The emulated-to-host time mapping ([`crate::serial::SerialTimeAnchor`]),
     /// last published by the emulator's own re-anchoring. `None` in tests
     /// that never call [`SerialSink::set_time_anchor`] -- S9's delay is then
@@ -729,6 +735,7 @@ impl ModemSerialSink {
         sink.telnet_config_explicit = options.telnet;
         sink.listen_host = listen_host;
         sink.listen_port = listen_port;
+        sink.configured_listen_port = configured_port;
         sink.settings = settings_from_sidecar(sidecar.as_ref(), sink.telnet_config_explicit);
         Ok(sink)
     }
@@ -771,6 +778,7 @@ impl ModemSerialSink {
             telnet_config_explicit: None,
             listen_host: DEFAULT_LISTEN_HOST.to_string(),
             listen_port: None,
+            configured_listen_port: None,
             time_anchor: None,
             connect_delay_until: None,
             telnet: None,
@@ -894,6 +902,27 @@ impl ModemSerialSink {
     fn reload_profile_settings(&mut self) {
         let sidecar = profile::ModemProfile::load();
         self.settings = settings_from_sidecar(sidecar.as_ref(), self.telnet_config_explicit);
+        // `AT&W` persists the `AT*L` port alongside `Settings`, so a soft
+        // reset has to put the answering side back where the profile says
+        // too -- otherwise `AT&W` (port 6400), `AT*L6500`, `ATZ` leaves the
+        // modem still answering on 6500, contradicting the documented
+        // profile lifecycle. Same precedence as construction: an explicit
+        // `[serial] listen` port outranks the stored one. With neither
+        // naming a port, whatever `AT*L` last bound is left alone rather
+        // than silently taking the machine off the hook.
+        let restored = self
+            .configured_listen_port
+            .or_else(|| sidecar.as_ref().and_then(|p| p.listen_port));
+        if let Some(port) = restored {
+            if self.listen_port != Some(port)
+                && self
+                    .transport
+                    .listen(&format!("{}:{port}", self.listen_host))
+                    .is_ok()
+            {
+                self.listen_port = Some(port);
+            }
+        }
     }
 
     /// `AT&W`: persist the currently active settings as the stored profile.
@@ -957,12 +986,20 @@ impl ModemSerialSink {
         // layer for this call only; AT*T0 leaves every byte untouched.
         self.telnet = self.settings.telnet.then(|| telnet::TelnetNvt::new(true));
         self.telnet_out_to_guest.clear();
-        // S9, in host time: nothing withheld with no time anchor published
-        // yet (tests with a fake transport that never calls
-        // set_time_anchor) or with S9 at its default of 0.
-        self.connect_delay_until = self.time_anchor.map(|anchor| {
-            anchor.host_time(at_cck) + Duration::from_millis(u64::from(self.settings.s9) * 100)
-        });
+        // S9, in host time. Documented as host time after CONNECT, not as
+        // a paced-window-only courtesy, so an unpaced run (headless, which
+        // never publishes a `SerialTimeAnchor` because
+        // `reanchor_realtime_clock` returns early there) falls back to the
+        // host clock directly rather than silently dropping every
+        // configured delay. S9 at its default of 0 needs no special case:
+        // the deadline lands at the connect instant itself, which
+        // `connect_delay_pending`'s strict `<` has already passed.
+        let connect_instant = match self.time_anchor {
+            Some(anchor) => anchor.host_time(at_cck),
+            None => Instant::now(),
+        };
+        self.connect_delay_until =
+            Some(connect_instant + Duration::from_millis(u64::from(self.settings.s9) * 100));
         // Gives a transport that times itself off emulated ticks (the
         // scripted session) the connect moment right away, rather than
         // waiting for the next `SerialSink::poll` -- see
@@ -1762,8 +1799,20 @@ impl SerialSink for ModemSerialSink {
         let _ = rts; // accepted, unused (no hardware flow control modeled)
         let was_asserted = self.dtr_prev.replace(dtr);
         if was_asserted == Some(true) && !dtr && matches!(self.settings.dtr_action, 2 | 3) {
+            // Only a call the guest still believes is up produces NO
+            // CARRIER. A serial driver that pulses DTR while opening or
+            // closing the port -- routine, and nothing to do with a call --
+            // would otherwise get an unsolicited result code on an idle
+            // modem. `carrier_expected` rather than the transport's own
+            // carrier is the right test: it is exactly "a call this sink
+            // has not yet reported the end of", so a line already dropped
+            // remotely (and already answered with NO CARRIER by `poll`)
+            // does not produce a second one here either.
+            let had_call = self.carrier_expected;
             self.hangup_internal();
-            self.queue_result(ResultCode::NoCarrier);
+            if had_call {
+                self.queue_result(ResultCode::NoCarrier);
+            }
         }
     }
 
@@ -2328,6 +2377,26 @@ mod tests {
     }
 
     #[test]
+    fn dtr_pulse_on_an_idle_modem_is_silent() {
+        // Opening or closing a serial device routinely toggles DTR with no
+        // call in progress; that must not look like a call ending.
+        let (mut sink, state) = fake();
+        drain(&mut sink);
+        sink.set_control_outputs(true, false);
+        sink.set_control_outputs(false, false);
+        assert_eq!(
+            drain_str(&mut sink),
+            "",
+            "an idle DTR pulse must not produce an unsolicited result code"
+        );
+        assert_eq!(
+            state.lock().unwrap().hangups,
+            1,
+            "the hangup itself is still harmless and still happens"
+        );
+    }
+
+    #[test]
     fn dtr_drop_with_d0_is_ignored() {
         let (mut sink, state) = fake();
         type_line(&mut sink, "AT&D0", 0);
@@ -2786,6 +2855,37 @@ mod tests {
             "S9 must withhold remote output before the delay elapses"
         );
         assert_eq!(sink.read_byte(), None);
+    }
+
+    #[test]
+    fn s9_delay_applies_without_a_time_anchor() {
+        // Unpaced runs (headless) never publish a SerialTimeAnchor, but S9
+        // is host time after CONNECT, not a paced-window-only courtesy --
+        // it used to silently evaporate there.
+        let (mut sink, state) = fake_no_echo();
+        assert!(sink.time_anchor.is_none());
+        type_line(&mut sink, "ATS9=200", 0); // 20 seconds
+        drain(&mut sink);
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().to_guest.push_back(b'z');
+        assert!(
+            !sink.has_pending_input(),
+            "S9 must withhold remote output with no anchor published"
+        );
+        assert_eq!(sink.read_byte(), None);
+    }
+
+    #[test]
+    fn s9_zero_withholds_nothing_without_an_anchor() {
+        // The default S9 still gates nothing, on the unanchored path too.
+        let (mut sink, state) = fake_no_echo();
+        assert!(sink.time_anchor.is_none());
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state.lock().unwrap().to_guest.push_back(b'z');
+        assert!(sink.has_pending_input());
+        assert_eq!(sink.read_byte(), Some(b'z'));
     }
 
     #[test]

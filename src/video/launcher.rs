@@ -3096,7 +3096,13 @@ impl MachineSetup {
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
         raw.serial.connect = self.serial_connect.clone();
-        if Some(self.serial_telnet) != base.serial.telnet {
+        // Compared against the resolved value, not the raw tri-state: the
+        // toggle is a plain on/off, so "unset" and "explicitly off" look
+        // the same to it and must not produce a spurious `telnet = false`
+        // write -- which would then fail validation on any non-modem mode.
+        // Flipping it away from a base that did say something still writes
+        // an explicit value, which is how an explicit off gets recorded.
+        if self.serial_telnet != base.serial.telnet.unwrap_or(false) {
             raw.serial.telnet = Some(self.serial_telnet);
         }
         // Parallel port. Carry each peripheral's settings whenever they are set
