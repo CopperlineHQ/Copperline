@@ -641,14 +641,20 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             seen.insert(&e.key, ());
             set_str(&mut doc, &["scsi"], "controller", controller);
             if *controller == "a3000" {
+                // The A3000 SDMAC is the motherboard's own controller, not a
+                // fittable Zorro board, so Copperline requires [machine]
+                // profile = "A3000" for controller = "a3000" to validate.
+                // Its presence in the source config is unambiguous enough
+                // to set the profile automatically rather than just flag it
+                // -- this key doesn't exist unless the machine really is an
+                // A3000.
+                set_str(&mut doc, &["machine"], "profile", "A3000");
                 annotate(
                     &mut doc,
-                    &["scsi"],
-                    "controller",
-                    "from scsi_a3000_rom_file -- Copperline requires [machine] profile = \
-                     \"A3000\" for this controller (it's the motherboard SDMAC, not a \
-                     fittable Zorro board); this converter doesn't derive the machine \
-                     profile, so set it by hand",
+                    &["machine"],
+                    "profile",
+                    "inferred from scsi_a3000_rom_file: that ROM key only makes sense on an \
+                     A3000 (the motherboard SDMAC), so the profile was set to match",
                 );
                 if !e.value.trim().eq_ignore_ascii_case(":ENABLED") {
                     report.approximated(
