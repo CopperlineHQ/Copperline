@@ -459,6 +459,76 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- RTG board --------------------------------------------------
+    // Amiberry (BlitterStudio/amiberry src/gfxboard.cpp `boards[]`,
+    // configname field) supports far more RTG chipsets than Copperline
+    // models; only Picasso II/II+ and Graffity Z2/Z3 have a Copperline
+    // equivalent (src/config/raw.rs RawRtg.card: "z3660"/"picasso2"/
+    // "picasso2plus"/"graffityz2"/"graffityz3"/"none") -- everything else
+    // (CyberVision, Retina, Piccolo, the built-in UAEGFX ZorroII/III
+    // boards, etc.) is flagged unsupported. Amiberry omits the key
+    // entirely rather than writing a "none" sentinel when no card is
+    // fitted, so absence needs no special handling here.
+    let mut card_mapped = false;
+    if let Some(e) = by_key("gfxcard_type") {
+        seen.insert(&e.key, ());
+        let card = match e.value.trim() {
+            "PicassoII" => Some("picasso2"),
+            "PicassoII+" => Some("picasso2plus"),
+            "GraffityZ2" => Some("graffityz2"),
+            "GraffityZ3" => Some("graffityz3"),
+            _ => None,
+        };
+        match card {
+            Some(card) => {
+                set_str(&mut doc, &["rtg"], "card", card);
+                card_mapped = true;
+            }
+            None => report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline only models Picasso II/II+ and Graffity Z2/Z3; this RTG chipset \
+                 has no equivalent",
+            ),
+        }
+    }
+
+    // --- RTG board VRAM -----------------------------------------------
+    // Amiberry's gfxcard_size is a plain megabyte count; Copperline's
+    // [rtg] vram (Picasso II/II+ and Graffity only) is a closed "1M"/"2M"
+    // enum, not a free size, so anything else is flagged rather than
+    // guessed at. Setting vram alone doesn't fit a board -- [rtg] card
+    // also needs choosing -- so that's called out too, unless gfxcard_type
+    // was already translated above, in which case it's redundant.
+    if let Some(e) = by_key("gfxcard_size") {
+        seen.insert(&e.key, ());
+        let mapped = match e.value.trim() {
+            "1" => Some("1M"),
+            "2" => Some("2M"),
+            _ => None,
+        };
+        match mapped {
+            Some(vram) => {
+                set_str(&mut doc, &["rtg"], "vram", vram);
+                if !card_mapped {
+                    annotate(
+                        &mut doc,
+                        &["rtg"],
+                        "vram",
+                        "from gfxcard_size -- also set [rtg] card (e.g. \"graffityz3\") for \
+                         this to take effect; the source config's board type wasn't translated",
+                    );
+                }
+            }
+            None => report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline's [rtg] vram only takes \"1M\" or \"2M\" (Picasso II/II+ and \
+                 Graffity); other sizes have no equivalent",
+            ),
+        }
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
