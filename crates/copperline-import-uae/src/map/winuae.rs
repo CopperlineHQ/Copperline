@@ -653,6 +653,11 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             "selects UAE's own internal custom serial.device implementation, not a host \
              wiring choice; there's nothing in [serial] this corresponds to",
         ),
+        (
+            "amiberry.expansion_gui_page",
+            "just remembers which tab of Amiberry's own RTG config page was last open; not \
+             a machine setting",
+        ),
     ] {
         if let Some(e) = by_key(uae_key) {
             seen.insert(&e.key, ());
