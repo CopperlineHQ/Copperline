@@ -84,6 +84,22 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
         }
     }
+    // 68060-only: how the emulator handles instructions the real 68060
+    // dropped from silicon. Amiberry's raw config key isn't inverted from
+    // its name -- confirmed against src/newcpu.cpp: int_no_unimplemented
+    // (this key) = true routes those opcodes to the genuine unimplemented-
+    // instruction trap (faithful, needs the guest's 68060.library); the
+    // GUI's checkbox label inverts the sense for display, the config key
+    // doesn't. So true -> "trap", false -> "native", matching Copperline's
+    // [cpu] unimplemented exactly.
+    if let Some(e) = by_key("cpu_no_unimplemented") {
+        seen.insert(&e.key, ());
+        match parse_bool(&e.value) {
+            Some(true) => set_str(&mut doc, &["cpu"], "unimplemented", "trap"),
+            Some(false) => set_str(&mut doc, &["cpu"], "unimplemented", "native"),
+            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        }
+    }
 
     // --- Memory ------------------------------------------------------
     // WinUAE's memory-size keys have changed units across major versions
