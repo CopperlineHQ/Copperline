@@ -399,6 +399,20 @@ probe_tests! {
     // High Res Laced invisible-pointer regression class, issue #270);
     // FS-UAE-verified exact placement.
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
+    // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
+    // supplied low address bits alias phases inside 32-bit fetches.
+    golden_aga_vamigats_fetch => probe_aga("agafetch-mode", "agafetch-mode.bin", 16.0);
+    // Alice's valid bitplane counts depend on resolution and FMODE bandwidth;
+    // overprogrammed counts fetch nothing rather than clamping.
+    golden_aga_vamigats_planes => probe_aga("agaplanes", "agaplanes.bin", 16.0);
+    // BPLCON3 SPRES 00/01/10/11 produces a 4:4:2:1 sprite-width staircase;
+    // the final band is true 35 ns output, not another 70 ns HIRES band.
+    golden_aga_shres_sprites => probe_aga("agashres-sprites", "agashres-sprites.bin", 16.0);
+    // Lisa palette readback follows BPLCON3 BANK/LOCT and makes COLORxx
+    // read-only while BPLCON2.RDRAM is set.
+    golden_aga_vamigats_rdram => probe_aga("rdram-aga", "rdram-aga.bin", 16.0);
+    // Lisa lands COLORxx changes one hires pixel after OCS/ECS Denise.
+    golden_aga_vamigats_colorlag => probe_aga("colorlag-aga", "colorlag-aga.bin", 16.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);

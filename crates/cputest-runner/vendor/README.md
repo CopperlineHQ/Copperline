@@ -35,6 +35,13 @@ embedding runner needs:
   header (bit 31 of the level word selects 32-bit addressing), and
   `m68k_tester_fpu_model()` the FPU configuration, so the Rust side can
   mirror the generated machine.
+- `M68KTester_run_tests` honours its documented contract (1 when every
+  test passed, 0 otherwise): upstream returns 0 on every path, so a clean
+  run was indistinguishable from a mismatch. A mnemonic skipped for a CPU
+  level mismatch or missing `lmem.dat`/`hmem.dat` counts as failed, and
+  every fatal abort (unreadable or malformed test data, allocation
+  failure) exits with status 1 instead of the WinUAE original's 0, so a
+  broken data set cannot read as a pass in CI.
 
 `capstone-stub/` shadows the capstone disassembler include the runner uses
 for pretty-printing failing instructions; the stub reports no disassembly

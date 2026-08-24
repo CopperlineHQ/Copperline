@@ -89,6 +89,15 @@ pacing_budget = "cycles"
 # rewind_budget_mb = 256
 # rewind_interval_frames = 25
 
+# Run-ahead input-latency reduction. In a compatible windowed session, each
+# refresh commits one frame, snapshots it, executes this many silent future
+# frames, presents the last, then restores the snapshot. The host therefore
+# needs roughly (run_ahead_frames + 1)x realtime headroom; start with 1.
+# Host-coupled devices and diagnostics that cannot be rewound make the setting
+# temporarily inactive, with the reason shown in the Run Ahead menu's OSD.
+# 0..4; adjust live from Emulation Settings > Run Ahead.
+# run_ahead_frames = 0
+
 
 [cpu]
 
@@ -195,9 +204,10 @@ model = "68000"
 # extended_rom = "cdtv-extended.rom"
 
 
-# CD image (BIN/CUE, single- or multi-file, with MODE1/2048, MODE1/2352,
-# and AUDIO tracks; a bare .iso; or a chdman v5 .chd), mounted on the
-# machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
+# CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,
+# and AUDIO tracks -- audio tracks may be BINARY, WAVE, or MP3 files, with
+# PREGAP/POSTGAP lines honoured; a bare .iso; or a chdman v5 .chd), mounted on
+# the machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
 # emulated seconds after power-on instead of at boot: some CDTV discs
 # (e.g. Xenon II) only boot when inserted after the boot screen, on
 # real hardware too.

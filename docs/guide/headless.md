@@ -331,7 +331,9 @@ An ignored integration test runs ADFs from a local
 [vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS) checkout through
 Copperline with Kickstart 1.3 in DF0:, captures screenshots after the
 suite's default 9-second wait, and can compare them against a baseline
-directory or a vAmiga reference render:
+directory or a vAmiga reference render. Each shipped RetroShell setup is
+mirrored, including `A1200_2MB` as 68EC020/AGA/2M chip RAM and the mixed
+8372A/OCS-Denise A500 ECS scheme:
 
 ```sh
 COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS \
@@ -348,7 +350,8 @@ Optional variables: `COPPERLINE_VAMIGATS_LIMIT=N` (cap test count),
 `COPPERLINE_VAMIGATS_VAMIGA_SETUP=NAME` (render vAmiga references via its
 RetroShell regression path).
 
-The reference renderer is vAmiga's headless build (tested against v4.4):
+The reference renderer is vAmiga's headless build (tested against v4.4 and
+the v5.0 AGA beta):
 
 ```sh
 git clone https://github.com/dirkwhoffmann/vAmiga
@@ -368,6 +371,6 @@ COPPERLINE_SHOT_RAW=1 COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS COPPERLINE_VAMIG
 tools/vamigats-compare.py /path/to/out | less   # worst cases first
 ```
 
-A full 1929-case sweep with references takes about an hour; screenshot
+A full-suite sweep with references takes about an hour; screenshot
 timing is frame-aligned in neither emulator, so tests with animating
 output show phase noise - rank first, then eyeball pairs.

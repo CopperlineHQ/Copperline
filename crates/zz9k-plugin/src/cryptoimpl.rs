@@ -13,7 +13,7 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use hmac::Mac;
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use rsa::traits::PublicKeyParts;
 use sha2::Digest;
 
@@ -33,11 +33,12 @@ pub fn digest_len(alg: u32) -> Option<u32> {
 
 fn hmac_digest<D>(key: &[u8], src: &[u8]) -> Vec<u8>
 where
-    D: sha2::digest::Digest + sha2::digest::core_api::BlockSizeUser + Clone,
+    D: sha2::digest::Digest + sha2::digest::common::BlockSizeUser + Clone,
 {
-    // Hmac::new_from_slice accepts any key length (hashing long keys down),
+    // KeyInit::new_from_slice accepts any key length (hashing long keys down),
     // matching RFC 2104.
-    let mut mac = <hmac::SimpleHmac<D> as Mac>::new_from_slice(key).expect("any key length");
+    let mut mac =
+        <hmac::SimpleHmac<D> as hmac::KeyInit>::new_from_slice(key).expect("any key length");
     mac.update(src);
     mac.finalize().into_bytes().to_vec()
 }
@@ -49,8 +50,10 @@ pub fn hash(alg: u32, hmac: bool, src: &[u8], key: &[u8]) -> Result<Vec<u8>, u16
         if hmac || key.len() != 32 {
             return Err(STATUS_BAD_REQUEST);
         }
-        let key = poly1305::Key::from_slice(key);
-        return Ok(poly1305::Poly1305::new(key).compute_unpadded(src).to_vec());
+        let key: &[u8; 32] = key.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
+        return Ok(poly1305::Poly1305::new(key.into())
+            .compute_unpadded(src)
+            .to_vec());
     }
     if hmac {
         if key.is_empty() {
@@ -71,7 +74,7 @@ pub fn hash(alg: u32, hmac: bool, src: &[u8], key: &[u8]) -> Result<Vec<u8>, u16
         HASH_SHA256 => Ok(sha2::Sha256::digest(src).to_vec()),
         HASH_SHA384 => Ok(sha2::Sha384::digest(src).to_vec()),
         HASH_SHA512 => Ok(sha2::Sha512::digest(src).to_vec()),
-        HASH_BLAKE2S => Ok(blake2::Blake2s256::digest(src).to_vec()),
+        HASH_BLAKE2S => Ok(<blake2::Blake2s256 as blake2::Digest>::digest(src).to_vec()),
         _ => Err(STATUS_UNSUPPORTED),
     }
 }
@@ -87,6 +90,8 @@ pub fn chacha20_stream(
     if key.len() != 32 || nonce.len() != 12 {
         return Err(STATUS_BAD_REQUEST);
     }
+    let key: &[u8; 32] = key.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
+    let nonce: &[u8; 12] = nonce.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
     let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
     // Fallible seek + keystream application: a counter near u32::MAX with a
     // multi-block source runs off the end of ChaCha20's 32-bit-block-counter
@@ -128,30 +133,31 @@ fn aead_apply(
     };
     match alg {
         AEAD_CHACHA20_POLY1305 => {
-            let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.into());
-            let nonce = chacha20poly1305::Nonce::from_slice(nonce);
+            let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(key)
+                .map_err(|_| STATUS_BAD_REQUEST)?;
+            let nonce: &[u8; 12] = nonce.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
             run(if decrypt {
-                cipher.decrypt(nonce, payload)
+                cipher.decrypt(nonce.into(), payload)
             } else {
-                cipher.encrypt(nonce, payload)
+                cipher.encrypt(nonce.into(), payload)
             })
         }
         AEAD_AES128_GCM => {
-            let cipher = aes_gcm::Aes128Gcm::new(key.into());
-            let nonce = aes_gcm::Nonce::from_slice(nonce);
+            let cipher = aes_gcm::Aes128Gcm::new_from_slice(key).map_err(|_| STATUS_BAD_REQUEST)?;
+            let nonce: &[u8; 12] = nonce.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
             run(if decrypt {
-                cipher.decrypt(nonce, payload)
+                cipher.decrypt(nonce.into(), payload)
             } else {
-                cipher.encrypt(nonce, payload)
+                cipher.encrypt(nonce.into(), payload)
             })
         }
         AEAD_AES256_GCM => {
-            let cipher = aes_gcm::Aes256Gcm::new(key.into());
-            let nonce = aes_gcm::Nonce::from_slice(nonce);
+            let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).map_err(|_| STATUS_BAD_REQUEST)?;
+            let nonce: &[u8; 12] = nonce.try_into().map_err(|_| STATUS_BAD_REQUEST)?;
             run(if decrypt {
-                cipher.decrypt(nonce, payload)
+                cipher.decrypt(nonce.into(), payload)
             } else {
-                cipher.encrypt(nonce, payload)
+                cipher.encrypt(nonce.into(), payload)
             })
         }
         _ => Err(STATUS_UNSUPPORTED),
@@ -224,7 +230,7 @@ pub fn kx(alg: u32, flags: u32, scalar: &[u8], point: &[u8]) -> Result<Vec<u8>, 
                 return Err(STATUS_BAD_REQUEST);
             }
             let secret = p256::SecretKey::from_slice(scalar).map_err(|_| STATUS_BAD_REQUEST)?;
-            let point = secret.public_key().to_encoded_point(false);
+            let point = secret.public_key().to_sec1_point(false);
             Ok(point.as_bytes().to_vec())
         }
         (KX_X25519, _) | (KX_P256, _) => Err(STATUS_UNSUPPORTED),
@@ -274,7 +280,7 @@ pub fn verify(alg: u32, digest: &[u8], sig: &[u8], key: &[u8]) -> Result<bool, u
             if public.size() != n_bytes.len() {
                 return Ok(false);
             }
-            let scheme = rsa::Pkcs1v15Sign::new::<sha2::Sha256>();
+            let scheme = rsa::Pkcs1v15Sign::new::<sha2_legacy::Sha256>();
             Ok(public.verify(scheme, digest, sig).is_ok())
         }
         _ => Err(STATUS_UNSUPPORTED),
@@ -446,11 +452,7 @@ mod tests {
         .unwrap();
         let digest = sha2::Sha256::digest(b"sample");
         let sig: p256::ecdsa::Signature = sk.sign_prehash(&digest).unwrap();
-        let key = sk
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .to_vec();
+        let key = sk.verifying_key().to_sec1_point(false).as_bytes().to_vec();
         assert_eq!(
             verify(VERIFY_ECDSA_P256_SHA256, &digest, &sig.to_bytes(), &key),
             Ok(true)

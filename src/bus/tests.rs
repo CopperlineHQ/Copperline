@@ -7,8 +7,9 @@
 use super::{
     bitplane_slot_plan_bplcon0_key, bitplane_words_per_row, clipped_display_rows_before_visible,
     display_window_contains_vpos, diw_h_start, diw_h_stop, diw_v_start, diw_v_stop,
-    framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits, live_display_window_x,
-    live_manual_sprite_collision_sources, live_sprite_playfield_collision_bits_in_range,
+    framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits,
+    live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
+    live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock,
@@ -16,10 +17,10 @@ use super::{
     LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot,
     BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF,
     BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
-    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
-    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    BPLCON3_SPRES_SHRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
+    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -31,6 +32,7 @@ use crate::chipset::cia::{
     REG_TBLO, REG_TODHI, REG_TODLO, REG_TODMID,
 };
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
+use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
 use crate::chipset::paula::{
     Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER, INT_PORTS,
@@ -727,8 +729,10 @@ fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
     let addr = |reg: usize| (reg as u64) << 8;
 
     // An empty port: BUSY, POUT, and SEL float high on the pull-ups, like
-    // the serial handshake lines on PA3-7. parallel.device reads this as a
-    // busy offline printer and never sends a byte, as on a real machine.
+    // the serial handshake inputs on PA3-5 with nothing on the serial port
+    // (the test bus's sink is an unplugged cable). parallel.device reads
+    // this as a busy offline printer and never sends a byte, as on a real
+    // machine.
     assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFF);
 
     // A printer holds SEL high with BUSY and POUT low, so the guest reads
@@ -748,43 +752,6 @@ fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
     assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFD);
 
     let _ = std::fs::remove_file(path);
-}
-
-#[test]
-fn modem_control_lines_drive_cia_b_rs232_status_inputs() {
-    struct FixedLines;
-    impl SerialSink for FixedLines {
-        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
-        fn flush(&mut self) {}
-        fn control_lines(&self) -> Option<u8> {
-            // /CD (PA5) asserted (low); /DSR (PA3) and /CTS (PA4) released.
-            Some(0xDF)
-        }
-    }
-    let mut bus = empty_bus();
-    bus.paula.serial = Box::new(FixedLines);
-    let addr = |reg: usize| (reg as u64) << 8;
-
-    // All three inputs default (DDRA = 0): /CD reads asserted (0),
-    // /DSR and /CTS read released (1).
-    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1) & 0x38, 0x18);
-
-    // The parallel port's Centronics status overlay on PA0-2 still composes
-    // alongside the RS-232 overlay on PA3-5.
-    let path = std::env::temp_dir().join(format!(
-        "copperline-bus-modem-status-{}.raw",
-        std::process::id()
-    ));
-    let printer = crate::parallel::FileParallelPort::create(&path).unwrap();
-    bus.attach_parallel_port(Box::new(printer));
-    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1) & 0x3F, 0x1C);
-    let _ = std::fs::remove_file(path);
-
-    // A pin the guest has switched to output stays CIA-driven: /CD driven
-    // high as an output reads high even with the modem sink attached.
-    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0x20);
-    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x20);
-    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1) & 0x20, 0x20);
 }
 
 #[test]
@@ -834,6 +801,64 @@ fn serper_write_pushes_baud_to_serial_sink() {
     // Divisor 372 is the SERPER value for ~9600 bps.
     let _ = bus.write_custom_word_from(0x032, 372, BeamWriteSource::Cpu);
     assert_eq!(*baud.lock().unwrap(), Some(PAULA_CLOCK_HZ / 373));
+}
+
+#[test]
+fn serial_device_drives_cia_b_handshake_inputs() {
+    use crate::serial::{SerialControlLines, CIAB_PA_CD, CIAB_PA_CTS, CIAB_PA_DSR};
+
+    struct LinesSerial(SerialControlLines);
+    impl SerialSink for LinesSerial {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn control_lines(&self) -> SerialControlLines {
+            self.0
+        }
+    }
+
+    let mut bus = empty_bus();
+    let addr = |reg: usize| (reg as u64) << 8;
+
+    // Nothing on the serial port: /DSR, /CTS, and /CD float high, so a
+    // 7-wire guest waits for CTS forever, as on a real machine with no
+    // cable.
+    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFF);
+
+    // A present device with no carrier asserts DSR and CTS; the 1489
+    // receivers invert them, so the guest reads those pins low and /CD
+    // still high.
+    bus.paula.serial = Box::new(LinesSerial(SerialControlLines::READY));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0xFF & !(CIAB_PA_DSR | CIAB_PA_CTS) as u64
+    );
+
+    // Carrier up: all three low. This is the byte serial.device hands back
+    // in SDCMD_QUERY's io_Status low byte.
+    bus.paula.serial = Box::new(LinesSerial(SerialControlLines::CONNECTED));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0xFF & !(CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD) as u64
+    );
+
+    // The CIA's own outputs are untouched: dropping /DTR (PA7) and raising
+    // /RTS (PA6) reads back exactly as written.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0xC0);
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x40);
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0x7F & !(CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD) as u64
+    );
+
+    // A handshake pin the guest switches to an output stays CIA-driven even
+    // while the device asserts the line: /CTS written high as an output
+    // reads back high.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, u64::from(0xC0 | CIAB_PA_CTS));
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, u64::from(0x40 | CIAB_PA_CTS));
+    assert_eq!(
+        bus.cia_b_read(addr(REG_PRA), 1),
+        0x7F & !(CIAB_PA_DSR | CIAB_PA_CD) as u64
+    );
 }
 
 #[test]
@@ -6149,6 +6174,41 @@ fn fmode_wide_sprite_dma_captures_extension_words() {
     assert_eq!(lines[0].datb_ext, [0xB001, 0xB002, 0xB003]);
 }
 
+#[test]
+fn fmode_page_sprite_dma_observer_reports_only_driven_addresses() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0008); // SPAGEM: both words alias to the group base.
+
+    let sprite_ptr = 0x0100usize;
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    write_chip_word(&mut bus, sprite_ptr, pos);
+    write_chip_word(&mut bus, sprite_ptr + 4, ctl);
+    write_chip_word(&mut bus, sprite_ptr + 8, 0xAAAA);
+    write_chip_word(&mut bus, sprite_ptr + 12, 0xBBBB);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.denise.sprpt[0] = sprite_ptr as u32;
+    bus.display_dma_sprpt[0] = sprite_ptr as u32;
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    assert_eq!(bus.display_dma_sprpt[0], sprite_ptr as u32 + 8);
+
+    // SPAGEM drives +8 twice, then advances to +12. It never drives +10,
+    // even though the logical 32-bit fetch consumes that pointer width.
+    bus.set_ui_mem_watches(&[(sprite_ptr + 10) as u32]);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+    bus.advance_chipset(4);
+
+    assert!(bus.take_ui_dma_hit().is_none());
+    let lines = bus.frame_captured_sprite_lines();
+    assert_eq!(lines.len(), 1, "the watched data fetch must have run");
+    assert_eq!(lines[0].data, 0xAAAA);
+    assert_eq!(lines[0].data_ext[0], 0xAAAA);
+    assert_eq!(lines[0].datb, 0xBBBB);
+    assert_eq!(lines[0].datb_ext[0], 0xBBBB);
+}
+
 /// FMODE SSCAN2 doubles each fetched sprite data line across two display
 /// lines, and a chained descriptor starts after the halved data block.
 #[test]
@@ -7719,6 +7779,61 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
 }
 
 #[test]
+fn aga_spres_shres_combines_adjacent_sprite_samples_for_live_clxdat() {
+    let clxdat_after_visible_sprite_pixels = |bplcon3| {
+        let mut bus = empty_bus();
+        bus.set_agnus_revision(AgnusRevision::AgaAlice);
+        let (pos0, ctl0) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let (pos2, ctl2) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let sprite0_ptr = 0x0100usize;
+        let sprite2_ptr = 0x0200usize;
+
+        write_chip_word(&mut bus, sprite0_ptr, pos0);
+        write_chip_word(&mut bus, sprite0_ptr + 2, ctl0);
+        write_chip_word(&mut bus, sprite0_ptr + 4, 0x4000);
+        write_chip_word(&mut bus, sprite0_ptr + 6, 0);
+        write_chip_word(&mut bus, sprite0_ptr + 8, 0);
+        write_chip_word(&mut bus, sprite0_ptr + 10, 0);
+        write_chip_word(&mut bus, sprite2_ptr, pos2);
+        write_chip_word(&mut bus, sprite2_ptr + 2, ctl2);
+        write_chip_word(&mut bus, sprite2_ptr + 4, 0x8000);
+        write_chip_word(&mut bus, sprite2_ptr + 6, 0);
+        write_chip_word(&mut bus, sprite2_ptr + 8, 0);
+        write_chip_word(&mut bus, sprite2_ptr + 10, 0);
+
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+        bus.denise.bplcon0 = 0x8000;
+        bus.denise.bplcon3 = bplcon3;
+        bus.denise.sprpt[0] = sprite0_ptr as u32;
+        bus.denise.sprpt[2] = sprite2_ptr as u32;
+        bus.display_dma_sprpt[0] = sprite0_ptr as u32;
+        bus.display_dma_sprpt[2] = sprite2_ptr as u32;
+        bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
+
+        let remaining = 0x3A - bus.agnus.hpos;
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+        bus.advance_chipset(remaining);
+
+        bus.custom_read(0x00E, 2)
+    };
+
+    // At 70 ns, bit 14 follows bit 15 into the next collision column.
+    assert_eq!(
+        clxdat_after_visible_sprite_pixels(BPLCON3_SPRES_HIRES),
+        0x8000
+    );
+    // At 35 ns, those adjacent bits share one collision column.
+    assert_eq!(
+        clxdat_after_visible_sprite_pixels(BPLCON3_SPRES_SHRES),
+        0x8200
+    );
+}
+
+#[test]
 fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite_clxdat() {
     let clxdat_after_visible_sprite_pixels = |initial_clxcon, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
@@ -7917,6 +8032,7 @@ fn shifted_horizontal_diw_offsets_live_playfield_clxdat_fetch_origin() {
         0,
         0,
         0,
+        0,
         0x2C93,
         0x2DC1,
         DiwHigh::ocs_implicit(),
@@ -7969,6 +8085,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -8025,6 +8142,7 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -8101,6 +8219,7 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
         0,
         0,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8174,6 +8293,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
         0,
         0,
         0,
+        0,
         0x2C81,
         0x2DC1,
         DiwHigh::ocs_implicit(),
@@ -8243,6 +8363,7 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
         0,
         BPLCON3_BRDSPRT,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8292,6 +8413,7 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
         0,
         BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
         0,
+        0,
         ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
         ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
         DiwHigh::ocs_implicit(),
@@ -8338,6 +8460,7 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
         0x1000,
+        0,
         0,
         0,
         0,
@@ -10688,6 +10811,35 @@ fn denise_write_only_reads_use_zero_bus_approximation() {
 }
 
 #[test]
+fn aga_rdram_reads_banked_palette_nibbles_and_blocks_writes() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+
+    // Bank 2, COLOR05: write independently distinguishable high/low nibbles.
+    assert!(!bus.custom_write(0x106, 2, 0x4000));
+    assert!(!bus.custom_write(0x18A, 2, 0x8123));
+    assert!(!bus.custom_write(0x106, 2, 0x4200));
+    assert!(!bus.custom_write(0x18A, 2, 0x0456));
+
+    assert!(!bus.custom_write(0x104, 2, u64::from(BPLCON2_RDRAM)));
+    assert!(!bus.custom_write(0x106, 2, 0x4000));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x8123);
+    assert!(!bus.custom_write(0x106, 2, 0x4200));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x0456);
+
+    // The COLOR window is read-only while RDRAM is active.
+    assert!(!bus.custom_write(0x18A, 2, 0x0FFF));
+    assert_eq!(bus.custom_read(0x18A, 2), 0x0456);
+    assert_eq!(bus.denise.palette.read_banked(2, 5, false), 0x8123);
+    assert_eq!(bus.denise.palette.read_banked(2, 5, true), 0x0456);
+
+    // Clearing RDRAM restores writes immediately.
+    assert!(!bus.custom_write(0x104, 2, 0));
+    assert!(!bus.custom_write(0x18A, 2, 0x0789));
+    assert_eq!(bus.denise.palette.read_banked(2, 5, true), 0x0789);
+}
+
+#[test]
 fn custom_writes_latch_sprite_pointer_and_data_registers() {
     let mut bus = empty_bus();
 
@@ -11166,6 +11318,62 @@ fn lisa_palette_writes_follow_bplcon3_bank_and_loct() {
     assert!(!aga.custom_write(0x106, 2, 0));
     assert!(!aga.custom_write(0x182, 2, 0x0ABC)); // COLOR01
     assert_eq!(aga.denise.palette[1], 0x0ABC);
+}
+
+#[test]
+fn live_collision_replay_accepts_lisa_clxcon2_with_ecs_agnus() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::AgaLisa);
+    bus.agnus.vpos = RENDER_VISIBLE_START_VPOS;
+    bus.agnus.hpos = 0x34;
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+
+    // Require the otherwise-clear plane 7 through Lisa's CLXCON2, then
+    // clear that extension through the hardware CLXCON reset side effect.
+    // Both writes go through CPU custom-register dispatch so this exercises
+    // Lisa-gated capture as well as replay on the mixed chipset pair.
+    assert!(!bus.custom_write(0x10E, 2, (1 << 6) | 1));
+    bus.advance_chipset(4);
+    assert!(!bus.custom_write(0x098, 2, 0));
+    assert_eq!(bus.current_frame_collision_control_events.len(), 2);
+
+    bus.ensure_current_collision_control_index();
+    let current_control = LiveCollisionControl::from_current(
+        bus.agnus.revision(),
+        bus.denise.bplcon0,
+        bus.denise.bplcon1,
+        bus.denise.bplcon3,
+        bus.denise.clxcon,
+        bus.denise.clxcon2,
+        bus.denise.diwstrt,
+        bus.denise.diwstop,
+        bus.effective_diwhigh(),
+        bus.denise.ddfstrt,
+        bus.denise.bpldat,
+    );
+    let replay = LiveCollisionLineReplay::from_index(
+        current_control,
+        bus.current_frame_render_base,
+        bus.current_frame_collision_control_index.as_ref().unwrap(),
+        RENDER_VISIBLE_START_VPOS as i32,
+    );
+    let enable_x =
+        framebuffer_x_for_live_collision_hpos(bus.current_frame_collision_control_events[0].hpos);
+    let reset_x =
+        framebuffer_x_for_live_collision_hpos(bus.current_frame_collision_control_events[1].hpos);
+
+    let before = replay.control_for_x(enable_x - 1);
+    let enabled = replay.control_for_x(enable_x);
+    let reset = replay.control_for_x(reset_x);
+    assert_eq!(before.clxcon2, 0);
+    assert_eq!(enabled.clxcon2, (1 << 6) | 1);
+    assert_eq!(reset.clxcon2, 0);
+    assert!(live_playfield_collision_pixel(0, 0, before.clxcon2, false).pf1_match);
+    assert!(
+        !live_playfield_collision_pixel(0, 0, enabled.clxcon2, false).pf1_match,
+        "the replayed plane-7 requirement gates the collision match"
+    );
+    assert!(live_playfield_collision_pixel(0, 0, reset.clxcon2, false).pf1_match);
 }
 
 #[test]
@@ -11876,5 +12084,123 @@ fn searchable_regions_cover_the_32_bit_ram_banks() {
     assert!(
         regions.windows(2).all(|w| w[0].0 <= w[1].0),
         "regions must be in ascending address order: {regions:08X?}"
+    );
+}
+
+#[test]
+fn live_clxcon2_extends_playfield_collision_match_to_planes_seven_and_eight() {
+    // Plane index 6 (AGA plane 7) set, everything else empty.
+    let idx = 0b0100_0000u8;
+    // CLXCON2 with ENBP7 (bit 6) and MVBP7 (bit 0): plane 7 enabled and
+    // required to be set.
+    let clxcon2 = (1 << 6) | (1 << 0);
+    // Pre-AGA decode ignores the extra planes entirely: the match is true
+    // because no CLXCON plane is enabled.
+    let ocs = live_playfield_collision_pixel(idx, 0, 0, false);
+    assert!(ocs.pf1_match && ocs.pf2_match);
+    // AGA decode: plane 7 participates; it matches when enabled+set.
+    let aga = live_playfield_collision_pixel(idx, 0, clxcon2, false);
+    assert!(aga.pf1_match && aga.pf2_match);
+    // The same pixel with plane 7 cleared fails the enabled-plane match.
+    let aga_clear = live_playfield_collision_pixel(0, 0, clxcon2, false);
+    assert!(!aga_clear.pf1_match || !aga_clear.pf2_match);
+    // A zero CLXCON2 leaves the classic six-plane behaviour untouched even
+    // under the AGA decode.
+    let aga_zero = live_playfield_collision_pixel(idx, 0, 0, false);
+    assert_eq!(aga_zero.pf1_match, ocs.pf1_match);
+    assert_eq!(aga_zero.pf2_match, ocs.pf2_match);
+}
+
+#[test]
+fn beam_timed_live_pixel_decode_applies_clxcon2_like_the_renderer() {
+    // Dual-playfield row: planes 1 and 2 carry overlapping odd/even group
+    // pixels, plane 8 data gates an AGA CLXCON2 requirement.
+    let row = CapturedBitplaneRow {
+        nplanes: 8,
+        words_per_row: 2,
+        fetch_origin_cck: None,
+        planes: [
+            vec![0, 0],
+            vec![0, 0xFFFF],
+            vec![0, 0xFFFF],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0xFFFF],
+        ],
+    };
+    let pixel_at = |agnus: AgnusRevision, clxcon: u16, clxcon2: u16| {
+        live_bitplane_collision_pixel_at(
+            &row,
+            agnus,
+            // DBLPF plus the AGA 8-plane encoding (BPU=0 with bit 4).
+            0x0610,
+            0,
+            clxcon,
+            clxcon2,
+            0x2C93,
+            0x2DC1,
+            DiwHigh::ocs_implicit(),
+            0x0038,
+            [0; 8],
+            100,
+        )
+        .expect("the sampled x lands inside the display window")
+    };
+    // CLXCON requires plane 6 to be set; its data is clear, so the even
+    // match (pf2_match) fails under every decode.
+    let clxcon_requires_clear_plane = (1 << (6 + 5)) | (1 << 5);
+    let ocs = pixel_at(AgnusRevision::Ocs, clxcon_requires_clear_plane, 0);
+    let aga_zero_clxcon2 = pixel_at(AgnusRevision::AgaAlice, clxcon_requires_clear_plane, 0);
+    assert_eq!(ocs.pf1_match, aga_zero_clxcon2.pf1_match);
+    assert_eq!(ocs.pf2_match, aga_zero_clxcon2.pf2_match);
+    assert!(
+        !aga_zero_clxcon2.pf2_match,
+        "the unmet plane-6 requirement fails the match"
+    );
+
+    // AGA with plane 8 enabled and required instead: the enabled-plane
+    // match now passes on the same line content.
+    let aga = pixel_at(AgnusRevision::AgaAlice, 0, (1 << 7) | (1 << 1));
+    assert!(aga.pf1 && aga.pf2);
+    assert!(aga.pf1_match && aga.pf2_match);
+
+    // And a plane-8 requirement against cleared plane-8 data must fail:
+    let row_clear = CapturedBitplaneRow {
+        planes: [
+            vec![0, 0],
+            vec![0, 0xFFFF],
+            vec![0, 0xFFFF],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0, 0],
+        ],
+        ..row
+    };
+    let aga_unmet = live_bitplane_collision_pixel_at(
+        &row_clear,
+        AgnusRevision::AgaAlice,
+        0x0610,
+        0,
+        0,
+        (1 << 7) | (1 << 1),
+        0x2C93,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+        100,
+    )
+    .unwrap();
+    assert!(
+        !aga_unmet.pf2_match,
+        "an unmet plane-8 requirement must fail the even match"
+    );
+    assert!(
+        aga_unmet.pf1 && aga_unmet.pf2 && !aga_unmet.pf2_match,
+        "raw pixels overlap but the gated match fails"
     );
 }

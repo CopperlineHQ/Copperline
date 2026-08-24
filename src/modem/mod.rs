@@ -1590,15 +1590,15 @@ impl SerialSink for ModemSerialSink {
         self.time_anchor = Some(anchor);
     }
 
-    fn control_lines(&self) -> Option<u8> {
-        // /DSR and /CTS are always asserted (this sink never models flow
-        // control or a missing terminal). Active-low: asserted = 0 bit.
-        let mut bits = 0u8;
-        let cd_asserted = self.transport.carrier() || self.settings.dcd_always;
-        if !cd_asserted {
-            bits |= 1 << 5; // /CD deasserted -> wire high
+    fn control_lines(&self) -> crate::serial::SerialControlLines {
+        // DSR and CTS are always asserted (this sink never models flow
+        // control or a missing terminal); CD follows carrier, or AT&C0's
+        // "DCD always" override.
+        crate::serial::SerialControlLines {
+            dsr: true,
+            cts: true,
+            cd: self.transport.carrier() || self.settings.dcd_always,
         }
-        Some(bits)
     }
 
     fn set_control_outputs(&mut self, dtr: bool, rts: bool) {
@@ -2101,7 +2101,10 @@ mod tests {
         type_line(&mut sink, "ATH", t0 + 20 + g + 1);
         assert_eq!(drain_str(&mut sink), "\r\nOK\r\n");
         assert_eq!(state.lock().unwrap().hangups, 1);
-        assert_eq!(sink.control_lines(), Some(1 << 5));
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::READY
+        );
     }
 
     #[test]
@@ -2125,13 +2128,22 @@ mod tests {
     #[test]
     fn control_lines_polarity_with_c1_default() {
         let (mut sink, state) = fake();
-        // Idle, no call: /CD deasserted (bit 5 = 1), /DSR and /CTS asserted.
-        assert_eq!(sink.control_lines(), Some(1 << 5));
+        // Idle, no call: DSR/CTS asserted (a modem is present), CD not.
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::READY
+        );
         type_line(&mut sink, "ATD127.0.0.1:23", 0);
         drain(&mut sink);
-        assert_eq!(sink.control_lines(), Some(0));
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::CONNECTED
+        );
         state.lock().unwrap().carrier = false;
-        assert_eq!(sink.control_lines(), Some(1 << 5));
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::READY
+        );
     }
 
     #[test]
@@ -2139,7 +2151,10 @@ mod tests {
         let (mut sink, _state) = fake();
         type_line(&mut sink, "AT&C0", 0);
         drain(&mut sink);
-        assert_eq!(sink.control_lines(), Some(0));
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::CONNECTED
+        );
     }
 
     // ---- 7. DTR drop ------------------------------------------------------
@@ -2221,7 +2236,10 @@ mod tests {
         type_line(&mut sink, "ATA", 0);
         assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\n");
         assert!(state.lock().unwrap().carrier);
-        assert_eq!(sink.control_lines(), Some(0));
+        assert_eq!(
+            sink.control_lines(),
+            crate::serial::SerialControlLines::CONNECTED
+        );
     }
 
     #[test]
@@ -2431,8 +2449,14 @@ mod tests {
         let out = drain_str(&mut answering);
         assert!(out.contains("CONNECT"), "{out:?}");
 
-        assert_eq!(dialing.control_lines(), Some(0));
-        assert_eq!(answering.control_lines(), Some(0));
+        assert_eq!(
+            dialing.control_lines(),
+            crate::serial::SerialControlLines::CONNECTED
+        );
+        assert_eq!(
+            answering.control_lines(),
+            crate::serial::SerialControlLines::CONNECTED
+        );
 
         dialing.write_byte(b'Q', 100);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2907,7 +2931,7 @@ mod tests {
         );
         assert_eq!(
             sink.control_lines(),
-            Some(0),
+            crate::serial::SerialControlLines::CONNECTED,
             "AT&C0 must report /CD asserted for the rest of the call"
         );
     }

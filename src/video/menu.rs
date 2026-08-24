@@ -60,6 +60,8 @@ pub enum MenuAction {
     SetPortDevice(usize, PortDevice),
     SetJoystickInput(JoystickInputMode),
     SetAutofire(u8),
+    /// Run-ahead input-latency reduction level in frames (0 = off).
+    SetRunAhead(u8),
     /// Show or hide the on-screen Amiga keyboard.
     ToggleKeyboardPanel,
 
@@ -99,11 +101,14 @@ pub enum MenuAction {
     QuickSave(usize),
     QuickLoad(usize),
 
-    // The player build's session rows. The full build reaches these through
-    // the status bar and shortcuts; a player session has neither, so the
+    // The player build's session rows. The full build reaches pause and
+    // reset through the status bar; a player session has none, so the
     // menu is where they live.
     TogglePause,
     ResetMachine,
+    // Both builds: the way out that a controller or keyboard walking the
+    // menu can reach without a host-side Quit binding or the Cmd/Alt+Q
+    // chord.
     Quit,
 }
 
@@ -455,6 +460,7 @@ pub struct MenuState<'a> {
     pub recording: bool,
     pub input_recording: bool,
     pub autofire_hz: u8,
+    pub run_ahead_frames: u8,
     pub joystick_input_mode: JoystickInputMode,
     /// Whether the on-screen Amiga keyboard is up.
     pub keyboard_panel: bool,
@@ -595,6 +601,10 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::action("Load Kickstart ROM...", MenuAction::LoadRom),
         MenuRow::action("Keyboard Shortcuts...", MenuAction::OpenShortcuts),
         MenuRow::action("About...", MenuAction::OpenAbout),
+        // Last, under everything else: a pad or keyboard walking the
+        // list reaches it on purpose, and walking off the foot of the
+        // menu closes the menu rather than landing on it.
+        MenuRow::action("Quit", MenuAction::Quit),
     ]);
     rows
 }
@@ -1054,7 +1064,31 @@ fn emulation_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu("Floppy Speed", speeds).available(s.floppy_speed_applies),
         MenuRow::toggle("Rewind", MenuAction::ToggleRewind, s.rewind),
+        MenuRow::submenu("Run Ahead", run_ahead_rows(s)),
     ]
+}
+
+/// Run-ahead levels offered by the menu; 0 is off. Mirrors
+/// `RUN_AHEAD_MAX_FRAMES` from the config.
+fn run_ahead_rows(s: &MenuState) -> Vec<MenuRow> {
+    let label = |n: u8| {
+        if n == 0 {
+            "Off".to_string()
+        } else if n == 1 {
+            "1 frame".to_string()
+        } else {
+            format!("{n} frames")
+        }
+    };
+    (0..=crate::config::RUN_AHEAD_MAX_FRAMES)
+        .map(|n| {
+            MenuRow::choice(
+                &label(n),
+                MenuAction::SetRunAhead(n),
+                s.run_ahead_frames == n,
+            )
+        })
+        .collect()
 }
 
 fn warp_rows(s: &MenuState) -> Vec<MenuRow> {
@@ -1290,6 +1324,7 @@ mod tests {
             recording: false,
             input_recording: false,
             autofire_hz: 0,
+            run_ahead_frames: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             keyboard_panel: false,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
@@ -1352,15 +1387,24 @@ mod tests {
         assert!(find(&rows, "Parallel Port").is_some());
     }
 
-    /// About is the last thing on the list, wherever the dynamic rows land.
+    /// Quit is the last thing on the list, under About, wherever the
+    /// dynamic rows land: a controller walking the menu finds it at the
+    /// foot, with nothing below it to pick by mistake.
     #[test]
-    fn about_is_always_last() {
+    fn quit_is_always_last_under_about() {
         let slots = empty_slots();
         let none: [String; 0] = [];
         let midi = ["IAC Bus 1".to_string()];
         for (a, m) in [(&none[..], &none[..]), (&none[..], &midi[..])] {
             let rows = build(&state(a, m, m, &none, &slots));
-            assert_eq!(rows.last().expect("rows").label, "About...");
+            let tail: Vec<&str> = rows
+                .iter()
+                .rev()
+                .take(2)
+                .map(|r| r.label.as_str())
+                .collect();
+            assert_eq!(tail, ["Quit", "About..."]);
+            assert!(find(&rows, "Quit").expect("quit").closes_menu());
         }
     }
 

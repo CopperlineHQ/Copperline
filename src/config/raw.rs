@@ -1015,6 +1015,10 @@ pub(crate) struct RawEmulation {
     /// Emulated frames between rewind snapshots (one rewind step).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rewind_interval_frames: Option<u64>,
+    /// Run-ahead input-latency reduction: present the frame `n` emulated
+    /// frames in the future of the anchor each display refresh (0 = off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_ahead_frames: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

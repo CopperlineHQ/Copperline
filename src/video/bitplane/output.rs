@@ -292,6 +292,11 @@ pub(super) fn rgb24_blend_halves(a: u32, b: u32) -> u32 {
     (a & b) + (((a ^ b) & 0x00FE_FEFE) >> 1)
 }
 
+/// Per-channel mean of two packed RGBA8 pixels, including genlock alpha.
+pub(super) fn rgba8_blend_halves(a: u32, b: u32) -> u32 {
+    (a & b) + (((a ^ b) & 0xFEFE_FEFE) >> 1)
+}
+
 /// Resolve the two 35 ns samples of one 70 ns framebuffer column, each
 /// through the full palette pipeline (ECS Denise carries at most two
 /// bitplanes into SHRES; AGA Lisa runs the complete 8-bit index path). On

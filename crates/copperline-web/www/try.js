@@ -732,6 +732,7 @@ async function boot() {
     machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
     window.__emu = emu; // for debugging/automation
+    serialApplyCarrier(); // a socket opened before (or across) this boot
     lastFddTrack = null; // a new machine starts the track latch over
     // Nothing is held down in a machine that has just been built, so the
     // on-screen keyboard forgets rather than sending release codes into it.
@@ -1256,6 +1257,22 @@ function setSerialStatus(text) {
   if (serialStatus) serialStatus.textContent = text;
 }
 
+// The far end's carrier, as the guest sees it on CIA-B /CD: up while the
+// socket is open, down otherwise. The desired state lives here rather than
+// only in the machine, because the socket and the machine have independent
+// lifetimes: a raw-mode socket can open before boot, and a crashed machine
+// is discarded and rebuilt while the socket stays up. Every new machine
+// gets the cached state applied (serialApplyCarrier below, called after
+// `emu` is installed). Older wasm bundles have no setter.
+let serialCarrier = false;
+function serialSetCarrier(connected) {
+  serialCarrier = connected;
+  serialApplyCarrier();
+}
+function serialApplyCarrier() {
+  if (emu && typeof emu.serial_set_carrier === 'function') emu.serial_set_carrier(serialCarrier);
+}
+
 function serialTeardown() {
   if (serialWs) {
     // Neuter the handlers first: close() fires onclose asynchronously, and
@@ -1264,6 +1281,7 @@ function serialTeardown() {
     serialWs.close();
     serialWs = null;
   }
+  serialSetCarrier(false);
   serialTelnet = null;
   serialDtrGated = false;
   serialRxQueue = [];
@@ -1309,7 +1327,10 @@ function serialOpen() {
   serialRxQueue = [];
   if (serialConnectBtn) serialConnectBtn.textContent = 'Disconnect';
   setSerialStatus('connecting...');
-  ws.onopen = () => setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  ws.onopen = () => {
+    serialSetCarrier(true);
+    setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  };
   ws.onclose = () => serialDisconnect('disconnected');
   ws.onerror = () => setSerialStatus('connection failed');
   ws.onmessage = (e) => {

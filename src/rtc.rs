@@ -149,6 +149,20 @@ impl Rtc {
         self.clock().frozen()
     }
 
+    /// Whether repeated speculative execution and rewind is self-contained.
+    /// A seeded clock advances only in emulated time. An RP5C01 is also safe
+    /// only without a battery-RAM file, because guest writes flush that file
+    /// immediately and a host write cannot be rewound with the machine.
+    pub fn runahead_safe(&self) -> bool {
+        if self.seed().is_none() {
+            return false;
+        }
+        match self {
+            Rtc::Msm6242(_) => true,
+            Rtc::Rp5c01(chip) => chip.battmem_path.is_none(),
+        }
+    }
+
     /// The Unix-seconds instant register reads decompose right now.
     pub fn current_unix(&self, emulated_secs: f64) -> u64 {
         self.clock().current_unix(emulated_secs)

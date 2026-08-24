@@ -79,6 +79,87 @@ jobs:
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  fuzz-build:
+    name: Fuzz harnesses build
+    # Build every untrusted-input harness on each change so parser API
+    # refactors cannot silently leave the fuzz workspace stale. Sustained
+    # campaigns remain a local or scheduled workload.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Verify the fuzz lockfile and build all targets
+        working-directory: fuzz
+        run: |
+          # cargo-fuzz 0.13.2 does not expose Cargo's --locked flag. Resolve
+          # the workspace under --locked first, then prove the build left the
+          # committed lockfile unchanged.
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo fuzz build
+          git diff --exit-code -- Cargo.lock
+
+  msrv:
+    name: MSRV (rust-version)
+    # Prove that Cargo.toml's declared minimum remains truthful when source
+    # or dependency updates land.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - name: Install the declared Rust version
+        run: |
+          msrv="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "copperline") | .rust_version')"
+          test -n "$msrv" && test "$msrv" != "null"
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Build with MSRV
+        run: cargo +"$MSRV" build --locked
+      - name: Compile unit tests with MSRV
+        # The ordinary Linux job executes these tests. This gate owns source
+        # compatibility, so compile the test targets without duplicating
+        # host-network runtime tests whose timing is unrelated to the MSRV.
+        run: cargo +"$MSRV" test --locked --lib --no-run
+
+  cargo-deny:
+    name: Dependency policy (${{ matrix.name }})
+    # The browser and publisher player are standalone workspaces with their
+    # own lockfiles, so check all three shipped dependency graphs explicitly.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            manifest: Cargo.toml
+          - name: browser
+            manifest: crates/copperline-web/Cargo.toml
+          - name: player
+            manifest: crates/copperline-player/Cargo.toml
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          arguments: --all-features --locked --config deny.toml
+          command-arguments: --hide-inclusion-graph
+          # Duplicate-version and git-wildcard findings are deliberate
+          # warnings; hide only their verbose dependency inclusion graphs.
+
   unit-tests:
     name: Unit tests
     needs: build

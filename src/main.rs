@@ -846,10 +846,10 @@ fn main() -> Result<()> {
 
     if matches!(cfg.chipset, Chipset::Aga) {
         info!(
-            "chipset AGA: bitplanes/palette/FMODE fetch, sprites (wide fetch, manual \
-             wide, SSCAN2/BSCAN2 scan doubling, BPLCON4 offsets) and CLXCON2 collisions \
-             are implemented; residual gaps: 35 ns SHRES sprite output, AGA DDF fine \
-             granularity, live collisions on the 6-plane decode (docs/internals/chipset.md)"
+            "chipset AGA: bitplanes/palette/RDRAM/FMODE fetch, sprites (wide fetch, manual \
+             wide, SSCAN2/BSCAN2 scan doubling, BPLCON3 SPRES, BPLCON4 offsets) and CLXCON2 \
+             collisions are implemented; residual gaps: AGA DDF fine granularity, live \
+             collisions on the 6-plane decode (docs/internals/chipset.md)"
         );
     }
 
@@ -1050,6 +1050,11 @@ fn main() -> Result<()> {
         cfg.mouse_capture,
         config::about_machine_lines(&cfg),
         raw_cfg,
+        if cli.load_state.is_some() {
+            Some("loaded save state")
+        } else {
+            cfg.runahead_machine_block_reason()
+        },
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
@@ -1183,6 +1188,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::MouseCapture::default(),
         vec![config::ABOUT_PLACEHOLDER_LINE.to_string()],
         raw_cfg,
+        None,
         audio_output_enabled,
         // The placeholder runs no sampler; run_machine attaches it on Run.
         copperline::sampler::SamplerRequest::default(),

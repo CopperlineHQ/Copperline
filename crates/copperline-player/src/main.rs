@@ -156,6 +156,7 @@ fn main() -> Result<()> {
         cfg.mouse_capture,
         config::about_machine_lines(&cfg),
         raw_for_app,
+        cfg.runahead_machine_block_reason(),
         live_audio,
         copperline::sampler::SamplerRequest::default(),
     );

@@ -30,6 +30,7 @@ default = [
     "profile-stats",
     "game-library",
     "mhi",
+    "cd-mp3",
     "gdb",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
@@ -57,6 +58,11 @@ game-library = ["dep:ureq", "dep:serde_json", "dep:zeroize"]
 # does not wire it up -- carry none of it, the same shape as `mt32`/
 # `wasm-boards` above.
 mhi = ["dep:symphonia-bundle-mp3", "dep:symphonia-core"]
+# MP3 audio tracks in cue sheets (`FILE "track02.mp3" MP3`, src/cdrom/mp3.rs):
+# the same Symphonia decoder as `mhi`, behind its own switch so a build can
+# have either without the other; default-on for the same reason `mhi` is,
+# and off in the browser build.
+cd-mp3 = ["dep:symphonia-bundle-mp3", "dep:symphonia-core"]
 display-plan-trace = []
 # Detailed host-cost counters used by native diagnostics. The browser crate
 # builds the core with `default-features = false`, so its release hot paths do
@@ -130,7 +136,7 @@ gdb = []
 fluxbridge = ["dep:fluxbridge"]
 
 [dependencies]
-m68k = { version = "0.10", features = ["serde"] }
+m68k = { version = "0.11", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
@@ -151,7 +157,8 @@ serde_json = { version = "1", optional = true }
 # away into nothing at all.
 zeroize = { version = "1", optional = true }
 serde-big-array = "0.5"
-# MP3 (MPEG-1/2/2.5 Layer III) decoding for the MHI board (src/mhi.rs).
+# MP3 (MPEG-1/2/2.5 Layer III) decoding for the MHI board (src/mhi.rs) and
+# for MP3 audio tracks in cue sheets (src/cdrom/mp3.rs, feature `cd-mp3`).
 # Symphonia's MPEG audio decoder: pure Rust (MPL-2.0, GPL-compatible), so it
 # builds on every target Rust itself does -- in particular on
 # aarch64-pc-windows-msvc, where the previous decoder's C build broke (its
@@ -162,16 +169,18 @@ serde-big-array = "0.5"
 # see docs/internals/mhi.md). symphonia-core is the same project's type
 # crate (Packet/CodecParameters/AudioBuffer), needed to drive the decoder
 # directly -- src/mhi.rs feeds it hand-packetized frames from the board's
-# byte-queue bitstream rather than going through a format reader.
+# byte-queue bitstream, and src/cdrom/mp3.rs frames from its own index of
+# a track file, rather than going through a format reader.
 symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp3"], optional = true }
 symphonia-core = { version = "0.6.1", default-features = false, optional = true }
 # Save-state and snapshot serialization (src/savestate.rs and friends).
-# Held on the 1.x serde API on purpose: bincode 2+/3 replaces the API and
-# defaults to a different wire format, so moving would invalidate every
-# existing .clstate for no functional gain. Migrate only as part of a
-# planned savestate::STATE_VERSION bump.
+# Held on the 1.x serde API on purpose: bincode 2 replaces the API and its
+# defaults use a different wire format, while bincode 3 is an intentionally
+# non-functional tombstone release. Moving serializers would invalidate every
+# existing .clstate for no functional gain. Migrate only as part of a planned
+# savestate::STATE_VERSION bump with an explicit compatibility story.
 bincode = "1"
-toml = "0.9"
+toml = "1.1"
 png = "0.18"
 flate2 = "1"
 cpal = { version = "0.18", optional = true }
@@ -203,7 +212,7 @@ socket2 = { version = "0.6", optional = true }
 # guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
 # sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets
 # only (DHCP/DNS/UDP/ICMP are handled at frame level with the wire parsers).
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",

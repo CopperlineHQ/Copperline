@@ -70,8 +70,9 @@ trap). Every other row -- including the copper-vs-CPU row 27, which is what the
 (68EC020, ECS, 2 MB chip, no slow, KS 2.05); compare against FS-UAE/vAmiga set
 up the same way.
 
-vAmiga cannot arbitrate this machine (it is OCS/ECS and A500/A1000/A2000 only),
-so the only cross-check on file for the 020 at 14 MHz is FS-UAE.
+Older vAmiga releases could not arbitrate this machine; vAmiga 5.0 adds an
+AGA A1200 setup, while the historical 020 timing column below remains the
+FS-UAE/real-hardware capture used to calibrate Copperline.
 `tt-a1200.fs-uae` boots the same disk on FS-UAE's A1200 and serves the probe's
 serial stream on `tcp://127.0.0.1:1234`; connect to that socket and the 32 words
 arrive as ASCII hex:
@@ -457,6 +458,10 @@ FS-UAE-verified on the equivalent live display constellation),
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible
 pointer regression class, FS-UAE-verified at exact SHRES placement),
+`agashres-sprites` (BPLCON3 SPRES `00/01/10/11` over one lo-res playfield:
+four identical solid sprites form the AGA 4:4:2:1 width staircase, pinning
+the final encoding to true 35 ns output; cross-checked against vAmigaTS
+`Denise/Sprites/aga/simple2` and its A1200 photograph),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),

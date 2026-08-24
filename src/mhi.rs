@@ -71,6 +71,7 @@
 //! uninterrupted run's output exactly -- proved by
 //! `tests::savestate_round_trip_reproduces_an_uninterrupted_runs_output`.
 
+use crate::audio::mpeg::{parse_frame_header, FrameHeader, HEADER_LEN as MPEG_HEADER_LEN};
 use crate::audio::resample::Resampler;
 use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::{MhiAudioRing, PAULA_CLOCK_HZ};
@@ -182,9 +183,6 @@ const MAX_FRAME_INPUT: usize = 4096;
 /// within one tick, exactly as it always has.
 const MAX_RESYNC_ATTEMPTS_PER_TICK: u32 = 64;
 
-/// The byte length of an MPEG audio frame header.
-const MPEG_HEADER_LEN: usize = 4;
-
 /// Savestate warmup-history bounds (see the module doc comment's
 /// "Savestates" and `Decoder::trim_history`).
 ///
@@ -255,52 +253,6 @@ fn new_mpa_decoder() -> MpaDecoder {
         .expect("symphonia-bundle-mp3 is built with its mp3 feature")
 }
 
-/// Pre-parse of a possible Layer III frame header: the frame's total byte
-/// length (header included), sample rate, and whether it is mono. `None`
-/// for anything the board treats as plain junk bytes -- no sync word, an
-/// MPEG version/layer outside `CAPS` (Layer III only), free format
-/// (bitrate index 0), or reserved bitrate/sample-rate indices. The length
-/// arithmetic mirrors Symphonia's own header parser (ISO 11172-3 section
-/// 2.4.3.1: 144 bitrate/sample-rate slots for MPEG-1, 72 for the MPEG-2/2.5
-/// half-rate frames, 1-byte slots for Layer III), so a frame cut to this
-/// length is never rejected by the decoder's own packet-length check.
-fn parse_frame_candidate(hdr: [u8; 4]) -> Option<(usize, u32, bool)> {
-    let h = u32::from_be_bytes(hdr);
-    if h & 0xFFE0_0000 != 0xFFE0_0000 {
-        return None;
-    }
-    let version = (h >> 19) & 0x3; // 00 = MPEG-2.5, 10 = MPEG-2, 11 = MPEG-1
-    let layer = (h >> 17) & 0x3; // 01 = Layer III
-    let bitrate_idx = ((h >> 12) & 0xF) as usize;
-    let sr_idx = ((h >> 10) & 0x3) as usize;
-    if version == 0b01 || layer != 0b01 || bitrate_idx == 0 || bitrate_idx == 0xF || sr_idx == 3 {
-        return None;
-    }
-    // Bit rates in kbit/s, indexed by the header's bitrate field.
-    const KBPS_MPEG1_L3: [u32; 15] = [
-        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
-    ];
-    const KBPS_MPEG2_L3: [u32; 15] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
-    const RATES: [[u32; 3]; 4] = [
-        [11_025, 12_000, 8_000],  // 00: MPEG-2.5
-        [0, 0, 0],                // 01: reserved (rejected above)
-        [22_050, 24_000, 16_000], // 10: MPEG-2
-        [44_100, 48_000, 32_000], // 11: MPEG-1
-    ];
-    let mpeg1 = version == 0b11;
-    let kbps = if mpeg1 {
-        KBPS_MPEG1_L3[bitrate_idx]
-    } else {
-        KBPS_MPEG2_L3[bitrate_idx]
-    };
-    let rate = RATES[version as usize][sr_idx];
-    let padding = (h >> 9) & 1;
-    let factor: u32 = if mpeg1 { 144 } else { 72 };
-    let total = (factor * (kbps * 1000) / rate + padding) as usize;
-    let mono = (h >> 6) & 0x3 == 0b11;
-    Some((total, rate, mono))
-}
-
 /// Byte-queue front end around Symphonia's packet-based [`MpaDecoder`]:
 /// packetizes the board's doorbell-fed bitstream into whole Layer III
 /// frames (see the module doc comment's "Decoder choice") and keeps the
@@ -360,7 +312,13 @@ impl Decoder {
         }
         for i in 0..=(input.len() - MPEG_HEADER_LEN) {
             let hdr = [input[i], input[i + 1], input[i + 2], input[i + 3]];
-            let Some((frame_len, rate, mono)) = parse_frame_candidate(hdr) else {
+            let Some(FrameHeader {
+                len: frame_len,
+                rate,
+                mono,
+                ..
+            }) = parse_frame_header(hdr)
+            else {
                 continue;
             };
             if i > 0 {
@@ -391,7 +349,7 @@ impl Decoder {
                 let scan_end = frame_len.min(input.len() - MPEG_HEADER_LEN + 1);
                 for j in 1..scan_end {
                     let hdr = [input[j], input[j + 1], input[j + 2], input[j + 3]];
-                    if parse_frame_candidate(hdr).is_some() {
+                    if parse_frame_header(hdr).is_some() {
                         return (j as u32, None);
                     }
                 }
@@ -489,8 +447,9 @@ impl Decoder {
             if frame.len() < MPEG_HEADER_LEN {
                 continue;
             }
-            if let Some((len, rate, mono)) =
-                parse_frame_candidate([frame[0], frame[1], frame[2], frame[3]])
+            if let Some(FrameHeader {
+                len, rate, mono, ..
+            }) = parse_frame_header([frame[0], frame[1], frame[2], frame[3]])
             {
                 if len == frame.len() {
                     let _ = decoder.submit_frame(frame, rate, mono);

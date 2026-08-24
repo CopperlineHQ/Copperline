@@ -527,6 +527,11 @@ pub struct Paula {
     toccata_muted: bool,
     #[serde(skip)]
     mhi_muted: bool,
+    /// While a run-ahead frame is speculative, keep host-only UART output,
+    /// debugger scopes, and the recording tap quiet. Guest-visible Paula and
+    /// mixer state still advance normally and are then rewound.
+    #[serde(skip)]
+    speculative_host_quiet: bool,
     // Rolling output-level scopes for the debugger's oscilloscope meters:
     // one per Paula channel plus one per line-mixed source (CD-DA, the
     // in-process MIDI synth, a Toccata board, an MHI board). Each holds the
@@ -599,6 +604,7 @@ impl Paula {
             synth_muted: false,
             toccata_muted: false,
             mhi_muted: false,
+            speculative_host_quiet: false,
             channel_scope: std::array::from_fn(|_| {
                 std::collections::VecDeque::with_capacity(AUDIO_SCOPE_LEN + 1)
             }),
@@ -627,6 +633,29 @@ impl Paula {
     /// Enable or disable the bounded host-side serial transmit tap.
     pub fn set_serial_observation_enabled(&mut self, enabled: bool) {
         self.serial_observer = enabled.then(crate::serial::SerialObserver::default);
+    }
+
+    pub fn set_speculative_host_quiet(&mut self, on: bool) {
+        self.speculative_host_quiet = on;
+    }
+
+    /// Move host-only audio inspection state from the live Paula into a
+    /// freshly deserialized one. Save states deliberately omit these taps;
+    /// without carrying them across, every run-ahead rewind would clear the
+    /// Audio-tab mutes, scopes, and recording buffer.
+    pub(crate) fn adopt_host_taps(&mut self, live: &mut Paula) {
+        self.channel_muted = live.channel_muted;
+        self.cd_muted = live.cd_muted;
+        self.synth_muted = live.synth_muted;
+        self.toccata_muted = live.toccata_muted;
+        self.mhi_muted = live.mhi_muted;
+        self.synth_silent = live.synth_silent;
+        std::mem::swap(&mut self.capture, &mut live.capture);
+        std::mem::swap(&mut self.channel_scope, &mut live.channel_scope);
+        std::mem::swap(&mut self.cd_scope, &mut live.cd_scope);
+        std::mem::swap(&mut self.synth_scope, &mut live.synth_scope);
+        std::mem::swap(&mut self.toccata_scope, &mut live.toccata_scope);
+        std::mem::swap(&mut self.mhi_scope, &mut live.mhi_scope);
     }
 
     /// Drain transmissions completed since the last poll, plus the number of
@@ -917,6 +946,10 @@ impl Paula {
 
     pub fn set_live_audio_suspended(&mut self, suspended: bool) {
         self.audio.set_live_output_suspended(suspended);
+    }
+
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.audio.set_live_output_discard(on);
     }
 
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
@@ -1215,14 +1248,16 @@ impl Paula {
                         // Stop bit done: this many clocks are left of the span.
                         let at_cck = end_cck.saturating_sub(u64::from(remaining));
                         let word = Self::serial_tx_data_word(&shift);
-                        if let Some(observer) = self.serial_observer.as_mut() {
-                            observer.push(crate::serial::SerialTxObservation {
-                                word,
-                                long: shift.long,
-                                at_cck,
-                            });
+                        if !self.speculative_host_quiet {
+                            if let Some(observer) = self.serial_observer.as_mut() {
+                                observer.push(crate::serial::SerialTxObservation {
+                                    word,
+                                    long: shift.long,
+                                    at_cck,
+                                });
+                            }
+                            self.serial.write_word(word, shift.long, at_cck);
                         }
-                        self.serial.write_word(word, shift.long, at_cck);
                     }
                     self.serial_tx_pin_high = true;
                     irq |= self.load_serial_shift_if_idle();
@@ -1937,6 +1972,7 @@ impl Paula {
     }
 
     fn push_mixed_frame(&mut self) {
+        let observe_host = !self.speculative_host_quiet;
         // Mix and push host-rate stereo frames into the sink. Paula
         // stereo routing follows the common A500/A600/A1200 and
         // Minimig mapping: channels 0 and 3 go left, 1 and 2 right.
@@ -1955,10 +1991,12 @@ impl Paula {
         // Tap each channel's output level (DAC sample * volume, -128..127)
         // for the debugger oscilloscopes. This is pre-mute so a muted
         // channel's trace still shows its activity (drawn greyed).
-        for i in 0..4 {
-            let level = ((self.chans[i].current as i32 * self.chans[i].audvol as i32) / 64)
-                .clamp(-128, 127);
-            scope_push(&mut self.channel_scope[i], level as i8);
+        if observe_host {
+            for i in 0..4 {
+                let level = ((self.chans[i].current as i32 * self.chans[i].audvol as i32) / 64)
+                    .clamp(-128, 127);
+                scope_push(&mut self.channel_scope[i], level as i8);
+            }
         }
         let l_raw = self.channel_mixed_sample(0) + self.channel_mixed_sample(3);
         let r_raw = self.channel_mixed_sample(1) + self.channel_mixed_sample(2);
@@ -1992,7 +2030,9 @@ impl Paula {
         // Record the pre-mute CD level for the debugger scope, then apply
         // the developer CD mute so the trace still shows activity while the
         // stream is silenced in the mix.
-        scope_push(&mut self.cd_scope, scope_level(cd_left, cd_right));
+        if observe_host {
+            scope_push(&mut self.cd_scope, scope_level(cd_left, cd_right));
+        }
         if self.cd_muted {
             cd_left = 0.0;
             cd_right = 0.0;
@@ -2017,7 +2057,9 @@ impl Paula {
                 None => self.synth_silent = true,
             }
         }
-        scope_push(&mut self.synth_scope, scope_level(synth_left, synth_right));
+        if observe_host {
+            scope_push(&mut self.synth_scope, scope_level(synth_left, synth_right));
+        }
         if self.synth_muted {
             synth_left = 0.0;
             synth_right = 0.0;
@@ -2030,10 +2072,12 @@ impl Paula {
         // rate before pushing here (see `Toccata::tick`), so this is a
         // plain per-frame pop like CD-DA, not a rate conversion.
         let (mut toccata_left, mut toccata_right) = self.toccata_audio.next_sample();
-        scope_push(
-            &mut self.toccata_scope,
-            scope_level(toccata_left, toccata_right),
-        );
+        if observe_host {
+            scope_push(
+                &mut self.toccata_scope,
+                scope_level(toccata_left, toccata_right),
+            );
+        }
         if self.toccata_muted {
             toccata_left = 0.0;
             toccata_right = 0.0;
@@ -2045,7 +2089,9 @@ impl Paula {
         // Likewise, an MHI board resamples its own decoded-MPEG-rate output
         // to the mixer rate before pushing here (see `Mhi::advance_mixer`).
         let (mut mhi_left, mut mhi_right) = self.mhi_audio.next_sample();
-        scope_push(&mut self.mhi_scope, scope_level(mhi_left, mhi_right));
+        if observe_host {
+            scope_push(&mut self.mhi_scope, scope_level(mhi_left, mhi_right));
+        }
         if self.mhi_muted {
             mhi_left = 0.0;
             mhi_right = 0.0;
@@ -2053,7 +2099,7 @@ impl Paula {
         left += mhi_left;
         right += mhi_right;
         self.audio.push_source("mhi", mhi_left, mhi_right);
-        if let Some(capture) = &mut self.capture {
+        if let (true, Some(capture)) = (observe_host, self.capture.as_mut()) {
             capture.push((left, right));
         }
         let (mut out_left, mut out_right) = (left * self.output_volume, right * self.output_volume);
@@ -3439,6 +3485,19 @@ mod tests {
         assert_eq!(observations[0].word, 0x0041);
         assert!(!observations[0].long);
         assert_eq!(observations[0].at_cck, 100);
+    }
+
+    #[test]
+    fn speculative_serial_completion_stays_inside_paula() {
+        let (mut paula, written, _) = paula_with_collect_serial_words();
+        paula.set_serial_observation_enabled(true);
+        paula.set_speculative_host_quiet(true);
+
+        assert_eq!(paula.write_serdat(0x0141), INT_TBE);
+        assert_eq!(paula.tick_serial(10, 100), 0);
+        assert!(written.lock().unwrap().is_empty());
+        assert!(paula.take_serial_observations().0.is_empty());
+        assert_ne!(paula.read_serdatr() & (1 << 12), 0);
     }
 
     #[test]

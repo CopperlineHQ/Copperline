@@ -5,9 +5,9 @@
 //! typed read/write methods for memory-mapped devices.
 
 use crate::chipset::agnus::{
-    sprite_dma_disabled_by_bitplane_ddf, Agnus, AgnusRevision, AgnusTick, VideoStandard,
-    BEAMCON0_DUAL, BEAMCON0_HARDDIS, COLORCLOCKS_PER_LINE, NTSC_LINES,
-    NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+    bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
+    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS,
+    COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::blitter::Blitter;
 use crate::chipset::cia::{
@@ -15,7 +15,7 @@ use crate::chipset::cia::{
 };
 use crate::chipset::copper::{Copper, CopperSlotAction, CopperWait, DMACON_COPEN};
 use crate::chipset::denise::{
-    color_register_value, BitplaneMode, Denise, DeniseRevision, DiwHigh, Palette,
+    color_register_value, BitplaneMode, Denise, DeniseRevision, DiwHigh, Palette, BPLCON2_RDRAM,
 };
 use crate::chipset::keyboard::KeyboardMcu;
 use crate::chipset::paula::{
@@ -4362,10 +4362,76 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
+        self.paula.adopt_host_taps(&mut live.paula);
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
         Ok(())
+    }
+
+    /// Why the live machine cannot safely execute frames that are then
+    /// rewound. This covers dynamic host couplings that a static config
+    /// cannot: mounted media, persistent clock/NVRAM storage, peripherals,
+    /// and active trace writers.
+    pub fn runahead_host_block_reason(&self) -> Option<&'static str> {
+        if let Some(reason) = self.floppy.runahead_block_reason() {
+            return Some(reason);
+        }
+        if self.cd_disc_inserted() {
+            // CdImage deserialization reopens its source files. Keeping that
+            // out of a per-refresh restore also avoids replaying host-backed
+            // decoder state for audio tracks.
+            return Some("CD image mounted");
+        }
+        if self
+            .akiko
+            .as_ref()
+            .is_some_and(crate::akiko::Akiko::persistent_nvram)
+        {
+            return Some("persistent CD32 NVRAM");
+        }
+        if self.rtc_present && !self.rtc.runahead_safe() {
+            return Some("live or persistent real-time clock");
+        }
+        if !self.parallel_port.runahead_safe() {
+            return Some("parallel host peripheral");
+        }
+        if self.wave_on {
+            return Some("waveform capture");
+        }
+        if self.blitter_trace.is_some()
+            || crate::envcfg::var_os("COPPERLINE_DUMP_BLITMEM").is_some()
+        {
+            return Some("file-backed hardware trace");
+        }
+        None
+    }
+
+    /// Why transient debugger state makes speculative execution unsafe.
+    /// These observers are deliberately absent from save states, and restore
+    /// carries some of them forward from the abandoned Bus. Letting them run
+    /// speculatively would consume one-shot faults, record discarded accesses,
+    /// or silently disarm the frame analyzer on every anchor restore.
+    pub fn runahead_debug_block_reason(&self) -> Option<&'static str> {
+        if !self.ui_beam_traps.is_empty() || !self.ui_copper_breaks.is_empty() {
+            return Some("debugger stop conditions armed");
+        }
+        if self.bus_faults_armed() {
+            return Some("injected bus fault armed");
+        }
+        if self.chipset_validation_armed() {
+            return Some("chipset validation armed");
+        }
+        if self.smc_detection_armed() {
+            return Some("SMC detection armed");
+        }
+        if self.heat_map_armed() {
+            return Some("memory heat map armed");
+        }
+        if self.frame_analyzer_enabled {
+            return Some("frame analyzer armed");
+        }
+        None
     }
 
     /// Acquire physical disks named by a fully decoded state. Deserialization
@@ -4544,6 +4610,10 @@ impl Bus {
 
     pub fn set_live_audio_suspended(&mut self, suspended: bool) {
         self.paula.set_live_audio_suspended(suspended);
+    }
+
+    pub fn set_live_audio_discard(&mut self, on: bool) {
+        self.paula.set_live_audio_discard(on);
     }
 
     pub fn reset_live_audio_after_timeline_jump(&mut self) {
@@ -6559,17 +6629,23 @@ impl Bus {
             // (BUSY, POUT, SEL), pulled up when nothing drives them. An
             // attached peripheral holds them at its own levels; pins the
             // guest has switched to outputs stay CIA-driven.
+            let ddr = self.cia_b.port_a_ddr();
             if let Some(lines) = self.parallel_port.control_lines() {
-                let inputs = !self.cia_b.port_a_ddr() & 0x07;
+                let inputs = !ddr & 0x07;
                 v = (v & !inputs) | (lines & inputs);
             }
-            // CIA-B PA3-5 are the RS-232 status inputs (/DSR, /CTS, /CD),
-            // pulled up when nothing drives them. An attached modem holds
-            // them at its own levels; pins the guest has switched to
-            // outputs stay CIA-driven.
-            if let Some(lines) = self.paula.serial.control_lines() {
-                let inputs = !self.cia_b.port_a_ddr() & 0x38;
-                v = (v & !inputs) | (lines & inputs);
+            // CIA-B PA3-5 are the RS-232 handshake inputs /DSR, /CTS, and
+            // /CD, arriving through the motherboard's inverting 1489
+            // receivers: a line the far-end device asserts reads as a low
+            // pin, and an unasserted (or unplugged) line is pulled up.
+            // serial.device's 7-wire handshake and SDCMD_QUERY status read
+            // them here. The levels come from whatever the serial port is
+            // wired to on the host; pins the guest has switched to outputs
+            // stay CIA-driven, like the Centronics inputs above.
+            let inputs = !ddr & crate::serial::CIAB_PA_SERIAL_INPUTS;
+            if inputs != 0 {
+                let levels = self.paula.serial.control_lines().cia_b_pa_levels();
+                v = (v & !inputs) | (levels & inputs);
             }
         }
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
@@ -7770,17 +7846,28 @@ fn push_live_sprite_collision_source_if_visible(
     }
 }
 
-fn sprite_pixel_repeat_for_control(bplcon0: u16, bplcon3: u16) -> i32 {
+fn sprite_pixel_repeat_subpixels_for_control(
+    agnus_revision: AgnusRevision,
+    bplcon0: u16,
+    bplcon3: u16,
+) -> i32 {
     match bplcon3 & BPLCON3_SPRES_MASK {
         0 => {
             if bplcon0 & BPLCON0_SHRES != 0 {
+                2
+            } else {
+                4
+            }
+        }
+        BPLCON3_SPRES_LORES => 4,
+        BPLCON3_SPRES_HIRES => 2,
+        BPLCON3_SPRES_SHRES => {
+            if matches!(agnus_revision, AgnusRevision::AgaAlice) {
                 1
             } else {
                 2
             }
         }
-        BPLCON3_SPRES_LORES => 2,
-        BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES => 1,
         _ => unreachable!(),
     }
 }
@@ -8048,6 +8135,7 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
             control.bplcon0,
             control.bplcon1,
             control.clxcon,
+            control.clxcon2,
             control.diwstrt,
             control.diwstop,
             control.diwhigh,
@@ -8486,30 +8574,34 @@ fn live_sprite_source_pixel_presence(
     if x < sprite_base_x || x >= sprite_stop_x {
         return LiveSpritePixelPresence::default();
     }
-    let mut x_cursor = sprite_base_x;
+    let target_start = x * 2;
+    let target_stop = target_start + 2;
+    let mut subpixel_cursor = sprite_base_x * 2;
+    let mut presence = LiveSpritePixelPresence::default();
     for bit in (0..16).rev() {
-        let sprite_control = control_replay.control_for_x(x_cursor);
-        let sprite_pixel_repeat =
-            sprite_pixel_repeat_for_control(sprite_control.bplcon0, sprite_control.bplcon3);
-        let x_stop = x_cursor + sprite_pixel_repeat;
-        if x >= x_cursor && x < x_stop {
+        let sprite_control = control_replay.control_for_x(subpixel_cursor.div_euclid(2));
+        let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
+            sprite_control.agnus_revision,
+            sprite_control.bplcon0,
+            sprite_control.bplcon3,
+        );
+        let subpixel_stop = subpixel_cursor + sprite_pixel_repeat;
+        if subpixel_cursor < target_stop && subpixel_stop > target_start {
             let low = source.words[0] & (1 << bit) != 0 || source.words[1] & (1 << bit) != 0;
             let high = source.words[2] & (1 << bit) != 0 || source.words[3] & (1 << bit) != 0;
-            return if source.requires_odd_enable {
-                LiveSpritePixelPresence {
-                    even: false,
-                    odd: low,
-                }
+            if source.requires_odd_enable {
+                presence.odd |= low;
             } else {
-                LiveSpritePixelPresence {
-                    even: low,
-                    odd: high,
-                }
-            };
+                presence.even |= low;
+                presence.odd |= high;
+            }
         }
-        x_cursor = x_stop;
+        subpixel_cursor = subpixel_stop;
+        if subpixel_cursor >= target_stop {
+            break;
+        }
     }
-    LiveSpritePixelPresence::default()
+    presence
 }
 
 fn live_sprite_source_pixel_presence_with_control(
@@ -8519,30 +8611,33 @@ fn live_sprite_source_pixel_presence_with_control(
 ) -> LiveSpritePixelPresence {
     let sprite_base_x = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(source.hsub_70ns);
-    let sprite_pixel_repeat = sprite_pixel_repeat_for_control(control.bplcon0, control.bplcon3);
-    let offset = x - sprite_base_x;
+    let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
+        control.agnus_revision,
+        control.bplcon0,
+        control.bplcon3,
+    );
+    let offset = x * 2 - sprite_base_x * 2;
     if offset < 0 {
         return LiveSpritePixelPresence::default();
     }
-    let bit_offset = offset / sprite_pixel_repeat;
-    if !(0..16).contains(&bit_offset) {
-        return LiveSpritePixelPresence::default();
-    }
-    let bit = 15 - bit_offset;
-    let mask = 1 << bit;
-    let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
-    let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
-    if source.requires_odd_enable {
-        LiveSpritePixelPresence {
-            even: false,
-            odd: low,
+    let mut presence = LiveSpritePixelPresence::default();
+    for subpixel in offset..offset + 2 {
+        let bit_offset = subpixel / sprite_pixel_repeat;
+        if !(0..16).contains(&bit_offset) {
+            continue;
         }
-    } else {
-        LiveSpritePixelPresence {
-            even: low,
-            odd: high,
+        let bit = 15 - bit_offset;
+        let mask = 1 << bit;
+        let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
+        let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
+        if source.requires_odd_enable {
+            presence.odd |= low;
+        } else {
+            presence.even |= low;
+            presence.odd |= high;
         }
     }
+    presence
 }
 
 fn live_sprite_source_collision_matches(
@@ -8680,6 +8775,7 @@ fn live_bitplane_collision_bits_in_range(
             control.bplcon0,
             control.bplcon1,
             control.clxcon,
+            control.clxcon2,
             control.diwstrt,
             control.diwstop,
             control.diwhigh,
@@ -8711,6 +8807,7 @@ struct LiveCollisionControl {
     bplcon1: u16,
     bplcon3: u16,
     clxcon: u16,
+    clxcon2: u16,
     diwstrt: u16,
     diwstop: u16,
     diwhigh: DiwHigh,
@@ -8725,6 +8822,7 @@ impl LiveCollisionControl {
         bplcon1: u16,
         bplcon3: u16,
         clxcon: u16,
+        clxcon2: u16,
         diwstrt: u16,
         diwstop: u16,
         diwhigh: DiwHigh,
@@ -8737,6 +8835,7 @@ impl LiveCollisionControl {
             bplcon1,
             bplcon3,
             clxcon,
+            clxcon2,
             diwstrt,
             diwstop,
             diwhigh,
@@ -8752,6 +8851,7 @@ impl LiveCollisionControl {
             bplcon1: snapshot.bplcon1,
             bplcon3: snapshot.bplcon3,
             clxcon: snapshot.clxcon,
+            clxcon2: snapshot.clxcon2,
             diwstrt: snapshot.diwstrt,
             diwstop: snapshot.diwstop,
             diwhigh: snapshot.diwhigh,
@@ -8765,10 +8865,21 @@ impl LiveCollisionControl {
             0x08E => self.diwstrt = value,
             0x090 => self.diwstop = value,
             0x092 => self.ddfstrt = value,
-            0x098 => self.clxcon = value,
+            // Lisa resets CLXCON2 on a CLXCON write; pre-AGA CLXCON2 is
+            // always zero, so mirroring the render replay unconditionally
+            // changes nothing there.
+            0x098 => {
+                self.clxcon = value;
+                self.clxcon2 = 0;
+            }
             0x100 => self.bplcon0 = value,
             0x102 => self.bplcon1 = value,
             0x106 => self.bplcon3 = value,
+            // Capture already admits CLXCON2 only for Lisa. Apply the
+            // recorded write without consulting Agnus so a supported mixed
+            // Lisa/ECS-Agnus configuration replays the same controls as the
+            // renderer.
+            0x10E => self.clxcon2 = value & 0x0FFF,
             0x1E4 => self.diwhigh = DiwHigh::ecs_explicit(value),
             off @ 0x110..=0x11A => {
                 let plane = ((off - 0x110) / 2) as usize;
@@ -8969,6 +9080,7 @@ fn live_sprite_playfield_collision_bits_in_range(
                 control.bplcon0,
                 control.bplcon1,
                 control.clxcon,
+                control.clxcon2,
                 control.diwstrt,
                 control.diwstop,
                 control.diwhigh,
@@ -9077,11 +9189,13 @@ fn apply_live_bpldat_event(bpldat: &mut [u16; 8], offset: u16, value: u16) {
     }
 }
 
-/// Live collisions evaluate at most the classic 6 bitplanes. The rendered
-/// collision path already interprets the AGA CLXCON2 extensions for planes
-/// 7-8; extending the beam-timed path to match is an open gap (see
-/// docs/internals/chipset.md).
-const COLLISIONS_AGA_DECODE: bool = false;
+/// AGA extends the collision decode past the classic 6 bitplanes (Alice
+/// BPU3 displays eight planes, Lisa's CLXCON2 gates planes 7-8). The live
+/// path follows the same Alice-gated decode the renderer uses
+/// (`ControlState::aga`); OCS/ECS keeps the 6-plane decode.
+fn live_collision_aga_decode(agnus_revision: AgnusRevision) -> bool {
+    matches!(agnus_revision, AgnusRevision::AgaAlice)
+}
 
 fn live_manual_bpl_word_collision_bits(
     planes: [u16; 8],
@@ -9110,9 +9224,10 @@ fn live_manual_bpl_word_collision_bits(
         let hires = bitplane_hires(source_control.bplcon0);
         let pixel_repeat = if hires || shres { 1 } else { 2 };
         let native_step = if shres { 2 } else { 1 };
-        // Collision sampling stays on the pre-AGA 6-plane decode; see
-        // COLLISIONS_AGA_DECODE.
-        let mode = BitplaneMode::from_bplcon0(source_control.bplcon0, COLLISIONS_AGA_DECODE);
+        let mode = BitplaneMode::from_bplcon0(
+            source_control.bplcon0,
+            live_collision_aga_decode(source_control.agnus_revision),
+        );
         let nplanes = mode.display_planes().min(planes.len());
         let dual_playfield = source_control.bplcon0 & 0x0400 != 0;
         let mut idx = 0u8;
@@ -9155,8 +9270,12 @@ fn live_manual_bpl_word_collision_bits(
             }
         }
         if word_active {
-            let collision =
-                live_playfield_collision_pixel(idx, source_control.clxcon, dual_playfield);
+            let collision = live_playfield_collision_pixel(
+                idx,
+                source_control.clxcon,
+                source_control.clxcon2,
+                dual_playfield,
+            );
             for dx in 0..pixel_repeat {
                 let x = x_cursor + dx;
                 if x < x_start || x >= x_stop {
@@ -9237,6 +9356,7 @@ fn live_bitplane_collision_pixel_at(
     bplcon0: u16,
     bplcon1: u16,
     clxcon: u16,
+    clxcon2: u16,
     diwstrt: u16,
     diwstop: u16,
     diwhigh: DiwHigh,
@@ -9265,10 +9385,8 @@ fn live_bitplane_collision_pixel_at(
     let native_x = relative_native_x
         + live_fetch_origin_native_offset(agnus_revision, bplcon0, diwstrt, diwhigh, ddfstrt);
     let fetched_pixels = row.words_per_row * 16;
-    // Collision sampling stays on the pre-AGA 6-plane decode; see
-    // COLLISIONS_AGA_DECODE.
-    let mode = BitplaneMode::from_bplcon0(bplcon0, COLLISIONS_AGA_DECODE);
-    let nplanes = mode.display_planes().min(row.nplanes).min(6);
+    let mode = BitplaneMode::from_bplcon0(bplcon0, live_collision_aga_decode(agnus_revision));
+    let nplanes = mode.display_planes().min(row.nplanes);
     let dma_planes = mode.dma_planes().min(nplanes);
     let mut idx = 0u8;
     for plane in 0..nplanes {
@@ -9317,6 +9435,7 @@ fn live_bitplane_collision_pixel_at(
     Some(live_playfield_collision_pixel(
         idx,
         clxcon,
+        clxcon2,
         bplcon0 & 0x0400 != 0,
     ))
 }
@@ -9324,10 +9443,11 @@ fn live_bitplane_collision_pixel_at(
 fn live_playfield_collision_pixel(
     idx: u8,
     clxcon: u16,
+    clxcon2: u16,
     dual_playfield: bool,
 ) -> LivePlayfieldCollisionPixel {
-    let even_match = live_clxcon_planes_match(idx, clxcon, 1);
-    let odd_match_raw = live_clxcon_planes_match(idx, clxcon, 0);
+    let even_match = live_clxcon_planes_match(idx, clxcon, clxcon2, 1);
+    let odd_match_raw = live_clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     LivePlayfieldCollisionPixel {
         pf1: dual_playfield && idx & 0b010101 != 0,
@@ -9341,19 +9461,29 @@ fn live_playfield_collision_pixel(
     }
 }
 
-fn live_clxcon_planes_match(idx: u8, clxcon: u16, first_plane: usize) -> bool {
+fn live_clxcon_planes_match(idx: u8, clxcon: u16, clxcon2: u16, first_plane: usize) -> bool {
     let mut matches = true;
-    // Every CLXCON-enabled plane participates in the match, not just the planes
-    // the display currently fetches: a plane enabled beyond the BPU count reads
-    // as 0 and still gates the collision (vAmiga checkS2PCollisions compares
-    // `(dBuffer & enbp) == (mvbp & enbp)` over all six planes). Regression:
+    // Every CLXCON/CLXCON2-enabled plane participates in the match, not just
+    // the planes the display currently fetches: a plane enabled beyond the BPU
+    // count reads as 0 and still gates the collision (vAmiga checkS2PCollisions
+    // compares `(dBuffer & enbp) == (mvbp & enbp)` over all planes). Regression:
     // Denise/Sprites/collision/sprcoll* set CLXCON match bits for absent planes
-    // over a low-plane-count playfield.
-    for plane in (first_plane..6).step_by(2) {
-        if clxcon & (1 << (6 + plane)) == 0 {
+    // over a low-plane-count playfield. Planes 1-6 take their enable/match bits
+    // from CLXCON; the AGA planes 7-8 from CLXCON2 (ENBP7/ENBP8 in bits 6-7,
+    // MVBP7/MVBP8 in bits 0-1) -- with CLXCON2 zero the extra planes stay
+    // disabled and pre-AGA results are unchanged.
+    for plane in (first_plane..8).step_by(2) {
+        let (enabled, desired) = if plane < 6 {
+            (clxcon & (1 << (6 + plane)) != 0, clxcon & (1 << plane) != 0)
+        } else {
+            (
+                clxcon2 & (1 << plane) != 0,
+                clxcon2 & (1 << (plane - 6)) != 0,
+            )
+        };
+        if !enabled {
             continue;
         }
-        let desired = clxcon & (1 << plane) != 0;
         let actual = idx & (1 << plane) != 0;
         matches &= desired == actual;
     }

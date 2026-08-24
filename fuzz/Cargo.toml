@@ -1,0 +1,61 @@
+[package]
+name = "copperline-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+copperline = { path = ".." }
+
+# The untrusted-media parsers, in the order SECURITY.md's threat model makes
+# them reachable: a hostile disk image, CD image, hardfile, archive, or save
+# state is attacker-supplied input parsed before any guest code runs. Run
+# with `cargo +nightly fuzz run <target>` from this directory (see
+# fuzz/README.md).
+
+[[bin]]
+name = "dms"
+path = "fuzz_targets/dms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "floppy_image"
+path = "fuzz_targets/floppy_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cd_image"
+path = "fuzz_targets/cd_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hardfile_classification"
+path = "fuzz_targets/hardfile_classification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "savestate"
+path = "fuzz_targets/savestate.rs"
+test = false
+doc = false
+bench = false
+
+[[example]]
+name = "generate_savestate_seed"
+path = "tools/generate_savestate_seed.rs"
+
+[workspace]
+members = ["."]

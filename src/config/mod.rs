@@ -1238,6 +1238,15 @@ pub struct Emulation {
     /// Emulated frames between rewind snapshots, and therefore the granularity
     /// of one rewind step. Larger is cheaper but coarser.
     pub rewind_interval_frames: u64,
+    /// Run-ahead input-latency reduction: each display refresh retires
+    /// `run_ahead_frames` extra emulated frames past the anchor, presents the
+    /// final frame of that burst, then rewinds to the anchor boundary. Host
+    /// input sampled before the burst therefore lands in guest time up to
+    /// `run_ahead_frames` earlier relative to what is on screen. Costs a
+    /// whole-machine snapshot plus `(run_ahead_frames + 1)`x realtime host
+    /// speed. Host-coupled devices and diagnostics that cannot be rewound
+    /// leave the configured value selected but temporarily inactive.
+    pub run_ahead_frames: u8,
 }
 
 /// Default rewind snapshot budget in MiB when `[emulation] rewind` is on.
@@ -1245,6 +1254,11 @@ pub const REWIND_DEFAULT_BUDGET_MB: usize = 256;
 /// Default emulated frames between rewind snapshots: half a second of PAL,
 /// which is a comfortable step size for a rewind hotkey.
 pub const REWIND_DEFAULT_INTERVAL_FRAMES: u64 = 25;
+
+/// Fastest configurable run-ahead. Beyond a handful of frames the burst no
+/// longer fits in one display refresh on realistic hosts, and skipping too
+/// many guest animation frames reads as rubber-banding.
+pub const RUN_AHEAD_MAX_FRAMES: u8 = 4;
 
 // ---------------------------------------------------------------------------
 // Autofire
@@ -2237,6 +2251,7 @@ impl Default for Config {
                 rewind: false,
                 rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
                 rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,
+                run_ahead_frames: 0,
             },
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
@@ -2323,6 +2338,39 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Why this resolved machine shape cannot use per-refresh run-ahead
+    /// snapshots. These devices retain or mutate host state outside the
+    /// serialized core. Dynamic media and observers are checked on the live
+    /// Bus by the window session.
+    pub fn runahead_machine_block_reason(&self) -> Option<&'static str> {
+        if !self.filesys.is_empty() {
+            return Some("host directory volume");
+        }
+        if !self.host_disks.is_empty() {
+            return Some("physical host disk");
+        }
+        if self.ide.master.is_some()
+            || self.ide.slave.is_some()
+            || self.scsi.units.iter().any(Option::is_some)
+            || self.lide.drives.iter().any(Option::is_some)
+        {
+            return Some("hard-drive or ATAPI image");
+        }
+        if self.a2065_net.is_some() {
+            return Some("A2065 network board");
+        }
+        if self.hostsocket_net.is_some() || self.hostsocket_transport.is_some() {
+            return Some("HostSocket network board");
+        }
+        if !self.wasm_boards.is_empty() {
+            return Some("WASM expansion board");
+        }
+        if self.mhi {
+            return Some("MHI decoder board");
+        }
+        None
+    }
+
     /// Load a config, applying command-line overrides on top of whatever the
     /// file (or the built-in defaults, when `path` is `None`) provides. The
     /// overrides are injected into the raw TOML view before validation, so
@@ -2464,6 +2512,9 @@ pub struct ConfigOverrides {
     /// Autofire rate in Hz (`--autofire`), 0 for off. Same validation as
     /// `[input] autofire_hz`.
     pub autofire_hz: Option<u8>,
+    /// Run-ahead frames (`--run-ahead`), 0 for off. Same validation as
+    /// `[emulation] run_ahead_frames`.
+    pub run_ahead_frames: Option<u8>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
     /// "tcp-connect", or "pty" ("none" and "terminal" parse as
     /// compatibility aliases of the first two). Same parser as
@@ -2596,6 +2647,7 @@ impl ConfigOverrides {
             && self.port1.is_none()
             && self.port2.is_none()
             && self.autofire_hz.is_none()
+            && self.run_ahead_frames.is_none()
             && self.serial.is_none()
             && self.serial_connect.is_none()
             && self.serial_session.is_none()
@@ -2751,6 +2803,9 @@ impl ConfigOverrides {
         }
         if let Some(hz) = self.autofire_hz {
             raw.input.autofire_hz = Some(hz);
+        }
+        if let Some(frames) = self.run_ahead_frames {
+            raw.emulation.run_ahead_frames = Some(frames);
         }
         if let Some(mode) = &self.serial {
             raw.serial.mode = Some(mode.clone());
