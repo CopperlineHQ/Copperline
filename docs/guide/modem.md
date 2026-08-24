@@ -60,7 +60,7 @@ without the guest ever typing one. A number with no phonebook entry is
 config-file only; there is no launcher row for it.
 
 Dialling still blocks the calling thread for up to five seconds while the
-TCP connect resolves (see [Notes](#notes) below) -- the same wait a real
+TCP connect resolves (see [Notes](#modem-notes) below) -- the same wait a real
 modem's own dial tone and handshake would cost, just spent in a `connect()`
 call instead.
 
@@ -120,7 +120,7 @@ time: `CONNECT` still fires the instant the TCP connection succeeds, but
 remote-to-guest output is withheld until `S9` has elapsed, the pause
 dialer-era terminal software (Terminate and its contemporaries) expects
 before BBS output starts. It is measured in host time deliberately -- see
-[Notes](#notes).
+[Notes](#modem-notes).
 
 `AT&W` persists the modem's active settings (echo/verbose/quiet, the
 S-registers below, `&C`/`&D`, telnet, the listen port, and the default
@@ -215,6 +215,7 @@ inbound side: it plays back a fixed sequence of outbound calls only, so
 `session` -- Copperline refuses the configuration outright rather than
 silently answering nothing.
 
+(modem-notes)=
 ## Notes
 
 - **No real network under emulation.** Dialing a `host:port` is a TCP
