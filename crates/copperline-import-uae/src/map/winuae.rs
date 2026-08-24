@@ -329,6 +329,136 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Joystick ports ---------------------------------------------
+    // Amiberry's device vocabulary (BlitterStudio/amiberry src/cfgfile.cpp
+    // `joyportmodes`) is richer than Copperline's five-way [input] port1/2
+    // ("mouse"/"joystick"/"cd32"/"analogue"/"none"): the common cases map
+    // cleanly, the rest collapse onto the nearest Copperline device and
+    // are flagged since the host-input semantics genuinely differ.
+    for (uae_key, port) in [("joyport0mode", "port1"), ("joyport1mode", "port2")] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            let (value, note): (&str, Option<&str>) = match e.value.trim() {
+                "" => ("none", None),
+                "mouse" => ("mouse", None),
+                "cd32joy" => ("cd32", None),
+                "ajoy" => ("analogue", None),
+                "djoy" => ("joystick", None),
+                "gamepad" => (
+                    "joystick",
+                    Some("Amiberry's \"gamepad\" and \"djoy\" (digital joystick) are distinct \
+                          host input sources; Copperline only has one \"joystick\" device"),
+                ),
+                "mousenowheel" => (
+                    "mouse",
+                    Some("Amiberry's wheel-less mouse variant has no separate Copperline mode"),
+                ),
+                "cdtvjoy" => (
+                    "joystick",
+                    Some("CDTV joystick has no dedicated Copperline device; approximated as joystick"),
+                ),
+                _ => {
+                    report.unsupported(&e.key, &e.value, "unrecognized or unsupported port device (e.g. lightpen)");
+                    ("", None)
+                }
+            };
+            if !value.is_empty() {
+                set_str(&mut doc, &["input"], port, value);
+                if let Some(note) = note {
+                    annotate(&mut doc, &["input"], port, note);
+                }
+            }
+        }
+    }
+
+    // --- Autofire -----------------------------------------------------
+    // Amiberry stores an autofire *mode* per port (BlitterStudio/amiberry
+    // src/cfgfile.cpp `joyaf`: none/normal/toggle/always/togglebutton),
+    // not a rate, and separately for port0/port1; Copperline has exactly
+    // one global Hz rate (0 = off), not per-port. Both sources of lossiness
+    // -- mode-to-rate and per-port-to-global -- are folded into a single
+    // comment rather than silently letting the second key clobber the
+    // first with no trace of what happened to it.
+    const APPROXIMATED_AUTOFIRE_HZ: i64 = 10;
+    let autofire_on = |v: &str| matches!(v, "normal" | "toggle" | "always" | "togglebutton");
+    let joyport0af = by_key("joyport0autofire");
+    let joyport1af = by_key("joyport1autofire");
+    for e in [joyport0af, joyport1af].into_iter().flatten() {
+        seen.insert(&e.key, ());
+        if !matches!(
+            e.value.trim(),
+            "none" | "normal" | "toggle" | "always" | "togglebutton"
+        ) {
+            report.unsupported(&e.key, &e.value, "unrecognized autofire mode");
+        }
+    }
+    match (joyport0af, joyport1af) {
+        (None, None) => {}
+        _ => {
+            let on0 = joyport0af.is_some_and(|e| autofire_on(e.value.trim()));
+            let on1 = joyport1af.is_some_and(|e| autofire_on(e.value.trim()));
+            let hz = if on0 || on1 {
+                APPROXIMATED_AUTOFIRE_HZ
+            } else {
+                0
+            };
+            table(&mut doc, &["input"])["autofire_hz"] = toml_edit::value(hz);
+            // Off+off is an unambiguous, lossless "off" -- nothing to flag.
+            if hz != 0 {
+                let source = match (joyport0af, joyport1af) {
+                    (Some(a), Some(b)) => {
+                        format!("joyport0autofire={}, joyport1autofire={}", a.value, b.value)
+                    }
+                    (Some(a), None) => format!("joyport0autofire={}", a.value),
+                    (None, Some(b)) => format!("joyport1autofire={}", b.value),
+                    (None, None) => unreachable!(),
+                };
+                let collision = if on0 && on1 {
+                    " (both ports requested autofire; Copperline's single global rate now \
+                       applies to both, and their distinct modes are both lost)"
+                } else if joyport0af.is_some() && joyport1af.is_some() {
+                    " (only one port requested autofire; Copperline's single global rate now \
+                       applies to both)"
+                } else {
+                    ""
+                };
+                annotate(
+                    &mut doc,
+                    &["input"],
+                    "autofire_hz",
+                    &format!(
+                        "from {source} -- Amiberry stores an autofire mode per port, not a rate; \
+                         Copperline has one global Hz rate, so this is a guessed default{collision}"
+                    ),
+                );
+            }
+        }
+    }
+
+    // --- Sound filter -------------------------------------------------
+    // Amiberry (BlitterStudio/amiberry src/cfgfile.cpp `soundfiltermode1`):
+    // off/emulated/on/fixedonly. Copperline's [audio] audio_filter
+    // (src/config/mod.rs parse_audio_filter_mode) only takes auto/on/off.
+    if let Some(e) = by_key("sound_filter") {
+        seen.insert(&e.key, ());
+        match e.value.trim() {
+            "off" => set_str(&mut doc, &["audio"], "audio_filter", "off"),
+            "on" => set_str(&mut doc, &["audio"], "audio_filter", "on"),
+            "emulated" => set_str(&mut doc, &["audio"], "audio_filter", "auto"),
+            "fixedonly" => {
+                set_str(&mut doc, &["audio"], "audio_filter", "on");
+                annotate(
+                    &mut doc,
+                    &["audio"],
+                    "audio_filter",
+                    "from sound_filter=fixedonly -- Copperline has no equivalent to Amiberry's \
+                     fixed-only filter curve; approximated as always-on",
+                );
+            }
+            _ => report.unsupported(&e.key, &e.value, "unrecognized sound_filter value"),
+        }
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
@@ -351,6 +481,15 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         (
             "sound_volume_master",
             "no master output-volume field ([audio] only has floppy_sounds_volume)",
+        ),
+        (
+            "cpu_speed",
+            "no equivalent: this is a baseline wall-clock throttle (max = bypass pacing \
+             entirely, real = pin to authentic 68000 timing), not a clock-rate override \
+             ([cpu] clock_mhz is a different thing -- see below); Copperline's [emulation] \
+             warp_speed only sets the ceiling of an on-demand turbo toggle that's off by \
+             default, so mapping to it would misrepresent \"always run flat out\" as a \
+             feature the user has to switch on by hand",
         ),
     ] {
         if let Some(e) = by_key(uae_key) {
