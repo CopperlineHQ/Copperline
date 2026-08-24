@@ -160,6 +160,8 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     for (amiberry_key, paths_key) in [
         ("amiberry.rom_path", "roms"),
         ("amiberry.floppy_path", "floppies"),
+        ("amiberry.hardfile_path", "harddrives"),
+        ("amiberry.cd_path", "cds"),
     ] {
         if let Some(e) = by_key(amiberry_key) {
             seen.insert(&e.key, ());
