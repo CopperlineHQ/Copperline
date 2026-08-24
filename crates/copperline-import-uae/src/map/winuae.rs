@@ -154,6 +154,35 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Amiberry file-dialog starting directories -----------------------
+    // WinUAE-only files never carry these (they're Amiberry GUI settings),
+    // so they're a no-op there.
+    for (amiberry_key, paths_key) in [
+        ("amiberry.rom_path", "roms"),
+        ("amiberry.floppy_path", "floppies"),
+    ] {
+        if let Some(e) = by_key(amiberry_key) {
+            seen.insert(&e.key, ());
+            if !e.value.trim().is_empty() {
+                set_str(&mut doc, &["paths"], paths_key, &e.value);
+            }
+        }
+    }
+    if let Some(e) = by_key("amiberry.soundcardname") {
+        seen.insert(&e.key, ());
+        if !e.value.trim().is_empty() {
+            set_str(&mut doc, &["audio"], "output_device", &e.value);
+            annotate(
+                &mut doc,
+                &["audio"],
+                "output_device",
+                "from amiberry.soundcardname -- Amiberry and Copperline enumerate host audio \
+                 devices differently, so this name may not match exactly; verify it selects \
+                 the intended device",
+            );
+        }
+    }
+
     // --- everything else --------------------------------------------
     for e in entries {
         if seen.contains_key(e.key.as_str()) {
