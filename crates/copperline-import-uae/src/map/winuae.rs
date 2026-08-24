@@ -619,37 +619,64 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // --- SCSI host adapter -----------------------------------------------
     // Same shape as the lide keys below: Amiberry has a separate ROM-file
     // key per controller rather than Copperline's single [scsi] controller
-    // = "..." selector, and only one adapter can be fitted at once.
-    let a2091 = by_key("a2091_rom_file");
-    let a4091 = by_key("a4091_rom_file");
-    match (a2091, a4091) {
-        (Some(a), Some(b)) => {
-            seen.insert(&a.key, ());
-            seen.insert(&b.key, ());
-            report.unsupported(
-                &a.key,
-                &a.value,
-                "both a2091_rom_file and a4091_rom_file are set, but Copperline's [scsi] \
-                 controller can only be one adapter at a time; pick one by hand",
-            );
-            report.unsupported(
-                &b.key,
-                &b.value,
-                "both a2091_rom_file and a4091_rom_file are set, but Copperline's [scsi] \
-                 controller can only be one adapter at a time; pick one by hand",
-            );
-        }
-        (Some(e), None) | (None, Some(e)) => {
+    // = "..." selector, and only one adapter can be fitted at once, so more
+    // than one of these present at once is a real conflict to flag rather
+    // than letting the last one silently win. a2091/a4091 carry a real ROM
+    // path; a3000 (the built-in A3000 SDMAC) uses the same ":ENABLED"
+    // sentinel convention as Toccata -- Copperline's [scsi] has no ROM
+    // field for it (the A3000's boot code lives in the machine ROM, not a
+    // separate image), so a real path there is flagged instead of dropped
+    // silently.
+    let scsi_adapters: Vec<(&Entry, &str)> = [
+        ("a2091_rom_file", "a2091"),
+        ("a4091_rom_file", "a4091"),
+        ("scsi_a3000_rom_file", "a3000"),
+    ]
+    .into_iter()
+    .filter_map(|(key, controller)| by_key(key).map(|e| (e, controller)))
+    .collect();
+    match scsi_adapters.as_slice() {
+        [] => {}
+        [(e, controller)] => {
             seen.insert(&e.key, ());
-            let controller = if e.key == "a2091_rom_file" {
-                "a2091"
-            } else {
-                "a4091"
-            };
             set_str(&mut doc, &["scsi"], "controller", controller);
-            set_str(&mut doc, &["scsi"], "rom", &e.value);
+            if *controller == "a3000" {
+                annotate(
+                    &mut doc,
+                    &["scsi"],
+                    "controller",
+                    "from scsi_a3000_rom_file -- Copperline requires [machine] profile = \
+                     \"A3000\" for this controller (it's the motherboard SDMAC, not a \
+                     fittable Zorro board); this converter doesn't derive the machine \
+                     profile, so set it by hand",
+                );
+                if !e.value.trim().eq_ignore_ascii_case(":ENABLED") {
+                    report.approximated(
+                        &e.key,
+                        &e.value,
+                        "Copperline's [scsi] has no ROM field for the built-in A3000 SDMAC \
+                         (its boot code lives in the machine ROM); only \"controller\" was set",
+                    );
+                }
+            } else {
+                set_str(&mut doc, &["scsi"], "rom", &e.value);
+            }
         }
-        (None, None) => {}
+        _ => {
+            let keys: Vec<&str> = scsi_adapters.iter().map(|(e, _)| e.key.as_str()).collect();
+            for (e, _) in &scsi_adapters {
+                seen.insert(&e.key, ());
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    format!(
+                        "{} are all set, but Copperline's [scsi] controller can only be one \
+                         adapter at a time; pick one by hand",
+                        keys.join(", ")
+                    ),
+                );
+            }
+        }
     }
 
     // --- lide.device-compatible IDE board --------------------------------
