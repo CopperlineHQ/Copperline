@@ -1003,20 +1003,31 @@ impl ControlState {
         (border && self.border_blank_enabled()) || color_key || bitplane_key
     }
 
-    fn sprite_pixel_repeat(&self) -> i32 {
+    /// Sprite pixel width in 35 ns (SuperHires) samples.
+    ///
+    /// The ordinary framebuffer coordinate is 70 ns, so using this finer
+    /// unit is what keeps AGA SPRES=11 distinct from SPRES=10. The renderer
+    /// either emits those samples directly on a doubled SHRES canvas or
+    /// combines each pair for the classic canvas.
+    fn sprite_pixel_repeat_subpixels(&self) -> i32 {
         match self.bplcon3 & BPLCON3_SPRES_MASK {
             0 => {
-                if self.bplcon0 & BPLCON0_SHRES != 0 {
+                if self.shres() {
+                    2
+                } else {
+                    4
+                }
+            }
+            BPLCON3_SPRES_LORES => 4,
+            BPLCON3_SPRES_HIRES => 2,
+            // ECS Super Denise accepts the SPRES encoding but retains its
+            // 70 ns sprite serializer; Lisa adds the final 35 ns rate.
+            BPLCON3_SPRES_SHRES => {
+                if self.aga() {
                     1
                 } else {
                     2
                 }
-            }
-            BPLCON3_SPRES_LORES => 2,
-            BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES => {
-                // TODO: A true SHRES output path should emit 35 ns sprite
-                // samples; the current framebuffer resolves 70 ns.
-                1
             }
             _ => unreachable!(),
         }

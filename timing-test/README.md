@@ -458,6 +458,10 @@ FS-UAE-verified on the equivalent live display constellation),
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible
 pointer regression class, FS-UAE-verified at exact SHRES placement),
+`agashres-sprites` (BPLCON3 SPRES `00/01/10/11` over one lo-res playfield:
+four identical solid sprites form the AGA 4:4:2:1 width staircase, pinning
+the final encoding to true 35 ns output; cross-checked against vAmigaTS
+`Denise/Sprites/aga/simple2` and its A1200 photograph),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),

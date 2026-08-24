@@ -365,9 +365,6 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
-  sprite resolution, but the compositor does not place sprites on the SHRES
-  pixel grid.
 - AGA palette reads through BPLCON2.RDRAM are modelled, including BANK/LOCT
   selection and the read-only COLORxx window. Other ECS register readback is
   pinned by unit tests and the vAmigaTS sweep.

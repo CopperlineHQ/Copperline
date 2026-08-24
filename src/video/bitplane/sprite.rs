@@ -42,7 +42,8 @@ pub(super) const SPRITE_LINE_MAX_BITS: usize = 64;
 
 pub(super) struct SpriteLineSampler<'a> {
     pub(super) line: &'a SpriteLine,
-    pub(super) bit_stops: [i32; SPRITE_LINE_MAX_BITS + 1],
+    /// Bit boundaries in 35 ns samples (two per framebuffer pixel).
+    pub(super) bit_stops_subpixels: [i32; SPRITE_LINE_MAX_BITS + 1],
     pub(super) bit_values: [u8; SPRITE_LINE_MAX_BITS],
     pub(super) bit_count: usize,
 }
@@ -55,53 +56,65 @@ impl<'a> SpriteLineSampler<'a> {
     ) -> Self {
         let base_x =
             sprite_base_framebuffer_x(line.hstart, line.hsub_70ns, base_control, control_segments);
-        let mut bit_stops = [0i32; SPRITE_LINE_MAX_BITS + 1];
+        let mut bit_stops_subpixels = [0i32; SPRITE_LINE_MAX_BITS + 1];
         let mut bit_values = [0u8; SPRITE_LINE_MAX_BITS];
         let mut bit_count = 0usize;
-        let mut x_cursor = base_x;
-        bit_stops[0] = base_x;
+        let mut subpixel_cursor = base_x * 2;
+        bit_stops_subpixels[0] = subpixel_cursor;
 
         for w in 0..line.width_words() {
             let (data, datb) = line.word(w);
             for bit in (0..16).rev() {
-                let sample_x = x_cursor.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
-                let sprite_pixel_repeat =
-                    control_at_x(base_control, control_segments, sample_x).sprite_pixel_repeat();
+                let sample_x = subpixel_cursor
+                    .div_euclid(2)
+                    .clamp(0, FB_WIDTH.saturating_sub(1) as i32)
+                    as usize;
+                let sprite_pixel_repeat = control_at_x(base_control, control_segments, sample_x)
+                    .sprite_pixel_repeat_subpixels();
                 let lo = u8::from(data & (1 << bit) != 0);
                 let hi = u8::from(datb & (1 << bit) != 0);
                 bit_values[bit_count] = lo | (hi << 1);
-                x_cursor += sprite_pixel_repeat;
+                subpixel_cursor += sprite_pixel_repeat;
                 bit_count += 1;
-                bit_stops[bit_count] = x_cursor;
+                bit_stops_subpixels[bit_count] = subpixel_cursor;
             }
         }
 
         Self {
             line,
-            bit_stops,
+            bit_stops_subpixels,
             bit_values,
             bit_count,
         }
     }
 
     pub(super) fn framebuffer_range(&self) -> Option<(i32, i32)> {
-        let start = self.bit_stops[0].max(self.line.x_start as i32).max(0);
-        let stop = self.bit_stops[self.bit_count]
+        let start = self.bit_stops_subpixels[0]
+            .div_euclid(2)
+            .max(self.line.x_start as i32)
+            .max(0);
+        let stop = (self.bit_stops_subpixels[self.bit_count] + 1)
+            .div_euclid(2)
             .min(self.line.x_stop as i32)
             .min(FB_WIDTH as i32);
         (start < stop).then_some((start, stop))
     }
 
-    pub(super) fn pixel_bits_at(&self, x: i32) -> u8 {
-        if x < self.line.x_start as i32
-            || x >= self.line.x_stop as i32
-            || x < self.bit_stops[0]
-            || x >= self.bit_stops[self.bit_count]
+    pub(super) fn subpixel_bits_at(&self, subpixel: i32) -> u8 {
+        if subpixel < self.line.x_start as i32 * 2
+            || subpixel >= self.line.x_stop as i32 * 2
+            || subpixel < self.bit_stops_subpixels[0]
+            || subpixel >= self.bit_stops_subpixels[self.bit_count]
         {
             return 0;
         }
-        let bit_idx = self.bit_stops[1..=self.bit_count].partition_point(|stop| *stop <= x);
+        let bit_idx =
+            self.bit_stops_subpixels[1..=self.bit_count].partition_point(|stop| *stop <= subpixel);
         self.bit_values[bit_idx]
+    }
+
+    pub(super) fn pixel_bits_at(&self, x: i32) -> u8 {
+        self.subpixel_bits_at(x * 2) | self.subpixel_bits_at(x * 2 + 1)
     }
 }
 
@@ -1248,10 +1261,13 @@ pub(super) fn render_attached_sprite_pair_lines(
 
         for x in x_start..x_stop {
             let x_usize = x as usize;
-            let even_idx = sprite_line_samplers_pixel_bits_at(&even_beam_lines, x);
-            let odd_idx = sprite_line_samplers_pixel_bits_at(&odd_beam_lines, x);
-            let idx = even_idx | (odd_idx << 2);
-            if idx == 0 {
+            let even_left = sprite_line_samplers_subpixel_bits_at(&even_beam_lines, x * 2);
+            let even_right = sprite_line_samplers_subpixel_bits_at(&even_beam_lines, x * 2 + 1);
+            let odd_left = sprite_line_samplers_subpixel_bits_at(&odd_beam_lines, x * 2);
+            let odd_right = sprite_line_samplers_subpixel_bits_at(&odd_beam_lines, x * 2 + 1);
+            let left_idx = even_left | (odd_left << 2);
+            let right_idx = even_right | (odd_right << 2);
+            if left_idx == 0 && right_idx == 0 {
                 continue;
             }
             let control = control_at_x(base_controls[y], &control_segments[y], x_usize);
@@ -1269,8 +1285,8 @@ pub(super) fn render_attached_sprite_pair_lines(
                 even_sprite,
                 fb_idx,
                 control.clxcon,
-                even_idx != 0,
-                odd_idx != 0,
+                even_left != 0 || even_right != 0,
+                odd_left != 0 || odd_right != 0,
                 sprite_group_mask,
                 collision_pixels,
                 playfield_mask,
@@ -1285,19 +1301,24 @@ pub(super) fn render_attached_sprite_pair_lines(
             if sprite_mask & (0b11 << even_sprite) != 0b11 << even_sprite {
                 continue;
             }
-            let color_idx = sprite_color_entry(control, even_sprite, idx, true);
-            let entry =
-                palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
-            let color_latch = entry.latch();
-            let transparent = control.genlock_transparent(color_latch, None, false);
-            let color = if control.aga() {
-                entry.rgb24() & 0x00FF_FFFF
+            let resolve = |idx| {
+                let color_idx = sprite_color_entry(control, even_sprite, idx, true);
+                let entry =
+                    palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
+                sprite_pixel_rgba(control, entry)
+            };
+            let (left, right) = if left_idx == right_idx {
+                let pixel = resolve(left_idx);
+                (Some(pixel), Some(pixel))
             } else {
-                rgb12_to_rgb24(color_rgb12(color_latch))
+                (
+                    (left_idx != 0).then(|| resolve(left_idx)),
+                    (right_idx != 0).then(|| resolve(right_idx)),
+                )
             };
             let canvas_scale = super::active_canvas_scale();
             let out_base = y * FB_WIDTH * canvas_scale + x_usize * canvas_scale;
-            fb[out_base..out_base + canvas_scale].fill(rgb24_to_rgba8_alpha(color, !transparent));
+            paint_sprite_subpixel_pair(fb, out_base, canvas_scale, left, right);
         }
     }
     clxdat
@@ -1332,11 +1353,14 @@ pub(super) fn sprite_lines_pixel_bits_at(
         .unwrap_or(0)
 }
 
-pub(super) fn sprite_line_samplers_pixel_bits_at(lines: &[SpriteLineSampler<'_>], x: i32) -> u8 {
+pub(super) fn sprite_line_samplers_subpixel_bits_at(
+    lines: &[SpriteLineSampler<'_>],
+    subpixel: i32,
+) -> u8 {
     lines
         .iter()
         .find_map(|line| {
-            let idx = line.pixel_bits_at(x);
+            let idx = line.subpixel_bits_at(subpixel);
             (idx != 0).then_some(idx)
         })
         .unwrap_or(0)
@@ -1348,28 +1372,7 @@ pub(super) fn sprite_line_pixel_bits_at(
     base_control: ControlState,
     control_segments: &[ControlSegment],
 ) -> u8 {
-    if x < line.x_start as i32 || x >= line.x_stop as i32 {
-        return 0;
-    }
-    let base_x =
-        sprite_base_framebuffer_x(line.hstart, line.hsub_70ns, base_control, control_segments);
-    let mut x_cursor = base_x;
-    for w in 0..line.width_words() {
-        let (data, datb) = line.word(w);
-        for bit in (0..16).rev() {
-            let sample_x = x_cursor.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
-            let sprite_pixel_repeat =
-                control_at_x(base_control, control_segments, sample_x).sprite_pixel_repeat();
-            let x_stop = x_cursor + sprite_pixel_repeat;
-            if x >= x_cursor && x < x_stop {
-                let lo = u8::from(data & (1 << bit) != 0);
-                let hi = u8::from(datb & (1 << bit) != 0);
-                return lo | (hi << 1);
-            }
-            x_cursor = x_stop;
-        }
-    }
-    0
+    SpriteLineSampler::new(line, base_control, control_segments).pixel_bits_at(x)
 }
 
 pub(super) fn clip_sprite_lines_around_register_lines(
@@ -1416,6 +1419,51 @@ pub(super) fn clip_sprite_lines_around_register_lines(
     *lines = clipped;
 }
 
+#[inline]
+fn blend_sprite_subpixels(left: u32, right: u32) -> u32 {
+    // Blend every RGBA channel independently. This is the same pairwise
+    // average used by the SHRES playfield path, extended to alpha so a
+    // genlock-transparent half remains representable on the 70 ns canvas.
+    (left & right) + (((left ^ right) & 0xFEFE_FEFE) >> 1)
+}
+
+#[inline]
+fn paint_sprite_subpixel_pair(
+    fb: &mut [u32],
+    out_base: usize,
+    canvas_scale: usize,
+    left: Option<u32>,
+    right: Option<u32>,
+) {
+    if canvas_scale == 2 {
+        if let Some(pixel) = left {
+            fb[out_base] = pixel;
+        }
+        if let Some(pixel) = right {
+            fb[out_base + 1] = pixel;
+        }
+        return;
+    }
+
+    fb[out_base] = match (left, right) {
+        (Some(left), Some(right)) => blend_sprite_subpixels(left, right),
+        (Some(sprite), None) | (None, Some(sprite)) => blend_sprite_subpixels(sprite, fb[out_base]),
+        (None, None) => return,
+    };
+}
+
+#[inline]
+fn sprite_pixel_rgba(control: ControlState, entry: crate::chipset::denise::PaletteEntry) -> u32 {
+    let color_latch = entry.latch();
+    let transparent = control.genlock_transparent(color_latch, None, false);
+    let color = if control.aga() {
+        entry.rgb24() & 0x00FF_FFFF
+    } else {
+        rgb12_to_rgb24(color_rgb12(color_latch))
+    };
+    rgb24_to_rgba8_alpha(color, !transparent)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sprite_line(
     sprite: usize,
@@ -1440,82 +1488,65 @@ pub(super) fn draw_sprite_line(
     if y < clip.y_start || y >= clip.y_stop {
         return 0;
     }
-    let base_x = sprite_base_framebuffer_x(
-        line.hstart,
-        line.hsub_70ns,
-        base_controls[y],
-        &control_segments[y],
-    );
+    let sampler = SpriteLineSampler::new(line, base_controls[y], &control_segments[y]);
+    let Some((mut x_start, mut x_stop)) = sampler.framebuffer_range() else {
+        return 0;
+    };
+    x_start = x_start.max(clip.x_start as i32);
+    x_stop = x_stop.min(clip.x_stop as i32);
     let mut clxdat = 0u16;
-    let mut x_cursor = base_x;
 
-    for w in 0..line.width_words() {
-        let (data, datb) = line.word(w);
-        for bit in (0..16).rev() {
-            let sample_x = x_cursor.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
-            let sprite_pixel_repeat =
-                control_at_x(base_controls[y], &control_segments[y], sample_x)
-                    .sprite_pixel_repeat();
-            let lo = u8::from(data & (1 << bit) != 0);
-            let hi = u8::from(datb & (1 << bit) != 0);
-            let idx = lo | (hi << 1);
-            if idx == 0 {
-                x_cursor += sprite_pixel_repeat;
-                continue;
-            }
-            for dx in 0..sprite_pixel_repeat {
-                let x = x_cursor + dx;
-                if x < 0 || x >= FB_WIDTH as i32 {
-                    continue;
-                }
-                let x = x as usize;
-                if x < clip.x_start || x >= clip.x_stop || x < line.x_start || x >= line.x_stop {
-                    continue;
-                }
-                let fb_idx = y * FB_WIDTH + x;
-                let control = control_at_x(base_controls[y], &control_segments[y], x);
-                if !sprite_pixel_inside_display_window(
-                    control,
-                    y,
-                    x,
-                    visible_line0,
-                    sprite_display_enable_x_for_y(sprite_display_enable_x_by_y, y),
-                ) {
-                    continue;
-                }
-                clxdat |= generated_sprite_collision_bits(
-                    sprite,
-                    fb_idx,
-                    control.clxcon,
-                    sprite_group_mask,
-                    collision_pixels,
-                    playfield_mask,
-                );
-                if !sprite_has_priority(sprite, playfield_mask[fb_idx], control) {
-                    continue;
-                }
-                // Debugger layer isolation: output only, after the
-                // collision bits above are accumulated from true data.
-                if super::active_debug_sprite_mask() & (1 << sprite) == 0 {
-                    continue;
-                }
-                let color_idx = sprite_color_entry(control, sprite, idx, false);
-                let entry =
-                    palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
-                let color_latch = entry.latch();
-                let transparent = control.genlock_transparent(color_latch, None, false);
-                let color = if control.aga() {
-                    entry.rgb24() & 0x00FF_FFFF
-                } else {
-                    rgb12_to_rgb24(color_rgb12(color_latch))
-                };
-                let canvas_scale = super::active_canvas_scale();
-                let out_base = y * FB_WIDTH * canvas_scale + x * canvas_scale;
-                fb[out_base..out_base + canvas_scale]
-                    .fill(rgb24_to_rgba8_alpha(color, !transparent));
-            }
-            x_cursor += sprite_pixel_repeat;
+    for x in x_start..x_stop {
+        let left_idx = sampler.subpixel_bits_at(x * 2);
+        let right_idx = sampler.subpixel_bits_at(x * 2 + 1);
+        if left_idx == 0 && right_idx == 0 {
+            continue;
         }
+        let x = x as usize;
+        let fb_idx = y * FB_WIDTH + x;
+        let control = control_at_x(base_controls[y], &control_segments[y], x);
+        if !sprite_pixel_inside_display_window(
+            control,
+            y,
+            x,
+            visible_line0,
+            sprite_display_enable_x_for_y(sprite_display_enable_x_by_y, y),
+        ) {
+            continue;
+        }
+        clxdat |= generated_sprite_collision_bits(
+            sprite,
+            fb_idx,
+            control.clxcon,
+            sprite_group_mask,
+            collision_pixels,
+            playfield_mask,
+        );
+        if !sprite_has_priority(sprite, playfield_mask[fb_idx], control) {
+            continue;
+        }
+        // Debugger layer isolation: output only, after the collision bits
+        // above are accumulated from the true 35 ns samples.
+        if super::active_debug_sprite_mask() & (1 << sprite) == 0 {
+            continue;
+        }
+        let resolve = |idx| {
+            let color_idx = sprite_color_entry(control, sprite, idx, false);
+            let entry = palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
+            sprite_pixel_rgba(control, entry)
+        };
+        let (left, right) = if left_idx == right_idx {
+            let pixel = resolve(left_idx);
+            (Some(pixel), Some(pixel))
+        } else {
+            (
+                (left_idx != 0).then(|| resolve(left_idx)),
+                (right_idx != 0).then(|| resolve(right_idx)),
+            )
+        };
+        let canvas_scale = super::active_canvas_scale();
+        let out_base = y * FB_WIDTH * canvas_scale + x * canvas_scale;
+        paint_sprite_subpixel_pair(fb, out_base, canvas_scale, left, right);
     }
     clxdat
 }

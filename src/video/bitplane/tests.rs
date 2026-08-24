@@ -2743,6 +2743,79 @@ fn bplcon3_spres_default_upgrades_to_70ns_when_shres_is_set() {
 }
 
 #[test]
+fn aga_bplcon3_spres_shres_packs_two_samples_into_one_70ns_pixel() {
+    let render = |spres: u16, data: u16, datb: u16| {
+        let mut state = RenderState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            dmacon: DMACON_DMAEN | DMACON_SPREN,
+            bplcon3: BPLCON3_PF2OF_DEFAULT | spres,
+            ..blank_state()
+        };
+        state.palette.write_ocs(17, 0x0F00);
+        state.palette.write_ocs(18, 0x00F0);
+        let base_palettes = [state.palette; FB_HEIGHT];
+        let palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let control_segments = vec![Vec::new(); FB_HEIGHT];
+        let playfield_mask = vec![0u8; FB_PIXELS];
+        let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+        let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+        let captured = [CapturedSpriteLine {
+            sprite: 0,
+            hstart: SPRITE_HSTART_FB0,
+            hsub_70ns: false,
+            beam_y: PAL_VISIBLE_LINE0,
+            // Two adjacent set samples make the 70 ns canvas comparison
+            // unambiguous: HIRES paints two pixels, SHRES packs both halves
+            // into the first pixel without introducing a blended edge.
+            data,
+            datb,
+            attached: false,
+            data_ext: [0; 3],
+            datb_ext: [0; 3],
+            width_words: 1,
+        }];
+
+        render_sprites(
+            &state,
+            &[0; 64],
+            &mut fb,
+            SpriteClip {
+                x_start: 0,
+                x_stop: FB_WIDTH,
+                y_start: 0,
+                y_stop: FB_HEIGHT,
+            },
+            &base_palettes,
+            &palette_segments,
+            &base_controls,
+            &control_segments,
+            &playfield_mask,
+            &mut collision_pixels,
+            [false; 8],
+            &captured,
+            true,
+        );
+        fb
+    };
+
+    let hires = render(BPLCON3_SPRES_HIRES, 0xC000, 0);
+    assert_eq!(hires[0], rgb12_to_rgba8(0x0F00));
+    assert_eq!(hires[1], rgb12_to_rgba8(0x0F00));
+    assert_eq!(hires[2], rgb12_to_rgba8(0));
+
+    let shres = render(BPLCON3_SPRES_SHRES, 0xC000, 0);
+    assert_eq!(shres[0], rgb12_to_rgba8(0x0F00));
+    assert_eq!(shres[1], rgb12_to_rgba8(0));
+
+    // On the 70 ns canvas, unlike-coloured 35 ns samples retain both
+    // channels through the same pairwise blend used for SHRES bitplanes.
+    let mixed = render(BPLCON3_SPRES_SHRES, 0x8000, 0x4000);
+    assert_eq!(mixed[0], 0xFF00_7F7F);
+    assert_eq!(mixed[1], rgb12_to_rgba8(0));
+}
+
+#[test]
 fn shres_sprite_control_bit4_adds_70ns_horizontal_offset() {
     let (pos, ctl) = sprite_control_words(PAL_VISIBLE_LINE0 as u16, 0x2D, DIW_HSTART_FB0 as u16);
     let mut state = RenderState {

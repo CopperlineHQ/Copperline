@@ -405,6 +405,9 @@ probe_tests! {
     // Alice's valid bitplane counts depend on resolution and FMODE bandwidth;
     // overprogrammed counts fetch nothing rather than clamping.
     golden_aga_vamigats_planes => probe_aga("agaplanes", "agaplanes.bin", 16.0);
+    // BPLCON3 SPRES 00/01/10/11 produces a 4:4:2:1 sprite-width staircase;
+    // the final band is true 35 ns output, not another 70 ns HIRES band.
+    golden_aga_shres_sprites => probe_aga("agashres-sprites", "agashres-sprites.bin", 16.0);
     // Lisa palette readback follows BPLCON3 BANK/LOCT and makes COLORxx
     // read-only while BPLCON2.RDRAM is set.
     golden_aga_vamigats_rdram => probe_aga("rdram-aga", "rdram-aga.bin", 16.0);

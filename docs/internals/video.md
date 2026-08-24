@@ -346,11 +346,13 @@ browser canvas carry the doubled width through (the desktop window shows
 it 1:1 on a 2x HiDPI texture). Every logical coordinate in the replay --
 comparators, fetch origins, sprite positions, the collision buffers --
 stays in the classic hi-res-pitch domain; only the framebuffer writes
-fan out, with non-SHRES pixels and sprites doubled. Standard 15 kHz
-scans keep the classic single-width canvas byte-identical; their SHRES
-screens still blend each 35 ns pair into the 70 ns pixel. Sprite
-positions remain at hi-res resolution on either canvas (true 35 ns
-sprite placement is a remaining TODO).
+fan out. The sprite serializer keeps its own 35 ns sample coordinate:
+BPLCON3 SPRES=11 emits one sample per doubled-canvas pixel, SPRES=10 emits
+two, and the lo-res encodings emit four. Standard 15 kHz scans keep the
+classic single-width canvas byte-identical; their SHRES playfield and
+sprite subpixel pairs are blended into each 70 ns pixel. Sprite comparator
+positions remain at hi-res resolution on either canvas, as on Lisa; SPRES
+changes pixel width, not the comparator's positional granularity.
 
 Two vertical edge cases the replay honours:
 
