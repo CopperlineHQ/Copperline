@@ -561,6 +561,11 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
              default, so mapping to it would misrepresent \"always run flat out\" as a \
              feature the user has to switch on by hand",
         ),
+        (
+            "uaeserial",
+            "selects UAE's own internal custom serial.device implementation, not a host \
+             wiring choice; there's nothing in [serial] this corresponds to",
+        ),
     ] {
         if let Some(e) = by_key(uae_key) {
             seen.insert(&e.key, ());
