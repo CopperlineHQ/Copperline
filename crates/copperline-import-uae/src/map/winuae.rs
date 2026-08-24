@@ -616,6 +616,32 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Toccata sound board --------------------------------------------
+    // Amiberry's toccata_rom_file doubles as the board's fit switch: a
+    // literal ":ENABLED" sentinel means the board is fitted with no ROM
+    // file selected. Copperline's [toccata] only has an enabled flag (no
+    // ROM file of its own), so any non-empty value here means "fitted" --
+    // a real path is flagged since the path itself has nowhere to go.
+    if let Some(e) = by_key("toccata_rom_file") {
+        seen.insert(&e.key, ());
+        let value = e.value.trim();
+        if !value.is_empty() {
+            table(&mut doc, &["toccata"])["enabled"] = toml_edit::value(true);
+            if !value.eq_ignore_ascii_case(":ENABLED") {
+                annotate(
+                    &mut doc,
+                    &["toccata"],
+                    "enabled",
+                    &format!(
+                        "from toccata_rom_file={value} -- Copperline's Toccata emulation \
+                         doesn't take a ROM file, only fitted/not fitted; the path itself \
+                         wasn't translated"
+                    ),
+                );
+            }
+        }
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
