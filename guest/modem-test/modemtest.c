@@ -94,6 +94,41 @@ static void drain(long ticks) {
     }
 }
 
+// Write bytes exactly as given, with no CR appended -- send_cmd's trailing
+// CR is right for an AT command line but fatal for the escape sequence,
+// which is framed by silence rather than terminated by a carriage return.
+static void send_raw(const char *bytes, long n) {
+    req->IOSer.io_Command = CMD_WRITE;
+    req->IOSer.io_Data = (APTR)bytes;
+    req->IOSer.io_Length = n;
+    DoIO((struct IORequest *)req);
+    log_line("TX", bytes, n);
+}
+
+// Wait without transmitting anything, reading whatever arrives. Unlike
+// drain() this never stops early: the guard windows around `+++` are
+// defined by the absence of guest traffic for a full S12, so cutting the
+// wait short on a quiet line is exactly the thing that must not happen.
+static void idle(long ticks) {
+    char buf[256];
+    for (long t = 0; t < ticks; t++) {
+        req->IOSer.io_Command = SDCMD_QUERY;
+        DoIO((struct IORequest *)req);
+        long avail = req->IOSer.io_Actual;
+        if (avail > 0) {
+            if (avail > (long)sizeof(buf)) avail = sizeof(buf);
+            req->IOSer.io_Command = CMD_READ;
+            req->IOSer.io_Data = buf;
+            req->IOSer.io_Length = avail;
+            DoIO((struct IORequest *)req);
+            if (req->IOSer.io_Actual > 0) {
+                log_line("RX", buf, req->IOSer.io_Actual);
+            }
+        }
+        for (volatile long i = 0; i < 20000; i++) {}
+    }
+}
+
 int main(void) {
     log_fp = fopen("MODEMLOG", "w");
     if (!log_fp) return 20;
@@ -149,8 +184,15 @@ int main(void) {
     send_cmd("HELLO FROM AMIGA");
     drain(60);
 
-    send_cmd("+++");
-    drain(60);
+    // Hayes escape: S12 of silence, exactly three S2 characters, then S12
+    // of silence again -- and nothing else transmitted inside either guard.
+    // send_cmd would append a CR that lands in the trailing guard and
+    // cancels the whole thing, leaving ATH below to be relayed to the
+    // remote end as online data instead of executed as a command.
+    idle(60);
+    send_raw("+++", 3);
+    idle(60);
+    drain(40);
 
     send_cmd("ATH");
     drain(40);

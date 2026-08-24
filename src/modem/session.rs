@@ -54,7 +54,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Directive {
     Accept,
     Refuse(DialError),
@@ -70,6 +70,13 @@ enum Directive {
 /// comment for the file format and the two timing paths.
 pub(crate) struct ScriptedTransport {
     directives: VecDeque<Directive>,
+    /// The script as parsed, kept so a timeline jump (rewind, or loading
+    /// an earlier save state) can put the replay back to the top. The
+    /// consumed position is host-side state that no save state carries, so
+    /// without this a rewind would carry on from directives consumed in
+    /// the abandoned future -- the next dial silently short of its script,
+    /// or straight to NO CARRIER. See [`ModemTransport::reset_timeline`].
+    initial: VecDeque<Directive>,
     /// Bytes released by completed `Send` directives, waiting for
     /// [`ModemTransport::read_byte`].
     ready: VecDeque<u8>,
@@ -111,6 +118,7 @@ impl ScriptedTransport {
 
     fn from_directives(directives: VecDeque<Directive>, label: String) -> Self {
         Self {
+            initial: directives.clone(),
             directives,
             ready: VecDeque::new(),
             pending_expect: None,
@@ -271,6 +279,25 @@ impl ModemTransport for ScriptedTransport {
         self.carrier = false;
         self.pending_expect = None;
         self.delay_due_cck = None;
+        // Bytes a `Send` directive already released but the guest never
+        // read belong to the call that just ended. Left queued they would
+        // surface partway through the *next* scripted call, which is both
+        // wrong and not reproducible from reading the script.
+        self.ready.clear();
+    }
+
+    fn reset_timeline(&mut self) {
+        // Replay from the top: the emulated machine has gone backwards, so
+        // the directives consumed on the abandoned timeline have not
+        // happened as far as the guest is concerned. Restarting is what
+        // keeps "the same script gives the same session" true across a
+        // rewind; carrying on from the old position would not.
+        self.directives = self.initial.clone();
+        self.ready.clear();
+        self.pending_expect = None;
+        self.delay_due_cck = None;
+        self.carrier = false;
+        self.ended = false;
     }
 
     fn listen(&mut self, _addr: &str) -> io::Result<()> {
@@ -583,5 +610,60 @@ mod tests {
         type_line(&mut sink, "ATD127.0.0.1:2323", 0);
         assert_eq!(drain_str(&mut sink), "\r\nCONNECT\r\nOK-FROM-SCRIPT\r\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hangup_discards_bytes_the_guest_never_read() {
+        // Two calls in one script. The first releases a banner the guest
+        // never drains before hanging up; those bytes belong to that call
+        // and must not surface inside the second one.
+        let script = "accept\nsend FIRST-CALL\\r\\n\naccept\nsend SECOND-CALL\\r\\n\n";
+        let transport = ScriptedTransport::from_script(script);
+        let mut sink = ModemSerialSink::with_transport(Box::new(transport));
+        type_line(&mut sink, "ATE0", 0);
+        drain(&mut sink);
+
+        type_line(&mut sink, "ATD127.0.0.1:2323", 0);
+        // Deliberately not drained: the banner is sitting in `ready`.
+        type_line(&mut sink, "ATH", 0);
+        drain(&mut sink);
+
+        type_line(&mut sink, "ATD127.0.0.1:2323", 0);
+        let second = drain_str(&mut sink);
+        assert!(
+            !second.contains("FIRST-CALL"),
+            "the first call's undrained bytes leaked into the second: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_timeline_jump_replays_the_script_from_the_top() {
+        use crate::modem::ModemTransport as _;
+        let script = "accept\nsend BANNER\\r\\n\n";
+        let mut transport = ScriptedTransport::from_script(script);
+        assert!(transport.dial("127.0.0.1:2323").is_ok());
+        transport.advance(0);
+        assert!(transport.has_pending(), "the banner should be queued");
+
+        // A rewind (or an earlier save state loading) puts the emulated
+        // machine back before the call; the replay position is host-side
+        // state no save state carries, so it has to be reset explicitly or
+        // the next dial continues from the abandoned future.
+        transport.reset_timeline();
+        assert!(!transport.carrier(), "the jump drops the call");
+        assert!(
+            !transport.has_pending(),
+            "the abandoned timeline's bytes must not survive the jump"
+        );
+        assert!(
+            transport.dial("127.0.0.1:2323").is_ok(),
+            "the script's first directive must be available again"
+        );
+        transport.advance(0);
+        let mut got = Vec::new();
+        while let Some(b) = transport.read_byte() {
+            got.push(b);
+        }
+        assert_eq!(String::from_utf8(got).unwrap(), "BANNER\r\n");
     }
 }

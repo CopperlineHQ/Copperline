@@ -63,7 +63,7 @@ const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 
 /// Errors ATD reports as distinct result codes: a refused connection is
 /// BUSY, anything else NO CARRIER.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum DialError {
     Refused,
     Unreachable,
@@ -129,6 +129,13 @@ pub(crate) trait ModemTransport: Send {
     /// implementation that uses this, to gate its `delay` directives on the
     /// same clock `Settings::s12`'s guard time already uses.
     fn advance(&mut self, _at_cck: u64) {}
+
+    /// Put host-side replay state back when the emulated machine jumps
+    /// backwards (a rewind, or loading an earlier save state). Nothing to
+    /// do for a real socket -- a live TCP peer has no timeline of ours to
+    /// rewind -- but a scripted session's consumed-directive position is
+    /// exactly the kind of state a jump invalidates.
+    fn reset_timeline(&mut self) {}
 }
 
 /// Spawn the background reader shared by every connected/accepted
@@ -1759,6 +1766,7 @@ impl SerialSink for ModemSerialSink {
         // are retained, only the call and any in-flight state go away.
         self.transport.reject();
         self.hangup_internal();
+        self.transport.reset_timeline();
         self.line.clear();
         self.out_queue.clear();
         self.last_online_activity_cck = None;
