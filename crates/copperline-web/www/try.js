@@ -557,7 +557,6 @@ async function load() {
       );
     }
   } catch (e) {
-    const inserted = insertedDiskDescription(' (write-protected)');
     setLoadStatus(
       `AROS ROMs failed to load (${e.message ?? e}) - load your own Kickstart to boot`,
     );
@@ -812,6 +811,7 @@ async function boot() {
     // Leave a fresh status behind: the old line ("inserts at boot", an
     // earlier failure) would otherwise go stale into any bug report filed
     // while the machine runs.
+    const inserted = insertedDiskDescription(' (write-protected)');
     setLoadStatus(
       // A ROM-less boot is only ever a landing place for a state load,
       // which overwrites this line the moment it lands.
