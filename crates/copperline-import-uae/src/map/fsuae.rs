@@ -49,6 +49,11 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // --- amiga_model preset, applied first so explicit keys below can
     // override individual axes of it -----------------------------------
     let mut machine_profile = "";
+    if by_key("amiga_model").is_none() {
+        report.note(
+            "the source config named no machine model (amiga_model), so the machine is whatever Copperline defaults to -- currently a stock A500 (68000 at 7.09MHz, 512K chip plus 512K slow, ECS Agnus with OCS Denise, PAL). Set [machine] profile if you wanted something else; the CPU/chipset/memory keys that did translate still override it either way.",
+        );
+    }
     if let Some(e) = by_key("amiga_model") {
         seen.insert(&e.key, ());
         match model_preset(&e.value) {
@@ -426,5 +431,29 @@ mod tests {
     fn zorro_iii_memory_is_counted_in_kilobytes() {
         assert!(convert("zorro_iii_memory = 131072\n").contains(r#"z3 = "128M""#));
         assert!(!convert("zorro_iii_memory = 0\n").contains("z3 ="));
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    #[test]
+    fn a_config_naming_no_model_says_so_rather_than_stamping_one() {
+        // Copperline's own default machine already *is* a stock A500, so
+        // writing `profile = "A500"` here would change nothing while
+        // making a guess look like something the source config asserted.
+        // Saying it in the report instead is honest and actionable.
+        let entries = crate::parse::parse("chip_memory = 512\n");
+        let out = map(&entries);
+        assert!(!out.doc.to_string().contains("profile ="), "{}", out.doc);
+        assert_eq!(out.report.notes.len(), 1);
+        assert!(out.report.notes[0].contains("no machine model"));
+
+        // ...and a config that does name one gets no such note.
+        let entries = crate::parse::parse("amiga_model = A1200\n");
+        let out = map(&entries);
+        assert!(out.report.notes.is_empty());
+        assert!(out.doc.to_string().contains(r#"profile = "A1200""#));
     }
 }

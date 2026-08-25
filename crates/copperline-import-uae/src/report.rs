@@ -29,6 +29,11 @@ pub struct FlaggedKey {
 #[derive(Debug, Default)]
 pub struct ImportReport {
     pub flagged: Vec<FlaggedKey>,
+    /// Remarks that belong to no particular source key -- typically about
+    /// something the config never said, which by definition has no key to
+    /// hang off. Kept apart from `flagged` so the two are not conflated:
+    /// these are not settings that failed to translate.
+    pub notes: Vec<String>,
 }
 
 impl ImportReport {
@@ -39,6 +44,11 @@ impl ImportReport {
             bucket: Bucket::Approximated,
             note: note.into(),
         });
+    }
+
+    /// Record something worth saying that no source key accounts for.
+    pub fn note(&mut self, note: impl Into<String>) {
+        self.notes.push(note.into());
     }
 
     pub fn unsupported(&mut self, key: &str, value: &str, note: impl Into<String>) {
@@ -56,10 +66,19 @@ impl ImportReport {
     /// mapper's job, via `toml_edit` decor -- this covers the keys with no
     /// natural Copperline home to sit next to.
     pub fn trailer_comment(&self) -> String {
-        if self.flagged.is_empty() {
+        if self.flagged.is_empty() && self.notes.is_empty() {
             return String::new();
         }
         let mut out = String::new();
+        for note in &self.notes {
+            out.push_str(&format!("# Note: {note}\n"));
+        }
+        if self.flagged.is_empty() {
+            return out;
+        }
+        if !self.notes.is_empty() {
+            out.push('\n');
+        }
         out.push_str("# --- Settings from the source config that were not translated ---\n");
         for bucket in [Bucket::Approximated, Bucket::Unsupported] {
             let keys: Vec<_> = self.flagged.iter().filter(|f| f.bucket == bucket).collect();

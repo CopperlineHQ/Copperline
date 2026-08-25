@@ -775,6 +775,11 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // socket, and the rest) rather than defaulting to a bare machine; the
     // explicit [cpu]/[chipset]/[memory] keys emitted above still override
     // whatever the profile would have supplied.
+    if by_key("chipset_compatible").is_none() {
+        report.note(
+            "the source config named no machine model (chipset_compatible), so the machine is whatever Copperline defaults to -- currently a stock A500 (68000 at 7.09MHz, 512K chip plus 512K slow, ECS Agnus with OCS Denise, PAL). Set [machine] profile if you wanted something else; the CPU/chipset/memory keys that did translate still override it either way.",
+        );
+    }
     if let Some(e) = by_key("chipset_compatible") {
         seen.insert(&e.key, ());
         let profile = match e.value.trim().to_ascii_uppercase().as_str() {
@@ -1155,5 +1160,23 @@ mod tests {
 
         let out = convert("cdimage0=/discs/os32.iso\n");
         assert!(out.contains(r#"image = "/discs/os32.iso""#), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    #[test]
+    fn a_config_naming_no_model_says_so_rather_than_stamping_one() {
+        let entries = crate::parse::parse("chipmem_size=1\n");
+        let out = map(&entries);
+        assert!(!out.doc.to_string().contains("profile ="), "{}", out.doc);
+        assert_eq!(out.report.notes.len(), 1);
+        assert!(out.report.notes[0].contains("no machine model"));
+
+        let entries = crate::parse::parse("chipset_compatible=A1200\n");
+        let out = map(&entries);
+        assert!(out.report.notes.is_empty());
     }
 }
