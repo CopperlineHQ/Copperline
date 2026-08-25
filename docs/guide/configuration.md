@@ -1863,6 +1863,13 @@ track layouts. MODE1/2048, MODE1/2352, and CD-DA tracks are supported;
 Mode 2, multi-session discs, and images with stored subchannel bytes are
 rejected explicitly.
 
+CDXL video discs need no special setting: mount the image on a `CD32`
+profile and launch it as on the console. For a bare ISO, Copperline promotes
+each cooked 2048-byte sector to a complete raw Mode 1 frame (including EDC
+and P/Q parity) when an Akiko client requests raw sectors. CD32 discs that
+use a CDTV trademark boot record for backward-compatible startup are accepted
+by the same path.
+
 A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
 multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a
 disc's audio tracks often come in, one file per track:

@@ -698,7 +698,8 @@ impl CdImage {
 
     /// Read one full 2352-byte raw frame at `sector`, whatever the track
     /// type: raw images are copied through; cooked (2048-byte) data
-    /// sectors get a synthesized sync + BCD MSF header (zero EDC/ECC).
+    /// sectors get a complete Mode 1 frame with sync, BCD MSF header,
+    /// EDC, and P/Q error-correction parity.
     pub fn read_raw_sector(&mut self, sector: u32, buf: &mut [u8; RAW_SECTOR_BYTES]) -> Result<()> {
         let kind = self
             .sector_kind(sector)
@@ -708,14 +709,7 @@ impl CdImage {
             TrackKind::Mode1_2048 => {
                 let mut data = [0u8; DATA_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
-                buf.fill(0);
-                buf[1..11].fill(0xFF);
-                let msf = sector + LEADIN_SECTORS;
-                buf[12] = to_bcd((msf / (60 * 75)) as u8);
-                buf[13] = to_bcd(((msf / 75) % 60) as u8);
-                buf[14] = to_bcd((msf % 75) as u8);
-                buf[15] = 1; // mode 1
-                buf[16..16 + DATA_SECTOR_BYTES].copy_from_slice(&data);
+                synthesize_mode1_sector(sector, &data, buf);
                 Ok(())
             }
         }
@@ -770,6 +764,112 @@ pub(crate) fn to_bcd(v: u8) -> u8 {
     ((v / 10) << 4) | (v % 10)
 }
 
+// Mode 1 sector layout after the 2048-byte user-data field. EDC is the
+// little-endian CD-ROM CRC, followed by eight reserved zero bytes and the
+// two interleaved Reed-Solomon parity fields. A bare ISO stores none of
+// these bytes, but CD controllers return them on a raw-sector read; Akiko
+// clients such as CDXL players consume the complete 2352-byte frame.
+const MODE1_EDC_OFFSET: usize = 16 + DATA_SECTOR_BYTES;
+const MODE1_ECC_P_OFFSET: usize = MODE1_EDC_OFFSET + 4 + 8;
+const MODE1_ECC_Q_OFFSET: usize = MODE1_ECC_P_OFFSET + 172;
+
+const fn build_edc_lut() -> [u32; 256] {
+    let mut lut = [0u32; 256];
+    let mut i = 0usize;
+    while i < lut.len() {
+        let mut value = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = (value >> 1) ^ if value & 1 != 0 { 0xD801_8001 } else { 0 };
+            bit += 1;
+        }
+        lut[i] = value;
+        i += 1;
+    }
+    lut
+}
+
+const fn build_ecc_luts() -> ([u8; 256], [u8; 256]) {
+    let mut forward = [0u8; 256];
+    let mut backward = [0u8; 256];
+    let mut i = 0usize;
+    while i < forward.len() {
+        let doubled = (i << 1) ^ if i & 0x80 != 0 { 0x11D } else { 0 };
+        forward[i] = doubled as u8;
+        backward[i ^ doubled] = i as u8;
+        i += 1;
+    }
+    (forward, backward)
+}
+
+const EDC_LUT: [u32; 256] = build_edc_lut();
+const ECC_LUTS: ([u8; 256], [u8; 256]) = build_ecc_luts();
+
+fn mode1_edc(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0u32, |edc, &byte| {
+        (edc >> 8) ^ EDC_LUT[((edc ^ u32::from(byte)) & 0xFF) as usize]
+    })
+}
+
+/// Generate one half of the Mode 1 P/Q parity field. The geometry values
+/// are the standard CD-ROM product-code interleave: 86x24 for P, then
+/// 52x43 for Q after P has been added to the source area.
+fn mode1_ecc(
+    source: &[u8],
+    major_count: usize,
+    minor_count: usize,
+    major_mult: usize,
+    minor_inc: usize,
+    dest: &mut [u8],
+) {
+    let size = major_count * minor_count;
+    debug_assert!(source.len() >= size);
+    debug_assert!(dest.len() >= major_count * 2);
+    for major in 0..major_count {
+        let mut index = (major >> 1) * major_mult + (major & 1);
+        let mut a = 0u8;
+        let mut b = 0u8;
+        for _ in 0..minor_count {
+            let byte = source[index];
+            index += minor_inc;
+            if index >= size {
+                index -= size;
+            }
+            a ^= byte;
+            b ^= byte;
+            a = ECC_LUTS.0[usize::from(a)];
+        }
+        a = ECC_LUTS.1[usize::from(ECC_LUTS.0[usize::from(a)] ^ b)];
+        dest[major] = a;
+        dest[major + major_count] = a ^ b;
+    }
+}
+
+/// Promote a cooked ISO sector to the exact 2352-byte Mode 1 frame a CD
+/// drive places on its raw-data path.
+fn synthesize_mode1_sector(
+    sector: u32,
+    data: &[u8; DATA_SECTOR_BYTES],
+    raw: &mut [u8; RAW_SECTOR_BYTES],
+) {
+    raw.fill(0);
+    raw[1..11].fill(0xFF);
+    let msf = sector + LEADIN_SECTORS;
+    raw[12] = to_bcd((msf / (60 * SECTORS_PER_SECOND)) as u8);
+    raw[13] = to_bcd(((msf / SECTORS_PER_SECOND) % 60) as u8);
+    raw[14] = to_bcd((msf % SECTORS_PER_SECOND) as u8);
+    raw[15] = 1;
+    raw[16..MODE1_EDC_OFFSET].copy_from_slice(data);
+
+    let edc = mode1_edc(&raw[..MODE1_EDC_OFFSET]);
+    raw[MODE1_EDC_OFFSET..MODE1_EDC_OFFSET + 4].copy_from_slice(&edc.to_le_bytes());
+
+    let (prefix, parity) = raw.split_at_mut(MODE1_ECC_P_OFFSET);
+    mode1_ecc(&prefix[12..], 86, 24, 2, 86, &mut parity[..172]);
+    let (prefix, parity) = raw.split_at_mut(MODE1_ECC_Q_OFFSET);
+    mode1_ecc(&prefix[12..], 52, 43, 86, 88, &mut parity[..104]);
+}
+
 /// Parse a cue MM:SS:FF time to a sector number.
 fn parse_msf(s: &str) -> Result<u32> {
     let parts: Vec<&str> = s.split(':').collect();
@@ -816,6 +916,20 @@ mod tests {
         assert_eq!(parse_msf("62:03:74").unwrap(), (62 * 60 + 3) * 75 + 74);
         assert!(parse_msf("00:60:00").is_err());
         assert!(parse_msf("00:00:75").is_err());
+    }
+
+    #[test]
+    fn cooked_mode1_synthesis_matches_mastered_raw_sector() {
+        // Sector 0 from a mastered CD32 MODE1/2352 image has a zeroed
+        // payload. Its golden hash still covers the sync/header,
+        // little-endian EDC, reserved bytes, and both P/Q parity fields.
+        let data = [0u8; DATA_SECTOR_BYTES];
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        synthesize_mode1_sector(0, &data, &mut raw);
+        assert_eq!(
+            crate::hash::sha256_hex(&raw),
+            "b4f18ab66709c9b3fdef2721cc323e031b6728f3ca6c57b7c435c96189222250"
+        );
     }
 
     #[test]
