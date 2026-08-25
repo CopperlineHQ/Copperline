@@ -923,6 +923,78 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         doc["filesys"] = toml_edit::Item::ArrayOfTables(array);
     }
 
+    // --- Hardfile images -------------------------------------------------
+    // `hardfile2=rw,DH0:/path.hdf,sectors,surfaces,reserved,blocksize,
+    // bootpri,filesys,controller`. Only the access flag, the path, the boot
+    // priority and the controller carry over: the geometry fields describe
+    // an image Copperline reads the layout out of itself, and the `filesys`
+    // field is a custom handler with no equivalent here.
+    //
+    // The controller decides the destination. `uaeN` is WinUAE's own
+    // virtual controller, which has no counterpart -- those become plain
+    // IDE drives, the closest real thing. `ideN`/`scsiN` go where they say.
+    // An `ide0_alfapower`/`ide0_ripple` names one of the lide.device boards
+    // Copperline models as `[lide]`, which only became expressible per slot
+    // with `[lide] drive0..drive3`.
+    let mut ide_next = 0usize;
+    let mut lide_next = 0usize;
+    for e in entries.iter().filter(|e| e.key == "hardfile2") {
+        seen.insert(&e.key, ());
+        let Some(hf) = parse_hardfile2(&e.value) else {
+            report.unsupported(
+                &e.key,
+                &e.value,
+                "could not read this as access,DEVICE:/path,geometry...,controller",
+            );
+            continue;
+        };
+        let controller = hf.controller.to_ascii_lowercase();
+        let drive = hardfile_drive_value(&hf);
+        if controller.contains("alfapower") || controller.contains("ripple") {
+            // The ROM key (if any) already picked the personality; this
+            // only adds the drive to whichever slot is next free.
+            if lide_next < 4 {
+                table(&mut doc, &["lide"])[&format!("drive{lide_next}")] = drive;
+                lide_next += 1;
+            } else {
+                report.unsupported(&e.key, &e.value, "a lide board has at most four drives");
+            }
+        } else if let Some(unit) = controller
+            .strip_prefix("scsi")
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            if unit < 7 {
+                table(&mut doc, &["scsi"])[&format!("unit{unit}")] = drive;
+            } else {
+                report.unsupported(&e.key, &e.value, "Copperline's [scsi] has units 0-6");
+            }
+        } else {
+            match ide_next {
+                0 => table(&mut doc, &["ide"])["master"] = drive,
+                1 => table(&mut doc, &["ide"])["slave"] = drive,
+                _ => {
+                    report.approximated(
+                        &e.key,
+                        &e.value,
+                        "Copperline's [ide] has only master and slave; put the rest on [scsi] \
+                         or [lide] by hand",
+                    );
+                    continue;
+                }
+            }
+            ide_next += 1;
+            if controller.starts_with("uae") {
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "WinUAE's own `uae` virtual hard-drive controller has no Copperline \
+                     equivalent; attached as an ordinary IDE drive, which needs a machine \
+                     with an IDE port (A600/A1200/A4000)",
+                );
+            }
+        }
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
@@ -1152,6 +1224,49 @@ mod tests {
     }
 
     #[test]
+    fn hardfiles_go_where_their_controller_says() {
+        // AmigaVision's own shape: two `uae` virtual-controller hardfiles,
+        // the second parked out of the boot order.
+        let out = convert(
+            "hardfile2=rw,DH0:AmigaVision.hdf,0,0,0,512,0,,uae0\n\
+             hardfile2=rw,DH1:AmigaVision-Saves.hdf,0,0,0,512,-128,,uae1\n",
+        );
+        assert!(out.contains(r#"master = "AmigaVision.hdf""#), "{out}");
+        assert!(
+            out.contains(r#"slave = { path = "AmigaVision-Saves.hdf", bootpri = -128 }"#),
+            "a non-default boot priority needs the table form: {out}"
+        );
+
+        // A lide board's drive, per-slot -- only expressible since
+        // [lide] gained drive0..drive3.
+        let out = convert("hardfile2=rw,DH0:/hd/test.hdf,0,0,0,512,0,,ide0_alfapower\n");
+        assert!(out.contains(r#"drive0 = "/hd/test.hdf""#), "{out}");
+        assert!(
+            !out.contains("master ="),
+            "it belongs to lide, not [ide]: {out}"
+        );
+
+        // An explicit SCSI unit keeps its number rather than being
+        // allocated in arrival order.
+        let out = convert("hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,scsi3\n");
+        assert!(out.contains(r#"unit3 = "/hd/a.hdf""#), "{out}");
+    }
+
+    #[test]
+    fn a_uae_virtual_controller_is_flagged_as_the_substitution_it_is() {
+        // There is no `uae` controller in Copperline; calling the result an
+        // ordinary IDE drive is a real substitution, and one that needs a
+        // machine with an IDE port -- worth saying rather than silently
+        // producing a config that may not build.
+        let entries = crate::parse::parse("hardfile2=rw,DH0:a.hdf,0,0,0,512,0,,uae0\n");
+        let out = map(&entries);
+        assert_eq!(out.report.flagged.len(), 1);
+        assert!(out.report.flagged[0]
+            .note
+            .contains("virtual hard-drive controller"));
+    }
+
+    #[test]
     fn a_disabled_cd_image_is_flagged_rather_than_inserted() {
         let entries = crate::parse::parse("cdimage0=/discs/os32.iso,disabled\n");
         let out = map(&entries);
@@ -1179,4 +1294,52 @@ mod note_tests {
         let out = map(&entries);
         assert!(out.report.notes.is_empty());
     }
+}
+
+/// One `hardfile2` entry, reduced to the parts Copperline can carry.
+struct Hardfile2 {
+    path: String,
+    bootpri: i16,
+    readonly: bool,
+    controller: String,
+}
+
+/// Parse a `hardfile2` value. The fields are positional and the path sits
+/// in the second one behind its AmigaDOS device name, so this splits on
+/// commas and then peels `DEVICE:` off the front of that field -- a bare
+/// `DH0:` prefix, unlike `filesystem2`, which also carries a volume name.
+fn parse_hardfile2(value: &str) -> Option<Hardfile2> {
+    let fields: Vec<&str> = value.trim().split(',').collect();
+    if fields.len() < 7 {
+        return None;
+    }
+    let spec = fields[1];
+    // `DH0:/path/to.hdf` -- the device name, then the host path. A Windows
+    // path's own drive letter colon is why this takes the *first* colon
+    // only and leaves the rest alone.
+    let path = spec.split_once(':').map(|(_, p)| p).unwrap_or(spec);
+    if path.is_empty() {
+        return None;
+    }
+    Some(Hardfile2 {
+        path: path.to_string(),
+        bootpri: fields[6].trim().parse().unwrap_or(0),
+        readonly: fields[0].trim().eq_ignore_ascii_case("ro"),
+        controller: fields.last().unwrap_or(&"").trim().to_string(),
+    })
+}
+
+/// A drive as `[ide]`/`[scsi]`/`[lide]` take it: a bare path when there is
+/// nothing else to say, or an inline table when a boot priority or
+/// read-only flag has to ride along.
+fn hardfile_drive_value(hf: &Hardfile2) -> toml_edit::Item {
+    if hf.bootpri == 0 && !hf.readonly {
+        return toml_edit::value(hf.path.as_str());
+    }
+    let mut t = toml_edit::InlineTable::new();
+    t.insert("path", hf.path.as_str().into());
+    if hf.bootpri != 0 {
+        t.insert("bootpri", i64::from(hf.bootpri).into());
+    }
+    toml_edit::value(t)
 }
