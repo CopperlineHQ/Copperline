@@ -15,6 +15,12 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     let mut report = ImportReport::default();
     let mut seen: HashMap<&str, ()> = HashMap::new();
     let by_key = |k: &str| entries.iter().find(|e| e.key == k);
+    // Several settings have more than one spelling in the wild: WinUAE's
+    // own name and the one Amiberry actually writes. Real Amiberry configs
+    // carry `rtc=`/`cpu_model=`, not the `cs_rtc=`/`cpu_type=` this mapper
+    // was first written against, so both are accepted and the first present
+    // wins.
+    let by_any = |ks: &[&str]| ks.iter().find_map(|k| by_key(k));
 
     // --- chipset -----------------------------------------------------
     if let Some(e) = by_key("chipset") {
@@ -52,7 +58,7 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     }
 
     // --- CPU -------------------------------------------------------------
-    if let Some(e) = by_key("cpu_type") {
+    if let Some(e) = by_any(&["cpu_type", "cpu_model"]) {
         seen.insert(&e.key, ());
         // WinUAE spells e.g. "68020", "68020i" (no MMU), "68030mmu",
         // "68040", "68060" -- Copperline only cares about the model digits.
@@ -102,39 +108,41 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     }
 
     // --- Memory ------------------------------------------------------
-    // WinUAE's memory-size keys have changed units across major versions
-    // (an old doubling-index scheme vs. a literal size), so this is always
-    // flagged for the user to double-check, whichever heuristic fires.
-    for (uae_key, section, note) in [
-        ("chipmem_size", "chip", "chip RAM"),
-        ("fastmem_size", "fast", "fast RAM"),
-        ("bogomem_size", "slow", "slow/Ranger RAM"),
+    // Each key has its own unit, verified against Amiberry's cfgfile.cpp
+    // (`cfgfile_intval`'s trailing argument is a multiplier): chip counts
+    // 512K blocks, bogo/slow counts 256K ones, and everything else counts
+    // megabytes. They are genuinely different -- a stock A500 writes
+    // `chipmem_size=1` (512K) with `bogomem_size=2` (512K, the A501
+    // trapdoor), and reading either as megabytes silently inflates the
+    // machine.
+    for (uae_key, section, unit) in [
+        ("chipmem_size", "chip", 512 * 1024),
+        ("bogomem_size", "slow", 256 * 1024),
+        ("fastmem_size", "fast", 1024 * 1024),
     ] {
         if let Some(e) = by_key(uae_key) {
             seen.insert(&e.key, ());
-            match guess_memory_size(&e.value) {
-                Some(size) => {
-                    let mut comment = format!(
-                        "from {uae_key}={} as literal MB -- if this source config predates WinUAE 2.x, \
-                         it may instead be a doubling index; verify against your source's actual {note} size",
-                        e.value
-                    );
+            match uae_mem_bytes(&e.value, unit) {
+                // Zero is "none fitted", which is simply the absence of the
+                // setting -- emitting `fast = "0M"` would be noise.
+                Some(0) => {}
+                Some(bytes) => {
+                    let size = bytes_to_size(bytes);
                     let size = if section == "chip" {
                         let (clamped, clamp_note) = clamp_chip_mb(&size);
                         if let Some(clamp_note) = clamp_note {
-                            comment = format!("{comment}; {clamp_note}");
+                            annotate(&mut doc, &["memory"], section, &clamp_note);
                         }
                         clamped
                     } else {
                         size
                     };
                     set_str(&mut doc, &["memory"], section, &size);
-                    annotate(&mut doc, &["memory"], section, &comment);
                 }
                 None => report.approximated(
                     &e.key,
                     &e.value,
-                    format!("couldn't parse a {note} size from this value"),
+                    format!("couldn't read a {uae_key} value from this"),
                 ),
             }
         }
@@ -256,9 +264,9 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // `[machine] battmem` backs only the RP5C01's battery RAM (the
     // A3000/A4000 part) -- the MSM6242 (the common A500+/A600/A1200 part)
     // has no battery RAM of its own in Copperline's model, so rtc_file is
-    // only translated when cs_rtc says RP5C01 is actually fitted.
+    // only translated when the RTC key says RP5C01 is actually fitted.
     let mut rtc_chip_is_rp5c01 = false;
-    if let Some(e) = by_key("cs_rtc") {
+    if let Some(e) = by_any(&["cs_rtc", "rtc"]) {
         seen.insert(&e.key, ());
         let lower = e.value.trim().to_ascii_lowercase();
         if lower == "none" || lower == "0" {
@@ -751,6 +759,157 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         }
     }
 
+    // --- Machine model --------------------------------------------------
+    // `chipset_compatible` is the machine whose chipset quirks WinUAE is
+    // imitating ("A500", "A1200", ...), which is the closest thing the
+    // format has to naming a model. Mapped to `[machine] profile` so the
+    // result inherits Copperline's own per-model wiring (Gayle, the RTC
+    // socket, and the rest) rather than defaulting to a bare machine; the
+    // explicit [cpu]/[chipset]/[memory] keys emitted above still override
+    // whatever the profile would have supplied.
+    if let Some(e) = by_key("chipset_compatible") {
+        seen.insert(&e.key, ());
+        let profile = match e.value.trim().to_ascii_uppercase().as_str() {
+            "A1000" => Some("A1000"),
+            "A500" => Some("A500"),
+            "A500+" => Some("A500Plus"),
+            "A600" => Some("A600"),
+            "A1200" => Some("A1200"),
+            "A3000" => Some("A3000"),
+            "A4000" => Some("A4000"),
+            "CDTV" => Some("CDTV"),
+            "CD32" => Some("CD32"),
+            _ => None,
+        };
+        match profile {
+            Some(profile) => set_str(&mut doc, &["machine"], "profile", profile),
+            None => report.approximated(
+                &e.key,
+                &e.value,
+                "no matching Copperline machine profile; the machine is built from the \
+                 explicit CPU/chipset/memory keys alone",
+            ),
+        }
+    }
+
+    // --- Memory (the expansions beyond chip/fast/slow) -------------------
+    for (uae_key, section, what) in [
+        ("z3mem_size", "z3", "Zorro III"),
+        ("mbresmem_size", "motherboard", "motherboard"),
+    ] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            match e.value.trim().parse::<u64>() {
+                // 0 is "none fitted", which is the absence of the key.
+                Ok(0) => {}
+                Ok(mb) => set_str(&mut doc, &["memory"], section, &format!("{mb}M")),
+                Err(_) => report.unsupported(
+                    &e.key,
+                    &e.value,
+                    format!("expected a {what} RAM size in MB"),
+                ),
+            }
+        }
+    }
+
+    // --- Audio ------------------------------------------------------
+    if let Some(e) = by_key("sound_channels") {
+        seen.insert(&e.key, ());
+        match e.value.trim().to_ascii_lowercase().as_str() {
+            "stereo" => set_str(&mut doc, &["audio"], "channel_mode", "stereo"),
+            "mono" => set_str(&mut doc, &["audio"], "channel_mode", "mono"),
+            _ => report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline's [audio] channel_mode is only \"stereo\" or \"mono\"",
+            ),
+        }
+    }
+
+    // --- CD image -----------------------------------------------------
+    // `cdimage0=/path/to.iso,disabled` -- the trailing flag is the drive's
+    // own enabled state, not part of the path.
+    if let Some(e) = by_key("cdimage0") {
+        seen.insert(&e.key, ());
+        let value = e.value.trim();
+        let (path, flag) = match value.rsplit_once(',') {
+            Some((path, flag)) => (path, Some(flag.trim())),
+            None => (value, None),
+        };
+        if path.is_empty() {
+            // An empty entry is just "no disc", not something to report.
+        } else if flag == Some("disabled") {
+            report.approximated(
+                &e.key,
+                &e.value,
+                "the CD drive was disabled in the source config, so the image is left out; \
+                 set [cd] image by hand to insert it",
+            );
+        } else {
+            set_str(&mut doc, &["cd"], "image", path);
+        }
+    }
+
+    // --- Host directory mounts ------------------------------------------
+    // `filesystem2=rw,DH0:Workbench:/host/path,0`: access, then
+    // device:volume:path, then boot priority. Copperline's [[filesys]] is
+    // the same idea -- a host directory handed to the guest as a volume --
+    // so these map across directly. Amiberry writes a paired
+    // `uaehfN=dir,<the same fields>` for every one of these; those are
+    // consumed here too rather than mapped again, or every mount would be
+    // emitted twice.
+    let mut filesys: Vec<FilesysMount> = Vec::new();
+    for e in entries.iter().filter(|e| e.key == "filesystem2") {
+        seen.insert(&e.key, ());
+        match parse_filesystem2(&e.value) {
+            Some(mount) => filesys.push(mount),
+            None => report.unsupported(
+                &e.key,
+                &e.value,
+                "could not read this as access,DEVICE:Volume:/path,bootpri",
+            ),
+        }
+    }
+    for e in entries
+        .iter()
+        .filter(|e| e.key.starts_with("uaehf") && e.key[5..].chars().all(|c| c.is_ascii_digit()))
+    {
+        let rest = e.value.trim().strip_prefix("dir,");
+        match rest {
+            // The directory form duplicates a `filesystem2` line, already
+            // taken above.
+            Some(rest)
+                if filesys
+                    .iter()
+                    .any(|m| parse_filesystem2(rest).as_ref() == Some(m)) =>
+            {
+                seen.insert(&e.key, ());
+            }
+            // A `hdf,...` entry is a real hardfile image, which needs a
+            // controller decision Copperline cannot infer -- left for the
+            // generic bucket below to report by name.
+            _ => {}
+        }
+    }
+    if !filesys.is_empty() {
+        let mut array = toml_edit::ArrayOfTables::new();
+        for mount in &filesys {
+            let mut t = toml_edit::Table::new();
+            t["path"] = toml_edit::value(mount.path.as_str());
+            if !mount.volume.is_empty() {
+                t["volume"] = toml_edit::value(mount.volume.as_str());
+            }
+            if mount.bootpri != -128 {
+                t["bootpri"] = toml_edit::value(i64::from(mount.bootpri));
+            }
+            if mount.readonly {
+                t["readonly"] = toml_edit::value(true);
+            }
+            array.push(t);
+        }
+        doc["filesys"] = toml_edit::Item::ArrayOfTables(array);
+    }
+
     // --- known settings with no Copperline equivalent, for visibility ---
     // Not a parsing failure or an oversight -- these are Amiberry/WinUAE
     // concepts Copperline genuinely doesn't have a knob for, called out by
@@ -815,16 +974,34 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     MapOutcome { doc, report }
 }
 
-/// WinUAE memory sizes have been spelled at least two ways across versions:
-/// current WinUAE/Amiberry (2.x+, effectively every `.uae` file in the
-/// wild today) writes a literal megabyte count; pre-2.x WinUAE wrote a
-/// doubling index from 256K instead (0=256K, 1=512K, 2=1M, 3=2M...). The
-/// literal reading is assumed since it matches the format nearly everyone
-/// actually has; callers still flag the result so a config from a very old
-/// WinUAE install gets a chance to be caught and fixed by hand.
-fn guess_memory_size(value: &str) -> Option<String> {
-    let n: u64 = value.trim().parse().ok()?;
-    Some(format!("{n}M"))
+/// A WinUAE/Amiberry memory-size integer in bytes. `unit` is the key's own
+/// multiplier (see the call site). `chipmem_size` alone has two sentinel
+/// values below one block, which Amiberry special-cases the same way:
+/// `-1` is 128K and `0` is 256K, rather than "none".
+fn uae_mem_bytes(value: &str, unit: u64) -> Option<u64> {
+    let n: i64 = value.trim().parse().ok()?;
+    if unit == 512 * 1024 {
+        return Some(match n {
+            -1 => 128 * 1024,
+            0 => 256 * 1024,
+            n if n > 0 => (n as u64) * unit,
+            _ => return None,
+        });
+    }
+    if n < 0 {
+        return None;
+    }
+    Some((n as u64) * unit)
+}
+
+/// A byte count as Copperline spells memory sizes: whole megabytes as `M`,
+/// anything smaller as `K`.
+fn bytes_to_size(bytes: u64) -> String {
+    if bytes.is_multiple_of(1024 * 1024) {
+        format!("{}M", bytes / (1024 * 1024))
+    } else {
+        format!("{}K", bytes / 1024)
+    }
 }
 
 /// WinUAE/Amiberry booleans are spelled `true`/`false`, `yes`/`no`, or
@@ -834,5 +1011,141 @@ fn parse_bool(value: &str) -> Option<bool> {
         "true" | "yes" | "1" => Some(true),
         "false" | "no" | "0" => Some(false),
         _ => None,
+    }
+}
+
+/// One `[[filesys]]` mount read out of a `filesystem2`/`uaehf` line.
+#[derive(Debug, PartialEq, Eq)]
+struct FilesysMount {
+    path: String,
+    volume: String,
+    bootpri: i16,
+    readonly: bool,
+}
+
+/// Parse `rw,DH0:Workbench:/host/path,0` (the body of a `filesystem2`, or a
+/// `uaehf` line with its leading `dir,` already stripped). The boot priority
+/// is peeled off the end and the access flag off the front, so a path
+/// holding a comma only breaks the cases a path holding a comma would break
+/// anyway; the device/volume/path triple is split on the first two colons,
+/// leaving any colon inside the path alone.
+fn parse_filesystem2(value: &str) -> Option<FilesysMount> {
+    let value = value.trim();
+    let (head, bootpri) = value.rsplit_once(',')?;
+    let (access, spec) = head.split_once(',')?;
+    let bootpri: i16 = bootpri.trim().parse().ok()?;
+    let mut parts = spec.splitn(3, ':');
+    let _device = parts.next()?;
+    let volume = parts.next()?;
+    let path = parts.next()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(FilesysMount {
+        path: path.to_string(),
+        volume: volume.to_string(),
+        bootpri,
+        readonly: access.trim().eq_ignore_ascii_case("ro"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn convert(text: &str) -> String {
+        let entries = crate::parse::parse(text);
+        map(&entries).doc.to_string()
+    }
+
+    #[test]
+    fn memory_keys_each_use_their_own_unit() {
+        // Verified against Amiberry's cfgfile.cpp: chip counts 512K
+        // blocks, bogo 256K ones, fast megabytes. A stock A500 writes
+        // exactly this, and reading either of the first two as megabytes
+        // would silently inflate the machine.
+        let out = convert("chipmem_size=1\nbogomem_size=2\nfastmem_size=8\n");
+        assert!(out.contains(r#"chip = "512K""#), "{out}");
+        assert!(out.contains(r#"slow = "512K""#), "{out}");
+        assert!(out.contains(r#"fast = "8M""#), "{out}");
+
+        // A stock A1200's 2MB of chip RAM, which must not trip the 2M clamp.
+        let out = convert("chipmem_size=4\n");
+        assert!(out.contains(r#"chip = "2M""#), "{out}");
+        assert!(
+            !out.contains("clamped"),
+            "2M is the ceiling, not over it: {out}"
+        );
+    }
+
+    #[test]
+    fn chipmem_sentinels_below_one_block_are_honoured() {
+        // Amiberry special-cases these two rather than treating them as
+        // "n blocks": -1 is 128K and 0 is 256K, neither of them "none".
+        assert!(convert("chipmem_size=-1\n").contains(r#"chip = "128K""#));
+        assert!(convert("chipmem_size=0\n").contains(r#"chip = "256K""#));
+    }
+
+    #[test]
+    fn zero_sized_expansions_are_left_out_entirely() {
+        // "none fitted" is the absence of the key, not `fast = "0M"`.
+        let out = convert("fastmem_size=0\nbogomem_size=0\nz3mem_size=0\nmbresmem_size=0\n");
+        assert!(!out.contains("fast ="), "{out}");
+        assert!(!out.contains("slow ="), "{out}");
+        assert!(!out.contains("z3 ="), "{out}");
+        assert!(!out.contains("motherboard ="), "{out}");
+    }
+
+    #[test]
+    fn the_amiberry_spellings_of_rtc_and_cpu_are_accepted() {
+        // Real Amiberry configs write `rtc=`/`cpu_model=`; the WinUAE
+        // spellings this mapper was first written against never appear, so
+        // both had to be accepted or neither setting ever imported.
+        let out = convert("rtc=MSM6242B\ncpu_model=68020\n");
+        assert!(out.contains(r#"rtc_chip = "MSM6242""#), "{out}");
+        assert!(out.contains("rtc = true"), "{out}");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
+    }
+
+    #[test]
+    fn chipset_compatible_picks_the_machine_profile() {
+        assert!(convert("chipset_compatible=A1200\n").contains(r#"profile = "A1200""#));
+        assert!(convert("chipset_compatible=A500\n").contains(r#"profile = "A500""#));
+    }
+
+    #[test]
+    fn filesystem2_becomes_a_filesys_mount() {
+        let out = convert(
+            "filesystem2=rw,DH0:Workbench:/host/wb,0\n\
+             filesystem2=ro,DH1:Transfer:/host/xfer,-128\n",
+        );
+        assert!(out.contains(r#"path = "/host/wb""#), "{out}");
+        assert!(out.contains(r#"volume = "Workbench""#), "{out}");
+        assert!(out.contains(r#"volume = "Transfer""#), "{out}");
+        assert!(out.contains("readonly = true"), "the ro mount: {out}");
+        // -128 is the default, so it is left implicit; 0 is not.
+        assert!(out.contains("bootpri = 0"), "{out}");
+    }
+
+    #[test]
+    fn a_uaehf_directory_entry_does_not_duplicate_its_filesystem2_twin() {
+        // Amiberry writes both lines for every directory mount; importing
+        // each would give the guest the same volume twice.
+        let out = convert(
+            "filesystem2=rw,DH0:Workbench:/host/wb,0\n\
+             uaehf0=dir,rw,DH0:Workbench:/host/wb,0\n",
+        );
+        assert_eq!(out.matches(r#"path = "/host/wb""#).count(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_disabled_cd_image_is_flagged_rather_than_inserted() {
+        let entries = crate::parse::parse("cdimage0=/discs/os32.iso,disabled\n");
+        let out = map(&entries);
+        assert!(!out.doc.to_string().contains("image ="), "{}", out.doc);
+        assert_eq!(out.report.flagged.len(), 1);
+
+        let out = convert("cdimage0=/discs/os32.iso\n");
+        assert!(out.contains(r#"image = "/discs/os32.iso""#), "{out}");
     }
 }
