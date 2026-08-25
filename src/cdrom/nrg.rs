@@ -852,6 +852,83 @@ mod tests {
         assert!(err.to_string().contains("reopening CD image"));
     }
 
+    /// One raw MODE1 sector: sync/header bytes, 2048 bytes of user data,
+    /// then the EDC/ECC tail. `read_data_sector` must expose only the user
+    /// payload whichever NRG metadata layout selected the 2352-byte geometry.
+    fn raw_mode1_sector(value: u8) -> Vec<u8> {
+        let mut sector = vec![0xEE; RAW_SECTOR_BYTES];
+        sector[16..16 + DATA_SECTOR_BYTES].fill(value);
+        sector
+    }
+
+    #[test]
+    fn mode1_2352_geometry_is_served_from_dao_and_tao_layouts() {
+        let raw = raw_mode1_sector(0x42);
+
+        let dao_path = temp_path("raw-dao.nrg");
+        let mut dao_image = raw.clone();
+        let descriptor_start = dao_image.len() as u64;
+        let mut cue = Vec::new();
+        for entry in [
+            cue_entry(0, 0, -150, false),
+            cue_entry(1, 0, 0, false),
+            cue_entry(1, 1, 0, false),
+            cue_entry(0xAA, 1, 1, false),
+        ] {
+            cue.extend_from_slice(&entry);
+        }
+        chunk(b"CUEX", &cue, &mut dao_image);
+        let mut dao = vec![0u8; DAO_HEADER_BYTES];
+        dao[20] = 1;
+        dao[21] = 1;
+        dao.extend(dao_entry(
+            RAW_SECTOR_BYTES as u16,
+            0x05,
+            [0, 0, RAW_SECTOR_BYTES as u64],
+            false,
+        ));
+        chunk(b"DAOX", &dao, &mut dao_image);
+        chunk(b"END!", &[], &mut dao_image);
+        dao_image.extend_from_slice(b"NER5");
+        dao_image.extend_from_slice(&descriptor_start.to_be_bytes());
+        File::create(&dao_path)
+            .unwrap()
+            .write_all(&dao_image)
+            .unwrap();
+
+        let tao_path = temp_path("raw-tao.nrg");
+        let mut tao_image = raw.clone();
+        let descriptor_start = tao_image.len() as u64;
+        let mut etn = Vec::new();
+        etn.extend_from_slice(&0u64.to_be_bytes());
+        etn.extend_from_slice(&(RAW_SECTOR_BYTES as u64).to_be_bytes());
+        etn.extend_from_slice(&0x05u32.to_be_bytes());
+        etn.extend_from_slice(&0u32.to_be_bytes());
+        etn.extend_from_slice(&0u64.to_be_bytes());
+        chunk(b"ETN2", &etn, &mut tao_image);
+        chunk(b"END!", &[], &mut tao_image);
+        tao_image.extend_from_slice(b"NER5");
+        tao_image.extend_from_slice(&descriptor_start.to_be_bytes());
+        File::create(&tao_path)
+            .unwrap()
+            .write_all(&tao_image)
+            .unwrap();
+
+        for path in [&dao_path, &tao_path] {
+            let mut image = CdImage::load(path).unwrap();
+            assert_eq!(image.tracks()[0].kind, TrackKind::Mode1_2352);
+            let mut data = [0u8; DATA_SECTOR_BYTES];
+            image.read_data_sector(0, &mut data).unwrap();
+            assert!(data.iter().all(|&byte| byte == 0x42));
+            let mut full = [0u8; RAW_SECTOR_BYTES];
+            image.read_raw_sector(0, &mut full).unwrap();
+            assert_eq!(full.as_slice(), raw.as_slice());
+        }
+
+        let _ = std::fs::remove_file(dao_path);
+        let _ = std::fs::remove_file(tao_path);
+    }
+
     #[test]
     fn etn2_tao_inserts_virtual_intertrack_pregap() {
         let path = temp_path("tao.nrg");
