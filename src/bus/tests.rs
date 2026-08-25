@@ -755,6 +755,55 @@ fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
 }
 
 #[test]
+fn cia_b_pra_writes_push_dtr_rts_to_serial_sink() {
+    struct RecordOutputs(Arc<Mutex<Vec<(bool, bool)>>>);
+    impl SerialSink for RecordOutputs {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn set_control_outputs(&mut self, dtr: bool, rts: bool) {
+            self.0.lock().unwrap().push((dtr, rts));
+        }
+    }
+    let mut bus = empty_bus();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    bus.paula.serial = Box::new(RecordOutputs(Arc::clone(&calls)));
+    let addr = |reg: usize| (reg as u64) << 8;
+
+    // A DDR flip alone (PA7/PA6 still inputs, released = deasserted) must
+    // also push, since it can change which side is driving the pins.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0x00);
+    assert_eq!(*calls.lock().unwrap().last().unwrap(), (false, false));
+
+    // Switch /DTR and /RTS to outputs and drive both low = asserted.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0xC0);
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x00);
+    assert_eq!(*calls.lock().unwrap().last().unwrap(), (true, true));
+
+    // Raise /DTR, keep /RTS asserted.
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x80);
+    assert_eq!(*calls.lock().unwrap().last().unwrap(), (false, true));
+}
+
+#[test]
+fn serper_write_pushes_baud_to_serial_sink() {
+    struct RecordBaud(Arc<Mutex<Option<u32>>>);
+    impl SerialSink for RecordBaud {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn baud_changed(&mut self, bps: u32) {
+            *self.0.lock().unwrap() = Some(bps);
+        }
+    }
+    let mut bus = empty_bus();
+    let baud = Arc::new(Mutex::new(None));
+    bus.paula.serial = Box::new(RecordBaud(Arc::clone(&baud)));
+
+    // Divisor 372 is the SERPER value for ~9600 bps.
+    let _ = bus.write_custom_word_from(0x032, 372, BeamWriteSource::Cpu);
+    assert_eq!(*baud.lock().unwrap(), Some(PAULA_CLOCK_HZ / 373));
+}
+
+#[test]
 fn serial_device_drives_cia_b_handshake_inputs() {
     use crate::serial::{SerialControlLines, CIAB_PA_CD, CIAB_PA_CTS, CIAB_PA_DSR};
 

@@ -4347,6 +4347,14 @@ impl Bus {
         // timeline-jump boundary after it moves, so it cannot retain data
         // from the abandoned future.
         self.paula.serial.reset_after_timeline_jump();
+        // The sink just moved onto this deserialized CIA-B's PRA/DDRA, whose
+        // /DTR and /RTS levels it never saw a write for (the swap bypasses
+        // `cia_b_write`). Push them once so a resumed machine's DTR/RTS reach
+        // the sink exactly as if the guest had just written them.
+        let pra = self.cia_b.port_a_pins();
+        self.paula
+            .serial
+            .set_control_outputs(pra & 0x80 == 0, pra & 0x40 == 0);
         std::mem::swap(
             &mut self.paula.serial_observer,
             &mut live.paula.serial_observer,
@@ -6669,6 +6677,12 @@ impl Bus {
         if reg == REG_PRB || reg == REG_DDRB {
             let prb = self.cia_b.port_b_pins();
             self.floppy.write_prb(prb);
+        }
+        if reg == REG_PRA || reg == REG_DDRA {
+            let pra = self.cia_b.port_a_pins();
+            self.paula
+                .serial
+                .set_control_outputs(pra & 0x80 == 0, pra & 0x40 == 0);
         }
         eff
     }

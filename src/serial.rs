@@ -213,6 +213,26 @@ pub trait SerialSink: Send {
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
 
+    /// Guest-driven RS-232 outputs, as logical assertions (true = asserted).
+    /// The bus decodes them from CIA-B PA7 (/DTR) and PA6 (/RTS) wire
+    /// levels, which are active-low; the decode happens there, once.
+    fn set_control_outputs(&mut self, _dtr: bool, _rts: bool) {}
+
+    /// The guest reprogrammed SERPER; `bps` is the resulting line rate.
+    /// Pacing stays Paula's job -- this only informs a sink whose protocol
+    /// text quotes the rate (a modem's CONNECT message).
+    fn baud_changed(&mut self, _bps: u32) {}
+
+    /// Once-per-span heartbeat: Paula calls this on every `tick_serial`,
+    /// stamped with that span's end color clock, whether or not any byte
+    /// moved in either direction. Most sinks have nothing to do with it and
+    /// keep the default. It exists for a sink whose protocol runs its own
+    /// timers off elapsed emulated time rather than guest traffic -- an
+    /// escape-sequence trailing guard that must complete even if the guest
+    /// falls silent right after it, or a ring cadence with nothing on the
+    /// wire to pace it.
+    fn poll(&mut self, _at_cck: u64) {}
+
     /// Discard host-side state tied to an emulated timeline that has just
     /// been abandoned by save-state load or rewind.
     ///

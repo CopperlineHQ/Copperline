@@ -347,7 +347,7 @@ impl Bus {
                 irq & self.paula.intena != 0
             }
             0x032 => {
-                self.paula.serper = val;
+                self.paula.write_serper(val);
                 false
             }
             0x034 => {

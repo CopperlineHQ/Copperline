@@ -628,6 +628,10 @@ pub enum LauncherField {
     /// Serial section's Listen box.
     #[cfg(feature = "midi")]
     SerialListen,
+    /// `AT*T1`/`AT*T0`'s default at power-on, edited in the Serial
+    /// section's Telnet row (modem mode only).
+    #[cfg(feature = "midi")]
+    SerialTelnet,
     #[cfg(feature = "midi")]
     MidiOut,
     Mt32ControlRom,
@@ -1136,6 +1140,15 @@ const SERIAL_ROWS_TCP_LISTEN: [Row; 2] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::SerialListen, "  Listen", RowKind::Text),
 ];
+// The modem's own rows: where it listens for incoming calls (RING/ATA/S0
+// answer them) and whether telnet NVT translation (AT*T1) is on by default.
+// The phonebook is config-file-only -- no row for it.
+#[cfg(feature = "midi")]
+const SERIAL_ROWS_MODEM: [Row; 3] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::SerialListen, "  Listen", RowKind::Text),
+    row(F::SerialTelnet, "  Telnet", Cycle),
+];
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
@@ -1430,6 +1443,7 @@ fn serial_rows(
             return match serial_mode {
                 SerialMode::TcpConnect => &SERIAL_ROWS_TCP_CONNECT,
                 SerialMode::Tcp => &SERIAL_ROWS_TCP_LISTEN,
+                SerialMode::Modem => &SERIAL_ROWS_MODEM,
                 _ => &SERIAL_ROWS_BASE,
             };
         }
@@ -1911,13 +1925,14 @@ const LIDE_BOARDS: [Option<LidePersonality>; 4] = [
     Some(LidePersonality::AtBus2008),
 ];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 6] = [
+const SERIAL_MODES: [SerialMode; 7] = [
     SerialMode::Off,
     SerialMode::Stdout,
     SerialMode::Midi,
     SerialMode::Tcp,
     SerialMode::TcpConnect,
     SerialMode::Pty,
+    SerialMode::Modem,
 ];
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
@@ -2154,6 +2169,9 @@ pub struct MachineSetup {
     /// box that mode shows. `None` there has nothing to dial, and the run
     /// says so rather than the launcher refusing the mode.
     serial_connect: Option<String>,
+    /// `AT*T1`/`AT*T0` default at power-on for `mode = "modem"`, toggled by
+    /// the Telnet row that mode shows.
+    serial_telnet: bool,
     /// The Centronics parallel-port device (None/Printer/Sampler), edited in the
     /// I/O Ports tab's Parallel section.
     parallel_device: crate::config::ParallelDevice,
@@ -2483,6 +2501,7 @@ impl MachineSetup {
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
             serial_connect: cfg.serial.connect.clone(),
+            serial_telnet: cfg.serial.telnet.unwrap_or(false),
             parallel_device: cfg.parallel.device,
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
@@ -3077,6 +3096,15 @@ impl MachineSetup {
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
         raw.serial.connect = self.serial_connect.clone();
+        // Compared against the resolved value, not the raw tri-state: the
+        // toggle is a plain on/off, so "unset" and "explicitly off" look
+        // the same to it and must not produce a spurious `telnet = false`
+        // write -- which would then fail validation on any non-modem mode.
+        // Flipping it away from a base that did say something still writes
+        // an explicit value, which is how an explicit off gets recorded.
+        if self.serial_telnet != base.serial.telnet.unwrap_or(false) {
+            raw.serial.telnet = Some(self.serial_telnet);
+        }
         // Parallel port. Carry each peripheral's settings whenever they are set
         // so a Save round-trips them even while another device is temporarily
         // selected. The sampler options do not imply the sampler, so they are
@@ -3660,6 +3688,8 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace,
             F::PerfOverlay => self.perf_overlay,
             F::Mt32Panel => self.mt32_panel,
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => self.serial_telnet,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             F::Toccata => self.toccata,
@@ -4173,6 +4203,8 @@ impl MachineSetup {
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Mt32Panel => enabled_label(self.mt32_panel),
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => enabled_label(self.serial_telnet),
             F::Rtc => enabled_label(self.rtc),
             F::Identify => enabled_label(self.identify),
             F::Fpu => enabled_label(self.fpu),
@@ -4273,6 +4305,7 @@ impl MachineSetup {
                 SerialMode::Tcp => "TCP".to_string(),
                 SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
+                SerialMode::Modem => "Modem".to_string(),
             },
             // The dial-out address has no default -- there is no host to
             // guess -- so an empty box says what it wants instead.
@@ -4627,6 +4660,8 @@ impl MachineSetup {
             }
             // Two states cycle the same either way round.
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => self.serial_telnet = !self.serial_telnet,
             F::Rtc => self.rtc = !self.rtc,
             F::Identify => self.identify = !self.identify,
             F::Fpu => self.fpu = !self.fpu,
@@ -8345,6 +8380,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_CSYNTH,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
@@ -8352,6 +8388,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_MT32,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
     let serial: &[&[Row]] = &[
@@ -8359,12 +8396,14 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_CSYNTH,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];

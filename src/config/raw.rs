@@ -569,6 +569,21 @@ pub(crate) struct RawSerial {
     /// Remote host:port to dial; tcp-connect mode only, and required there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) connect: Option<String>,
+    /// AT*T1/AT*T0 default at power-on: telnet NVT translation (the
+    /// WiModem extra) on by default. Modem mode only. Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) telnet: Option<bool>,
+    /// `[serial.phonebook]`: dialable numbers a guest's ATD can look up,
+    /// number -> "host:port" (or a bare host, which dials the modem's
+    /// default port). Modem mode only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) phonebook: Option<std::collections::BTreeMap<String, String>>,
+    /// A scripted session file to replay instead of dialing out over TCP
+    /// (`docs/guide/modem.md`'s "Scripted sessions" section has the file
+    /// format). Modem mode only; incompatible with `listen` (the scripted
+    /// transport has no inbound side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.

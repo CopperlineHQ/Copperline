@@ -2290,6 +2290,90 @@ fn serial_address_rows_appear_only_in_their_tcp_mode() {
 
 #[cfg(feature = "midi")]
 #[test]
+fn modem_mode_rows_are_listen_and_telnet_only() {
+    let has = |field| {
+        rows(
+            LauncherTab::IoPorts,
+            ParallelDevice::None,
+            SerialMode::Modem,
+            false,
+            false,
+        )
+        .iter()
+        .any(|r| r.field == field)
+    };
+    // The modem shares the Listen box with plain TCP-listen mode (where
+    // incoming calls come from) and adds its own Telnet default toggle;
+    // it has nothing to dial itself (that's ATD's job), so no Connect box.
+    assert!(has(LauncherField::SerialListen));
+    assert!(has(LauncherField::SerialTelnet));
+    assert!(!has(LauncherField::SerialConnect));
+    // And the toggle only shows for the modem: the other TCP mode and
+    // the address-free modes have no AT*T default to edit.
+    for mode in [
+        SerialMode::Off,
+        SerialMode::Stdout,
+        SerialMode::Midi,
+        SerialMode::Tcp,
+        SerialMode::TcpConnect,
+    ] {
+        assert!(!rows(
+            LauncherTab::IoPorts,
+            ParallelDevice::None,
+            mode,
+            false,
+            false
+        )
+        .iter()
+        .any(|r| r.field == LauncherField::SerialTelnet));
+    }
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn serial_telnet_toggle_round_trips_through_raw() {
+    let mut s = MachineSetup {
+        serial_mode: SerialMode::Modem,
+        ..Default::default()
+    };
+    assert!(!s.toggle_value(LauncherField::SerialTelnet));
+    assert_eq!(s.value_label(LauncherField::SerialTelnet), "Disabled");
+    s.cycle(LauncherField::SerialTelnet, true);
+    assert!(s.toggle_value(LauncherField::SerialTelnet));
+    assert_eq!(s.value_label(LauncherField::SerialTelnet), "Enabled");
+
+    let raw = s.to_raw();
+    assert_eq!(raw.serial.mode.as_deref(), Some("modem"));
+    assert_eq!(raw.serial.telnet, Some(true));
+
+    let reloaded = MachineSetup::from_raw(&raw).expect("valid raw");
+    assert!(reloaded.toggle_value(LauncherField::SerialTelnet));
+
+    // Cycling back to the default must not leave a redundant override in
+    // a saved config (same contract as every other bool row, e.g. the
+    // MT-32 panel above).
+    s.cycle(LauncherField::SerialTelnet, false);
+    assert_eq!(s.to_raw().serial.telnet, None);
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn modem_listen_round_trips_through_raw() {
+    // Incoming calls bind the same [serial] listen key TCP-listen mode
+    // uses; the modem mode must carry it just as faithfully.
+    let mut raw = RawConfig::default();
+    raw.serial.mode = Some("modem".into());
+    raw.serial.listen = Some("0.0.0.0:2323".into());
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.serial_mode, SerialMode::Modem);
+    assert_eq!(setup.serial_listen.as_deref(), Some("0.0.0.0:2323"));
+    let back = setup.to_raw();
+    assert_eq!(back.serial.mode.as_deref(), Some("modem"));
+    assert_eq!(back.serial.listen.as_deref(), Some("0.0.0.0:2323"));
+}
+
+#[cfg(feature = "midi")]
+#[test]
 fn typing_a_serial_connect_address_sets_it_and_round_trips() {
     let mut state = LauncherState::new(MachineSetup::default());
     state.setup.serial_mode = SerialMode::TcpConnect;

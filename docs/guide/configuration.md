@@ -1201,11 +1201,13 @@ button.
 
 ```toml
 [serial]
-mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
+mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, or modem
 # midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
-# listen = "127.0.0.1:1234"  # tcp mode: bind address
+# listen = "127.0.0.1:1234"  # tcp mode: bind address; modem mode: incoming-call address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
+# telnet = false           # modem mode: AT*T1 telnet NVT translation, on by default
+# session = "bbs-demo.session"  # modem mode: replay a scripted session instead of TCP
 ```
 
 The Amiga serial port doubles as the MIDI port. `mode` selects where
@@ -1239,6 +1241,55 @@ Paula's serial in/out is connected:
 - `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
+- `modem` -- a Hayes/AT-command modem personality (see
+  [the modem chapter](modem.md) for a BBS quick-start and the full command
+  set): the guest dials out with `ATD host:port` rather than the port being
+  wired to a peer at startup, so (unlike `tcp-connect`) there is no `connect`
+  address in the config; carrier presence drives /CD. `listen` here means
+  something different from `tcp`
+  mode's bind address: it is the address the modem answers incoming calls
+  on, and an incoming connection produces `RING` on the guest's serial port
+  rather than being bridged straight through -- the guest (or its S0
+  register, if auto-answer is configured) has to `ATA` to pick up, exactly
+  as a real modem waits for the terminal program to answer. `telnet` turns
+  on `AT*T1`, the WiModem-style telnet NVT translation layer, by default at
+  power-on (off by default; the guest can still toggle it with `AT*T1`/
+  `AT*T0` at runtime) -- turn it on when the far end is a real telnet server
+  (a BBS) rather than a raw TCP byte service, so IAC option negotiation and
+  CR handling are answered instead of leaking into the data stream.
+  `[serial.phonebook]` maps a dialable number to a `host:port` (or a bare
+  host, which dials the modem's default port), so an `ATD<number>` from a
+  terminal program's dialing directory resolves to a real address without
+  the guest ever typing one:
+  ```toml
+  [serial.phonebook]
+  "5551234" = "bbs.example.com:23"
+  "5555678" = "bbs2.example.com"
+  ```
+  The phonebook is config-file-only; there is no launcher row for it.
+
+  The command set is the Hayes base plus the WiModem232 `AT*` extensions
+  most Amiga BBS/terminal guides are written against: `AT*B<baud>` (stored
+  for CONNECT text only -- pacing always follows the guest's own SERPER
+  rate), `AT*T0`/`AT*T1` (this session's telnet translation), `AT*L<port>`/
+  `AT*P<port>` (listen/default outgoing port), `AT*N`/`AT*NS<n>,<pass>`
+  (a stubbed network scan/join, so a guide's Wi-Fi setup steps do not error
+  out), and `AT*REBOOT` (resets the state machine, like `ATZ`). `S9`
+  (tenths of a second) is the WiModem connect-delay register: CONNECT
+  fires immediately but remote output is withheld for `S9` of *host* time
+  first, the pause older terminal software expects before BBS output
+  starts. `AT&W` persists the active settings to a sidecar file beside the
+  machine's other batteries; `ATZ` reloads it (an explicit `[serial]
+  telnet` always wins over what was stored); `AT&F` is a hardcoded factory
+  reset that ignores both.
+
+  `session = "path"` replays a scripted dial-out session from a file
+  instead of dialing out over TCP -- the determinism story for a
+  modem-using headless run or test case, since live network traffic (like
+  MIDI, like a camera) is otherwise outside Copperline's replay
+  guarantees. See [the modem chapter](modem.md#scripted-sessions) for the
+  file format; `session` cannot be combined with `listen` (the scripted
+  transport plays back outbound calls only, with no inbound side).
 
 Every mode also drives the port's RS-232 handshake inputs, which the guest
 reads on CIA-B port A (`/DSR`, `/CTS`, `/CD`) and `serial.device` reports
@@ -1258,15 +1309,20 @@ guest's own `/DTR` and `/RTS` outputs are the CIA's pins as written.
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
-`mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial Port page) sets all
+`mode = "tcp-connect"`), `--serial-session FILE` replays a scripted modem
+session (and implies `mode = "modem"`), and `--midi-out NAME`/
+`--midi-in NAME` imply `mode = "midi"`. The launcher's **I/O Ports** tab
+(Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows
 the `127.0.0.1:1234` default until something else is typed). Either box
 takes a `host:port`, with an IPv6 literal in brackets
 (`[::1]:1337`); clearing it unsets the key. The in-window
-**MIDI In / MIDI Out** menu items select the MIDI endpoints.
+**MIDI In / MIDI Out** menu items select the MIDI endpoints. Under `modem`,
+the page shows the same **Listen** box (the incoming-call address above)
+plus a **Telnet** toggle for `telnet`; the phonebook has no row and stays
+config-file-only.
 
 The browser build has its own serial transport (the page bridges the port
 to a WebSocket); see [the browser chapter](browser.md).

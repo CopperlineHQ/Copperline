@@ -726,6 +726,9 @@ fn main() -> Result<()> {
     // configuration.
     #[cfg(feature = "coppersynth")]
     copperline::csynth::set_persistence(!cli.factory);
+    // The modem's stored profile (AT&W/ATZ) is the frontend's to ask for
+    // too, same promise as the synth's battery-backed memory above.
+    copperline::modem::profile::set_persistence(!cli.factory);
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());

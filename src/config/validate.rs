@@ -440,7 +440,78 @@ impl TryFrom<RawConfig> for Config {
                 .unwrap_or(defaults.serial.coppersynth_panel),
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
+            telnet: raw.serial.telnet.or(defaults.serial.telnet),
+            phonebook: raw
+                .serial
+                .phonebook
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            session: raw.serial.session.as_ref().map(PathBuf::from),
         };
+        if serial.mode == SerialMode::Modem && raw.serial.connect.is_some() {
+            bail!(
+                "[serial] connect is for mode = \"tcp-connect\"; in modem mode the guest \
+                 dials with ATD<host:port>"
+            );
+        }
+        if raw.serial.telnet.is_some() && serial.mode != SerialMode::Modem {
+            bail!(
+                "[serial] telnet is for mode = \"modem\" (it sets AT*T1's default at \
+                 power-on); got mode = {:?}",
+                serial.mode.label()
+            );
+        }
+        if raw.serial.phonebook.is_some() && serial.mode != SerialMode::Modem {
+            bail!(
+                "[serial] phonebook is for mode = \"modem\" (a guest's ATD looks numbers up \
+                 there); got mode = {:?}",
+                serial.mode.label()
+            );
+        }
+        if raw.serial.session.is_some() && serial.mode != SerialMode::Modem {
+            bail!(
+                "[serial] session is for mode = \"modem\" (it replays a canned dial-out \
+                 session instead of dialing out over TCP); got mode = {:?}",
+                serial.mode.label()
+            );
+        }
+        if serial.session.is_some() && raw.serial.listen.is_some() {
+            bail!(
+                "[serial] session and [serial] listen cannot be combined: the scripted \
+                 transport has no inbound-call support (dial-out replay only)"
+            );
+        }
+        if let Some(phonebook) = raw.serial.phonebook.as_ref() {
+            for (number, target) in phonebook {
+                if number.is_empty()
+                    || !number.chars().all(|c| {
+                        c.is_ascii_digit() || matches!(c, '-' | ' ' | '(' | ')' | '#' | '*')
+                    })
+                {
+                    errors.push(anyhow!(
+                        "[serial.phonebook] {number:?} is not a valid phone number: only \
+                         digits, the DTMF symbols # and *, and the separators a dialer sends \
+                         (-, space, parentheses) are allowed"
+                    ));
+                }
+                let trimmed = target.trim();
+                if trimmed.is_empty() {
+                    errors.push(anyhow!(
+                        "[serial.phonebook] {number:?} has an empty value; expected \
+                         \"host:port\" or a bare host (the modem's default port is appended)"
+                    ));
+                } else if let Some((_, port)) = trimmed.rsplit_once(':') {
+                    if port.parse::<u16>().is_err() {
+                        errors.push(anyhow!(
+                            "[serial.phonebook] {number:?} = {target:?}: {port:?} is not a \
+                             valid port (0-65535)"
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(mode) = serial.coppersynth_mt32_mode.as_deref() {
             let m = mode.trim();
             if !(m.eq_ignore_ascii_case("auto")
@@ -1325,9 +1396,10 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "tcp" => Ok(SerialMode::Tcp),
         "tcp-connect" => Ok(SerialMode::TcpConnect),
         "pty" => Ok(SerialMode::Pty),
+        "modem" => Ok(SerialMode::Modem),
         _ => Err(anyhow!(
             "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", \
-             \"tcp-connect\", or \"pty\"",
+             \"tcp-connect\", \"pty\", or \"modem\"",
             s
         )),
     }

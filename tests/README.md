@@ -70,6 +70,29 @@ protocol contract itself (chunked PIO, interrupt-reason register,
 error/sense mapping, mixed disk+ATAPI buses) is covered without assets by
 the unit tests in `src/ata.rs`.
 
+### Modem end to end
+
+`tests/modem_e2e.rs` closes the one gap `src/modem/`'s exhaustive unit
+suite (a fake transport) cannot: the real hardware path between the AT
+state machine and a guest -- Paula's SERPER-paced UART, the CIA-B
+control-line overlay, and a real `serial.device` actually driving them. It
+boots from a `[[filesys]]` mount holding the committed guest probe
+(`guest/modem-test/modemtest`, built like `guest/hostfs-test`'s), lets a
+real Startup-Sequence run it, and asserts the transcript it writes back:
+`ATZ` answered `OK`, `ATDT` dialing a one-shot local TCP peer this test
+spins up on an ephemeral port, `CONNECT`, the peer's greeting arriving at
+the guest, and the guest's own line arriving at the peer.
+
+Unlike the hostfs tests above, this one cannot use the bundled AROS ROM:
+`serial.device` is not ROM-resident on real AmigaOS either (Kickstart
+2.0+ loads it from `DEVS:serial.device` on demand via `LoadSeg` the first
+time something opens it), and the bundled AROS build carries no
+`serial.device` at all, ROM-resident or otherwise. It needs a local
+Kickstart ROM (`KICK31.ROM`, anywhere in the asset directory or the repo
+root) and a real `Devs/serial.device` driver file at
+`test-assets/modem/Devs/serial.device` (copy one out of any Workbench
+2.0+ install), and skips cleanly without either.
+
 ### WHDLoad boot
 
 `tests/whdload_boot.rs` boots the committed, project-owned

@@ -87,6 +87,7 @@ pub mod memory;
 pub mod mhi;
 #[cfg(feature = "midi")]
 pub mod midi;
+pub mod modem;
 #[cfg(feature = "mt32")]
 pub mod mt32;
 pub mod net;
