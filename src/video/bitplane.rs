@@ -3888,6 +3888,9 @@ pub struct RenderInput {
     /// its input. Applied to colour resolution only, never collisions.
     debug_plane_mask: u8,
     debug_sprite_mask: u8,
+    /// CD32 FMV signal behind Denise/Lisa's genlock-transparent pixels.
+    #[cfg(feature = "cd32-fmv")]
+    fmv: Option<crate::cd32_fmv::FmvPresentation>,
 }
 
 /// Exact, compact ownership of every frame-snapshot field that can affect
@@ -3920,6 +3923,8 @@ struct RenderContentPrefix {
     programmable_horizontal_blank: Option<(u32, u32)>,
     debug_plane_mask: u8,
     debug_sprite_mask: u8,
+    #[cfg(feature = "cd32-fmv")]
+    fmv: Option<crate::cd32_fmv::FmvPresentation>,
 }
 
 impl RenderContentPrefix {
@@ -3943,6 +3948,8 @@ impl RenderContentPrefix {
             programmable_horizontal_blank: input.programmable_horizontal_blank,
             debug_plane_mask: input.debug_plane_mask,
             debug_sprite_mask: input.debug_sprite_mask,
+            #[cfg(feature = "cd32-fmv")]
+            fmv: input.fmv.clone(),
         }
     }
 
@@ -3974,6 +3981,8 @@ impl RenderContentPrefix {
         different!(programmable_horizontal_blank);
         different!(debug_plane_mask);
         different!(debug_sprite_mask);
+        #[cfg(feature = "cd32-fmv")]
+        different!(fmv);
         None
     }
 }
@@ -4138,6 +4147,8 @@ impl RenderInput {
             emulated_frames: bus.emulated_frames(),
             debug_plane_mask: bus.ui_layer_masks().planes,
             debug_sprite_mask: bus.ui_layer_masks().sprites,
+            #[cfg(feature = "cd32-fmv")]
+            fmv: bus.fmv_presentation(),
         }
     }
 
@@ -4184,6 +4195,10 @@ impl RenderInput {
         self.emulated_frames = bus.emulated_frames();
         self.debug_plane_mask = bus.ui_layer_masks().planes;
         self.debug_sprite_mask = bus.ui_layer_masks().sprites;
+        #[cfg(feature = "cd32-fmv")]
+        {
+            self.fmv = bus.fmv_presentation();
+        }
     }
 
     /// Override the layer-isolation masks on an existing snapshot (tests
@@ -5452,6 +5467,10 @@ fn render_from_input_with_scratch(
         visible_line0,
         rows,
     );
+    #[cfg(feature = "cd32-fmv")]
+    if let Some(fmv) = input.fmv.as_ref().filter(|fmv| fmv.enabled) {
+        compose_cd32_fmv(fmv, fb, rows, canvas_scale);
+    }
     apply_programmable_blanking(
         input.programmable_vertical_blank,
         input.programmable_horizontal_blank,
@@ -5490,6 +5509,61 @@ fn render_from_input_with_scratch(
         timing: render_timing,
         clxdat,
         chip_ram_reads,
+    }
+}
+
+/// Key the FMV module's signal into the native output. The production module
+/// software does not program Denise/Lisa's digital genlock controls; the
+/// cartridge instead keys low-level RGB from the analogue output path. Keep
+/// explicit chipset transparency too, for software that does use those bits.
+/// MPEG-1 VCD video is 352 pixels wide. The module's video DAC stretches that
+/// active line across the native capture aperture; mapping it to a fixed 704
+/// pixels leaves the remaining raster visible as a one-sided strip whenever
+/// the Amiga key signal is not symmetric. Its field-height rows already match
+/// PAL's 288-line MPEG frame one-for-one.
+#[cfg(feature = "cd32-fmv")]
+fn compose_cd32_fmv(
+    presentation: &crate::cd32_fmv::FmvPresentation,
+    fb: &mut [u32],
+    rows: usize,
+    canvas_scale: usize,
+) {
+    let out_w = FB_WIDTH * canvas_scale;
+    let border = {
+        let r = ((presentation.border >> 16) & 0xFF) as u8;
+        let g = ((presentation.border >> 8) & 0xFF) as u8;
+        let b = (presentation.border & 0xFF) as u8;
+        u32::from_le_bytes([r, g, b, 0xFF])
+    };
+    let frame = (!presentation.blank)
+        .then_some(presentation.frame.as_ref())
+        .flatten();
+    let (target_w, target_h, x0, y0) = frame.map_or((0, 0, 0, 0), |frame| {
+        let width = out_w;
+        let height = (frame.height as usize).min(rows);
+        (width, height, (out_w - width) / 2, (rows - height) / 2)
+    });
+    for y in 0..rows {
+        for x in 0..out_w {
+            let pixel = &mut fb[y * out_w + x];
+            let [r, g, b, alpha] = pixel.to_le_bytes();
+            let dark_key = r.max(g).max(b) < 0x20;
+            if alpha != 0 && !dark_key {
+                continue;
+            }
+            *pixel = if let Some(frame) = frame {
+                if x >= x0 && x < x0 + target_w && y >= y0 && y < y0 + target_h {
+                    let sx =
+                        ((x - x0) * frame.width as usize / target_w).min(frame.width as usize - 1);
+                    let sy = (y - y0).min(frame.height as usize - 1);
+                    frame.pixels[sy * frame.width as usize + sx]
+                } else {
+                    border
+                }
+            } else {
+                border
+            };
+        }
     }
 }
 

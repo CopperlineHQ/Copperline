@@ -641,15 +641,14 @@ fn cue_lba(entries: &[CueEntry], track: u8, index: u8) -> Option<i32> {
 fn decode_mode(mode: u8, sector_bytes: u64, path: &Path) -> Result<TrackKind> {
     match (mode, sector_bytes) {
         (0x00, n) if n == DATA_SECTOR_BYTES as u64 => Ok(TrackKind::Mode1_2048),
+        (0x02 | 0x03, n) if n == super::MODE2_SECTOR_BYTES as u64 => Ok(TrackKind::Mode2_2336),
         (0x05, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Mode1_2352),
+        (0x06, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Mode2_2352),
         (0x07, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Audio),
         (0x0F..=0x11, 2448) => bail!(
             "{}: NRG sectors with stored subchannel data are not supported",
             path.display()
         ),
-        (0x02 | 0x03 | 0x06 | 0x11, _) => {
-            bail!("{}: Mode 2 NRG tracks are not supported", path.display())
-        }
         _ => bail!(
             "{}: unsupported NRG track mode 0x{mode:02X} with {sector_bytes}-byte sectors",
             path.display()
@@ -660,9 +659,10 @@ fn decode_mode(mode: u8, sector_bytes: u64, path: &Path) -> Result<TrackKind> {
 fn tao_mode(mode: u8, path: &Path) -> Result<(TrackKind, u64)> {
     match mode {
         0x00 => Ok((TrackKind::Mode1_2048, DATA_SECTOR_BYTES as u64)),
+        0x02 | 0x03 => Ok((TrackKind::Mode2_2336, super::MODE2_SECTOR_BYTES as u64)),
         0x05 => Ok((TrackKind::Mode1_2352, RAW_SECTOR_BYTES as u64)),
+        0x06 => Ok((TrackKind::Mode2_2352, RAW_SECTOR_BYTES as u64)),
         0x07 => Ok((TrackKind::Audio, RAW_SECTOR_BYTES as u64)),
-        0x02 | 0x03 | 0x06 => bail!("{}: Mode 2 NRG tracks are not supported", path.display()),
         _ => bail!(
             "{}: unsupported NRG track mode 0x{mode:02X}",
             path.display()

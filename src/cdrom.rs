@@ -3,7 +3,7 @@
 //! CD image backend: cue/bin, NRG, and CHD parsing and sector access.
 //!
 //! Supports single-file and multi-file cue layouts with MODE1/2048,
-//! MODE1/2352, and AUDIO tracks, including INDEX 00 pregaps stored in
+//! MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks, including INDEX 00 pregaps stored in
 //! the files and PREGAP/POSTGAP gaps that are not (they read as zero
 //! fill, like a CHD's unstored gaps). A `FILE` is `BINARY` (raw sector
 //! bytes) or, for audio tracks, `WAVE` or `MP3` -- the packaged form a
@@ -33,6 +33,7 @@ pub use audio::FileFormat;
 
 pub const SECTORS_PER_SECOND: u32 = 75;
 pub const DATA_SECTOR_BYTES: usize = 2048;
+pub const MODE2_SECTOR_BYTES: usize = 2336;
 pub const RAW_SECTOR_BYTES: usize = 2352;
 /// Standard lead-in offset: LBA 0 is MSF 00:02:00 on a real disc.
 pub const LEADIN_SECTORS: u32 = 150;
@@ -45,13 +46,18 @@ pub enum TrackKind {
     Mode1_2352,
     /// 2352-byte CD-DA sectors.
     Audio,
+    /// 2336-byte Mode 2 sectors, stored without sync and address header.
+    Mode2_2336,
+    /// Complete 2352-byte raw Mode 2 sectors.
+    Mode2_2352,
 }
 
 impl TrackKind {
     pub fn sector_bytes(self) -> usize {
         match self {
             TrackKind::Mode1_2048 => DATA_SECTOR_BYTES,
-            TrackKind::Mode1_2352 | TrackKind::Audio => RAW_SECTOR_BYTES,
+            TrackKind::Mode2_2336 => MODE2_SECTOR_BYTES,
+            TrackKind::Mode1_2352 | TrackKind::Mode2_2352 | TrackKind::Audio => RAW_SECTOR_BYTES,
         }
     }
 
@@ -397,10 +403,12 @@ impl CdImage {
                     let kind = match words.next() {
                         Some("MODE1/2048") => TrackKind::Mode1_2048,
                         Some("MODE1/2352") => TrackKind::Mode1_2352,
+                        Some("MODE2/2336") => TrackKind::Mode2_2336,
+                        Some("MODE2/2352") => TrackKind::Mode2_2352,
                         Some("AUDIO") => TrackKind::Audio,
                         other => bail!(
                             "{}: track {} type {:?} is not supported (MODE1/2048, \
-                             MODE1/2352, AUDIO)",
+                             MODE1/2352, MODE2/2336, MODE2/2352, AUDIO)",
                             cue_path.display(),
                             number,
                             other
@@ -677,6 +685,21 @@ impl CdImage {
                 buf.copy_from_slice(&raw[16..16 + DATA_SECTOR_BYTES]);
                 Ok(())
             }
+            TrackKind::Mode2_2336 => {
+                let mut mode2 = [0u8; MODE2_SECTOR_BYTES];
+                self.read_payload(sector, &mut mode2)?;
+                // CD-ROM XA repeats an eight-byte subheader before the
+                // Form 1/2 user-data field. Cooked callers always request
+                // 2048 bytes; sustained Form 2 streams use read_raw_sector.
+                buf.copy_from_slice(&mode2[8..8 + DATA_SECTOR_BYTES]);
+                Ok(())
+            }
+            TrackKind::Mode2_2352 => {
+                let mut raw = [0u8; RAW_SECTOR_BYTES];
+                self.read_payload(sector, &mut raw)?;
+                buf.copy_from_slice(&raw[24..24 + DATA_SECTOR_BYTES]);
+                Ok(())
+            }
             TrackKind::Audio => bail!("sector {sector} is in an audio track"),
         }
     }
@@ -705,11 +728,19 @@ impl CdImage {
             .sector_kind(sector)
             .with_context(|| format!("sector {sector} beyond end of disc"))?;
         match kind {
-            TrackKind::Mode1_2352 | TrackKind::Audio => self.read_payload(sector, buf),
+            TrackKind::Mode1_2352 | TrackKind::Mode2_2352 | TrackKind::Audio => {
+                self.read_payload(sector, buf)
+            }
             TrackKind::Mode1_2048 => {
                 let mut data = [0u8; DATA_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
                 synthesize_mode1_sector(sector, &data, buf);
+                Ok(())
+            }
+            TrackKind::Mode2_2336 => {
+                let mut data = [0u8; MODE2_SECTOR_BYTES];
+                self.read_payload(sector, &mut data)?;
+                synthesize_mode2_sector(sector, &data, buf);
                 Ok(())
             }
         }
@@ -868,6 +899,24 @@ fn synthesize_mode1_sector(
     mode1_ecc(&prefix[12..], 86, 24, 2, 86, &mut parity[..172]);
     let (prefix, parity) = raw.split_at_mut(MODE1_ECC_Q_OFFSET);
     mode1_ecc(&prefix[12..], 52, 43, 86, 88, &mut parity[..104]);
+}
+
+/// Add the sync/address header omitted by a MODE2/2336 image. The stored
+/// bytes already contain the duplicated XA subheader, user data, EDC and
+/// (for Form 1) ECC, so no payload bytes are regenerated here.
+fn synthesize_mode2_sector(
+    sector: u32,
+    data: &[u8; MODE2_SECTOR_BYTES],
+    raw: &mut [u8; RAW_SECTOR_BYTES],
+) {
+    raw.fill(0);
+    raw[1..11].fill(0xFF);
+    let msf = sector + LEADIN_SECTORS;
+    raw[12] = to_bcd((msf / (60 * SECTORS_PER_SECOND)) as u8);
+    raw[13] = to_bcd(((msf / SECTORS_PER_SECOND) % 60) as u8);
+    raw[14] = to_bcd((msf % SECTORS_PER_SECOND) as u8);
+    raw[15] = 2;
+    raw[16..].copy_from_slice(data);
 }
 
 /// Parse a cue MM:SS:FF time to a sector number.
@@ -1035,6 +1084,72 @@ mod tests {
         let mut data = [0u8; DATA_SECTOR_BYTES];
         image.read_data_sector(0, &mut data).unwrap();
         assert!(data.iter().all(|&b| b == 0x42));
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn mode2_2336_is_promoted_to_a_complete_raw_sector() {
+        let cue = temp_path("mode2-2336.cue");
+        let bin = temp_path("mode2-2336.bin");
+        let mut stored = [0u8; MODE2_SECTOR_BYTES];
+        stored[..8].copy_from_slice(&[1, 2, 0x20, 4, 1, 2, 0x20, 4]);
+        stored[8..8 + DATA_SECTOR_BYTES].fill(0x5A);
+        write_file(&bin, &stored);
+        std::fs::write(
+            &cue,
+            format!(
+                "FILE \"{}\" BINARY\n  TRACK 01 MODE2/2336\n    INDEX 01 00:00:00\n",
+                bin.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(image.tracks()[0].kind, TrackKind::Mode2_2336);
+        let mut data = [0u8; DATA_SECTOR_BYTES];
+        image.read_data_sector(0, &mut data).unwrap();
+        assert!(data.iter().all(|&byte| byte == 0x5A));
+
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        image.read_raw_sector(0, &mut raw).unwrap();
+        assert_eq!(
+            &raw[..16],
+            &[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 2, 0, 2]
+        );
+        assert_eq!(&raw[16..], &stored);
+
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn mode2_2352_exposes_xa_user_data_and_preserves_raw_frame() {
+        let cue = temp_path("mode2-2352.cue");
+        let bin = temp_path("mode2-2352.bin");
+        let mut raw = [0xEE; RAW_SECTOR_BYTES];
+        raw[15] = 2;
+        raw[16..24].copy_from_slice(&[1, 2, 0x20, 4, 1, 2, 0x20, 4]);
+        raw[24..24 + DATA_SECTOR_BYTES].fill(0xA6);
+        write_file(&bin, &raw);
+        std::fs::write(
+            &cue,
+            format!(
+                "FILE \"{}\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+                bin.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(image.tracks()[0].kind, TrackKind::Mode2_2352);
+        let mut data = [0u8; DATA_SECTOR_BYTES];
+        image.read_data_sector(0, &mut data).unwrap();
+        assert!(data.iter().all(|&byte| byte == 0xA6));
+        let mut actual = [0u8; RAW_SECTOR_BYTES];
+        image.read_raw_sector(0, &mut actual).unwrap();
+        assert_eq!(actual, raw);
+
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
     }

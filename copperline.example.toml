@@ -203,9 +203,15 @@ model = "68000"
 # main rom.
 # extended_rom = "cdtv-extended.rom"
 
+# CD32 Full Motion Video module ROM. A 256 KiB v40.30 image fits the physical
+# Commodore MPEG cartridge as the first Zorro II board in a CD32. Omit it for
+# a stock CD32 without the FMV module.
+# fmv_rom = "cd32fmv.rom"
+
 
 # CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,
-# and AUDIO tracks -- audio tracks may be BINARY, WAVE, or MP3 files, with
+# MODE2/2336, MODE2/2352, and AUDIO tracks -- audio tracks may be BINARY,
+# WAVE, or MP3 files, with
 # PREGAP/POSTGAP lines honoured; a bare .iso; or a chdman v5 .chd), mounted on
 # the machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
 # emulated seconds after power-on instead of at boot: some CDTV discs

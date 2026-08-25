@@ -24,6 +24,8 @@ pub mod audio;
 pub mod blockdev;
 pub mod bus;
 pub mod cache;
+#[cfg(feature = "cd32-fmv")]
+pub mod cd32_fmv;
 pub mod cdrom;
 pub mod cdtv;
 pub mod chipset;

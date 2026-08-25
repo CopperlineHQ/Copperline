@@ -419,8 +419,15 @@ fn track_kind(name: &str, number: u8) -> Result<TrackKind> {
     match name {
         "MODE1" | "MODE1/2048" => Ok(TrackKind::Mode1_2048),
         "MODE1_RAW" | "MODE1/2352" => Ok(TrackKind::Mode1_2352),
+        // CHD CD hunks always expose complete 2352-byte frames even when
+        // the source image used a cooked Mode 2 geometry.
+        "MODE2" | "MODE2_RAW" | "MODE2/2336" | "MODE2/2352" | "MODE2_FORM1" | "MODE2_FORM2"
+        | "MODE2_FORM_MIX" => Ok(TrackKind::Mode2_2352),
         "AUDIO" => Ok(TrackKind::Audio),
-        other => bail!("track {number} type {other:?} is not supported (MODE1, MODE1_RAW, AUDIO)"),
+        other => bail!(
+            "track {number} type {other:?} is not supported \
+             (MODE1, MODE1_RAW, MODE2, MODE2_RAW, AUDIO)"
+        ),
     }
 }
 
@@ -840,9 +847,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_track_type_is_rejected() {
+    fn mode2_raw_track_is_served_as_a_raw_sector() {
         let path = temp_path("mode2.chd");
-        let data = track_frames(&[frame(&[0u8; RAW_SECTOR_BYTES])]);
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        raw[15] = 2;
+        raw[24..24 + DATA_SECTOR_BYTES].fill(0x6B);
+        let data = track_frames(&[frame(&raw)]);
         write_chd_v5(
             &path,
             HUNK_BYTES,
@@ -853,8 +863,11 @@ mod tests {
                  PGSUB:NONE POSTGAP:0",
             )],
         );
-        let err = CdImage::load(&path).unwrap_err();
-        assert!(format!("{err:#}").contains("not supported"), "{err:#}");
+        let mut image = CdImage::load(&path).unwrap();
+        assert_eq!(image.tracks()[0].kind, TrackKind::Mode2_2352);
+        let mut actual = [0u8; RAW_SECTOR_BYTES];
+        image.read_raw_sector(0, &mut actual).unwrap();
+        assert_eq!(actual, raw);
         let _ = std::fs::remove_file(&path);
     }
 

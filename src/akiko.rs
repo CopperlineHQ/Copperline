@@ -422,6 +422,8 @@ pub struct Akiko {
     door: u8,
     toc_counter: i32,
     data_offset: i64,
+    /// Exclusive end sector supplied by the drive's READ DATA command.
+    data_end: i64,
     sector_counter: u32,
     current_sector: i64,
     seek_delay: u32,
@@ -488,6 +490,7 @@ impl Default for Akiko {
             door: 1,
             toc_counter: -1,
             data_offset: -1,
+            data_end: -1,
             sector_counter: 0,
             current_sector: -1,
             seek_delay: 0,
@@ -568,6 +571,7 @@ impl Akiko {
         self.audio_notify = 0;
         self.toc_counter = -1;
         self.data_offset = -1;
+        self.data_end = -1;
         self.media_notify = self.cd_initialized != 0;
         log::info!("akiko: disc ejected");
     }
@@ -1071,6 +1075,8 @@ impl Akiko {
         }
         self.result_buffer[1] = 0;
         self.stop_audio();
+        self.data_offset = -1;
+        self.data_end = -1;
         2
     }
 
@@ -1122,6 +1128,7 @@ impl Akiko {
         if self.command_buffer[7] & 0x80 != 0 {
             // Data read from seekpos to endpos.
             self.data_offset = seekpos;
+            self.data_end = endpos;
             let distance = (self.current_sector - seekpos).unsigned_abs();
             self.seek_delay = if distance < 100 {
                 1
@@ -1322,7 +1329,30 @@ impl Akiko {
         };
         let sector = self.data_offset + i64::from(self.sector_counter);
         self.current_sector = sector;
-        if sector < 0 || !sector_in_data_track(&self.toc, sector as u32) {
+        if self.data_end >= 0 && sector > self.data_end {
+            self.data_offset = -1;
+            self.data_end = -1;
+            return;
+        }
+
+        // The READ DATA end MSF is exclusive, but the CD32 driver keeps a
+        // continuous hardware read open across filesystem requests. When a
+        // request seeks backwards after that stream reaches lead-out, the
+        // driver needs one final position-bearing PBX frame to notice that
+        // the buffered stream is nowhere near the requested sector; it then
+        // sends STOP and starts a new read at the requested LSN. Re-present
+        // the final valid raw sector as that boundary probe. Its payload is
+        // never returned to the caller because its on-disc MSF mismatches the
+        // requested LSN, while retaining the real frame also preserves valid
+        // Mode 1/2 EDC and ECC bytes for the ROM's sector validator.
+        let at_end = self.data_end >= 0 && sector == self.data_end;
+        let read_sector = if at_end { sector - 1 } else { sector };
+        if read_sector < 0 || !sector_in_data_track(&self.toc, read_sector as u32) {
+            if at_end {
+                self.data_offset = -1;
+                self.data_end = -1;
+                self.intreq |= CDINT_PBX;
+            }
             return;
         }
         // Akiko's PBX path carries the complete raw Mode 1 frame. Preserve
@@ -1330,7 +1360,7 @@ impl Akiko {
         // promote a cooked ISO sector with its EDC and P/Q parity. CDXL
         // players use this raw-sector path for sustained video streaming.
         let mut raw = [0u8; RAW_SECTOR_BYTES];
-        if disc.read_raw_sector(sector as u32, &mut raw).is_err() {
+        if disc.read_raw_sector(read_sector as u32, &mut raw).is_err() {
             return;
         }
 
@@ -1371,6 +1401,13 @@ impl Akiko {
         }
 
         self.sector_counter += 1;
+        if at_end {
+            log::debug!(
+                "akiko: READ DATA reached exclusive end {sector}; delivered final-sector boundary probe"
+            );
+            self.data_offset = -1;
+            self.data_end = -1;
+        }
     }
 
     // ----- C2P -------------------------------------------------------------
@@ -2091,6 +2128,39 @@ mod tests {
                                             // Both slots consumed, PBX interrupt raised.
         assert_eq!(akiko.pbx, 0);
         assert_ne!(akiko.intreq & CDINT_PBX, 0);
+    }
+
+    #[test]
+    fn data_read_end_delivers_a_position_probe_for_the_next_seek() {
+        let mut chip = vec![0u8; 256 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.addressdata = 0x0001_0000;
+        akiko.flags = CDFLAG_ENABLE | CDFLAG_PBX | CDFLAG_CAS;
+        akiko.data_offset = 0;
+        akiko.data_end = 2;
+        akiko.pbx = 0x0007;
+
+        // Sectors 0 and 1 consume the two highest armed buffers.
+        akiko.run_sector_read(&mut chip);
+        akiko.run_sector_read(&mut chip);
+        assert_eq!(akiko.sector_counter, 2);
+        assert_eq!(akiko.pbx, 0x0001);
+
+        // Reaching the exclusive end re-presents the final valid sector. The
+        // ROM uses its MSF to detect that a later backwards request needs a
+        // STOP/reseek, rather than sleeping forever on an empty PBX ring.
+        akiko.intreq = 0;
+        akiko.run_sector_read(&mut chip);
+        assert_eq!(akiko.data_offset, -1);
+        assert_eq!(akiko.data_end, -1);
+        assert_eq!(akiko.pbx, 0);
+        assert_eq!(akiko.sector_counter, 3);
+        let slot0 = 0x0001_0000;
+        assert_eq!(chip[slot0 + 3], 2);
+        assert_eq!(chip[slot0 + 16], 1);
+        assert_ne!(akiko.intreq & CDINT_PBX, 0);
+        assert!(!akiko.activity_led_on());
     }
 
     #[test]

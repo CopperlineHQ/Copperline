@@ -1506,6 +1506,29 @@ fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
 }
 
 #[test]
+fn fmv_rom_is_cd32_only() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+            fmv_rom = "cd32fmv.rom"
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(cfg.fmv_rom_path.as_deref(), Some(Path::new("cd32fmv.rom")));
+
+    let err = parse_config(
+        r#"
+            fmv_rom = "cd32fmv.rom"
+            [machine]
+            profile = "A1200"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("only valid for a CD32"), "{err:#}");
+    Ok(())
+}
+
+#[test]
 fn machine_profiles_supply_defaults_and_keep_overrides() -> Result<()> {
     // No [machine] section: the default machine is the A500 Rev 6A
     // (ECS 8372A Agnus + OCS 8362 Denise), no gate array, no RTC (the base
@@ -4875,6 +4898,7 @@ fn the_about_rom_line_names_the_image_it_can_identify() {
     // An unknown extended ROM gets a line of its own, named the same
     // way; without one fitted no such line appears.
     cfg.extended_rom_path = Some(unknown.clone());
+    cfg.fmv_rom_path = Some(unknown.clone());
     let name = unknown.file_name().unwrap().to_string_lossy().into_owned();
     let lines = about_machine_lines(&cfg);
     assert!(
@@ -4885,7 +4909,12 @@ fn the_about_rom_line_names_the_image_it_can_identify() {
         lines.iter().any(|l| *l == format!("Extended ROM: {name}")),
         "{lines:?}"
     );
+    assert!(
+        lines.iter().any(|l| *l == format!("CD32 FMV ROM: {name}")),
+        "{lines:?}"
+    );
     cfg.extended_rom_path = None;
+    cfg.fmv_rom_path = None;
     assert!(!about_machine_lines(&cfg)
         .iter()
         .any(|l| l.starts_with("Extended ROM: ")),);

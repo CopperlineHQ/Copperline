@@ -306,6 +306,18 @@ impl CdAudioRing {
         self.samples.len() + 588 <= CD_AUDIO_RING_LIMIT
     }
 
+    /// Push one already-decoded stereo frame.  The CD32 FMV cartridge's
+    /// L64111 output joins the same analogue CD input of the CD32 mixer as
+    /// CD-DA, but arrives one MPEG-audio sample at a time rather than in
+    /// 2352-byte sectors.
+    pub fn push_frame(&mut self, left: f32, right: f32) -> bool {
+        if self.samples.len() >= CD_AUDIO_RING_LIMIT {
+            return false;
+        }
+        self.samples.push_back((left, right));
+        true
+    }
+
     pub fn next_sample(&mut self) -> (f32, f32) {
         self.samples.pop_front().unwrap_or((0.0, 0.0))
     }

@@ -99,6 +99,7 @@ described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
 rom = "KICK13.ROM"            # Kickstart image, 512 KiB (or a 256 KiB 1.x part)
 extended_rom = "cd32ext.rom"  # optional: CDTV (256K at $F00000) or
                               # CD32 (512K at $E00000) extended ROM
+fmv_rom = "cd32fmv.rom"       # optional: 256K CD32 FMV module ROM
 # identify = false            # drop the Copperline identification board
                               # from the Zorro chain (default: present)
 ```
@@ -120,7 +121,8 @@ menu's **Load Kickstart ROM...** item, which hard-resets the machine. Machine
 profiles that need an extended ROM (CDTV, CD32) will tell you if it is
 missing.
 
-Both ROM keys accept images in either byte order. Alongside plain CPU-order
+The Kickstart and extended-ROM keys accept images in either byte order.
+Alongside plain CPU-order
 dumps, the byte-swapped images prepared for EPROM programmers -- the
 single-chip `.bin` ROM files in Hyperion's Kickstart 3.1.4/3.2 releases, such
 as `kick.a500a600a2000.46.143.bin`, store every 16-bit word with its bytes
@@ -129,6 +131,14 @@ file boots identically. A 256 KiB Kickstart 1.x part is mirrored across the
 512 KiB ROM window, as it decodes on real hardware. The split `hi`/`lo` chip
 pairs for the 32-bit machines are not accepted; use the matching single-file
 image instead.
+
+`fmv_rom` fits the Commodore CD32 Full Motion Video module and is valid only
+with the `CD32` machine profile. It must be the 256 KiB module ROM (v40.30 is
+the released ROM). The cartridge autoconfigures ahead of the normal Zorro
+chain, and its CL450 video and L64111 MPEG Layer II audio decoders are fed by
+the original module software; no per-title setting or replacement player is
+used. Leave the key out for a stock CD32. The launcher's **ROM** tab exposes
+the same setting as **FMV module ROM**.
 
 Copperline also names the ROM it is given. A ROM file's name is whatever its
 dumper called it, so the image is identified by checksum against a table of
@@ -1846,7 +1856,8 @@ it. It is CLI-only by design (no config section) and is covered in
 profile = "CD32"
 
 [cd]
-image = "disc.cue"        # cue sheet (BINARY/WAVE/MP3 files; MODE1/2048, MODE1/2352, AUDIO)
+image = "disc.cue"        # cue sheet (MODE1/2048, MODE1/2352,
+                          # MODE2/2336, MODE2/2352, AUDIO)
 insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file (default)
 ```
@@ -1859,9 +1870,9 @@ CDTV.
 
 NRG supports both the older `NERO`/32-bit and newer `NER5`/64-bit footer
 formats, with DAO (`CUES`/`DAOI`, `CUEX`/`DAOX`) or TAO (`ETNF`/`ETN2`)
-track layouts. MODE1/2048, MODE1/2352, and CD-DA tracks are supported;
-Mode 2, multi-session discs, and images with stored subchannel bytes are
-rejected explicitly.
+track layouts. MODE1/2048, MODE1/2352, MODE2/2336, MODE2/2352, and CD-DA
+tracks are supported; multi-session discs and images with stored subchannel
+bytes are rejected explicitly.
 
 CDXL video discs need no special setting: mount the image on a `CD32`
 profile and launch it as on the console. For a bare ISO, Copperline promotes
@@ -1869,6 +1880,10 @@ each cooked 2048-byte sector to a complete raw Mode 1 frame (including EDC
 and P/Q parity) when an Akiko client requests raw sectors. CD32 discs that
 use a CDTV trademark boot record for backward-compatible startup are accepted
 by the same path.
+
+MPEG Video CD and CD32 FMV-enhanced titles use the same Akiko media path. Fit
+the FMV module with top-level `fmv_rom`; the module ROM then detects and feeds
+the MPEG cartridge exactly as it does on the console.
 
 A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
 multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a

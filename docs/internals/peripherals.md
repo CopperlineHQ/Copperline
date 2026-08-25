@@ -465,11 +465,39 @@ audio mixes into the host output, and both light the blue CD LED. The
 512 KiB extended ROM sits at `$E00000`, and the CD32 pad protocol drives
 port 2.
 
+### CD32 Full Motion Video module (`cd32_fmv.rs`)
+
+Setting top-level `fmv_rom` fits Commodore's 1 MiB Zorro II FMV cartridge as
+the first autoconfig board, normally at `$200000` (manufacturer 514, product
+`$6A`, serial `$0028001E`). Its window follows the physical decode: 256 KiB ROM at
+`+$000000`, board status/control at `+$040000`, LSI L64111 MPEG Layer II audio
+at `+$050000`, the C-Cube CL450 bitstream port at `+$060000`, CL450 registers
+at `+$070000`, and 512 KiB module RAM at `+$080000`.
+
+The guest module ROM remains responsible for reading sectors through Akiko
+and programming both chips. Copperline implements their register, command,
+FIFO, interrupt, SCR/PTS, presentation, and audio-buffer contracts; MPEG-1
+video is decoded through CopperlineHQ's safe pure-Rust `plmpeg` core and
+MPEG-1 Layer II audio through Symphonia. The production player never programs
+Denise/Lisa's digital genlock controls: the cartridge keys the dark native RGB
+level in its analogue output path, which the renderer models alongside
+explicit chipset genlock transparency while preserving the module's border
+and blanking controls. The decoder's partial bitstream, prediction frames,
+and presentation state are serialized directly, so a resumed headless run
+produces the same frames without retaining the already-decoded program stream.
+
 The optical sector clock and the firmware command transport are separate:
 sector payloads retain their physical 75/150 Hz cadence, while the drive's
 cached TOC is returned over the command ring at 600 packets/second. This lets
 CDStrap receive a coherent TOC during its first media probe, including on
 CD32 discs mastered with the older CDTV trademark boot layout.
+
+READ DATA's end MSF is exclusive. At that boundary the PBX path retains one
+final position-bearing raw frame, matching the sector already buffered by a
+continuous physical read. The ROM driver uses its on-disc MSF to detect when
+the next filesystem request is outside the current stream, stop it, and seek
+to the new LSN; dropping the buffered boundary frame instead would leave the
+driver asleep waiting for a PBX interrupt that can never arrive.
 
 The drive protocol is cross-checked against both ROM drivers known to have
 run on real hardware, Kickstart's cd.device and AROS's, which pinned down
@@ -490,14 +518,17 @@ included, which is where AROS places its `MEMF_24BITDMA` allocations when
 fast RAM exists -- not just chip RAM.
 
 `cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
-MODE1/2352, and AUDIO tracks; `PREGAP`/`POSTGAP` as unstored zero-fill
+MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks;
+`PREGAP`/`POSTGAP` as unstored zero-fill
 extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
 and lays every `FILE` out as a run of extents over a byte-addressed
 source. Nero NRG images use the same extent model after their 32- or
 64-bit CUE/DAO or ETN footer has supplied the track offsets and stored
 pregaps. A raw read from a cooked MODE1/2048 source synthesizes the complete
 2352-byte frame: sync and BCD MSF header, EDC, the reserved bytes, and both
-Reed-Solomon P/Q parity fields. Akiko therefore presents the same raw-sector
+Reed-Solomon P/Q parity fields. MODE2/2336 similarly gains its omitted sync,
+BCD MSF, and mode header without disturbing the stored XA subheader, payload,
+EDC, or parity. Akiko therefore presents the same raw-sector
 shape to CDXL players whether their video disc is a bare ISO or BIN/CUE. A
 `BINARY` source is the file itself; a `WAVE` or `MP3` source
 (`cdrom/audio.rs`) presents the decoded audio as CD-DA sectors --

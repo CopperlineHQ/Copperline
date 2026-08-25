@@ -50,6 +50,8 @@ fn repeated_frame_test_input() -> RenderInput {
         emulated_frames: 50,
         debug_plane_mask: 0xFF,
         debug_sprite_mask: 0xFF,
+        #[cfg(feature = "cd32-fmv")]
+        fmv: None,
     }
 }
 
@@ -8793,4 +8795,57 @@ fn fast_playfield_interior_engages_for_standard_screens() {
         "interior {fast_lo}..{fast_hi} should cover most of {x0}..{}",
         plan.x_stop
     );
+}
+
+#[cfg(feature = "cd32-fmv")]
+#[test]
+fn cd32_fmv_keys_dark_native_video_without_digital_genlock_bits() {
+    let mpeg = u32::from_le_bytes([0xC8, 0x10, 0x20, 0xFF]);
+    let presentation = crate::cd32_fmv::FmvPresentation {
+        enabled: true,
+        blank: false,
+        border: 0,
+        generation: 1,
+        frame: Some(crate::cd32_fmv::FmvFrame {
+            width: 1,
+            height: 1,
+            pixels: std::sync::Arc::new(vec![mpeg]),
+        }),
+    };
+    let bright_native = u32::from_le_bytes([0x40, 0x40, 0x40, 0xFF]);
+    let mut fb = vec![bright_native; FB_WIDTH];
+    fb[0] = u32::from_le_bytes([0x1F, 0x10, 0x08, 0xFF]);
+    fb[1] = 0;
+
+    compose_cd32_fmv(&presentation, &mut fb, 1, 1);
+
+    assert_eq!(fb[0], mpeg, "dark analogue key must reveal FMV");
+    assert_eq!(fb[1], mpeg, "digital genlock transparency still works");
+    assert_eq!(fb[2], bright_native, "bright native overlay remains");
+}
+
+#[cfg(feature = "cd32-fmv")]
+#[test]
+fn cd32_fmv_stretches_the_active_line_to_both_capture_edges() {
+    let left = u32::from_le_bytes([0x20, 0x40, 0x60, 0xFF]);
+    let right = u32::from_le_bytes([0x80, 0xA0, 0xC0, 0xFF]);
+    let presentation = crate::cd32_fmv::FmvPresentation {
+        enabled: true,
+        blank: false,
+        border: 0,
+        generation: 1,
+        frame: Some(crate::cd32_fmv::FmvFrame {
+            width: 2,
+            height: 1,
+            pixels: std::sync::Arc::new(vec![left, right]),
+        }),
+    };
+    let mut fb = vec![0; FB_WIDTH];
+
+    compose_cd32_fmv(&presentation, &mut fb, 1, 1);
+
+    assert_eq!(fb[0], left);
+    assert_eq!(fb[FB_WIDTH / 2 - 1], left);
+    assert_eq!(fb[FB_WIDTH / 2], right);
+    assert_eq!(fb[FB_WIDTH - 1], right);
 }

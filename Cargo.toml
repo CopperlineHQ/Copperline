@@ -31,6 +31,7 @@ default = [
     "game-library",
     "mhi",
     "cd-mp3",
+    "cd32-fmv",
     "gdb",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
@@ -63,6 +64,16 @@ mhi = ["dep:symphonia-bundle-mp3", "dep:symphonia-core"]
 # have either without the other; default-on for the same reason `mhi` is,
 # and off in the browser build.
 cd-mp3 = ["dep:symphonia-bundle-mp3", "dep:symphonia-core"]
+# Commodore's CD32 Full Motion Video module: the L64111 MPEG Layer II path
+# reuses Symphonia, while the CL450's MPEG-1 video path uses CopperlineHQ's
+# safe pure-Rust plmpeg decoder. Native-only by construction: browser builds
+# use `default-features = false` and do not fit this physical Zorro II module.
+cd32-fmv = [
+    "dep:plmpeg",
+    "dep:symphonia-bundle-mp3",
+    "dep:symphonia-core",
+    "symphonia-bundle-mp3/mp2",
+]
 display-plan-trace = []
 # Detailed host-cost counters used by native diagnostics. The browser crate
 # builds the core with `default-features = false`, so its release hot paths do
@@ -173,6 +184,10 @@ serde-big-array = "0.5"
 # a track file, rather than going through a format reader.
 symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp3"], optional = true }
 symphonia-core = { version = "0.6.1", default-features = false, optional = true }
+# Safe incremental MPEG-1 video decoder used by the CD32 FMV module. The
+# serde feature snapshots prediction frames and partial bitstream state rather
+# than retaining and replaying the compressed stream on every save-state load.
+plmpeg = { git = "https://github.com/CopperlineHQ/plmpeg-rs", rev = "d020ba1015b48c0c646d32b16a27157623fff915", features = ["serde"], optional = true }
 # Save-state and snapshot serialization (src/savestate.rs and friends).
 # Held on the 1.x serde API on purpose: bincode 2 replaces the API and its
 # defaults use a different wire format, while bincode 3 is an intentionally

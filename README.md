@@ -57,7 +57,8 @@ against real hardware.
   (ADF / ADZ / ZIP / DMS, read-only IPF and SCP, or a real 3.5" drive over
   a Greaseweazle via the pure-Rust FluxBridge library,
   `docs/guide/fluxbridge.md`), Gayle and A4000 IDE, SCSI (A2091,
-  A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
+  A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, the CD32 Full
+  Motion Video module with pure-Rust MPEG-1 video decoding, A2065 Ethernet,
   a bundled host-backed `bsdsocket.library` (socket networking for guest
   applications with no guest TCP/IP stack to boot),
   Z3660 and Picasso II/II+ RTG cards (high-colour Picasso96 screens), the serial
@@ -336,6 +337,7 @@ steps for every channel are in
 | Fast RAM | Optional Zorro II autoconfig RAM at $00200000 and Zorro III autoconfig RAM (`[memory] z3`); runs at the CPU clock. |
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |
 | ROM | Kickstart at $F80000 (512 KiB); optional extended ROM for CD32 ($E00000) and CDTV ($F00000). |
+| CD32 FMV | Optional Commodore Full Motion Video cartridge: Zorro II autoconfig ROM/RAM, CL450 MPEG-1 video, L64111 MPEG Layer II audio, and analogue-keyed presentation. |
 | Battery RTC | Oki MSM6242 or Ricoh RP5C01 at $DC0000 (`rtc_chip`; Ricoh is the A3000/A4000 default), read-only wall clock -- guest writes drive latch/bank/control state and the RP5C01's battery RAM, which persists to a WinUAE/Amiberry-compatible `.nvram` file (`battmem`). A `rtc_time` seed ticks in emulated time for reproducible runs; `rtc_frozen` pins it. |
 | CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, CIA-B FLAG disk index pulses, and the Centronics parallel port (data/strobe/ACK on CIA-A, BUSY/POUT/SEL on CIA-B). |
 | Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout, a TCP port, a pseudo-terminal, or -- with the default `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected input. |
