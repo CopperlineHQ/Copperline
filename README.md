@@ -70,9 +70,12 @@ against real hardware.
   GDB support, a JSON-RPC control protocol for scripts and AI agents
   (`docs/debugger/control.md`, with the `copperline-ctl` client and bounded
   frame/serial/interrupt/media event streams),
-  deterministic save states, input recording/replay, and
+  deterministic save states, input recording/replay,
   headless screenshot/frame-dump capture -- the deterministic core makes
-  every replay byte-identical.
+  every replay byte-identical -- and `copperline-import-uae`, which converts
+  an existing WinUAE, Amiberry or FS-UAE configuration into Copperline's own
+  (`docs/guide/import-uae.md`), flagging in the file it writes whatever did
+  not translate cleanly.
 - **A browser build**: the same core compiled to WebAssembly with a
   canvas/Web Audio frontend, hosted at
   [copperline.dev/try](https://copperline.dev/try/) -- boots the bundled

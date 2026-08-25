@@ -9,8 +9,11 @@
 //! (translated, but worth double-checking) and settings with no Copperline
 //! equivalent at all. Nothing from the source file is silently dropped.
 
+#[path = "import_uae/map/mod.rs"]
 mod map;
+#[path = "import_uae/parse.rs"]
 mod parse;
+#[path = "import_uae/report.rs"]
 mod report;
 
 use copperline::config::{Config, RawConfig};

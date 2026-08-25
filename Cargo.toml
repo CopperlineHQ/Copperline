@@ -21,6 +21,7 @@ default = [
     "wasm-boards",
     "control",
     "ctl-bin",
+    "import-uae-bin",
     "net-nat",
     "net-bridge",
     "fluxbridge",
@@ -124,6 +125,9 @@ net-nat = ["dep:smoltcp"]
 net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
+# The `copperline-import-uae` converter for WinUAE/Amiberry/FS-UAE
+# configuration files.
+import-uae-bin = ["dep:toml_edit"]
 # The remote GDB stub (`--gdb`, src/gdbstub.rs): a 68k-aware gdbserver over
 # TCP. Default on; player builds (crates/copperline-player) leave it out so
 # a shipped game carries no debugger surface.
@@ -148,6 +152,9 @@ log = "0.4"
 env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
+# Formatting-preserving TOML writer, so the generated config can carry
+# per-setting comments (copperline-import-uae only).
+toml_edit = { version = "0.22", optional = true }
 # The game library's HTTP client (src/gamelib/openretro.rs) is declared per
 # platform, with the other per-target dependencies below: its TLS backend
 # differs by what each host can build without a C toolchain.
@@ -316,6 +323,11 @@ required-features = ["bench-bin"]
 name = "copperline-ctl"
 path = "src/bin/copperline-ctl.rs"
 required-features = ["ctl-bin"]
+
+[[bin]]
+name = "copperline-import-uae"
+path = "src/bin/copperline-import-uae.rs"
+required-features = ["import-uae-bin"]
 
 [[bin]]
 name = "copperline-net-helper"
