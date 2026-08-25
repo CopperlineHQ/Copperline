@@ -833,7 +833,7 @@ impl Akiko {
 
         self.frame_counter_cck -= cck as i32;
         if self.frame_counter_cck <= 0 {
-            self.frame_counter_cck += (CCK_PER_TOC_PACKET / self.speed.max(1)) as i32;
+            self.frame_counter_cck += CCK_PER_TOC_PACKET as i32;
             self.frame_sync = true;
         }
 
@@ -2345,6 +2345,36 @@ mod tests {
                 && ring[(i + 12) & 0xFF] == 0x08
         });
         assert!(found, "lead-out TOC packet not found in RX ring");
+    }
+
+    #[test]
+    fn toc_transport_rate_ignores_double_speed_bit() {
+        fn frame_phase_after_dump(speed_bit: u8) -> i32 {
+            let mut ring = CdAudioRing::default();
+            let mut chip = vec![0u8; 64 * 1024];
+            let mut akiko = Akiko::new();
+            akiko.insert_disc(test_disc());
+            akiko.tick(2048, &mut chip, &mut ring);
+            akiko.cd_initialized = 2;
+            akiko.receive_length = 0;
+
+            let response = dma_command(
+                &mut akiko,
+                &mut chip,
+                &[
+                    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, speed_bit, 0x00, 0x00, 0x00,
+                ],
+            );
+            assert_eq!(response[0], 0x04);
+            assert_eq!(akiko.toc_counter, -1, "cached TOC should complete");
+            akiko.frame_counter_cck
+        }
+
+        assert_eq!(
+            frame_phase_after_dump(0),
+            frame_phase_after_dump(0x40),
+            "the data-speed bit must not change cached TOC pacing"
+        );
     }
 
     #[test]
