@@ -35,11 +35,44 @@ pub struct MapOutcome {
     pub report: ImportReport,
 }
 
-pub fn map(format: SourceFormat, entries: &[crate::parse::Entry]) -> MapOutcome {
+/// `source` is the config file being read. It is used only to resolve
+/// relative image paths well enough to *describe* them in the report (a
+/// drive's size, say); nothing it finds or fails to find changes the
+/// emitted config, so a miss costs only a vaguer warning.
+pub fn map(
+    format: SourceFormat,
+    entries: &[crate::parse::Entry],
+    source: &std::path::Path,
+) -> MapOutcome {
     match format {
-        SourceFormat::WinUae | SourceFormat::Amiberry => winuae::map(entries),
+        SourceFormat::WinUae | SourceFormat::Amiberry => winuae::map(entries, source),
         SourceFormat::FsUae => fsuae::map(entries),
     }
+}
+
+/// Find a config-relative file the way the emulator that wrote the config
+/// would. Amiberry keeps its configs in `conf/` or `Configurations/` under
+/// an install root and resolves bare names against that root's own media
+/// folders, so the config's directory alone is not enough. Best-effort and
+/// diagnostic only -- see [`map`].
+pub(crate) fn resolve_media_path(
+    source: &std::path::Path,
+    path: &str,
+) -> Option<std::path::PathBuf> {
+    let given = std::path::Path::new(path);
+    if given.is_absolute() {
+        return given.is_file().then(|| given.to_path_buf());
+    }
+    let dir = source.parent()?;
+    let root = dir.parent();
+    let mut candidates: Vec<std::path::PathBuf> = vec![given.to_path_buf(), dir.join(given)];
+    if let Some(root) = root {
+        candidates.push(root.join(given));
+        for media in ["Harddrives", "HardDrives", "hardfiles", "Floppies"] {
+            candidates.push(root.join(media).join(given));
+        }
+    }
+    candidates.into_iter().find(|c| c.is_file())
 }
 
 /// Get (creating if absent) the `[a.b.c]` table at `path`, e.g.

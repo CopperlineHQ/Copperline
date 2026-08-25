@@ -10,7 +10,7 @@ use crate::report::ImportReport;
 use std::collections::HashMap;
 use toml_edit::DocumentMut;
 
-pub fn map(entries: &[Entry]) -> MapOutcome {
+pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     let mut doc = DocumentMut::new();
     let mut report = ImportReport::default();
     let mut seen: HashMap<&str, ()> = HashMap::new();
@@ -984,13 +984,7 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             }
             ide_next += 1;
             if controller.starts_with("uae") {
-                report.approximated(
-                    &e.key,
-                    &e.value,
-                    "WinUAE's own `uae` virtual hard-drive controller has no Copperline \
-                     equivalent; attached as an ordinary IDE drive, which needs a machine \
-                     with an IDE port (A600/A1200/A4000)",
-                );
+                report.approximated(&e.key, &e.value, uae_controller_note(&hf.path, source));
             }
         }
     }
@@ -1140,7 +1134,9 @@ mod tests {
 
     fn convert(text: &str) -> String {
         let entries = crate::parse::parse(text);
-        map(&entries).doc.to_string()
+        map(&entries, std::path::Path::new("test.uae"))
+            .doc
+            .to_string()
     }
 
     #[test]
@@ -1259,7 +1255,7 @@ mod tests {
         // machine with an IDE port -- worth saying rather than silently
         // producing a config that may not build.
         let entries = crate::parse::parse("hardfile2=rw,DH0:a.hdf,0,0,0,512,0,,uae0\n");
-        let out = map(&entries);
+        let out = map(&entries, std::path::Path::new("test.uae"));
         assert_eq!(out.report.flagged.len(), 1);
         assert!(out.report.flagged[0]
             .note
@@ -1267,9 +1263,49 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_uae_hardfile_names_the_kickstart_limit_it_will_hit() {
+        // The real AmigaVision shape: a bare filename in `conf/`, with the
+        // image itself under the install root's Harddrives/ folder. A
+        // `uae` hardfile has no size ceiling; the built-in IDE port
+        // inherits Kickstart's, so a 10GB drive that worked in Amiberry
+        // silently will not here.
+        let root = std::env::temp_dir().join(format!(
+            "copperline-import-hf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conf = root.join("conf");
+        let hd = root.join("Harddrives");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::create_dir_all(&hd).unwrap();
+        let big = hd.join("Big.hdf");
+        let f = std::fs::File::create(&big).unwrap();
+        // Sparse: the length is what matters, not the bytes behind it.
+        f.set_len(5 * 1024 * 1024 * 1024).unwrap();
+        drop(f);
+        let source = conf.join("default.uae");
+
+        let entries = crate::parse::parse("hardfile2=rw,DH0:Big.hdf,0,0,0,512,0,,uae0\n");
+        let note = &map(&entries, &source).report.flagged[0].note;
+        assert!(note.contains("5.0GB"), "the measured size: {note}");
+        assert!(note.contains("[lide]"), "and the way out: {note}");
+
+        // An image it cannot find falls back to the general caveat rather
+        // than claiming a size it does not know.
+        let entries = crate::parse::parse("hardfile2=rw,DH0:Absent.hdf,0,0,0,512,0,,uae0\n");
+        let note = &map(&entries, &source).report.flagged[0].note;
+        assert!(note.contains("Worth checking the image size"), "{note}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_disabled_cd_image_is_flagged_rather_than_inserted() {
         let entries = crate::parse::parse("cdimage0=/discs/os32.iso,disabled\n");
-        let out = map(&entries);
+        let out = map(&entries, std::path::Path::new("test.uae"));
         assert!(!out.doc.to_string().contains("image ="), "{}", out.doc);
         assert_eq!(out.report.flagged.len(), 1);
 
@@ -1285,13 +1321,13 @@ mod note_tests {
     #[test]
     fn a_config_naming_no_model_says_so_rather_than_stamping_one() {
         let entries = crate::parse::parse("chipmem_size=1\n");
-        let out = map(&entries);
+        let out = map(&entries, std::path::Path::new("test.uae"));
         assert!(!out.doc.to_string().contains("profile ="), "{}", out.doc);
         assert_eq!(out.report.notes.len(), 1);
         assert!(out.report.notes[0].contains("no machine model"));
 
         let entries = crate::parse::parse("chipset_compatible=A1200\n");
-        let out = map(&entries);
+        let out = map(&entries, std::path::Path::new("test.uae"));
         assert!(out.report.notes.is_empty());
     }
 }
@@ -1342,4 +1378,43 @@ fn hardfile_drive_value(hf: &Hardfile2) -> toml_edit::Item {
         t.insert("bootpri", i64::from(hf.bootpri).into());
     }
     toml_edit::value(t)
+}
+
+/// The caveat for a hardfile moved off WinUAE's `uae` virtual controller
+/// onto a real IDE port. This is not a like-for-like swap: `uae` hardfiles
+/// are served by WinUAE's own driver and sidestep the guest's storage
+/// stack, where `[ide]` is the machine's actual Gayle/A4000 port, so the
+/// image goes through the Kickstart ROM's `scsi.device` and inherits its
+/// size limits -- 3.1 and earlier cannot address past about 4GB, and older
+/// filesystems stop well before that. An image that was fine under WinUAE
+/// can therefore fail to mount, or mount and misbehave, on the same
+/// machine here. `[lide]` is the way out: a modern `lide.device` that
+/// autoboots large drives under any Kickstart, including 1.3.
+///
+/// Where the path resolves, the measured size makes the warning concrete
+/// rather than theoretical; a relative path (which is relative to the
+/// source config, not this process) simply falls back to the general case.
+fn uae_controller_note(path: &str, source: &std::path::Path) -> String {
+    const IDE_SAFE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+    let base = "WinUAE's own `uae` virtual hard-drive controller has no Copperline \
+                equivalent; attached as an ordinary IDE drive, which needs a machine with \
+                an IDE port (A600/A1200/A4000)";
+    let size = super::resolve_media_path(source, path)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len());
+    match size {
+        Some(bytes) if bytes > IDE_SAFE_LIMIT => format!(
+            "{base}. This image is {:.1}GB, past what Kickstart 3.1 and earlier can address \
+             through the built-in IDE port -- a `uae` hardfile bypassed that limit, a real \
+             one does not. Put it on [lide] (a modern lide.device, large drives under any \
+             Kickstart) or check it mounts before trusting it",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ),
+        _ => format!(
+            "{base}. Worth checking the image size: Kickstart 3.1 and earlier cannot address \
+             past about 4GB through the built-in IDE port, and older filesystems stop sooner, \
+             where a `uae` hardfile had no such limit. [lide] carries a modern lide.device \
+             that autoboots large drives under any Kickstart"
+        ),
+    }
 }

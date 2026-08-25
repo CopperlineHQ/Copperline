@@ -59,7 +59,7 @@ fn run() -> Result<(), String> {
     let text = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
     let entries = parse::parse(&text);
-    let outcome = map::map(args.format, &entries);
+    let outcome = map::map(args.format, &entries, &args.input);
 
     let mut output = outcome.doc.to_string();
     let trailer = outcome.report.trailer_comment();
