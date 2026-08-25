@@ -1,4 +1,4 @@
-//! Fuzz the CD image loaders (CUE sheet, bare ISO, CHD) by writing the
+//! Fuzz the CD image loaders (CUE sheet, bare ISO, NRG, CHD) by writing the
 //! input to a temporary file named by its extension and loading it. The
 //! CUE parser follows BINARY file references, so the bytes are also laid
 //! down under the name a cue sheet would point at.
@@ -31,5 +31,6 @@ fn load_as(data: &[u8], extension: &str) {
 fuzz_target!(|data: &[u8]| {
     load_as(data, "cue");
     load_as(data, "iso");
+    load_as(data, "nrg");
     load_as(data, "chd");
 });

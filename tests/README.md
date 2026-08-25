@@ -178,6 +178,7 @@ baselines to maintain.
 | `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
 | `graffity_z2_workbench_opens_640x480x8` / `graffity_z3_workbench_opens_640x480x8` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-graffity.hdf` (WB + Picasso96 with `Graffity.card`, default 640x480x8 screen) |
 | `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
+| `nrg_cd32_disc_serves_iso9660_data_and_smooth_audio` | `30 Games Compilation CD (2005)(Stuermer, A.).nrg` (a Nero 5 DAO CD32 disc with one MODE1/2048 data track and nine CD audio tracks) |
 | `toccata_ahi_driver_recognizes_the_board` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `toccata-ahi.hdf` (WB3.1 + AHI 4.18 with `toccata.audio` staged into `Devs/AHI` and Unit 0 set to Toccata) |
 | `zz9k_sdk_tools_pass_on_zorro_ii` / `zz9k_sdk_tools_pass_on_zorro_iii` | `zz9k/C/zz9k-{info,hash,chacha,aead,irqtest}` -- the unmodified ZZ9000 SDK m68k tools, built from the zz9000-sdk revision pinned in `docs/internals/zz9k.md` (build recipe in `tests/zz9k_sdk_tools.rs`'s module comment) |
 

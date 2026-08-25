@@ -1417,7 +1417,7 @@ fn print_help() {
          \x20                            insert PATH into DFN after SECS seconds\n  \
          --defer-disk-insert SECS DFN   start with configured DFN empty, then insert\n  \
          \x20                            its configured disk image after SECS seconds\n  \
-         --insert-cd-after SECS PATH    swap the CD image (cue/iso/chd) in the machine's CD\n  \
+         --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \

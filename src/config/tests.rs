@@ -2452,13 +2452,14 @@ fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     Ok(())
 }
 
-/// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
+/// CD images (CUE/BIN, bare ISO, NRG, and CHD) are recognised by extension:
 /// they attach as SCSI CD-ROM drives on [scsi], and as ATAPI drives on
 /// [ide]/[lide].
 #[test]
 fn cd_images_fit_scsi_units_and_the_ide_port() -> Result<()> {
     assert!(is_cd_image_path(Path::new("games/Disc.CUE")));
     assert!(is_cd_image_path(Path::new("cd32.iso")));
+    assert!(is_cd_image_path(Path::new("compilation.NRG")));
     assert!(!is_cd_image_path(Path::new("workbench.hdf")));
     assert!(!is_cd_image_path(Path::new("directory/")));
 

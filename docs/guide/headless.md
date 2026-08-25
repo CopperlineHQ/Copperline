@@ -102,7 +102,7 @@ deterministically:
 | `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`1` to `4`), so scheduled inserts can target empty external drives |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Start with the configured drive empty, then insert its configured image |
-| `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`/`.iso`/`.chd`) in the machine's CD drive (CDTV, CD32, or a SCSI CD-ROM unit) |
+| `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`/`.iso`/`.nrg`/`.chd`) in the machine's CD drive (CDTV, CD32, or a SCSI CD-ROM unit) |
 | `--script FILE` | Run scripted-input directives from a file (below) |
 | `--record-input PATH` | Record all machine-bound input for the whole run; the script is written to PATH on exit |
 

@@ -1563,7 +1563,7 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
-A path ending in `.cue`, `.iso`, or `.chd` attaches an **ATAPI CD-ROM
+A path ending in `.cue`, `.iso`, `.nrg`, or `.chd` attaches an **ATAPI CD-ROM
 drive** at that slot instead of a hard disk, through the PACKET (0xA0)
 command -- the same read-only SCSI-2 command engine `[scsi]` CD-ROM units
 use (see below), reached over the ATA task file instead of a WD33C93 SCSI
@@ -1579,7 +1579,7 @@ rom = "a2091-v6.6.rom"       # boot ROM (a2091 needs one; a4091 defaults to bund
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
-unit2 = "game.cue"           # a .cue, .iso, or .chd attaches a CD-ROM drive
+unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 # unit3..unit6 = ...
 ```
 
@@ -1622,11 +1622,11 @@ form that overrides a directory mount's volume name, filesystem, and the
 synthesized partition's boot priority. The HDD activity LED covers SCSI
 traffic too.
 
-A `unitN` path ending in `.cue`, `.iso`, or `.chd` attaches a **SCSI
+A `unitN` path ending in `.cue`, `.iso`, `.nrg`, or `.chd` attaches a **SCSI
 CD-ROM drive** at that ID instead of a hard disk: a read-only removable
 SCSI-2 target (INQUIRY device type 5) serving 2048-byte blocks, with the
 full READ TOC / READ CD / mode-page surface CD filesystems expect.
-Cue sheets and CHD images may mix data and audio tracks (a cue sheet's
+Cue sheets, NRG, and CHD images may mix data and audio tracks (a cue sheet's
 audio tracks may be `WAVE` or `MP3` files, as described under `[cd]`
 below); a bare `.iso` is a single data track. The drive answers on the host adapter's `scsi.device` like any
 other unit, so mount it the way you would on real hardware: a
@@ -1640,7 +1640,7 @@ emulated time (as if the drive's analogue output were cabled to the
 machine), the sub-channel reports the live playback position, and the
 debugger's Audio tab shows the stream on its CD-DA row with the play
 state, track, and position. Discs swap at runtime like CDTV/CD32 media:
-the status bar's CD load/eject buttons, dropping a `.cue`/`.iso`/`.chd`
+the status bar's CD load/eject buttons, dropping a `.cue`/`.iso`/`.nrg`/`.chd`
 on the window, the scheduled `--insert-cd-after SECS PATH` flag, or the
 control protocol's `media.cd.insert` all eject the current disc, run the
 tray for a second of emulated time, and mount the new one with a
@@ -1660,7 +1660,7 @@ A built-in Zorro II IDE board compatible with LIV2's actively-maintained
 open-source [lide.device](https://github.com/LIV2/lide.device), giving
 autobooting IDE storage under any Kickstart including 1.3 -- unlike `[ide]`,
 which needs a Gayle or A4000 IDE port, `[lide]` works on **any machine
-model**, the same way `[scsi]`'s Zorro boards do. A `.cue`/`.iso`/`.chd`
+model**, the same way `[scsi]`'s Zorro boards do. A `.cue`/`.iso`/`.nrg`/`.chd`
 drive entry attaches an ATAPI CD-ROM drive, exactly as it does on `[ide]`.
 
 `board` picks the AutoConfig identity: `"ripple"` (the default), LIV2's
@@ -1836,11 +1836,17 @@ insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file (default)
 ```
 
-`image` takes a cue sheet, a bare `.iso` (single data track), or a
-`.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
+`image` takes a cue sheet, a bare `.iso` (single data track), a Nero
+`.nrg`, or a `.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
 writes: LZMA/Deflate/FLAC-compressed hunks with data and audio tracks).
 The disc mounts on the machine's CD controller: Akiko on CD32, the DMAC on
 CDTV.
+
+NRG supports both the older `NERO`/32-bit and newer `NER5`/64-bit footer
+formats, with DAO (`CUES`/`DAOI`, `CUEX`/`DAOX`) or TAO (`ETNF`/`ETN2`)
+track layouts. MODE1/2048, MODE1/2352, and CD-DA tracks are supported;
+Mode 2, multi-session discs, and images with stored subchannel bytes are
+rejected explicitly.
 
 A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
 multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a

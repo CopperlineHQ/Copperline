@@ -128,7 +128,7 @@ Status Bar*):
   drive, and changing it is done by hand (see [](fluxbridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
-  (`.cue`/`.iso`/`.chd`) with the proper media-change notification, and a
+  (`.cue`/`.iso`/`.nrg`/`.chd`) with the proper media-change notification, and a
   CD eject button. These do not appear on machines without a CD drive.
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the joystick port. Click it to
@@ -235,7 +235,7 @@ Disk images can be dropped anywhere on the emulator window:
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
   queues them all as the target drive's swap playlist, exactly like a
   multi-selection in the disk dialog.
-- **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
+- **CD images** (`.cue`/`.iso`/`.nrg`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
 - **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
   machine straight into the game through the [WHDLoad booter](whdload.md),

@@ -4889,7 +4889,7 @@ enum DroppedMediaKind {
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
-    /// A CD image (cue sheet, bare ISO, or CHD) for the CD drive.
+    /// A CD image (cue sheet, bare ISO, Nero NRG, or CHD) for the CD drive.
     Cd,
     /// Hard disk images cannot be hot-attached; point at the config screen.
     HardDisk,
@@ -4905,7 +4905,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some("cue") | Some("iso") | Some("chd") => DroppedMediaKind::Cd,
+        Some("cue") | Some("iso") | Some("nrg") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("hdz") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         // Every shape `package` accepts, or a dropped zip would be taken
