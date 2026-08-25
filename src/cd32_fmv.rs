@@ -9,6 +9,7 @@
 //! this module therefore models the cartridge rather than recognizing any
 //! particular disc or title.
 
+use crate::audio::resample::Resampler;
 use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::{CdAudioRing, PAULA_CLOCK_HZ};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
@@ -536,6 +537,8 @@ pub struct Cd32Fmv {
     audio_pcm: VecDeque<AudioPcmFrame>,
     audio_sample_acc: u64,
     audio_rate: u32,
+    audio_resampler_rate: u32,
+    audio_resampler: Resampler,
 }
 
 impl Cd32Fmv {
@@ -587,6 +590,8 @@ impl Cd32Fmv {
             audio_pcm: VecDeque::new(),
             audio_sample_acc: 0,
             audio_rate: MIX_SAMPLE_RATE,
+            audio_resampler_rate: MIX_SAMPLE_RATE,
+            audio_resampler: Resampler::new(MIX_SAMPLE_RATE, MIX_SAMPLE_RATE),
         };
         board.reset_all();
         Ok(board)
@@ -666,6 +671,8 @@ impl Cd32Fmv {
         self.audio_pcm.clear();
         self.audio_sample_acc = 0;
         self.audio_rate = MIX_SAMPLE_RATE;
+        self.audio_resampler_rate = MIX_SAMPLE_RATE;
+        self.audio_resampler = Resampler::new(MIX_SAMPLE_RATE, MIX_SAMPLE_RATE);
         self.audio_decoder = Mp2Decoder::new();
     }
 
@@ -802,6 +809,10 @@ impl Cd32Fmv {
                         self.audio_regs[A_CB_READ] = 0;
                         self.audio_regs[A_CB_STATUS] = 0;
                         self.audio_pcm.clear();
+                        self.audio_sample_acc = 0;
+                        self.audio_resampler_rate = self.audio_rate.max(1);
+                        self.audio_resampler =
+                            Resampler::new(self.audio_resampler_rate, MIX_SAMPLE_RATE);
                     }
                 }
                 self.audio_regs[A_CONTROL1] = value;
@@ -1276,35 +1287,51 @@ impl Cd32Fmv {
         if self.audio_regs[A_CONTROL1] & 1 == 0 {
             return;
         }
-        // VCD audio is 44.1 kHz.  The L64111 also accepts 32/48 kHz Layer II;
-        // those uncommon modes are paced at their declared native rate while
-        // the hardware's ordinary VCD path remains exactly mixer-rate.
-        self.audio_sample_acc += u64::from(cck) * u64::from(self.audio_rate.max(1));
+        let native_rate = self.audio_rate.max(1);
+        if self.audio_resampler_rate != native_rate {
+            self.audio_resampler_rate = native_rate;
+            self.audio_resampler = Resampler::new(native_rate, MIX_SAMPLE_RATE);
+        }
+        // The L64111 accepts 32/44.1/48 kHz Layer II streams, while the
+        // analogue CD input is sampled on Copperline's fixed mixer grid.
+        self.audio_sample_acc += u64::from(cck) * u64::from(MIX_SAMPLE_RATE);
+        let muted =
+            self.audio_regs[A_CONTROL2] & (1 << 5) != 0 || self.io_reg & IO_L64111_MUTE != 0;
         while self.audio_sample_acc >= u64::from(PAULA_CLOCK_HZ) {
             self.audio_sample_acc -= u64::from(PAULA_CLOCK_HZ);
-            let mut finished = false;
-            let sample = if let Some(frame) = self.audio_pcm.front_mut() {
-                let sample = frame
-                    .samples
-                    .get(frame.index)
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
-                frame.index += 1;
-                finished = frame.index >= frame.samples.len();
-                sample
-            } else {
-                (0.0, 0.0)
+            let sample = {
+                let Self {
+                    audio_resampler,
+                    audio_pcm,
+                    audio_regs,
+                    ..
+                } = self;
+                audio_resampler.next(|| Self::pop_native_audio_sample(audio_pcm, audio_regs))
             };
-            let muted =
-                self.audio_regs[A_CONTROL2] & (1 << 5) != 0 || self.io_reg & IO_L64111_MUTE != 0;
             let sample = if muted { (0.0, 0.0) } else { sample };
             let _ = ring.push_frame(sample.0, sample.1);
-            if finished {
-                self.audio_pcm.pop_front();
-                self.audio_regs[A_CB_READ] = (self.audio_regs[A_CB_READ] + 1) & 63;
-                self.audio_regs[A_CB_STATUS] = self.audio_regs[A_CB_STATUS].saturating_sub(1);
-            }
         }
+    }
+
+    fn pop_native_audio_sample(
+        audio_pcm: &mut VecDeque<AudioPcmFrame>,
+        audio_regs: &mut [u16; 32],
+    ) -> (f32, f32) {
+        let Some(frame) = audio_pcm.front_mut() else {
+            return (0.0, 0.0);
+        };
+        let sample = frame
+            .samples
+            .get(frame.index)
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        frame.index += 1;
+        if frame.index >= frame.samples.len() {
+            audio_pcm.pop_front();
+            audio_regs[A_CB_READ] = (audio_regs[A_CB_READ] + 1) & 63;
+            audio_regs[A_CB_STATUS] = audio_regs[A_CB_STATUS].saturating_sub(1);
+        }
+        sample
     }
 }
 
@@ -1509,6 +1536,26 @@ mod tests {
         assert_eq!(header.rate, 44_100);
         assert_eq!(header.len, 731);
         assert!(!header.mono);
+    }
+
+    #[test]
+    fn non_vcd_audio_rates_are_resampled_to_mixer_cadence() {
+        for (rate, expected_native_frames) in [(32_000, 32_064), (48_000, 48_064)] {
+            let mut board = Cd32Fmv::new(rom()).unwrap();
+            board.audio_regs[A_CONTROL1] = 1;
+            board.audio_rate = rate;
+            board.audio_pcm.push_back(AudioPcmFrame {
+                samples: vec![(0.25, -0.25); 50_000],
+                index: 0,
+            });
+            let mut ring = CdAudioRing::default();
+            board.advance_audio(PAULA_CLOCK_HZ, Some(&mut ring));
+            assert_eq!(
+                board.audio_pcm.front().unwrap().index,
+                expected_native_frames,
+                "native rate {rate}"
+            );
+        }
     }
 
     #[test]

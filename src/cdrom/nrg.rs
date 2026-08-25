@@ -641,7 +641,7 @@ fn cue_lba(entries: &[CueEntry], track: u8, index: u8) -> Option<i32> {
 fn decode_mode(mode: u8, sector_bytes: u64, path: &Path) -> Result<TrackKind> {
     match (mode, sector_bytes) {
         (0x00, n) if n == DATA_SECTOR_BYTES as u64 => Ok(TrackKind::Mode1_2048),
-        (0x02 | 0x03, n) if n == super::MODE2_SECTOR_BYTES as u64 => Ok(TrackKind::Mode2_2336),
+        (0x03, n) if n == super::MODE2_SECTOR_BYTES as u64 => Ok(TrackKind::Mode2_2336),
         (0x05, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Mode1_2352),
         (0x06, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Mode2_2352),
         (0x07, n) if n == RAW_SECTOR_BYTES as u64 => Ok(TrackKind::Audio),
@@ -659,7 +659,7 @@ fn decode_mode(mode: u8, sector_bytes: u64, path: &Path) -> Result<TrackKind> {
 fn tao_mode(mode: u8, path: &Path) -> Result<(TrackKind, u64)> {
     match mode {
         0x00 => Ok((TrackKind::Mode1_2048, DATA_SECTOR_BYTES as u64)),
-        0x02 | 0x03 => Ok((TrackKind::Mode2_2336, super::MODE2_SECTOR_BYTES as u64)),
+        0x03 => Ok((TrackKind::Mode2_2336, super::MODE2_SECTOR_BYTES as u64)),
         0x05 => Ok((TrackKind::Mode1_2352, RAW_SECTOR_BYTES as u64)),
         0x06 => Ok((TrackKind::Mode2_2352, RAW_SECTOR_BYTES as u64)),
         0x07 => Ok((TrackKind::Audio, RAW_SECTOR_BYTES as u64)),
@@ -704,6 +704,17 @@ mod tests {
             "copperline-nrg-{}-{unique}-{name}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn cooked_mode2_form1_is_not_misclassified_as_2336_bytes() {
+        let path = Path::new("mode2-form1.nrg");
+        assert!(decode_mode(0x02, DATA_SECTOR_BYTES as u64, path).is_err());
+        assert!(tao_mode(0x02, path).is_err());
+        assert_eq!(
+            decode_mode(0x03, super::super::MODE2_SECTOR_BYTES as u64, path).unwrap(),
+            TrackKind::Mode2_2336
+        );
     }
 
     fn chunk(id: &[u8; 4], data: &[u8], out: &mut Vec<u8>) {

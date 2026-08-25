@@ -13,7 +13,7 @@
 //! disc out. CD-DA frames are stored with big-endian samples and are
 //! swapped back to the little-endian disc byte order on read.
 
-use super::{CdTrack, TrackKind, DATA_SECTOR_BYTES, RAW_SECTOR_BYTES};
+use super::{CdTrack, TrackKind, DATA_SECTOR_BYTES, MODE2_SECTOR_BYTES, RAW_SECTOR_BYTES};
 use anyhow::{anyhow, bail, Context, Result};
 use chd::metadata::{KnownMetadata, Metadata};
 use chd::Chd;
@@ -386,7 +386,10 @@ impl ChdImage {
                 Some(first) => (first + (sector - region.disc_start), region.kind),
             }
         };
-        debug_assert!(matches!(buf.len(), DATA_SECTOR_BYTES | RAW_SECTOR_BYTES));
+        debug_assert!(matches!(
+            buf.len(),
+            DATA_SECTOR_BYTES | MODE2_SECTOR_BYTES | RAW_SECTOR_BYTES
+        ));
         self.load_hunk(frame / self.frames_per_hunk)?;
         let offset = (frame % self.frames_per_hunk) as usize * FRAME_BYTES;
         buf.copy_from_slice(&self.hunk_buf[offset..offset + buf.len()]);
@@ -419,10 +422,11 @@ fn track_kind(name: &str, number: u8) -> Result<TrackKind> {
     match name {
         "MODE1" | "MODE1/2048" => Ok(TrackKind::Mode1_2048),
         "MODE1_RAW" | "MODE1/2352" => Ok(TrackKind::Mode1_2352),
-        // CHD CD hunks always expose complete 2352-byte frames even when
-        // the source image used a cooked Mode 2 geometry.
-        "MODE2" | "MODE2_RAW" | "MODE2/2336" | "MODE2/2352" | "MODE2_FORM1" | "MODE2_FORM2"
-        | "MODE2_FORM_MIX" => Ok(TrackKind::Mode2_2352),
+        "MODE2" | "MODE2/2336" | "MODE2_FORM_MIX" => Ok(TrackKind::Mode2_2336),
+        "MODE2_RAW" | "MODE2/2352" => Ok(TrackKind::Mode2_2352),
+        "MODE2_FORM1" | "MODE2_FORM2" => {
+            bail!("track {number} type {name:?} uses an unsupported cooked Mode 2 sector width")
+        }
         "AUDIO" => Ok(TrackKind::Audio),
         other => bail!(
             "track {number} type {other:?} is not supported \
@@ -869,6 +873,40 @@ mod tests {
         image.read_raw_sector(0, &mut actual).unwrap();
         assert_eq!(actual, raw);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mode2_2336_track_preserves_its_stored_geometry() {
+        let path = temp_path("mode2-2336.chd");
+        let mut stored = [0u8; MODE2_SECTOR_BYTES];
+        stored[..8].copy_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1]);
+        stored[8..8 + DATA_SECTOR_BYTES].fill(0x6B);
+        let data = track_frames(&[frame(&stored)]);
+        write_chd_v5(
+            &path,
+            HUNK_BYTES,
+            FRAME_BYTES as u32,
+            &data,
+            &[cht2(
+                "TRACK:1 TYPE:MODE2/2336 SUBTYPE:NONE FRAMES:1 PREGAP:0 PGTYPE:MODE1 \
+                 PGSUB:NONE POSTGAP:0",
+            )],
+        );
+        let mut image = CdImage::load(&path).unwrap();
+        assert_eq!(image.tracks()[0].kind, TrackKind::Mode2_2336);
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        image.read_raw_sector(0, &mut raw).unwrap();
+        assert_eq!(raw[15], 2);
+        assert_eq!(&raw[16..], &stored);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unsupported_cooked_mode2_forms_are_rejected() {
+        for kind in ["MODE2_FORM1", "MODE2_FORM2"] {
+            let error = track_kind(kind, 1).unwrap_err();
+            assert!(error.to_string().contains("unsupported cooked Mode 2"));
+        }
     }
 
     #[test]

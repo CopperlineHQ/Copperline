@@ -159,6 +159,9 @@ pub struct BoardSpec {
     pub memory_space: bool,
     /// Another autoconfig identity belonging to this physical board follows.
     pub chained: bool,
+    /// The board cannot be removed from the autoconfig chain by writing
+    /// `ec_Shutup` (ERFF_NOSHUTUP).
+    pub no_shutup: bool,
     /// Logical aperture number passed to a shared device in offset bits 31:28.
     pub window: u8,
     /// Autoboot: ERTF_DIAGVALID with er_InitDiagVec pointing at the
@@ -184,6 +187,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            no_shutup: true,
             window: 0,
             diag_vec: Some(0x0080),
         }
@@ -202,6 +206,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -220,6 +225,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -246,6 +252,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -266,6 +273,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -288,6 +296,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -312,6 +321,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -341,6 +351,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -363,6 +374,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(0x2000),
         }
@@ -386,6 +398,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(0x0200),
         }
@@ -412,6 +425,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
         }
@@ -436,6 +450,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(crate::hostsocket::DIAG_OFFSET),
         }
@@ -470,6 +485,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: has_rom.then_some(diag_vec),
         }
@@ -492,6 +508,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -522,6 +539,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            no_shutup: false,
             window: 1,
             diag_vec: None,
         }
@@ -549,6 +567,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -569,6 +588,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            no_shutup: false,
             window: 1,
             diag_vec: None,
         }
@@ -587,6 +607,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -608,6 +629,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -949,6 +971,9 @@ impl ZorroChain {
                 // accepting it keeps the register sequence faithful.
             }
             EC_SHUTUP_PHYS => {
+                if board.spec.no_shutup {
+                    return;
+                }
                 board.state = BoardState::ShutUp;
                 log::debug!("zorro board {:?} shut up", board.spec.name);
                 self.rebuild_regions();
@@ -982,14 +1007,7 @@ impl ZorroChain {
         let memlist = if spec.memlist { ERTF_MEMLIST } else { 0 };
         let chained = if spec.chained { ERTF_CHAINEDCONFIG } else { 0 };
         let memspace = if spec.memory_space { ERFF_MEMSPACE } else { 0 };
-        // The CD32 FMV cartridge's production autoconfig ROM sets
-        // ERFF_NOSHUTUP. Its identity is fixed physical hardware rather than
-        // a user-authored BoardSpec, so preserve that extra flag here.
-        let no_shutup = if spec.manufacturer == 514 && spec.product == 0x6A {
-            ERFF_NOSHUTUP
-        } else {
-            0
-        };
+        let no_shutup = if spec.no_shutup { ERFF_NOSHUTUP } else { 0 };
         match spec.version {
             ZorroVersion::II => {
                 rom[0] = ERT_ZORROII | memlist | chained | zorro_ii_size_code(spec.size_bytes)?;
@@ -1243,6 +1261,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(true),
                 memory_space: true,
                 chained: false,
+                no_shutup: false,
                 window: 0,
                 diag_vec: None,
             };
@@ -1293,6 +1312,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(false),
                 memory_space: false,
                 chained: false,
+                no_shutup: false,
                 window: 0,
                 diag_vec: raw.diag_vec,
             };
@@ -1502,6 +1522,24 @@ mod tests {
             logical,
             [0xD5, 0x6A, 0xC0, 0x00, 0x02, 0x02, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x80,]
         );
+    }
+
+    #[cfg(feature = "cd32-fmv")]
+    #[test]
+    fn no_shutup_board_ignores_the_shutup_register() {
+        let mut chain = chain_with(vec![BoardSpec::cd32_fmv(0)]);
+        chain.config_write(AUTOCONFIG_BASE + EC_SHUTUP_PHYS, 1, 0);
+        assert_eq!(chain.config_logical_byte(0, 2), Some(0xC0));
+        assert_ne!(chain.config_read(AUTOCONFIG_BASE, 1), 0xFF);
+    }
+
+    #[test]
+    fn autoconfig_identity_does_not_imply_no_shutup() {
+        let mut spec = BoardSpec::fast_ram(512 * 1024);
+        spec.manufacturer = 514;
+        spec.product = 0x6A;
+        let chain = chain_with(vec![spec]);
+        assert_eq!(chain.config_logical_byte(0, 2), Some(ERFF_MEMSPACE));
     }
 
     #[test]

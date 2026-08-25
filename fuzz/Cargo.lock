@@ -576,6 +576,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pcap",
  "pixels",
+ "plmpeg",
  "png",
  "rfd",
  "ringbuf",
@@ -2939,6 +2940,15 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "plmpeg"
+version = "0.1.0"
+source = "git+https://github.com/CopperlineHQ/plmpeg-rs?rev=d020ba1015b48c0c646d32b16a27157623fff915#d020ba1015b48c0c646d32b16a27157623fff915"
+dependencies = [
+ "serde",
+ "serde-big-array",
+]
 
 [[package]]
 name = "png"
