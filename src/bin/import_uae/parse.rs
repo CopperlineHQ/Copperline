@@ -13,11 +13,26 @@ pub struct Entry {
     pub value: String,
 }
 
+/// Lines that carried no `key=value` pair, in file order: not comments or
+/// blanks, which are meaningless by construction, but content the reader
+/// could make nothing of. The caller reports these so a line the converter
+/// could not even tokenize is still visible, rather than the file quietly
+/// shrinking by a setting.
+pub fn unreadable_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !(line.is_empty() || line.starts_with('#') || line.starts_with(';')))
+        .filter(|line| !line.contains('='))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Parse WinUAE/Amiberry/FS-UAE style config text: `key=value` or
 /// `key = value` per line, `#` and `;` comment lines, blank lines ignored.
 /// Unparseable lines (no `=`) are skipped rather than erroring -- a
 /// best-effort import should degrade to "didn't recognize this line", not
 /// abort on the first stray comment style a real-world file throws at it.
+/// [`unreadable_lines`] collects those so they can still be reported.
 pub fn parse(text: &str) -> Vec<Entry> {
     text.lines()
         .filter_map(|line| {

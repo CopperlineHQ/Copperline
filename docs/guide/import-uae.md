@@ -120,10 +120,12 @@ which is a stock A500. The converter does not write a `[machine] profile`
 it was not told, but it does leave a `# Note:` saying which machine you
 ended up with and how to change it.
 
-**Nothing about the host is translated** -- window size, scaling filters,
-vsync mode, JIT tuning, input device assignments and hotkeys are all
-either Copperline's own settings or things it does not model. Set those up
-once on this side.
+**Most host-side settings are not translated.** The few Copperline has its
+own equivalent for do come across -- Amiberry's scaling method, fullscreen
+and status-bar flags, audio output device and the launcher's file-dialog
+directories. Window size, vsync mode, JIT tuning, input device assignments
+and hotkeys do not: they are either things Copperline does not model or
+settings you would want to make once on this side anyway.
 
 ## Building it
 

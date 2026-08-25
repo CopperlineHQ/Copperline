@@ -62,7 +62,15 @@ fn run() -> Result<(), String> {
     let text = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
     let entries = parse::parse(&text);
-    let outcome = map::map(args.format, &entries, &args.input);
+    let mut outcome = map::map(args.format, &entries, &args.input);
+    // A line the tokenizer could make nothing of is still something the
+    // source said; it belongs in the report like any other untranslated
+    // content, not on the floor.
+    for line in parse::unreadable_lines(&text) {
+        outcome.report.note(format!(
+            "this line of the source config is not a `key=value` setting and was not read: {line}"
+        ));
+    }
 
     let mut output = outcome.doc.to_string();
     let trailer = outcome.report.trailer_comment();
@@ -124,8 +132,13 @@ fn run() -> Result<(), String> {
         .filter(|f| f.bucket == report::Bucket::Approximated)
         .count();
     let unsupported = outcome.report.flagged.len() - approximated;
+    // Only trailer entries are counted; a setting that came across with an
+    // inline `#` comment on its own line is not one of these, so the
+    // wording points at both rather than implying the count covers every
+    // approximation in the file.
     eprintln!(
-        "wrote {} ({} setting(s) approximated, {} not translated -- see the trailing comment)",
+        "wrote {} ({} setting(s) approximated, {} not translated -- see the trailing comment, \
+         and the inline # comments for settings that changed shape on the way in)",
         args.output.display(),
         approximated,
         unsupported
@@ -152,6 +165,12 @@ fn absent_media(doc: &toml_edit::DocumentMut, source: &std::path::Path) -> Vec<S
             toml_edit::Item::Table(t) => {
                 if let Some(p) = t.get("path").and_then(|v| v.as_str()) {
                     out.push(p.to_string());
+                }
+                // A floppy drive can hold a swap playlist instead of (or
+                // as well as) a single image; every entry is media this
+                // host may or may not have.
+                if let Some(list) = t.get("paths").and_then(|v| v.as_array()) {
+                    out.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
                 }
             }
             _ => {}

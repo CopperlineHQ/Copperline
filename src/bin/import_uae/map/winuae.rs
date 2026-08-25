@@ -355,11 +355,22 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     }
 
     // --- Audio ------------------------------------------------------
+    // WinUAE counts separation in tenths -- its own GUI lists the ten
+    // steps as `i * 10` percent, and 10 (the maximum) is full separation,
+    // where Copperline's [audio] stereo_separation is that percentage. The
+    // default there is 7, so copying the number through would import a
+    // normal machine as 7% separation: very nearly mono.
     if let Some(e) = by_key("sound_stereo_separation") {
         seen.insert(&e.key, ());
         match e.value.trim().parse::<i64>() {
-            Ok(sep) => table(&mut doc, &["audio"])["stereo_separation"] = toml_edit::value(sep),
-            Err(_) => report.unsupported(&e.key, &e.value, "expected an integer"),
+            Ok(sep) if (0..=10).contains(&sep) => {
+                table(&mut doc, &["audio"])["stereo_separation"] = toml_edit::value(sep * 10)
+            }
+            _ => report.unsupported(
+                &e.key,
+                &e.value,
+                "expected one of the ten separation steps, an integer 0-10",
+            ),
         }
     }
 
@@ -926,21 +937,34 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
         .iter()
         .filter(|e| e.key.starts_with("uaehf") && e.key[5..].chars().all(|c| c.is_ascii_digit()))
     {
-        let rest = e.value.trim().strip_prefix("dir,");
-        match rest {
-            // The directory form duplicates a `filesystem2` line, already
-            // taken above.
-            Some(rest)
-                if filesys
-                    .iter()
-                    .any(|m| parse_filesystem2(rest).as_ref() == Some(m)) =>
+        let value = e.value.trim();
+        // The directory form duplicates a `filesystem2` line and the image
+        // form duplicates a `hardfile2` line; both are already taken (the
+        // hardfile loop below runs over the same entries). Marking them
+        // seen is what keeps every drive in a normal Amiberry config from
+        // also appearing in the trailer as "not recognized" -- it was
+        // recognized, under its other name.
+        if let Some(rest) = value.strip_prefix("dir,") {
+            if filesys
+                .iter()
+                .any(|m| parse_filesystem2(rest).as_ref() == Some(m))
             {
                 seen.insert(&e.key, ());
             }
-            // A `hdf,...` entry is a real hardfile image, which needs a
-            // controller decision Copperline cannot infer -- left for the
-            // generic bucket below to report by name.
-            _ => {}
+        } else if let Some(rest) = value.strip_prefix("hdf,") {
+            // This copy of the fields is escaped more heavily than
+            // `hardfile2`'s (backslashes doubled), so the paths are
+            // compared with that undone rather than byte for byte.
+            let twin = parse_hardfile2(rest).map(|hf| hf.path.replace("\\\\", "\\"));
+            if twin.is_some()
+                && entries
+                    .iter()
+                    .filter(|h| h.key == "hardfile2")
+                    .filter_map(|h| parse_hardfile2(&h.value))
+                    .any(|hf| Some(hf.path) == twin)
+            {
+                seen.insert(&e.key, ());
+            }
         }
     }
     if !filesys.is_empty() {
@@ -990,6 +1014,17 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             continue;
         };
         let controller = hf.controller.to_ascii_lowercase();
+        if let Some(written) = &hf.bootpri_unreadable {
+            report.approximated(
+                &e.key,
+                &e.value,
+                format!(
+                    "could not read \"{written}\" as a boot priority; imported as 0, which is \
+                     bootable -- set bootpri by hand if this drive should not be a boot \
+                     candidate"
+                ),
+            );
+        }
         if hf.readonly {
             report.unsupported(
                 &e.key,
@@ -1222,10 +1257,14 @@ struct FilesysMount {
 /// anyway; the device/volume/path triple is split on the first two colons,
 /// leaving any colon inside the path alone.
 fn parse_filesystem2(value: &str) -> Option<FilesysMount> {
-    let value = value.trim();
-    let (head, bootpri) = value.rsplit_once(',')?;
-    let (access, spec) = head.split_once(',')?;
-    let bootpri: i16 = bootpri.trim().parse().ok()?;
+    // Quoted like `hardfile2`'s: a mount path holding a comma arrives
+    // wrapped in quotes, so the fields are split the same way.
+    let fields = split_fields(value.trim());
+    if fields.len() < 3 {
+        return None;
+    }
+    let (access, spec) = (&fields[0], &fields[1]);
+    let bootpri: i16 = fields[2].trim().parse().ok()?;
     let mut parts = spec.splitn(3, ':');
     let _device = parts.next()?;
     let volume = parts.next()?;
@@ -1432,13 +1471,56 @@ mod tests {
 
     #[test]
     fn a_hardfile_path_may_contain_a_comma() {
-        // The fields are positional, so counting from the front would cut
-        // the path at the comma and read a geometry number as the rest.
-        let out = convert("hardfile2=rw,DH0:/hd/Amiga, The Best.hdf,32,1,2,512,-128,,ide0\n");
+        // WinUAE quotes a field holding a comma (cfgfile_escape_min), so
+        // the quotes are what keeps the fields aligned; splitting on every
+        // comma would cut the path in half and read a geometry number as
+        // the boot priority.
+        let out = convert("hardfile2=rw,DH0:\"/hd/Amiga, The Best.hdf\",32,1,2,512,-128,,ide0\n");
         assert!(
             out.contains(r#"master = { path = "/hd/Amiga, The Best.hdf", bootpri = -128 }"#),
             "{out}"
         );
+    }
+
+    #[test]
+    fn extras_behind_the_controller_do_not_become_the_controller() {
+        // WinUAE appends highcyl/geometry/CF/ATA1/lock and friends behind
+        // the controller field; reading the last field as the controller
+        // turns any of them into an unknown controller name and sends the
+        // drive to the wrong port.
+        let out = convert("hardfile2=rw,DH0:/hd/a.hdf,32,1,2,512,0,,scsi3,1024,CF,ATA1,lock\n");
+        assert!(out.contains(r#"unit3 = "/hd/a.hdf""#), "{out}");
+        assert!(!out.contains("master ="), "{out}");
+    }
+
+    #[test]
+    fn a_paired_uaehf_hardfile_line_is_not_reported_as_unrecognized() {
+        // Amiberry writes `uaehfN=hdf,<the same fields>` beside every
+        // hardfile2; the drive was imported, so the twin must not turn up
+        // in the trailer as a setting the converter did not know.
+        let entries = crate::parse::parse(
+            "hardfile2=rw,DH0:/hd/a.hdf,32,1,2,512,0,,ide0\n\
+             uaehf0=hdf,rw,DH0:/hd/a.hdf,32,1,2,512,0,,ide0\n",
+        );
+        let out = map(&entries, std::path::Path::new("test.uae"));
+        assert!(
+            out.doc.to_string().contains(r#"master = "/hd/a.hdf""#),
+            "{}",
+            out.doc
+        );
+        assert!(
+            !out.report.flagged.iter().any(|f| f.source_key == "uaehf0"),
+            "{:?}",
+            out.report.flagged
+        );
+    }
+
+    #[test]
+    fn stereo_separation_comes_across_as_a_percentage() {
+        // WinUAE counts ten steps (its GUI lists them as i * 10 percent);
+        // Copperline's field is that percentage, so the default 7 is 70%.
+        assert!(convert("sound_stereo_separation=10\n").contains("stereo_separation = 100"));
+        assert!(convert("sound_stereo_separation=7\n").contains("stereo_separation = 70"));
     }
 
     #[test]
@@ -1564,6 +1646,10 @@ mod note_tests {
 struct Hardfile2 {
     path: String,
     bootpri: i16,
+    /// The boot-priority field as written, when it could not be read as a
+    /// number. `bootpri` falls back to 0 in that case, which is a bootable
+    /// priority, so this is reported rather than assumed.
+    bootpri_unreadable: Option<String>,
     readonly: bool,
     controller: String,
 }
@@ -1573,35 +1659,62 @@ struct Hardfile2 {
 /// commas and then peels `DEVICE:` off the front of that field -- a bare
 /// `DH0:` prefix, unlike `filesystem2`, which also carries a volume name.
 fn parse_hardfile2(value: &str) -> Option<Hardfile2> {
-    let fields: Vec<&str> = value.trim().split(',').collect();
+    let fields = split_fields(value.trim());
     if fields.len() < 7 {
         return None;
     }
-    // The full form is access, spec, sectors, surfaces, reserved,
-    // blocksize, bootpri, filesys, controller: seven fields behind the
-    // spec. A host path with a comma in it splits into extra fields, so
-    // the spec is measured from the back, where the count is fixed --
-    // counting from the front would shift every field after the path and
-    // silently produce a truncated path with a geometry number appended.
-    let (spec, bootpri) = if fields.len() >= 9 {
-        let spec_end = fields.len() - 7;
-        (fields[1..spec_end].join(","), fields[spec_end + 4])
-    } else {
-        (fields[1].to_string(), fields[6])
-    };
+    // The controller sits at a fixed index, not at the end: WinUAE appends
+    // optional extras behind it (`highcyl`, a geometry triple, `CF`,
+    // `ATA1`/`SCSI1`, `flags=0x..`, `lock`, `identity`), and reading the
+    // last field as the controller turns any of those into an unknown
+    // controller name.
+    let spec = &fields[1];
+    let controller = fields.get(8).unwrap_or(fields.last().unwrap());
     // `DH0:/path/to.hdf` -- the device name, then the host path. A Windows
     // path's own drive letter colon is why this takes the *first* colon
     // only and leaves the rest alone.
-    let path = spec.split_once(':').map(|(_, p)| p).unwrap_or(&spec);
+    let path = spec.split_once(':').map(|(_, p)| p).unwrap_or(spec);
     if path.is_empty() {
         return None;
     }
+    let bootpri_field = fields[6].trim();
     Some(Hardfile2 {
         path: path.to_string(),
-        bootpri: bootpri.trim().parse().unwrap_or(0),
+        bootpri: bootpri_field.parse().unwrap_or(0),
+        // An unreadable boot priority is quietly worth 0 to the emulator
+        // too, but 0 is a *bootable* priority, so the caller says so
+        // rather than letting a typo decide which disk boots.
+        bootpri_unreadable: (!bootpri_field.is_empty() && bootpri_field.parse::<i16>().is_err())
+            .then(|| bootpri_field.to_string()),
         readonly: fields[0].trim().eq_ignore_ascii_case("ro"),
-        controller: fields.last().unwrap_or(&"").trim().to_string(),
+        controller: controller.trim().to_string(),
     })
+}
+
+/// Split a comma-separated UAE value into its fields, honouring the
+/// quoting WinUAE applies to any field holding a comma (`cfgfile_escape`):
+/// the field is wrapped in `"` and an embedded quote is backslash-escaped.
+/// Splitting on every comma instead would cut a path like
+/// `DH0:"/hd/Amiga, The Best.hdf"` in half and shift every field behind it.
+/// Only `\"` counts as an escape: this form of the escaper leaves
+/// backslashes alone, so consuming `\\` as one would eat the second half of
+/// a UNC path (`\\server\share`) that was never escaped to begin with.
+fn split_fields(value: &str) -> Vec<String> {
+    let mut fields = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        let current = fields.last_mut().expect("never empty");
+        match c {
+            '"' => quoted = !quoted,
+            '\\' if chars.peek() == Some(&'"') => {
+                current.push(chars.next().expect("peeked"));
+            }
+            ',' if !quoted => fields.push(String::new()),
+            _ => current.push(c),
+        }
+    }
+    fields
 }
 
 /// Put a drive in `[ide] master` (slot 0) or `slave` (slot 1), reporting
