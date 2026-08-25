@@ -867,6 +867,10 @@ impl MidiSerialSink {
 }
 
 impl SerialSink for MidiSerialSink {
+    // `control_lines` keeps the trait default, an unplugged cable: a MIDI
+    // interface hangs off TXD/RXD through its own current-loop drivers and
+    // leaves the RS-232 handshake pins unconnected.
+
     fn synth_source_name(&self) -> &'static str {
         #[cfg(feature = "coppersynth")]
         if self.csynth.is_some() {

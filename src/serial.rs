@@ -68,6 +68,88 @@ impl SerialTimeAnchor {
     }
 }
 
+/// CIA-B port A pin of the RS-232 /DSR input (Data Set Ready, DB25 pin 6).
+pub const CIAB_PA_DSR: u8 = 1 << 3;
+/// CIA-B port A pin of the RS-232 /CTS input (Clear To Send, DB25 pin 5).
+pub const CIAB_PA_CTS: u8 = 1 << 4;
+/// CIA-B port A pin of the RS-232 /CD input (Carrier Detect, DB25 pin 8).
+pub const CIAB_PA_CD: u8 = 1 << 5;
+/// The three RS-232 control inputs on CIA-B port A. The outputs /RTS (PA6)
+/// and /DTR (PA7) are the CIA's own pins; the remaining PA0-2 are the
+/// Centronics status inputs.
+pub const CIAB_PA_SERIAL_INPUTS: u8 = CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD;
+
+/// The RS-232 control lines the device on the far end of the serial cable
+/// drives back at the Amiga: DSR, CTS, and carrier detect. Each is `true`
+/// when the line is asserted (the RS-232 ON state). The motherboard's 1489
+/// receivers invert them onto CIA-B port A -- an asserted line reads as a
+/// LOW pin, and a line nothing drives is pulled up -- so `serial.device`'s
+/// 7-wire handshake and `SDCMD_QUERY` status see exactly what the attached
+/// device is saying.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SerialControlLines {
+    /// Data Set Ready: the far-end device is powered and present.
+    pub dsr: bool,
+    /// Clear To Send: the far-end device accepts data right now.
+    pub cts: bool,
+    /// Carrier Detect: a connection exists beyond the far-end device (a
+    /// modem has a carrier; a null-modem peer has its port open).
+    pub cd: bool,
+}
+
+impl SerialControlLines {
+    /// Nothing plugged in: every input floats high on its pull-up.
+    pub const UNPLUGGED: Self = Self {
+        dsr: false,
+        cts: false,
+        cd: false,
+    };
+    /// A device is present and accepting data, but has no carrier: a modem
+    /// with no call up, or a bridge with no client connected.
+    pub const READY: Self = Self {
+        dsr: true,
+        cts: true,
+        cd: false,
+    };
+    /// A device is present, accepting data, and connected through.
+    pub const CONNECTED: Self = Self {
+        dsr: true,
+        cts: true,
+        cd: true,
+    };
+
+    /// Pack into a bitmask for lock-free mirrors (bit 0 = DSR, 1 = CTS,
+    /// 2 = CD). Round-trips through [`from_bits`](Self::from_bits).
+    fn to_bits(self) -> u8 {
+        u8::from(self.dsr) | u8::from(self.cts) << 1 | u8::from(self.cd) << 2
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        Self {
+            dsr: bits & 1 != 0,
+            cts: bits & 2 != 0,
+            cd: bits & 4 != 0,
+        }
+    }
+
+    /// The pin levels CIA-B port A samples on PA3-5, inverted through the
+    /// 1489 receivers: bit clear where a line is asserted, set where it is
+    /// not. Other bits are zero.
+    pub fn cia_b_pa_levels(self) -> u8 {
+        let mut high = CIAB_PA_SERIAL_INPUTS;
+        if self.dsr {
+            high &= !CIAB_PA_DSR;
+        }
+        if self.cts {
+            high &= !CIAB_PA_CTS;
+        }
+        if self.cd {
+            high &= !CIAB_PA_CD;
+        }
+        high
+    }
+}
+
 pub trait SerialSink: Send {
     /// Transmit one byte. `at_cck` is the emulated color clock the byte finished
     /// shifting out on, a monotonic power-on count. Sinks that only want the data
@@ -105,9 +187,51 @@ pub trait SerialSink: Send {
         false
     }
 
+    /// The RS-232 control inputs (/DSR, /CTS, /CD) the far-end device is
+    /// driving at CIA-B port A right now. The bus samples this on every
+    /// guest read of CIA-B PRA, so it must be cheap and must not block.
+    /// The default is an unplugged cable -- every input pulled high -- which
+    /// is what a guest waiting on CTS or carrier sees on a real machine with
+    /// nothing attached. Sinks that stand in for a real device override it:
+    /// a present device asserts DSR and CTS, and carrier follows whether
+    /// the connection beyond it is up.
+    fn control_lines(&self) -> SerialControlLines {
+        SerialControlLines::UNPLUGGED
+    }
+
+    /// Whether this host endpoint can remain attached during run-ahead.
+    /// Speculative transmissions are withheld until their committed
+    /// re-emulation, so an output-only byte stream is safe when it has no
+    /// host-timing or connection state. Endpoints that can feed bytes back
+    /// into the guest, schedule MIDI, or own a live connection keep the
+    /// conservative default.
+    fn runahead_safe(&self) -> bool {
+        false
+    }
+
     /// Update the emulated-to-host time mapping (see [`SerialTimeAnchor`]).
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
+
+    /// Guest-driven RS-232 outputs, as logical assertions (true = asserted).
+    /// The bus decodes them from CIA-B PA7 (/DTR) and PA6 (/RTS) wire
+    /// levels, which are active-low; the decode happens there, once.
+    fn set_control_outputs(&mut self, _dtr: bool, _rts: bool) {}
+
+    /// The guest reprogrammed SERPER; `bps` is the resulting line rate.
+    /// Pacing stays Paula's job -- this only informs a sink whose protocol
+    /// text quotes the rate (a modem's CONNECT message).
+    fn baud_changed(&mut self, _bps: u32) {}
+
+    /// Once-per-span heartbeat: Paula calls this on every `tick_serial`,
+    /// stamped with that span's end color clock, whether or not any byte
+    /// moved in either direction. Most sinks have nothing to do with it and
+    /// keep the default. It exists for a sink whose protocol runs its own
+    /// timers off elapsed emulated time rather than guest traffic -- an
+    /// escape-sequence trailing guard that must complete even if the guest
+    /// falls silent right after it, or a ring cadence with nothing on the
+    /// wire to pace it.
+    fn poll(&mut self, _at_cck: u64) {}
 
     /// Discard host-side state tied to an emulated timeline that has just
     /// been abandoned by save-state load or rewind.
@@ -185,6 +309,11 @@ pub struct TcpSerialSink {
     /// dips to a transient -1 "debt" instead of wrapping to a stuck-huge
     /// unsigned value.
     buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    /// Whether a peer is connected right now: set by the acceptor (or at
+    /// dial time), cleared when the connection ends. This is the modem's
+    /// carrier as the guest sees it on CIA-B /CD; an atomic so the bus can
+    /// sample it on every PRA read without touching the writer lock.
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The bound listen address (resolves port 0 to the real port) in listen
     /// mode; the connected peer in connect mode.
     local_addr: std::net::SocketAddr,
@@ -209,6 +338,8 @@ impl TcpSerialSink {
         let acceptor_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
         let reader_buffered = std::sync::Arc::clone(&buffered);
+        let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let acceptor_connected = std::sync::Arc::clone(&connected);
         std::thread::Builder::new()
             .name("serial-tcp".into())
             .spawn(move || loop {
@@ -224,6 +355,7 @@ impl TcpSerialSink {
                         continue;
                     }
                 }
+                acceptor_connected.store(true, std::sync::atomic::Ordering::Release);
                 let mut buf = [0u8; 512];
                 let mut stream = stream;
                 loop {
@@ -242,11 +374,13 @@ impl TcpSerialSink {
                 }
                 log::info!("serial: client {peer} disconnected");
                 *acceptor_writer.lock().unwrap() = None;
+                acceptor_connected.store(false, std::sync::atomic::Ordering::Release);
             })?;
         Ok(Self {
             rx,
             writer,
             buffered,
+            connected,
             local_addr,
         })
     }
@@ -268,6 +402,8 @@ impl TcpSerialSink {
         let reader_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
         let reader_buffered = std::sync::Arc::clone(&buffered);
+        let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_connected = std::sync::Arc::clone(&connected);
         std::thread::Builder::new()
             .name("serial-tcp-connect".into())
             .spawn(move || {
@@ -289,11 +425,13 @@ impl TcpSerialSink {
                 }
                 log::info!("serial: {peer} disconnected");
                 *reader_writer.lock().unwrap() = None;
+                reader_connected.store(false, std::sync::atomic::Ordering::Release);
             })?;
         Ok(Self {
             rx,
             writer,
             buffered,
+            connected,
             local_addr: peer,
         })
     }
@@ -312,6 +450,8 @@ impl SerialSink for TcpSerialSink {
         if let Some(w) = guard.as_mut() {
             if w.write_all(&[b]).is_err() {
                 *guard = None;
+                self.connected
+                    .store(false, std::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -331,6 +471,18 @@ impl SerialSink for TcpSerialSink {
 
     fn can_produce_input(&self) -> bool {
         true
+    }
+
+    /// The bridge is a modem: powered and accepting data (DSR, CTS) from
+    /// the moment it is configured, with carrier only while a peer is
+    /// connected -- so a guest BBS sees the caller hang up as carrier loss,
+    /// and a terminal program sees the dial-out drop the same way.
+    fn control_lines(&self) -> SerialControlLines {
+        if self.connected.load(std::sync::atomic::Ordering::Acquire) {
+            SerialControlLines::CONNECTED
+        } else {
+            SerialControlLines::READY
+        }
     }
 
     fn flush(&mut self) {}
@@ -524,6 +676,14 @@ impl SerialSink for PtySerialSink {
         true
     }
 
+    /// A null-modem cable to a host terminal. Its DTR and RTS cross to our
+    /// DSR/CD and CTS, and the terminal's side is invisible from here (the
+    /// sink keeps the slave open itself), so the lines are reported as a
+    /// terminal that has the port open.
+    fn control_lines(&self) -> SerialControlLines {
+        SerialControlLines::CONNECTED
+    }
+
     fn flush(&mut self) {
         let _ = self.master.flush();
     }
@@ -561,6 +721,12 @@ pub struct ChannelSerialSink {
     /// Signed for the same transient-debt reason as
     /// [`TcpSerialSink::buffered`].
     buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    /// The handshake lines the frontend's far end is driving, as
+    /// [`SerialControlLines`] bits. An atomic for the same reason as
+    /// `buffered`: the bus samples `control_lines` on every guest CIA-B
+    /// PRA read, which must never wait on the frontend holding the queue
+    /// mutex in `push_input`/`take_output`.
+    lines: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl ChannelSerialSink {
@@ -569,11 +735,24 @@ impl ChannelSerialSink {
     pub fn pair() -> (Self, ChannelSerialHandle) {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(ChannelSerialShared::default()));
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        // A bridge is present and accepting data from the start; the
+        // frontend raises carrier once its own connection is up.
+        let lines = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            SerialControlLines::READY.to_bits(),
+        ));
         let handle = ChannelSerialHandle {
             shared: std::sync::Arc::clone(&shared),
             buffered: std::sync::Arc::clone(&buffered),
+            lines: std::sync::Arc::clone(&lines),
         };
-        (Self { shared, buffered }, handle)
+        (
+            Self {
+                shared,
+                buffered,
+                lines,
+            },
+            handle,
+        )
     }
 }
 
@@ -604,6 +783,10 @@ impl SerialSink for ChannelSerialSink {
         true
     }
 
+    fn control_lines(&self) -> SerialControlLines {
+        SerialControlLines::from_bits(self.lines.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     fn flush(&mut self) {}
 }
 
@@ -612,6 +795,7 @@ impl SerialSink for ChannelSerialSink {
 pub struct ChannelSerialHandle {
     shared: std::sync::Arc<std::sync::Mutex<ChannelSerialShared>>,
     buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    lines: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl ChannelSerialHandle {
@@ -655,6 +839,31 @@ impl ChannelSerialHandle {
     pub fn output_overflow(&self) -> u64 {
         self.shared.lock().unwrap().output_dropped
     }
+
+    /// Set the RS-232 control inputs the guest sees on CIA-B (/DSR, /CTS,
+    /// /CD). The sink starts as a present, ready device with no carrier
+    /// ([`SerialControlLines::READY`]); a frontend bridging to a socket
+    /// raises carrier when that connection opens and drops it when it
+    /// closes, which is how a guest BBS or terminal notices the hang-up.
+    pub fn set_control_lines(&self, lines: SerialControlLines) {
+        self.lines
+            .store(lines.to_bits(), std::sync::atomic::Ordering::Release);
+    }
+
+    /// Raise or drop carrier detect alone, keeping DSR and CTS asserted:
+    /// the one line a byte-stream bridge actually knows the state of.
+    pub fn set_carrier(&self, connected: bool) {
+        self.set_control_lines(if connected {
+            SerialControlLines::CONNECTED
+        } else {
+            SerialControlLines::READY
+        });
+    }
+
+    /// The control inputs currently presented to the guest.
+    pub fn control_lines(&self) -> SerialControlLines {
+        SerialControlLines::from_bits(self.lines.load(std::sync::atomic::Ordering::Acquire))
+    }
 }
 
 /// Inert sink: discards output and never produces input. Placeholder used
@@ -666,6 +875,10 @@ impl SerialSink for NullSerialSink {
     fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
 
     fn flush(&mut self) {}
+
+    fn runahead_safe(&self) -> bool {
+        true
+    }
 }
 
 pub struct StdoutSink {
@@ -697,6 +910,13 @@ impl SerialSink for StdoutSink {
         }
     }
 
+    /// The host console is a serial printer or terminal that is always
+    /// ready for data (DSR, CTS) but has no call behind it, so a guest
+    /// polling for carrier sees none rather than a phantom caller.
+    fn control_lines(&self) -> SerialControlLines {
+        SerialControlLines::READY
+    }
+
     fn flush(&mut self) {
         if !self.buf.is_empty() {
             let mut stdout = io::stdout().lock();
@@ -704,6 +924,10 @@ impl SerialSink for StdoutSink {
             let _ = stdout.flush();
             self.buf.clear();
         }
+    }
+
+    fn runahead_safe(&self) -> bool {
+        true
     }
 }
 
@@ -788,6 +1012,90 @@ mod tests {
             .unwrap();
         peer.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"x");
+    }
+
+    #[test]
+    fn control_lines_invert_onto_cia_b_port_a_pins() {
+        // Unplugged: the 1489 outputs idle high on the pull-ups.
+        assert_eq!(
+            SerialControlLines::UNPLUGGED.cia_b_pa_levels(),
+            CIAB_PA_DSR | CIAB_PA_CTS | CIAB_PA_CD
+        );
+        // A present device with no carrier: /DSR and /CTS low, /CD high.
+        assert_eq!(SerialControlLines::READY.cia_b_pa_levels(), CIAB_PA_CD);
+        // Connected through: all three low.
+        assert_eq!(SerialControlLines::CONNECTED.cia_b_pa_levels(), 0);
+        // Each line maps to its own pin.
+        let cts_only = SerialControlLines {
+            dsr: false,
+            cts: true,
+            cd: false,
+        };
+        assert_eq!(cts_only.cia_b_pa_levels(), CIAB_PA_DSR | CIAB_PA_CD);
+        // The default sink (an output-only byte sink) is an unplugged cable.
+        assert_eq!(
+            NullSerialSink.control_lines(),
+            SerialControlLines::UNPLUGGED
+        );
+        assert_eq!(StdoutSink::new().control_lines(), SerialControlLines::READY);
+    }
+
+    fn wait_for_lines(sink: &dyn SerialSink, want: SerialControlLines, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sink.control_lines() != want {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: lines stuck at {:?}",
+                sink.control_lines()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn tcp_listen_sink_carrier_follows_the_client() {
+        let mut sink = TcpSerialSink::listen("127.0.0.1:0").unwrap();
+        // A listening modem is powered and ready, but nobody has called.
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
+
+        let client = std::net::TcpStream::connect(sink.local_addr()).unwrap();
+        wait_for_lines(&sink, SerialControlLines::CONNECTED, "client connect");
+
+        // The caller hangs up: carrier drops, DSR and CTS stay up.
+        drop(client);
+        wait_for_lines(&sink, SerialControlLines::READY, "client hang-up");
+        // Output into the dropped connection stays a no-op and keeps carrier
+        // down.
+        sink.write_byte(b'x', 0);
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
+    }
+
+    #[test]
+    fn tcp_connect_sink_carrier_drops_when_the_remote_hangs_up() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let sink = TcpSerialSink::connect(&addr.to_string()).unwrap();
+        let peer = accepted.join().unwrap();
+        // The dial-out succeeded, so carrier is up from the start.
+        assert_eq!(sink.control_lines(), SerialControlLines::CONNECTED);
+
+        drop(peer);
+        wait_for_lines(&sink, SerialControlLines::READY, "remote hang-up");
+    }
+
+    #[test]
+    fn channel_sink_control_lines_follow_the_handle() {
+        let (sink, handle) = ChannelSerialSink::pair();
+        // A bridge is present and ready before the page has a connection.
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
+        assert_eq!(handle.control_lines(), SerialControlLines::READY);
+        handle.set_carrier(true);
+        assert_eq!(sink.control_lines(), SerialControlLines::CONNECTED);
+        handle.set_carrier(false);
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
+        handle.set_control_lines(SerialControlLines::UNPLUGGED);
+        assert_eq!(sink.control_lines(), SerialControlLines::UNPLUGGED);
     }
 
     #[test]

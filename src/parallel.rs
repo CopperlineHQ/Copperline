@@ -53,6 +53,13 @@ pub trait ParallelPort: Send {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+
+    /// Whether speculative run-ahead frames may touch this peripheral.
+    /// A printer writes an irreversible host stream and a sampler consumes
+    /// live input, so only the unplugged port opts in.
+    fn runahead_safe(&self) -> bool {
+        false
+    }
 }
 
 pub struct NullParallelPort;
@@ -60,6 +67,10 @@ pub struct NullParallelPort;
 impl ParallelPort for NullParallelPort {
     fn strobe(&mut self, _data: u8, _at_cck: u64) -> bool {
         false
+    }
+
+    fn runahead_safe(&self) -> bool {
+        true
     }
 }
 

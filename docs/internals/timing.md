@@ -294,8 +294,8 @@ models COLORxx on Denise's final palette/output phase, one lores pixel
 ahead of writes that feed delayed shifter/control paths. OCS Denise (8362)
 and ECS Denise (8373) share this timing; the only OCS/ECS colour-path
 difference is the OCS 12-bit value mask. (AGA Lisa delays colour changes by
-one hires pixel relative to OCS/ECS per WinUAE; that sub-colour-clock offset
-is not yet modelled.) AGA BPLCON4's sprite palette-base byte uses Lisa's
+one hires pixel relative to OCS/ECS; the AGA replay adds that one framebuffer
+sample after the common COLOR write anchor.) AGA BPLCON4's sprite palette-base byte uses Lisa's
 earlier sprite colour-lookup path at `(hpos - $36) * 4`
 (`SPRITE_PALETTE_CONTROL_HPOS_FB0`), one lores pixel ahead of ordinary
 COLORxx replay. Tests:

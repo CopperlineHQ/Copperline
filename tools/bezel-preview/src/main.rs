@@ -423,7 +423,7 @@ async fn run(args: Args, shader_src: String) {
             timeout: None,
         })
         .expect("poll");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("mapped range");
 
     let mut png_data = Vec::with_capacity((args.width * args.height * 4) as usize);
     for y in 0..args.height {

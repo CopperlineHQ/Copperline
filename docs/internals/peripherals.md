@@ -70,7 +70,7 @@ WinUAE-verified model so device scans terminate correctly. PCMCIA reports
 an empty slot (the status/config registers exist so card.resource
 behaves); credit-card device emulation is a non-goal.
 
-Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.chd`
+Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.nrg`/`.chd`
 image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
 handing 12-byte CDBs to the same bus-agnostic SCSI-2 CD-ROM command engine
 (`scsi/cd.rs`'s `ScsiCdRom`) the `[scsi]` host adapters use, so the read
@@ -204,7 +204,7 @@ whole clone family). All three reuse the front-end-agnostic ATA core in
 drive backend above; the new work is entirely in the board's own address
 decode, since none of the three personalities resemble Gayle's 4-byte task
 file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
-PACKET support, `.cue`/`.iso`/`.chd` CD-ROM images.
+PACKET support, `.cue`/`.iso`/`.nrg`/`.chd` CD-ROM images.
 
 **Register decode.** Each ATA channel occupies a 4K block of the board
 window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
@@ -483,8 +483,32 @@ resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
 included, which is where AROS places its `MEMF_24BITDMA` allocations when
 fast RAM exists -- not just chip RAM.
 
-`cdrom.rs` parses BIN/CUE cue sheets (single- or multi-file;
-MODE1/2048, MODE1/2352, and AUDIO tracks) for both machines.
+`cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
+MODE1/2352, and AUDIO tracks; `PREGAP`/`POSTGAP` as unstored zero-fill
+extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
+and lays every `FILE` out as a run of extents over a byte-addressed
+source. Nero NRG images use the same extent model after their 32- or
+64-bit CUE/DAO or ETN footer has supplied the track offsets and stored
+pregaps. A `BINARY` source is the file itself; a `WAVE` or `MP3` source
+(`cdrom/audio.rs`) presents the decoded audio as CD-DA sectors --
+588 stereo frames per sector, the last sector zero-padded, other sample
+rates linearly interpolated in integer arithmetic -- so the layout code
+sees only sector bytes. Decoding is on demand: a WAV is random access
+(`cdrom/wav.rs`, via `hound`); an MP3 (`cdrom/mp3.rs`, Symphonia's
+decoder behind the `cd-mp3` feature) is indexed at load without decoding
+(frames located by header, ID3v2 skipped, a Xing/Info frame dropped, a
+LAME tag's encoder delay and padding trimmed) and then decoded by a
+cursor that follows sequential reads. A jump warms a fresh decoder up on
+as many earlier frames as it takes to refill the Layer III bit reservoir
+(511 bytes of main data for MPEG-1, 255 for MPEG-2/2.5 -- sized in bytes
+from the frame index, since a frame at the bottom of the MPEG-2 range
+carries only a byte or two of main data) plus the one-frame-deep
+overlap-add and synthesis state, so a sector decodes to the same bytes
+whichever way the cursor reached it; that is what keeps a run resumed
+from a save state byte-identical to an uninterrupted one, and a unit
+test holds it to that down to 8 kbps streams.
+A save state records each file's path, format, and sector byte length and
+reopens (re-indexes) it on load.
 
 ## RTC (`rtc.rs`)
 
@@ -527,7 +551,11 @@ feed the JOY0DAT quadrature counters. Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad
 resolves through a fixed standard layout, overridden per-UUID by the
 calibration described in [](../guide/ui), which records raw event codes
-and is the only path for unrecognised pads. On CD32 machines the pad
+(one per control, plus an optional alternate per direction so a stick
+and a d-pad can both steer) and is the only path for unrecognised pads.
+A direction pair recorded on the two ends of one raw axis is reported
+as that stick's deflection as well, which is what the gamepad-mouse
+device paces the pointer by. On CD32 machines the pad
 output is serialized through the CD32 pad protocol instead of the plain
 digital joystick lines, modelled after the pad's 4021 shift register:
 in load mode the register's output follows Blue continuously (which is
@@ -594,6 +622,8 @@ Default live-audio warnings are emitted from the producer side at the same
 one-second cadence, and only when an underrun, overrun, or stale-frame
 counter is nonzero.
 
+(serial-sink)=
+
 ## Serial (`serial.rs`)
 
 Paula's SERDAT transmit path lands on a `SerialSink`. The default
@@ -613,6 +643,28 @@ A `SerialSink` that can *produce* input must override
 Paula's per-tick UART step takes an idle fast path that skips the receiver
 entirely while it reports false -- the TCP and pty sinks poll a counter
 there, never a syscall.
+
+The sink is also the device on the far end of the RS-232 cable, so it owns
+the handshake inputs. `SerialSink::control_lines` reports DSR, CTS, and
+carrier detect as asserted-or-not (`SerialControlLines`); the bus samples
+it on every guest read of CIA-B PRA and overlays PA3-5 with the levels the
+motherboard's inverting 1489 receivers would present (asserted = pin low,
+undriven = pulled high), leaving pins the guest has switched to outputs
+CIA-driven -- the same shape as the Centronics status overlay on PA0-2.
+The guest's `/DTR` (PA7) and `/RTS` (PA6) outputs are the CIA's own pins,
+readable by a host bridge through `Cia::port_a_pins`. The default is an
+unplugged cable (every input high), which is what the inert and MIDI sinks
+keep; `StdoutSink` is a ready device with no carrier; `TcpSerialSink`
+is a modem whose carrier follows the live connection (an atomic flag the
+acceptor/reader thread maintains, so the PRA read never touches the
+writer lock); `PtySerialSink` is a null-modem peer with its port open;
+`ChannelSerialSink` starts ready-without-carrier and lets the frontend set
+the lines (`ChannelSerialHandle::set_carrier`, exported to the browser as
+`serial_set_carrier`). The lines are host-side state like the bytes
+themselves -- never serialized, never part of the deterministic timeline.
+Paula has no framing-error or parity hardware: a received word always
+carries its stop bit(s) set, and `serial.device` computes parity in
+software, so neither needs a model here.
 
 CCP serial observability is a host-side tap beside `SerialSink`, not another
 serial device. When a control connection subscribes, each successfully

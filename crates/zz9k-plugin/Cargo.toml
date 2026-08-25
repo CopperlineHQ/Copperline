@@ -19,18 +19,25 @@ crate-type = ["cdylib", "rlib"]
 # live in this standalone crate's own lockfile and never touch the root
 # dependency tree (the emulator embeds the committed .wasm artifact).
 [dependencies]
-sha1 = { version = "0.10", default-features = false }
-# "oid" gives sha2's digests AssociatedOid, which rsa's Pkcs1v15Sign::new
-# needs to build the DigestInfo prefix for signature verification.
-sha2 = { version = "0.10", default-features = false, features = ["oid"] }
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false, features = ["oid"] }
+# rsa 0.9 is still the latest stable RSA release and uses digest 0.10. Keep a
+# narrowly named SHA-256 type solely to select its PKCS#1 DigestInfo prefix;
+# hashing and every guest-visible SHA operation use the current line above.
+sha2_legacy = { package = "sha2", version = "0.10", default-features = false, features = ["oid"] }
 blake2 = { version = "0.10", default-features = false }
-hmac = { version = "0.12", default-features = false }
-poly1305 = { version = "0.8", default-features = false }
-chacha20 = { version = "0.9", default-features = false }
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "precomputed-tables", "alloc", "zeroize"] }
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "alloc"] }
+hmac = { version = "0.13", default-features = false }
+poly1305 = { version = "0.9", default-features = false }
+# The cipher API became optional in 0.10; this board uses it directly and
+# therefore enables it explicitly while keeping all other defaults off.
+chacha20 = { version = "0.10", default-features = false, features = ["cipher"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
+x25519-dalek = { version = "3", default-features = false, features = ["precomputed-tables", "zeroize"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "alloc"] }
+# rsa 0.9 remains the latest stable line. RUSTSEC-2023-0071 affects its
+# private-key operations; this board only constructs RsaPublicKey values and
+# verifies signatures, so it has no private key for the timing leak to expose.
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 # rand_core (a transitive dependency of p256/rsa) enables getrandom, which
 # has no wasm32-unknown-unknown backend by default. "custom" compiles a

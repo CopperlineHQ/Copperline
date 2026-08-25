@@ -569,6 +569,21 @@ pub(crate) struct RawSerial {
     /// Remote host:port to dial; tcp-connect mode only, and required there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) connect: Option<String>,
+    /// AT*T1/AT*T0 default at power-on: telnet NVT translation (the
+    /// WiModem extra) on by default. Modem mode only. Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) telnet: Option<bool>,
+    /// `[serial.phonebook]`: dialable numbers a guest's ATD can look up,
+    /// number -> "host:port" (or a bare host, which dials the modem's
+    /// default port). Modem mode only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) phonebook: Option<std::collections::BTreeMap<String, String>>,
+    /// A scripted session file to replay instead of dialing out over TCP
+    /// (`docs/guide/modem.md`'s "Scripted sessions" section has the file
+    /// format). Modem mode only; incompatible with `listen` (the scripted
+    /// transport has no inbound side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
@@ -784,8 +799,53 @@ pub(crate) struct RawLide {
     pub(crate) rom_bank2: Option<String>,
     /// Drive images, in (channel, master/slave) order: index 0-1 are
     /// channel 0's master/slave, index 2-3 are channel 1's (RIPPLE only).
+    ///
+    /// Deprecated in favour of the `drive0`..`drive3` keys below, which can
+    /// leave a slot empty -- a positional array cannot express "channel 0
+    /// slave only", so this form forced the launcher to hide any slot past
+    /// the first empty one. Still read, so configs written before the named
+    /// keys existed keep working; never written back out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) drives: Vec<RawDrive>,
+    /// Channel 0 master. Named per slot, like `[ide]`'s `master`/`slave`
+    /// and `[scsi]`'s `unit0`..`unit6`, so any slot can be filled or left
+    /// empty independently of the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) drive0: Option<RawDrive>,
+    /// Channel 0 slave.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) drive1: Option<RawDrive>,
+    /// Channel 1 master (RIPPLE only -- RIDE and AT-Bus 2008 have one
+    /// channel).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) drive2: Option<RawDrive>,
+    /// Channel 1 slave (RIPPLE only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) drive3: Option<RawDrive>,
+}
+
+impl RawLide {
+    /// The four drive slots as named keys, with the deprecated positional
+    /// `drives` array filled in underneath: a named key always wins, so a
+    /// config carrying both is unambiguous rather than order-dependent.
+    pub(crate) fn drive_slots(&self) -> [Option<RawDrive>; 4] {
+        let named = self.named_drive_slots();
+        std::array::from_fn(|i| named[i].clone().or_else(|| self.drives.get(i).cloned()))
+    }
+
+    /// Just the named `driveN` keys, without the deprecated array
+    /// underneath. Validation checks these per slot so it can name the key
+    /// at fault; a slot filled from the legacy array is covered by that
+    /// array's own length rule instead, since reporting it as `driveN`
+    /// would name a key the config never wrote.
+    pub(crate) fn named_drive_slots(&self) -> [Option<RawDrive>; 4] {
+        [
+            self.drive0.clone(),
+            self.drive1.clone(),
+            self.drive2.clone(),
+            self.drive3.clone(),
+        ]
+    }
 }
 
 /// `[a2065]` Ethernet board. Fitting the board enables host networking, which
@@ -925,7 +985,7 @@ pub(crate) struct RawRtg {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCd {
-    /// Path to a CUE/BIN, bare ISO, or CHD CD image.
+    /// Path to a CUE/BIN, bare ISO, Nero NRG, or CHD CD image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) image: Option<String>,
     /// Insert the disc this many emulated seconds after power-on
@@ -1000,6 +1060,10 @@ pub(crate) struct RawEmulation {
     /// Emulated frames between rewind snapshots (one rewind step).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rewind_interval_frames: Option<u64>,
+    /// Run-ahead input-latency reduction: present the frame `n` emulated
+    /// frames in the future of the anchor each display refresh (0 = off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_ahead_frames: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

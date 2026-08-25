@@ -11,7 +11,7 @@ use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::gzip;
 use anyhow::{bail, ensure, Context, Result};
-use formats::{FloppyImage, FloppyImageData, FloppyTrackImage};
+use formats::{FloppyImage, FloppyImageBacking, FloppyImageData, FloppyTrackImage};
 use log::{debug, warn};
 // The bridge's retry path traces, and its media reporting is worth an info
 // line; both are compiled out with the feature.
@@ -549,6 +549,45 @@ impl FloppyController {
         )
     }
 
+    /// Whether the image in DFn presents a closed write-protect tab.
+    pub fn disk_image_write_protected(&self, drive_idx: usize) -> Option<bool> {
+        Some(self.drives.get(drive_idx)?.image.as_ref()?.write_protected)
+    }
+
+    /// Encode the current in-memory image as a standalone ADF. Standard ADFs
+    /// stay byte-for-byte standard; track images become the same UAE extended
+    /// ADF variant they were loaded as. Container formats such as ADZ and DMS
+    /// deliberately export their decoded disk rather than recompressing it.
+    pub fn export_disk_image(&self, drive_idx: usize) -> Result<Vec<u8>> {
+        let image = self
+            .drives
+            .get(drive_idx)
+            .with_context(|| format!("invalid floppy drive df{drive_idx}"))?
+            .image
+            .as_ref()
+            .with_context(|| format!("floppy.df{drive_idx} is empty"))?;
+        match &image.data {
+            FloppyImageData::StandardAdf(data) => Ok(data.clone()),
+            FloppyImageData::Tracks(tracks) if image.legacy_extended_adf => {
+                encode_uae_legacy_extended_adf(tracks)
+            }
+            FloppyImageData::Tracks(tracks) => encode_uae_extended_adf(tracks),
+        }
+    }
+
+    /// A host without a writable filesystem adopts every restored image into
+    /// memory. This is intentionally called after browser save-state loads:
+    /// desktop states may name writable host files which do not exist there.
+    pub fn make_disk_images_memory_backed(&mut self) {
+        for image in self
+            .drives
+            .iter_mut()
+            .filter_map(|drive| drive.image.as_mut())
+        {
+            image.backing = FloppyImageBacking::Memory;
+        }
+    }
+
     pub fn insert_disk_image(
         &mut self,
         drive_idx: usize,
@@ -586,10 +625,9 @@ impl FloppyController {
         Ok(())
     }
 
-    /// Insert a disk from in-memory image bytes (any format
-    /// [`FloppyImage::from_bytes`] accepts). `label` stands in for the file
-    /// path in logs and the UI; hosts without a filesystem should pass
-    /// `write_protected = true` (see `from_bytes`).
+    /// Insert a disk from already-loaded image bytes while retaining ordinary
+    /// host-file write-through semantics. `label` is both its UI name and the
+    /// path updated by a writable image.
     pub fn insert_disk_image_bytes(
         &mut self,
         drive_idx: usize,
@@ -616,6 +654,45 @@ impl FloppyController {
         );
         let image = FloppyImage::from_bytes(bytes, label, write_protected)
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
+        self.idle_cache = false;
+        self.drives[drive_idx].insert_image(image);
+        if self.selected_drive() == Some(drive_idx) {
+            self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
+        }
+        Ok(())
+    }
+
+    /// Insert a disk whose writable backing lives entirely in this controller.
+    /// Guest writes update the serialized image data and never touch `label`;
+    /// [`Self::export_disk_image`] snapshots the current bytes for its host.
+    /// Formats without a writable representation (compressed containers,
+    /// DMS, IPF and SCP) reject a writable request instead of silently
+    /// presenting a write-protected disk.
+    pub fn insert_memory_disk_image_bytes(
+        &mut self,
+        drive_idx: usize,
+        bytes: Vec<u8>,
+        label: PathBuf,
+        write_protected: bool,
+    ) -> Result<()> {
+        ensure!(
+            drive_idx < self.drives.len(),
+            "invalid floppy drive df{}",
+            drive_idx
+        );
+        #[cfg(feature = "fluxbridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
+        let image = FloppyImage::from_memory_bytes(bytes, label, write_protected)
+            .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
+        ensure!(
+            write_protected || !image.write_protected,
+            "floppy image {} uses a read-only format; use an uncompressed ADF or UAE extended ADF for writable media",
+            image.path.display()
+        );
         self.idle_cache = false;
         self.drives[drive_idx].insert_image(image);
         if self.selected_drive() == Some(drive_idx) {
@@ -686,6 +763,25 @@ impl FloppyController {
     #[cfg(feature = "fluxbridge")]
     pub fn has_bridged_drive(&self) -> bool {
         self.drives.iter().any(|d| d.bridge.is_some())
+    }
+
+    /// Why this controller cannot be replayed speculatively. A physical
+    /// mechanism cannot rewind, and a file-backed writable image flushes
+    /// completed guest writes to its host file. Read-only and memory-backed
+    /// image media are fully serialized.
+    pub fn runahead_block_reason(&self) -> Option<&'static str> {
+        #[cfg(feature = "fluxbridge")]
+        if self.drives.iter().any(FloppyDrive::is_bridged) {
+            return Some("physical floppy drive");
+        }
+        if self.drives.iter().any(|drive| {
+            drive.image.as_ref().is_some_and(|image| {
+                !image.write_protected && image.backing == FloppyImageBacking::File
+            })
+        }) {
+            return Some("writable floppy image");
+        }
+        None
     }
 
     /// Whether any fitted bay serves from an image. Drive speed only shapes
@@ -1378,7 +1474,10 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // A bridged bay retains a filler track while its physical drive is
+        // empty. No media still means no cells reach Paula, regardless of
+        // what is cached for the bridge transport.
+        if !self.drive_can_transfer_cells(idx) {
             return false;
         }
         // Free-running comparator mode comes from the mirrored ADKCON; an
@@ -1431,6 +1530,11 @@ impl FloppyController {
             let storing = read_dma.as_ref().is_some_and(|d| !d.wait_sync);
             self.read_shifter.sample_bit(bit, dsksync, storing);
 
+            // The DSKSYN interrupt is edge-triggered, but the comparator
+            // itself answers on every cell: a DSKSYNC that a same-bit run
+            // keeps matching (0x0000, 0xFFFF) holds the match for the whole
+            // run.
+            let comparator_match = self.read_shifter.sync_matched();
             if self.read_shifter.take_sync_irq() && sync_enabled {
                 self.record_sync_match();
                 if let Some(dma) = read_dma.as_mut() {
@@ -1442,6 +1546,22 @@ impl FloppyController {
                             irq = true;
                             break 'outer;
                         }
+                    }
+                }
+            }
+            if comparator_match && sync_enabled && self.adkcon & ADK_WORDSYNC != 0 {
+                if let Some(dma) = read_dma.as_mut() {
+                    if !dma.wait_sync {
+                        // With WORDSYNC set, Paula re-frames the word boundary
+                        // on every DSKSYNC match, not only on the one that
+                        // starts the transfer. A revolution whose cell count
+                        // is not a multiple of 16 otherwise leaves every
+                        // sector after the index wrap off the word grid, and
+                        // a reader that scans its buffer on that grid (AROS
+                        // trackdisk.device) never finds them. Re-framing on
+                        // every matching cell of a run parks the framing at
+                        // the run's end, where the first word after it starts.
+                        self.read_shifter.reframe();
                     }
                 }
             }
@@ -1499,7 +1619,9 @@ impl FloppyController {
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
-        if !self.drives[idx].motor_on || self.drives[idx].cached.is_empty() {
+        // Match the read path: a bridge filler track must not make an empty
+        // physical drive accept a write.
+        if !self.drive_can_transfer_cells(idx) {
             return false;
         }
         let Some(mut dma) = self.dma.take() else {
@@ -1518,6 +1640,14 @@ impl FloppyController {
                 break;
             }
             self.drives[idx].rotation_acc_cck -= word_cck;
+            if dma.write_start_pending {
+                // A start position sampled while the mechanism was idle is
+                // not meaningful (inserting media resets rotation). Latch
+                // the actual head position when the first word is consumed.
+                dma.write_start_pending = false;
+                dma.write_start_word = self.drives[idx].rotation_bit / 16;
+                dma.write_start_bit = (self.drives[idx].rotation_bit % 16) as u8;
+            }
             let word = read_chip_word(chip_ram, self.dskpt);
             dma.write_words.push(word);
             self.advance_dskpt();
@@ -1586,7 +1716,7 @@ impl FloppyController {
 
     fn next_completion_cck_raw(&self, dmacon: u16) -> Option<u32> {
         let dma = self.dma.as_ref()?;
-        if !self.dma_enabled(dmacon) || dma.wait_sync {
+        if !self.dma_enabled(dmacon) || dma.wait_sync || !self.drive_can_transfer_cells(dma.drive) {
             return None;
         }
         let drive = &self.drives[dma.drive];
@@ -1604,6 +1734,15 @@ impl FloppyController {
             drive.head_cck_for_bits(bits.max(1))
         };
         Some((cck.min(u64::from(u32::MAX)) as u32).max(1))
+    }
+
+    /// Whether the active track can currently deliver cells to Paula. Keep
+    /// the completion predictor on the same boundary as the read/write
+    /// engines: an armed transfer over an idle or empty mechanism remains
+    /// pending, but has no completion event for STOP-state pacing to chase.
+    fn drive_can_transfer_cells(&self, drive_idx: usize) -> bool {
+        let drive = &self.drives[drive_idx];
+        drive.motor_on && drive.has_media() && !drive.cached.is_empty()
     }
 
     pub fn next_sync_irq_cck(&self, dmacon: u16) -> Option<u32> {
@@ -1710,22 +1849,27 @@ impl FloppyController {
         // arming enters the transfer state regardless, and data starts
         // flowing once the mechanism delivers stable cells. A drive that is
         // still spinning up must therefore arm normally instead of faking an
-        // instant, dataless completion -- trackloaders (Gods, Shadow of the
-        // Beast disk 2) issue the read within the spin-up window and poll the
-        // buffer for arriving data, dead-spinning if it never fills.
-        // TODO: media-less and motor-off drives should also arm and idle
-        // (real Paula would wait for sync forever); they keep the instant
-        // completion until the software relying on it is characterized.
-        if !self.drives[idx].has_media() || !self.drives[idx].motor_on {
-            if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
-                log::info!(
-                    "disk-dma refused: df{idx} media={} motor_on={} motor_cck={}",
-                    self.drives[idx].has_media(),
-                    self.drives[idx].motor_on,
-                    self.drives[idx].motor_cck,
-                );
-            }
-            return self.no_drive_completion();
+        // instant, dataless completion. A trackloader may arm within the
+        // spin-up window and poll its buffer for the data that arrives later.
+        //
+        // The same honesty covers a drive with no media or a stopped
+        // platter: the transfer arms and then idles, because no cells pass
+        // under the head for the shifter to drain. Real Paula waits for
+        // sync forever in that state; the guest's own timeout governs, and
+        // a media insert or motor start mid-transfer brings the transfer to
+        // life exactly as on hardware. The read and write tick paths idle
+        // without motor, media, and cached cells, and the turbo burst refuses
+        // drives that are not ready, so nothing completes early.
+        if (!self.drives[idx].has_media() || !self.drives[idx].motor_on)
+            && crate::envcfg::flag("COPPERLINE_DIAG_DISK")
+        {
+            log::info!(
+                "disk-dma armed against an idle mechanism: df{idx} media={} motor_on={} \
+                 motor_cck={} (transfer will pend until the mechanism delivers)",
+                self.drives[idx].has_media(),
+                self.drives[idx].motor_on,
+                self.drives[idx].motor_cck,
+            );
         }
 
         let track = self.track_for_drive(idx);
@@ -1755,6 +1899,8 @@ impl FloppyController {
             write_words: Vec::new(),
             write_start_word,
             write_start_bit,
+            write_start_pending: write
+                && (!self.drives[idx].has_media() || !self.drives[idx].motor_on),
         });
         if self.turbo() {
             self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
@@ -1820,6 +1966,8 @@ impl FloppyController {
         dma.track = new_track;
         dma.write_start_word = self.drives[drive_idx].rotation_bit / 16;
         dma.write_start_bit = (self.drives[drive_idx].rotation_bit % 16) as u8;
+        dma.write_start_pending =
+            !self.drives[drive_idx].has_media() || !self.drives[drive_idx].motor_on;
         self.dma = Some(dma);
     }
 
@@ -1976,11 +2124,17 @@ impl FloppyController {
         }
         let path = image.path.clone();
         let legacy_extended_adf = image.legacy_extended_adf;
+        let backing = image.backing;
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
                 decode_non_empty_track_write(track, write_words).and_then(|sectors| {
                     apply_standard_adf_sectors(image_data, track, &sectors);
-                    write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                    match backing {
+                        FloppyImageBacking::File => {
+                            write_standard_adf_sectors_to_disk(&path, track, &sectors)
+                        }
+                        FloppyImageBacking::Memory => Ok(()),
+                    }
                 })
             }
             FloppyImageData::Tracks(tracks) => apply_extended_adf_write(
@@ -1992,16 +2146,24 @@ impl FloppyController {
                 legacy_extended_adf,
                 lose_tail_bits,
             )
-            .and_then(|encoded| {
-                std::fs::write(&path, encoded).context("writing extended ADF image")
+            .and_then(|()| match backing {
+                FloppyImageBacking::File => {
+                    let encoded = if legacy_extended_adf {
+                        encode_uae_legacy_extended_adf(tracks)
+                    } else {
+                        encode_uae_extended_adf(tracks)
+                    }?;
+                    std::fs::write(&path, encoded).context("writing extended ADF image")
+                }
+                FloppyImageBacking::Memory => Ok(()),
             }),
         };
         match write_result {
             Ok(()) => {
                 drive.cached_track = None;
-                debug!("floppy.df{} write-through complete", drive_idx);
+                debug!("floppy.df{} image write complete", drive_idx);
             }
-            Err(e) => warn!("floppy.df{} write-through failed: {e:#}", drive_idx),
+            Err(e) => warn!("floppy.df{} image write failed: {e:#}", drive_idx),
         }
     }
 
@@ -3223,7 +3385,7 @@ fn apply_extended_adf_write(
     write_start_bit: u8,
     legacy_extended_adf: bool,
     lose_tail_bits: bool,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
     let Some(Some(image_track)) = tracks.get_mut(track) else {
         bail!("target track {track} is empty");
     };
@@ -3231,11 +3393,6 @@ fn apply_extended_adf_write(
         FloppyTrackImage::AmigaDos(track_data) => {
             let sectors = decode_non_empty_track_write(track, write_words)?;
             apply_amigados_track_sectors(track_data, track, &sectors)?;
-            if legacy_extended_adf {
-                encode_uae_legacy_extended_adf(tracks)
-            } else {
-                encode_uae_extended_adf(tracks)
-            }
         }
         FloppyTrackImage::RawMfm {
             words,
@@ -3258,7 +3415,6 @@ fn apply_extended_adf_write(
                     write_start_bit,
                     lose_tail_bits,
                 )?;
-                encode_uae_legacy_extended_adf(tracks)
             } else {
                 apply_raw_mfm_write(
                     words,
@@ -3270,10 +3426,10 @@ fn apply_extended_adf_write(
                     write_start_bit,
                     lose_tail_bits,
                 )?;
-                encode_uae_extended_adf(tracks)
             }
         }
     }
+    Ok(())
 }
 
 fn decode_non_empty_track_write(
@@ -3652,6 +3808,9 @@ struct DiskDma {
     write_words: Vec<u16>,
     write_start_word: usize,
     write_start_bit: u8,
+    /// Set when a write arms without a delivering mechanism. The rotational
+    /// start is re-latched from the first word actually consumed.
+    write_start_pending: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3786,7 +3945,8 @@ impl<'a> DiskBitStream<'a> {
 // DSKBYT each assembled byte, compares the running 16-bit window to DSKSYNC
 // every bit (so sync is detected bit-aligned, not on a fixed word grid), and
 // frames read-DMA words into a 3-word FIFO. Word framing realigns to the sync
-// bit phase so the post-sync word stream matches the disk's framing.
+// bit phase so the post-sync word stream matches the disk's framing, and with
+// WORDSYNC set it does so again at every later match.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PaulaDiskReadDpllFifo {
     shift_word: u16,
@@ -3830,6 +3990,19 @@ impl PaulaDiskReadDpllFifo {
         self.bit_offset = 0;
         self.fifo_len = 0;
         self.fifo_overflow = false;
+    }
+
+    /// Restart word framing at the cell after a sync match made mid-transfer,
+    /// keeping the words already framed and queued for DMA. The partial word
+    /// the sync interrupted is dropped, as on the hardware.
+    fn reframe(&mut self) {
+        self.bit_offset = 0;
+    }
+
+    /// Whether the cell just sampled completed a DSKSYNC match: the
+    /// comparator's level, where `take_sync_irq` reports only its edge.
+    fn sync_matched(&self) -> bool {
+        self.word_equal
     }
 
     #[cfg(test)]

@@ -15,7 +15,7 @@ locally, and how to embed the emulator in your own page.
 AROS ROM or a loaded Kickstart. Changing it before boot just changes what
 the boot button builds, and changing it while a machine runs rebuilds the
 machine and powers it up again -- the model is the board itself, not a
-knob on it -- keeping the chosen ROM and the inserted disk. A link can
+knob on it -- keeping the chosen ROM and the inserted disks. A link can
 preset the model with `?machine=A1200`, and a
 [save state](#browser-save-states) carries its own machine, so loading
 one switches the select to whatever the state brings back. The **Video**
@@ -24,13 +24,23 @@ desktop's `[chipset] video` key) -- the standard is the Agnus crystal,
 so changing it rebuilds a running machine exactly like the model select,
 and `?video=NTSC` presets it per link. The
 page fetches the open-source AROS ROM while it loads, so the boot button
-works with no files of your own; the **Kickstart ROM** and **DF0 disk**
-pickers load local images instead. Both work before or after boot: a
+works with no files of your own; the **Kickstart ROM**, **DF0 disk** and
+**DF1 disk** pickers load local images instead. The hosted machine fits both
+floppy drives, so a multi-disk title can keep its second disk in DF1 instead
+of swapping DF0. The pickers work before or after boot: a
 pre-boot choice is stashed and applied when the machine starts (the boot
 button relabels to show which ROM it will use), and a post-boot pick swaps
 the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, IPF,
-and SCP, plain or gzip/zip packed -- and are always write-protected, since
-the browser has no filesystem to write changes back to. A file picker
+and SCP, plain or gzip/zip packed. They open write-protected by default.
+Check **Open disks writable** before picking one to give an uncompressed
+standard or UAE extended ADF an in-memory writable backing; compressed
+containers, DMS, IPF and SCP have no write-back representation and are
+refused in that mode. **Blank DF0/DF1** creates a writable 880 KiB disk for
+the guest to format. The browser never alters the file that was picked:
+**Download DF0/DF1** saves a snapshot of the current image, and guest
+software must flush or close the disk before that snapshot is taken. Writable
+images and their changes also travel in save states and survive machine/video
+rebuilds. A file picker
 cannot sniff content, though: it filters by extension and hides whatever
 the filter leaves out, which is how an `.ipf` stayed greyed out in a
 bundle that decodes IPF perfectly well. So the glue rewrites the disk
@@ -111,10 +121,11 @@ restores a [save state](#browser-save-states), and anything else inserts
 into DF0 like the disk picker -- dropped before boot it queues and inserts
 when the machine starts. The same 64 MiB cap as URL fetches applies.
 
-A disk can also come from a link: `/try/?df0=<url>` fetches the image while
-the emulator loads and inserts it at boot, so a bootable demo is one
-shareable URL, and the **DF0 from URL** button does the same for a pasted
-address, inserting live when the machine is already running. The fetch
+A disk can also come from a link: `/try/?df0=<url>&df1=<url>` fetches either
+or both images while the emulator loads and inserts them at boot, so a
+multi-disk demo is one shareable URL. The **DF0 from URL** button does the
+same for a pasted boot-disk address, inserting live when the machine is
+already running. The fetch
 happens in the visitor's browser and nothing is proxied, so the image's
 host must allow cross-origin GETs (same-origin always works; archive.org
 does too). Only http(s) URLs are accepted, capped at 64 MiB (SCP flux
@@ -314,7 +325,7 @@ does not place them:
   restarts.
 - **Quick load** restores that slot. It is enabled only when the browser
   holds a quick state, and its tooltip says when the state was taken,
-  what was in DF0, and how far the machine had run.
+  what was in DF0/DF1, and how far the machine had run.
 - **Saved states...** opens the panel over everything the browser
   remembers: the stored Kickstart (with its **Forget** button), the quick
   slot, and *named* states -- type a name and **Save new** keeps the
@@ -336,7 +347,10 @@ state of this build's format version is refused with the running machine
 untouched -- including a state from an older Copperline whose format
 version has moved on. If that refusal follows a boot the load itself
 asked for, the page returns to its pre-boot screen rather than leaving a
-machine running that nothing was restored into.
+machine running that nothing was restored into. A writable disk restored
+from a desktop state is adopted into browser memory before the guest resumes,
+so its old host path is never treated as a browser path; use **Download DFn**
+to keep later changes as an image file.
 
 There are no keyboard shortcuts for these (the desktop's
 Cmd/Alt+Shift+S and +L): every key on the page belongs to the guest, so a
@@ -451,10 +465,11 @@ through wasm-bindgen; the page's JavaScript drives everything from
 
 The guest sees a stock machine: ROMs arrive as bytes
 (`Emulator::reload_rom`), floppies as bytes
-(`FloppyController::insert_disk_image_bytes`, which sniffs the same image
-formats by content as the desktop file paths), and disks are always
-write-protected because the browser has no filesystem to write changes back
-to.
+(`FloppyController::insert_disk_image_bytes` or its memory-backed writable
+counterpart, which sniff the same image formats by content as the desktop
+file paths). A writable browser image updates the controller's serialized
+image data; it never treats the display label as a filesystem path. Exporting
+encodes that current data as a standard or UAE extended ADF.
 
 ## Building it locally
 
@@ -496,8 +511,11 @@ import init, { WebEmu } from './pkg/copperline_web.js';
 const wasm = await init();
 const emu = new WebEmu();          // default A500 machine, placeholder ROM
 // ...or pick a machine model: new WebEmu('A1200')
+// ...or fit DF0 + DF1: new WebEmu('A500', 'PAL', 2)
 emu.load_rom(romBytes, extBytes);  // Kickstart or AROS bytes; cold reset
 emu.insert_floppy(0, adfBytes, 'game.adf');
+emu.insert_floppy_writable(1, workBytes, 'work.adf');
+const changedDisk = emu.export_floppy(1); // download/store these current bytes
 
 function tick(nowMs) {
   emu.run(nowMs, 5);               // step to the wall clock, max 5 frames
@@ -526,7 +544,11 @@ second optional argument picks the video standard on top of the profile
 (`new WebEmu('A500', 'NTSC')`), the desktop's `[chipset] video` key;
 omitted, the profile keeps its own (PAL for every offered profile).
 `WebEmu.video_standards()` lists the accepted names and is the matching
-feature test. `machine_model()` returns the running machine's profile name
+feature test. The third optional argument fits one to four floppy drives,
+the browser equivalent of `[floppy] drives`; it must be an integer. When
+omitted, the chosen profile's default remains for backward compatibility.
+`machine_model()` returns the
+running machine's profile name
 (`undefined` for a shape no profile describes, such as a state saved
 from a custom desktop config) and follows `load_state`, so a page can
 re-point its machine select at what a state brought back;
@@ -538,7 +560,14 @@ and diagnostics.
 
 `insert_floppy(drive, bytes, name)` takes any format the core reads --
 ADF/ADZ, extended ADF, DMS, IPF, SCP, plain or gzip/zip packed -- decided
-by signature, so the name it is given is only a label. The static
+by signature, so the name it is given is only a label, and presents it
+write-protected. `insert_floppy_writable(drive, bytes, name)` instead keeps
+an uncompressed standard or UAE extended ADF writable in serialized memory;
+formats that cannot be faithfully written back throw. `export_floppy(drive)`
+returns the current bytes (standard ADF, or the matching UAE extended ADF
+variant), including completed guest writes; `floppy_write_protected(drive)`
+reports the inserted image's current protection or `undefined` for an empty
+drive. The host still decides where exported bytes live. The static
 `WebEmu.floppy_formats()` lists the extensions those formats conventionally
 carry (`["adf", "adz", ...]`, no dots) for the one thing a page cannot
 decide by content: a file input's `accept` filter, and any list it scrapes
@@ -633,7 +662,8 @@ the selected drive's head or `undefined` when no drive is selected (latch
 the last value so a counter does not flicker), and `drive_connected(n)` /
 `disk_name(n)` describe DF0-DF3 -- a `disk_name` of `undefined` means the
 drive is empty. `serial_send(bytes)`,
-`serial_take()`, `serial_input_backlog()` and `serial_dtr()` bridge
+`serial_take()`, `serial_input_backlog()`, `serial_dtr()` and
+`serial_set_carrier(bool)` bridge
 Paula's serial port to whatever byte stream the page likes (see
 [the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
 valid until the next `run` call -- rebuild the typed-array view every frame,
@@ -661,6 +691,15 @@ elements, and pages without them are untouched:
 
 - `#df0url` / `#kickurl` (buttons): prompt for a disk / same-origin ROM
   URL, as described above.
+- `#df1` (file input) / `#eject1` (button): place the hosted page's second
+  drive controls. An older shell with only `#df0` and `#eject` gets the DF1
+  picker and eject button inserted beside them automatically; in that case
+  the original eject button is relabelled **Eject DF0** for clarity.
+- `#writable-floppies` (checkbox), `#blank-df0` / `#blank-df1` and
+  `#download-df0` / `#download-df1` (buttons): place the writable-disk
+  workflow. Without them the glue adds the opt-in checkbox and both drives'
+  blank/download buttons to the storage controls. Opening remains read-only
+  by default.
 - `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.
@@ -864,7 +903,7 @@ elements, and pages without them are untouched:
 A site can set its defaults in one hand-editable file instead of editing
 the shell: `copperline.json`, served next to the page. Every key is
 optional, a missing or invalid file means no defaults, link parameters
-(`?df0=`, `?kick=`, `?machine=`, `?joy=`, `?fdspeed=`) override the file
+(`?df0=`, `?df1=`, `?kick=`, `?machine=`, `?joy=`, `?fdspeed=`) override the file
 per URL, and anything the visitor changes by hand wins as usual:
 
 ```json
@@ -873,6 +912,7 @@ per URL, and anything the visitor changes by hand wins as usual:
   "video": "NTSC",
   "kick": "roms/kick31.rom",
   "df0": "adf/demo.adf",
+  "df1": "adf/demo-disk2.adf",
   "floppy_sounds": false,
   "mono_audio": true,
   "floppy_speed": 800,
@@ -890,8 +930,8 @@ per URL, and anything the visitor changes by hand wins as usual:
 `machine` picks the machine model, like `?machine=`; `video` the PAL/NTSC
 standard, like `?video=`; `kick` follows the
 same-origin rule as `?kick=` (the file can only name a ROM the site
-already serves); `df0` is any URL the visitor's browser may fetch, like
-`?df0=`. `floppy_sounds`, `mono_audio`, and
+already serves); `df0` and `df1` are URLs the visitor's browser may fetch,
+like `?df0=` / `?df1=`. `floppy_sounds`, `mono_audio`, and
 `floppy_speed` reach the machine whether or not the shell has their
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
@@ -935,6 +975,13 @@ telnet BBS, with a terminal program running on the guest. Three calls:
   set the CIA bit themselves -- and drops it on exit and at reset, so this
   is the "a terminal is actually listening" signal, exactly what a real
   modem keys off.
+- `serial_set_carrier(connected)` drives the port's carrier-detect input
+  (CIA-B PA5, `/CD`) the other way: call it with `true` when the page's
+  socket opens and `false` when it closes. The bridge always presents
+  itself to the guest as a present, ready device (DSR and CTS asserted);
+  carrier is what a guest terminal or BBS watches to notice a hang-up. A
+  page that never calls it leaves the guest seeing a modem with no call
+  up, which 3-wire software ignores.
 
 Browsers cannot open raw TCP, so the page's transport is a WebSocket to a
 gateway that forwards to the real service --

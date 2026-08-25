@@ -340,6 +340,7 @@ warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
+run_ahead_frames = 0       # run-ahead input-latency reduction, 0..4 (0 = off)
 ```
 
 The deterministic cycle-driven core is the only emulation timing. It is
@@ -396,6 +397,29 @@ carried no information.)
   Turning the menu item off releases the retained snapshots. The same
   determinism preconditions as reverse debugging apply -- a real-time clock
   and host disk writes are not rolled back.
+- `run_ahead_frames` reduces input latency in compatible windowed sessions.
+  Each refresh commits one ordinary frame, snapshots the machine, executes
+  the requested number of future frames, presents the last future image, and
+  restores the snapshot. Audio, serial output, and control events come only
+  from the committed frame; speculative output is discarded. The committed
+  machine timeline is therefore unchanged. This costs one whole-machine
+  snapshot per refresh and roughly `(run_ahead_frames + 1)`x realtime host
+  performance, so start at 1 and raise it only while the performance overlay
+  shows comfortable headroom. Large values also skip visible intermediate
+  animation.
+
+  Run-ahead stays inactive when a speculative frame could observe or change
+  host state that the snapshot cannot restore. This includes warp and
+  headless capture, RTG output, rewind/reverse debugging, debugger stops,
+  injected faults, validation/SMC/heat-map/frame-analyzer observers,
+  instruction or waveform traces, a connected control client, video recording, loaded
+  save states, live serial or parallel devices, writable or physical floppy
+  media, mounted CDs, hard-drive and host-directory storage, host networking
+  or plugin boards, MHI decoding, and a live or persistent RTC/NVRAM. Offline
+  WAV and stem capture are supported: speculative audio is discarded at the
+  mixer before any sink receives it. The **Run Ahead** item under Emulation
+  Settings adjusts the level live and reports the current blocking reason.
+  `--run-ahead FRAMES` overrides the config for one run.
 
 ## `[cpu]`
 
@@ -556,9 +580,9 @@ The ECS preset picks an 8372A for up to 1M chip RAM and an 8375 above; the
 A600 profile always uses the 8375 as the real machine did. The AGA preset
 resolves to Alice and Lisa: 8 bitplanes, the 256-entry 25-bit palette with
 BPLCON3 BANK/LOCT banking, HAM8, FMODE wide bitplane and sprite fetch
-(DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, BPLCON4, and
-CLXCON2 (remaining gaps, such as true 35 ns SuperHires sprite output, are
-recorded in [](../internals/chipset)).
+(DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, 35 ns BPLCON3
+SPRES output, BPLCON4, and CLXCON2. Remaining gaps are recorded in
+[](../internals/chipset).
 
 ## `[display]`
 
@@ -1177,11 +1201,13 @@ button.
 
 ```toml
 [serial]
-mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
+mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, or modem
 # midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
-# listen = "127.0.0.1:1234"  # tcp mode: bind address
+# listen = "127.0.0.1:1234"  # tcp mode: bind address; modem mode: incoming-call address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
+# telnet = false           # modem mode: AT*T1 telnet NVT translation, on by default
+# session = "bbs-demo.session"  # modem mode: replay a scripted session instead of TCP
 ```
 
 The Amiga serial port doubles as the MIDI port. `mode` selects where
@@ -1215,19 +1241,88 @@ Paula's serial in/out is connected:
 - `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
+- `modem` -- a Hayes/AT-command modem personality (see
+  [the modem chapter](modem.md) for a BBS quick-start and the full command
+  set): the guest dials out with `ATD host:port` rather than the port being
+  wired to a peer at startup, so (unlike `tcp-connect`) there is no `connect`
+  address in the config; carrier presence drives /CD. `listen` here means
+  something different from `tcp`
+  mode's bind address: it is the address the modem answers incoming calls
+  on, and an incoming connection produces `RING` on the guest's serial port
+  rather than being bridged straight through -- the guest (or its S0
+  register, if auto-answer is configured) has to `ATA` to pick up, exactly
+  as a real modem waits for the terminal program to answer. `telnet` turns
+  on `AT*T1`, the WiModem-style telnet NVT translation layer, by default at
+  power-on (off by default; the guest can still toggle it with `AT*T1`/
+  `AT*T0` at runtime) -- turn it on when the far end is a real telnet server
+  (a BBS) rather than a raw TCP byte service, so IAC option negotiation and
+  CR handling are answered instead of leaking into the data stream.
+  `[serial.phonebook]` maps a dialable number to a `host:port` (or a bare
+  host, which dials the modem's default port), so an `ATD<number>` from a
+  terminal program's dialing directory resolves to a real address without
+  the guest ever typing one:
+  ```toml
+  [serial.phonebook]
+  "5551234" = "bbs.example.com:23"
+  "5555678" = "bbs2.example.com"
+  ```
+  The phonebook is config-file-only; there is no launcher row for it.
+
+  The command set is the Hayes base plus the WiModem232 `AT*` extensions
+  most Amiga BBS/terminal guides are written against: `AT*B<baud>` (stored
+  for CONNECT text only -- pacing always follows the guest's own SERPER
+  rate), `AT*T0`/`AT*T1` (this session's telnet translation), `AT*L<port>`/
+  `AT*P<port>` (listen/default outgoing port), `AT*N`/`AT*NS<n>,<pass>`
+  (a stubbed network scan/join, so a guide's Wi-Fi setup steps do not error
+  out), and `AT*REBOOT` (resets the state machine, like `ATZ`). `S9`
+  (tenths of a second) is the WiModem connect-delay register: CONNECT
+  fires immediately but remote output is withheld for `S9` of *host* time
+  first, the pause older terminal software expects before BBS output
+  starts. `AT&W` persists the active settings to a sidecar file beside the
+  machine's other batteries; `ATZ` reloads it (an explicit `[serial]
+  telnet` always wins over what was stored); `AT&F` is a hardcoded factory
+  reset that ignores both.
+
+  `session = "path"` replays a scripted dial-out session from a file
+  instead of dialing out over TCP -- the determinism story for a
+  modem-using headless run or test case, since live network traffic (like
+  MIDI, like a camera) is otherwise outside Copperline's replay
+  guarantees. See [the modem chapter](modem.md#scripted-sessions) for the
+  file format; `session` cannot be combined with `listen` (the scripted
+  transport plays back outbound calls only, with no inbound side).
+
+Every mode also drives the port's RS-232 handshake inputs, which the guest
+reads on CIA-B port A (`/DSR`, `/CTS`, `/CD`) and `serial.device` reports
+through `SDCMD_QUERY` and honours in 7-wire mode. `off` (and `midi`, whose
+interface only uses the data lines) is an unplugged cable: every input
+floats high, so a guest waiting for CTS or carrier waits forever, as on a
+real machine with nothing attached. `stdout` is a ready device with no
+call behind it: DSR and CTS asserted, no carrier. `tcp` and `tcp-connect`
+behave as a modem: DSR and CTS asserted from startup, and carrier only
+while a client is connected (or the dial-out is up) -- so a guest BBS sees
+the caller hang up as carrier loss, and a terminal program sees the remote
+drop the same way. `pty` reports a host terminal with the port open (all
+three asserted), since a null-modem cable crosses its DTR and RTS to
+these inputs and the terminal's side cannot be observed from here. The
+guest's own `/DTR` and `/RTS` outputs are the CIA's pins as written.
 
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
 console. `--serial MODE` overrides the mode per run,
 `--serial-connect HOST:PORT` sets the dial-out target (and implies
-`mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
-`mode = "midi"`. The launcher's **I/O Ports** tab (Serial Port page) sets all
+`mode = "tcp-connect"`), `--serial-session FILE` replays a scripted modem
+session (and implies `mode = "modem"`), and `--midi-out NAME`/
+`--midi-in NAME` imply `mode = "midi"`. The launcher's **I/O Ports** tab
+(Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows
 the `127.0.0.1:1234` default until something else is typed). Either box
 takes a `host:port`, with an IPv6 literal in brackets
 (`[::1]:1337`); clearing it unsets the key. The in-window
-**MIDI In / MIDI Out** menu items select the MIDI endpoints.
+**MIDI In / MIDI Out** menu items select the MIDI endpoints. Under `modem`,
+the page shows the same **Listen** box (the incoming-call address above)
+plus a **Telnet** toggle for `telnet`; the phonebook has no row and stays
+config-file-only.
 
 The browser build has its own serial transport (the page bridges the port
 to a WebSocket); see [the browser chapter](browser.md).
@@ -1468,7 +1563,7 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
-A path ending in `.cue`, `.iso`, or `.chd` attaches an **ATAPI CD-ROM
+A path ending in `.cue`, `.iso`, `.nrg`, or `.chd` attaches an **ATAPI CD-ROM
 drive** at that slot instead of a hard disk, through the PACKET (0xA0)
 command -- the same read-only SCSI-2 command engine `[scsi]` CD-ROM units
 use (see below), reached over the ATA task file instead of a WD33C93 SCSI
@@ -1484,7 +1579,7 @@ rom = "a2091-v6.6.rom"       # boot ROM (a2091 needs one; a4091 defaults to bund
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
-unit2 = "game.cue"           # a .cue, .iso, or .chd attaches a CD-ROM drive
+unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 # unit3..unit6 = ...
 ```
 
@@ -1527,12 +1622,13 @@ form that overrides a directory mount's volume name, filesystem, and the
 synthesized partition's boot priority. The HDD activity LED covers SCSI
 traffic too.
 
-A `unitN` path ending in `.cue`, `.iso`, or `.chd` attaches a **SCSI
+A `unitN` path ending in `.cue`, `.iso`, `.nrg`, or `.chd` attaches a **SCSI
 CD-ROM drive** at that ID instead of a hard disk: a read-only removable
 SCSI-2 target (INQUIRY device type 5) serving 2048-byte blocks, with the
 full READ TOC / READ CD / mode-page surface CD filesystems expect.
-Cue/bin and CHD images may mix data and audio tracks; a bare `.iso` is a
-single data track. The drive answers on the host adapter's `scsi.device` like any
+Cue sheets, NRG, and CHD images may mix data and audio tracks (a cue sheet's
+audio tracks may be `WAVE` or `MP3` files, as described under `[cd]`
+below); a bare `.iso` is a single data track. The drive answers on the host adapter's `scsi.device` like any
 other unit, so mount it the way you would on real hardware: a
 `DOSDrivers` mount entry (or MountList) pointing `CDFileSystem` --
 CacheCDFS, AsimCDFS, and AmiCDROM work the same way -- at the controller's
@@ -1544,7 +1640,7 @@ emulated time (as if the drive's analogue output were cabled to the
 machine), the sub-channel reports the live playback position, and the
 debugger's Audio tab shows the stream on its CD-DA row with the play
 state, track, and position. Discs swap at runtime like CDTV/CD32 media:
-the status bar's CD load/eject buttons, dropping a `.cue`/`.iso`/`.chd`
+the status bar's CD load/eject buttons, dropping a `.cue`/`.iso`/`.nrg`/`.chd`
 on the window, the scheduled `--insert-cd-after SECS PATH` flag, or the
 control protocol's `media.cd.insert` all eject the current disc, run the
 tray for a second of emulated time, and mount the new one with a
@@ -1564,7 +1660,7 @@ A built-in Zorro II IDE board compatible with LIV2's actively-maintained
 open-source [lide.device](https://github.com/LIV2/lide.device), giving
 autobooting IDE storage under any Kickstart including 1.3 -- unlike `[ide]`,
 which needs a Gayle or A4000 IDE port, `[lide]` works on **any machine
-model**, the same way `[scsi]`'s Zorro boards do. A `.cue`/`.iso`/`.chd`
+model**, the same way `[scsi]`'s Zorro boards do. A `.cue`/`.iso`/`.nrg`/`.chd`
 drive entry attaches an ATAPI CD-ROM drive, exactly as it does on `[ide]`.
 
 `board` picks the AutoConfig identity: `"ripple"` (the default), LIV2's
@@ -1576,12 +1672,27 @@ CDTV-RAM-IDE, Zorro-LAN-IDE), one register model covering the whole family,
 one channel, no ROM banking. None of the three wire an interrupt line --
 `lide.device` is a purely polling driver.
 
-`drives` takes the same bare-path/table form as `[ide]`/`[scsi]` (RDB images,
-bare partition hardfiles, `.hdz`, host directories, and the `{ path = "...",
-name = "...", bootpri = N, filesystem = "..." }` table), in (channel,
-master/slave) order:
-entries 0 and 1 are channel 0's master and slave, entries 2 and 3 are channel
-1's (`"ripple"` only -- `"ride"` and `"atbus2008"` have one channel).
+`drive0`..`drive3` take the same bare-path/table form as `[ide]`/`[scsi]`
+(RDB images, bare partition hardfiles, `.hdz`, host directories, and the
+`{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table), one
+key per slot in (channel, master/slave) order: `drive0` and `drive1` are
+channel 0's master and slave, `drive2` and `drive3` are channel 1's
+(`"ripple"` only -- `"ride"` and `"atbus2008"` have one channel). Each is
+independent, so any slot can be filled or left empty on its own, the same way
+`[ide]`'s `master`/`slave` and `[scsi]`'s `unit0`..`unit6` are:
+
+```toml
+[lide]
+board = "ripple"
+rom = "lide.rom"
+drive1 = "ch0-slave.hdf"   # channel 0 slave, with no master fitted
+```
+
+An older `drives = [...]` array is still read, so configs written before the
+named keys existed keep working. It is positional and cannot express a gap
+(the first empty entry ends the list), which is why the named keys replaced
+it; a named key wins over the same slot in the array, and saving from the
+launcher rewrites a config to the named form.
 
 `rom` is **always user-supplied**, never bundled: fetch a release from
 [lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases)
@@ -1735,16 +1846,55 @@ it. It is CLI-only by design (no config section) and is covered in
 profile = "CD32"
 
 [cd]
-image = "disc.cue"        # BIN/CUE cue sheet (MODE1/2048, MODE1/2352, AUDIO)
+image = "disc.cue"        # cue sheet (BINARY/WAVE/MP3 files; MODE1/2048, MODE1/2352, AUDIO)
 insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file (default)
 ```
 
-`image` takes a BIN/CUE cue sheet, a bare `.iso` (single data track), or
-a `.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
+`image` takes a cue sheet, a bare `.iso` (single data track), a Nero
+`.nrg`, or a `.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
 writes: LZMA/Deflate/FLAC-compressed hunks with data and audio tracks).
 The disc mounts on the machine's CD controller: Akiko on CD32, the DMAC on
-CDTV. `insert_delay` inserts the disc some emulated seconds after power-on
+CDTV.
+
+NRG supports both the older `NERO`/32-bit and newer `NER5`/64-bit footer
+formats, with DAO (`CUES`/`DAOI`, `CUEX`/`DAOX`) or TAO (`ETNF`/`ETN2`)
+track layouts. MODE1/2048, MODE1/2352, and CD-DA tracks are supported;
+Mode 2, multi-session discs, and images with stored subchannel bytes are
+rejected explicitly.
+
+A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
+multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a
+disc's audio tracks often come in, one file per track:
+
+```text
+FILE "game.bin" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+FILE "game (Track 02).mp3" MP3
+  TRACK 02 AUDIO
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+FILE "game (Track 03).wav" WAVE
+  TRACK 03 AUDIO
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+```
+
+Audio files are decoded to CD-DA as the drive reads them, not up front,
+so a disc with an hour of MP3 audio loads as fast as a BIN/CUE and never
+holds its decoded audio in memory. Any WAV PCM layout is accepted
+(8/16/24/32-bit or float, mono or stereo, any rate); MP3 covers
+MPEG-1/2/2.5 Layer III at the standard bitrates, constant or variable
+(free-format streams are not read), with ID3
+tags skipped and a LAME tag's encoder delay trimmed so the track is
+sample-exact against the WAV it was encoded from. Sources not at 44.1 kHz
+are resampled. `PREGAP`/`POSTGAP` lines add the gap sectors such files
+cannot hold (they read as silence, and the TOC points past them), as does
+an `INDEX 00` inside a file. Data tracks must be in `BINARY` files;
+`MOTOROLA` and `AIFF` files are not supported. MP3 decoding is the
+default-on `cd-mp3` Cargo feature; a build without it loads WAVE tracks
+and rejects MP3 ones with a message saying so. `insert_delay` inserts the disc some emulated seconds after power-on
 with the proper media-change notification; some CDTV discs only boot when
 inserted after the boot screen appears. CD32 NVRAM
 persists to `cd32-nvram.bin` in the `[paths]` nvram folder unless

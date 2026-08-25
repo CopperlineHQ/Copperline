@@ -89,7 +89,28 @@ jobs:
           import { readFileSync } from 'fs';
           import init, { WebEmu } from './pkg-smoke-glue.mjs';
           await init({ module_or_path: readFileSync('./pkg/copperline_web_bg.wasm') });
-          const emu = new WebEmu('A500', 'PAL');
+          const emu = new WebEmu('A500', 'PAL', 2);
+          if (!emu.drive_connected(0) || !emu.drive_connected(1) || emu.drive_connected(2)) {
+            throw new Error('browser floppy drive count was not applied');
+          }
+          emu.insert_floppy_writable(1, new Uint8Array(901120), 'blank.adf');
+          if (emu.floppy_write_protected(1) !== false || emu.export_floppy(1).length !== 901120) {
+            throw new Error('browser writable floppy did not round-trip in memory');
+          }
+          const writableState = emu.save_state();
+          emu.eject_floppy(1);
+          emu.load_state(writableState);
+          if (emu.floppy_write_protected(1) !== false || emu.export_floppy(1).length !== 901120) {
+            throw new Error('browser writable floppy did not survive a save-state round trip');
+          }
+          for (const invalid of [0, 5, 2.5, 257, NaN, Infinity]) {
+            try {
+              new WebEmu('A500', 'PAL', invalid);
+              throw new Error(`invalid browser floppy drive count was accepted: ${invalid}`);
+            } catch (error) {
+              if (String(error).includes('was accepted')) throw error;
+            }
+          }
           if (emu.presentation_revision() !== 0) {
             throw new Error('fresh presentation revision is not zero');
           }

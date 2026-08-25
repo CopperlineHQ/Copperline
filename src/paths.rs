@@ -460,6 +460,12 @@ pub fn coppersynth_nvram_file() -> PathBuf {
     battery_ram("coppersynth.nvram")
 }
 
+/// The Hayes modem's stored profile (`AT&W`/`ATZ`), kept with the machines'
+/// other batteries.
+pub fn modem_profile_file() -> PathBuf {
+    battery_ram("modem.profile")
+}
+
 // --- where a dialog opens ------------------------------------------------
 //
 // Not Copperline's to write, and not created: these only say where a file
@@ -605,6 +611,10 @@ mod tests {
         assert_eq!(
             akiko_nvram_file().file_name().and_then(|n| n.to_str()),
             Some("cd32-nvram.bin")
+        );
+        assert_eq!(
+            modem_profile_file().file_name().and_then(|n| n.to_str()),
+            Some("modem.profile")
         );
     }
 

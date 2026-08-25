@@ -235,7 +235,7 @@ fn deserialize_component<R: std::io::Read, T: serde::de::DeserializeOwned>(
     r: &mut R,
     what: &str,
 ) -> Result<T> {
-    bincode::deserialize_from(r).map_err(|e| anyhow!("reading {what}: {e}"))
+    crate::savestate::deserialize_from_state(r).map_err(|e| anyhow!("reading {what}: {e}"))
 }
 
 /// Machine-level runtime state outside `CpuCore` and `Bus` that a save
@@ -1948,6 +1948,42 @@ impl M68kMachine {
     pub fn ui_debug_stop_pending(&mut self) -> bool {
         self.ui_promote_reg_hit();
         self.ui_stop.is_some()
+    }
+
+    /// Whether an interactive debugger condition could stop inside a
+    /// speculative frame. Run-ahead remains off while one is armed so the
+    /// debugger always stops on the committed timeline.
+    pub fn ui_debug_stops_armed(&self) -> bool {
+        self.ui_breaks.armed()
+    }
+
+    /// Whether the environment-driven headless debugger is observing the
+    /// machine. Its counters, traces, and screenshots are host-side and must
+    /// not see frames that will be rewound.
+    pub fn headless_debugger_armed(&self) -> bool {
+        self.dbg.is_some()
+    }
+
+    /// Why interactive or environment-driven debugger state cannot observe
+    /// speculative frames. Unlike CPU and chipset state, these counters,
+    /// files, and rolling views intentionally survive a machine restore.
+    pub fn runahead_debug_block_reason(&self) -> Option<&'static str> {
+        if self.ui_debug_stops_armed() {
+            return Some("debugger stop conditions armed");
+        }
+        if let Some(reason) = self.bus.bus.runahead_debug_block_reason() {
+            return Some(reason);
+        }
+        if self.headless_debugger_armed() {
+            return Some("COPPERLINE_DBG_* debugger armed");
+        }
+        if self.ui_trace.is_some() {
+            return Some("instruction trace active");
+        }
+        if self.ui_pc_history_enabled {
+            return Some("debugger PC history active");
+        }
+        None
     }
 
     /// Promote a custom-register watch or beam-trap hit recorded by the

@@ -692,15 +692,30 @@ where
                         .map_err(|_| anyhow!("--autofire rate must be a whole number of Hz"))?,
                 );
             }
+            "--run-ahead" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--run-ahead requires a frame count (0 = off)"))?;
+                overrides.run_ahead_frames =
+                    Some(value.parse::<u8>().map_err(|_| {
+                        anyhow!("--run-ahead must be a whole number of frames (0..4)")
+                    })?);
+            }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
-                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty)")
+                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty/modem)")
                 })?);
             }
             "--serial-connect" => {
                 overrides.serial_connect =
                     Some(args.next().ok_or_else(|| {
                         anyhow!("--serial-connect requires an address (host:port)")
+                    })?);
+            }
+            "--serial-session" => {
+                overrides.serial_session =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--serial-session requires a scripted session file")
                     })?);
             }
             "--a2065-net" => {
@@ -1346,6 +1361,8 @@ fn print_help() {
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
          --autofire HZ                  pulse a held fire button at HZ (0 = off, the default)\n  \
+         --run-ahead FRAMES             run-ahead input-latency reduction, 0..4 frames\n  \
+         \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
@@ -1400,7 +1417,7 @@ fn print_help() {
          \x20                            insert PATH into DFN after SECS seconds\n  \
          --defer-disk-insert SECS DFN   start with configured DFN empty, then insert\n  \
          \x20                            its configured disk image after SECS seconds\n  \
-         --insert-cd-after SECS PATH    swap the CD image (cue/iso/chd) in the machine's CD\n  \
+         --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \
@@ -1435,9 +1452,12 @@ fn print_help() {
          --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
          --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
-         \x20                            tcp-connect, or pty\n  \
+         \x20                            tcp-connect, pty, or modem\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
          \x20                            serial port (implies --serial tcp-connect)\n  \
+         --serial-session FILE          modem mode: replay a scripted session from FILE\n  \
+         \x20                            instead of dialing out over TCP (implies\n  \
+         \x20                            --serial modem); see docs/guide/modem.md\n  \
          --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, nat,\n  \
          \x20                            or bridge (direct attachment to a host adapter)\n  \
          --a2065-interface NAME         bridge adapter; implies --a2065-net bridge\n  \

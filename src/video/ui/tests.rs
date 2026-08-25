@@ -216,12 +216,19 @@ fn the_calibration_prompt_wraps_inside_its_panel() {
     // Where the rows leave off, plus the wrapped prompt, still above the
     // buttons along the bottom.
     let rows = crate::gamepad::CalibrationSession::step_count();
-    let y = rect.y + 64 + rows * 18 + 6 + lines.len() * (font::GLYPH_H + 2);
+    let y = rect.y + 64 + rows * CAL_ROW_H + 6 + lines.len() * (font::GLYPH_H + 2);
     let buttons = cal_button_rects(rect)[0].1;
     assert!(
         y <= buttons.y,
         "the prompt reaches {y}, the buttons start at {}",
         buttons.y
+    );
+    // And the whole panel, sized from the step count, stays on screen.
+    assert!(
+        rect.h <= present_height(),
+        "calibration panel is {}px tall, taller than the {}px display",
+        rect.h,
+        present_height()
     );
 }
 
@@ -2990,6 +2997,7 @@ fn panels_render_into_their_rects() {
         recording: false,
         input_recording: false,
         autofire_hz: 0,
+        run_ahead_frames: 0,
         joystick_input_mode: JoystickInputMode::Gamepad,
         keyboard_panel: false,
         port_devices: [

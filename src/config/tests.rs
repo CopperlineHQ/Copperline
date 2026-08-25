@@ -2353,6 +2353,108 @@ fn scsi_section_parses_units_and_requires_the_boot_rom() -> Result<()> {
 }
 
 #[test]
+fn lide_named_drive_keys_allow_holes_and_beat_the_legacy_array() -> Result<()> {
+    // A slot filled with the one before it empty -- the whole point of the
+    // named keys, and impossible to express with the positional `drives`
+    // array that predates them.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drive1 = "ch0-slave.hdf"
+            drive3 = "ch1-slave.hdf"
+            "#,
+    )?;
+    assert!(cfg.lide.drives[0].is_none());
+    assert_eq!(
+        cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("ch0-slave.hdf"))
+    );
+    assert!(cfg.lide.drives[2].is_none());
+    assert_eq!(
+        cfg.lide.drives[3].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("ch1-slave.hdf"))
+    );
+
+    // The deprecated array still loads, so configs written before the named
+    // keys existed keep working unchanged.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["dh0.hdf", "dh1.hdf"]
+            "#,
+    )?;
+    assert_eq!(
+        cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("dh0.hdf"))
+    );
+    assert_eq!(
+        cfg.lide.drives[1].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("dh1.hdf"))
+    );
+
+    // A named key wins over the same slot in the legacy array, so a config
+    // carrying both is unambiguous rather than order-dependent.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["from-array.hdf"]
+            drive0 = "from-named.hdf"
+            "#,
+    )?;
+    assert_eq!(
+        cfg.lide.drives[0].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("from-named.hdf"))
+    );
+
+    // A named key naming a channel the board does not have is an error, and
+    // says which slot rather than just counting entries.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ride"
+            drive2 = "ch1-master.hdf"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("drive2"), "{err:#}");
+
+    // A named key must not buy an over-long legacy array a free pass:
+    // `drive_slots` only reads the first four entries, so a fifth would
+    // otherwise be dropped without a word.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["a.hdf", "b.hdf", "c.hdf", "d.hdf", "e.hdf"]
+            drive0 = "named.hdf"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("5 entries"), "{err:#}");
+
+    // ...and a legacy-array overflow with no named key still reports once,
+    // by length, not as a `driveN` key the config never wrote.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ride"
+            drives = ["a.hdf", "b.hdf", "c.hdf"]
+            "#,
+    )
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("3 entries"), "{err:#}");
+    assert!(
+        !text.contains("drive2"),
+        "should not name an unwritten key: {err:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     let cfg = parse_config(
         r#"
@@ -2452,13 +2554,14 @@ fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     Ok(())
 }
 
-/// CD images (CUE/BIN, bare ISO, and CHD) are recognised by extension:
+/// CD images (CUE/BIN, bare ISO, NRG, and CHD) are recognised by extension:
 /// they attach as SCSI CD-ROM drives on [scsi], and as ATAPI drives on
 /// [ide]/[lide].
 #[test]
 fn cd_images_fit_scsi_units_and_the_ide_port() -> Result<()> {
     assert!(is_cd_image_path(Path::new("games/Disc.CUE")));
     assert!(is_cd_image_path(Path::new("cd32.iso")));
+    assert!(is_cd_image_path(Path::new("compilation.NRG")));
     assert!(!is_cd_image_path(Path::new("workbench.hdf")));
     assert!(!is_cd_image_path(Path::new("directory/")));
 
@@ -3852,6 +3955,92 @@ fn serial_section_selects_tcp_connect_and_address() -> Result<()> {
 }
 
 #[test]
+fn serial_section_selects_modem_mode_and_telnet_default() -> Result<()> {
+    let cfg = parse_config("[serial]\nmode = \"modem\"\ntelnet = true\n")?;
+    assert_eq!(cfg.serial.mode, SerialMode::Modem);
+    assert_eq!(cfg.serial.telnet, Some(true));
+    // An explicit off stays distinguishable from unset, so it can beat a
+    // stored profile's own AT*T rather than being read as "no opinion".
+    let cfg = parse_config("[serial]\nmode = \"modem\"\ntelnet = false\n")?;
+    assert_eq!(cfg.serial.telnet, Some(false));
+    // Unset by default.
+    let cfg = parse_config("[serial]\nmode = \"modem\"\n")?;
+    assert_eq!(cfg.serial.telnet, None);
+    Ok(())
+}
+
+#[test]
+fn serial_telnet_and_phonebook_are_rejected_outside_modem_mode() -> Result<()> {
+    let err = parse_config("[serial]\nmode = \"stdout\"\ntelnet = true\n").unwrap_err();
+    assert!(err.to_string().contains("mode = \"modem\""), "{err:#}");
+
+    let err = parse_config(
+        "[serial]\nmode = \"tcp\"\n[serial.phonebook]\n\"555-1234\" = \"bbs.example.com:23\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("mode = \"modem\""), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_parses_and_sorts_by_number() -> Result<()> {
+    let text = "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\
+                \"555-2000\" = \"bbs2.example.com:2323\"\n\
+                \"555-1000\" = \"bbs1.example.com\"\n";
+    let cfg = parse_config(text)?;
+    assert_eq!(
+        cfg.serial.phonebook,
+        vec![
+            ("555-1000".to_string(), "bbs1.example.com".to_string()),
+            ("555-2000".to_string(), "bbs2.example.com:2323".to_string()),
+        ]
+    );
+
+    // Round-trips through a Save.
+    let raw: RawConfig = toml::from_str(text)?;
+    let written = raw.to_toml_string()?;
+    assert!(written.contains("555-1000"), "{written}");
+    let reloaded = parse_config(&written)?;
+    assert_eq!(reloaded.serial.phonebook, cfg.serial.phonebook);
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_rejects_a_bad_number() -> Result<()> {
+    let err = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"call mom\" = \"host:23\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("call mom"), "{err:#}");
+    assert!(err.to_string().contains("phonebook"), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn serial_phonebook_rejects_a_bad_host_port() -> Result<()> {
+    let err = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"host:not-a-port\"\n",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not-a-port"), "{err:#}");
+
+    // A bare host with no colon is fine (the modem's default port applies).
+    let cfg = parse_config(
+        "[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"bbs.example.com\"\n",
+    )?;
+    assert_eq!(
+        cfg.serial.phonebook,
+        vec![("555-1234".to_string(), "bbs.example.com".to_string())]
+    );
+
+    // An empty value is rejected too.
+    let err = parse_config("[serial]\nmode = \"modem\"\n[serial.phonebook]\n\"555-1234\" = \"\"\n")
+        .unwrap_err();
+    assert!(err.to_string().contains("empty"), "{err:#}");
+    Ok(())
+}
+
+#[test]
 fn cli_serial_connect_implies_tcp_connect_mode() -> Result<()> {
     // Like --midi-out implying midi mode: naming a dial-out address is
     // enough, unless --serial explicitly chose another mode.
@@ -4776,4 +4965,49 @@ fn toml_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
+}
+
+#[test]
+fn emulation_run_ahead_frames_parses_and_rejects_out_of_range() -> Result<()> {
+    assert_eq!(parse_config("")?.emulation.run_ahead_frames, 0);
+    let cfg = parse_config(
+        r#"
+            [emulation]
+            run_ahead_frames = 2
+            "#,
+    )?;
+    assert_eq!(cfg.emulation.run_ahead_frames, 2);
+    assert!(parse_config("[emulation]\nrun_ahead_frames = 5").is_err());
+    Ok(())
+}
+
+#[test]
+fn runahead_machine_gate_rejects_host_coupled_storage() -> Result<()> {
+    assert_eq!(parse_config("")?.runahead_machine_block_reason(), None);
+
+    let cfg = parse_config(
+        r#"
+            [[filesys]]
+            path = "shared"
+        "#,
+    )?;
+    assert_eq!(
+        cfg.runahead_machine_block_reason(),
+        Some("host directory volume")
+    );
+
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A600"
+
+            [ide]
+            master = "disk.hdf"
+        "#,
+    )?;
+    assert_eq!(
+        cfg.runahead_machine_block_reason(),
+        Some("hard-drive or ATAPI image")
+    );
+    Ok(())
 }

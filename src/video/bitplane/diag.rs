@@ -328,7 +328,10 @@ pub(super) fn maybe_log_manual_sprite_intervals(
         }
         let off = event.offset & 0x01FE;
         let beam_x = beam_to_framebuffer_x_unclamped(event.hpos);
-        let color_x = color_write_framebuffer_x(event.hpos);
+        let color_x = color_write_framebuffer_x(
+            event.hpos,
+            matches!(state.agnus_revision, AgnusRevision::AgaAlice),
+        );
         let source = manual_sprite_source_name(event.source);
         match off {
             0x096 => log::info!(

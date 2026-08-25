@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Keep all independent Cargo workspaces in one update block. Some of them
+  # depend on the root package by path, so updating a shared dependency in
+  # only one lockfile leaves the others unable to build with --locked.
+  # group-by makes one PR per non-patch dependency across every affected
+  # directory; patch releases stay in one consolidated PR.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /crates/copperline-web
+      - /crates/copperline-player
+      - /crates/cputest-runner
+      - /crates/hostsocket-plugin
+      - /crates/zz9k-plugin
+      - /tools/bezel-preview
+      - /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      patch-updates:
+        update-types: ["patch"]
+      shared-dependency-updates:
+        group-by: dependency-name
+    ignore:
+      # Save states deliberately remain on bincode 1.x; see Cargo.toml.
+      - dependency-name: bincode
+      # Wasmtime is part of the save-state contract and is intentionally pinned
+      # to an LTS line. Keep receiving that line's security/bugfix patches, but
+      # require a planned state-version migration for a new runtime series.
+      - dependency-name: wasmtime
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

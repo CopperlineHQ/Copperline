@@ -31,6 +31,41 @@ const bootBtn = $('boot');
 const loadStatus = $('load-status');
 const statLine = $('stat');
 
+// The hosted page fits DF0 + DF1. A page shell may place its own #df1 and
+// #eject1 controls; older shells only know DF0, so add the second pair beside
+// their existing controls. Keeping this in the published glue means the wasm
+// API, controller and copperline.dev page acquire DF1 in the same release.
+const PAGE_FLOPPY_DRIVES = 2;
+
+function ensureDf1Controls() {
+  const df0 = $('df0');
+  if (df0 && !$('df1')) {
+    const label = document.createElement('label');
+    const df0Label = df0.closest('label');
+    if (df0Label) label.className = df0Label.className;
+    label.append('Insert DF1\u2026 ');
+    const input = document.createElement('input');
+    input.id = 'df1';
+    input.type = 'file';
+    input.hidden = true;
+    if (df0.hasAttribute('accept')) input.accept = df0.accept;
+    label.appendChild(input);
+    (df0Label ?? df0).insertAdjacentElement('afterend', label);
+  }
+
+  const eject0 = $('eject');
+  if (eject0 && !$('eject1')) {
+    eject0.textContent = 'Eject DF0';
+    const eject1 = document.createElement('button');
+    eject1.id = 'eject1';
+    eject1.className = eject0.className;
+    eject1.textContent = 'Eject DF1';
+    eject0.insertAdjacentElement('afterend', eject1);
+  }
+}
+
+ensureDf1Controls();
+
 // iOS's document picker only offers files whose extensions map to a
 // system-known type: .bin, .zip and .gz are fine, but .rom, .adf and
 // friends grey out, locking iPhone/iPad users out of their own dumps.
@@ -42,6 +77,7 @@ if (
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 ) {
   $('df0').removeAttribute('accept');
+  $('df1').removeAttribute('accept');
   $('kick').removeAttribute('accept');
 }
 
@@ -181,12 +217,13 @@ async function fetchBytes(url, label) {
 // the machine is running.
 
 let bootRom = null; // { rom, ext, label } - what the boot button will fit
-let pendingDisk = null; // { bytes, name } - inserted right after boot
-let df0Name = null; // what the page believes is in DF0, for bug reports
-// The page's copy of the last disk that went into DF0. The inserted bytes
-// live inside the machine, so switching the machine model (which builds a
-// new one) re-inserts from this stash; kept forever, like the ROM stash.
-let lastDisk = null; // { bytes, name }
+// Per-drive page state. Pickers can fill either drive before boot; the last
+// uploaded bytes stay available so a model/video rebuild can re-insert them
+// into the replacement machine. A disk restored only from a save state has
+// no page-side bytes and therefore cannot cross such a rebuild.
+const pendingDisks = Array(4).fill(null); // { bytes, name, writable }, inserted at boot
+const diskNames = Array(4).fill(null); // page's view, for reports and captions
+const lastDisks = Array(4).fill(null); // last uploaded { bytes, name, writable }
 
 function refreshBootButton() {
   bootBtn.disabled = !(wasm && bootRom);
@@ -305,23 +342,79 @@ async function forgetStoredRom() {
 
 // Route disk bytes from any source (picker, URL, drop): insert into a
 // running machine, or stash them for the boot button to insert after boot.
-function insertDisk(bytes, name) {
-  lastDisk = { bytes, name };
+function insertDisk(bytes, name, drive = 0, writable = writableFloppyToggle.checked) {
+  if (drive < 0 || drive >= PAGE_FLOPPY_DRIVES) {
+    throw new Error(`DF${drive} is not fitted`);
+  }
+  const disk = { bytes, name, writable };
   if (emu) {
-    emu.insert_floppy(0, bytes, name);
-    setLoadStatus(`DF0: ${name} (write-protected)`);
+    if (writable) emu.insert_floppy_writable(drive, bytes, name);
+    else emu.insert_floppy(drive, bytes, name);
+    setLoadStatus(
+      `DF${drive}: ${name} (${writable ? 'writable in memory; download to keep changes' : 'write-protected'})`,
+    );
     lastFddTrack = null; // desktop clears its track latch on insert too
     updateStatusDisks();
+    updateFloppyImageControls();
   } else {
-    pendingDisk = { bytes, name };
-    setLoadStatus(`DF0: ${name} (inserts at boot)`);
+    pendingDisks[drive] = disk;
+    setLoadStatus(
+      `DF${drive}: ${name} (${writable ? 'writable; ' : ''}inserts at boot)`,
+    );
   }
-  df0Name = name;
+  lastDisks[drive] = disk;
+  diskNames[drive] = name;
 }
 
-// A disk image can also come from a link: /try/?df0=<url> fetches it and
-// inserts it at boot, so a bootable demo is one shareable URL, and the
-// "DF0 from URL" button does the same for a pasted address. The fetch
+function queuedDiskDescription() {
+  return pendingDisks
+    .map((disk, drive) =>
+      disk ? `DF${drive}: ${disk.name}${disk.writable ? ' (writable)' : ''}` : null,
+    )
+    .filter(Boolean)
+    .join(', ');
+}
+
+function insertedDiskDescription(suffix = '') {
+  return diskNames
+    .map((name, drive) => (name ? `DF${drive}: ${name}${suffix}` : null))
+    .filter(Boolean)
+    .join(', ');
+}
+
+function insertedDiskStatusDescription() {
+  return diskNames
+    .map((name, drive) => {
+      if (!name) return null;
+      const writable = emu?.floppy_write_protected?.(drive) === false;
+      return `DF${drive}: ${name} (${writable ? 'writable in memory' : 'write-protected'})`;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+function keepUploadedDisksForRebuild() {
+  for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    // A writable disk's page-side upload is stale as soon as the guest writes
+    // it. Snapshot the controller before replacing the machine so model/video
+    // changes keep the current platter, not the original upload.
+    if (diskNames[drive] && emu?.floppy_write_protected?.(drive) === false) {
+      lastDisks[drive] = {
+        bytes: emu.export_floppy(drive),
+        name: diskNames[drive],
+        writable: true,
+      };
+    }
+    if (diskNames[drive] && lastDisks[drive]?.name === diskNames[drive]) {
+      pendingDisks[drive] = lastDisks[drive];
+    }
+  }
+}
+
+// Disk images can also come from a link: /try/?df0=<url>&df1=<url> fetches
+// either or both and inserts them at boot, so a multi-disk demo is one
+// shareable URL. The "DF0 from URL" button does the same for a pasted boot
+// disk address. The fetch
 // happens in the visitor's browser and nothing is proxied, so the host
 // must allow cross-origin GETs (same-origin always works, archive.org
 // does too).
@@ -355,7 +448,7 @@ function nameFromUrlPath(pathname, fallback) {
 // the cap only keeps a mislinked file from buffering unbounded.
 const ROM_URL_MAX_BYTES = 4 << 20;
 
-async function insertDiskFromUrl(url) {
+async function insertDiskFromUrl(url, drive = 0) {
   let parsed;
   try {
     parsed = new URL(url, location.href);
@@ -377,7 +470,7 @@ async function insertDiskFromUrl(url) {
     }
     const bytes = new Uint8Array(await resp.arrayBuffer());
     if (bytes.length > DISK_URL_MAX_BYTES) throw new Error('file too large');
-    insertDisk(bytes, name);
+    insertDisk(bytes, name, drive);
   } catch (e) {
     // A TypeError is the opaque network/CORS failure; HTTP and size errors
     // speak for themselves.
@@ -474,20 +567,22 @@ async function load() {
     // A Kickstart picked (or remembered) while the ROMs were downloading
     // wins; a ?kick= failure rides along either way.
     const problem = romUrlProblem ? ` (${romUrlProblem})` : '';
+    const queued = queuedDiskDescription();
+    const queuedVerb = pendingDisks.filter(Boolean).length === 1 ? 'inserts' : 'insert';
     if (!bootRom) {
       bootRom = arosRom;
       // A disk that landed first (file picker or ?df0= fetch) keeps its
       // place in the status line.
       setLoadStatus(
-        (pendingDisk
-          ? `ready - DF0: ${pendingDisk.name} inserts at boot`
+        (queued
+          ? `ready - ${queued} ${queuedVerb} at boot`
           : 'ready - boots the open-source AROS ROM') + problem,
       );
     } else {
       setLoadStatus(
         `ready - boots ${bootRom.label}` +
           (bootRom.remembered ? ' (remembered in this browser)' : '') +
-          (pendingDisk ? ` - DF0: ${pendingDisk.name} inserts at boot` : '') +
+          (queued ? ` - ${queued} ${queuedVerb} at boot` : '') +
           problem,
       );
     }
@@ -700,7 +795,11 @@ async function boot() {
     // shell, or the list not knowing better) builds the default A500. The
     // video argument picks PAL/NTSC the same way; a bundle older than both
     // ignores the extra arguments.
-    const machine = new WebEmu(machineModel ?? undefined, videoStandard ?? undefined);
+    const machine = new WebEmu(
+      machineModel ?? undefined,
+      videoStandard ?? undefined,
+      PAGE_FLOPPY_DRIVES,
+    );
     if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
     await buildAudioStack(false);
@@ -712,14 +811,19 @@ async function boot() {
     shaderMsThisSecond = 0;
     resetRenderStrideController();
 
-    // A fresh machine boots with an empty drive: DF0 holds the pending disk
-    // or nothing, never a name left over from before the reboot (a crash
-    // consumes the pending disk, and the bug report reads df0Name).
-    if (pendingDisk) {
-      machine.insert_floppy(0, pendingDisk.bytes, pendingDisk.name);
+    // A fresh machine boots with empty drives: each holds its pending disk or
+    // nothing, never a name left over from before the reboot.
+    for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+      const disk = pendingDisks[drive];
+      if (disk) {
+        if (disk.writable) machine.insert_floppy_writable(drive, disk.bytes, disk.name);
+        else machine.insert_floppy(drive, disk.bytes, disk.name);
+      }
     }
-    df0Name = pendingDisk?.name ?? null;
-    pendingDisk = null;
+    for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+      diskNames[drive] = pendingDisks[drive]?.name ?? null;
+    }
+    pendingDisks.fill(null);
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
     else if (configFloppySounds !== null) machine.set_floppy_sounds(configFloppySounds);
@@ -732,22 +836,25 @@ async function boot() {
     machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
     window.__emu = emu; // for debugging/automation
+    serialApplyCarrier(); // a socket opened before (or across) this boot
     lastFddTrack = null; // a new machine starts the track latch over
     // Nothing is held down in a machine that has just been built, so the
     // on-screen keyboard forgets rather than sending release codes into it.
     forgetVirtualKeys();
     updateStatusDisks();
+    updateFloppyImageControls();
 
     // Leave a fresh status behind: the old line ("inserts at boot", an
     // earlier failure) would otherwise go stale into any bug report filed
     // while the machine runs.
+    const inserted = insertedDiskStatusDescription();
     setLoadStatus(
       // A ROM-less boot is only ever a landing place for a state load,
       // which overwrites this line the moment it lands.
       (bootRom
         ? `booted ${bootRom.label}${machineModel ? ` on the ${machineModel}` : ''}`
         : 'machine built, waiting for the state') +
-        (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
+        (inserted ? ` - ${inserted}` : ''),
     );
     overlay.style.display = 'none';
     showBugLink(false);
@@ -1256,6 +1363,22 @@ function setSerialStatus(text) {
   if (serialStatus) serialStatus.textContent = text;
 }
 
+// The far end's carrier, as the guest sees it on CIA-B /CD: up while the
+// socket is open, down otherwise. The desired state lives here rather than
+// only in the machine, because the socket and the machine have independent
+// lifetimes: a raw-mode socket can open before boot, and a crashed machine
+// is discarded and rebuilt while the socket stays up. Every new machine
+// gets the cached state applied (serialApplyCarrier below, called after
+// `emu` is installed). Older wasm bundles have no setter.
+let serialCarrier = false;
+function serialSetCarrier(connected) {
+  serialCarrier = connected;
+  serialApplyCarrier();
+}
+function serialApplyCarrier() {
+  if (emu && typeof emu.serial_set_carrier === 'function') emu.serial_set_carrier(serialCarrier);
+}
+
 function serialTeardown() {
   if (serialWs) {
     // Neuter the handlers first: close() fires onclose asynchronously, and
@@ -1264,6 +1387,7 @@ function serialTeardown() {
     serialWs.close();
     serialWs = null;
   }
+  serialSetCarrier(false);
   serialTelnet = null;
   serialDtrGated = false;
   serialRxQueue = [];
@@ -1309,7 +1433,10 @@ function serialOpen() {
   serialRxQueue = [];
   if (serialConnectBtn) serialConnectBtn.textContent = 'Disconnect';
   setSerialStatus('connecting...');
-  ws.onopen = () => setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  ws.onopen = () => {
+    serialSetCarrier(true);
+    setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  };
   ws.onclose = () => serialDisconnect('disconnected');
   ws.onerror = () => setSerialStatus('connection failed');
   ws.onmessage = (e) => {
@@ -2036,16 +2163,18 @@ function touchJoyEnd(e) {
 
 // --- controls ------------------------------------------------------------
 
-$('df0').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  try {
-    insertDisk(new Uint8Array(await file.arrayBuffer()), file.name);
-  } catch (err) {
-    setLoadStatus(`insert failed: ${err.message ?? err}`);
-  }
-});
+for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+  $(`df${drive}`).addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      insertDisk(new Uint8Array(await file.arrayBuffer()), file.name, drive);
+    } catch (err) {
+      setLoadStatus(`DF${drive} insert failed: ${err.message ?? err}`);
+    }
+  });
+}
 
 $('kick').addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -2058,17 +2187,20 @@ $('kick').addEventListener('change', async (e) => {
   }
 });
 
-$('eject').addEventListener('click', () => {
-  if (!emu) return;
-  try {
-    emu.eject_floppy(0);
-    df0Name = null;
-    setLoadStatus('DF0 ejected');
-    updateStatusDisks();
-  } catch (err) {
-    setLoadStatus(`${err.message ?? err}`);
-  }
-});
+for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+  $(`eject${drive || ''}`).addEventListener('click', () => {
+    if (!emu) return;
+    try {
+      emu.eject_floppy(drive);
+      diskNames[drive] = null;
+      setLoadStatus(`DF${drive} ejected`);
+      updateStatusDisks();
+      updateFloppyImageControls();
+    } catch (err) {
+      setLoadStatus(`${err.message ?? err}`);
+    }
+  });
+}
 
 $('reset').addEventListener('click', () => {
   if (!emu) return;
@@ -2090,6 +2222,120 @@ $('reset').addEventListener('click', () => {
 // toggle and Exit.
 
 const shell = $('shell');
+
+// Writable browser floppies live in the WASM machine rather than a host file.
+// Keep opening read-only by default, then make the choice explicit and put
+// the only persistence operation -- downloading the current image -- beside
+// it. Older page shells acquire the controls from this glue automatically.
+const BLANK_ADF_BYTES = 901120;
+
+function buildFloppyImageControls() {
+  const eject = $('eject');
+  const host = eject?.closest('.try-side-section') ?? eject?.parentElement ?? shell.parentElement;
+  const buttonClass = eject?.className ?? '';
+
+  let writable = $('writable-floppies');
+  if (!writable) {
+    const label = document.createElement('label');
+    label.className = 'try-check';
+    label.title = 'New disk inserts stay read-only unless this is checked';
+    writable = document.createElement('input');
+    writable.type = 'checkbox';
+    writable.id = 'writable-floppies';
+    label.appendChild(writable);
+    label.append(' Open disks writable');
+    host.appendChild(label);
+  }
+
+  for (const [prefix, text] of [
+    ['blank', 'Blank'],
+    ['download', 'Download'],
+  ]) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:0.45rem;flex-wrap:wrap;';
+    for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+      let button = $(`${prefix}-df${drive}`);
+      if (!button) {
+        button = document.createElement('button');
+        button.id = `${prefix}-df${drive}`;
+        button.className = buttonClass;
+        button.textContent = `${text} DF${drive}`;
+        row.appendChild(button);
+      }
+    }
+    if (row.childElementCount) host.appendChild(row);
+  }
+  return { writable };
+}
+
+const { writable: writableFloppyToggle } = buildFloppyImageControls();
+const blankFloppyButtons = Array.from(
+  { length: PAGE_FLOPPY_DRIVES },
+  (_, drive) => $(`blank-df${drive}`),
+);
+const downloadFloppyButtons = Array.from(
+  { length: PAGE_FLOPPY_DRIVES },
+  (_, drive) => $(`download-df${drive}`),
+);
+
+function updateFloppyImageControls() {
+  for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    const button = downloadFloppyButtons[drive];
+    if (!button) continue;
+    const name = emu?.disk_name(drive);
+    button.disabled = !name;
+    const writable = name && emu?.floppy_write_protected?.(drive) === false;
+    button.title = name
+      ? `Download ${name}${writable ? ' with its current guest changes' : ''}`
+      : `DF${drive} is empty`;
+  }
+}
+
+function floppyDownloadName(name, bytes) {
+  const clean = (name || 'disk').replace(/[^\w.()+ -]+/g, '_');
+  if (/\.adf$/i.test(clean)) return clean;
+  const stem = clean.replace(/\.(adz|dms|ipf|scp|gz|zip)$/i, '');
+  return bytes.length === BLANK_ADF_BYTES ? `${stem}.adf` : `${stem}.extended.adf`;
+}
+
+function downloadFloppy(drive) {
+  if (!emu) return;
+  try {
+    const name = emu.disk_name(drive);
+    if (!name) throw new Error(`DF${drive} is empty`);
+    const bytes = emu.export_floppy(drive);
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = floppyDownloadName(name, bytes);
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setLoadStatus(
+      `DF${drive}: ${name} downloaded - guest software must flush its own buffers first`,
+    );
+  } catch (err) {
+    setLoadStatus(`DF${drive} download failed: ${err.message ?? err}`);
+  }
+}
+
+for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+  blankFloppyButtons[drive]?.addEventListener('click', () => {
+    try {
+      insertDisk(
+        new Uint8Array(BLANK_ADF_BYTES),
+        `blank-df${drive}.adf`,
+        drive,
+        true,
+      );
+    } catch (err) {
+      setLoadStatus(`DF${drive} blank disk failed: ${err.message ?? err}`);
+    }
+  });
+  downloadFloppyButtons[drive]?.addEventListener('click', () => downloadFloppy(drive));
+}
+updateFloppyImageControls();
+
 let cssFullscreen = false;
 let fsUi = null; // { bar, joy } - built lazily, like the touch-joystick UI
 
@@ -3675,7 +3921,8 @@ function stateRecord(bytes) {
     saved: new Date(),
     emulated: emu.emulated_seconds(),
     rom: bootRom?.label ?? 'unknown',
-    df0: df0Name,
+    df0: diskNames[0],
+    df1: diskNames[1],
     machine: emu.machine_model?.() ?? machineModel ?? null,
   };
 }
@@ -3684,7 +3931,11 @@ function describeState(info) {
   if (!info) return '';
   const when = info.saved instanceof Date ? info.saved.toLocaleString() : 'unknown time';
   const machine = info.machine ? `${info.machine}, ` : '';
-  return `${when} - ${info.df0 ?? 'no disk'} (${machine}${Math.round(info.emulated ?? 0)}s emulated)`;
+  const disks = [info.df0, info.df1]
+    .map((name, drive) => (name ? `DF${drive}: ${name}` : null))
+    .filter(Boolean)
+    .join(', ');
+  return `${when} - ${disks || 'no disks'} (${machine}${Math.round(info.emulated ?? 0)}s emulated)`;
 }
 
 // Enablement follows what each control can actually do right now: saving
@@ -3776,19 +4027,21 @@ function restoreState(bytes, source) {
   // A restored state carries its own idea of which keys are held, so the
   // on-screen keyboard's latches are stale: believe the machine.
   forgetVirtualKeys();
-  // The disk came back inside the state; believe the machine, not the page.
-  df0Name = emu.disk_name(0) ?? null;
+  // The disks came back inside the state; believe the machine, not the page.
+  for (let drive = 0; drive < diskNames.length; drive++) {
+    diskNames[drive] = emu.disk_name(drive) ?? null;
+  }
   lastFddTrack = null;
   updateStatusDisks();
+  updateFloppyImageControls();
   // So did the machine itself, model, video standard and all.
   syncMachineSelect();
   syncVideoSelect();
   // Paint the restored screen now: a load into a paused machine steps no
   // frames, so nothing else would.
   presentFrame();
-  setLoadStatus(
-    `state loaded from ${source}` + (df0Name ? ` - DF0: ${df0Name}` : ''),
-  );
+  const disks = insertedDiskDescription();
+  setLoadStatus(`state loaded from ${source}` + (disks ? ` - ${disks}` : ''));
   return true;
 }
 
@@ -4463,10 +4716,9 @@ machineSel.addEventListener('change', () => {
   if (!model || model === machineModel) return;
   machineModel = model;
   if (emu && running) {
-    // Carry the page's copy of the inserted disk into the new machine; a
-    // disk that only exists inside the old one (restored from a state)
-    // cannot come along.
-    if (df0Name && lastDisk?.name === df0Name) pendingDisk = lastDisk;
+    // Carry page-owned uploaded disks into the new machine; a disk that only
+    // exists inside the old one (restored from a state) cannot come along.
+    keepUploadedDisksForRebuild();
     boot();
   } else if (!emu) {
     setLoadStatus(`machine: ${model} - applies at boot`);
@@ -4553,8 +4805,8 @@ videoSel.addEventListener('change', () => {
   videoStandard = std;
   if (emu && running) {
     // The machine select's rebuild, for the same reason: the standard is
-    // soldered in. ROM and disk carry over the same way.
-    if (df0Name && lastDisk?.name === df0Name) pendingDisk = lastDisk;
+    // soldered in. ROM and disks carry over the same way.
+    keepUploadedDisksForRebuild();
     boot();
   } else if (!emu) {
     setLoadStatus(`video: ${std} - applies at boot`);
@@ -6313,7 +6565,9 @@ function updateStatusDisks() {
   const parts = [];
   for (let drive = 0; drive < 4; drive++) {
     if (!emu.drive_connected(drive)) continue;
-    parts.push(`DF${drive}: ${emu.disk_name(drive) ?? '-'}`);
+    const name = emu.disk_name(drive);
+    const writable = name && emu.floppy_write_protected?.(drive) === false;
+    parts.push(`DF${drive}: ${name ?? '-'}${writable ? ' [writable]' : ''}`);
   }
   const text = parts.join('  ');
   if (text !== sb.disksText) {
@@ -6350,7 +6604,7 @@ const KICK_LIST_EXT = /\.(rom|bin)$/i;
 // Null until the module is up, and on a bundle too old to say.
 let diskFormats = null;
 
-// Called once the wasm module is ready (load()): point the disk picker and
+// Called once the wasm module is ready (load()): point the disk pickers and
 // the optional DF0 list at the formats this build reads. A shell's
 // hand-written accept attribute is a list the wasm can outgrow, and it did
 // - which is why the glue rewrites it rather than trusting it. Only a
@@ -6372,9 +6626,11 @@ function applyDiskFormats() {
     if (diskListSelect) diskListSelect.hidden = true;
     return;
   }
-  const picker = $('df0');
-  if (picker.hasAttribute('accept')) {
-    picker.accept = diskFormats.map((ext) => `.${ext}`).join(',');
+  for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    const picker = $(`df${drive}`);
+    if (picker.hasAttribute('accept')) {
+      picker.accept = diskFormats.map((ext) => `.${ext}`).join(',');
+    }
   }
   if (diskListSelect) {
     const listExt = new RegExp(`\\.(${diskFormats.join('|')})$`, 'i');
@@ -6564,7 +6820,8 @@ function bugReportHref() {
       // tracks state loads); otherwise what the next boot would build.
       `machine = ${toml(emu?.machine_summary?.() ?? machineModel ?? 'A500 (default)')}`,
       `kickstart = ${toml(bootRom?.label ?? 'none')}`,
-      `df0 = ${toml(df0Name ?? 'empty')}`,
+      `df0 = ${toml(diskNames[0] ?? 'empty')}`,
+      `df1 = ${toml(diskNames[1] ?? 'empty')}`,
       `joystick = ${toml(joyMode)}`,
       // The emulated presentation and the canvas backing store; under
       // the monitor path the latter is display-resolution, so a size
@@ -6689,7 +6946,7 @@ const pageParams = new URLSearchParams(location.search);
 // Optional copperline.json next to the page: a site sets its defaults in
 // one hand-editable file instead of touching the shell or this glue. All
 // keys are optional; a missing or invalid file is simply no defaults.
-// Link parameters (?df0=, ?kick=, ?machine=, ?joy=, ?fdspeed=) override
+// Link parameters (?df0=/df1=, ?kick=, ?machine=, ?joy=, ?fdspeed=) override
 // the file, and anything the visitor changes by hand wins as usual.
 //
 //   {
@@ -6697,6 +6954,7 @@ const pageParams = new URLSearchParams(location.search);
 //     "video": "NTSC",               video standard, like ?video= (PAL|NTSC)
 //     "kick": "roms/kick31.rom",     same-origin path, like ?kick=
 //     "df0": "adf/demo.adf",         URL, like ?df0=
+//     "df1": "adf/demo-disk2.adf",   optional second-drive URL
 //     "floppy_sounds": false,        preset the drive-sounds toggle
 //     "mono_audio": true,            preset the mono-audio toggle
 //     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
@@ -6761,9 +7019,12 @@ async function startup() {
   if (bgRunPref !== null) bgRunToggle.checked = bgRunPref === 'on';
   else if (typeof cfg.background_run === 'boolean') bgRunToggle.checked = cfg.background_run;
   const fetches = [];
-  const linkedDisk =
-    pageParams.get('df0') ?? (typeof cfg.df0 === 'string' ? cfg.df0 : null);
-  if (linkedDisk) fetches.push(insertDiskFromUrl(linkedDisk));
+  for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    const key = `df${drive}`;
+    const linkedDisk =
+      pageParams.get(key) ?? (typeof cfg[key] === 'string' ? cfg[key] : null);
+    if (linkedDisk) fetches.push(insertDiskFromUrl(linkedDisk, drive));
+  }
   const linkedKick =
     pageParams.get('kick') ?? (typeof cfg.kick === 'string' ? cfg.kick : null);
   if (linkedKick) fetches.push(fitRomFromUrl(linkedKick));

@@ -89,6 +89,15 @@ pacing_budget = "cycles"
 # rewind_budget_mb = 256
 # rewind_interval_frames = 25
 
+# Run-ahead input-latency reduction. In a compatible windowed session, each
+# refresh commits one frame, snapshots it, executes this many silent future
+# frames, presents the last, then restores the snapshot. The host therefore
+# needs roughly (run_ahead_frames + 1)x realtime headroom; start with 1.
+# Host-coupled devices and diagnostics that cannot be rewound make the setting
+# temporarily inactive, with the reason shown in the Run Ahead menu's OSD.
+# 0..4; adjust live from Emulation Settings > Run Ahead.
+# run_ahead_frames = 0
+
 
 [cpu]
 
@@ -195,9 +204,10 @@ model = "68000"
 # extended_rom = "cdtv-extended.rom"
 
 
-# CD image (BIN/CUE, single- or multi-file, with MODE1/2048, MODE1/2352,
-# and AUDIO tracks; a bare .iso; or a chdman v5 .chd), mounted on the
-# machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
+# CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,
+# and AUDIO tracks -- audio tracks may be BINARY, WAVE, or MP3 files, with
+# PREGAP/POSTGAP lines honoured; a bare .iso; or a chdman v5 .chd), mounted on
+# the machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
 # emulated seconds after power-on instead of at boot: some CDTV discs
 # (e.g. Xenon II) only boot when inserted after the boot screen, on
 # real hardware too.
@@ -383,7 +393,7 @@ slow = "512K"
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
 # same images as [ide]: RDB HDFs, bare partition hardfiles, gzip-compressed
-# hardfiles (.hdz), or host directories. A path ending in .cue, .iso, or .chd
+# hardfiles (.hdz), or host directories. A path ending in .cue, .iso, .nrg, or .chd
 # attaches a SCSI CD-ROM drive at that ID instead (read-only; mount it in the
 # guest with a CD filesystem pointed at the controller's scsi.device and that
 # unit number). CD audio tracks play through the machine's audio output, and
@@ -431,11 +441,16 @@ slow = "512K"
 # uses to test in-development driver builds). rom_bank2 optionally supplies
 # a second flash bank (e.g. cdfs.rom, LIV2's CD filesystem); it needs rom
 # and does not apply to atbus2008, which has no banking.
+# One drive key per slot, in (channel, master/slave) order: drive0/drive1 are
+# channel 0's master/slave, drive2/drive3 are channel 1's (ripple only). Each
+# is independent, so a slot can be left empty without ending the list -- the
+# same shape as [ide]'s master/slave and [scsi]'s unit0..unit6. The older
+# positional `drives = [...]` array is still read for existing configs.
 # [lide]
 # board = "ripple"
 # rom = "lide.rom"
-# drives = ["workbench.hdf", "data.hdf"]
-# drives = [{ path = "workbench.hdf", bootpri = 6 }]   # table form, as for [ide]
+# drive0 = "workbench.hdf"
+# drive1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
 
 
 [chipset]
@@ -484,7 +499,7 @@ video = "PAL"
 # own RDB, which keeps its label, priorities, and filesystem recorded inside
 # it.
 #
-# A path ending in .cue, .iso, or .chd attaches an ATAPI CD-ROM drive at
+# A path ending in .cue, .iso, .nrg, or .chd attaches an ATAPI CD-ROM drive at
 # that slot instead of a hard disk (see [scsi], above, for the read-only
 # SCSI-2 command engine both share).
 # [ide]
@@ -754,14 +769,40 @@ floppy_sounds_volume = 100
 #   "pty"     serial in/out is bridged to a host pseudo-terminal (Unix only).
 #             The slave path (/dev/pts/N) is logged at startup; attach a
 #             terminal with e.g. `minicom -D`, `screen`, or `cu -l`.
+#   "modem"   a Hayes/AT-command modem: the guest dials out with
+#             "ATD host:port" rather than the port being wired to a peer at
+#             startup, so there is no connect key here. listen means
+#             something different from tcp mode: it is the address the
+#             modem answers incoming calls on; a connection there rings the
+#             guest (RING) rather than being bridged straight through, and
+#             ATA (or S0 auto-answer) picks it up. telnet turns on AT*T1's
+#             telnet NVT translation (RFC 854 option negotiation and CR
+#             handling) by default at power-on -- needed for a real telnet
+#             server (a BBS), not a raw TCP byte service. [serial.phonebook]
+#             maps a dialable number to a host:port (or a bare host, which
+#             dials the modem's default port); config-file only, no
+#             launcher row. session replays a scripted dial-out session
+#             from a file instead of dialing out over TCP -- the
+#             determinism story for a modem-using headless run or test
+#             case (docs/guide/modem.md#scripted-sessions has the file
+#             format); cannot be combined with listen.
+# See docs/guide/modem.md for the full command set and a BBS quick-start.
 # With an AUX: shell on the Amiga side, "tcp"/"pty" give a remote AmigaDOS
 # console. --serial MODE overrides this per run; --serial-connect HOST:PORT
-# implies "tcp-connect"; --midi-out/--midi-in NAME imply "midi".
+# implies "tcp-connect"; --serial-session FILE implies "modem"; --midi-out/
+# --midi-in NAME imply "midi".
 # mode = "stdout"
 # connect = "bbs.example.com:1337"
 # midi_out = "USB MIDI Interface"
 # midi_in = "USB MIDI Interface"
 # listen = "127.0.0.1:1234"
+#
+# Modem mode's own keys (see "modem" above).
+# telnet = false                     # AT*T1 telnet translation at power-on
+# session = "bbs-demo.session"       # replay a scripted session instead of TCP
+# [serial.phonebook]
+# "5551234" = "bbs.example.com:23"
+# "5555678" = "bbs2.example.com"
 #
 # The emulated MT-32 (docs/guide/mt32.md). midi_out = "mt32" plays to it
 # instead of a host endpoint; both ROM images are needed, and are yours to

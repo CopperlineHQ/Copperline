@@ -56,10 +56,17 @@ and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
-timing). FMODE's BSCAN2 and SSCAN2 bits repeat bitplane and sprite data on
-successive display lines. SSCAN2 also masks the high bit of Lisa's sprite
-horizontal comparator: HSTART `$100..$1FF` aliases `$000..$0FF` while the bit
-is active. DblPAL/DblNTSC modes rely on that alias for the Workbench pointer.
+timing). The fetch phase supplies the low pointer bits: 32/64-bit fetches
+therefore alias words when BPLxPT/SPRxPT is not naturally aligned, and the
+FMODE `10` page mode duplicates the first 16-bit word while advancing the
+pointer by the full 32-bit width. Fetch bandwidth also bounds valid AGA plane
+counts: FMODE0 permits 8/4/2 planes in lo-res/hi-res/SHRES, FMODE1-2 permits
+8/8/4, and FMODE3 permits eight in every resolution. An overprogrammed count
+fetches no bitplanes rather than clamping. FMODE's BSCAN2 and SSCAN2 bits
+repeat bitplane and sprite data on successive display lines. SSCAN2 also masks
+the high bit of Lisa's sprite horizontal comparator: HSTART `$100..$1FF`
+aliases `$000..$0FF` while the bit is active. DblPAL/DblNTSC modes rely on that
+alias for the Workbench pointer.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
@@ -193,8 +200,9 @@ Palette (32 12-bit entries as seen by OCS/ECS; the store is the AGA
 the genlock transparency (T) bit, with Lisa COLORxx writes routed through
 BPLCON3 BANK/LOCT banking), BPLCON0-4,
 display window (DIWSTRT/DIWSTOP, ECS DIWHIGH), sprite
-position/control/data registers, and CLXCON/CLXDAT collision detection
-(CLXCON2 extends it to planes 7-8 on Lisa). Denise revisions: OCS 8362,
+position/control/data registers, and CLXCON/CLXDAT collision detection.
+On Lisa, CLXCON2 extends the plane match to planes 7-8 in both the rendered
+and live beam-timed collision paths. Denise revisions: OCS 8362,
 ECS 8373, AGA Lisa (DENISEID $00F8). The AGA decode adds 8 bitplanes,
 HAM8, the BPLCON4 BPLAM pixel-index XOR mask, and the OSPRM/ESPRM sprite
 palette banks. The two BPLCON4 fields are on different Lisa timing paths:
@@ -262,8 +270,12 @@ creating another access, forwards one strobe to the attached parallel
 peripheral, and feeds an accepted byte's `/ACK` edge back through CIA-A
 FLAG. With no peripheral attached the line remains unacknowledged, like an
 unplugged cable. CIA-B carries the floppy control lines (motor, select,
-side, step), the FLAG input pulsed by the disk index, and the parallel
-status lines (BUSY/POUT/SEL on port A bits 0-2). PB6/PB7 pulse-output mode
+side, step), the FLAG input pulsed by the disk index, the parallel
+status lines (BUSY/POUT/SEL on port A bits 0-2), and the RS-232 control
+lines: /DSR, /CTS, and /CD inputs on port A bits 3-5, driven through the
+inverting 1489 receivers by whatever the serial port is wired to on the
+host (see [peripherals](peripherals.md#serial-sink)), and the /RTS and
+/DTR outputs on bits 6-7. PB6/PB7 pulse-output mode
 holds the selected pin low for one E-clock; reading PRB observes the pulse
 without shortening it.
 
@@ -295,7 +307,12 @@ the 11-sector AmigaDOS track layout; DSKSYNC matching, word-at-a-time
 DSKDAT, and DMA into chip RAM behave as Paula documents. Non-WORDSYNC read
 DMA drains Paula's recovered 16-bit disk word phase even when DSKLEN is
 armed between disk-word boundaries; WORDSYNC is the explicit mode that
-realigns framing to a matched sync word before transfer. Supported image
+realigns framing to a matched sync word before transfer and again on every
+later DSKSYNC match during it, so the sectors after an index wrap on a track
+whose cell count is not a multiple of 16 still land word-aligned (AROS's
+trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
+word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
+Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
 images.
@@ -333,6 +350,13 @@ The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
 
+Disk DMA against a mechanism that cannot deliver cells -- no media in the
+drive, or the motor line off -- arms normally and then pends: Paula has no
+readiness interlock and waits for data forever, so the guest's own timeout
+governs. A media insert or motor start mid-transfer brings the pending
+transfer to life exactly as on hardware; nothing completes early (the
+turbo burst also refuses drives that are not ready).
+
 ## Known AGA/ECS gaps and non-goals
 
 Most ECS and AGA behaviour is implemented (the register notes above and
@@ -341,14 +365,9 @@ Most ECS and AGA behaviour is implemented (the register notes above and
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- **Live (beam-timed) collisions** stay on the 6-plane decode: CLXCON2 is
-  interpreted in the rendered collision path but not yet in the beam-timed
-  `COLLISIONS_AGA_DECODE` path.
-- **True 35 ns SuperHires sprite** output is not modelled -- SPRES upgrades
-  sprite resolution, but the compositor does not place sprites on the SHRES
-  pixel grid.
-- The vAmigaTS ECS register-readback sweep has not been run against a local
-  checkout; readback is pinned by unit tests meanwhile.
+- AGA palette reads through BPLCON2.RDRAM are modelled, including BANK/LOCT
+  selection and the read-only COLORxx window. Other ECS register readback is
+  pinned by unit tests and the vAmigaTS sweep.
 
 Deliberate non-goals, recorded so they are not re-investigated: A2024 /
 UHRES dual-scan display (a one-time "not emulated" warning is kept),

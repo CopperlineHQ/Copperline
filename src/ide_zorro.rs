@@ -6,7 +6,7 @@
 //! sharing RIPPLE's ROM image and register layout, one channel), and
 //! **AT-Bus 2008** (the register model shared by that board's whole clone
 //! family, one channel). Drives may be hard disks or ATAPI CD-ROMs, either a
-//! `.cue`/`.iso`/`.chd` image on any `[lide] drives` slot or a real host
+//! `.cue`/`.iso`/`.nrg`/`.chd` image on any `[lide] drives` slot or a real host
 //! block device attached via `[[host_disk]] attach = "lide0-master"` (etc).
 //! The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
 //! release image from <https://github.com/LIV2/lide.device>) -- nothing is

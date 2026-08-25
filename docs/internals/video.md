@@ -346,11 +346,16 @@ browser canvas carry the doubled width through (the desktop window shows
 it 1:1 on a 2x HiDPI texture). Every logical coordinate in the replay --
 comparators, fetch origins, sprite positions, the collision buffers --
 stays in the classic hi-res-pitch domain; only the framebuffer writes
-fan out, with non-SHRES pixels and sprites doubled. Standard 15 kHz
-scans keep the classic single-width canvas byte-identical; their SHRES
-screens still blend each 35 ns pair into the 70 ns pixel. Sprite
-positions remain at hi-res resolution on either canvas (true 35 ns
-sprite placement is a remaining TODO).
+fan out. The sprite serializer keeps its own 35 ns sample coordinate:
+BPLCON3 SPRES=11 emits one sample per doubled-canvas pixel, SPRES=10 emits
+two, and the lo-res encodings emit four. Standard 15 kHz scans keep the
+classic single-width canvas byte-identical; their SHRES playfield and
+sprite subpixel pairs are blended into each 70 ns pixel. The renderer keeps
+the two playfield colours and priority masks separate until sprite
+composition, while CLXDAT keeps its 70 ns column pitch and combines adjacent
+35 ns sprite samples. Sprite comparator positions remain at hi-res resolution
+on either canvas, as on Lisa; SPRES changes pixel width, not the comparator's
+positional granularity.
 
 Two vertical edge cases the replay honours:
 
@@ -419,6 +424,28 @@ the main thread uploads the newest completed presentation buffer to the
 capture paths call `finish_render_for_current_frame` so screenshots, frame
 dumps, recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
+
+Run-ahead (`[emulation] run_ahead_frames`) sits above this pipeline. A burst
+first retires one committed anchor frame, snapshots the machine, and then
+retires `n` speculative frames with per-frame pacing suppressed. Every
+speculative frame is silent: `AudioMux` drops all master/source/channel fanout,
+and Paula withholds completed serial words from both its sink and observer.
+The final future frame is synchronously rendered while its Bus is still live;
+only then is the anchor restored. Rendering after restore would present the
+past, and merely submitting a worker job before restore would race the
+fallback renderer. One `pace_runahead_burst` call at the end uses the anchor's
+emulated time, so snapshot, speculation, rendering, and restore all share one
+display-period budget. Speculative frames contribute host busy time but not
+the committed-frame counter.
+
+The eligibility gate is deliberately conservative. It excludes any device or
+observer with host state that `M68kMachine::write_state` cannot rewind; the
+user guide lists the current set. A snapshot or restore failure disables
+run-ahead for the session instead of silently advancing by extra frames. If
+stepping or rendering interrupts a burst after speculation has started, the
+anchor restore is still attempted before run-ahead is disabled: output from
+those abandoned future frames was suppressed and they cannot become the
+committed timeline.
 
 Progressive frames have two exact reuse checks. First, two consecutive
 renders with identical lightweight inputs arm a pre-render key containing

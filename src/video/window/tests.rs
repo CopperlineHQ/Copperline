@@ -2038,6 +2038,103 @@ fn cycle_warp_speed_walks_the_levels() {
 }
 
 #[test]
+fn burst_frames_preserves_warp_and_runahead_frame_counts() {
+    let mut app = test_app();
+    app.warp_speed = WarpSpeed::X4;
+    assert_eq!(app.burst_frames(false), (4, 0, None));
+
+    app.emu.set_paced(true);
+    app.emu.bus_mut().set_rtc_present(false);
+    app.run_ahead_frames = 2;
+    assert_eq!(app.runahead_block_reason(), None);
+    assert_eq!(app.burst_frames(false), (3, 2, None));
+    assert_eq!(
+        app.burst_frames(true),
+        (1, 0, None),
+        "scheduled capture uses committed frames only"
+    );
+}
+
+#[test]
+fn armed_debugger_stop_blocks_runahead() {
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    app.emu.bus_mut().set_rtc_present(false);
+    app.run_ahead_frames = 1;
+    assert_eq!(app.runahead_effective_frames(), 1);
+
+    app.emu.machine.ui_set_breakpoint(0x00FC_0000, None, 0);
+    assert_eq!(app.runahead_effective_frames(), 0);
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("debugger stop conditions armed")
+    );
+}
+
+#[test]
+fn transient_debug_observers_block_runahead() {
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    app.emu.bus_mut().set_rtc_present(false);
+    app.run_ahead_frames = 1;
+
+    app.emu
+        .bus_mut()
+        .inject_bus_fault(crate::bus::FaultInjection {
+            start: 0x1000,
+            end: 0x1001,
+            on_read: true,
+            on_write: false,
+            remaining: Some(1),
+            hits: 0,
+        });
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("injected bus fault armed")
+    );
+    app.emu.bus_mut().clear_injected_bus_faults();
+
+    app.emu.bus_mut().set_chipset_validation(true);
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("chipset validation armed")
+    );
+    app.emu.bus_mut().set_chipset_validation(false);
+
+    app.emu.bus_mut().set_smc_detection(true);
+    assert_eq!(app.runahead_block_reason(), Some("SMC detection armed"));
+    app.emu.bus_mut().set_smc_detection(false);
+
+    app.emu.bus_mut().set_heat_map(Some((0, 0x10000)));
+    assert_eq!(app.runahead_block_reason(), Some("memory heat map armed"));
+    app.emu.bus_mut().set_heat_map(None);
+
+    app.emu.bus_mut().set_frame_analyzer_enabled(true);
+    assert_eq!(app.runahead_block_reason(), Some("frame analyzer armed"));
+    app.emu.bus_mut().set_frame_analyzer_enabled(false);
+
+    app.emu.machine.ui_set_pc_history_enabled(true);
+    assert_eq!(
+        app.runahead_block_reason(),
+        Some("debugger PC history active")
+    );
+}
+
+#[test]
+fn incomplete_speculative_burst_restores_anchor_before_disabling_runahead() {
+    let mut app = test_app();
+    app.run_ahead_frames = 2;
+    app.emu.bus_mut().mem.chip_ram[0x2000] = 0x12;
+    let anchor = app.emu.runahead_snapshot().unwrap();
+
+    app.emu.bus_mut().mem.chip_ram[0x2000] = 0xAB;
+    app.restore_runahead_anchor(Some(&anchor), false, true);
+
+    assert_eq!(app.emu.bus().mem.chip_ram[0x2000], 0x12);
+    assert_eq!(app.run_ahead_frames, 0);
+}
+
+#[test]
 fn mouse_delta_integrator_keeps_fractional_remainder() {
     let mut delta = 0.75;
     assert_eq!(take_integral_mouse_delta(&mut delta), 0);
@@ -3975,6 +4072,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::MouseCapture::Click,
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
+        None,
         true,
         crate::sampler::SamplerRequest::default(),
     )
@@ -6976,6 +7074,7 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("mystery"), DroppedMediaKind::Floppy);
     assert_eq!(kind("game.CUE"), DroppedMediaKind::Cd);
     assert_eq!(kind("game.iso"), DroppedMediaKind::Cd);
+    assert_eq!(kind("game.NRG"), DroppedMediaKind::Cd);
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.HDZ"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);

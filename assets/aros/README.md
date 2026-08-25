@@ -17,11 +17,39 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-20 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 677a83bb
-(the merge of the m68k chip-RAM footprint series, pull request 1034).
+Built from source on 2026-08-24 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit 4df19140.
 Fixes Copperline contributed or depends on, all in master:
 
+- the ciab.resource port-direction fix of pull request 1063
+  (https://github.com/aros-development-team/AROS/pull/1063, merged
+  2026-08-24): cia_init programmed CIA-B DDRA to 0xff, driving all
+  eight port A pins as outputs, where only /DTR and /RTS are outputs
+  on the machine. PA0-2 are the parallel port's Centronics status
+  inputs and PA3-5 the serial port's /DSR, /CTS and /CD, so an AROS
+  guest could never read printer status or see a serial control line
+  change -- under Copperline's serial bridges, which drive those lines
+  (carrier follows the TCP connection), every input read back 1. DDRA
+  is now 0xc0, matching Kickstart, and the same guest probe reads the
+  same values under this ROM as under Kickstart 3.1.
+- the dosboot stale-IORequest fix of pull request 1051
+  (https://github.com/aros-development-team/AROS/pull/1051, merged
+  2026-08-22): dosboot closed the trackdisk request and deleted it and
+  its reply port before calling the init code a boot block hands back
+  (dos.library's init, for a DOS disk), assuming that init never
+  returns. It does return whenever CliInit cannot mount the boot
+  volume -- a disk whose root block cannot be read, for instance -- and
+  the strap then closed and deleted the same request again, by which
+  time exec had reused the memory as a library jump table, so
+  CloseDevice jumped through a JMP opcode and the machine died with an
+  illegal address access in the Exec Bootstrap Task. Such a disk now
+  falls through to the "Waiting for bootable media" screen like any
+  other unbootable node.
+- the exec SMP series of pull requests 1046, 1048 and 1049 (merged
+  2026-08-21 to 2026-08-22), which reworks the shared exec memory
+  allocator, task state, signalling and scheduling arbitration, and
+  ETask lifetime handling; the m68k ROM picks these up as common exec
+  code.
 - the m68k chip-RAM footprint series of pull request 1034
   (https://github.com/aros-development-team/AROS/pull/1034, merged
   2026-08-20): the boot-time chip RAM cost of the ROM drops by well over

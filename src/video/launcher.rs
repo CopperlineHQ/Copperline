@@ -628,6 +628,10 @@ pub enum LauncherField {
     /// Serial section's Listen box.
     #[cfg(feature = "midi")]
     SerialListen,
+    /// `AT*T1`/`AT*T0`'s default at power-on, edited in the Serial
+    /// section's Telnet row (modem mode only).
+    #[cfg(feature = "midi")]
+    SerialTelnet,
     #[cfg(feature = "midi")]
     MidiOut,
     Mt32ControlRom,
@@ -1070,12 +1074,12 @@ const LIDE_ROWS: [Row; 11] = [
     row(F::LideRom, "Boot ROM", PathRow),
     row(F::LideRomBank2, "Boot ROM bank 2", PathRow),
     row(F::LideDrive0, "Drive 0", Drive),
-    row(F::LideDrive1, "Drive 1", Drive),
-    row(F::LideDrive2, "Drive 2", Drive),
-    row(F::LideDrive3, "Drive 3", Drive),
     row(F::LideDrive0Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive1, "Drive 1", Drive),
     row(F::LideDrive1Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive2, "Drive 2", Drive),
     row(F::LideDrive2Boot, "  Boot priority", Bootpri),
+    row(F::LideDrive3, "Drive 3", Drive),
     row(F::LideDrive3Boot, "  Boot priority", Bootpri),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
@@ -1135,6 +1139,15 @@ const SERIAL_ROWS_TCP_CONNECT: [Row; 2] = [
 const SERIAL_ROWS_TCP_LISTEN: [Row; 2] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
     row(F::SerialListen, "  Listen", RowKind::Text),
+];
+// The modem's own rows: where it listens for incoming calls (RING/ATA/S0
+// answer them) and whether telnet NVT translation (AT*T1) is on by default.
+// The phonebook is config-file-only -- no row for it.
+#[cfg(feature = "midi")]
+const SERIAL_ROWS_MODEM: [Row; 3] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::SerialListen, "  Listen", RowKind::Text),
+    row(F::SerialTelnet, "  Telnet", Cycle),
 ];
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_MIDI: [Row; 3] = [
@@ -1430,6 +1443,7 @@ fn serial_rows(
             return match serial_mode {
                 SerialMode::TcpConnect => &SERIAL_ROWS_TCP_CONNECT,
                 SerialMode::Tcp => &SERIAL_ROWS_TCP_LISTEN,
+                SerialMode::Modem => &SERIAL_ROWS_MODEM,
                 _ => &SERIAL_ROWS_BASE,
             };
         }
@@ -1911,13 +1925,14 @@ const LIDE_BOARDS: [Option<LidePersonality>; 4] = [
     Some(LidePersonality::AtBus2008),
 ];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 6] = [
+const SERIAL_MODES: [SerialMode; 7] = [
     SerialMode::Off,
     SerialMode::Stdout,
     SerialMode::Midi,
     SerialMode::Tcp,
     SerialMode::TcpConnect,
     SerialMode::Pty,
+    SerialMode::Modem,
 ];
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
@@ -2154,6 +2169,9 @@ pub struct MachineSetup {
     /// box that mode shows. `None` there has nothing to dial, and the run
     /// says so rather than the launcher refusing the mode.
     serial_connect: Option<String>,
+    /// `AT*T1`/`AT*T0` default at power-on for `mode = "modem"`, toggled by
+    /// the Telnet row that mode shows.
+    serial_telnet: bool,
     /// The Centronics parallel-port device (None/Printer/Sampler), edited in the
     /// I/O Ports tab's Parallel section.
     parallel_device: crate::config::ParallelDevice,
@@ -2274,6 +2292,9 @@ pub struct MachineSetup {
     pacing_budget: PacingBudget,
     realtime_priority: bool,
     warp: WarpSpeed,
+    /// The config screen has no control for run-ahead yet, but must preserve
+    /// a value loaded from TOML or the CLI when it rebuilds RawConfig.
+    run_ahead_frames: u8,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2304,6 +2325,11 @@ impl MachineSetup {
     /// "no boot ROM = AROS" distinction, and the `[[zorro]]` board paths.
     pub fn from_raw(raw: &RawConfig) -> Result<Self> {
         let cfg: Config = raw.clone().try_into()?;
+        // Boot priority is read from the raw form (the validated
+        // `DriveImage` resolves it to a number, losing "unset"), so this
+        // needs the same named-key-over-legacy-array merge validation used
+        // rather than the positional array alone.
+        let lide_raw_slots = raw.lide.drive_slots();
         // One tick box governs both kinds of bay, so read it from whichever
         // of the two a bay actually has.
         let df_write_protected = std::array::from_fn(|i| {
@@ -2434,10 +2460,10 @@ impl MachineSetup {
                 cfg.lide.drives[i].as_ref().is_some_and(|d| d.path.is_dir())
             }),
             lide_drive_bootpri: std::array::from_fn(|i| {
-                boot_priority_of(raw.lide.drives.get(i).and_then(|d| d.bootpri))
+                boot_priority_of(lide_raw_slots[i].as_ref().and_then(|d| d.bootpri))
             }),
             lide_drive_boot_off: std::array::from_fn(|i| {
-                boot_is_off(raw.lide.drives.get(i).and_then(|d| d.bootpri))
+                boot_is_off(lide_raw_slots[i].as_ref().and_then(|d| d.bootpri))
             }),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
@@ -2480,6 +2506,7 @@ impl MachineSetup {
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
             serial_connect: cfg.serial.connect.clone(),
+            serial_telnet: cfg.serial.telnet.unwrap_or(false),
             parallel_device: cfg.parallel.device,
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
@@ -2542,6 +2569,7 @@ impl MachineSetup {
             pacing_budget: cfg.emulation.pacing_budget,
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
+            run_ahead_frames: cfg.emulation.run_ahead_frames,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -2878,26 +2906,34 @@ impl MachineSetup {
             raw.lide.rom_bank2 = (board != LidePersonality::AtBus2008)
                 .then(|| self.lide_rom_bank2.as_deref().map(path_string))
                 .flatten();
-            // `[lide] drives` is a positional list in the config file -- a hole
-            // cannot be represented -- so this stops at the first empty slot
-            // rather than filtering, trusting `clear_path`'s cascade to keep
-            // the array itself always gap-free.
+            // One named `driveN` key per slot, so an empty slot before a
+            // filled one round-trips: each is emitted independently rather
+            // than as a positional array that could not express the hole.
+            // The deprecated `drives` array is never written back -- reading
+            // one and saving migrates the config to the named form.
             const LIDE_DRIVE_BOOT_FIELDS: [LauncherField; 4] = [
                 F::LideDrive0Boot,
                 F::LideDrive1Boot,
                 F::LideDrive2Boot,
                 F::LideDrive3Boot,
             ];
-            raw.lide.drives = (0..board.max_drives())
-                .map_while(|i| {
-                    drive_raw(
-                        self.lide_drives[i].as_deref(),
-                        self.lide_drive_names[i].as_deref(),
-                        self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
-                        self.lide_drive_fs[i],
-                    )
-                })
-                .collect();
+            let slot_raw = |i: usize| {
+                (i < board.max_drives())
+                    .then(|| {
+                        drive_raw(
+                            self.lide_drives[i].as_deref(),
+                            self.lide_drive_names[i].as_deref(),
+                            self.effective_bootpri(LIDE_DRIVE_BOOT_FIELDS[i]),
+                            self.lide_drive_fs[i],
+                        )
+                    })
+                    .flatten()
+            };
+            raw.lide.drives = Vec::new();
+            raw.lide.drive0 = slot_raw(0);
+            raw.lide.drive1 = slot_raw(1);
+            raw.lide.drive2 = slot_raw(2);
+            raw.lide.drive3 = slot_raw(3);
         }
         // Host FS mounts: the edited slots (empty ones drop out), then any
         // hand-written extras beyond what the GUI shows.
@@ -3046,6 +3082,9 @@ impl MachineSetup {
         if self.warp != base.emulation.warp_speed {
             raw.emulation.warp_speed = Some(self.warp.label().to_ascii_lowercase());
         }
+        if self.run_ahead_frames != base.emulation.run_ahead_frames {
+            raw.emulation.run_ahead_frames = Some(self.run_ahead_frames);
+        }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
@@ -3070,6 +3109,15 @@ impl MachineSetup {
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
         raw.serial.connect = self.serial_connect.clone();
+        // Compared against the resolved value, not the raw tri-state: the
+        // toggle is a plain on/off, so "unset" and "explicitly off" look
+        // the same to it and must not produce a spurious `telnet = false`
+        // write -- which would then fail validation on any non-modem mode.
+        // Flipping it away from a base that did say something still writes
+        // an explicit value, which is how an explicit off gets recorded.
+        if self.serial_telnet != base.serial.telnet.unwrap_or(false) {
+            raw.serial.telnet = Some(self.serial_telnet);
+        }
         // Parallel port. Carry each peripheral's settings whenever they are set
         // so a Save round-trips them even while another device is temporarily
         // selected. The sampler options do not imply the sampler, so they are
@@ -3318,6 +3366,7 @@ impl MachineSetup {
         self.pacing_budget = base.emulation.pacing_budget;
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
+        self.run_ahead_frames = base.emulation.run_ahead_frames;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
@@ -3415,11 +3464,16 @@ impl MachineSetup {
                         .and_then(|drive| self.drive_holds(drive))
                         .is_none()
             }
+            // Each sits directly under the drive it belongs to, and stays
+            // on the page when that drive is empty -- greyed with "No
+            // drive" (see `disabled_reason`) rather than vanishing, so the
+            // rows do not reshuffle under the cursor as slots are filled
+            // and the indented label always has its own drive above it.
+            // Only a slot the board does not have goes, along with the
+            // drive row itself.
             F::LideDrive0Boot | F::LideDrive1Boot | F::LideDrive2Boot | F::LideDrive3Boot => {
-                self.lide_board.is_none()
-                    || Self::boot_field_drive(field)
-                        .and_then(|drive| self.drive_holds(drive))
-                        .is_none()
+                lide_drive_index(field)
+                    .is_some_and(|i| self.lide_board.is_none_or(|b| b.max_drives() <= i))
             }
             // Nothing to configure without a board fitted.
             F::LideRom => self.lide_board.is_none(),
@@ -3427,16 +3481,15 @@ impl MachineSetup {
             F::LideRomBank2 => self
                 .lide_board
                 .is_none_or(|b| b == LidePersonality::AtBus2008),
-            // `[lide] drives` is a positional list in the config file -- a
-            // hole cannot be represented -- so a slot beyond the board's
-            // channel count (RIDE/AT-Bus 2008 have one; RIPPLE has two) or
-            // beyond the first empty slot stays hidden: it is not just
-            // inapplicable, filling it would be unrepresentable.
+            // Only a slot the fitted board does not have stays hidden
+            // (RIDE/AT-Bus 2008 have one channel, RIPPLE two). Every slot
+            // the board *does* have is always editable, the same way
+            // `[ide]`'s master/slave and `[scsi]`'s units are: each is its
+            // own `driveN` key, so filling one without the one before it is
+            // representable.
             F::LideDrive0 | F::LideDrive1 | F::LideDrive2 | F::LideDrive3 => {
-                lide_drive_index(field).is_some_and(|i| {
-                    self.lide_board.is_none_or(|b| b.max_drives() <= i)
-                        || (i > 0 && self.lide_drives[i - 1].is_none())
-                })
+                lide_drive_index(field)
+                    .is_some_and(|i| self.lide_board.is_none_or(|b| b.max_drives() <= i))
             }
             _ => false,
         }
@@ -3652,6 +3705,8 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace,
             F::PerfOverlay => self.perf_overlay,
             F::Mt32Panel => self.mt32_panel,
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => self.serial_telnet,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             F::Toccata => self.toccata,
@@ -4165,6 +4220,8 @@ impl MachineSetup {
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Mt32Panel => enabled_label(self.mt32_panel),
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => enabled_label(self.serial_telnet),
             F::Rtc => enabled_label(self.rtc),
             F::Identify => enabled_label(self.identify),
             F::Fpu => enabled_label(self.fpu),
@@ -4265,6 +4322,7 @@ impl MachineSetup {
                 SerialMode::Tcp => "TCP".to_string(),
                 SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
+                SerialMode::Modem => "Modem".to_string(),
             },
             // The dial-out address has no default -- there is no host to
             // guess -- so an empty box says what it wants instead.
@@ -4619,6 +4677,8 @@ impl MachineSetup {
             }
             // Two states cycle the same either way round.
             F::Mt32Panel => self.mt32_panel = !self.mt32_panel,
+            #[cfg(feature = "midi")]
+            F::SerialTelnet => self.serial_telnet = !self.serial_telnet,
             F::Rtc => self.rtc = !self.rtc,
             F::Identify => self.identify = !self.identify,
             F::Fpu => self.fpu = !self.fpu,
@@ -5086,17 +5146,6 @@ impl MachineSetup {
             self.set_drive_filesystem(field, crate::diskimage::FileSystem::FFS);
             self.clear_drive_bootpri(field);
             self.refresh_drive_is_dir(field);
-        }
-        // `[lide] drives` is a positional list in the config file -- a hole
-        // cannot be represented -- so clearing a slot also clears every slot
-        // after it, keeping the array always representable as a config.
-        if let Some(i) = lide_drive_index(field) {
-            for slot in i + 1..self.lide_drives.len() {
-                self.lide_drives[slot] = None;
-                self.lide_drive_names[slot] = None;
-                self.lide_drive_bootpri[slot] = None;
-                self.lide_drive_boot_off[slot] = false;
-            }
         }
     }
 
@@ -5742,18 +5791,6 @@ impl MachineSetup {
                 }
                 if let Some(name) = self.lide_drive_names.get_mut(idx) {
                     *name = None;
-                }
-                // `[lide] drives` is a positional list -- a hole cannot be
-                // represented -- so a host disk taking over this slot must
-                // cascade-clear every later slot too, exactly like
-                // `clear_path` does for the image case, or `to_raw`'s
-                // `map_while` would silently stop emitting at this slot and
-                // drop any image still sitting in a later one.
-                for slot in idx + 1..self.lide_drives.len() {
-                    self.lide_drives[slot] = None;
-                    self.lide_drive_names[slot] = None;
-                    self.lide_drive_bootpri[slot] = None;
-                    self.lide_drive_boot_off[slot] = false;
                 }
             }
             crate::config::HostDiskAttach::Scsi(unit) => {
@@ -8337,6 +8374,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_CSYNTH,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
@@ -8344,6 +8382,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_MT32,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
     let serial: &[&[Row]] = &[
@@ -8351,12 +8390,14 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_CSYNTH,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
         &SERIAL_ROWS_MIDI,
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
+        &SERIAL_ROWS_MODEM,
     ];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];

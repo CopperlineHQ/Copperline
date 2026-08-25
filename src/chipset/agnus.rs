@@ -293,8 +293,9 @@ pub fn plan_bitplane_dma_fetches(
     if config.dmacon & (DMACON_DMAEN | DMACON_BPLEN) != (DMACON_DMAEN | DMACON_BPLEN) {
         return None;
     }
-    let dma_planes = bitplane_dma_planes(
+    let dma_planes = bitplane_dma_planes_for_fmode(
         config.bplcon0,
+        config.fmode,
         matches!(config.revision, AgnusRevision::AgaAlice),
     );
     if dma_planes == 0 {
@@ -343,14 +344,19 @@ pub fn plan_bitplane_dma_fetches(
             break;
         }
         let plane = timing.plane;
+        let quantum = bitplane_fetch_quantum(config.fmode) as usize;
+        let word_in_fetch = timing.word_idx % quantum;
         slots.push(BitplaneDmaFetchSlot {
             hpos: timing.hpos,
             order: timing.order,
             word_idx: timing.word_idx,
             plane,
-            addr: ptrs[plane] & config.addr_mask,
+            addr: wide_fetch_word_address(ptrs[plane], config.fmode & 0x0003, word_in_fetch)
+                & config.addr_mask,
         });
-        ptrs[plane] = ptrs[plane].wrapping_add(2) & config.addr_mask;
+        if word_in_fetch + 1 == quantum {
+            ptrs[plane] = ptrs[plane].wrapping_add(2 * quantum as u32) & config.addr_mask;
+        }
         if Some(timing) == last_fetch {
             line_complete = true;
         }
@@ -449,6 +455,20 @@ pub fn bitplane_fetch_quantum(fmode: u16) -> u32 {
     }
 }
 
+/// Address driven for one word inside an AGA wide fetch. Alice supplies the
+/// low address bits from the fetch phase instead of incrementing the complete
+/// pointer. Consequently an unaligned pointer aliases words within the fetch,
+/// and page mode (`10`) reads the first word twice while still advancing the
+/// pointer by the full 32-bit fetch width.
+pub(crate) fn wide_fetch_word_address(ptr: u32, mode: u16, word: usize) -> u32 {
+    match mode & 0x0003 {
+        0 => ptr,
+        1 | 3 => ptr | (2 * word as u32),
+        2 => ptr,
+        _ => unreachable!(),
+    }
+}
+
 /// Colour clocks between successive fetches of one plane.
 pub(crate) fn bitplane_fetch_period(bplcon0: u16, fmode: u16) -> u32 {
     bitplane_fetch_cck_per_word(bplcon0) * bitplane_fetch_quantum(fmode)
@@ -514,7 +534,9 @@ pub fn sprite_dma_disabled_by_bitplane_ddf(
     if sprite != 7 || dmacon & (DMACON_DMAEN | DMACON_BPLEN) != (DMACON_DMAEN | DMACON_BPLEN) {
         return false;
     }
-    if bitplane_dma_planes(bplcon0, matches!(revision, AgnusRevision::AgaAlice)) == 0 {
+    if bitplane_dma_planes_for_fmode(bplcon0, fmode, matches!(revision, AgnusRevision::AgaAlice))
+        == 0
+    {
         return false;
     }
     let Some((ddfstart, ddfstop)) =
@@ -560,6 +582,37 @@ pub fn bitplane_dma_planes(bplcon0: u16, aga: bool) -> usize {
         4
     } else {
         code
+    }
+}
+
+/// Fetchable bitplane streams for the selected resolution and AGA fetch mode.
+/// Lisa can display eight BPLDAT latches in every resolution, but Alice's DMA
+/// table has narrower ceilings at the lower fetch widths. Like OCS/ECS
+/// overprogramming, requesting more than the table can schedule disables the
+/// bitplane fetch rather than clamping it.
+pub fn bitplane_dma_planes_for_fmode(bplcon0: u16, fmode: u16, aga: bool) -> usize {
+    let planes = bitplane_dma_planes(bplcon0, aga);
+    if !aga {
+        return planes;
+    }
+
+    let mode = fmode & 0x0003;
+    let max = if bitplane_shres(bplcon0) {
+        match mode {
+            0 => 2,
+            1 | 2 => 4,
+            3 => 8,
+            _ => unreachable!(),
+        }
+    } else if bitplane_hires(bplcon0) && mode == 0 {
+        4
+    } else {
+        8
+    };
+    if planes <= max {
+        planes
+    } else {
+        0
     }
 }
 
@@ -1367,11 +1420,12 @@ impl Agnus {
 #[cfg(test)]
 mod tests {
     use super::{
-        bitplane_words_per_row, effective_bitplane_ddf_window, plan_bitplane_dma_fetches,
-        sprite_dma_disabled_by_bitplane_ddf, Agnus, AgnusRevision, BitplaneDmaFetchConfig,
-        BitplaneDmaFetchSlot, VideoStandard, BEAMCON0_LOLDIS, BEAMCON0_LPENDIS, BEAMCON0_PAL,
-        BEAMCON0_VARBEAMEN, BEAMCON0_VARVBEN, COLORCLOCKS_PER_LINE, DMACON_BPLEN, DMACON_DMAEN,
-        NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES, VHPOSR_LOOKAHEAD_CCK,
+        bitplane_dma_planes_for_fmode, bitplane_words_per_row, effective_bitplane_ddf_window,
+        plan_bitplane_dma_fetches, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
+        Agnus, AgnusRevision, BitplaneDmaFetchConfig, BitplaneDmaFetchSlot, VideoStandard,
+        BEAMCON0_LOLDIS, BEAMCON0_LPENDIS, BEAMCON0_PAL, BEAMCON0_VARBEAMEN, BEAMCON0_VARVBEN,
+        COLORCLOCKS_PER_LINE, DMACON_BPLEN, DMACON_DMAEN, NTSC_LINES,
+        NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES, VHPOSR_LOOKAHEAD_CCK,
     };
 
     #[test]
@@ -2172,6 +2226,50 @@ mod tests {
         );
         assert!(plan.line_complete);
         assert_eq!(plan.ptrs_after_range[0], 0x0100 + 24);
+    }
+
+    #[test]
+    fn aga_wide_fetch_address_bits_come_from_the_fetch_phase() {
+        // 32-bit mode: an aligned pointer reads two consecutive words, while
+        // an address with bit 1 already set aliases both phases to that word.
+        assert_eq!(wide_fetch_word_address(0x0100, 1, 0), 0x0100);
+        assert_eq!(wide_fetch_word_address(0x0100, 1, 1), 0x0102);
+        assert_eq!(wide_fetch_word_address(0x0102, 1, 0), 0x0102);
+        assert_eq!(wide_fetch_word_address(0x0102, 1, 1), 0x0102);
+
+        // Page mode duplicates the first word. A 64-bit fetch similarly ORs
+        // in bits 1-2, so a pointer already carrying bit 2 aliases phases.
+        assert_eq!(wide_fetch_word_address(0x0100, 2, 0), 0x0100);
+        assert_eq!(wide_fetch_word_address(0x0100, 2, 1), 0x0100);
+        assert_eq!(
+            (0..4)
+                .map(|word| wide_fetch_word_address(0x0104, 3, word))
+                .collect::<Vec<_>>(),
+            vec![0x0104, 0x0106, 0x0104, 0x0106]
+        );
+    }
+
+    #[test]
+    fn aga_resolution_and_fmode_bound_the_fetchable_plane_count() {
+        let lores_8 = 0x0010;
+        let hires_5 = 0xD000;
+        let shres_3 = 0x3040;
+        let shres_5 = 0x5040;
+        let shres_8 = 0x0050;
+
+        for fmode in 0..=3 {
+            assert_eq!(bitplane_dma_planes_for_fmode(lores_8, fmode, true), 8);
+        }
+        assert_eq!(bitplane_dma_planes_for_fmode(hires_5, 0, true), 0);
+        assert_eq!(bitplane_dma_planes_for_fmode(hires_5, 1, true), 5);
+        assert_eq!(bitplane_dma_planes_for_fmode(shres_3, 0, true), 0);
+        assert_eq!(bitplane_dma_planes_for_fmode(shres_3, 1, true), 3);
+        assert_eq!(bitplane_dma_planes_for_fmode(shres_5, 2, true), 0);
+        assert_eq!(bitplane_dma_planes_for_fmode(shres_5, 3, true), 5);
+        assert_eq!(bitplane_dma_planes_for_fmode(shres_8, 3, true), 8);
+
+        // Pre-AGA decoding is independent of FMODE, which does not exist.
+        assert_eq!(bitplane_dma_planes_for_fmode(0x7000, 3, false), 4);
     }
 
     #[test]

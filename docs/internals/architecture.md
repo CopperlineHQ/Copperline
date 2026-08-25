@@ -57,7 +57,7 @@ src/
   filesys.rs        # host directories mounted live as AmigaDOS volumes
   a2065.rs          # A2065 Zorro II Ethernet board (Am7990 LANCE)
   net/              # loopback, userspace NAT, and host-adapter bridge backends
-  cdrom.rs          # CD image (BIN/CUE) parsing
+  cdrom.rs          # CD images: cue sheets (BINARY/WAVE/MP3), ISO, NRG, CHD
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
   rtc.rs            # MSM6242-compatible battery RTC

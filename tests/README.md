@@ -70,6 +70,29 @@ protocol contract itself (chunked PIO, interrupt-reason register,
 error/sense mapping, mixed disk+ATAPI buses) is covered without assets by
 the unit tests in `src/ata.rs`.
 
+### Modem end to end
+
+`tests/modem_e2e.rs` closes the one gap `src/modem/`'s exhaustive unit
+suite (a fake transport) cannot: the real hardware path between the AT
+state machine and a guest -- Paula's SERPER-paced UART, the CIA-B
+control-line overlay, and a real `serial.device` actually driving them. It
+boots from a `[[filesys]]` mount holding the committed guest probe
+(`guest/modem-test/modemtest`, built like `guest/hostfs-test`'s), lets a
+real Startup-Sequence run it, and asserts the transcript it writes back:
+`ATZ` answered `OK`, `ATDT` dialing a one-shot local TCP peer this test
+spins up on an ephemeral port, `CONNECT`, the peer's greeting arriving at
+the guest, and the guest's own line arriving at the peer.
+
+Unlike the hostfs tests above, this one cannot use the bundled AROS ROM:
+`serial.device` is not ROM-resident on real AmigaOS either (Kickstart
+2.0+ loads it from `DEVS:serial.device` on demand via `LoadSeg` the first
+time something opens it), and the bundled AROS build carries no
+`serial.device` at all, ROM-resident or otherwise. It needs a local
+Kickstart ROM (`KICK31.ROM`, anywhere in the asset directory or the repo
+root) and a real `Devs/serial.device` driver file at
+`test-assets/modem/Devs/serial.device` (copy one out of any Workbench
+2.0+ install), and skips cleanly without either.
+
 ### WHDLoad boot
 
 `tests/whdload_boot.rs` boots the committed, project-owned
@@ -155,6 +178,7 @@ baselines to maintain.
 | `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
 | `graffity_z2_workbench_opens_640x480x8` / `graffity_z3_workbench_opens_640x480x8` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-graffity.hdf` (WB + Picasso96 with `Graffity.card`, default 640x480x8 screen) |
 | `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
+| `nrg_cd32_disc_serves_iso9660_data_and_smooth_audio` | `30 Games Compilation CD (2005)(Stuermer, A.).nrg` (a Nero 5 DAO CD32 disc with one MODE1/2048 data track and nine CD audio tracks) |
 | `toccata_ahi_driver_recognizes_the_board` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `toccata-ahi.hdf` (WB3.1 + AHI 4.18 with `toccata.audio` staged into `Devs/AHI` and Unit 0 set to Toccata) |
 | `zz9k_sdk_tools_pass_on_zorro_ii` / `zz9k_sdk_tools_pass_on_zorro_iii` | `zz9k/C/zz9k-{info,hash,chacha,aead,irqtest}` -- the unmodified ZZ9000 SDK m68k tools, built from the zz9000-sdk revision pinned in `docs/internals/zz9k.md` (build recipe in `tests/zz9k_sdk_tools.rs`'s module comment) |
 

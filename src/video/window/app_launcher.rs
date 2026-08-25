@@ -126,9 +126,9 @@ impl App {
                 dialog.add_filter("Floppy images", crate::floppy::IMAGE_EXTENSIONS)
             }
             // Only formats CdImage::load takes: a cue sheet, a bare ISO,
-            // or a CHD (a raw .bin is a cue sheet's payload, not loadable
+            // an NRG, or a CHD (a raw .bin is a cue sheet's payload, not loadable
             // alone).
-            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "chd"]),
+            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
             // A WHDLoad package however it arrived: as distributed
             // (`.lha`), zipped, or as a bare `.slave` picked inside an
             // already-extracted one (stored as its directory, which is
@@ -146,7 +146,7 @@ impl App {
                 dialog.add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
             }
             // SCSI, IDE, and lide drive slots all take hard disks or CD
-            // images (a cue/iso/chd attaches a CD-ROM drive at that slot,
+            // images (a cue/iso/nrg/chd attaches a CD-ROM drive at that slot,
             // over SCSI or ATAPI as appropriate).
             LauncherField::ScsiUnit0
             | LauncherField::ScsiUnit1
@@ -162,7 +162,7 @@ impl App {
             | LauncherField::LideDrive2
             | LauncherField::LideDrive3 => dialog
                 .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
-                .add_filter("CD images", &["cue", "iso", "chd"]),
+                .add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
@@ -1350,6 +1350,7 @@ impl App {
             self.serial_is_midi = self.emu.bus_mut().midi_serial_mut().is_some();
         }
         self.machine_config = raw;
+        self.runahead_machine_block = cfg.runahead_machine_block_reason();
         // Re-derive the sampler from the launcher's parallel config and attach it
         // to the fresh machine (the printer attaches inside build_machine, since
         // its byte sink is Send).
@@ -1387,6 +1388,16 @@ impl App {
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
         self.mouse_capture = cfg.mouse_capture;
         self.autofire_hz = cfg.autofire_hz;
+        self.run_ahead_frames = cfg
+            .emulation
+            .run_ahead_frames
+            .min(crate::config::RUN_AHEAD_MAX_FRAMES);
+        if let (true, Some(reason)) = (self.run_ahead_frames > 0, self.runahead_block_reason()) {
+            warn!(
+                "run-ahead ({} frames) configured but inactive: {reason}",
+                self.run_ahead_frames
+            );
+        }
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
         self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;

@@ -10,7 +10,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 
 | macOS | Linux/Windows | Action |
 |---|---|---|
-| `Cmd+Q` | `Alt+Q` | Quit (a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
+| `Cmd+Q` | `Alt+Q` | Quit (also the [menu's](#and-last) last row; a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
 | `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
@@ -90,7 +90,9 @@ away again.
 
 A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
-machine.
+machine, and the way out too: the menu's last row is **Quit**, and the
+Menu button *held* quits -- unless the pad's calibration bound a
+separate Quit control, which then owns the hold instead.
 
 The debugger, frame analyzer and console windows are not navigated this
 way, but `Esc` closes the focused one and the pad's second button closes
@@ -126,7 +128,7 @@ Status Bar*):
   drive, and changing it is done by hand (see [](fluxbridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
-  (`.cue`/`.iso`/`.chd`) with the proper media-change notification, and a
+  (`.cue`/`.iso`/`.nrg`/`.chd`) with the proper media-change notification, and a
   CD eject button. These do not appear on machines without a CD drive.
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the joystick port. Click it to
@@ -233,7 +235,7 @@ Disk images can be dropped anywhere on the emulator window:
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
   queues them all as the target drive's swap playlist, exactly like a
   multi-selection in the disk dialog.
-- **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
+- **CD images** (`.cue`/`.iso`/`.nrg`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
 - **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
   machine straight into the game through the [WHDLoad booter](whdload.md),
@@ -456,6 +458,16 @@ Shown only when something is on the port.
   [Configuration](configuration.md)). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
+- **Run Ahead**: input-latency reduction for play. Each display refresh
+  commits one frame, runs a few silent future frames, presents the last future
+  image, and rewinds to the committed boundary. Level **1 frame** is the best
+  starting point; higher levels need proportionally more host CPU (watch the
+  performance overlay) and skip more intermediate animation. When a live
+  device, writable medium, debugger, capture, or other host coupling makes
+  speculation unsafe, selecting a level keeps it configured but the OSD says
+  why it is inactive. The start-up value is
+  `[emulation] run_ahead_frames` or `--run-ahead`; the full compatibility list
+  is in [Configuration](configuration.md).
 
 ### Warp Settings
 
@@ -508,6 +520,11 @@ Shown only when something is on the port.
   `CREDITS.md`). Builds
   made from an untagged git commit append the short commit ID to the version
   shown in the window title and About panel.
+- **Quit** (also `Cmd+Q` / `Alt+Q`): exits Copperline. It is the last row
+  so that a [controller or keyboard walking the
+  menu](#keyboard-and-controller-navigation) finds it at the foot, with
+  nothing below it to pick by mistake; there is no confirmation, as with
+  the shortcut.
 
 ```{figure} ../images/ui-preview-shortcuts.png
 :alt: The keyboard shortcuts window
@@ -869,8 +886,8 @@ not silently mixed in. Two caveats:
   hard drive *after* the snapshot are still visible after restoring --
   treat a state as a CPU/chipset snapshot, not a disk backup. In-memory
   volumes (directory-as-HDD) and floppy images are embedded whole.
-- CD images are likewise reopened by path; keep the cue/bin (or CHD)
-  where it was.
+- CD images are likewise reopened by path; keep the cue sheet and its
+  files (or the CHD) where they were.
 
 ### Quick-save slots
 
@@ -1049,9 +1066,9 @@ face button (A / Cross) is fire / CD32 red, east (B / Circle) is blue,
 west (X / Square) is green, north (Y / Triangle) is yellow, Start is
 play/pause, and the left and right shoulders or triggers are reverse and
 forward. Select/Back and the guide button -- which no emulated control
-uses -- open the pop-up menu (below). Personal SDL mapping strings in the
-standard `SDL_GAMECONTROLLERCONFIG` environment variable are honoured
-too.
+uses -- open the pop-up menu, and Select *held* quits (both below).
+Personal SDL mapping strings in the standard `SDL_GAMECONTROLLERCONFIG`
+environment variable are honoured too.
 
 Calibration is the per-pad override, and the only path for controllers
 the database does not cover: push each control when prompted. This
@@ -1072,10 +1089,20 @@ live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
 the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, and an optional **Quit Copperline** hotkey. Push a
-control to bind it, or hold any control for about a second to skip a step
-the pad has no control for; the four directions and fire cannot be
-skipped.
+**Open menu** button, an optional **Quit Copperline** hotkey, and finally
+the four directions again as optional **alternates**. Push a control to
+bind it, or hold any control for about a second to skip a step the pad
+has no control for; the four directions and fire cannot be skipped.
+
+The alternates are for a pad with both a stick and a d-pad: bind the
+stick to the first four steps and the d-pad to the alternates (or the
+other way round) and either steers, as on the standard layout. Each
+alternate simply ORs with its primary, so a pad with one set of
+directions skips them and loses nothing. When a direction pair is bound
+to the two ends of one stick axis, the stick's deflection is known too,
+and a [`gamepad-mouse`](#controller-ports) device on that pad moves the
+pointer at a speed that follows the stick rather than at the d-pad's
+fixed pace.
 
 The Quit hotkey is a host-side control: it never reaches the emulated
 machine, so any spare pad button (Select, Start, a shoulder button) can
@@ -1084,9 +1111,13 @@ it must be *held* for about a second and a half -- an on-screen countdown
 shows the hold in progress, and releasing early cancels it. It works
 whenever the pad is connected -- even while the keyboard or another
 device drives the joystick ports, and while the machine is paused or
-powered off. Skip the step to leave quitting to the keyboard shortcut.
-The default database layout never binds a Quit hotkey; only a
-calibration can arm one.
+powered off. On the default database layout Select/Back carries it: a
+tap opens the menu and keeping it held quits, with the countdown drawn
+over the menu; let go early and the menu simply stays open, where
+**Quit** is the last row. A calibrated pad's Menu button works the same
+way unless a separate Quit control was bound, which then takes the hold
+to itself. Skip both steps to leave quitting to the menu row and the
+keyboard shortcut.
 
 The Menu button is the other host-side control: a press opens the pop-up
 menu (or closes an open overlay panel), and from there the pad walks
@@ -1095,7 +1126,7 @@ whatever is up, as described under
 above. While the menu or a panel is open the pad stops driving the
 emulated port, just as the keyboard does. On the default database layout
 Select/Back and the guide button carry it; a calibration can put it
-anywhere (or skip it).
+anywhere (or skip it). Held, it doubles as the Quit hotkey, as above.
 
 Once every step is captured, pushing a control tests its binding and
 holding one hands the panel's Save and Cancel buttons to the pad, so a

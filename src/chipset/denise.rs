@@ -96,6 +96,9 @@ impl DiwHigh {
 /// 0..32) with LOCT clear, which keeps hi == lo, and the OCS/ECS render path
 /// consumes the 12-bit `ocs_view`, so pre-AGA behaviour is unchanged.
 pub const PALETTE_ENTRIES: usize = 256;
+/// AGA BPLCON2.RDRAM: enable COLORxx palette readback and make the palette
+/// register window read-only while set.
+pub const BPLCON2_RDRAM: u16 = 1 << 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Palette {
@@ -158,6 +161,17 @@ impl Palette {
     /// writes both nibble planes, LOCT=1 only the low nibbles.
     pub fn write_banked(&mut self, bank: usize, idx: usize, loct: bool, value: u16) {
         self.write_entry((bank & 7) * 32 + (idx & 31), loct, value);
+    }
+
+    /// AGA COLORxx readback: BANK selects the 32-entry block and LOCT selects
+    /// the high or low component nibbles exactly as on a palette write.
+    pub fn read_banked(&self, bank: usize, idx: usize, loct: bool) -> u16 {
+        let entry = (bank & 7) * 32 + (idx & 31);
+        if loct {
+            self.lo[entry]
+        } else {
+            self.hi[entry]
+        }
     }
 
     /// Absolute-entry variant of `write_banked`, used by the replay
@@ -269,8 +283,9 @@ pub struct Denise {
     /// timing paths described in docs/internals/chipset.md.
     pub bplcon4: u16,
     /// AGA CLXCON2 ($10E): collision enable/match bits for planes 7-8.
-    /// Lisa-gated. Interpreted by the rendered collision decode; the
-    /// beam-timed live path still stops at the classic 6 planes.
+    /// Lisa-gated. Interpreted by both collision decodes (rendered and
+    /// beam-timed live); a zero CLXCON2 leaves the classic six-plane
+    /// behaviour untouched.
     pub clxcon2: u16,
     pub clxcon: u16,
     pub clxdat: u16,

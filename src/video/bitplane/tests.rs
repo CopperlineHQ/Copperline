@@ -1181,16 +1181,29 @@ fn denise_horizontal_delay_aligns_copper_beam_and_display_fetch_domains() {
 
 #[test]
 fn color_register_writes_use_final_output_position() {
-    assert_eq!(color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32), 0);
     assert_eq!(
-        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 + 4) as u32),
+        color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32, false),
+        0
+    );
+    assert_eq!(
+        color_write_framebuffer_x(COLOR_WRITE_HPOS_FB0 as u32, true),
+        1
+    );
+    assert_eq!(
+        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 - 1) as u32, true),
+        0,
+        "Lisa's one-pixel delay applies before the left-edge clamp"
+    );
+    assert_eq!(
+        color_write_framebuffer_x((COLOR_WRITE_HPOS_FB0 + 4) as u32, false),
         16
     );
     assert!(color_write_wraps_to_previous_output_line(2));
     assert!(!color_write_wraps_to_previous_output_line(
         DENISE_HBLANK_START_HPOS
     ));
-    assert_eq!(color_write_wrapped_framebuffer_x(2), 704);
+    assert_eq!(color_write_wrapped_framebuffer_x(2, false), 704);
+    assert_eq!(color_write_wrapped_framebuffer_x(2, true), 705);
     assert_eq!(
         beam_to_framebuffer_x_unclamped(COLOR_WRITE_HPOS_FB0 as u32),
         52
@@ -2727,6 +2740,170 @@ fn bplcon3_spres_default_upgrades_to_70ns_when_shres_is_set() {
 
     assert_eq!(fb[0], rgb12_to_rgba8(0x0F00));
     assert_eq!(fb[1], rgb12_to_rgba8(0));
+}
+
+#[test]
+fn aga_bplcon3_spres_shres_packs_two_samples_into_one_70ns_pixel() {
+    let render = |spres: u16, data: u16, datb: u16| {
+        let mut state = RenderState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            dmacon: DMACON_DMAEN | DMACON_SPREN,
+            bplcon3: BPLCON3_PF2OF_DEFAULT | spres,
+            ..blank_state()
+        };
+        state.palette.write_ocs(17, 0x0F00);
+        state.palette.write_ocs(18, 0x00F0);
+        let base_palettes = [state.palette; FB_HEIGHT];
+        let palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let control_segments = vec![Vec::new(); FB_HEIGHT];
+        let playfield_mask = vec![0u8; FB_PIXELS];
+        let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+        let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+        let captured = [CapturedSpriteLine {
+            sprite: 0,
+            hstart: SPRITE_HSTART_FB0,
+            hsub_70ns: false,
+            beam_y: PAL_VISIBLE_LINE0,
+            // Two adjacent set samples make the 70 ns canvas comparison
+            // unambiguous: HIRES paints two pixels, SHRES packs both halves
+            // into the first pixel without introducing a blended edge.
+            data,
+            datb,
+            attached: false,
+            data_ext: [0; 3],
+            datb_ext: [0; 3],
+            width_words: 1,
+        }];
+
+        render_sprites(
+            &state,
+            &[0; 64],
+            &mut fb,
+            SpriteClip {
+                x_start: 0,
+                x_stop: FB_WIDTH,
+                y_start: 0,
+                y_stop: FB_HEIGHT,
+            },
+            &base_palettes,
+            &palette_segments,
+            &base_controls,
+            &control_segments,
+            &playfield_mask,
+            &mut collision_pixels,
+            [false; 8],
+            &captured,
+            true,
+        );
+        fb
+    };
+
+    let hires = render(BPLCON3_SPRES_HIRES, 0xC000, 0);
+    assert_eq!(hires[0], rgb12_to_rgba8(0x0F00));
+    assert_eq!(hires[1], rgb12_to_rgba8(0x0F00));
+    assert_eq!(hires[2], rgb12_to_rgba8(0));
+
+    let shres = render(BPLCON3_SPRES_SHRES, 0xC000, 0);
+    assert_eq!(shres[0], rgb12_to_rgba8(0x0F00));
+    assert_eq!(shres[1], rgb12_to_rgba8(0));
+
+    // On the 70 ns canvas, unlike-coloured 35 ns samples retain both
+    // channels through the same pairwise blend used for SHRES bitplanes.
+    let mixed = render(BPLCON3_SPRES_SHRES, 0x8000, 0x4000);
+    assert_eq!(mixed[0], 0xFF00_7F7F);
+    assert_eq!(mixed[1], rgb12_to_rgba8(0));
+}
+
+#[test]
+fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
+    let render = |attached: bool| {
+        let mut state = RenderState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            dmacon: DMACON_DMAEN | DMACON_SPREN,
+            bplcon3: BPLCON3_PF2OF_DEFAULT | BPLCON3_SPRES_SHRES,
+            ..blank_state()
+        };
+        state.palette.write_ocs(17, 0x0FF0);
+        let base_palettes = [state.palette; FB_HEIGHT];
+        let palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let control_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut playfield_mask = vec![0u8; FB_PIXELS];
+        playfield_mask[0] = 2;
+        let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+        let blue = rgb12_to_rgba8(0x000F);
+        let black = rgb12_to_rgba8(0);
+        let mut fb = vec![black; FB_PIXELS];
+        fb[0] = rgba8_blend_halves(blue, black);
+        let mut sprite_subpixels = SpriteSubpixelState::from_collapsed(&fb, &playfield_mask);
+        sprite_subpixels.playfield_masks[0] = [2, 0];
+        sprite_subpixels.pixels[0] = [blue, black];
+        let mut captured = vec![CapturedSpriteLine {
+            sprite: 0,
+            hstart: SPRITE_HSTART_FB0,
+            hsub_70ns: false,
+            beam_y: PAL_VISIBLE_LINE0,
+            data: 0xC000,
+            datb: 0,
+            attached: false,
+            data_ext: [0; 3],
+            datb_ext: [0; 3],
+            width_words: 1,
+        }];
+        if attached {
+            captured.push(CapturedSpriteLine {
+                sprite: 1,
+                hstart: SPRITE_HSTART_FB0,
+                hsub_70ns: false,
+                beam_y: PAL_VISIBLE_LINE0,
+                data: 0,
+                datb: 0,
+                attached: true,
+                data_ext: [0; 3],
+                datb_ext: [0; 3],
+                width_words: 1,
+            });
+        }
+        let mut sprite_group_mask = Vec::new();
+        let mut sprite_lines = std::array::from_fn(|_| Vec::new());
+        let mut attached_beams = std::array::from_fn(|_| Vec::new());
+        render_sprites_with_manual_lines_and_writes_reusing_mask(
+            &state,
+            &[0; 64],
+            &mut fb,
+            SpriteClip {
+                x_start: 0,
+                x_stop: FB_WIDTH,
+                y_start: 0,
+                y_stop: FB_HEIGHT,
+            },
+            &base_palettes,
+            &palette_segments,
+            &base_controls,
+            &control_segments,
+            &sprite_display_enabled_from_line_start(),
+            &playfield_mask,
+            &mut sprite_subpixels,
+            &mut collision_pixels,
+            &mut sprite_group_mask,
+            &mut sprite_lines,
+            &mut attached_beams,
+            &captured,
+            true,
+            None,
+            PAL_VISIBLE_LINE0,
+        );
+        (fb, sprite_subpixels)
+    };
+
+    let yellow = rgb12_to_rgba8(0x0FF0);
+    let blue = rgb12_to_rgba8(0x000F);
+    for attached in [false, true] {
+        let (fb, subpixels) = render(attached);
+        assert_eq!(subpixels.pixels[0], [blue, yellow]);
+        assert_eq!(fb[0], rgba8_blend_halves(blue, yellow));
+    }
 }
 
 #[test]
@@ -7529,8 +7706,8 @@ fn color00_overscan_write_does_not_backfill_row_start() {
         &mut manual_bpl_segments,
     );
 
-    let x_on = color_write_framebuffer_x(68);
-    let x_off = color_write_framebuffer_x(76);
+    let x_on = color_write_framebuffer_x(68, false);
+    let x_off = color_write_framebuffer_x(76, false);
     assert_eq!(palette_segments[0][0].x, x_on);
     assert_eq!(palette_segments[0][0].value, 0x087A);
     assert_eq!(palette_segments[0][1].x, x_off);
@@ -7580,7 +7757,7 @@ fn pre_hblank_color_write_updates_previous_row_tail_and_next_row_base() {
     assert_eq!(palette_segments[0].len(), 1);
     assert_eq!(
         palette_segments[0][0].x,
-        color_write_wrapped_framebuffer_x(2)
+        color_write_wrapped_framebuffer_x(2, false)
     );
     assert_eq!(palette_segments[0][0].value, 0x0123);
 
@@ -7593,7 +7770,7 @@ fn pre_hblank_color_write_updates_previous_row_tail_and_next_row_base() {
         &control_segments,
     );
 
-    let wrapped_x = color_write_wrapped_framebuffer_x(2);
+    let wrapped_x = color_write_wrapped_framebuffer_x(2, false);
     assert_eq!(fb[wrapped_x - 1], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[wrapped_x], rgb12_to_rgba8(0x0123));
     assert_eq!(fb[FB_WIDTH], rgb12_to_rgba8(0x0123));
@@ -7655,7 +7832,10 @@ fn aga_bplcon4_splits_sprite_base_from_bitplane_xor_timing() {
 
     let line = (0x50 - 0x2C) as usize;
     let sprite_x = sprite_palette_control_framebuffer_x(hpos);
-    assert_eq!(sprite_x, color_write_framebuffer_x(hpos).saturating_sub(4));
+    assert_eq!(
+        sprite_x,
+        color_write_framebuffer_x(hpos, true).saturating_sub(5)
+    );
     let beam_x = beam_to_framebuffer_x_unclamped(hpos) as usize;
     assert!(sprite_x < beam_x);
     assert_eq!(control_segments[line].len(), 2);
@@ -7746,7 +7926,7 @@ fn display_plan_events_record_beam_timed_palette_control_and_bpldat_writes() {
     assert!(
         display_line_events[line].contains(&DisplayLinePlanEvent::PaletteChange {
             hpos: 0x0040,
-            x: color_write_framebuffer_x(0x0040),
+            x: color_write_framebuffer_x(0x0040, false),
             palette: {
                 let mut palette = Palette::from_ocs([0x0103; 32]);
                 palette.write_ocs(0, 0x0ABC);

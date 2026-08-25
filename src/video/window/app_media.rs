@@ -103,7 +103,7 @@ impl App {
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
             .set_title("Load CD image")
-            .add_filter("CD images", &["cue", "iso", "chd"])
+            .add_filter("CD images", &["cue", "iso", "nrg", "chd"])
             .pick_file();
 
         // Re-baseline pacing after the modal dialog, as for floppies.
@@ -143,7 +143,7 @@ impl App {
 
     /// Route files dropped on the window: floppy images to a drive
     /// (directly, or via the chooser panel when several drives could take
-    /// them), a CD image (cue/iso/chd) to the CD drive, and everything else to
+    /// them), a CD image (cue/iso/nrg/chd) to the CD drive, and everything else to
     /// an explanatory notice. winit reports drops with no cursor position,
     /// so the target drive can only be picked after the fact.
     pub(super) fn handle_dropped_files(&mut self, files: Vec<PathBuf>) {

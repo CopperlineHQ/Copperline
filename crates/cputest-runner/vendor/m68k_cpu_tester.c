@@ -19,6 +19,13 @@
 
 #define DONTSTOPONERROR 0
 
+/* Local patch: every fatal abort in this file (unreadable or malformed
+ * test data, allocation failure, user abort) exits with status 1. The
+ * WinUAE original exits 0 everywhere because the Amiga-side harness never
+ * consults the status; here the process exit code is the only signal the
+ * embedding runner (and CI) has, so a setup failure must not read as a
+ * pass. M68KTester_run_tests likewise reports the aggregate verdict. */
+
 #include "capstone/include/capstone/capstone.h"
 #include "cputest_defines.h"
 #include "m68k_cpu_tester.h"
@@ -374,13 +381,13 @@ static void start_test(void) {
     if (lmem_rom > 0) {
         if (memcmp(low_memory, low_memory_temp, low_memory_size)) {
             printf("Low memory ROM mismatch!\n");
-            exit(0);
+            exit(1);
         }
     }
     if (hmem_rom > 0) {
         if (memcmp(high_memory, high_memory_temp, high_memory_size)) {
             printf("High memory ROM mismatch!\n");
-            exit(0);
+            exit(1);
         }
     }
 #endif
@@ -463,7 +470,7 @@ static uae_u8* load_file(const char* path, const char* file, uae_u8* p, int* siz
     if (!f) {
         if (exiterror) {
             printf("load file Couldn't open '%s'\n", fname);
-            exit(0);
+            exit(1);
         }
         return NULL;
     }
@@ -477,7 +484,7 @@ static uae_u8* load_file(const char* path, const char* file, uae_u8* p, int* siz
         p = calloc(1, size);
         if (!p) {
             printf("Couldn't allocate %d bytes, file '%s'\n", size, fname);
-            exit(0);
+            exit(1);
         }
     }
 
@@ -485,7 +492,7 @@ static uae_u8* load_file(const char* path, const char* file, uae_u8* p, int* siz
 
     if (*sizep != size) {
         printf("Couldn't read file '%s'\n", fname);
-        exit(0);
+        exit(1);
     }
 
     fclose(f);
@@ -517,7 +524,7 @@ static uae_u8* restore_fpvalue(uae_u8* p, struct fpureg* fp) {
         end_test();
         printf("Expected CT_SIZE_FPU, got %02x\n", v);
         endinfo();
-        exit(0);
+        exit(1);
     }
     fp->exp = gw(p);
     p += 2;
@@ -555,7 +562,7 @@ static uae_u8* restore_value(uae_u8* p, uae_u32* vp, int* sizep) {
             end_test();
             printf("Unexpected CT_SIZE_FPU\n");
             endinfo();
-            exit(0);
+            exit(1);
             break;
     }
     *vp = val;
@@ -623,7 +630,7 @@ static void validate_mode(uae_u8 mode, uae_u8 v) {
         end_test();
         printf("CT_MEMWRITE expected but got %02X\n", mode);
         endinfo();
-        exit(0);
+        exit(1);
     }
 }
 
@@ -673,7 +680,7 @@ static uae_u8* get_memory_addr(uae_u8* p, uae_u8** addrp) {
                 end_test();
                 printf("get_memory_addr CT_ABSOLUTE_LONG outside of test memory! %08x\n", val);
                 endinfo();
-                exit(0);
+                exit(1);
             }
         }
         case CT_RELATIVE_START_WORD: {
@@ -691,7 +698,7 @@ static uae_u8* get_memory_addr(uae_u8* p, uae_u8** addrp) {
             end_test();
             printf("get_memory_addr unknown size %02x\n", v);
             endinfo();
-            exit(0);
+            exit(1);
     }
     return NULL;
 }
@@ -773,7 +780,7 @@ static uae_u8* restore_memory(uae_u8* p, int storedata) {
                 end_test();
                 printf("Unknown restore_memory type!?\n");
                 endinfo();
-                exit(0);
+                exit(1);
                 break;
         }
     } else {
@@ -792,7 +799,7 @@ static uae_u8* restore_memory(uae_u8* p, int storedata) {
                 end_test();
                 printf("Unknown restore_memory type!?\n");
                 endinfo();
-                exit(0);
+                exit(1);
                 break;
         }
     }
@@ -805,7 +812,7 @@ static uae_u8* restore_data(uae_u8* p) {
         end_test();
         printf("Unexpected end bit!? offset %ld\n", p - test_data);
         endinfo();
-        exit(0);
+        exit(1);
     }
     int mode = v & CT_DATA_MASK;
     if (mode == CT_SRCADDR) {
@@ -854,7 +861,7 @@ static uae_u8* restore_data(uae_u8* p) {
         end_test();
         printf("Unexpected mode %02x\n", v);
         endinfo();
-        exit(0);
+        exit(1);
     }
     return p;
 }
@@ -1171,7 +1178,7 @@ static uae_u8* validate_exception(struct registers* regs, uae_u8* p, int excnum,
                 default:
                     end_test();
                     printf("Unknown frame %04x\n", frame);
-                    exit(0);
+                    exit(1);
                     break;
             }
         }
@@ -1179,7 +1186,7 @@ static uae_u8* validate_exception(struct registers* regs, uae_u8* p, int excnum,
         if (p != op + excdatalen + 1) {
             end_test();
             printf("Exception length mismatch %d != %ld\n", excdatalen, p - op - 1);
-            exit(0);
+            exit(1);
         }
     } else {
         exclen = last_exception_len;
@@ -1253,13 +1260,13 @@ static uae_u8* validate_test(uae_u8* p, int ignore_errors, int ignore_sr) {
                 end_test();
                 printf("Unexpected CT_END_INIT %02x %08lx\n", v, p - test_data);
                 endinfo();
-                exit(0);
+                exit(1);
             }
             if (exc == 1) {
                 end_test();
                 printf("Invalid exception %02x\n", exc);
                 endinfo();
-                exit(0);
+                exit(1);
             }
             if (cpu_lvl > 0 && exc > 0 && cpuexc010 != cpuexc) {
                 addinfo();
@@ -1494,7 +1501,7 @@ static uae_u8* validate_test(uae_u8* p, int ignore_errors, int ignore_sr) {
         } else {
             end_test();
             printf("Unknown test data %02x mode %d\n", v, mode);
-            exit(0);
+            exit(1);
         }
     }
     if (!ignore_errors) {
@@ -1803,7 +1810,7 @@ static void process_test(uae_u8* p) {
                 if (testexit()) {
                     end_test();
                     printf("\nAborted (%d)\n", testcnt);
-                    exit(0);
+                    exit(1);
                 }
 
 #if DONTSTOPONERROR == 0
@@ -1864,12 +1871,12 @@ static int test_mnemo(const char* path, const char* opcode) {
     FILE* f = fopen(tfname, "rb");
     if (!f) {
         printf("Couldn't open '%s'\n", tfname);
-        exit(0);
+        exit(1);
     }
     v = read_u32(f);
     if (v != DATA_VERSION) {
         printf("Invalid test data file (header)\n");
-        exit(0);
+        exit(1);
     }
 
     starttimeid = read_u32(f);
@@ -1903,7 +1910,8 @@ static int test_mnemo(const char* path, const char* opcode) {
     if (lvl != lvl2) {
         printf("Mismatched CPU model: %u <> %u\n", 68000 + 10 * (cpu_lvl < 5 ? cpu_lvl : 6),
                68000 + (lvl < 5 ? lvl : 6) * 10);
-        return 0;
+        /* Local patch: a skipped mnemonic is a failed mnemonic. */
+        return 1;
     }
 
     if (!check_undefined_sr) {
@@ -1914,11 +1922,11 @@ static int test_mnemo(const char* path, const char* opcode) {
 
     if (lmem_rom >= 0 && (low_memory_size <= 0 || !low_memory_temp)) {
         printf("lmem.dat required but it was not loaded or was missing.\n");
-        return 0;
+        return 1;
     }
     if (hmem_rom >= 0 && (high_memory_size <= 0 || !high_memory_temp)) {
         printf("hmem.dat required but it was not loaded or was missing.\n");
-        return 0;
+        return 1;
     }
 
     low_memory_offset = 0;
@@ -1930,20 +1938,20 @@ static int test_mnemo(const char* path, const char* opcode) {
         test_memory = allocate_absolute(test_memory_addr, test_memory_size);
         if (!test_memory) {
             printf("Couldn't allocate tmem area %08x-%08x\n", (uae_u32)test_memory_addr, test_memory_size);
-            exit(0);
+            exit(1);
         }
         absallocated = test_memory;
     }
     if (absallocated != test_memory) {
         printf("tmem area changed!?\n");
-        exit(0);
+        exit(1);
     }
 
     size = test_memory_size;
     load_file(path, "tmem.dat", test_memory, &size, 1);
     if (size != test_memory_size) {
         printf("tmem.dat size mismatch\n");
-        exit(0);
+        exit(1);
     }
 
     opcode_memory = translate_to_native(opcode_memory_addr);
@@ -1981,7 +1989,7 @@ static int test_mnemo(const char* path, const char* opcode) {
         fread(data, 1, 4, f);
         if (gl(data) != DATA_VERSION) {
             printf("Invalid test data file (header)\n");
-            exit(0);
+            exit(1);
         }
         fread(data, 1, 4, f);
         if (gl(data) != starttimeid) {
@@ -1996,7 +2004,7 @@ static int test_mnemo(const char* path, const char* opcode) {
         test_data = calloc(1, test_data_size);
         if (!test_data) {
             printf("Couldn't allocate memory for '%s', %u bytes\n", tfname, test_memory_size);
-            exit(0);
+            exit(1);
         }
         if (fread(test_data, 1, test_data_size, f) != test_data_size) {
             printf("Couldn't read '%s'\n", fname);
@@ -2011,7 +2019,7 @@ static int test_mnemo(const char* path, const char* opcode) {
             !(test_data_size >= 2 && test_data[test_data_size - 2] == CT_END_FINISH)) {
             printf("Invalid test data file (footer)\n");
             free(test_data);
-            exit(0);
+            exit(1);
         }
 
         process_test(test_data);
@@ -2102,6 +2110,12 @@ int M68KTester_run_tests(M68KTesterContext* context, void* user_data, M68KTester
     s_cpu_callback = callback;
     s_cpu_user_data = user_data;
     s_cpu_context = context;
+    /* Local patch: the upstream function returns 0 on every path, so the
+     * header's "returns 1 if the tests are ok" contract was never met and
+     * an embedding runner could not distinguish a clean run from a
+     * mismatch. test_mnemo already reports per-mnemonic failure; carry it
+     * across the whole run. */
+    int failed = 0;
 
     if (!strcmp(context->opcode, "all")) {
         DIR* d = opendir(context->cpu_path);
@@ -2143,6 +2157,7 @@ int M68KTester_run_tests(M68KTesterContext* context, void* user_data, M68KTester
 
         for (int i = 0; i < diroff; i += MAX_FILE_LEN) {
             if (test_mnemo(context->cpu_path, dirs + i)) {
+                failed = 1;
                 if (context->stop_on_error) break;
             }
         }
@@ -2150,8 +2165,8 @@ int M68KTester_run_tests(M68KTesterContext* context, void* user_data, M68KTester
         free(dirs);
 
     } else {
-        test_mnemo(context->cpu_path, context->opcode);
+        failed = test_mnemo(context->cpu_path, context->opcode) != 0;
     }
 
-    return 0;
+    return failed ? 0 : 1;
 }
