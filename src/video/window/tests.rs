@@ -93,10 +93,10 @@ fn host_mapping_includes_amiga_modifiers() {
 }
 
 #[test]
-fn ui_needs_continuous_redraw_only_when_running_and_active() {
-    assert!(!super::ui_needs_continuous_redraw(false, true));
-    assert!(super::ui_needs_continuous_redraw(true, true));
-    assert!(!super::ui_needs_continuous_redraw(true, false));
+fn only_an_animated_focus_needs_continuous_ui_redraws() {
+    assert!(!super::animated_focus_needs_continuous_redraw(false, true));
+    assert!(super::animated_focus_needs_continuous_redraw(true, true));
+    assert!(!super::animated_focus_needs_continuous_redraw(true, false));
 }
 
 #[test]
