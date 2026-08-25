@@ -46,11 +46,17 @@ pub fn map(format: SourceFormat, entries: &[crate::parse::Entry]) -> MapOutcome 
 /// `["floppy", "df0"]` for `[floppy.df0]`.
 pub(crate) fn table<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> &'a mut Table {
     let mut current = doc.as_table_mut();
-    for segment in path {
+    for (depth, segment) in path.iter().enumerate() {
         let entry = current
             .entry(segment)
             .or_insert_with(|| Item::Table(Table::new()));
         current = entry.as_table_mut().expect("path segment is a table");
+        // A table that only exists to hold `[a.b]` is implicit: written
+        // out it would be a bare `[a]` header with nothing under it.
+        // Anything that gains keys of its own turns explicit again below.
+        if depth + 1 < path.len() && current.is_empty() {
+            current.set_implicit(true);
+        }
     }
     current
 }

@@ -58,6 +58,7 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     }
 
     // --- CPU -------------------------------------------------------------
+    let mut cpu_model = String::new();
     if let Some(e) = by_any(&["cpu_type", "cpu_model"]) {
         seen.insert(&e.key, ());
         // WinUAE spells e.g. "68020", "68020i" (no MMU), "68030mmu",
@@ -66,6 +67,7 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         let known = ["68000", "68010", "68020", "68030", "68040", "68060"];
         if known.contains(&digits.as_str()) {
             set_str(&mut doc, &["cpu"], "model", &digits);
+            cpu_model = digits;
         } else {
             report.unsupported(&e.key, &e.value, "unrecognized CPU model");
         }
@@ -100,10 +102,16 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // [cpu] unimplemented exactly.
     if let Some(e) = by_key("cpu_no_unimplemented") {
         seen.insert(&e.key, ());
-        match parse_bool(&e.value) {
-            Some(true) => set_str(&mut doc, &["cpu"], "unimplemented", "trap"),
-            Some(false) => set_str(&mut doc, &["cpu"], "unimplemented", "native"),
-            None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+        // Only the 68060 dropped instructions from silicon, so Copperline
+        // rejects `[cpu] unimplemented` on anything else. WinUAE writes the
+        // key regardless of the configured CPU, so emitting it unguarded
+        // made every non-060 config fail validation.
+        if cpu_model == "68060" {
+            match parse_bool(&e.value) {
+                Some(true) => set_str(&mut doc, &["cpu"], "unimplemented", "trap"),
+                Some(false) => set_str(&mut doc, &["cpu"], "unimplemented", "native"),
+                None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+            }
         }
     }
 
