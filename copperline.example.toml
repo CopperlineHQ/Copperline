@@ -441,11 +441,16 @@ slow = "512K"
 # uses to test in-development driver builds). rom_bank2 optionally supplies
 # a second flash bank (e.g. cdfs.rom, LIV2's CD filesystem); it needs rom
 # and does not apply to atbus2008, which has no banking.
+# One drive key per slot, in (channel, master/slave) order: drive0/drive1 are
+# channel 0's master/slave, drive2/drive3 are channel 1's (ripple only). Each
+# is independent, so a slot can be left empty without ending the list -- the
+# same shape as [ide]'s master/slave and [scsi]'s unit0..unit6. The older
+# positional `drives = [...]` array is still read for existing configs.
 # [lide]
 # board = "ripple"
 # rom = "lide.rom"
-# drives = ["workbench.hdf", "data.hdf"]
-# drives = [{ path = "workbench.hdf", bootpri = 6 }]   # table form, as for [ide]
+# drive0 = "workbench.hdf"
+# drive1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
 
 
 [chipset]

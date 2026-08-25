@@ -3507,23 +3507,19 @@ fn lide_rows_are_hidden_without_a_board_and_rom_bank2_hidden_on_atbus2008() {
     s.cycle(F::LideBoard, true); // RIPPLE: two channels, four drives
     assert!(!s.row_hidden(F::LideRom));
     assert!(!s.row_hidden(F::LideRomBank2));
+    // Every slot the fitted board has is configurable straight away, the
+    // same as `[ide]`'s master/slave and `[scsi]`'s units: each is its own
+    // `driveN` key, so a hole is representable and nothing is gated on the
+    // slot before it holding an image.
     assert!(!s.row_hidden(F::LideDrive0));
-    // Drive 1 is gated on drive 0 holding an image: `[lide] drives` is a
-    // positional list, so a hole cannot be represented in the config.
-    assert!(s.row_hidden(F::LideDrive1));
-    s.set_path(F::LideDrive0, PathBuf::from("a.hdf"));
     assert!(!s.row_hidden(F::LideDrive1));
-    assert!(s.row_hidden(F::LideDrive2), "drive 1 is still empty");
-    s.set_path(F::LideDrive1, PathBuf::from("b.hdf"));
-    s.set_path(F::LideDrive2, PathBuf::from("c.hdf"));
+    assert!(!s.row_hidden(F::LideDrive2));
     assert!(!s.row_hidden(F::LideDrive3));
 
     s.cycle(F::LideBoard, true); // RIDE: one channel, two drives, four banks
     assert!(!s.row_hidden(F::LideRomBank2), "RIDE has flash banking too");
     assert!(s.row_hidden(F::LideDrive2), "RIDE has only one channel");
     assert!(s.row_hidden(F::LideDrive3));
-    // Cycling the board dropped the drives beyond RIDE's channel count.
-    assert!(s.to_raw().lide.drives.len() <= 2);
 
     s.cycle(F::LideBoard, true); // AT-Bus 2008: one channel, no banking
     assert!(s.row_hidden(F::LideRomBank2));
@@ -3545,17 +3541,27 @@ fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
     assert!(!s.has_boot_priority_rows());
     assert_eq!(s.value_label(F::LideDrive0Boot), "5");
     assert_eq!(s.disabled_reason(F::LideDrive1Boot), None);
-    assert!(
-        s.row_hidden(F::LideDrive2Boot),
-        "empty slot stays off the page"
-    );
+    // An empty slot keeps its boot row, greyed rather than hidden, so the
+    // page does not reshuffle as slots are filled.
+    assert!(!s.row_hidden(F::LideDrive2Boot));
+    assert_eq!(s.disabled_reason(F::LideDrive2Boot), Some("No drive"));
+    // A slot the fitted board does not have goes entirely, drive row and
+    // boot row together.
+    s.cycle(F::LideBoard, true); // RIDE: one channel
+    assert!(s.row_hidden(F::LideDrive2));
+    assert!(s.row_hidden(F::LideDrive2Boot));
+    s.cycle(F::LideBoard, true); // AT-Bus 2008
+    s.cycle(F::LideBoard, true); // None
+    s.cycle(F::LideBoard, true); // back to RIPPLE for the round trip below
 
     let raw = s.to_raw();
     assert_eq!(raw.lide.board.as_deref(), Some("ripple"));
-    assert_eq!(raw.lide.drives.len(), 2);
-    assert_eq!(raw.lide.drives[0].path, "ch0-master.hdf");
-    assert_eq!(raw.lide.drives[0].bootpri, Some(5));
-    assert_eq!(raw.lide.drives[1].path, "ch0-slave.hdf");
+    // Named per-slot keys, never the deprecated positional array.
+    assert!(raw.lide.drives.is_empty());
+    assert_eq!(raw.lide.drive0.as_ref().unwrap().path, "ch0-master.hdf");
+    assert_eq!(raw.lide.drive0.as_ref().unwrap().bootpri, Some(5));
+    assert_eq!(raw.lide.drive1.as_ref().unwrap().path, "ch0-slave.hdf");
+    assert!(raw.lide.drive2.is_none());
 
     let back = MachineSetup::from_raw(&raw).unwrap();
     assert_eq!(back.path(F::LideDrive0), Some(Path::new("ch0-master.hdf")));
@@ -3623,22 +3629,32 @@ fn drive_filesystem_toggle_applies_only_to_disk_backed_fields_and_tracks_path_sh
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Clearing a slot is just that one slot: with a named `driveN` key each,
+/// a gap is representable, so emptying channel 0's master no longer drags
+/// everything after it out too.
 #[test]
-fn lide_clearing_a_drive_cascades_to_later_slots() {
+fn lide_clearing_a_drive_leaves_later_slots_alone() {
     use LauncherField as F;
     let mut s = MachineSetup::default();
     s.cycle(F::LideBoard, true); // RIPPLE
     s.set_path(F::LideDrive0, PathBuf::from("a.hdf"));
     s.set_path(F::LideDrive1, PathBuf::from("b.hdf"));
     s.set_path(F::LideDrive2, PathBuf::from("c.hdf"));
-    assert_eq!(s.to_raw().lide.drives.len(), 3);
 
-    // Clearing an earlier slot cannot leave a later one dangling: the
-    // config format has no way to represent the resulting gap.
     s.clear_path(F::LideDrive0);
-    assert_eq!(s.path(F::LideDrive1), None);
-    assert_eq!(s.path(F::LideDrive2), None);
-    assert!(s.to_raw().lide.drives.is_empty());
+    assert_eq!(s.path(F::LideDrive0), None);
+    assert_eq!(s.path(F::LideDrive1), Some(Path::new("b.hdf")));
+    assert_eq!(s.path(F::LideDrive2), Some(Path::new("c.hdf")));
+
+    // ...and the hole survives a round trip through the config.
+    let raw = s.to_raw();
+    assert!(raw.lide.drive0.is_none(), "the emptied slot stays empty");
+    assert_eq!(raw.lide.drive1.as_ref().unwrap().path, "b.hdf");
+    assert_eq!(raw.lide.drive2.as_ref().unwrap().path, "c.hdf");
+    let back = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(back.path(F::LideDrive0), None);
+    assert_eq!(back.path(F::LideDrive1), Some(Path::new("b.hdf")));
+    assert_eq!(back.path(F::LideDrive2), Some(Path::new("c.hdf")));
 }
 
 /// Lide host-disk attachment points are only fitted for a channel the
@@ -3683,19 +3699,17 @@ fn lide_host_disk_attach_points_are_fitted_by_board_channel_count() {
     );
 }
 
-/// Mounting a host disk on an earlier lide slot must cascade-clear later
-/// slots exactly like `clear_path` does for the image case -- otherwise
-/// `[lide] drives` (a positional array) would go on carrying images the
-/// UI, and a saved config, no longer have any way to show.
+/// Mounting a host disk takes over exactly the slot it attaches to: the
+/// images on the other slots keep their own `driveN` keys, so there is no
+/// gap to avoid and nothing else to clear.
 #[test]
-fn lide_host_disk_on_an_earlier_slot_cascades_to_later_slots() {
+fn lide_host_disk_takes_only_the_slot_it_attaches_to() {
     use LauncherField as F;
     let mut s = MachineSetup::default();
     s.cycle(F::LideBoard, true); // RIPPLE
     s.set_path(F::LideDrive0, PathBuf::from("ch0-master.hdf"));
     s.set_path(F::LideDrive1, PathBuf::from("ch0-slave.hdf"));
     s.set_path(F::LideDrive2, PathBuf::from("ch1-master.hdf"));
-    assert_eq!(s.to_raw().lide.drives.len(), 3);
 
     s.set_host_disks_for_test(vec![HostDiskRow {
         id: "disk4".to_string(),
@@ -3710,11 +3724,14 @@ fn lide_host_disk_on_an_earlier_slot_cascades_to_later_slots() {
     let mounted = s.mount_host_disks().expect("channel 0 master is fitted");
     assert_eq!(mounted.len(), 1);
 
-    // The host disk took slot 0; slots 1 and 2's images must not be left
-    // dangling as invisible ghosts behind it.
-    assert_eq!(s.path(F::LideDrive1), None);
-    assert_eq!(s.path(F::LideDrive2), None);
-    assert!(s.to_raw().lide.drives.is_empty());
+    // The host disk took slot 0 and only slot 0.
+    assert_eq!(s.path(F::LideDrive0), None, "the host disk owns this slot");
+    assert_eq!(s.path(F::LideDrive1), Some(Path::new("ch0-slave.hdf")));
+    assert_eq!(s.path(F::LideDrive2), Some(Path::new("ch1-master.hdf")));
+    let raw = s.to_raw();
+    assert!(raw.lide.drive0.is_none());
+    assert_eq!(raw.lide.drive1.as_ref().unwrap().path, "ch0-slave.hdf");
+    assert_eq!(raw.lide.drive2.as_ref().unwrap().path, "ch1-master.hdf");
 }
 
 /// Cycling the lide board to a personality with fewer channels must drop
