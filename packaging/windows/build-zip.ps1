@@ -69,6 +69,15 @@ foreach ($f in @("a4091_cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
     Copy-Item (Join-Path "assets\a4091" $f) (Join-Path $a4091Dir $f)
 }
 
+# Bundled open-source lide.device autoboot ROM and CD-filesystem bank
+# (default for a fitted [lide] board without a named rom/rom_bank2);
+# romsearch.rs probes a sibling lide\ next to the exe.
+$lideDir = Join-Path $stage "lide"
+New-Item -ItemType Directory -Force -Path $lideDir | Out-Null
+foreach ($f in @("lide.rom", "lide-atbus.rom", "cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
+    Copy-Item (Join-Path "assets\lide" $f) (Join-Path $lideDir $f)
+}
+
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
 # with checksums pinned in step with tools/fetch-whdload.sh (the sh script
 # does not run on Windows runners) and shipped unmodified next to the exe,

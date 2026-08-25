@@ -3527,6 +3527,61 @@ fn lide_rows_are_hidden_without_a_board_and_rom_bank2_hidden_on_atbus2008() {
 }
 
 #[test]
+fn lide_rom_defaults_without_leaking_the_bundled_sentinel() {
+    use LauncherField as F;
+    // A fitted board with no rom named: `from_raw` runs the same
+    // `Config::try_from` that fills the bundled-rom sentinel in, which
+    // must never reach the launcher's own path field -- it would both
+    // display as literal text and, on save, get pinned into the file.
+    let raw = RawConfig::parse(
+        r#"
+        [lide]
+        board = "ripple"
+        drives = ["dh0.hdf"]
+        "#,
+    )
+    .unwrap();
+    let s = MachineSetup::from_raw(&raw).unwrap();
+    assert!(s.path(F::LideRom).is_none());
+    assert!(s.path(F::LideRomBank2).is_none());
+    assert_eq!(s.value_label(F::LideRom), "(bundled lide.rom)");
+    assert_eq!(s.value_label(F::LideRomBank2), "(bundled cdfs.rom)");
+
+    // Saving without touching the field leaves rom unset -- the bundled
+    // default keeps applying, rather than pinning the sentinel string.
+    let saved = s.to_raw();
+    assert!(saved.lide.rom.is_none());
+    assert!(saved.lide.rom_bank2.is_none());
+}
+
+#[test]
+fn lide_rom_explicit_opt_out_survives_a_launcher_round_trip() {
+    use LauncherField as F;
+    let raw = RawConfig::parse(
+        r#"
+        [lide]
+        board = "ripple"
+        rom = ""
+        drives = ["dh0.hdf"]
+        "#,
+    )
+    .unwrap();
+    let s = MachineSetup::from_raw(&raw).unwrap();
+    assert!(s.path(F::LideRom).is_none());
+    assert_eq!(s.value_label(F::LideRom), "(hardware-only, no ROM)");
+
+    // Untouched, the explicit opt-out is preserved rather than silently
+    // dropped back to the implicit bundled default.
+    let saved = s.to_raw();
+    assert_eq!(saved.lide.rom.as_deref(), Some(""));
+
+    // Typing a path un-disables it, same as any other field.
+    let mut s = s;
+    s.set_path(F::LideRom, PathBuf::from("custom-lide.rom"));
+    assert_eq!(s.to_raw().lide.rom.as_deref(), Some("custom-lide.rom"));
+}
+
+#[test]
 fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
     use LauncherField as F;
     let mut s = MachineSetup::default();

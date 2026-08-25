@@ -2102,8 +2102,15 @@ pub struct MachineSetup {
     /// (see `LideConfig::enabled`); this `Option` is purely the launcher's
     /// session-level "is a board fitted" toggle.
     lide_board: Option<LidePersonality>,
+    /// `None` here reads as "use the bundled default", the same as an
+    /// absent `rom` key -- the sentinel `Config` resolves it to is never
+    /// let into this field. `lide_rom_disabled` carries the config's
+    /// explicit `rom = ""` opt-out (hardware-only mode) through a launcher
+    /// session that never touches the field; typing a path clears it.
     lide_rom: Option<PathBuf>,
+    lide_rom_disabled: bool,
     lide_rom_bank2: Option<PathBuf>,
+    lide_rom_bank2_disabled: bool,
     /// Drive slots in (channel, master/slave) order (RIPPLE's two channels;
     /// RIDE/AT-Bus 2008 only ever use the first two). `[lide] drives` is a
     /// positional list in the config file -- a hole cannot be represented --
@@ -2440,8 +2447,24 @@ impl MachineSetup {
                 boot_is_off(raw_scsi_unit(&raw.scsi, i).and_then(|d| d.bootpri))
             }),
             lide_board: cfg.lide.enabled().then_some(cfg.lide.board),
-            lide_rom: cfg.lide.rom.clone(),
-            lide_rom_bank2: cfg.lide.rom_bank2.clone(),
+            // Read from the raw text, not the validated `Config`: an
+            // absent `rom` resolves there to the bundled sentinel, which
+            // must never reach this field (it would display and, on save,
+            // round-trip as the literal sentinel string).
+            lide_rom: raw
+                .lide
+                .rom
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .map(PathBuf::from),
+            lide_rom_disabled: raw.lide.rom.as_deref() == Some(""),
+            lide_rom_bank2: raw
+                .lide
+                .rom_bank2
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .map(PathBuf::from),
+            lide_rom_bank2_disabled: raw.lide.rom_bank2.as_deref() == Some(""),
             lide_drives: std::array::from_fn(|i| {
                 cfg.lide.drives[i].as_ref().map(|d| d.path.clone())
             }),
@@ -2900,11 +2923,23 @@ impl MachineSetup {
         // Only emit `[lide]` when a board is fitted, matching `[scsi]` above.
         if let Some(board) = self.lide_board {
             raw.lide.board = Some(board.name().to_string());
-            raw.lide.rom = self.lide_rom.as_deref().map(path_string);
+            raw.lide.rom = match &self.lide_rom {
+                Some(p) => Some(path_string(p)),
+                // A path takes priority over the disabled flag (typing one
+                // is how the field un-disables in the UI, but this also
+                // covers stale state defensively); otherwise preserve an
+                // explicit opt-out the session never touched.
+                None if self.lide_rom_disabled => Some(String::new()),
+                None => None,
+            };
             // AT-Bus 2008 has no flash banking; a second bank there does not
             // validate, so the row is hidden and nothing is ever emitted for it.
             raw.lide.rom_bank2 = (board != LidePersonality::AtBus2008)
-                .then(|| self.lide_rom_bank2.as_deref().map(path_string))
+                .then(|| match &self.lide_rom_bank2 {
+                    Some(p) => Some(path_string(p)),
+                    None if self.lide_rom_bank2_disabled => Some(String::new()),
+                    None => None,
+                })
                 .flatten();
             // One named `driveN` key per slot, so an empty slot before a
             // filled one round-trips: each is emitted independently rather
@@ -4491,6 +4526,18 @@ impl MachineSetup {
             F::ScsiRom if self.scsi_controller_is_a4091() => {
                 self.path_label(field, "(bundled A4091 ROM)")
             }
+            // A fitted lide board defaults to a bundled ROM: lide.rom for
+            // RIPPLE/RIDE, lide-atbus.rom for AT-Bus 2008 -- not the same
+            // file. rom = "" (hardware-only mode) has no field of its own
+            // to hold the path, so it borrows this row's placeholder text
+            // instead.
+            F::LideRom if self.lide_rom_disabled => "(hardware-only, no ROM)".to_string(),
+            F::LideRom if self.lide_board == Some(LidePersonality::AtBus2008) => {
+                self.path_label(field, "(bundled lide-atbus.rom)")
+            }
+            F::LideRom => self.path_label(field, "(bundled lide.rom)"),
+            F::LideRomBank2 if self.lide_rom_bank2_disabled => "(none)".to_string(),
+            F::LideRomBank2 => self.path_label(field, "(bundled cdfs.rom)"),
             _ if rows_contains_kind(field, RowKind::Path)
                 || rows_contains_kind(field, RowKind::Drive)
                 || rows_contains_kind(field, RowKind::FloppyMedia) =>
@@ -5045,8 +5092,14 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = Some(path),
             F::ScsiUnit5 => self.scsi_units[5] = Some(path),
             F::ScsiUnit6 => self.scsi_units[6] = Some(path),
-            F::LideRom => self.lide_rom = Some(path),
-            F::LideRomBank2 => self.lide_rom_bank2 = Some(path),
+            F::LideRom => {
+                self.lide_rom = Some(path);
+                self.lide_rom_disabled = false;
+            }
+            F::LideRomBank2 => {
+                self.lide_rom_bank2 = Some(path);
+                self.lide_rom_bank2_disabled = false;
+            }
             F::LideDrive0 => self.lide_drives[0] = Some(path),
             F::LideDrive1 => self.lide_drives[1] = Some(path),
             F::LideDrive2 => self.lide_drives[2] = Some(path),
@@ -5114,8 +5167,14 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = None,
             F::ScsiUnit5 => self.scsi_units[5] = None,
             F::ScsiUnit6 => self.scsi_units[6] = None,
-            F::LideRom => self.lide_rom = None,
-            F::LideRomBank2 => self.lide_rom_bank2 = None,
+            F::LideRom => {
+                self.lide_rom = None;
+                self.lide_rom_disabled = false;
+            }
+            F::LideRomBank2 => {
+                self.lide_rom_bank2 = None;
+                self.lide_rom_bank2_disabled = false;
+            }
             F::LideDrive0 => self.lide_drives[0] = None,
             F::LideDrive1 => self.lide_drives[1] = None,
             F::LideDrive2 => self.lide_drives[2] = None,

@@ -433,14 +433,16 @@ slow = "512K"
 #                 accelerator boards' IDE, CDTV-RAM-IDE, Zorro-LAN-IDE). One
 #                 channel, two drives, no ROM banking.
 #
-# rom is always user-supplied: fetch a release from LIV2's GitHub releases
-# page (lide.rom for ripple/ride, lide-atbus.rom for atbus2008; both 32768
-# bytes) -- nothing is bundled or distributed with Copperline. Omitting rom
-# is a legal hardware-only mode: no DiagArea, no autoboot, but drives still
-# work once a disk-loaded lide.device finds them (the setup lide's own CI
-# uses to test in-development driver builds). rom_bank2 optionally supplies
-# a second flash bank (e.g. cdfs.rom, LIV2's CD filesystem); it needs rom
-# and does not apply to atbus2008, which has no banking.
+# A fitted board (an explicit board, or a drive image) with no rom defaults
+# to a Copperline-bundled ROM: ripple/ride get LIV2's lide.rom build,
+# atbus2008 gets its own lide-atbus.rom -- different linker layouts, not
+# interchangeable, so which board is fitted picks which file resolves. Set
+# rom = "" to opt back out into hardware-only mode: no DiagArea, no
+# autoboot, but drives still work once a disk-loaded lide.device finds
+# them. rom_bank2 (a second flash bank, cdfs.rom, LIV2's CD filesystem)
+# defaults the same way alongside a fitted rom, except on atbus2008, which
+# has no banking; rom_bank2 = "" opts out on its own. Either can still be
+# pointed at a release download of your own.
 # One drive key per slot, in (channel, master/slave) order: drive0/drive1 are
 # channel 0's master/slave, drive2/drive3 are channel 1's (ripple only). Each
 # is independent, so a slot can be left empty without ending the list -- the

@@ -788,13 +788,16 @@ pub(crate) struct RawLide {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) board: Option<String>,
     /// Boot ROM image (a `lide.rom`/`lide-atbus.rom` release download, 32768
-    /// bytes). Absent means hardware-only mode: no autoboot, drives still
-    /// work under a disk-loaded `lide.device`.
+    /// bytes). Absent on a fitted board defaults to the bundled `lide.rom`;
+    /// an explicit empty string opts out and keeps the board in
+    /// hardware-only mode: no autoboot, drives still work under a
+    /// disk-loaded `lide.device`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rom: Option<String>,
     /// Optional second flash bank (e.g. `cdfs.rom`), also 32768 bytes.
     /// Requires `rom`; not valid on the AT-Bus 2008 personality, which has
-    /// no banking.
+    /// no banking. Absent alongside a fitted `rom` defaults to the bundled
+    /// `cdfs.rom` (RIPPLE/RIDE only); an explicit empty string opts out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rom_bank2: Option<String>,
     /// Drive images, in (channel, master/slave) order: index 0-1 are

@@ -1651,8 +1651,8 @@ medium-change unit attention for the guest's filesystem to notice.
 ```toml
 [lide]
 # board = "ripple"        # ripple (default), ride, or atbus2008
-rom = "lide.rom"           # user-supplied; omit for hardware-only mode
-# rom_bank2 = "cdfs.rom"   # optional second flash bank (ripple/ride only)
+# rom = "lide.rom"         # omit for the bundled default; "" for hardware-only mode
+# rom_bank2 = "cdfs.rom"   # omit for the bundled default (ripple/ride only)
 drives = ["workbench.hdf", "data.hdf"]
 ```
 
@@ -1694,16 +1694,22 @@ named keys existed keep working. It is positional and cannot express a gap
 it; a named key wins over the same slot in the array, and saving from the
 launcher rewrites a config to the named form.
 
-`rom` is **always user-supplied**, never bundled: fetch a release from
-[lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases)
--- `lide.rom` (32768 bytes) covers `"ripple"` and `"ride"`, `lide-atbus.rom`
-covers `"atbus2008"`. Omitting `rom` is a legal **hardware-only mode**: no
-DiagArea, no autoboot, but drives still work once a disk-loaded
+A fitted board (an explicit `board`, or a drive image) with no `rom`
+defaults to a Copperline-bundled ROM from
+[lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases):
+`"ripple"`/`"ride"` get the CIDER/RIPPLE/RIDE build (`lide.rom`),
+`"atbus2008"` gets its own `lide-atbus.rom` -- the two are different linker
+layouts, not interchangeable, so which board is fitted picks which bundled
+file resolves. Set `rom = ""` to opt back out into **hardware-only mode**:
+no DiagArea, no autoboot, but drives still work once a disk-loaded
 `lide.device` finds them -- the same setup lide's own CI uses to test
-in-development driver builds without flashing anything. `rom_bank2`
-optionally supplies a second flash bank (e.g. `cdfs.rom`, LIV2's CD
-filesystem, from the same releases page); it requires `rom` and does not
-apply to `"atbus2008"`, which has no ROM banking.
+in-development driver builds
+without flashing anything. `rom_bank2` (a second flash bank, e.g. LIV2's
+`cdfs.rom` CD filesystem) defaults the same way alongside a fitted `rom`,
+except on `"atbus2008"`, which has no ROM banking and is never offered one;
+`rom_bank2 = ""` opts out on its own without touching `rom`. Either can
+still be pointed at a `rom`/`rom_bank2` release download of your own, which
+always wins over the bundled default.
 
 ## `[[host_disk]]` -- a real disk of the host's
 
