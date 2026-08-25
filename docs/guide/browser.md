@@ -31,8 +31,16 @@ of swapping DF0. The pickers work before or after boot: a
 pre-boot choice is stashed and applied when the machine starts (the boot
 button relabels to show which ROM it will use), and a post-boot pick swaps
 the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, IPF,
-and SCP, plain or gzip/zip packed -- and are always write-protected, since
-the browser has no filesystem to write changes back to. A file picker
+and SCP, plain or gzip/zip packed. They open write-protected by default.
+Check **Open disks writable** before picking one to give an uncompressed
+standard or UAE extended ADF an in-memory writable backing; compressed
+containers, DMS, IPF and SCP have no write-back representation and are
+refused in that mode. **Blank DF0/DF1** creates a writable 880 KiB disk for
+the guest to format. The browser never alters the file that was picked:
+**Download DF0/DF1** saves a snapshot of the current image, and guest
+software must flush or close the disk before that snapshot is taken. Writable
+images and their changes also travel in save states and survive machine/video
+rebuilds. A file picker
 cannot sniff content, though: it filters by extension and hides whatever
 the filter leaves out, which is how an `.ipf` stayed greyed out in a
 bundle that decodes IPF perfectly well. So the glue rewrites the disk
@@ -339,7 +347,10 @@ state of this build's format version is refused with the running machine
 untouched -- including a state from an older Copperline whose format
 version has moved on. If that refusal follows a boot the load itself
 asked for, the page returns to its pre-boot screen rather than leaving a
-machine running that nothing was restored into.
+machine running that nothing was restored into. A writable disk restored
+from a desktop state is adopted into browser memory before the guest resumes,
+so its old host path is never treated as a browser path; use **Download DFn**
+to keep later changes as an image file.
 
 There are no keyboard shortcuts for these (the desktop's
 Cmd/Alt+Shift+S and +L): every key on the page belongs to the guest, so a
@@ -454,10 +465,11 @@ through wasm-bindgen; the page's JavaScript drives everything from
 
 The guest sees a stock machine: ROMs arrive as bytes
 (`Emulator::reload_rom`), floppies as bytes
-(`FloppyController::insert_disk_image_bytes`, which sniffs the same image
-formats by content as the desktop file paths), and disks are always
-write-protected because the browser has no filesystem to write changes back
-to.
+(`FloppyController::insert_disk_image_bytes` or its memory-backed writable
+counterpart, which sniff the same image formats by content as the desktop
+file paths). A writable browser image updates the controller's serialized
+image data; it never treats the display label as a filesystem path. Exporting
+encodes that current data as a standard or UAE extended ADF.
 
 ## Building it locally
 
@@ -502,6 +514,8 @@ const emu = new WebEmu();          // default A500 machine, placeholder ROM
 // ...or fit DF0 + DF1: new WebEmu('A500', 'PAL', 2)
 emu.load_rom(romBytes, extBytes);  // Kickstart or AROS bytes; cold reset
 emu.insert_floppy(0, adfBytes, 'game.adf');
+emu.insert_floppy_writable(1, workBytes, 'work.adf');
+const changedDisk = emu.export_floppy(1); // download/store these current bytes
 
 function tick(nowMs) {
   emu.run(nowMs, 5);               // step to the wall clock, max 5 frames
@@ -546,7 +560,14 @@ and diagnostics.
 
 `insert_floppy(drive, bytes, name)` takes any format the core reads --
 ADF/ADZ, extended ADF, DMS, IPF, SCP, plain or gzip/zip packed -- decided
-by signature, so the name it is given is only a label. The static
+by signature, so the name it is given is only a label, and presents it
+write-protected. `insert_floppy_writable(drive, bytes, name)` instead keeps
+an uncompressed standard or UAE extended ADF writable in serialized memory;
+formats that cannot be faithfully written back throw. `export_floppy(drive)`
+returns the current bytes (standard ADF, or the matching UAE extended ADF
+variant), including completed guest writes; `floppy_write_protected(drive)`
+reports the inserted image's current protection or `undefined` for an empty
+drive. The host still decides where exported bytes live. The static
 `WebEmu.floppy_formats()` lists the extensions those formats conventionally
 carry (`["adf", "adz", ...]`, no dots) for the one thing a page cannot
 decide by content: a file input's `accept` filter, and any list it scrapes
@@ -674,6 +695,11 @@ elements, and pages without them are untouched:
   drive controls. An older shell with only `#df0` and `#eject` gets the DF1
   picker and eject button inserted beside them automatically; in that case
   the original eject button is relabelled **Eject DF0** for clarity.
+- `#writable-floppies` (checkbox), `#blank-df0` / `#blank-df1` and
+  `#download-df0` / `#download-df1` (buttons): place the writable-disk
+  workflow. Without them the glue adds the opt-in checkbox and both drives'
+  blank/download buttons to the storage controls. Opening remains read-only
+  by default.
 - `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.

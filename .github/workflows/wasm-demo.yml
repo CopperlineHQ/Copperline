@@ -93,6 +93,16 @@ jobs:
           if (!emu.drive_connected(0) || !emu.drive_connected(1) || emu.drive_connected(2)) {
             throw new Error('browser floppy drive count was not applied');
           }
+          emu.insert_floppy_writable(1, new Uint8Array(901120), 'blank.adf');
+          if (emu.floppy_write_protected(1) !== false || emu.export_floppy(1).length !== 901120) {
+            throw new Error('browser writable floppy did not round-trip in memory');
+          }
+          const writableState = emu.save_state();
+          emu.eject_floppy(1);
+          emu.load_state(writableState);
+          if (emu.floppy_write_protected(1) !== false || emu.export_floppy(1).length !== 901120) {
+            throw new Error('browser writable floppy did not survive a save-state round trip');
+          }
           for (const invalid of [0, 5, 2.5, 257, NaN, Infinity]) {
             try {
               new WebEmu('A500', 'PAL', invalid);

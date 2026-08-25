@@ -221,9 +221,9 @@ let bootRom = null; // { rom, ext, label } - what the boot button will fit
 // uploaded bytes stay available so a model/video rebuild can re-insert them
 // into the replacement machine. A disk restored only from a save state has
 // no page-side bytes and therefore cannot cross such a rebuild.
-const pendingDisks = Array(4).fill(null); // { bytes, name }, inserted at boot
+const pendingDisks = Array(4).fill(null); // { bytes, name, writable }, inserted at boot
 const diskNames = Array(4).fill(null); // page's view, for reports and captions
-const lastDisks = Array(4).fill(null); // last uploaded { bytes, name }
+const lastDisks = Array(4).fill(null); // last uploaded { bytes, name, writable }
 
 function refreshBootButton() {
   bootBtn.disabled = !(wasm && bootRom);
@@ -342,26 +342,35 @@ async function forgetStoredRom() {
 
 // Route disk bytes from any source (picker, URL, drop): insert into a
 // running machine, or stash them for the boot button to insert after boot.
-function insertDisk(bytes, name, drive = 0) {
+function insertDisk(bytes, name, drive = 0, writable = writableFloppyToggle.checked) {
   if (drive < 0 || drive >= PAGE_FLOPPY_DRIVES) {
     throw new Error(`DF${drive} is not fitted`);
   }
-  lastDisks[drive] = { bytes, name };
+  const disk = { bytes, name, writable };
   if (emu) {
-    emu.insert_floppy(drive, bytes, name);
-    setLoadStatus(`DF${drive}: ${name} (write-protected)`);
+    if (writable) emu.insert_floppy_writable(drive, bytes, name);
+    else emu.insert_floppy(drive, bytes, name);
+    setLoadStatus(
+      `DF${drive}: ${name} (${writable ? 'writable in memory; download to keep changes' : 'write-protected'})`,
+    );
     lastFddTrack = null; // desktop clears its track latch on insert too
     updateStatusDisks();
+    updateFloppyImageControls();
   } else {
-    pendingDisks[drive] = { bytes, name };
-    setLoadStatus(`DF${drive}: ${name} (inserts at boot)`);
+    pendingDisks[drive] = disk;
+    setLoadStatus(
+      `DF${drive}: ${name} (${writable ? 'writable; ' : ''}inserts at boot)`,
+    );
   }
+  lastDisks[drive] = disk;
   diskNames[drive] = name;
 }
 
 function queuedDiskDescription() {
   return pendingDisks
-    .map((disk, drive) => (disk ? `DF${drive}: ${disk.name}` : null))
+    .map((disk, drive) =>
+      disk ? `DF${drive}: ${disk.name}${disk.writable ? ' (writable)' : ''}` : null,
+    )
     .filter(Boolean)
     .join(', ');
 }
@@ -373,8 +382,29 @@ function insertedDiskDescription(suffix = '') {
     .join(', ');
 }
 
+function insertedDiskStatusDescription() {
+  return diskNames
+    .map((name, drive) => {
+      if (!name) return null;
+      const writable = emu?.floppy_write_protected?.(drive) === false;
+      return `DF${drive}: ${name} (${writable ? 'writable in memory' : 'write-protected'})`;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
 function keepUploadedDisksForRebuild() {
   for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    // A writable disk's page-side upload is stale as soon as the guest writes
+    // it. Snapshot the controller before replacing the machine so model/video
+    // changes keep the current platter, not the original upload.
+    if (diskNames[drive] && emu?.floppy_write_protected?.(drive) === false) {
+      lastDisks[drive] = {
+        bytes: emu.export_floppy(drive),
+        name: diskNames[drive],
+        writable: true,
+      };
+    }
     if (diskNames[drive] && lastDisks[drive]?.name === diskNames[drive]) {
       pendingDisks[drive] = lastDisks[drive];
     }
@@ -785,10 +815,15 @@ async function boot() {
     // nothing, never a name left over from before the reboot.
     for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
       const disk = pendingDisks[drive];
-      if (disk) machine.insert_floppy(drive, disk.bytes, disk.name);
-      diskNames[drive] = disk?.name ?? null;
-      pendingDisks[drive] = null;
+      if (disk) {
+        if (disk.writable) machine.insert_floppy_writable(drive, disk.bytes, disk.name);
+        else machine.insert_floppy(drive, disk.bytes, disk.name);
+      }
     }
+    for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+      diskNames[drive] = pendingDisks[drive]?.name ?? null;
+    }
+    pendingDisks.fill(null);
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
     else if (configFloppySounds !== null) machine.set_floppy_sounds(configFloppySounds);
@@ -807,11 +842,12 @@ async function boot() {
     // on-screen keyboard forgets rather than sending release codes into it.
     forgetVirtualKeys();
     updateStatusDisks();
+    updateFloppyImageControls();
 
     // Leave a fresh status behind: the old line ("inserts at boot", an
     // earlier failure) would otherwise go stale into any bug report filed
     // while the machine runs.
-    const inserted = insertedDiskDescription(' (write-protected)');
+    const inserted = insertedDiskStatusDescription();
     setLoadStatus(
       // A ROM-less boot is only ever a landing place for a state load,
       // which overwrites this line the moment it lands.
@@ -2159,6 +2195,7 @@ for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
       diskNames[drive] = null;
       setLoadStatus(`DF${drive} ejected`);
       updateStatusDisks();
+      updateFloppyImageControls();
     } catch (err) {
       setLoadStatus(`${err.message ?? err}`);
     }
@@ -2185,6 +2222,120 @@ $('reset').addEventListener('click', () => {
 // toggle and Exit.
 
 const shell = $('shell');
+
+// Writable browser floppies live in the WASM machine rather than a host file.
+// Keep opening read-only by default, then make the choice explicit and put
+// the only persistence operation -- downloading the current image -- beside
+// it. Older page shells acquire the controls from this glue automatically.
+const BLANK_ADF_BYTES = 901120;
+
+function buildFloppyImageControls() {
+  const eject = $('eject');
+  const host = eject?.closest('.try-side-section') ?? eject?.parentElement ?? shell.parentElement;
+  const buttonClass = eject?.className ?? '';
+
+  let writable = $('writable-floppies');
+  if (!writable) {
+    const label = document.createElement('label');
+    label.className = 'try-check';
+    label.title = 'New disk inserts stay read-only unless this is checked';
+    writable = document.createElement('input');
+    writable.type = 'checkbox';
+    writable.id = 'writable-floppies';
+    label.appendChild(writable);
+    label.append(' Open disks writable');
+    host.appendChild(label);
+  }
+
+  for (const [prefix, text] of [
+    ['blank', 'Blank'],
+    ['download', 'Download'],
+  ]) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:0.45rem;flex-wrap:wrap;';
+    for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+      let button = $(`${prefix}-df${drive}`);
+      if (!button) {
+        button = document.createElement('button');
+        button.id = `${prefix}-df${drive}`;
+        button.className = buttonClass;
+        button.textContent = `${text} DF${drive}`;
+        row.appendChild(button);
+      }
+    }
+    if (row.childElementCount) host.appendChild(row);
+  }
+  return { writable };
+}
+
+const { writable: writableFloppyToggle } = buildFloppyImageControls();
+const blankFloppyButtons = Array.from(
+  { length: PAGE_FLOPPY_DRIVES },
+  (_, drive) => $(`blank-df${drive}`),
+);
+const downloadFloppyButtons = Array.from(
+  { length: PAGE_FLOPPY_DRIVES },
+  (_, drive) => $(`download-df${drive}`),
+);
+
+function updateFloppyImageControls() {
+  for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+    const button = downloadFloppyButtons[drive];
+    if (!button) continue;
+    const name = emu?.disk_name(drive);
+    button.disabled = !name;
+    const writable = name && emu?.floppy_write_protected?.(drive) === false;
+    button.title = name
+      ? `Download ${name}${writable ? ' with its current guest changes' : ''}`
+      : `DF${drive} is empty`;
+  }
+}
+
+function floppyDownloadName(name, bytes) {
+  const clean = (name || 'disk').replace(/[^\w.()+ -]+/g, '_');
+  if (/\.adf$/i.test(clean)) return clean;
+  const stem = clean.replace(/\.(adz|dms|ipf|scp|gz|zip)$/i, '');
+  return bytes.length === BLANK_ADF_BYTES ? `${stem}.adf` : `${stem}.extended.adf`;
+}
+
+function downloadFloppy(drive) {
+  if (!emu) return;
+  try {
+    const name = emu.disk_name(drive);
+    if (!name) throw new Error(`DF${drive} is empty`);
+    const bytes = emu.export_floppy(drive);
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = floppyDownloadName(name, bytes);
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setLoadStatus(
+      `DF${drive}: ${name} downloaded - guest software must flush its own buffers first`,
+    );
+  } catch (err) {
+    setLoadStatus(`DF${drive} download failed: ${err.message ?? err}`);
+  }
+}
+
+for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+  blankFloppyButtons[drive]?.addEventListener('click', () => {
+    try {
+      insertDisk(
+        new Uint8Array(BLANK_ADF_BYTES),
+        `blank-df${drive}.adf`,
+        drive,
+        true,
+      );
+    } catch (err) {
+      setLoadStatus(`DF${drive} blank disk failed: ${err.message ?? err}`);
+    }
+  });
+  downloadFloppyButtons[drive]?.addEventListener('click', () => downloadFloppy(drive));
+}
+updateFloppyImageControls();
+
 let cssFullscreen = false;
 let fsUi = null; // { bar, joy } - built lazily, like the touch-joystick UI
 
@@ -3882,6 +4033,7 @@ function restoreState(bytes, source) {
   }
   lastFddTrack = null;
   updateStatusDisks();
+  updateFloppyImageControls();
   // So did the machine itself, model, video standard and all.
   syncMachineSelect();
   syncVideoSelect();
@@ -6413,7 +6565,9 @@ function updateStatusDisks() {
   const parts = [];
   for (let drive = 0; drive < 4; drive++) {
     if (!emu.drive_connected(drive)) continue;
-    parts.push(`DF${drive}: ${emu.disk_name(drive) ?? '-'}`);
+    const name = emu.disk_name(drive);
+    const writable = name && emu.floppy_write_protected?.(drive) === false;
+    parts.push(`DF${drive}: ${name ?? '-'}${writable ? ' [writable]' : ''}`);
   }
   const text = parts.join('  ');
   if (text !== sb.disksText) {

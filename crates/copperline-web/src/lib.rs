@@ -881,13 +881,41 @@ impl WebEmu {
 
     /// Insert a floppy image from bytes: every format the core reads
     /// (ADF/ADZ, extended ADF, DMS, IPF, SCP, optionally gzip/zip-packed),
-    /// recognised by signature rather than by name. Always write-protected:
-    /// the browser has nowhere to write changes back to.
+    /// recognised by signature rather than by name. Always write-protected;
+    /// use `insert_floppy_writable` when the page will offer an export.
     pub fn insert_floppy(&mut self, drive: u8, bytes: Vec<u8>, name: &str) -> Result<(), JsValue> {
         self.emu
             .bus_mut()
             .floppy
             .insert_disk_image_bytes(drive as usize, bytes, PathBuf::from(name), true)
+            .map_err(js_err)
+    }
+
+    /// Insert an uncompressed standard or UAE extended ADF with a writable,
+    /// in-memory backing. Guest writes stay in the machine (and its save
+    /// states) until the page calls `export_floppy`; no browser filesystem is
+    /// involved. Compressed containers, DMS, IPF and SCP throw because their
+    /// decoded representation cannot be written back in the original format.
+    pub fn insert_floppy_writable(
+        &mut self,
+        drive: u8,
+        bytes: Vec<u8>,
+        name: &str,
+    ) -> Result<(), JsValue> {
+        self.emu
+            .bus_mut()
+            .floppy
+            .insert_memory_disk_image_bytes(drive as usize, bytes, PathBuf::from(name), false)
+            .map_err(js_err)
+    }
+
+    /// Snapshot DFn's current image bytes. Standard disks export as ADF and
+    /// track images as UAE extended ADF; compressed inputs export decoded.
+    pub fn export_floppy(&self, drive: u8) -> Result<Vec<u8>, JsValue> {
+        self.emu
+            .bus()
+            .floppy
+            .export_disk_image(drive as usize)
             .map_err(js_err)
     }
 
@@ -940,6 +968,15 @@ impl WebEmu {
     /// empty (so this doubles as the inserted check).
     pub fn disk_name(&self, drive: u8) -> Option<String> {
         self.emu.bus().floppy.inserted_disk_name(drive as usize)
+    }
+
+    /// Whether DFn's inserted image is write-protected, or undefined when
+    /// empty. A writable browser image remains in memory until exported.
+    pub fn floppy_write_protected(&self, drive: u8) -> Option<bool> {
+        self.emu
+            .bus()
+            .floppy
+            .disk_image_write_protected(drive as usize)
     }
 
     /// Queue received bytes for Paula's serial receiver (the page's
@@ -1009,6 +1046,10 @@ impl WebEmu {
     /// speed choices should re-apply them after a load.
     pub fn load_state(&mut self, blob: &[u8]) -> Result<(), JsValue> {
         self.emu.load_state_bytes(blob).map_err(js_err)?;
+        // A desktop state can name writable host files. The browser has no
+        // such paths, so adopt every restored image into serialized memory
+        // before the guest gets another chance to write it.
+        self.emu.bus_mut().floppy.make_disk_images_memory_backed();
         // Emulated time jumps to the state's timeline, so the pacer must
         // start over from now rather than chase the gap, and motion buffered
         // against the pre-load machine must not replay into it.
@@ -1235,7 +1276,8 @@ fn elapsed_fields_for_immediate_render(deferred_fields: &mut u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::elapsed_fields_for_immediate_render;
+    use super::{elapsed_fields_for_immediate_render, WebEmu};
+    use std::path::PathBuf;
 
     #[test]
     fn immediate_render_consumes_deferred_fields_without_double_aging() {
@@ -1243,5 +1285,31 @@ mod tests {
         assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 3);
         assert_eq!(deferred, 0);
         assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 1);
+    }
+
+    #[test]
+    fn state_load_adopts_desktop_writable_disk_into_memory() {
+        let mut web = WebEmu::new(Some("A500".into()), Some("PAL".into()), Some(1.0)).unwrap();
+        web.emu
+            .bus_mut()
+            .floppy
+            .insert_disk_image_bytes(
+                0,
+                vec![0xA5; 901_120],
+                PathBuf::from("desktop-writable.adf"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            web.emu.bus().floppy.runahead_block_reason(),
+            Some("writable floppy image")
+        );
+
+        let state = web.save_state().unwrap();
+        web.load_state(&state).unwrap();
+
+        assert_eq!(web.emu.bus().floppy.runahead_block_reason(), None);
+        assert_eq!(web.floppy_write_protected(0), Some(false));
+        assert_eq!(web.export_floppy(0).unwrap(), vec![0xA5; 901_120]);
     }
 }
