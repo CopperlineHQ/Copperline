@@ -814,23 +814,22 @@ impl RawLide {
     /// `drives` array filled in underneath: a named key always wins, so a
     /// config carrying both is unambiguous rather than order-dependent.
     pub(crate) fn drive_slots(&self) -> [Option<RawDrive>; 4] {
-        let named = [
+        let named = self.named_drive_slots();
+        std::array::from_fn(|i| named[i].clone().or_else(|| self.drives.get(i).cloned()))
+    }
+
+    /// Just the named `driveN` keys, without the deprecated array
+    /// underneath. Validation checks these per slot so it can name the key
+    /// at fault; a slot filled from the legacy array is covered by that
+    /// array's own length rule instead, since reporting it as `driveN`
+    /// would name a key the config never wrote.
+    pub(crate) fn named_drive_slots(&self) -> [Option<RawDrive>; 4] {
+        [
             self.drive0.clone(),
             self.drive1.clone(),
             self.drive2.clone(),
             self.drive3.clone(),
-        ];
-        std::array::from_fn(|i| named[i].clone().or_else(|| self.drives.get(i).cloned()))
-    }
-
-    /// Whether any named `driveN` key was given, so validation can tell a
-    /// legacy `drives` config apart from a modern one and only apply the
-    /// positional array's own length rule to the former.
-    pub(crate) fn has_named_drives(&self) -> bool {
-        self.drive0.is_some()
-            || self.drive1.is_some()
-            || self.drive2.is_some()
-            || self.drive3.is_some()
+        ]
     }
 }
 

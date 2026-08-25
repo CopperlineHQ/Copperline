@@ -613,28 +613,31 @@ impl TryFrom<RawConfig> for Config {
         // "rom_bank2 needs rom" instead of the whole table being silently
         // accepted as a no-op.
         let max_drives = lide_board.max_drives();
-        if raw.lide.has_named_drives() {
-            // Named keys are checked per slot rather than by count: with
-            // holes now expressible, "how many are set" no longer says
-            // which ones, and `drive2` on a one-channel board is the error
-            // worth naming.
-            for (slot, raw_drive) in raw_lide_slots.iter().enumerate() {
-                if raw_drive.is_some() && slot >= max_drives {
-                    errors.push(anyhow!(
-                        "[lide] drive{slot} is on channel {}; {} only has {max_drives} drive(s)",
-                        slot / 2,
-                        lide_board.name()
-                    ));
-                }
-            }
-        } else if raw.lide.drives.len() > max_drives {
-            // The deprecated positional array keeps its own length message,
-            // which names the real problem for a config written that way.
+        // The deprecated positional array's length is checked whatever else
+        // the section sets: a named key must not buy an over-long array a
+        // free pass, and `drive_slots` only reads the first four entries,
+        // so an unchecked fifth would be dropped without a word.
+        if raw.lide.drives.len() > max_drives {
             errors.push(anyhow!(
                 "[lide] drives has {} entries; {} only has {max_drives} drive(s)",
                 raw.lide.drives.len(),
                 lide_board.name()
             ));
+        }
+        // Named keys are checked per slot rather than by count: with holes
+        // expressible, "how many are set" no longer says which ones, and
+        // `drive2` on a one-channel board is the error worth naming. Only
+        // the named ones -- a slot filled from the legacy array is already
+        // covered above, and calling it `driveN` would name a key the
+        // config never wrote.
+        for (slot, named) in raw.lide.named_drive_slots().iter().enumerate() {
+            if named.is_some() && slot >= max_drives {
+                errors.push(anyhow!(
+                    "[lide] drive{slot} is on channel {}; {} only has {max_drives} drive(s)",
+                    slot / 2,
+                    lide_board.name()
+                ));
+            }
         }
         if lide.rom_bank2.is_some() && lide.rom.is_none() {
             errors.push(anyhow!(

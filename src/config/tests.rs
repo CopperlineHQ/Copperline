@@ -2420,6 +2420,37 @@ fn lide_named_drive_keys_allow_holes_and_beat_the_legacy_array() -> Result<()> {
     )
     .unwrap_err();
     assert!(err.to_string().contains("drive2"), "{err:#}");
+
+    // A named key must not buy an over-long legacy array a free pass:
+    // `drive_slots` only reads the first four entries, so a fifth would
+    // otherwise be dropped without a word.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["a.hdf", "b.hdf", "c.hdf", "d.hdf", "e.hdf"]
+            drive0 = "named.hdf"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("5 entries"), "{err:#}");
+
+    // ...and a legacy-array overflow with no named key still reports once,
+    // by length, not as a `driveN` key the config never wrote.
+    let err = parse_config(
+        r#"
+            [lide]
+            board = "ride"
+            drives = ["a.hdf", "b.hdf", "c.hdf"]
+            "#,
+    )
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("3 entries"), "{err:#}");
+    assert!(
+        !text.contains("drive2"),
+        "should not name an unwritten key: {err:#}"
+    );
     Ok(())
 }
 
