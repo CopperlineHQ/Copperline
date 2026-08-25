@@ -69,6 +69,18 @@ install -Dm644 assets/a4091/README.md \
 install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt \
   "$appdir/usr/share/copperline/a4091/THIRD_PARTY_NOTICES.txt"
 
+# Bundled open-source lide.device autoboot ROM and CD-filesystem bank
+# (default for a fitted [lide] board without a named rom/rom_bank2);
+# romsearch.rs looks under share/copperline/lide.
+install -Dm644 assets/lide/lide.rom \
+  "$appdir/usr/share/copperline/lide/lide.rom"
+install -Dm644 assets/lide/cdfs.rom \
+  "$appdir/usr/share/copperline/lide/cdfs.rom"
+install -Dm644 assets/lide/README.md \
+  "$appdir/usr/share/copperline/lide/README.md"
+install -Dm644 assets/lide/THIRD_PARTY_NOTICES.txt \
+  "$appdir/usr/share/copperline/lide/THIRD_PARTY_NOTICES.txt"
+
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
 # with pinned checksums, shipped unmodified with their provenance README.
 # whdload::find_whdboot_assets looks under share/copperline/whdboot.

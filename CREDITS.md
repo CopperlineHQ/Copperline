@@ -36,6 +36,13 @@ Thank you to:
   NetBSD, Berkeley, OSF, ODFileSystem, and ZX0 contributors. The exact source
   revisions, component inventory, and redistribution notices are kept beside
   the ROM in `assets/a4091/THIRD_PARTY_NOTICES.txt`.
+- **[lide.device](https://github.com/LIV2/lide.device)** by Matt Harlum
+  (LIV2) provides the autoboot ROM and CD-filesystem bank bundled as
+  Copperline's default for a fitted `[lide]` board. `cdfs.rom` is Stefan
+  Reinauer's [ODFileSystem](https://github.com/reinauer/ODFileSystem),
+  fetched by lide.device's own release build. Exact source revisions and
+  redistribution notices are kept beside the ROMs in
+  `assets/lide/THIRD_PARTY_NOTICES.txt`.
 - **[FluxBridge](https://github.com/CopperlineHQ/FluxBridge)**, CopperlineHQ's
   own pure-Rust library, is what lets a floppy bay drive a physical 3.5" drive
   over a Greaseweazle. It grew from a port of Rob Smith's

@@ -241,12 +241,16 @@ and no banking: its image sits on the odd lane across the whole window,
 always. None of the three boards wire an interrupt line -- `lide.device`
 is a purely polling driver.
 
-**ROM is always user-supplied** (`rom`, optionally `rom_bank2`): LIV2's
-GitHub releases ship `lide.rom` (RIPPLE/RIDE), `lide-atbus.rom`, and
-`cdfs.rom`, all 32768 bytes; Copperline never bundles or distributes them.
-Omitting `rom` is hardware-only mode: no DiagArea, no autoboot, `diag_vec`
-absent from the `BoardSpec`, but drives still answer once a disk-loaded
-driver finds them.
+A fitted board with no `rom`/`rom_bank2` named defaults to Copperline's
+bundled `assets/lide/lide.rom` and `cdfs.rom` (`src/config/resolve.rs`,
+`resolve_bundled_lide_rom`), the same `lide.rom` LIV2's GitHub releases ship
+for RIPPLE/RIDE -- also served here for `atbus2008`, since `rom_lane_odd`
+already handles that personality's odd-lane placement in software, the only
+real difference from `lide-atbus.rom`'s own build (which instead repeats the
+same content to fill a larger physical flash chip). `rom = ""` opts out
+into hardware-only mode: no DiagArea, no autoboot, `diag_vec` absent from
+the `BoardSpec`, but drives still answer once a disk-loaded driver finds
+them.
 
 All three personalities have booted a real `lide.rom`/`lide-atbus.rom`
 release end-to-end to a real Workbench (Kickstart 1.3 and 3.1, `--cpu

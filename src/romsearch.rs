@@ -91,3 +91,51 @@ pub fn find_bundled_a4091() -> Option<PathBuf> {
         .map(|dir| dir.join(A4091_ROM_FILE))
         .find(|rom| rom.is_file())
 }
+
+/// Bundled open-source lide.device autoboot ROM and its CD-filesystem
+/// second bank, used when a `[lide]` board is fitted without naming ROMs of
+/// its own. From https://github.com/LIV2/lide.device . `lide.rom` also
+/// serves `board = "atbus2008"`: the odd-lane byte placement AT-Bus 2008
+/// needs is handled in `ide_zorro.rs`, not by different ROM content.
+pub const LIDE_ROM_FILE: &str = "lide.rom";
+/// CD-filesystem second flash bank (RIPPLE/RIDE only).
+pub const LIDE_CDFS_ROM_FILE: &str = "cdfs.rom";
+
+/// A located pair of bundled lide ROM files. `cdfs` is `None` when only the
+/// primary ROM is installed (a lide/ directory carrying just `lide.rom`).
+pub struct BundledLide {
+    pub rom: PathBuf,
+    pub cdfs: Option<PathBuf>,
+}
+
+/// Locate the bundled lide ROMs, searching the same places as
+/// [`find_bundled_a4091`] under a `lide/` subdirectory.
+pub fn find_bundled_lide() -> Option<BundledLide> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = crate::envcfg::var("COPPERLINE_LIDE_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("lide"));
+            if let Some(parent) = bin_dir.parent() {
+                dirs.push(parent.join("Resources").join("lide"));
+                dirs.push(parent.join("share").join("copperline").join("lide"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("assets").join("lide"));
+
+    dirs.into_iter().find_map(|dir| {
+        let rom = dir.join(LIDE_ROM_FILE);
+        rom.is_file().then(|| {
+            let cdfs = dir.join(LIDE_CDFS_ROM_FILE);
+            BundledLide {
+                rom,
+                cdfs: cdfs.is_file().then_some(cdfs),
+            }
+        })
+    })
+}

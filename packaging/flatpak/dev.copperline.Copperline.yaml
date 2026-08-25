@@ -90,6 +90,17 @@ modules:
         -t ${FLATPAK_DEST}/share/copperline/a4091/
       - install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt
         -t ${FLATPAK_DEST}/share/copperline/a4091/
+      # Bundled open-source lide.device autoboot ROM and CD-filesystem bank
+      # (default for a fitted [lide] board without a named rom/rom_bank2);
+      # romsearch.rs resolves it via <prefix>/share/copperline/lide.
+      - install -Dm644 assets/lide/lide.rom
+        -t ${FLATPAK_DEST}/share/copperline/lide/
+      - install -Dm644 assets/lide/cdfs.rom
+        -t ${FLATPAK_DEST}/share/copperline/lide/
+      - install -Dm644 assets/lide/README.md
+        -t ${FLATPAK_DEST}/share/copperline/lide/
+      - install -Dm644 assets/lide/THIRD_PARTY_NOTICES.txt
+        -t ${FLATPAK_DEST}/share/copperline/lide/
       # Desktop integration metadata.
       - install -Dm644 packaging/flatpak/dev.copperline.Copperline.desktop
         ${FLATPAK_DEST}/share/applications/dev.copperline.Copperline.desktop

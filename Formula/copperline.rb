@@ -56,6 +56,11 @@ class Copperline < Formula
     # fits an A4091 without naming a ROM): <prefix>/share/copperline/a4091.
     (pkgshare/"a4091").install Dir["assets/a4091/*"]
 
+    # Install the bundled open-source lide.device autoboot ROM and
+    # CD-filesystem bank (default for a fitted [lide] board without a named
+    # rom/rom_bank2): <prefix>/share/copperline/lide.
+    (pkgshare/"lide").install Dir["assets/lide/*"]
+
     # WHDLoad support archives: <prefix>/share/copperline/whdboot, where
     # whdload::find_whdboot_assets looks, with the provenance README beside
     # them. The stable formula can briefly point at a release made before a

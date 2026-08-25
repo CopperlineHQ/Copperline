@@ -2477,12 +2477,14 @@ fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     );
     assert!(cfg.lide.drives[2].is_none());
 
-    // Hardware-only mode (no rom) is legal: no ROM, no autoboot, but the
-    // section still "enabled" via drives alone.
+    // Hardware-only mode (rom = "", opting out of the bundled default) is
+    // legal: no ROM, no autoboot, but the section still "enabled" via
+    // drives alone.
     let cfg = parse_config(
         r#"
             [lide]
             board = "ride"
+            rom = ""
             drives = ["dh0.hdf"]
             "#,
     )?;
@@ -2515,11 +2517,14 @@ fn lide_section_parses_board_rom_and_drives() -> Result<()> {
     .unwrap_err();
     assert!(err.to_string().contains("drive(s)"), "{err:#}");
 
-    // rom_bank2 needs rom.
+    // rom_bank2 needs rom -- opting out of the bundled default with an
+    // explicit rom = "" is the only way left to hit this with a fitted
+    // board, since an unset rom on a fitted board now defaults instead.
     let err = parse_config(
         r#"
             [lide]
             board = "ripple"
+            rom = ""
             rom_bank2 = "cdfs.rom"
             drives = ["dh0.hdf"]
             "#,
@@ -2705,6 +2710,91 @@ fn a4091_without_rom_defaults_to_the_bundled_rom() -> Result<()> {
     )
     .unwrap_err();
     assert!(err.to_string().contains("boot ROM"), "{err:#}");
+    Ok(())
+}
+
+/// A fitted [lide] board with no ROM opinion of its own defaults to the
+/// bundled lide.rom/cdfs.rom: validation leaves the sentinels in place, and
+/// resolution swaps in the real paths. `rom = ""` opts back out.
+#[test]
+fn lide_without_rom_defaults_to_the_bundled_roms() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new(BUNDLED_LIDE_ROM)));
+    assert_eq!(
+        cfg.lide.rom_bank2.as_deref(),
+        Some(Path::new(BUNDLED_LIDE_CDFS_ROM))
+    );
+
+    // A bare `board = "..."` with no drives still fits the board, exactly
+    // as an A4091 does: the bundled ROM makes it enabled.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ride"
+            "#,
+    )?;
+    assert!(cfg.lide.enabled());
+    assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new(BUNDLED_LIDE_ROM)));
+
+    // AT-Bus 2008 gets the bundled primary ROM too (the odd-lane placement
+    // is handled by ide_zorro.rs, not by different ROM content), but never
+    // the CD-filesystem bank: that board has no flash banking to put it in.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "atbus2008"
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new(BUNDLED_LIDE_ROM)));
+    assert!(cfg.lide.rom_bank2.is_none());
+
+    // Resolution finds the ROMs bundled in the source tree (assets/lide).
+    let mut cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    resolve_bundled_rom(&mut cfg)?;
+    let rom = cfg.lide.rom.as_deref().expect("resolved lide rom");
+    assert!(rom.ends_with(crate::romsearch::LIDE_ROM_FILE), "{rom:?}");
+    assert_ne!(rom, Path::new(BUNDLED_LIDE_ROM));
+    let cdfs = cfg.lide.rom_bank2.as_deref().expect("resolved lide cdfs");
+    assert!(
+        cdfs.ends_with(crate::romsearch::LIDE_CDFS_ROM_FILE),
+        "{cdfs:?}"
+    );
+
+    // An explicit rom still wins, and an explicit empty string opts all the
+    // way back out to hardware-only mode.
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            rom = "custom-lide.rom"
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new("custom-lide.rom")));
+
+    let cfg = parse_config(
+        r#"
+            [lide]
+            board = "ripple"
+            rom = ""
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    assert!(cfg.lide.rom.is_none());
+    assert!(cfg.lide.rom_bank2.is_none());
     Ok(())
 }
 

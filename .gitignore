@@ -54,6 +54,8 @@
 !/assets/services/services_rom.bin
 !/assets/hostsocket/hostsocket_rom.bin
 !/assets/a4091/a4091_cdfs.rom
+!/assets/lide/lide.rom
+!/assets/lide/cdfs.rom
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,
 # RTC battery-RAM backing files).

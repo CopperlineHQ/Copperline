@@ -669,11 +669,47 @@ impl TryFrom<RawConfig> for Config {
                 lide_drives[slot] = Some(drive_image(raw_drive.clone())?);
             }
         }
+        // An empty string is an explicit "no ROM" -- the escape hatch back
+        // to hardware-only mode -- kept apart from "not set" so the default
+        // below only fires when the source config said nothing at all.
+        let rom_named = raw.lide.rom.as_deref() != Some("");
+        let rom_bank2_named = raw.lide.rom_bank2.as_deref() != Some("");
+        let mut lide_rom = raw
+            .lide
+            .rom
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .map(PathBuf::from);
+        let mut lide_rom_bank2 = raw
+            .lide
+            .rom_bank2
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .map(PathBuf::from);
+        // A fitted board (named explicitly, or carrying a drive image) with
+        // no ROM opinion of its own gets the bundled lide.rom, the same way
+        // an explicitly-fitted A4091 gets its bundled ROM below -- this
+        // also fits a bare `board = "..."` with no drives yet, the setup
+        // for booting a CD inserted at runtime.
+        let lide_fitted = raw.lide.board.is_some() || lide_drives.iter().any(Option::is_some);
+        if lide_fitted && rom_named && lide_rom.is_none() {
+            lide_rom = Some(PathBuf::from(BUNDLED_LIDE_ROM));
+        }
+        // The CD-filesystem bank only applies where the board has one
+        // (RIPPLE/RIDE); AT-Bus 2008 would reject it below, so it is never
+        // offered there.
+        if lide_rom.is_some()
+            && rom_bank2_named
+            && lide_rom_bank2.is_none()
+            && lide_board != crate::ide_zorro::LidePersonality::AtBus2008
+        {
+            lide_rom_bank2 = Some(PathBuf::from(BUNDLED_LIDE_CDFS_ROM));
+        }
         let lide = LideConfig {
             board: lide_board,
             board_named: raw.lide.board.is_some(),
-            rom: raw.lide.rom.as_ref().map(PathBuf::from),
-            rom_bank2: raw.lide.rom_bank2.as_ref().map(PathBuf::from),
+            rom: lide_rom,
+            rom_bank2: lide_rom_bank2,
             drives: lide_drives,
         };
         // Unconditional, not gated on `lide.enabled()`: each checks a

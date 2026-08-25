@@ -48,6 +48,18 @@ pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
 /// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
 
+/// Sentinel `[lide] rom` for a board fitted (an explicit `board`, or a drive
+/// image) without a named ROM: resolve to the bundled `lide.rom`, or fail.
+/// A real `rom = "..."` replaces it; `rom = ""` opts out and keeps the board
+/// in hardware-only mode.
+pub const BUNDLED_LIDE_ROM: &str = "<bundled-lide>";
+
+/// Sentinel `[lide] rom_bank2` alongside [`BUNDLED_LIDE_ROM`]: resolve to the
+/// bundled `cdfs.rom` (RIPPLE/RIDE only -- AT-Bus 2008 has no flash
+/// banking). A real `rom_bank2 = "..."` replaces it; `rom_bank2 = ""` opts
+/// out.
+pub const BUNDLED_LIDE_CDFS_ROM: &str = "<bundled-lide-cdfs>";
+
 /// A WASM plugin Zorro board resolved from config: its autoconfig identity
 /// (`spec`, with a placeholder device slot reassigned at build time), the
 /// `.wasm` module path, and the plugin manifest (name + capabilities).
@@ -1176,8 +1188,9 @@ impl ScsiConfig {
 }
 
 /// `[lide]`: a built-in Zorro II IDE board compatible with LIV2's
-/// `lide.device`. Drives may be hard disks or ATAPI CD-ROMs; the boot ROM is
-/// always user-supplied (never bundled).
+/// `lide.device`. Drives may be hard disks or ATAPI CD-ROMs. A fitted board
+/// with no ROM named defaults to the bundled `lide.rom`/`cdfs.rom`
+/// (`rom = ""` opts out and keeps the board in hardware-only mode).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LideConfig {
     /// Which of the three AutoConfig identities the board presents. Only

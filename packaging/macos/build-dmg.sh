@@ -61,7 +61,7 @@ done
 echo "==> Staging $app_name"
 rm -rf "$stage"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/aros" \
-  "$app/Contents/Resources/a4091"
+  "$app/Contents/Resources/a4091" "$app/Contents/Resources/lide"
 
 # Universal binary from the per-arch builds (a single-arch lipo is a no-op copy).
 bins=()
@@ -99,6 +99,13 @@ done
 # the binary artifact.
 for f in a4091_cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
   cp "assets/a4091/$f" "$app/Contents/Resources/a4091/$f"
+done
+
+# Bundled open-source lide.device autoboot ROM and CD-filesystem bank
+# (default for a fitted [lide] board without a named rom/rom_bank2);
+# romsearch.rs resolves Contents/Resources/lide.
+for f in lide.rom cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
+  cp "assets/lide/$f" "$app/Contents/Resources/lide/$f"
 done
 
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
