@@ -7074,6 +7074,7 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("mystery"), DroppedMediaKind::Floppy);
     assert_eq!(kind("game.CUE"), DroppedMediaKind::Cd);
     assert_eq!(kind("game.iso"), DroppedMediaKind::Cd);
+    assert_eq!(kind("game.NRG"), DroppedMediaKind::Cd);
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.HDZ"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);

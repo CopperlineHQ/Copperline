@@ -12,7 +12,7 @@ cargo install cargo-fuzz
 cd fuzz
 cargo +nightly fuzz run dms            # one target...
 cargo +nightly fuzz run floppy_image   # ADF/extADF/DMS/SCP/IPF/gzip/zip
-cargo +nightly fuzz run cd_image       # CUE/BIN, bare ISO, and CHD
+cargo +nightly fuzz run cd_image       # CUE/BIN, bare ISO, NRG, and CHD
 cargo +nightly fuzz run hardfile_classification # HDF/RDSK/bare-volume classification
 cargo +nightly fuzz run savestate      # .clstate bincode machine images
 ```

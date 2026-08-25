@@ -70,7 +70,7 @@ WinUAE-verified model so device scans terminate correctly. PCMCIA reports
 an empty slot (the status/config registers exist so card.resource
 behaves); credit-card device emulation is a non-goal.
 
-Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.chd`
+Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.nrg`/`.chd`
 image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
 handing 12-byte CDBs to the same bus-agnostic SCSI-2 CD-ROM command engine
 (`scsi/cd.rs`'s `ScsiCdRom`) the `[scsi]` host adapters use, so the read
@@ -204,7 +204,7 @@ whole clone family). All three reuse the front-end-agnostic ATA core in
 drive backend above; the new work is entirely in the board's own address
 decode, since none of the three personalities resemble Gayle's 4-byte task
 file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
-PACKET support, `.cue`/`.iso`/`.chd` CD-ROM images.
+PACKET support, `.cue`/`.iso`/`.nrg`/`.chd` CD-ROM images.
 
 **Register decode.** Each ATA channel occupies a 4K block of the board
 window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
@@ -487,7 +487,9 @@ fast RAM exists -- not just chip RAM.
 MODE1/2352, and AUDIO tracks; `PREGAP`/`POSTGAP` as unstored zero-fill
 extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
 and lays every `FILE` out as a run of extents over a byte-addressed
-source. A `BINARY` source is the file itself; a `WAVE` or `MP3` source
+source. Nero NRG images use the same extent model after their 32- or
+64-bit CUE/DAO or ETN footer has supplied the track offsets and stored
+pregaps. A `BINARY` source is the file itself; a `WAVE` or `MP3` source
 (`cdrom/audio.rs`) presents the decoded audio as CD-DA sectors --
 588 stereo frames per sector, the last sector zero-padded, other sample
 rates linearly interpolated in integer arithmetic -- so the layout code

@@ -1086,13 +1086,14 @@ pub const HARDFILE_DEFAULT_BOOT_PRI: i8 = 0;
 pub const BOOT_PRI_NEVER: i8 = -128;
 
 /// Whether a drive-image path names a CD image (a cue sheet, a bare ISO,
-/// or a CHD). On the SCSI bus such an entry attaches a CD-ROM drive
+/// a Nero NRG, or a CHD). On the SCSI bus such an entry attaches a CD-ROM drive
 /// instead of a hard disk; the file extension is the format signal,
 /// exactly as it is for the hard-drive back ends (HDF vs. directory).
 pub fn is_cd_image_path(path: &std::path::Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         e.eq_ignore_ascii_case("cue")
             || e.eq_ignore_ascii_case("iso")
+            || e.eq_ignore_ascii_case("nrg")
             || e.eq_ignore_ascii_case("chd")
     })
 }

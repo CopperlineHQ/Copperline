@@ -940,7 +940,7 @@ pub(crate) struct RawRtg {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCd {
-    /// Path to a CUE/BIN, bare ISO, or CHD CD image.
+    /// Path to a CUE/BIN, bare ISO, Nero NRG, or CHD CD image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) image: Option<String>,
     /// Insert the disc this many emulated seconds after power-on

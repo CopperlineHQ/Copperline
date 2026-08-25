@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! CD image backend: cue/bin parsing and sector access.
+//! CD image backend: cue/bin, NRG, and CHD parsing and sector access.
 //!
 //! Supports single-file and multi-file cue layouts with MODE1/2048,
 //! MODE1/2352, and AUDIO tracks, including INDEX 00 pregaps stored in
@@ -13,7 +13,9 @@
 //! sector size; the disc address space is the concatenation of all files
 //! and gaps in cue order. A bare `.iso` image (2048-byte cooked data
 //! sectors, no cue sheet) loads as a single-track data disc, and a `.chd`
-//! loads through the compressed CHD backend in the `chd` child module.
+//! loads through the compressed CHD backend in the `chd` child module. Nero
+//! `.nrg` images use their footer's CUE/DAO or ETN layout to address the same
+//! plain-file extent backend.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
@@ -24,6 +26,7 @@ mod audio;
 mod chd;
 #[cfg(feature = "cd-mp3")]
 mod mp3;
+mod nrg;
 mod wav;
 
 pub use audio::FileFormat;
@@ -294,11 +297,13 @@ struct RawTrack {
 
 impl CdImage {
     /// Load a CD image: a cue sheet (with its BINARY/WAVE/MP3 files), a
-    /// bare `.iso` data image, or a `.chd`.
+    /// bare `.iso` data image, a Nero `.nrg`, or a `.chd`.
     pub fn load(path: &Path) -> Result<Self> {
         let ext = path.extension().and_then(|e| e.to_str());
         if ext.is_some_and(|e| e.eq_ignore_ascii_case("chd")) {
             Self::load_chd(path)
+        } else if ext.is_some_and(|e| e.eq_ignore_ascii_case("nrg")) {
+            nrg::load(path)
         } else if ext.is_some_and(|e| e.eq_ignore_ascii_case("iso")) {
             Self::load_iso(path)
         } else {

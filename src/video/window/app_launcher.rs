@@ -126,9 +126,9 @@ impl App {
                 dialog.add_filter("Floppy images", crate::floppy::IMAGE_EXTENSIONS)
             }
             // Only formats CdImage::load takes: a cue sheet, a bare ISO,
-            // or a CHD (a raw .bin is a cue sheet's payload, not loadable
+            // an NRG, or a CHD (a raw .bin is a cue sheet's payload, not loadable
             // alone).
-            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "chd"]),
+            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
             // A WHDLoad package however it arrived: as distributed
             // (`.lha`), zipped, or as a bare `.slave` picked inside an
             // already-extracted one (stored as its directory, which is
@@ -146,7 +146,7 @@ impl App {
                 dialog.add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
             }
             // SCSI, IDE, and lide drive slots all take hard disks or CD
-            // images (a cue/iso/chd attaches a CD-ROM drive at that slot,
+            // images (a cue/iso/nrg/chd attaches a CD-ROM drive at that slot,
             // over SCSI or ATAPI as appropriate).
             LauncherField::ScsiUnit0
             | LauncherField::ScsiUnit1
@@ -162,7 +162,7 @@ impl App {
             | LauncherField::LideDrive2
             | LauncherField::LideDrive3 => dialog
                 .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
-                .add_filter("CD images", &["cue", "iso", "chd"]),
+                .add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
