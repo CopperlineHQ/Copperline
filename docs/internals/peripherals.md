@@ -465,6 +465,12 @@ audio mixes into the host output, and both light the blue CD LED. The
 512 KiB extended ROM sits at `$E00000`, and the CD32 pad protocol drives
 port 2.
 
+The optical sector clock and the firmware command transport are separate:
+sector payloads retain their physical 75/150 Hz cadence, while the drive's
+cached TOC is returned over the command ring at 600 packets/second. This lets
+CDStrap receive a coherent TOC during its first media probe, including on
+CD32 discs mastered with the older CDTV trademark boot layout.
+
 The drive protocol is cross-checked against both ROM drivers known to have
 run on real hardware, Kickstart's cd.device and AROS's, which pinned down
 four behaviours where the two disagree with older emulator lore: the drive
@@ -489,7 +495,11 @@ extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
 and lays every `FILE` out as a run of extents over a byte-addressed
 source. Nero NRG images use the same extent model after their 32- or
 64-bit CUE/DAO or ETN footer has supplied the track offsets and stored
-pregaps. A `BINARY` source is the file itself; a `WAVE` or `MP3` source
+pregaps. A raw read from a cooked MODE1/2048 source synthesizes the complete
+2352-byte frame: sync and BCD MSF header, EDC, the reserved bytes, and both
+Reed-Solomon P/Q parity fields. Akiko therefore presents the same raw-sector
+shape to CDXL players whether their video disc is a bare ISO or BIN/CUE. A
+`BINARY` source is the file itself; a `WAVE` or `MP3` source
 (`cdrom/audio.rs`) presents the decoded audio as CD-DA sectors --
 588 stereo frames per sector, the last sector zero-padded, other sample
 rates linearly interpolated in integer arithmetic -- so the layout code

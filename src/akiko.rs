@@ -32,7 +32,7 @@
 //! CD-DA sectors into the host mixer ring (44.1 kHz, the mixer's native
 //! rate) and sends the drive's start/end notification packets.
 
-use crate::cdrom::{to_bcd, CdImage, DATA_SECTOR_BYTES, LEADIN_SECTORS};
+use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES};
 use crate::chipset::paula::CdAudioRing;
 
 pub const AKIKO_BASE: u32 = 0x00B8_0000;
@@ -78,6 +78,13 @@ const TOC_REPEAT: u32 = 3;
 
 /// Colour clocks per 1/75th second (one single-speed CD frame).
 const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
+
+/// The drive firmware returns its cached TOC over the command channel,
+/// independently of the 75-sector/s optical data path. A single-track TOC
+/// is 12 packets after the mandated three copies of each point; 600 packets/s
+/// lets the controller deliver that table inside the boot ROM's first media
+/// probe. Sector data and CD-DA remain at their physical 75/150 Hz cadence.
+const CCK_PER_TOC_PACKET: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 600;
 /// TX/RX DMA restart delay: ~3 scanlines, expressed in colour clocks.
 const DMA_RESTART_DELAY_CCK: u32 = 3 * 227;
 
@@ -826,7 +833,7 @@ impl Akiko {
 
         self.frame_counter_cck -= cck as i32;
         if self.frame_counter_cck <= 0 {
-            self.frame_counter_cck += (CCK_PER_CD_FRAME / self.speed.max(1)) as i32;
+            self.frame_counter_cck += CCK_PER_TOC_PACKET as i32;
             self.frame_sync = true;
         }
 
@@ -923,7 +930,7 @@ impl Akiko {
             }
             _ => {}
         }
-        // One TOC entry per CD frame while a TOC dump is in progress.
+        // One cached-TOC packet per firmware transport interval.
         if self.toc_counter >= 0 && self.command_active == 0 && self.frame_sync {
             self.frame_sync = false;
             let len = self.return_toc_entry();
@@ -1318,28 +1325,24 @@ impl Akiko {
         if sector < 0 || !sector_in_data_track(&self.toc, sector as u32) {
             return;
         }
-        let mut data = [0u8; DATA_SECTOR_BYTES];
-        if disc.read_data_sector(sector as u32, &mut data).is_err() {
+        // Akiko's PBX path carries the complete raw Mode 1 frame. Preserve
+        // a raw BIN/CUE sector verbatim, or let the shared image backend
+        // promote a cooked ISO sector with its EDC and P/Q parity. CDXL
+        // players use this raw-sector path for sustained video streaming.
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        if disc.read_raw_sector(sector as u32, &mut raw).is_err() {
             return;
         }
 
-        // Build the raw 2352-byte frame: sync + BCD MSF header + data.
-        // The first four bytes carry the transfer tag the ROM expects.
-        let mut raw = [0u8; 2352];
-        raw[1..11].fill(0xFF);
-        let msf = sector as u32 + LEADIN_SECTORS;
-        raw[12] = to_bcd((msf / (60 * 75)) as u8);
-        raw[13] = to_bcd(((msf / 75) % 60) as u8);
-        raw[14] = to_bcd((msf % 75) as u8);
-        raw[15] = 1; // mode 1
-        raw[16..16 + DATA_SECTOR_BYTES].copy_from_slice(&data);
+        // The first four sync bytes carry Akiko's transfer tag instead.
         raw[0] = 0;
         raw[1] = 0;
         raw[2] = 0;
         raw[3] = (self.sector_counter & 31) as u8;
 
         log::trace!(
-            "akiko: sector {sector} -> slot {slot} (tag {}, pbx {:04x})",
+            "akiko: sector {sector} -> slot {slot} at {:#010x} (tag {}, pbx {:04x})",
+            self.addressdata + slot * 4096,
             self.sector_counter & 31,
             self.pbx
         );
@@ -1593,6 +1596,7 @@ fn sector_in_data_track(toc: &[TocEntry], sector: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cdrom::DATA_SECTOR_BYTES;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -2322,20 +2326,10 @@ mod tests {
             ],
         );
         assert_eq!(response[0], 0x04);
-        assert!(akiko.toc_counter >= 0, "TOC dump should be armed");
-
-        // Re-arm RX and let the whole TOC stream (one packet per CD
-        // frame, each entry repeated three times).
-        akiko.write(
-            AKIKO_BASE + 0x1F,
-            1,
-            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
-            &mut chip,
+        assert_eq!(
+            akiko.toc_counter, -1,
+            "cached TOC should complete at the firmware transport rate"
         );
-        for _ in 0..400 {
-            akiko.tick(CCK_PER_CD_FRAME / 4, &mut chip, &mut ring);
-        }
-        assert_eq!(akiko.toc_counter, -1, "TOC dump should have completed");
 
         // Find the lead-out (A2) packet in the RX ring: packet type 6,
         // status 0x0A, point byte A2, MSF = 8 sectors + lead-in =
@@ -2351,6 +2345,36 @@ mod tests {
                 && ring[(i + 12) & 0xFF] == 0x08
         });
         assert!(found, "lead-out TOC packet not found in RX ring");
+    }
+
+    #[test]
+    fn toc_transport_rate_ignores_double_speed_bit() {
+        fn frame_phase_after_dump(speed_bit: u8) -> i32 {
+            let mut ring = CdAudioRing::default();
+            let mut chip = vec![0u8; 64 * 1024];
+            let mut akiko = Akiko::new();
+            akiko.insert_disc(test_disc());
+            akiko.tick(2048, &mut chip, &mut ring);
+            akiko.cd_initialized = 2;
+            akiko.receive_length = 0;
+
+            let response = dma_command(
+                &mut akiko,
+                &mut chip,
+                &[
+                    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, speed_bit, 0x00, 0x00, 0x00,
+                ],
+            );
+            assert_eq!(response[0], 0x04);
+            assert_eq!(akiko.toc_counter, -1, "cached TOC should complete");
+            akiko.frame_counter_cck
+        }
+
+        assert_eq!(
+            frame_phase_after_dump(0),
+            frame_phase_after_dump(0x40),
+            "the data-speed bit must not change cached TOC pacing"
+        );
     }
 
     #[test]
@@ -2376,21 +2400,13 @@ mod tests {
             ],
         );
         assert_eq!(response[0], 0x04);
-        assert!(akiko.toc_counter >= 0, "TOC dump should be armed");
+        assert_eq!(
+            akiko.toc_counter, -1,
+            "cached TOC should complete at the firmware transport rate"
+        );
         // The ring serializes responses: the 3-byte command response
         // first, then the TOC packets.
         let start = pre + 3;
-
-        akiko.write(
-            AKIKO_BASE + 0x1F,
-            1,
-            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
-            &mut chip,
-        );
-        for _ in 0..400 {
-            akiko.tick(CCK_PER_CD_FRAME / 4, &mut chip, &mut ring);
-        }
-        assert_eq!(akiko.toc_counter, -1, "TOC dump should have completed");
 
         // One data track: 4 entries x TOC_REPEAT packets of 16 bytes,
         // laid out in DMA order from the pre-dump RX index (no wrap).
