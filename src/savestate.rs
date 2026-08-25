@@ -322,7 +322,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      genlock presentation latch; Akiko also records READ DATA's end LSN.
 //  67: CD32 FMV audio gained native-rate resampler state and BoardSpec records
 //      whether an autoconfig board ignores ec_Shutup.
-pub const STATE_VERSION: u32 = 67;
+//  68: Akiko gained carried physical byte offsets for command/response packets
+//      whose visible eight-bit indices cross a page boundary.
+pub const STATE_VERSION: u32 = 68;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

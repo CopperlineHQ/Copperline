@@ -482,9 +482,13 @@ MPEG-1 Layer II audio through Symphonia. The production player never programs
 Denise/Lisa's digital genlock controls: the cartridge keys the dark native RGB
 level in its analogue output path, which the renderer models alongside
 explicit chipset genlock transparency while preserving the module's border
-and blanking controls. The decoder's partial bitstream, prediction frames,
-and presentation state are serialized directly, so a resumed headless run
-produces the same frames without retaining the already-decoded program stream.
+and blanking controls. The CL450's interpolated 704-pixel output line maps to
+the captured TV aperture rather than the deeper native overscan framebuffer;
+the later TV presentation therefore retains both edges of the 352-pixel MPEG
+source instead of applying a second, one-sided crop. The decoder's partial
+bitstream, prediction frames, and presentation state are serialized directly,
+so a resumed headless run produces the same frames without retaining the
+already-decoded program stream.
 
 The optical sector clock and the firmware command transport are separate:
 sector payloads retain their physical 75/150 Hz cadence, while the drive's
@@ -504,7 +508,9 @@ run on real hardware, Kickstart's cd.device and AROS's, which pinned down
 four behaviours where the two disagree with older emulator lore: the drive
 microcontroller answers a command about a millisecond after its last byte
 rather than inside the guest's register write (drivers arm their
-completion interrupt in that window); the TOC dump streams the track
+completion interrupt in that window), and an enabled TX-DMA completion is
+presented before the corresponding RX completion on the half-duplex drive
+link; the TOC dump streams the track
 entries before the A0/A1/A2 session entries, since a parser may treat the
 lead-out entry as end-of-TOC; the CDINTREQ status read exposes only
 enabled sources (`intreq & intena`), because INT2 servers read it on every
@@ -515,7 +521,13 @@ satisfies both). Akiko's DMA engines drive a full 24-bit address bus (the
 address registers mask to `$00FFF000`), so the rings and sector buffers
 resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
 included, which is where AROS places its `MEMF_24BITDMA` allocations when
-fast RAM exists -- not just chip RAM.
+fast RAM exists -- not just chip RAM. The command/status comparator indices
+are eight-bit, but the physical DMA byte counter retains its page carry for
+the remainder of a packet. Kickstart relies on this when it copies a packet
+contiguously across index `$FF`; folding the physical address at the same point
+reads stale bytes from the start of the page. The next parsed packet rebases
+the counter to its visible index, even if the producer queued several packets
+under one comparator value.
 
 `cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
 MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks;

@@ -8814,19 +8814,20 @@ fn cd32_fmv_keys_dark_native_video_without_digital_genlock_bits() {
     };
     let bright_native = u32::from_le_bytes([0x40, 0x40, 0x40, 0xFF]);
     let mut fb = vec![bright_native; FB_WIDTH];
-    fb[0] = u32::from_le_bytes([0x1F, 0x10, 0x08, 0xFF]);
-    fb[1] = 0;
+    let x0 = crate::video::present_common::TV_CAPTURED_SOURCE_X;
+    fb[x0] = u32::from_le_bytes([0x1F, 0x10, 0x08, 0xFF]);
+    fb[x0 + 1] = 0;
 
     compose_cd32_fmv(&presentation, &mut fb, 1, 1);
 
-    assert_eq!(fb[0], mpeg, "dark analogue key must reveal FMV");
-    assert_eq!(fb[1], mpeg, "digital genlock transparency still works");
-    assert_eq!(fb[2], bright_native, "bright native overlay remains");
+    assert_eq!(fb[x0], mpeg, "dark analogue key must reveal FMV");
+    assert_eq!(fb[x0 + 1], mpeg, "digital genlock transparency still works");
+    assert_eq!(fb[x0 + 2], bright_native, "bright native overlay remains");
 }
 
 #[cfg(feature = "cd32-fmv")]
 #[test]
-fn cd32_fmv_stretches_the_active_line_to_both_capture_edges() {
+fn cd32_fmv_maps_the_active_line_to_both_tv_capture_edges() {
     let left = u32::from_le_bytes([0x20, 0x40, 0x60, 0xFF]);
     let right = u32::from_le_bytes([0x80, 0xA0, 0xC0, 0xFF]);
     let presentation = crate::cd32_fmv::FmvPresentation {
@@ -8844,8 +8845,19 @@ fn cd32_fmv_stretches_the_active_line_to_both_capture_edges() {
 
     compose_cd32_fmv(&presentation, &mut fb, 1, 1);
 
-    assert_eq!(fb[0], left);
-    assert_eq!(fb[FB_WIDTH / 2 - 1], left);
-    assert_eq!(fb[FB_WIDTH / 2], right);
-    assert_eq!(fb[FB_WIDTH - 1], right);
+    let x0 = crate::video::present_common::TV_CAPTURED_SOURCE_X;
+    let width = crate::video::present_common::TV_CAPTURED_WIDTH;
+    assert_eq!(fb[x0], left);
+    assert_eq!(fb[x0 + width / 2 - 1], left);
+    assert_eq!(fb[x0 + width / 2], right);
+    assert_eq!(fb[x0 + width - 1], right);
+    assert_ne!(
+        crate::video::present_common::tv_glass_sample(&fb, 0, 0),
+        0,
+        "left MPEG edge contributes through the sampler's half-texel blend"
+    );
+    assert_eq!(
+        crate::video::present_common::tv_glass_sample(&fb, FB_WIDTH - 1, 0),
+        right
+    );
 }

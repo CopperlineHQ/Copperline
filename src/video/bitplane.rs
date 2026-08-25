@@ -5517,10 +5517,11 @@ fn render_from_input_with_scratch(
 /// cartridge instead keys low-level RGB from the analogue output path. Keep
 /// explicit chipset transparency too, for software that does use those bits.
 /// MPEG-1 VCD video is 352 pixels wide. The module's video DAC stretches that
-/// active line across the native capture aperture; mapping it to a fixed 704
-/// pixels leaves the remaining raster visible as a one-sided strip whenever
-/// the Amiga key signal is not symmetric. Its field-height rows already match
-/// PAL's 288-line MPEG frame one-for-one.
+/// active line to 704 display pixels within the TV capture aperture. Mapping
+/// it across Copperline's entire deep-overscan framebuffer makes the later TV
+/// sampler crop only the MPEG picture's left edge, visibly pushing any encoded
+/// matte to the right. Its field-height rows already match PAL's 288-line MPEG
+/// frame one-for-one.
 #[cfg(feature = "cd32-fmv")]
 fn compose_cd32_fmv(
     presentation: &crate::cd32_fmv::FmvPresentation,
@@ -5539,9 +5540,11 @@ fn compose_cd32_fmv(
         .then_some(presentation.frame.as_ref())
         .flatten();
     let (target_w, target_h, x0, y0) = frame.map_or((0, 0, 0, 0), |frame| {
-        let width = out_w;
+        let x = crate::video::present_common::TV_CAPTURED_SOURCE_X * canvas_scale;
+        let width = (crate::video::present_common::TV_CAPTURED_WIDTH * canvas_scale)
+            .min(out_w.saturating_sub(x));
         let height = (frame.height as usize).min(rows);
-        (width, height, (out_w - width) / 2, (rows - height) / 2)
+        (width, height, x, (rows - height) / 2)
     });
     for y in 0..rows {
         for x in 0..out_w {
