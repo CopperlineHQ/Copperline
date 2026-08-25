@@ -77,8 +77,41 @@ fn run() -> Result<(), String> {
     let raw = RawConfig::parse(&output)
         .map_err(|e| format!("generated config is invalid TOML: {e:#}"))?;
     if let Err(e) = Config::try_from(raw) {
-        eprintln!("warning: generated config did not validate cleanly: {e}");
-        eprintln!("it has still been written -- fix the reported settings by hand.");
+        // Validation opens the media the config names, so importing on a
+        // host that doesn't hold the source machine's images fails on
+        // files that are merely elsewhere. That is not a mapping bug, and
+        // warning about it on every real import trains the reader to
+        // ignore the warning that does mean one -- so complaints that name
+        // an absent file are separated out from the rest.
+        let absent = absent_media(&outcome.doc, &args.input);
+        let text = format!("{e:#}");
+        let mut unexplained: Vec<&str> = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("- "))
+            .filter(|line| !absent.iter().any(|p| line.contains(p.as_str())))
+            .collect();
+        // A single-error message has no "  - " lines to filter; it is
+        // itself the complaint.
+        let single = unexplained.is_empty() && !text.contains("\n  - ");
+        if single && !absent.iter().any(|p| text.contains(p.as_str())) {
+            unexplained.push(text.as_str());
+        }
+        if !unexplained.is_empty() {
+            eprintln!("warning: generated config did not validate cleanly:");
+            for line in unexplained {
+                eprintln!("  {}", line.trim_start().trim_start_matches("- "));
+            }
+            eprintln!("it has still been written -- fix the reported settings by hand.");
+        } else {
+            // Media checks stop at the first missing file, so this is
+            // "checking got no further", not "everything else is fine".
+            eprintln!(
+                "note: {} file(s) the source config names are not on this host, so checking \
+                 stopped there; copy them across (or fix the paths) and re-run to have the \
+                 rest of the config checked.",
+                absent.len()
+            );
+        }
     }
 
     std::fs::write(&args.output, &output)
@@ -99,6 +132,84 @@ fn run() -> Result<(), String> {
     );
 
     Ok(())
+}
+
+/// Every host path the generated config names that this machine does not
+/// have, resolved the way the emulator that wrote the source would (bare
+/// names live next to the source config, or in its install root's media
+/// folders). Used only to tell "the image is on the other machine" apart
+/// from a real complaint about the generated file.
+fn absent_media(doc: &toml_edit::DocumentMut, source: &std::path::Path) -> Vec<String> {
+    fn paths(item: &toml_edit::Item, out: &mut Vec<String>) {
+        match item {
+            // A drive is either a bare path or a table with one.
+            toml_edit::Item::Value(toml_edit::Value::String(s)) => out.push(s.value().clone()),
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(t)) => {
+                if let Some(p) = t.get("path").and_then(|v| v.as_str()) {
+                    out.push(p.to_string());
+                }
+            }
+            toml_edit::Item::Table(t) => {
+                if let Some(p) = t.get("path").and_then(|v| v.as_str()) {
+                    out.push(p.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut named = Vec::new();
+    if let Some(rom) = doc.get("rom") {
+        paths(rom, &mut named);
+    }
+    // The tables holding host paths, and the keys within them that carry
+    // one; `[floppy]`'s and `[[filesys]]`'s are nested a level deeper.
+    for (section, keys) in [
+        ("cd", &["image"][..]),
+        ("ide", &["master", "slave"]),
+        (
+            "scsi",
+            &[
+                "rom", "rom_odd", "unit0", "unit1", "unit2", "unit3", "unit4", "unit5", "unit6",
+            ],
+        ),
+        (
+            "lide",
+            &["rom", "rom_bank2", "drive0", "drive1", "drive2", "drive3"],
+        ),
+    ] {
+        let Some(table) = doc.get(section) else {
+            continue;
+        };
+        for key in keys {
+            if let Some(item) = table.get(key) {
+                paths(item, &mut named);
+            }
+        }
+    }
+    if let Some(floppy) = doc.get("floppy") {
+        for drive in ["df0", "df1", "df2", "df3"] {
+            if let Some(d) = floppy.get(drive) {
+                paths(d, &mut named);
+            }
+        }
+    }
+    if let Some(toml_edit::Item::ArrayOfTables(mounts)) = doc.get("filesys") {
+        for mount in mounts.iter() {
+            if let Some(p) = mount.get("path").and_then(|v| v.as_str()) {
+                named.push(p.to_string());
+            }
+        }
+    }
+
+    named
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let given = std::path::Path::new(p);
+            !given.exists() && map::resolve_media_path(source, p).is_none()
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {

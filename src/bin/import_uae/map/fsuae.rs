@@ -44,7 +44,9 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     let mut doc = DocumentMut::new();
     let mut report = ImportReport::default();
     let mut seen: HashMap<&str, ()> = HashMap::new();
-    let by_key = |k: &str| entries.iter().find(|e| e.key == k);
+    // Last occurrence wins, as FS-UAE itself applies them: a key restated
+    // further down the file is the one that took effect.
+    let by_key = |k: &str| entries.iter().rev().find(|e| e.key == k);
 
     // --- amiga_model preset, applied first so explicit keys below can
     // override individual axes of it -----------------------------------
@@ -271,7 +273,13 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             );
             continue;
         }
-        if !path.contains('.') {
+        // A drive image is named by its extension, which lives in the last
+        // path component: testing the whole path takes a dotted *parent*
+        // (`~/.fs-uae/hd/System`, `games/v1.2/wb`) for an image and hands a
+        // directory to [ide], where it fails to open as an HDF instead of
+        // being flagged for [[filesys]].
+        let leaf = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        if !leaf.contains('.') {
             report.approximated(
                 &e.key,
                 &e.value,
@@ -415,6 +423,22 @@ mod tests {
         let out = map(&entries);
         assert!(!out.doc.to_string().contains("master ="), "{}", out.doc);
         assert_eq!(out.report.flagged.len(), 1);
+
+        // The extension lives in the last component: a dotted parent
+        // directory (FS-UAE's own ~/.fs-uae, a versioned folder) does not
+        // make the mount a drive image.
+        let entries = crate::parse::parse("hard_drive_0 = /home/me/.fs-uae/hd/System\n");
+        let out = map(&entries);
+        assert!(!out.doc.to_string().contains("master ="), "{}", out.doc);
+        assert_eq!(out.report.flagged.len(), 1);
+
+        // ...and a real image under such a parent still is one.
+        let entries = crate::parse::parse("hard_drive_0 = /home/me/.fs-uae/hd/System.hdf\n");
+        let out = map(&entries);
+        // No machine named, so it lands on SCSI rather than an IDE port
+        // this machine may not have -- attached either way, which is the
+        // point here.
+        assert!(out.doc.to_string().contains("unit0 ="), "{}", out.doc);
     }
 
     #[test]

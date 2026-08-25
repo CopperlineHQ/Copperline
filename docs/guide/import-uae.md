@@ -19,7 +19,10 @@ Copperline has an equivalent for, and **says so, in the file it writes,
 about everything else** -- nothing from the source is dropped silently. The
 result always parses, and is validated exactly the way `copperline
 --config` would load it before being written, so a mistake in the mapping
-surfaces here rather than at the next boot.
+surfaces here rather than at the next boot. That validation opens the media
+the config names, so importing on a machine that does not hold the source's
+images stops at the first missing file and says so as a `note:` -- copy the
+images across (or fix the paths) and re-run to have the rest checked.
 
 ## Reading the result
 
@@ -72,9 +75,10 @@ does the most work:
 | Source | Becomes |
 |---|---|
 | `filesystem2=rw,DH0:Workbench:/path,0` | a `[[filesys]]` host-directory mount |
-| `hardfile2=...,,ide0_alfapower` | a `[lide]` drive |
+| `hardfile2=...,,ide1_alfapower` | `[lide] drive1`, on the AT-Bus 2008 personality |
 | `hardfile2=...,,scsi3` | `[scsi] unit3` |
-| `hardfile2=...,,uae0` | `[ide] master` (see below) |
+| `hardfile2=...,,ide0` / `ide1` | `[ide] master` / `slave` |
+| `hardfile2=...,,uae0` | the first free `[ide]` slot (see below) |
 | FS-UAE `hard_drive_0` + `_controller` | `[ide]` or `[scsi]`, per the controller |
 | FS-UAE `floppy_image_0..N` | a `[floppy.df0] paths` swap list |
 
@@ -90,6 +94,19 @@ was fine in WinUAE can fail to mount here. AmigaVision's ~10GB drive is
 exactly this case. Where the converter can find the image it says how big
 it is; either way it points at [`[lide]`](configuration.md), whose modern
 `lide.device` autoboots large drives under any Kickstart including 1.3.
+
+**A drive's unit number is its port, not its position in the file.** WinUAE
+numbers the built-in IDE 0-3 (two channels); `ide0` and `ide1` are the
+Amiga's own port as master and slave, which is all `[ide]` has, so a
+hardfile on unit 2 or 3 is flagged for `[scsi]` or `[lide]` rather than
+quietly taking a port that is already spoken for. The same number picks the
+`[lide]` slot for a board drive.
+
+**Read-only hardfiles come across writable.** Copperline's hard-drive ports
+have no per-image write protection, so a `ro` `hardfile2` is listed as
+unsupported and the guest can write to the image; protect the file at the
+host filesystem if that matters. Directory mounts are unaffected --
+`[[filesys]]` has its own `readonly`.
 
 **Relative paths are not rewritten.** Emulators resolve them against their
 own install directories, which Copperline does not share, so a config full

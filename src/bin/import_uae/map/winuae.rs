@@ -14,7 +14,11 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     let mut doc = DocumentMut::new();
     let mut report = ImportReport::default();
     let mut seen: HashMap<&str, ()> = HashMap::new();
-    let by_key = |k: &str| entries.iter().find(|e| e.key == k);
+    // Last occurrence wins: UAE applies config lines in order, so a key
+    // restated further down (a merged or hand-appended config) is the one
+    // that took effect. `parse` deliberately keeps duplicates, and taking
+    // the first would import the stale value with nothing said about it.
+    let by_key = |k: &str| entries.iter().rev().find(|e| e.key == k);
     // Several settings have more than one spelling in the wild: WinUAE's
     // own name and the one Amiberry actually writes. Real Amiberry configs
     // carry `rtc=`/`cpu_model=`, not the `cs_rtc=`/`cpu_type=` this mapper
@@ -136,16 +140,16 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                 Some(0) => {}
                 Some(bytes) => {
                     let size = bytes_to_size(bytes);
-                    let size = if section == "chip" {
-                        let (clamped, clamp_note) = clamp_chip_mb(&size);
-                        if let Some(clamp_note) = clamp_note {
-                            annotate(&mut doc, &["memory"], section, &clamp_note);
-                        }
-                        clamped
+                    let (size, clamp_note) = if section == "chip" {
+                        clamp_chip_mb(&size)
                     } else {
-                        size
+                        (size, None)
                     };
                     set_str(&mut doc, &["memory"], section, &size);
+                    // After set_str: annotate needs the key to exist already.
+                    if let Some(clamp_note) = clamp_note {
+                        annotate(&mut doc, &["memory"], section, &clamp_note);
+                    }
                 }
                 None => report.approximated(
                     &e.key,
@@ -183,11 +187,17 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             Err(_) => report.unsupported(&e.key, &e.value, "unrecognized floppy speed"),
         }
     }
+    // WinUAE stores this as *attenuation*, not loudness: driveclick.cpp
+    // mixes the sample as `smp * (100 - vol) / 100` and the GUI slider
+    // shows `100 - vol`, so 0 is a full-volume drive and 100 a silent one.
+    // Copperline's floppy_sounds_volume is the loudness the slider shows,
+    // so the two are mirror images and copying the number across would
+    // import a silent drive as a loud one and back.
     if let Some(e) = by_key("floppy_volume") {
         seen.insert(&e.key, ());
         match e.value.trim().parse::<i64>() {
             Ok(vol) if (0..=100).contains(&vol) => {
-                table(&mut doc, &["audio"])["floppy_sounds_volume"] = toml_edit::value(vol);
+                table(&mut doc, &["audio"])["floppy_sounds_volume"] = toml_edit::value(100 - vol);
             }
             _ => report.unsupported(&e.key, &e.value, "expected an integer 0-100"),
         }
@@ -680,6 +690,17 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                          (its boot code lives in the machine ROM); only \"controller\" was set",
                     );
                 }
+            } else if e.value.trim().eq_ignore_ascii_case(":ENABLED") {
+                // The same "fitted, no ROM file chosen" sentinel the A3000
+                // and Toccata keys use; writing it through as a path would
+                // send Copperline looking for a file called ":ENABLED".
+                annotate(
+                    &mut doc,
+                    &["scsi"],
+                    "controller",
+                    "the source fitted this adapter with no ROM image selected; set [scsi] rom \
+                     to a dump of the board's boot ROM if you want it to autoboot",
+                );
             } else {
                 set_str(&mut doc, &["scsi"], "rom", &e.value);
             }
@@ -736,7 +757,19 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                 "ripple"
             };
             set_str(&mut doc, &["lide"], "board", board);
-            set_str(&mut doc, &["lide"], "rom", &e.value);
+            // ":ENABLED" is the board-fitted-without-a-ROM sentinel, not a
+            // filename (the same convention the SCSI and Toccata keys use).
+            if e.value.trim().eq_ignore_ascii_case(":ENABLED") {
+                annotate(
+                    &mut doc,
+                    &["lide"],
+                    "board",
+                    "the source fitted this board with no ROM image selected; without [lide] \
+                     rom the board works but does not autoboot",
+                );
+            } else {
+                set_str(&mut doc, &["lide"], "rom", &e.value);
+            }
         }
         (None, None) => {}
     }
@@ -845,9 +878,15 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     if let Some(e) = by_key("cdimage0") {
         seen.insert(&e.key, ());
         let value = e.value.trim();
+        // Only split off a trailing field that really is the drive's state
+        // flag: a comma is a legal character in a host path, and treating
+        // the tail of `/discs/Amiga, The Best.iso` as a flag would write a
+        // truncated path out with nothing said about it.
         let (path, flag) = match value.rsplit_once(',') {
-            Some((path, flag)) => (path, Some(flag.trim())),
-            None => (value, None),
+            Some((path, flag)) if matches!(flag.trim(), "disabled" | "enabled" | "") => {
+                (path, Some(flag.trim()))
+            }
+            _ => (value, None),
         };
         if path.is_empty() {
             // An empty entry is just "no disc", not something to report.
@@ -932,12 +971,14 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     //
     // The controller decides the destination. `uaeN` is WinUAE's own
     // virtual controller, which has no counterpart -- those become plain
-    // IDE drives, the closest real thing. `ideN`/`scsiN` go where they say.
-    // An `ide0_alfapower`/`ide0_ripple` names one of the lide.device boards
-    // Copperline models as `[lide]`, which only became expressible per slot
-    // with `[lide] drive0..drive3`.
+    // IDE drives, the closest real thing. `ideN`/`scsiN` go where they say:
+    // the trailing number is the unit on that controller (WinUAE's
+    // get_filesys_controller), so `ide1` is the first channel's slave and
+    // not "the second hardfile in the file". An `ideN_alfapower` /
+    // `ideN_ripple` names one of the lide.device boards Copperline models
+    // as `[lide]`, which only became expressible per slot with
+    // `[lide] drive0..drive3`; the unit is the slot there too.
     let mut ide_next = 0usize;
-    let mut lide_next = 0usize;
     for e in entries.iter().filter(|e| e.key == "hardfile2") {
         seen.insert(&e.key, ());
         let Some(hf) = parse_hardfile2(&e.value) else {
@@ -949,38 +990,110 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             continue;
         };
         let controller = hf.controller.to_ascii_lowercase();
+        if hf.readonly {
+            report.unsupported(
+                &e.key,
+                &e.value,
+                "this hardfile was write-protected in the source; Copperline's hard-drive \
+                 ports have no read-only flag, so the guest can write to the image -- \
+                 protect it at the host filesystem if that matters",
+            );
+        }
         let drive = hardfile_drive_value(&hf);
-        if controller.contains("alfapower") || controller.contains("ripple") {
-            // The ROM key (if any) already picked the personality; this
-            // only adds the drive to whichever slot is next free.
-            if lide_next < 4 {
-                table(&mut doc, &["lide"])[&format!("drive{lide_next}")] = drive;
-                lide_next += 1;
+        // `ide1_ripple` is unit 1 of a RIPPLE board: the board name (if
+        // any) rides behind an underscore, the unit in front of it.
+        let (port, board) = match controller.split_once('_') {
+            Some((port, board)) => (port, Some(board)),
+            None => (controller.as_str(), None),
+        };
+        let unit = |prefix: &str| {
+            port.strip_prefix(prefix)
+                .and_then(|n| n.parse::<usize>().ok())
+        };
+        let lide_board = match board {
+            // "alfapower" covers AlfaPower Plus too; both are the AT-Bus
+            // 2008 personality, the same one alfapower_rom_file selects.
+            Some(b) if b.contains("alfapower") => Some("atbus2008"),
+            Some(b) if b.contains("ripple") => Some("ripple"),
+            _ => None,
+        };
+        if let Some(lide_board) = lide_board {
+            let slot = unit("ide").unwrap_or(0);
+            if slot < 4 {
+                table(&mut doc, &["lide"])[&format!("drive{slot}")] = drive;
+                // Which board this is only reached the config through the
+                // board's own ROM key before; with no ROM in the source,
+                // [lide] defaulted to RIPPLE and an AlfaPower drive landed
+                // on the wrong personality (different channel layout).
+                let lide = table(&mut doc, &["lide"]);
+                let named_board = lide.get("board").is_some();
+                let named_rom = lide.get("rom").is_some();
+                if !named_board {
+                    lide["board"] = toml_edit::value(lide_board);
+                }
+                if !named_board && !named_rom {
+                    annotate(
+                        &mut doc,
+                        &["lide"],
+                        "board",
+                        &format!(
+                            "inferred from the hardfile2 controller ({controller}); the source \
+                             named no board ROM, so this board autoboots only once [lide] rom \
+                             points at one"
+                        ),
+                    );
+                }
             } else {
                 report.unsupported(&e.key, &e.value, "a lide board has at most four drives");
             }
-        } else if let Some(unit) = controller
-            .strip_prefix("scsi")
-            .and_then(|n| n.parse::<usize>().ok())
-        {
+        } else if let Some(unit) = unit("scsi") {
             if unit < 7 {
                 table(&mut doc, &["scsi"])[&format!("unit{unit}")] = drive;
             } else {
                 report.unsupported(&e.key, &e.value, "Copperline's [scsi] has units 0-6");
             }
-        } else {
-            match ide_next {
-                0 => table(&mut doc, &["ide"])["master"] = drive,
-                1 => table(&mut doc, &["ide"])["slave"] = drive,
-                _ => {
-                    report.approximated(
-                        &e.key,
-                        &e.value,
-                        "Copperline's [ide] has only master and slave; put the rest on [scsi] \
-                         or [lide] by hand",
-                    );
-                    continue;
+        } else if let Some(unit) = unit("ide") {
+            // WinUAE numbers the built-in IDE 0-3 (two channels); the
+            // Amiga's own Gayle/A4000 port, which is what [ide] is, has
+            // only the one channel.
+            match unit {
+                0 | 1 => {
+                    if !place_ide(&mut doc, unit, drive) {
+                        report.unsupported(
+                            &e.key,
+                            &e.value,
+                            format!(
+                                "another hardfile already took IDE unit {unit}; \
+                                 attach this one by hand"
+                            ),
+                        );
+                    }
                 }
+                _ => report.approximated(
+                    &e.key,
+                    &e.value,
+                    format!(
+                        "the source puts this on IDE unit {unit} (a second channel); \
+                         Copperline's [ide] is the machine's own port, master and slave only \
+                         -- put it on [scsi] or [lide] by hand"
+                    ),
+                ),
+            }
+        } else {
+            // A controller with no real counterpart (`uaeN`, or a name this
+            // mapper doesn't know): fill the first [ide] slot an explicit
+            // `ideN` drive hasn't already claimed.
+            while ide_next < 2 && !place_ide(&mut doc, ide_next, drive.clone()) {
+                ide_next += 1;
+            }
+            if ide_next >= 2 {
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "Copperline's [ide] has only master and slave; put the rest on [scsi] \
+                     or [lide] by hand",
+                );
+                continue;
             }
             ide_next += 1;
             if controller.starts_with("uae") {
@@ -1168,6 +1281,34 @@ mod tests {
     }
 
     #[test]
+    fn chip_ram_past_the_ceiling_is_clamped_with_the_reason_in_the_file() {
+        // The clamp is a real change to the machine, so the comment has to
+        // survive into the output -- an unexplained `chip = "2M"` reads as
+        // what the source asked for.
+        let out = convert("chipmem_size=8\n");
+        assert!(out.contains(r#"chip = "2M""#), "{out}");
+        assert!(out.contains("clamped"), "{out}");
+    }
+
+    #[test]
+    fn a_read_only_hardfile_says_the_protection_is_gone() {
+        // Copperline's drive ports are always writable; importing the image
+        // silently would hand the guest write access the source refused it.
+        let entries = crate::parse::parse("hardfile2=ro,DH0:/hd/ro.hdf,32,1,2,512,0,,ide0\n");
+        let out = map(&entries, std::path::Path::new("test.uae"));
+        let doc = out.doc.to_string();
+        assert!(doc.contains("/hd/ro.hdf"), "{doc}");
+        assert!(
+            out.report
+                .flagged
+                .iter()
+                .any(|f| f.source_key == "hardfile2" && f.note.contains("write-protected")),
+            "{:?}",
+            out.report.flagged
+        );
+    }
+
+    #[test]
     fn zero_sized_expansions_are_left_out_entirely() {
         // "none fitted" is the absence of the key, not `fast = "0M"`.
         let out = convert("fastmem_size=0\nbogomem_size=0\nz3mem_size=0\nmbresmem_size=0\n");
@@ -1246,6 +1387,93 @@ mod tests {
         // allocated in arrival order.
         let out = convert("hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,scsi3\n");
         assert!(out.contains(r#"unit3 = "/hd/a.hdf""#), "{out}");
+    }
+
+    #[test]
+    fn an_ide_unit_number_is_the_port_it_names_not_arrival_order() {
+        // `ideN` is the unit on the controller, so a lone `ide1` drive is
+        // the slave and two drives listed ide1-then-ide0 keep their ports.
+        let out = convert("hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,ide1\n");
+        assert!(out.contains(r#"slave = "/hd/a.hdf""#), "{out}");
+        assert!(!out.contains("master ="), "{out}");
+
+        let out = convert(
+            "hardfile2=rw,DH1:/hd/b.hdf,0,0,0,512,0,,ide1\n\
+             hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,ide0\n",
+        );
+        assert!(out.contains(r#"master = "/hd/a.hdf""#), "{out}");
+        assert!(out.contains(r#"slave = "/hd/b.hdf""#), "{out}");
+
+        // The second channel has no [ide] equivalent: said, not silently
+        // folded onto a port that is already taken.
+        let entries = crate::parse::parse("hardfile2=rw,DH0:/hd/c.hdf,0,0,0,512,0,,ide2\n");
+        let out = map(&entries, std::path::Path::new("test.uae"));
+        assert!(!out.doc.to_string().contains("[ide]"), "{}", out.doc);
+        assert!(out.report.flagged[0].note.contains("second channel"));
+    }
+
+    #[test]
+    fn a_lide_drive_names_the_board_it_came_off() {
+        // Without this the [lide] section defaults to RIPPLE, so an
+        // AlfaPower drive silently lands on the wrong personality.
+        let out = convert("hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,ide2_alfapower\n");
+        assert!(out.contains(r#"board = "atbus2008""#), "{out}");
+        assert!(out.contains(r#"drive2 = "/hd/a.hdf""#), "{out}");
+
+        // A board ROM key already picked the personality; the drive must
+        // not second-guess it.
+        let out = convert(
+            "ripple_rom_file=/roms/lide.rom\n\
+             hardfile2=rw,DH0:/hd/a.hdf,0,0,0,512,0,,ide0_ripple\n",
+        );
+        assert!(out.contains(r#"board = "ripple""#), "{out}");
+        assert!(out.contains(r#"drive0 = "/hd/a.hdf""#), "{out}");
+    }
+
+    #[test]
+    fn a_hardfile_path_may_contain_a_comma() {
+        // The fields are positional, so counting from the front would cut
+        // the path at the comma and read a geometry number as the rest.
+        let out = convert("hardfile2=rw,DH0:/hd/Amiga, The Best.hdf,32,1,2,512,-128,,ide0\n");
+        assert!(
+            out.contains(r#"master = { path = "/hd/Amiga, The Best.hdf", bootpri = -128 }"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_cd_image_path_may_contain_a_comma() {
+        let out = convert("cdimage0=/discs/Amiga, The Best.iso\n");
+        assert!(
+            out.contains(r#"image = "/discs/Amiga, The Best.iso""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn floppy_volume_is_attenuation_and_comes_back_the_other_way_up() {
+        // WinUAE mixes the click as `smp * (100 - vol) / 100`: 0 is a
+        // full-volume drive, 100 a silent one. Copying the number through
+        // would import silence as maximum loudness.
+        assert!(convert("floppy_volume=0\n").contains("floppy_sounds_volume = 100"));
+        assert!(convert("floppy_volume=100\n").contains("floppy_sounds_volume = 0"));
+    }
+
+    #[test]
+    fn an_enabled_sentinel_is_a_fitted_board_not_a_rom_filename() {
+        let out = convert("a2091_rom_file=:ENABLED\n");
+        assert!(out.contains(r#"controller = "a2091""#), "{out}");
+        assert!(!out.contains(":ENABLED"), "{out}");
+
+        let out = convert("ripple_rom_file=:ENABLED\n");
+        assert!(out.contains(r#"board = "ripple""#), "{out}");
+        assert!(!out.contains("rom ="), "{out}");
+    }
+
+    #[test]
+    fn a_restated_key_imports_the_value_that_took_effect() {
+        // UAE applies its config lines in order, so the later line wins.
+        assert!(convert("chipmem_size=1\nchipmem_size=2\n").contains(r#"chip = "1M""#));
     }
 
     #[test]
@@ -1349,34 +1577,59 @@ fn parse_hardfile2(value: &str) -> Option<Hardfile2> {
     if fields.len() < 7 {
         return None;
     }
-    let spec = fields[1];
+    // The full form is access, spec, sectors, surfaces, reserved,
+    // blocksize, bootpri, filesys, controller: seven fields behind the
+    // spec. A host path with a comma in it splits into extra fields, so
+    // the spec is measured from the back, where the count is fixed --
+    // counting from the front would shift every field after the path and
+    // silently produce a truncated path with a geometry number appended.
+    let (spec, bootpri) = if fields.len() >= 9 {
+        let spec_end = fields.len() - 7;
+        (fields[1..spec_end].join(","), fields[spec_end + 4])
+    } else {
+        (fields[1].to_string(), fields[6])
+    };
     // `DH0:/path/to.hdf` -- the device name, then the host path. A Windows
     // path's own drive letter colon is why this takes the *first* colon
     // only and leaves the rest alone.
-    let path = spec.split_once(':').map(|(_, p)| p).unwrap_or(spec);
+    let path = spec.split_once(':').map(|(_, p)| p).unwrap_or(&spec);
     if path.is_empty() {
         return None;
     }
     Some(Hardfile2 {
         path: path.to_string(),
-        bootpri: fields[6].trim().parse().unwrap_or(0),
+        bootpri: bootpri.trim().parse().unwrap_or(0),
         readonly: fields[0].trim().eq_ignore_ascii_case("ro"),
         controller: fields.last().unwrap_or(&"").trim().to_string(),
     })
 }
 
+/// Put a drive in `[ide] master` (slot 0) or `slave` (slot 1), reporting
+/// whether the slot was free. Two claimants share these two slots --
+/// explicit `ideN` units and `uae` hardfiles falling back to the closest
+/// real port -- so an occupied slot is something to say, not to overwrite.
+fn place_ide(doc: &mut DocumentMut, slot: usize, drive: toml_edit::Item) -> bool {
+    let key = if slot == 0 { "master" } else { "slave" };
+    let ide = table(doc, &["ide"]);
+    if ide.get(key).is_some() {
+        return false;
+    }
+    ide[key] = drive;
+    true
+}
+
 /// A drive as `[ide]`/`[scsi]`/`[lide]` take it: a bare path when there is
-/// nothing else to say, or an inline table when a boot priority or
-/// read-only flag has to ride along.
+/// nothing else to say, or an inline table when a boot priority has to ride
+/// along. A read-only hardfile has no equivalent here -- `[ide]`/`[scsi]`
+/// drives are always writable -- so the flag is reported at the call site
+/// rather than quietly discarded.
 fn hardfile_drive_value(hf: &Hardfile2) -> toml_edit::Item {
-    if hf.bootpri == 0 && !hf.readonly {
+    if hf.bootpri == 0 {
         return toml_edit::value(hf.path.as_str());
     }
     let mut t = toml_edit::InlineTable::new();
     t.insert("path", hf.path.as_str().into());
-    if hf.bootpri != 0 {
-        t.insert("bootpri", i64::from(hf.bootpri).into());
-    }
+    t.insert("bootpri", i64::from(hf.bootpri).into());
     toml_edit::value(t)
 }
 
