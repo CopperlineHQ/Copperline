@@ -92,19 +92,27 @@ pub fn find_bundled_a4091() -> Option<PathBuf> {
         .find(|rom| rom.is_file())
 }
 
-/// Bundled open-source lide.device autoboot ROM and its CD-filesystem
-/// second bank, used when a `[lide]` board is fitted without naming ROMs of
-/// its own. From https://github.com/LIV2/lide.device . `lide.rom` also
-/// serves `board = "atbus2008"`: the odd-lane byte placement AT-Bus 2008
-/// needs is handled in `ide_zorro.rs`, not by different ROM content.
+/// Bundled open-source lide.device autoboot ROMs and CD-filesystem second
+/// bank, used when a `[lide]` board is fitted without naming ROMs of its
+/// own. From https://github.com/LIV2/lide.device . RIPPLE and RIDE share
+/// `lide.rom`; AT-Bus 2008 needs its own `lide-atbus.rom` -- the two are
+/// built from different linker scripts (`rom.ld` puts a 4-byte "LIV2"
+/// header before the bootloader; `atbusrom.ld` starts the bootloader
+/// straight at offset 0), matching the different `diag_vec` Copperline's
+/// own `zorro::BoardSpec::lide` already uses per personality (0x0008 vs
+/// 0x0001) -- not merely a byte-lane placement difference.
 pub const LIDE_ROM_FILE: &str = "lide.rom";
+/// AT-Bus 2008's own boot ROM build (bootloader at offset 0, no header).
+pub const LIDE_ATBUS_ROM_FILE: &str = "lide-atbus.rom";
 /// CD-filesystem second flash bank (RIPPLE/RIDE only).
 pub const LIDE_CDFS_ROM_FILE: &str = "cdfs.rom";
 
-/// A located pair of bundled lide ROM files. `cdfs` is `None` when only the
-/// primary ROM is installed (a lide/ directory carrying just `lide.rom`).
+/// A located set of bundled lide ROM files. `atbus`/`cdfs` are `None` when
+/// only the files a particular install actually carries are present (e.g. a
+/// lide/ directory shipping just `lide.rom` and `cdfs.rom`).
 pub struct BundledLide {
     pub rom: PathBuf,
+    pub atbus: Option<PathBuf>,
     pub cdfs: Option<PathBuf>,
 }
 
@@ -131,9 +139,11 @@ pub fn find_bundled_lide() -> Option<BundledLide> {
     dirs.into_iter().find_map(|dir| {
         let rom = dir.join(LIDE_ROM_FILE);
         rom.is_file().then(|| {
+            let atbus = dir.join(LIDE_ATBUS_ROM_FILE);
             let cdfs = dir.join(LIDE_CDFS_ROM_FILE);
             BundledLide {
                 rom,
+                atbus: atbus.is_file().then_some(atbus),
                 cdfs: cdfs.is_file().then_some(cdfs),
             }
         })

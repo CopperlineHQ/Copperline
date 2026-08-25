@@ -49,9 +49,11 @@ pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
 
 /// Sentinel `[lide] rom` for a board fitted (an explicit `board`, or a drive
-/// image) without a named ROM: resolve to the bundled `lide.rom`, or fail.
-/// A real `rom = "..."` replaces it; `rom = ""` opts out and keeps the board
-/// in hardware-only mode.
+/// image) without a named ROM: resolve to the bundled ROM for that board's
+/// personality (`lide.rom` for RIPPLE/RIDE, `lide-atbus.rom` for AT-Bus
+/// 2008 -- the two are not interchangeable), or fail. A real `rom = "..."`
+/// replaces it; `rom = ""` opts out and keeps the board in hardware-only
+/// mode.
 pub const BUNDLED_LIDE_ROM: &str = "<bundled-lide>";
 
 /// Sentinel `[lide] rom_bank2` alongside [`BUNDLED_LIDE_ROM`]: resolve to the
@@ -232,8 +234,9 @@ pub struct Config {
     pub scsi: ScsiConfig,
     /// `lide.device`-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
     /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Drives
-    /// may be hard disks or ATAPI CD-ROMs; the boot ROM is always
-    /// user-supplied.
+    /// may be hard disks or ATAPI CD-ROMs. A fitted board with no ROM named
+    /// defaults to the bundled one for its personality (`rom = ""` opts
+    /// out into hardware-only mode).
     pub lide: LideConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
@@ -1189,8 +1192,10 @@ impl ScsiConfig {
 
 /// `[lide]`: a built-in Zorro II IDE board compatible with LIV2's
 /// `lide.device`. Drives may be hard disks or ATAPI CD-ROMs. A fitted board
-/// with no ROM named defaults to the bundled `lide.rom`/`cdfs.rom`
-/// (`rom = ""` opts out and keeps the board in hardware-only mode).
+/// with no ROM named defaults to the bundled ROM for its personality
+/// (`lide.rom` for RIPPLE/RIDE, `lide-atbus.rom` for AT-Bus 2008, plus
+/// `cdfs.rom` on RIPPLE/RIDE) -- `rom = ""` opts out and keeps the board in
+/// hardware-only mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LideConfig {
     /// Which of the three AutoConfig identities the board presents. Only

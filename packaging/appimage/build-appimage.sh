@@ -74,6 +74,8 @@ install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt \
 # romsearch.rs looks under share/copperline/lide.
 install -Dm644 assets/lide/lide.rom \
   "$appdir/usr/share/copperline/lide/lide.rom"
+install -Dm644 assets/lide/lide-atbus.rom \
+  "$appdir/usr/share/copperline/lide/lide-atbus.rom"
 install -Dm644 assets/lide/cdfs.rom \
   "$appdir/usr/share/copperline/lide/cdfs.rom"
 install -Dm644 assets/lide/README.md \

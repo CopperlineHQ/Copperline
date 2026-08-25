@@ -55,6 +55,7 @@
 !/assets/hostsocket/hostsocket_rom.bin
 !/assets/a4091/a4091_cdfs.rom
 !/assets/lide/lide.rom
+!/assets/lide/lide-atbus.rom
 !/assets/lide/cdfs.rom
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,

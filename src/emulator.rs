@@ -2573,9 +2573,10 @@ pub fn build_machine(
         devices.push(device);
     }
     // A lide.device-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
-    // or AT-Bus 2008. Drives may be hard disks or ATAPI CD-ROMs; the boot
-    // ROM is always user-supplied (never bundled), and its absence is a
-    // legal hardware-only mode.
+    // or AT-Bus 2008. Drives may be hard disks or ATAPI CD-ROMs; a fitted
+    // board with no rom named defaults to the bundled ROM for its
+    // personality (resolve_bundled_rom), and rom = "" is a legal
+    // hardware-only mode.
     if cfg.lide.enabled() {
         let slot = devices.len();
         let has_rom = cfg.lide.rom.is_some();

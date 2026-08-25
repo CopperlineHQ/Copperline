@@ -8,9 +8,10 @@
 //! family, one channel). Drives may be hard disks or ATAPI CD-ROMs, either a
 //! `.cue`/`.iso`/`.nrg`/`.chd` image on any `[lide] drives` slot or a real host
 //! block device attached via `[[host_disk]] attach = "lide0-master"` (etc).
-//! The boot ROM is always user-supplied (a `lide.rom` / `lide-atbus.rom`
-//! release image from <https://github.com/LIV2/lide.device>) -- nothing is
-//! bundled or distributed.
+//! A fitted board with no `rom` named defaults to Copperline's own bundled
+//! ROM for its personality (`lide.rom` for RIPPLE/RIDE, `lide-atbus.rom`
+//! for AT-Bus 2008 -- the two are different builds, not interchangeable;
+//! `src/config/resolve.rs`); `rom = ""` opts out into hardware-only mode.
 //!
 //! ## Register map (from the LIV2 CPLD RTL)
 //!

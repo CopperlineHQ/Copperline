@@ -74,7 +74,7 @@ foreach ($f in @("a4091_cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
 # romsearch.rs probes a sibling lide\ next to the exe.
 $lideDir = Join-Path $stage "lide"
 New-Item -ItemType Directory -Force -Path $lideDir | Out-Null
-foreach ($f in @("lide.rom", "cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
+foreach ($f in @("lide.rom", "lide-atbus.rom", "cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
     Copy-Item (Join-Path "assets\lide" $f) (Join-Path $lideDir $f)
 }
 

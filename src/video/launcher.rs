@@ -4526,10 +4526,15 @@ impl MachineSetup {
             F::ScsiRom if self.scsi_controller_is_a4091() => {
                 self.path_label(field, "(bundled A4091 ROM)")
             }
-            // A fitted lide board defaults to the bundled lide.rom/cdfs.rom;
-            // rom = "" (hardware-only mode) has no field of its own to hold
-            // the path, so it borrows this row's placeholder text instead.
+            // A fitted lide board defaults to a bundled ROM: lide.rom for
+            // RIPPLE/RIDE, lide-atbus.rom for AT-Bus 2008 -- not the same
+            // file. rom = "" (hardware-only mode) has no field of its own
+            // to hold the path, so it borrows this row's placeholder text
+            // instead.
             F::LideRom if self.lide_rom_disabled => "(hardware-only, no ROM)".to_string(),
+            F::LideRom if self.lide_board == Some(LidePersonality::AtBus2008) => {
+                self.path_label(field, "(bundled lide-atbus.rom)")
+            }
             F::LideRom => self.path_label(field, "(bundled lide.rom)"),
             F::LideRomBank2 if self.lide_rom_bank2_disabled => "(none)".to_string(),
             F::LideRomBank2 => self.path_label(field, "(bundled cdfs.rom)"),

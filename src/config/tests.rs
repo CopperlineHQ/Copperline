@@ -2742,9 +2742,10 @@ fn lide_without_rom_defaults_to_the_bundled_roms() -> Result<()> {
     assert!(cfg.lide.enabled());
     assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new(BUNDLED_LIDE_ROM)));
 
-    // AT-Bus 2008 gets the bundled primary ROM too (the odd-lane placement
-    // is handled by ide_zorro.rs, not by different ROM content), but never
-    // the CD-filesystem bank: that board has no flash banking to put it in.
+    // AT-Bus 2008 also defaults to a bundled ROM (still the sentinel at
+    // this stage -- board only decides which real file resolution picks),
+    // but never the CD-filesystem bank: that board has no flash banking to
+    // put it in.
     let cfg = parse_config(
         r#"
             [lide]
@@ -2755,7 +2756,8 @@ fn lide_without_rom_defaults_to_the_bundled_roms() -> Result<()> {
     assert_eq!(cfg.lide.rom.as_deref(), Some(Path::new(BUNDLED_LIDE_ROM)));
     assert!(cfg.lide.rom_bank2.is_none());
 
-    // Resolution finds the ROMs bundled in the source tree (assets/lide).
+    // Resolution finds the ROMs bundled in the source tree (assets/lide),
+    // and RIPPLE/RIDE resolve to lide.rom.
     let mut cfg = parse_config(
         r#"
             [lide]
@@ -2771,6 +2773,30 @@ fn lide_without_rom_defaults_to_the_bundled_roms() -> Result<()> {
     assert!(
         cdfs.ends_with(crate::romsearch::LIDE_CDFS_ROM_FILE),
         "{cdfs:?}"
+    );
+
+    // AT-Bus 2008 resolves to its own build, lide-atbus.rom, not lide.rom --
+    // the two are different linker layouts (a leading "LIV2" header vs the
+    // bootloader at offset 0), matching the different diag_vec
+    // BoardSpec::lide already uses per personality. Getting this wrong
+    // means an AT-Bus 2008 board that fails to autoboot from the wrong
+    // image, not a working substitute.
+    let mut cfg = parse_config(
+        r#"
+            [lide]
+            board = "atbus2008"
+            drives = ["dh0.hdf"]
+            "#,
+    )?;
+    resolve_bundled_rom(&mut cfg)?;
+    let rom = cfg.lide.rom.as_deref().expect("resolved lide-atbus rom");
+    assert!(
+        rom.ends_with(crate::romsearch::LIDE_ATBUS_ROM_FILE),
+        "{rom:?}"
+    );
+    assert!(
+        cfg.lide.rom_bank2.is_none(),
+        "no flash banking on AT-Bus 2008"
     );
 
     // An explicit rom still wins, and an explicit empty string opts all the

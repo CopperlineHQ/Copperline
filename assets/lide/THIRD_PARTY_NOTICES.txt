@@ -9,13 +9,13 @@ Upstream release: https://github.com/LIV2/lide.device/releases/tag/Release-40.12
 Upstream release asset:
 https://github.com/LIV2/lide.device/releases/download/Release-40.12/lide.rom
 Upstream source commit: a387f65b3a0b9a206674c1a391365ea9f9d39e90
-SHA-256: e151f10b75678537ab93144d80c26bf3dde2aabad1305d64428f95974b893b
+SHA-256: e151f10b75678537ab93144d80c26bf3dde2aabad1305d64428f95974b893b37
 
 File: cdfs.rom
 Upstream release: same as above (fetched by lide.device's own release build)
 Upstream release asset:
 https://github.com/LIV2/lide.device/releases/download/Release-40.12/cdfs.rom
-SHA-256: cccd66446120d274c40b15d352c94786421bb405b48c950b2e9818335e27c1
+SHA-256: cccd66446120d274c40b15d352c94786421bb405b48c950b2e9818335e27c138
 
 Both are unmodified upstream release artifacts.
 

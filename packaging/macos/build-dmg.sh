@@ -104,7 +104,7 @@ done
 # Bundled open-source lide.device autoboot ROM and CD-filesystem bank
 # (default for a fitted [lide] board without a named rom/rom_bank2);
 # romsearch.rs resolves Contents/Resources/lide.
-for f in lide.rom cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
+for f in lide.rom lide-atbus.rom cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
   cp "assets/lide/$f" "$app/Contents/Resources/lide/$f"
 done
 

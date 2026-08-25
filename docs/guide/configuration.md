@@ -1695,15 +1695,15 @@ it; a named key wins over the same slot in the array, and saving from the
 launcher rewrites a config to the named form.
 
 A fitted board (an explicit `board`, or a drive image) with no `rom`
-defaults to Copperline's bundled `lide.rom` -- the CIDER/RIPPLE/RIDE build
-from [lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases),
-which also covers `"atbus2008"` here: the odd-byte-lane placement that
-board's own release build handles by repeating the same ROM content to fill
-a larger physical flash chip is handled internally by Copperline's
-emulation instead, so one bundled image serves all three personalities. Set
-`rom = ""` to opt back out into **hardware-only mode**: no DiagArea, no
-autoboot, but drives still work once a disk-loaded `lide.device` finds them
--- the same setup lide's own CI uses to test in-development driver builds
+defaults to a Copperline-bundled ROM from
+[lide.device's GitHub releases page](https://github.com/LIV2/lide.device/releases):
+`"ripple"`/`"ride"` get the CIDER/RIPPLE/RIDE build (`lide.rom`),
+`"atbus2008"` gets its own `lide-atbus.rom` -- the two are different linker
+layouts, not interchangeable, so which board is fitted picks which bundled
+file resolves. Set `rom = ""` to opt back out into **hardware-only mode**:
+no DiagArea, no autoboot, but drives still work once a disk-loaded
+`lide.device` finds them -- the same setup lide's own CI uses to test
+in-development driver builds
 without flashing anything. `rom_bank2` (a second flash bank, e.g. LIV2's
 `cdfs.rom` CD filesystem) defaults the same way alongside a fitted `rom`,
 except on `"atbus2008"`, which has no ROM banking and is never offered one;

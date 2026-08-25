@@ -95,6 +95,8 @@ modules:
       # romsearch.rs resolves it via <prefix>/share/copperline/lide.
       - install -Dm644 assets/lide/lide.rom
         -t ${FLATPAK_DEST}/share/copperline/lide/
+      - install -Dm644 assets/lide/lide-atbus.rom
+        -t ${FLATPAK_DEST}/share/copperline/lide/
       - install -Dm644 assets/lide/cdfs.rom
         -t ${FLATPAK_DEST}/share/copperline/lide/
       - install -Dm644 assets/lide/README.md

@@ -241,16 +241,18 @@ and no banking: its image sits on the odd lane across the whole window,
 always. None of the three boards wire an interrupt line -- `lide.device`
 is a purely polling driver.
 
-A fitted board with no `rom`/`rom_bank2` named defaults to Copperline's
-bundled `assets/lide/lide.rom` and `cdfs.rom` (`src/config/resolve.rs`,
-`resolve_bundled_lide_rom`), the same `lide.rom` LIV2's GitHub releases ship
-for RIPPLE/RIDE -- also served here for `atbus2008`, since `rom_lane_odd`
-already handles that personality's odd-lane placement in software, the only
-real difference from `lide-atbus.rom`'s own build (which instead repeats the
-same content to fill a larger physical flash chip). `rom = ""` opts out
-into hardware-only mode: no DiagArea, no autoboot, `diag_vec` absent from
-the `BoardSpec`, but drives still answer once a disk-loaded driver finds
-them.
+A fitted board with no `rom`/`rom_bank2` named defaults to Copperline's own
+bundled ROMs (`assets/lide/`, `src/config/resolve.rs`,
+`resolve_bundled_lide_rom`): RIPPLE/RIDE get `lide.rom`, AT-Bus 2008 gets
+its own `lide-atbus.rom`. The two are not interchangeable -- upstream links
+them with different scripts (`bootrom/rom.ld` puts a 4-byte `"LIV2"` header
+before the bootloader; `bootrom/atbusrom.ld` starts the bootloader at offset
+0), matching the different `diag_vec` `BoardSpec::lide` already carries per
+personality above (`0x0008` vs `0x0001`). `cdfs.rom` (the CD-filesystem
+bank) only defaults on RIPPLE/RIDE, which have the flash banking to put it
+in. `rom = ""` opts out into hardware-only mode: no DiagArea, no autoboot,
+`diag_vec` absent from the `BoardSpec`, but drives still answer once a
+disk-loaded driver finds them.
 
 All three personalities have booted a real `lide.rom`/`lide-atbus.rom`
 release end-to-end to a real Workbench (Kickstart 1.3 and 3.1, `--cpu

@@ -213,10 +213,12 @@ fn resolve_bundled_a4091_rom(cfg: &mut Config) -> Result<()> {
 
 /// Resolve [`BUNDLED_LIDE_ROM`]/[`BUNDLED_LIDE_CDFS_ROM`] sentinels in
 /// `[lide] rom`/`rom_bank2` to the located bundled ROMs, or fail telling the
-/// user where to install them. A `rom_bank2` sentinel with no bundled
-/// `cdfs.rom` installed alongside `lide.rom` is simply left unset -- the
-/// primary ROM still resolves and the board still autoboots, just without a
-/// CD filesystem baked in.
+/// user where to install them. RIPPLE/RIDE resolve to `lide.rom`; AT-Bus
+/// 2008 resolves to the separate `lide-atbus.rom` it actually needs (see
+/// [`crate::romsearch::LIDE_ATBUS_ROM_FILE`]). A `rom_bank2` sentinel with
+/// no bundled `cdfs.rom` installed is simply left unset -- the primary ROM
+/// still resolves and the board still autoboots, just without a CD
+/// filesystem baked in.
 fn resolve_bundled_lide_rom(cfg: &mut Config) -> Result<()> {
     let wants_rom = cfg.lide.rom.as_deref() == Some(Path::new(BUNDLED_LIDE_ROM));
     let wants_cdfs = cfg.lide.rom_bank2.as_deref() == Some(Path::new(BUNDLED_LIDE_CDFS_ROM));
@@ -233,11 +235,29 @@ fn resolve_bundled_lide_rom(cfg: &mut Config) -> Result<()> {
         )
     })?;
     if wants_rom {
+        // AT-Bus 2008 needs its own build (bootloader at offset 0, no
+        // header) -- lide.rom's layout does not boot it. Falling back to
+        // lide.rom when lide-atbus.rom is not installed would produce a
+        // board that fails to autoboot instead of clearly saying why.
+        let rom = if cfg.lide.board == crate::ide_zorro::LidePersonality::AtBus2008 {
+            lide.atbus.ok_or_else(|| {
+                anyhow!(
+                    "board = \"atbus2008\" but no ROM was named and the bundled {} was not \
+                     found (only {} is installed). Set [lide] rom = \"...\", or install {} \
+                     alongside it, or set rom = \"\" for hardware-only mode.",
+                    crate::romsearch::LIDE_ATBUS_ROM_FILE,
+                    crate::romsearch::LIDE_ROM_FILE,
+                    crate::romsearch::LIDE_ATBUS_ROM_FILE
+                )
+            })?
+        } else {
+            lide.rom
+        };
         log::info!(
             "no lide ROM specified; using bundled ROM ({})",
-            lide.rom.display()
+            rom.display()
         );
-        cfg.lide.rom = Some(lide.rom);
+        cfg.lide.rom = Some(rom);
     }
     if wants_cdfs {
         match lide.cdfs {
