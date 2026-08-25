@@ -30,6 +30,11 @@ Thank you to:
 
 ## Bundled third-party code
 
+- **[plmpeg](https://github.com/CopperlineHQ/plmpeg-rs)** provides the safe,
+  pure-Rust incremental MPEG-1 video decoder used by the CD32 Full Motion
+  Video module. Its reconstruction core descends from Native32Emu's
+  BSD-3-Clause Rust port of Dominic Szablewski's MIT-licensed PL_MPEG; exact
+  source revisions and both license notices are recorded in that repository.
 - **[A4091 software](https://github.com/A4091/a4091-software)** provides the
   v42.39 autoboot ROM bundled as Copperline's default for an A4091. Thanks to
   Stefan Reinauer, Chris Hooper, Toni Wilen, Matt Harlum, and the upstream

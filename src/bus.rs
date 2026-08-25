@@ -4224,6 +4224,17 @@ impl Bus {
         })
     }
 
+    /// Immutable CD32 FMV genlock/video snapshot for the native renderer.
+    /// The decoded pixel storage is shared, so taking one for the render
+    /// worker is constant-time.
+    #[cfg(feature = "cd32-fmv")]
+    pub fn fmv_presentation(&self) -> Option<crate::cd32_fmv::FmvPresentation> {
+        self.devices.iter().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::Cd32Fmv(board) => Some(board.presentation()),
+            _ => None,
+        })
+    }
+
     /// Whether the machine has a hard-disk controller, which is what gives it
     /// an HDD LED: a Zorro board, or the A3000's motherboard SCSI.
     fn has_hard_disk_controller(&self) -> bool {

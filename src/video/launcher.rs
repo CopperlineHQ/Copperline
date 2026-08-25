@@ -522,6 +522,7 @@ pub enum LauncherField {
     // ROM
     Rom,
     ExtendedRom,
+    FmvRom,
     // Floppy
     FloppyDrives,
     FloppySpeed,
@@ -969,7 +970,7 @@ const MEMORY_ROWS: [Row; 8] = [
 // ("Kickstart", "3.1", "40.68"), since a ROM file's name says only what
 // its dumper called it. The lines stand whether or not an image is
 // loaded; a blank value means an empty (or unrecognised) slot.
-const ROM_ROWS: [Row; 7] = [
+const ROM_ROWS: [Row; 9] = [
     section_header("Primary ROM:"),
     row(F::Rom, "  Kickstart ROM", PathRow),
     // The label picks which fact the line carries.
@@ -978,6 +979,8 @@ const ROM_ROWS: [Row; 7] = [
     row(F::Rom, "Revision", RowKind::RomInfo),
     section_header("Extended ROM:"),
     row(F::ExtendedRom, "  Extended ROM", PathRow),
+    section_header("CD32 Full Motion Video:"),
+    row(F::FmvRom, "  FMV module ROM", PathRow),
 ];
 // Each drive is a greyed "DFn:" heading with its settings indented under it. The
 // heading is keyed on the drive's image field so `row_hidden` drops it along
@@ -2003,6 +2006,7 @@ pub struct MachineSetup {
     // ROM (None = bundled AROS for the boot ROM, none for extended)
     rom: Option<PathBuf>,
     extended_rom: Option<PathBuf>,
+    fmv_rom: Option<PathBuf>,
     // Floppy
     floppy_drives: u8,
     /// `[floppy] speed`: a percentage (100/200/400/800) or 0 for turbo.
@@ -2380,6 +2384,7 @@ impl MachineSetup {
             z3_ram: cfg.z3_ram_bytes,
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
+            fmv_rom: raw.fmv_rom.as_deref().map(PathBuf::from),
             floppy_drives: raw.floppy.drives.unwrap_or(connected).clamp(1, 4),
             floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
@@ -2822,6 +2827,7 @@ impl MachineSetup {
         // ROM
         raw.rom = self.rom.as_deref().map(path_string);
         raw.extended_rom = self.extended_rom.as_deref().map(path_string);
+        raw.fmv_rom = self.fmv_rom.as_deref().map(path_string);
         // Floppy: cover any drive carrying media so the count never orphans it.
         let media_max = self
             .df_playlists
@@ -3420,6 +3426,7 @@ impl MachineSetup {
         }
         if model != Some(MachineModel::Cd32) {
             self.cd32_nvram = None;
+            self.fmv_rom = None;
         }
         // The motherboard SCSI leaves with the motherboard; the drives stay and
         // land on the default Zorro board instead.
@@ -3599,6 +3606,7 @@ impl MachineSetup {
                 reason(self.has_cd(), "needs CDTV/CD32 (or SCSI/IDE/Lide)")
             }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
+            F::FmvRom => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
@@ -3766,6 +3774,7 @@ impl MachineSetup {
             F::CsynthSoundfont => self.csynth_soundfont.as_deref(),
             F::Mt32PcmRom => self.mt32_pcm_rom.as_deref(),
             F::ExtendedRom => self.extended_rom.as_deref(),
+            F::FmvRom => self.fmv_rom.as_deref(),
             F::Df0Image => self.df_playlists[0].first().map(PathBuf::as_path),
             F::Df1Image => self.df_playlists[1].first().map(PathBuf::as_path),
             F::Df2Image => self.df_playlists[2].first().map(PathBuf::as_path),
@@ -5077,6 +5086,7 @@ impl MachineSetup {
             F::CsynthSoundfont => self.csynth_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
+            F::FmvRom => self.fmv_rom = Some(path),
             F::Df0Image => self.set_floppy(0, path),
             F::Df1Image => self.set_floppy(1, path),
             F::Df2Image => self.set_floppy(2, path),
@@ -5148,6 +5158,7 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
+            F::FmvRom => self.fmv_rom = None,
             F::Mt32ControlRom => self.mt32_control_rom = None,
             #[cfg(feature = "coppersynth")]
             F::CsynthSoundfont => self.csynth_soundfont = None,

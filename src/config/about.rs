@@ -108,6 +108,11 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
             ));
         }
     }
+    if let Some(fmv) = cfg.fmv_rom_path.as_deref() {
+        if let Some(name) = fmv.file_name() {
+            lines.push(format!("CD32 FMV ROM: {}", name.to_string_lossy()));
+        }
+    }
     let drives = cfg
         .floppy_connected
         .iter()

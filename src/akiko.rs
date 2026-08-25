@@ -399,6 +399,11 @@ pub struct Akiko {
     cdcomrxinx: u8,
     cdcomtxcmp: u8,
     cdcomrxcmp: u8,
+    /// Physical byte offsets within the misc-DMA allocation. The comparator
+    /// registers expose only the low eight bits, but the DMA address counters
+    /// carry into the following page for the remainder of the current packet.
+    tx_dma_offset: u16,
+    rx_dma_offset: u16,
     tx_dma_delay_cck: u32,
     rx_dma_delay_cck: u32,
 
@@ -422,6 +427,8 @@ pub struct Akiko {
     door: u8,
     toc_counter: i32,
     data_offset: i64,
+    /// Exclusive end sector supplied by the drive's READ DATA command.
+    data_end: i64,
     sector_counter: u32,
     current_sector: i64,
     seek_delay: u32,
@@ -471,6 +478,8 @@ impl Default for Akiko {
             cdcomrxinx: 0,
             cdcomtxcmp: 0,
             cdcomrxcmp: 0,
+            tx_dma_offset: 0,
+            rx_dma_offset: 0,
             tx_dma_delay_cck: 0,
             rx_dma_delay_cck: 0,
             command_buffer: [0; 32],
@@ -488,6 +497,7 @@ impl Default for Akiko {
             door: 1,
             toc_counter: -1,
             data_offset: -1,
+            data_end: -1,
             sector_counter: 0,
             current_sector: -1,
             seek_delay: 0,
@@ -568,6 +578,7 @@ impl Akiko {
         self.audio_notify = 0;
         self.toc_counter = -1;
         self.data_offset = -1;
+        self.data_end = -1;
         self.media_notify = self.cd_initialized != 0;
         log::info!("akiko: disc ejected");
     }
@@ -719,11 +730,25 @@ impl Akiko {
             0x18 => self.intreq &= !CDINT_SUBCODE,
             0x1D => {
                 self.intreq &= !CDINT_TXDMADONE;
+                if self.cdcomtxinx == self.cdcomtxcmp
+                    && (self.command_active != 0 || self.command_length == 0)
+                {
+                    // A fresh DMA window starts at base + the visible index.
+                    // If a comparator stopped in the middle of a command,
+                    // retain the carried address when the guest extends it.
+                    self.tx_dma_offset = u16::from(self.cdcomtxinx);
+                }
                 self.cdcomtxcmp = value;
                 self.tx_dma_delay_cck = DMA_RESTART_DELAY_CCK;
             }
             0x1F => {
                 self.intreq &= !CDINT_RXDMADONE;
+                if self.cdcomrxinx == self.cdcomrxcmp && self.receive_offset == 0 {
+                    // New response packet/window: restart at base + index.
+                    // An extension after a partial response instead preserves
+                    // the page carry in rx_dma_offset.
+                    self.rx_dma_offset = u16::from(self.cdcomrxinx);
+                }
                 self.cdcomrxcmp = value;
                 self.rx_dma_delay_cck = DMA_RESTART_DELAY_CCK;
             }
@@ -814,6 +839,15 @@ impl Akiko {
                     // it in result_buffer. Hold the command until the
                     // ring drains; the host cannot send another one
                     // meanwhile (can_send_command gates on both).
+                    self.command_active = 1;
+                } else if self.intreq & self.intena & CDINT_TXDMADONE != 0 {
+                    // The three-wire drive link is half duplex. Akiko may
+                    // already have the drive's reply buffered, but it does
+                    // not expose RX completion while an enabled TX-DMA
+                    // completion is still awaiting service. Keeping those
+                    // edges distinct matters to the ROM driver: it uses one
+                    // shared INT2 server for both channels and advances the
+                    // response ring according to the completion it observed.
                     self.command_active = 1;
                 } else {
                     self.execute_command();
@@ -974,8 +1008,9 @@ impl Akiko {
         if !self.can_send_command() {
             return;
         }
-        let byte = mem.dma_get(self.cdtx_address + u32::from(self.cdcomtxinx));
+        let byte = mem.dma_get(self.cdtx_address + u32::from(self.tx_dma_offset));
         self.add_command_byte(byte);
+        self.tx_dma_offset = self.tx_dma_offset.wrapping_add(1);
         self.cdcomtxinx = self.cdcomtxinx.wrapping_add(1);
         if self.cdcomtxinx == self.cdcomtxcmp {
             self.intreq |= CDINT_TXDMADONE;
@@ -1021,6 +1056,10 @@ impl Akiko {
             self.unknown_command
         );
         self.command_length = 0;
+        // The page carry belongs to the packet just parsed. A later command
+        // queued under the same comparator starts at base + the visible index,
+        // exactly where the ROM's producer copied it.
+        self.tx_dma_offset = u16::from(self.cdcomtxinx);
         self.result_buffer = [0; 32];
 
         if self.checksum_error || self.unknown_command {
@@ -1071,6 +1110,8 @@ impl Akiko {
         }
         self.result_buffer[1] = 0;
         self.stop_audio();
+        self.data_offset = -1;
+        self.data_end = -1;
         2
     }
 
@@ -1122,6 +1163,7 @@ impl Akiko {
         if self.command_buffer[7] & 0x80 != 0 {
             // Data read from seekpos to endpos.
             self.data_offset = seekpos;
+            self.data_end = endpos;
             let distance = (self.current_sector - seekpos).unsigned_abs();
             self.seek_delay = if distance < 100 {
                 1
@@ -1268,7 +1310,11 @@ impl Akiko {
         }
         while self.receive_offset < self.receive_length {
             self.last_rx = self.result_buffer[self.receive_offset];
-            mem.dma_put(self.cdrx_address + u32::from(self.cdcomrxinx), self.last_rx);
+            mem.dma_put(
+                self.cdrx_address + u32::from(self.rx_dma_offset),
+                self.last_rx,
+            );
+            self.rx_dma_offset = self.rx_dma_offset.wrapping_add(1);
             self.cdcomrxinx = self.cdcomrxinx.wrapping_add(1);
             self.receive_offset += 1;
             if self.cdcomrxinx == self.cdcomrxcmp {
@@ -1279,6 +1325,9 @@ impl Akiko {
         if self.receive_offset == self.receive_length {
             self.receive_length = 0;
             self.receive_offset = 0;
+            // Like TX, the next packet begins at base + the visible index even
+            // if this response crossed into the following physical page.
+            self.rx_dma_offset = u16::from(self.cdcomrxinx);
             self.intreq &= !CDINT_DRIVERECV;
             self.intreq |= CDINT_DRIVEXMIT;
         }
@@ -1322,7 +1371,30 @@ impl Akiko {
         };
         let sector = self.data_offset + i64::from(self.sector_counter);
         self.current_sector = sector;
-        if sector < 0 || !sector_in_data_track(&self.toc, sector as u32) {
+        if self.data_end >= 0 && sector > self.data_end {
+            self.data_offset = -1;
+            self.data_end = -1;
+            return;
+        }
+
+        // The READ DATA end MSF is exclusive, but the CD32 driver keeps a
+        // continuous hardware read open across filesystem requests. When a
+        // request seeks backwards after that stream reaches lead-out, the
+        // driver needs one final position-bearing PBX frame to notice that
+        // the buffered stream is nowhere near the requested sector; it then
+        // sends STOP and starts a new read at the requested LSN. Re-present
+        // the final valid raw sector as that boundary probe. Its payload is
+        // never returned to the caller because its on-disc MSF mismatches the
+        // requested LSN, while retaining the real frame also preserves valid
+        // Mode 1/2 EDC and ECC bytes for the ROM's sector validator.
+        let at_end = self.data_end >= 0 && sector == self.data_end;
+        let read_sector = if at_end { sector - 1 } else { sector };
+        if read_sector < 0 || !sector_in_data_track(&self.toc, read_sector as u32) {
+            if at_end {
+                self.data_offset = -1;
+                self.data_end = -1;
+                self.intreq |= CDINT_PBX;
+            }
             return;
         }
         // Akiko's PBX path carries the complete raw Mode 1 frame. Preserve
@@ -1330,7 +1402,7 @@ impl Akiko {
         // promote a cooked ISO sector with its EDC and P/Q parity. CDXL
         // players use this raw-sector path for sustained video streaming.
         let mut raw = [0u8; RAW_SECTOR_BYTES];
-        if disc.read_raw_sector(sector as u32, &mut raw).is_err() {
+        if disc.read_raw_sector(read_sector as u32, &mut raw).is_err() {
             return;
         }
 
@@ -1371,6 +1443,13 @@ impl Akiko {
         }
 
         self.sector_counter += 1;
+        if at_end {
+            log::debug!(
+                "akiko: READ DATA reached exclusive end {sector}; delivered final-sector boundary probe"
+            );
+            self.data_offset = -1;
+            self.data_end = -1;
+        }
     }
 
     // ----- C2P -------------------------------------------------------------
@@ -2094,6 +2173,39 @@ mod tests {
     }
 
     #[test]
+    fn data_read_end_delivers_a_position_probe_for_the_next_seek() {
+        let mut chip = vec![0u8; 256 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.addressdata = 0x0001_0000;
+        akiko.flags = CDFLAG_ENABLE | CDFLAG_PBX | CDFLAG_CAS;
+        akiko.data_offset = 0;
+        akiko.data_end = 2;
+        akiko.pbx = 0x0007;
+
+        // Sectors 0 and 1 consume the two highest armed buffers.
+        akiko.run_sector_read(&mut chip);
+        akiko.run_sector_read(&mut chip);
+        assert_eq!(akiko.sector_counter, 2);
+        assert_eq!(akiko.pbx, 0x0001);
+
+        // Reaching the exclusive end re-presents the final valid sector. The
+        // ROM uses its MSF to detect that a later backwards request needs a
+        // STOP/reseek, rather than sleeping forever on an empty PBX ring.
+        akiko.intreq = 0;
+        akiko.run_sector_read(&mut chip);
+        assert_eq!(akiko.data_offset, -1);
+        assert_eq!(akiko.data_end, -1);
+        assert_eq!(akiko.pbx, 0);
+        assert_eq!(akiko.sector_counter, 3);
+        let slot0 = 0x0001_0000;
+        assert_eq!(chip[slot0 + 3], 2);
+        assert_eq!(chip[slot0 + 16], 1);
+        assert_ne!(akiko.intreq & CDINT_PBX, 0);
+        assert!(!akiko.activity_led_on());
+    }
+
+    #[test]
     fn intreq_read_exposes_only_enabled_sources() {
         // The CDINTREQ status read returns intreq AND intena: interrupt
         // servers on the shared INT2 line read it on every entry, and a
@@ -2305,6 +2417,162 @@ mod tests {
             akiko.tick(CMD_EXEC_DELAY_CCK / 4, &mut chip, &mut ring);
         }
         assert_ne!(akiko.cdcomrxinx, rx_before, "response after the delay");
+    }
+
+    #[test]
+    fn command_dma_keeps_the_physical_page_carry_through_a_packet_wrap() {
+        // Kickstart copies each command linearly from base + its software
+        // producer index, even when the visible eight-bit index wraps. Akiko's
+        // physical DMA counter carries into the following page for the rest of
+        // that packet; wrapping the address itself reads stale data
+        // from the start of the TX page.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 128 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.cd_initialized = 2;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        akiko.cdcomtxinx = 0xF8;
+        akiko.cdcomtxcmp = 0xF8;
+
+        let command = [
+            0x04, 0x00, 0x02, 0x00, 0x00, 0x02, 0x04, 0x80, 0x40, 0x00, 0x00, 0x00,
+        ];
+        let tx_base = (MISC | 0x200) as usize;
+        let mut checksum = 0xFFu8;
+        for (i, byte) in command.iter().copied().enumerate() {
+            chip[tx_base + 0xF8 + i] = byte;
+            checksum = checksum.wrapping_sub(byte);
+        }
+        chip[tx_base + 0xF8 + command.len()] = checksum;
+        let end = 0xF8u8.wrapping_add(command.len() as u8 + 1);
+        akiko.write(AKIKO_BASE + 0x1D, 1, u32::from(end), &mut chip);
+
+        for _ in 0..24 {
+            akiko.tick(2048, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.cdcomtxinx, end);
+        assert!(!akiko.checksum_error);
+        assert_eq!(akiko.data_offset, 0, "the READ command executed");
+
+        // A later packet starts from base + the visible index again; the page
+        // carry belongs only to the completed packet.
+        akiko.receive_length = 0;
+        akiko.receive_offset = 0;
+        akiko.command_active = 0;
+        let next = [0x15, 0x00, 0xEA];
+        chip[tx_base + end as usize..tx_base + end as usize + next.len()].copy_from_slice(&next);
+        let next_end = end.wrapping_add(next.len() as u8);
+        akiko.write(AKIKO_BASE + 0x1D, 1, u32::from(next_end), &mut chip);
+        for _ in 0..8 {
+            akiko.tick(2048, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.cdcomtxinx, next_end);
+        assert!(!akiko.checksum_error);
+    }
+
+    #[test]
+    fn response_dma_keeps_the_physical_page_carry_when_extended() {
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.cd_initialized = 2;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_RXD, &mut chip);
+        akiko.cdcomrxinx = 0xFE;
+        akiko.cdcomrxcmp = 0xFE;
+        chip[MISC as usize] = 0xCC;
+
+        akiko.result_buffer[0] = 0x42;
+        akiko.result_buffer[1] = 0x01;
+        assert!(akiko.start_return_data(2));
+
+        // Deliver one byte to the old page, then extend the same response
+        // across $FF. The comparator extension must not discard the carry.
+        akiko.write(AKIKO_BASE + 0x1F, 1, 0xFF, &mut chip);
+        akiko.tick(DMA_RESTART_DELAY_CCK, &mut chip, &mut ring);
+        assert_eq!(akiko.receive_offset, 1);
+        akiko.write(AKIKO_BASE + 0x1F, 1, 0x01, &mut chip);
+        akiko.tick(DMA_RESTART_DELAY_CCK, &mut chip, &mut ring);
+
+        let checksum = 0xFFu8.wrapping_sub(0x42).wrapping_sub(0x01);
+        assert_eq!(
+            &chip[MISC as usize + 0xFE..MISC as usize + 0x101],
+            &[0x42, 0x01, checksum]
+        );
+        assert_eq!(chip[MISC as usize], 0xCC, "physical address did not fold");
+        assert_eq!(akiko.cdcomrxinx, 0x01);
+    }
+
+    #[test]
+    fn command_dma_rebases_between_packets_queued_in_one_window() {
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.cd_initialized = 2;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD, &mut chip);
+        akiko.cdcomtxinx = 0xFE;
+        akiko.cdcomtxcmp = 0xFE;
+        let tx_base = (MISC | 0x200) as usize;
+
+        // The first LED packet crosses the physical page; the second is
+        // already queued at base + its wrapped software index. One comparator
+        // window covers both packets, so only the parser boundary can rebase
+        // the physical DMA address for the second one.
+        chip[tx_base + 0xFE..tx_base + 0x101].copy_from_slice(&[0x15, 0x00, 0xEA]);
+        chip[tx_base + 0x01..tx_base + 0x04].copy_from_slice(&[0x25, 0x01, 0xD9]);
+        akiko.write(AKIKO_BASE + 0x1D, 1, 0x04, &mut chip);
+
+        for _ in 0..16 {
+            akiko.tick(2048, &mut chip, &mut ring);
+        }
+        assert_eq!(akiko.cdcomtxinx, 0x04);
+        assert_eq!(akiko.command, 0x25);
+        assert!(!akiko.checksum_error);
+    }
+
+    #[test]
+    fn response_waits_for_an_enabled_tx_completion_to_be_acknowledged() {
+        // TX and RX completion share one interrupt server in the ROM driver.
+        // A response becoming visible while the enabled TX completion is
+        // still pending makes that server account the RX ring against the
+        // wrong event and can leave it stopped at its comparator indefinitely.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.cd_initialized = 2;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_RXD, &mut chip);
+        akiko.write(AKIKO_BASE + 0x1F, 1, 3, &mut chip);
+        akiko.command = 0x12; // PAUSE, sequence 1
+        akiko.command_buffer[0] = 0x12;
+        akiko.command_length = 1;
+        akiko.command_active = 1;
+        akiko.intreq = CDINT_TXDMADONE;
+        akiko.intena = CDINT_TXDMADONE | CDINT_RXDMADONE;
+
+        akiko.tick(DMA_RESTART_DELAY_CCK, &mut chip, &mut ring);
+        assert_eq!(akiko.command_active, 1, "command remains deferred");
+        assert_eq!(akiko.receive_length, 0, "no response exposed yet");
+        assert_eq!(akiko.cdcomrxinx, 0);
+
+        // Writing TXCMP acknowledges TXDMADONE. The next controller tick may
+        // execute the command and deliver the response through RX DMA.
+        akiko.write(AKIKO_BASE + 0x1D, 1, 0, &mut chip);
+        akiko.tick(1, &mut chip, &mut ring);
+        assert_eq!(akiko.intreq & CDINT_TXDMADONE, 0);
+        assert_ne!(akiko.intreq & CDINT_RXDMADONE, 0);
+        assert_eq!(akiko.cdcomrxinx, 3);
     }
 
     #[test]

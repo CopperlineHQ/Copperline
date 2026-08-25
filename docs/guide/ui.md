@@ -569,12 +569,13 @@ The layout is:
   *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed
   16-bit word -- plus chip/fast/slow/motherboard/accelerator/Zorro III RAM),
   *ROM*
-  (Kickstart and
-  extended ROM; the Kickstart row carries **Name**, **Version** and
+  (Kickstart, extended ROM, and the CD32-only **FMV module ROM**; the
+  Kickstart row carries **Name**, **Version** and
   **Revision** lines naming what the chosen image is, identified by
   checksum rather than by file name -- blank for an image Copperline does
-  not know, and read from the image itself for the bundled AROS;
-  see [](configuration)),
+  not know, and read from the image itself for the bundled AROS. The FMV row
+  fits the physical Commodore MPEG cartridge when a 256 KiB module ROM is
+  selected and is greyed on non-CD32 profiles; see [](configuration)),
   *Floppy* (drive count and speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
   drives that are not enabled are hidden rather than greyed. Each drive also

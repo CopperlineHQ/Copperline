@@ -1137,6 +1137,9 @@ impl TryFrom<RawConfig> for Config {
         // perfectly and is then never looked at.
         let host_disk_on_ide = host_disks.iter().any(|disk| !disk.attach.is_scsi());
         let host_disk_on_scsi = host_disks.iter().any(|disk| disk.attach.is_scsi());
+        if raw.fmv_rom.is_some() && !defaults.akiko {
+            anyhow::bail!("fmv_rom is only valid for a CD32 machine profile");
+        }
         Ok(Config {
             host_disks,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
@@ -1199,6 +1202,7 @@ impl TryFrom<RawConfig> for Config {
                 .extended_rom
                 .map(PathBuf::from)
                 .or(defaults.extended_rom_path),
+            fmv_rom_path: raw.fmv_rom.map(PathBuf::from).or(defaults.fmv_rom_path),
             cd_image_path: raw.cd.image.map(PathBuf::from),
             cd_insert_delay_secs,
             cd32_nvram_path: raw

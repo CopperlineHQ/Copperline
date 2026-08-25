@@ -68,10 +68,12 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Project-owned sources: mt32-rs and Coppersynth are revision-pinned in the
-# manifest; FluxBridge currently follows its maintained main branch.
+# Project-owned sources: mt32-rs, Coppersynth, and plmpeg-rs are
+# revision-pinned in the manifest; FluxBridge currently follows its
+# maintained main branch.
 allow-git = [
     "https://github.com/CopperlineHQ/mt32-rs",
     "https://github.com/CopperlineHQ/Coppersynth",
+    "https://github.com/CopperlineHQ/plmpeg-rs",
     "https://github.com/CopperlineHQ/FluxBridge",
 ]

@@ -188,6 +188,9 @@ pub struct Config {
     /// Extended ROM image (`extended_rom = "path"`): 512 KiB maps at
     /// $E00000 (CD32), 256 KiB at $F00000 (CDTV).
     pub extended_rom_path: Option<PathBuf>,
+    /// CD32 Full Motion Video cartridge ROM (`fmv_rom = "path"`).  Naming
+    /// one fits the physical 1 MiB autoconfig module; absent means no module.
+    pub fmv_rom_path: Option<PathBuf>,
     /// CD image (`[cd] image = "disc.cue"`), mounted on the machine's CD
     /// controller (CD32 Akiko or CDTV DMAC).
     pub cd_image_path: Option<PathBuf>,
@@ -2308,6 +2311,7 @@ impl Default for Config {
             akiko: false,
             cdtv_cd: false,
             extended_rom_path: None,
+            fmv_rom_path: None,
             cd_image_path: None,
             cd_insert_delay_secs: 0.0,
             cd32_nvram_path: None,

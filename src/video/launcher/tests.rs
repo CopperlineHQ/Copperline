@@ -1089,6 +1089,12 @@ fn the_rom_tab_carries_an_identification_line_under_each_path_row() {
             ("Revision", RowKind::RomInfo, F::Rom),
             ("Extended ROM:", RowKind::SectionHeader, F::SectionHeader),
             ("  Extended ROM", RowKind::Path, F::ExtendedRom),
+            (
+                "CD32 Full Motion Video:",
+                RowKind::SectionHeader,
+                F::SectionHeader,
+            ),
+            ("  FMV module ROM", RowKind::Path, F::FmvRom),
         ]
     );
 
@@ -1176,6 +1182,24 @@ fn the_rom_tab_carries_an_identification_line_under_each_path_row() {
     );
     // Only the ROM rows have one.
     assert_eq!(state.rom_note(F::Df0Image), None);
+}
+
+#[test]
+fn fmv_rom_path_round_trips_through_the_launcher() {
+    let mut setup = MachineSetup::default();
+    setup.select_model(Some(MachineModel::Cd32));
+    let path = PathBuf::from("/roms/cd32fmv.rom");
+    setup.set_path(F::FmvRom, path.clone());
+    assert_eq!(setup.path(F::FmvRom), Some(path.as_path()));
+    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some("/roms/cd32fmv.rom"));
+
+    setup.clear_path(F::FmvRom);
+    assert_eq!(setup.path(F::FmvRom), None);
+    assert_eq!(setup.to_raw().fmv_rom, None);
+
+    setup.set_path(F::FmvRom, path);
+    setup.select_model(Some(MachineModel::A1200));
+    assert_eq!(setup.path(F::FmvRom), None, "non-CD32 profile drops module");
 }
 
 #[test]

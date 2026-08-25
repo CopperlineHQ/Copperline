@@ -13,6 +13,8 @@ use crate::floppy::FloppyController;
 use crate::memory::Memory;
 use crate::serial::StdoutSink;
 use crate::timebase::{Duration, Instant};
+#[cfg(feature = "cd32-fmv")]
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use log::{info, warn};
 
@@ -2513,6 +2515,37 @@ pub fn build_machine(
     // the chain (mapping its window to a device slot) while the device object
     // is attached to the bus after it is built; the slot index ties them.
     let mut devices: Vec<crate::zorro_device::BoardDevice> = Vec::new();
+    // The CD32 FMV cartridge must be first in the chain: its production ROM
+    // and driver expect expansion.library's first 1 MiB Zorro II placement,
+    // $200000.  Prepending keeps that physical address even when the config
+    // also names fast RAM or other expansion boards.
+    #[cfg(feature = "cd32-fmv")]
+    if let Some(rom_path) = &cfg.fmv_rom_path {
+        let slot = devices.len();
+        let rom = if rom_optional && !rom_path.is_file() {
+            info!(
+                "--load-state: CD32 FMV ROM {} is unavailable; building with a \
+                 placeholder the save state will replace",
+                rom_path.display()
+            );
+            vec![0u8; crate::cd32_fmv::ROM_BYTES]
+        } else {
+            std::fs::read(rom_path)
+                .with_context(|| format!("reading CD32 FMV ROM {}", rom_path.display()))?
+        };
+        let board = crate::cd32_fmv::Cd32Fmv::new(rom)?;
+        zorro.prepend_board(crate::zorro::BoardSpec::cd32_fmv(slot))?;
+        info!(
+            "cd32-fmv: Full Motion Video cartridge first on the Zorro chain \
+             (slot {slot}), ROM {}",
+            rom_path.display()
+        );
+        devices.push(crate::zorro_device::BoardDevice::Cd32Fmv(Box::new(board)));
+    }
+    #[cfg(not(feature = "cd32-fmv"))]
+    if cfg.fmv_rom_path.is_some() {
+        anyhow::bail!("fmv_rom needs a build with the cd32-fmv feature");
+    }
     // The A3000's motherboard SCSI is not a Zorro board: its drives are fitted
     // to the Super DMAC further down, once the bus exists.
     if cfg.scsi.enabled() && cfg.scsi.controller.is_zorro_board() {

@@ -39,6 +39,7 @@ const ERTF_CHAINEDCONFIG: u8 = 1 << 3;
 
 // er_Flags fields.
 const ERFF_MEMSPACE: u8 = 1 << 7;
+const ERFF_NOSHUTUP: u8 = 1 << 6;
 const ERFF_EXTENDED: u8 = 1 << 5;
 const ERFF_ZORRO_III: u8 = 1 << 4;
 
@@ -158,6 +159,9 @@ pub struct BoardSpec {
     pub memory_space: bool,
     /// Another autoconfig identity belonging to this physical board follows.
     pub chained: bool,
+    /// The board cannot be removed from the autoconfig chain by writing
+    /// `ec_Shutup` (ERFF_NOSHUTUP).
+    pub no_shutup: bool,
     /// Logical aperture number passed to a shared device in offset bits 31:28.
     pub window: u8,
     /// Autoboot: ERTF_DIAGVALID with er_InitDiagVec pointing at the
@@ -166,6 +170,29 @@ pub struct BoardSpec {
 }
 
 impl BoardSpec {
+    /// Commodore's CD32 Full Motion Video cartridge: a 1 MiB Zorro II
+    /// memory-space board containing its 256 KiB diagnostic/autoboot ROM,
+    /// CL450/L64111 register windows, and 512 KiB local RAM.  Product and
+    /// serial values come from the production v40.30 ROM's autoconfig data.
+    #[cfg(feature = "cd32-fmv")]
+    pub fn cd32_fmv(slot: usize) -> Self {
+        Self {
+            name: "CD32 Full Motion Video".into(),
+            version: ZorroVersion::II,
+            manufacturer: 514,
+            product: 0x6A,
+            serial: 0x0028_001E,
+            size_bytes: 0x10_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: true,
+            chained: false,
+            no_shutup: true,
+            window: 0,
+            diag_vec: Some(0x0080),
+        }
+    }
+
     /// The built-in Zorro II fast RAM board (`[memory] fast`).
     pub fn fast_ram(size_bytes: usize) -> Self {
         Self {
@@ -179,6 +206,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -197,6 +225,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -223,6 +252,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -243,6 +273,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -265,6 +296,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -289,6 +321,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -318,6 +351,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -340,6 +374,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(0x2000),
         }
@@ -363,6 +398,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(0x0200),
         }
@@ -389,6 +425,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
         }
@@ -413,6 +450,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: Some(crate::hostsocket::DIAG_OFFSET),
         }
@@ -447,6 +485,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: has_rom.then_some(diag_vec),
         }
@@ -469,6 +508,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -499,6 +539,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            no_shutup: false,
             window: 1,
             diag_vec: None,
         }
@@ -526,6 +567,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -546,6 +588,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            no_shutup: false,
             window: 1,
             diag_vec: None,
         }
@@ -564,6 +607,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -585,6 +629,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            no_shutup: false,
             window: 0,
             diag_vec: None,
         }
@@ -680,6 +725,29 @@ impl ZorroChain {
             state: BoardState::Unconfigured,
             ram,
         });
+        Ok(())
+    }
+
+    /// Put a board at the front of the autoconfig chain.  The CD32 FMV
+    /// cartridge is physically expected at $200000 and its ROM assumes that
+    /// first legal Zorro II placement, so it must precede optional fast RAM
+    /// and other expansion boards already assembled from the configuration.
+    #[cfg(feature = "cd32-fmv")]
+    pub fn prepend_board(&mut self, spec: BoardSpec) -> Result<()> {
+        spec.validate()?;
+        let ram = match spec.backing {
+            BoardBacking::Ram => vec![0u8; spec.size_bytes],
+            BoardBacking::Device(_) => Vec::new(),
+        };
+        self.boards.insert(
+            0,
+            Board {
+                spec,
+                state: BoardState::Unconfigured,
+                ram,
+            },
+        );
+        self.rebuild_regions();
         Ok(())
     }
 
@@ -903,6 +971,9 @@ impl ZorroChain {
                 // accepting it keeps the register sequence faithful.
             }
             EC_SHUTUP_PHYS => {
+                if board.spec.no_shutup {
+                    return;
+                }
                 board.state = BoardState::ShutUp;
                 log::debug!("zorro board {:?} shut up", board.spec.name);
                 self.rebuild_regions();
@@ -936,10 +1007,11 @@ impl ZorroChain {
         let memlist = if spec.memlist { ERTF_MEMLIST } else { 0 };
         let chained = if spec.chained { ERTF_CHAINEDCONFIG } else { 0 };
         let memspace = if spec.memory_space { ERFF_MEMSPACE } else { 0 };
+        let no_shutup = if spec.no_shutup { ERFF_NOSHUTUP } else { 0 };
         match spec.version {
             ZorroVersion::II => {
                 rom[0] = ERT_ZORROII | memlist | chained | zorro_ii_size_code(spec.size_bytes)?;
-                rom[2] = memspace;
+                rom[2] = memspace | no_shutup;
             }
             ZorroVersion::III => {
                 let (code, extended) = zorro_iii_size_bits(spec.size_bytes)?;
@@ -1189,6 +1261,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(true),
                 memory_space: true,
                 chained: false,
+                no_shutup: false,
                 window: 0,
                 diag_vec: None,
             };
@@ -1239,6 +1312,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(false),
                 memory_space: false,
                 chained: false,
+                no_shutup: false,
                 window: 0,
                 diag_vec: raw.diag_vec,
             };
@@ -1435,6 +1509,37 @@ mod tests {
         // nibbles: product 0x03 appears as 0xFC.
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 4, 1), 0xF0);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 6, 1), 0xC0);
+    }
+
+    #[cfg(feature = "cd32-fmv")]
+    #[test]
+    fn cd32_fmv_autoconfig_identity_matches_the_production_rom() {
+        let chain = chain_with(vec![BoardSpec::cd32_fmv(0)]);
+        let logical: Vec<u8> = (0..12)
+            .map(|byte| chain.config_logical_byte(0, byte).unwrap())
+            .collect();
+        assert_eq!(
+            logical,
+            [0xD5, 0x6A, 0xC0, 0x00, 0x02, 0x02, 0x00, 0x28, 0x00, 0x1E, 0x00, 0x80,]
+        );
+    }
+
+    #[cfg(feature = "cd32-fmv")]
+    #[test]
+    fn no_shutup_board_ignores_the_shutup_register() {
+        let mut chain = chain_with(vec![BoardSpec::cd32_fmv(0)]);
+        chain.config_write(AUTOCONFIG_BASE + EC_SHUTUP_PHYS, 1, 0);
+        assert_eq!(chain.config_logical_byte(0, 2), Some(0xC0));
+        assert_ne!(chain.config_read(AUTOCONFIG_BASE, 1), 0xFF);
+    }
+
+    #[test]
+    fn autoconfig_identity_does_not_imply_no_shutup() {
+        let mut spec = BoardSpec::fast_ram(512 * 1024);
+        spec.manufacturer = 514;
+        spec.product = 0x6A;
+        let chain = chain_with(vec![spec]);
+        assert_eq!(chain.config_logical_byte(0, 2), Some(ERFF_MEMSPACE));
     }
 
     #[test]

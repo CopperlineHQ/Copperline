@@ -32,7 +32,7 @@ pub(crate) fn raw_from_path(path: &Path) -> Result<RawConfig> {
 // the output minimal -- only fields and sections the user actually set are
 // emitted, matching the style of the hand-written `*.example.toml`. The
 // `toml` serializer requires every top-level scalar key to be emitted before
-// any `[table]`, so the three top-level scalars (`rom`, `extended_rom`,
+// any `[table]`, so the top-level scalars (`rom`, `extended_rom`, `fmv_rom`,
 // `identify`) are declared first, ahead of the section tables and the `zorro`
 // array of tables. Field declaration order otherwise mirrors deserialization,
 // which is order-independent.
@@ -44,6 +44,9 @@ pub struct RawConfig {
     /// Extended ROM image (CD32 512K at $E00000, CDTV 256K at $F00000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extended_rom: Option<String>,
+    /// CD32 Full Motion Video cartridge ROM (256 KiB v40.30 image).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fmv_rom: Option<String>,
     /// `identify = false` drops the Copperline identification board from the
     /// autoconfig chain (default: present).
     #[serde(skip_serializing_if = "Option::is_none")]

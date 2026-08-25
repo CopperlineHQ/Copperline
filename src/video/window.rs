@@ -803,8 +803,8 @@ fn repeated_main_key_should_drop(
     }
 }
 
-fn ui_needs_continuous_redraw(running: bool, active: bool) -> bool {
-    running && active
+fn animated_focus_needs_continuous_redraw(running: bool, showing: bool) -> bool {
+    running && showing
 }
 
 fn raw_device_qualifier_rawkey(code: KeyCode) -> Option<u8> {
@@ -4848,7 +4848,12 @@ impl ApplicationHandler for App {
             let chrome_changed = self.last_main_redraw_state != Some(redraw_state);
             if self.main_presentation_dirty
                 || chrome_changed
-                || ui_needs_continuous_redraw(running, self.ui.active())
+                // Opening a static menu/panel is not itself a reason to
+                // upload and present the whole framebuffer every scheduler
+                // pass. New emulated pictures and UI interactions already
+                // dirty it. Only the keyboard/pad focus needs clock-driven
+                // frames for its breathing highlight.
+                || animated_focus_needs_continuous_redraw(running, self.nav.showing())
                 || self.drop_hover
                 || osd_active
                 || calibrating

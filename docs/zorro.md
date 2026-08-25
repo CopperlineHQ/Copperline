@@ -587,6 +587,12 @@ ways:
 On CDTV machines the DMAC occupies the config window first; the Zorro chain
 follows once it is configured, matching real-machine autoconfig order.
 
+On a CD32 with `fmv_rom`, the Commodore Full Motion Video cartridge instead
+occupies the first Zorro II slot, as its module ROM expects: manufacturer 514,
+product `$6A`, serial `$0028001E`, 1 MiB memory-space board with DiagArea vector
+`$80` and the no-shut-up flag. Its hardware model and address map are documented in
+[](internals/peripherals).
+
 ## The Copperline manufacturer ID
 
 Copperline's built-in virtual boards autoconfig under manufacturer ID

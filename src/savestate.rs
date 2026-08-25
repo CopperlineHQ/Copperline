@@ -317,7 +317,14 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      with the new dependency's layout.
 //  65: floppy images record whether writable changes go to a host file or
 //      remain in serialized memory for filesystem-free hosts such as WASM.
-pub const STATE_VERSION: u32 = 65;
+//  66: BoardDevice gained the CD32 FMV variant, including the cartridge ROM,
+//      CL450/L64111 state, decoder warm-up histories, queued PCM/video, and
+//      genlock presentation latch; Akiko also records READ DATA's end LSN.
+//  67: CD32 FMV audio gained native-rate resampler state and BoardSpec records
+//      whether an autoconfig board ignores ec_Shutup.
+//  68: Akiko gained carried physical byte offsets for command/response packets
+//      whose visible eight-bit indices cross a page boundary.
+pub const STATE_VERSION: u32 = 68;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

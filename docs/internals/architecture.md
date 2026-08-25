@@ -60,6 +60,7 @@ src/
   cdrom.rs          # CD images: cue sheets (BINARY/WAVE/MP3), ISO, NRG, CHD
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
+  cd32_fmv.rs       # CD32 FMV cartridge (CL450 video + L64111 MPEG audio)
   rtc.rs            # MSM6242-compatible battery RTC
   serial.rs         # Paula serial sinks (stdout, TCP, pty)
   midi/             # host MIDI serial bridge (CoreMIDI / ALSA / WinMM)

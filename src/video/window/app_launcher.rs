@@ -109,6 +109,7 @@ impl App {
         dialog = match field {
             LauncherField::Rom
             | LauncherField::ExtendedRom
+            | LauncherField::FmvRom
             | LauncherField::ScsiRom
             | LauncherField::ScsiRomOdd
             | LauncherField::LideRom
