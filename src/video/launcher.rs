@@ -2350,7 +2350,7 @@ impl MachineSetup {
                 .or_else(|| cfg.floppy.bridges[i].as_ref().map(|b| b.write_protected))
                 .unwrap_or(true)
         });
-        let connected = cfg.floppy_connected.iter().filter(|&&c| c).count().max(1) as u8;
+        let connected = cfg.floppy_connected.iter().filter(|&&c| c).count() as u8;
         Ok(Self {
             model: cfg.machine,
             chipset: cfg.chipset,
@@ -2385,7 +2385,7 @@ impl MachineSetup {
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
             fmv_rom: raw.fmv_rom.as_deref().map(PathBuf::from),
-            floppy_drives: raw.floppy.drives.unwrap_or(connected).clamp(1, 4),
+            floppy_drives: raw.floppy.drives.unwrap_or(connected).min(4),
             floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
             df_write_protected,
@@ -2832,11 +2832,17 @@ impl MachineSetup {
         let media_max = self
             .df_playlists
             .iter()
-            .rposition(|p| !p.is_empty())
+            .enumerate()
+            .rposition(|(i, p)| !p.is_empty() || self.df_bridge[i].is_some())
             .map(|i| i as u8 + 1)
-            .unwrap_or(1);
+            .unwrap_or(0);
         let drives = self.floppy_drives.max(media_max);
-        if drives != 1 {
+        let base_drives = base
+            .floppy_connected
+            .iter()
+            .filter(|&&connected| connected)
+            .count() as u8;
+        if drives != base_drives {
             raw.floppy.drives = Some(drives);
         }
         if self.floppy_speed != 100 {
@@ -3412,6 +3418,19 @@ impl MachineSetup {
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
         self.port_devices = base.port_devices;
+        let profile_drives = base
+            .floppy_connected
+            .iter()
+            .filter(|&&connected| connected)
+            .count() as u8;
+        let media_max = self
+            .df_playlists
+            .iter()
+            .enumerate()
+            .rposition(|(i, playlist)| !playlist.is_empty() || self.df_bridge[i].is_some())
+            .map(|i| i as u8 + 1)
+            .unwrap_or(0);
+        self.floppy_drives = profile_drives.max(media_max);
         if !self.has_ide() {
             self.ide_master = None;
             self.ide_master_name = None;
@@ -3478,6 +3497,7 @@ impl MachineSetup {
     pub fn row_hidden(&self, field: LauncherField) -> bool {
         use LauncherField as F;
         match field {
+            F::Df0Image | F::Df0WriteProtect => self.floppy_drives < 1,
             F::Df1Image | F::Df1WriteProtect => self.floppy_drives < 2,
             F::Df2Image | F::Df2WriteProtect => self.floppy_drives < 3,
             F::Df3Image | F::Df3WriteProtect => self.floppy_drives < 4,
@@ -3615,8 +3635,8 @@ impl MachineSetup {
             // real drive's data rate is the disk's own. With every fitted bay
             // physical there is nothing for it to act on.
             F::FloppySpeed => {
-                let any_image = self.floppy_drives == 0
-                    || (0..self.floppy_drives as usize).any(|i| self.df_bridge[i].is_none());
+                let any_image =
+                    (0..self.floppy_drives as usize).any(|i| self.df_bridge[i].is_none());
                 reason(any_image, "no image drives")
             }
             // Shader strength only feeds the shader pass, which does not run when
@@ -4693,7 +4713,7 @@ impl MachineSetup {
             F::AccelRam => self.accel_ram = cycle_nearest(&ACCEL_PRESETS, self.accel_ram, forward),
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
-                self.floppy_drives = step_u8(self.floppy_drives, forward, 1, 4);
+                self.floppy_drives = step_u8(self.floppy_drives, forward, 0, 4);
                 // A bay that is no longer fitted has no business holding a
                 // physical drive open: the row is gone from the page, so
                 // nothing would say why the interface was busy the next time

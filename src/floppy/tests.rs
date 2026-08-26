@@ -923,6 +923,7 @@ fn side_select_crosses_cylinder_head_boundaries_after_steps() {
 #[test]
 fn cia_b_drive_select_lines_map_df0_bit3_to_df3_bit6() {
     let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true; 4]);
 
     for (idx, select_mask) in CIAB_DSKSEL_MASKS.iter().enumerate() {
         ctrl.write_prb(!select_mask);
@@ -1005,6 +1006,24 @@ fn connected_empty_external_drive_answers_standard_drive_id() {
 }
 
 #[test]
+fn a_machine_with_no_floppy_drives_leaves_the_bus_unanswered() {
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([false; 4]);
+
+    assert!((0..4).all(|idx| !ctrl.drive_connected(idx)));
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    assert_eq!(ctrl.selected_drive(), None);
+    assert_eq!(ctrl.selected_track(), None);
+    assert_eq!(ctrl.cia_a_status_bits(), 0x3C);
+    assert!(!ctrl.drives[0].motor_on);
+    assert!(!ctrl.activity_led_on());
+    let err = ctrl
+        .insert_disk_image_bytes(0, Vec::new(), PathBuf::from("ghost.adf"), true)
+        .unwrap_err();
+    assert!(err.to_string().contains("not connected"), "{err:#}");
+}
+
+#[test]
 fn internal_df0_motor_follows_selected_motor_line_level() {
     let mut ctrl = FloppyController::default();
 
@@ -1020,6 +1039,7 @@ fn internal_df0_motor_follows_selected_motor_line_level() {
 fn external_drive_mtrxd_latches_only_on_select_active_edge() {
     let mut ctrl = FloppyController::default();
     let idx = 1;
+    ctrl.set_connected_drives([true, true, false, false]);
 
     ctrl.write_prb(drive_select_prb(idx, false));
     assert!(!ctrl.drives[idx].motor_on);
@@ -1054,6 +1074,7 @@ fn dresb_does_not_reset_internal_df0_motor_latch() {
 fn dresb_resets_external_motor_latch_and_write_protect_sense() {
     let mut ctrl = FloppyController::default();
     let idx = 1;
+    ctrl.set_connected_drives([true, true, false, false]);
 
     ctrl.drives[idx].write_protected_target = false;
     ctrl.drives[idx].write_protected_sense = false;
@@ -5016,13 +5037,17 @@ fn temp_adf() -> Result<PathBuf> {
 #[test]
 fn drive_connected_and_disk_inserted_track_drive_state() -> Result<()> {
     let mut ctrl = FloppyController::default();
-    // DF0 is the internal drive: always connected, starts empty.
+    // The ordinary Amiga profiles fit DF0, and it starts empty.
     assert!(ctrl.drive_connected(0));
     assert!(!ctrl.disk_inserted(0));
     // DF1-DF3 are not wired up by default.
     assert!(!ctrl.drive_connected(1));
     assert!(!ctrl.drive_connected(3));
     assert!(!ctrl.drive_connected(4));
+
+    ctrl.set_connected_drives([false; 4]);
+    assert!(!ctrl.drive_connected(0));
+    ctrl.set_connected_drives([true, false, false, false]);
 
     let adf = temp_adf()?;
     ctrl.insert_disk_image(0, adf.clone(), true)?;

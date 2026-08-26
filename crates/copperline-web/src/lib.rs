@@ -286,10 +286,10 @@ impl WebEmu {
     /// `video` picks the video standard ("PAL" or "NTSC", the desktop's
     /// `[chipset] video` key) on top of whatever the profile chose; omitted
     /// or empty keeps the profile's own standard (PAL for every offered
-    /// profile). `floppy_drives` fits one to four drives, matching the
+    /// profile). `floppy_drives` fits zero to four drives, matching the
     /// desktop's `[floppy] drives` setting; omitted, the profile default stays
-    /// in place (one drive for the offered models). An unknown name or invalid
-    /// drive count throws.
+    /// in place (zero for CDTV/CD32, one for the other profiles). An unknown
+    /// name or invalid drive count throws.
     #[wasm_bindgen(constructor)]
     pub fn new(
         model: Option<String>,
@@ -305,9 +305,9 @@ impl WebEmu {
             Some(name) => cfg.video_standard = parse_video_standard(name).map_err(js_err)?,
         }
         if let Some(count) = floppy_drives {
-            if !count.is_finite() || count.fract() != 0.0 || !(1.0..=4.0).contains(&count) {
+            if !count.is_finite() || count.fract() != 0.0 || !(0.0..=4.0).contains(&count) {
                 return Err(JsValue::from_str(&format!(
-                    "floppy drive count must be a finite integer between 1 and 4, got {count}"
+                    "floppy drive count must be a finite integer between 0 and 4, got {count}"
                 )));
             }
             let count = count as usize;
@@ -959,7 +959,8 @@ impl WebEmu {
         self.emu.bus().front_panel_status().cd_led
     }
 
-    /// Whether DFn is wired up: DF0 always, DF1-DF3 when configured.
+    /// Whether DFn is wired up. CDTV/CD32 start with none; other profiles
+    /// start with DF0, and an explicit constructor count overrides either.
     pub fn drive_connected(&self, drive: u8) -> bool {
         self.emu.bus().floppy.drive_connected(drive as usize)
     }
@@ -1285,6 +1286,12 @@ mod tests {
         assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 3);
         assert_eq!(deferred, 0);
         assert_eq!(elapsed_fields_for_immediate_render(&mut deferred), 1);
+    }
+
+    #[test]
+    fn web_constructor_accepts_no_floppy_drives() {
+        let web = WebEmu::new(Some("A500".into()), Some("PAL".into()), Some(0.0)).unwrap();
+        assert!((0..4).all(|idx| !web.emu.bus().floppy.drive_connected(idx)));
     }
 
     #[test]

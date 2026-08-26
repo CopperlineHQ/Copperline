@@ -102,7 +102,25 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
             texture_scale,
         );
     }
-    draw_fdd_track_counter(frame, status.fdd_track, texture_scale);
+    let counters = track_counter_layout(&view.media);
+    if let Some(counter) = counters.fdd {
+        draw_track_counter(
+            frame,
+            counter,
+            status.fdd_track,
+            TrackPalette::Fdd,
+            texture_scale,
+        );
+    }
+    if let Some(counter) = counters.cd {
+        draw_track_counter(
+            frame,
+            counter,
+            status.cd_track,
+            TrackPalette::Cd,
+            texture_scale,
+        );
+    }
     for idx in 0..4 {
         let drive = view.media.drives[idx];
         if let Some(rect) = layout.drive_load[idx] {
@@ -525,6 +543,66 @@ pub(super) fn fdd_track_digit_rect(index: usize) -> Rect {
     }
 }
 
+/// One digital track display. A single removable-media type gets the
+/// original full-size bay; when both floppy and CD drives are present the
+/// same fixed bay holds two shallow, vertically stacked displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TrackCounterSpec {
+    pub(super) rect: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TrackCounterLayout {
+    pub(super) fdd: Option<TrackCounterSpec>,
+    pub(super) cd: Option<TrackCounterSpec>,
+}
+
+pub(super) fn track_counter_layout(media: &MediaBar) -> TrackCounterLayout {
+    let has_fdd = media.drives.iter().any(|drive| drive.connected);
+    let has_cd = media.cd.is_some();
+    let full = || TrackCounterSpec {
+        rect: fdd_track_counter_rect(),
+    };
+    let stacked = |y| TrackCounterSpec {
+        rect: Rect {
+            x: fdd_track_counter_rect().x,
+            y: status_bar_top() + y,
+            w: fdd_track_counter_rect().w,
+            h: 20,
+        },
+    };
+    match (has_fdd, has_cd) {
+        (false, false) => TrackCounterLayout {
+            fdd: None,
+            cd: None,
+        },
+        (true, false) => TrackCounterLayout {
+            fdd: Some(full()),
+            cd: None,
+        },
+        (false, true) => TrackCounterLayout {
+            fdd: None,
+            cd: Some(full()),
+        },
+        (true, true) => TrackCounterLayout {
+            fdd: Some(stacked(1)),
+            cd: Some(stacked(23)),
+        },
+    }
+}
+
+pub(super) fn track_counter_digit_rect(counter: TrackCounterSpec, index: usize) -> Rect {
+    if counter.rect == fdd_track_counter_rect() {
+        return fdd_track_digit_rect(index);
+    }
+    Rect {
+        x: counter.rect.x + 5 + index * 17,
+        y: counter.rect.y + (counter.rect.h.saturating_sub(16)) / 2,
+        w: 12,
+        h: 16,
+    }
+}
+
 pub(super) fn shot_button_rect() -> Rect {
     Rect {
         x: SHOT_BUTTON_X,
@@ -627,8 +705,33 @@ pub(super) fn bar_hover_changed(
         != current.and_then(|pos| control_at(pos, layout))
 }
 
-pub(super) fn draw_fdd_track_counter(frame: &mut [u8], track: Option<u8>, texture_scale: usize) {
-    let rect = scale_rect(fdd_track_counter_rect(), texture_scale);
+#[derive(Debug, Clone, Copy)]
+enum TrackPalette {
+    Fdd,
+    Cd,
+}
+
+impl TrackPalette {
+    fn colors(self) -> (u32, u32, u32) {
+        match self {
+            Self::Fdd => (TRACK_SEGMENT_ON, TRACK_SEGMENT_OFF, TRACK_SEGMENT_HIGHLIGHT),
+            Self::Cd => (
+                CD_TRACK_SEGMENT_ON,
+                CD_TRACK_SEGMENT_OFF,
+                CD_TRACK_SEGMENT_HIGHLIGHT,
+            ),
+        }
+    }
+}
+
+fn draw_track_counter(
+    frame: &mut [u8],
+    counter: TrackCounterSpec,
+    track: Option<u8>,
+    palette: TrackPalette,
+    texture_scale: usize,
+) {
+    let rect = scale_rect(counter.rect, texture_scale);
     fill_rect(frame, rect, LED_BEZEL_DARK, texture_scale);
     draw_rect_bevel(frame, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM, texture_scale);
     let inset = 2 * texture_scale;
@@ -654,8 +757,9 @@ pub(super) fn draw_fdd_track_counter(frame: &mut [u8], track: Option<u8>, textur
     for (idx, ch) in digits.into_iter().enumerate() {
         draw_seven_segment_digit(
             frame,
-            scale_rect(fdd_track_digit_rect(idx), texture_scale),
+            scale_rect(track_counter_digit_rect(counter, idx), texture_scale),
             ch as char,
+            palette.colors(),
             texture_scale,
         );
     }
@@ -1188,6 +1292,7 @@ pub(super) fn draw_seven_segment_digit(
     frame: &mut [u8],
     rect: Rect,
     ch: char,
+    colors: (u32, u32, u32),
     texture_scale: usize,
 ) {
     const SEG_A: u8 = 1 << 0;
@@ -1214,7 +1319,12 @@ pub(super) fn draw_seven_segment_digit(
     };
     let thickness = 2 * texture_scale;
     let short = 5 * texture_scale;
-    let horizontal = 8 * texture_scale;
+    // Stop the horizontal segments before the vertical pair. A fixed 8px
+    // span was correct for the original 12px digit, but overlapped the
+    // right-hand strokes when the counter used narrower digits, filling the
+    // upper- and lower-right corners.
+    let horizontal = rect.w.saturating_sub(2 * thickness);
+    let (segment_on, segment_off, segment_highlight) = colors;
 
     let segments = [
         (
@@ -1287,11 +1397,7 @@ pub(super) fn draw_seven_segment_digit(
         fill_rect(
             frame,
             segment_rect,
-            if lit {
-                TRACK_SEGMENT_ON
-            } else {
-                TRACK_SEGMENT_OFF
-            },
+            if lit { segment_on } else { segment_off },
             texture_scale,
         );
         if lit {
@@ -1300,7 +1406,7 @@ pub(super) fn draw_seven_segment_digit(
                 segment_rect.y,
                 segment_rect.x,
                 segment_rect.x + segment_rect.w,
-                TRACK_SEGMENT_HIGHLIGHT,
+                segment_highlight,
                 texture_scale,
             );
         }

@@ -53,7 +53,7 @@ range checks as the equivalent TOML fields:
 | `--ram-init MODE` | `[memory] init` | `zero` (default), `random[:SEED]`, `pattern:WORD`, or `0xWORD` |
 | `--motherboard SIZE` | `[memory] motherboard` | Ramsey RAM (A3000/A4000): `0`, `1M`..`4M`, `8M`, `12M`, `16M`; A4000 up to `64M` |
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
-| `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
+| `--floppy-drives COUNT` | `[floppy] drives` | `0` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `greaseweazle`, or `off` |
 | `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
@@ -231,8 +231,8 @@ gives a plain 8371/8362 OCS machine.
 | `A1200` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Gayle IDE |
 | `A3000` | ECS | 68030 @ 25 MHz | 2M | 0 | Ramsey-04, RP5C01 RTC |
 | `A4000` | AGA (Alice/Lisa) | 68040 @ 25 MHz | 2M | 0 | Ramsey-07, RP5C01 RTC |
-| `CDTV` | ECS | 68000 @ 7.09 MHz | 1M | 0 | DMAC CD controller, RTC, 256K extended ROM |
-| `CD32` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Akiko, CD32 pad, NVRAM, 512K extended ROM |
+| `CDTV` | ECS | 68000 @ 7.09 MHz | 1M | 0 | DMAC CD controller, RTC, 256K extended ROM, no floppy drive |
+| `CD32` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Akiko, CD32 pad, NVRAM, 512K extended ROM, no floppy drive |
 
 `rtc` exists because most Amigas shipped without a battery-backed clock and
 only some carried one. The `A500Plus` (an OKI RTC soldered to the Rev 8A
@@ -1386,7 +1386,7 @@ through a loopback device such as BlackHole needs none.
 
 ```toml
 [floppy]
-drives = 2                 # DF0 and DF1 connected; default is DF0 only
+drives = 2                 # DF0 and DF1 connected; 0 disconnects every drive
 speed = 100                # 100/200/400/800 percent, or 0 for turbo
 
 [floppy.df0]
@@ -1396,11 +1396,13 @@ write_protected = true       # default true
 # enabled = true             # implied by path/paths
 ```
 
-`drives` controls how many mechanisms are wired, from one to four. DF0 is
-the internal drive; DF1-DF3 are external drives that answer the standard
-Amiga external-drive ID protocol when connected. A configured disk image
-also connects that drive automatically, so existing configs that name
-`[floppy.df1]` .. `[floppy.df3]` keep working.
+`drives` controls how many mechanisms are wired, from zero to four. DF0 is
+the internal drive on models that have one; DF1-DF3 are external drives that
+answer the standard Amiga external-drive ID protocol when connected. The CDTV
+and CD32 profiles default to zero, matching the physical machines; every other
+profile defaults to DF0 only. A configured disk image also connects that drive
+automatically, so existing configs that name `[floppy.df0]` .. `[floppy.df3]`
+keep working.
 
 `speed` accelerates the emulated drives beyond the authentic data rate.
 `100` (the default) is real speed. `200`, `400`, and `800` clock the whole

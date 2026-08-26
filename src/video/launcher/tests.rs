@@ -1821,6 +1821,33 @@ fn select_model_applies_profile_defaults_and_emits_only_the_profile() {
 }
 
 #[test]
+fn cd_profiles_select_zero_drives_and_the_launcher_can_override_them() {
+    let mut s = MachineSetup::default();
+    s.select_model(Some(MachineModel::Cd32));
+    assert_eq!(s.floppy_drives, 0);
+    assert_eq!(s.to_raw().floppy.drives, None);
+    assert_eq!(s.build_config().unwrap().floppy_connected, [false; 4]);
+
+    s.cycle(F::FloppyDrives, true);
+    assert_eq!(s.floppy_drives, 1);
+    assert_eq!(s.to_raw().floppy.drives, Some(1));
+
+    s.select_model(Some(MachineModel::Cdtv));
+    assert_eq!(s.floppy_drives, 0);
+    s.select_model(Some(MachineModel::A500));
+    assert_eq!(s.floppy_drives, 1);
+}
+
+#[test]
+fn zero_floppy_drives_round_trips_as_an_a500_override() {
+    let raw: RawConfig = toml::from_str("[floppy]\ndrives = 0").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.floppy_drives, 0);
+    assert_eq!(setup.to_raw().floppy.drives, Some(0));
+    assert_eq!(setup.build_config().unwrap().floppy_connected, [false; 4]);
+}
+
+#[test]
 fn mouse_sensitivity_round_trips_through_raw() {
     let mut s = MachineSetup::default();
     // The neutral midpoint shows as "Default" and matches the baseline, so
@@ -3356,8 +3383,11 @@ fn floppy_rows_hidden_until_wired() {
         MachineSetup::from_raw(&toml::from_str(&format!("[floppy]\ndrives = {n}")).unwrap())
             .unwrap()
     };
+    let zero = with_drives(0);
+    assert!(zero.row_hidden(F::Df0Image));
+    assert!(zero.disabled_reason(F::FloppySpeed).is_some());
     let one = with_drives(1);
-    assert!(!one.row_hidden(F::Df0Image)); // DF0: is always shown
+    assert!(!one.row_hidden(F::Df0Image));
     assert!(one.row_hidden(F::Df1Image));
     assert!(one.row_hidden(F::Df3WriteProtect));
     let three = with_drives(3);

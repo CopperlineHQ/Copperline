@@ -1834,6 +1834,10 @@ pub struct FrontPanelStatus {
     /// CD activity LED: None on machines without a CD drive, Some(on)
     /// while the drive is reading data or playing audio.
     pub cd_led: Option<bool>,
+    /// CD track under the emulated optical head. `None` when no medium is
+    /// mounted, including while a replacement disc is travelling in the
+    /// tray.
+    pub cd_track: Option<u8>,
     pub output_volume_percent: u8,
 }
 
@@ -1845,6 +1849,7 @@ impl Default for FrontPanelStatus {
             fdd_track: None,
             hdd_led: None,
             cd_led: None,
+            cd_track: None,
             output_volume_percent: 100,
         }
     }
@@ -3933,6 +3938,19 @@ impl Bus {
                 .or_else(|| {
                     self.scsi_cd_ref()
                         .map(crate::scsi::ScsiCdRom::audio_playing)
+                }),
+            cd_track: self
+                .cdtv
+                .as_ref()
+                .and_then(crate::cdtv::CdtvController::current_track)
+                .or_else(|| {
+                    self.akiko
+                        .as_ref()
+                        .and_then(crate::akiko::Akiko::current_track)
+                })
+                .or_else(|| {
+                    self.scsi_cd_ref()
+                        .and_then(crate::scsi::ScsiCdRom::current_track)
                 }),
             output_volume_percent: self.paula.output_volume_percent(),
         }

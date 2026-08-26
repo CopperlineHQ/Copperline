@@ -544,9 +544,10 @@ second optional argument picks the video standard on top of the profile
 (`new WebEmu('A500', 'NTSC')`), the desktop's `[chipset] video` key;
 omitted, the profile keeps its own (PAL for every offered profile).
 `WebEmu.video_standards()` lists the accepted names and is the matching
-feature test. The third optional argument fits one to four floppy drives,
+feature test. The third optional argument fits zero to four floppy drives,
 the browser equivalent of `[floppy] drives`; it must be an integer. When
-omitted, the chosen profile's default remains for backward compatibility.
+omitted, the chosen profile's default remains (zero for CDTV/CD32, one for
+the other profiles) for backward compatibility.
 `machine_model()` returns the
 running machine's profile name
 (`undefined` for a shape no profile describes, such as a state saved

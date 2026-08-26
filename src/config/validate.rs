@@ -288,7 +288,8 @@ impl TryFrom<RawConfig> for Config {
                 },
             },
         };
-        let (floppy, floppy_connected, floppy_playlists) = parse_floppy(raw.floppy)?;
+        let (floppy, floppy_connected, floppy_playlists) =
+            parse_floppy(raw.floppy, defaults.floppy_connected)?;
         let overscan = match raw.display.overscan.as_deref() {
             None => defaults.overscan,
             Some(s) => parse_overscan(s)?,
@@ -1674,6 +1675,7 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.chipset = Chipset::Ecs;
             d.chip_ram_bytes = 1024 * 1024;
             d.slow_ram_bytes = 0;
+            d.floppy_connected = [false; 4];
             d.cdtv_cd = true;
             d.rtc_present = true;
         }
@@ -1685,6 +1687,7 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.slow_ram_bytes = 0;
             d.cpu = CpuModel::M68EC020;
             d.cpu_clock_mhz = 14.18;
+            d.floppy_connected = [false; 4];
             d.akiko = true;
             // The bundled controller: lowlevel.library expects the pad's
             // serial button protocol on port 2.
@@ -2124,11 +2127,14 @@ fn validate_slow_ram(slow: usize) -> Result<()> {
     Ok(())
 }
 
-fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf>; 4])> {
+fn parse_floppy(
+    raw: RawFloppy,
+    default_connected: [bool; 4],
+) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf>; 4])> {
     let connected_count = match raw.drives {
         None => None,
-        Some(n @ 1..=4) => Some(usize::from(n)),
-        Some(n) => bail!("[floppy] drives must be between 1 and 4, got {n}"),
+        Some(n @ 0..=4) => Some(usize::from(n)),
+        Some(n) => bail!("[floppy] drives must be between 0 and 4, got {n}"),
     };
     let speed = match raw.speed {
         None => 100,
@@ -2144,7 +2150,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
     let mut drives: [Option<FloppyDriveConfig>; 4] = std::array::from_fn(|_| None);
     let mut connected = match connected_count {
         Some(count) => std::array::from_fn(|idx| idx < count),
-        None => [true, false, false, false],
+        None => default_connected,
     };
     let mut playlists: [Vec<PathBuf>; 4] = std::array::from_fn(|_| Vec::new());
     #[cfg_attr(not(feature = "fluxbridge"), allow(unused_mut))]

@@ -1489,6 +1489,7 @@ fn cold_power_on_reset_clears_chip_ram_and_restores_overlay() {
 #[test]
 fn cpu_reset_drives_external_floppy_reset_line() {
     let mut bus = empty_bus();
+    bus.floppy.set_connected_drives([true, true, false, false]);
     bus.floppy.write_prb(0x6F);
     assert!(bus.floppy.activity_led_on());
 

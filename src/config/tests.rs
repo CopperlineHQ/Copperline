@@ -1501,6 +1501,10 @@ fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
             piped.rtg_vram_bytes, direct.rtg_vram_bytes,
             "{model:?} RTG VRAM"
         );
+        assert_eq!(
+            piped.floppy_connected, direct.floppy_connected,
+            "{model:?} floppy drives"
+        );
     }
     Ok(())
 }
@@ -3537,6 +3541,19 @@ fn floppy_drive_count_connects_empty_external_mechanisms() -> Result<()> {
 }
 
 #[test]
+fn cd_profiles_default_to_no_floppy_drives() -> Result<()> {
+    for profile in ["CDTV", "CD32"] {
+        let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+        assert_eq!(cfg.floppy_connected, [false; 4], "{profile}");
+    }
+    assert_eq!(
+        parse_config("[machine]\nprofile = \"A500\"\n")?.floppy_connected,
+        [true, false, false, false]
+    );
+    Ok(())
+}
+
+#[test]
 fn floppy_speed_defaults_and_parses_supported_values() -> Result<()> {
     assert_eq!(parse_config("")?.floppy.speed, 100);
     for speed in [100u16, 200, 400, 800, 0] {
@@ -3826,7 +3843,7 @@ fn floppy_image_connects_external_drive_without_count() -> Result<()> {
 }
 
 #[test]
-fn floppy_drive_count_rejects_media_beyond_connected_slots() -> Result<()> {
+fn floppy_drive_count_allows_zero_and_rejects_media_beyond_connected_slots() -> Result<()> {
     let adf = temp_adf()?;
     let err = parse_config(&format!(
         r#"
@@ -3842,8 +3859,18 @@ fn floppy_drive_count_rejects_media_beyond_connected_slots() -> Result<()> {
         err.to_string().contains("leaves floppy.df1 disconnected"),
         "{err:#}"
     );
-    let err = parse_config("[floppy]\ndrives = 0").unwrap_err();
-    assert!(err.to_string().contains("between 1 and 4"), "{err:#}");
+    let cfg = parse_config("[floppy]\ndrives = 0")?;
+    assert_eq!(cfg.floppy_connected, [false; 4]);
+
+    let err = parse_config(&format!(
+        "[floppy]\ndrives = 0\n[floppy.df0]\npath = {:?}\n",
+        adf.to_string_lossy()
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("leaves floppy.df0 disconnected"),
+        "{err:#}"
+    );
     Ok(())
 }
 
@@ -4011,6 +4038,13 @@ fn cli_overrides_layer_on_top_of_a_profile() -> Result<()> {
 #[test]
 fn cli_floppy_drive_override_uses_config_validation() -> Result<()> {
     let overrides = ConfigOverrides {
+        floppy_drives: Some(0),
+        ..Default::default()
+    };
+    let cfg = load_overrides(&overrides)?;
+    assert_eq!(cfg.floppy_connected, [false; 4]);
+
+    let overrides = ConfigOverrides {
         floppy_drives: Some(4),
         ..Default::default()
     };
@@ -4022,7 +4056,7 @@ fn cli_floppy_drive_override_uses_config_validation() -> Result<()> {
         ..Default::default()
     };
     let err = load_overrides(&overrides).unwrap_err();
-    assert!(err.to_string().contains("between 1 and 4"), "{err:#}");
+    assert!(err.to_string().contains("between 0 and 4"), "{err:#}");
     Ok(())
 }
 
