@@ -681,8 +681,8 @@ impl Akiko {
             0x00..=0x03 => ID[offset as usize],
             // INTREQ / INTENA (and the read-only INTENA mirror).
             // The status read returns the raw request latches; INTENA
-            // gates only the INT2 line (see irq()). Games that drive the
-            // DRIVE port directly poll CDINTREQ for DRIVEXMIT/DRIVERECV
+            // gates only the INT2 line (see int2_line()). Games driving
+            // the DRIVE port directly poll CDINTREQ for DRIVEXMIT/DRIVERECV
             // with those sources never enabled in INTENA -- Jim Power's
             // CD32 loader spins on bit 30 before each PIO command byte --
             // so a masked read hides the transmitter-ready latch and
