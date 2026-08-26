@@ -680,19 +680,19 @@ impl Akiko {
         match offset {
             0x00..=0x03 => ID[offset as usize],
             // INTREQ / INTENA (and the read-only INTENA mirror).
-            // The status read exposes only enabled sources (intreq AND
-            // intena): interrupt servers on the shared INT2 line read
-            // CDINTREQ on every entry, including entries for CIA-A
-            // events, and a stale latched completion bit from a disabled
-            // source must not look like fresh work. The AROS cd.device
-            // interrupt server signals its task on any visible RXDMADONE
-            // and wedges its sector waits if a disabled stale latch shows
-            // through -- and that server ran on real CD32s in 2013 with
-            // this structure, so the real register cannot behave that
-            // way; Kickstart's server tolerates either reading. TODO:
-            // verify the masking against real Akiko silicon (WinUAE
-            // returns the raw latches).
-            0x04..=0x07 => get_long_byte(self.intreq & self.intena, offset - 0x04),
+            // The status read returns the raw request latches; INTENA
+            // gates only the INT2 line (see irq()). Games that drive the
+            // DRIVE port directly poll CDINTREQ for DRIVEXMIT/DRIVERECV
+            // with those sources never enabled in INTENA -- Jim Power's
+            // CD32 loader spins on bit 30 before each PIO command byte --
+            // so a masked read hides the transmitter-ready latch and
+            // hangs them. WinUAE and MAME both return the raw latches.
+            // (An earlier masked reading here papered over the AROS
+            // cd.device INT2 server reacting to stale completion latches
+            // it had never armed; that server now masks CDINTREQ with
+            // its own enable state, and the bundled ROM carries the
+            // fix.)
+            0x04..=0x07 => get_long_byte(self.intreq, offset - 0x04),
             0x08..=0x0B => get_long_byte(self.intena, offset - 0x08),
             0x0C..=0x0F => get_long_byte(self.intena, offset - 0x0C),
             // 0x18-0x1B mirror 0x10/0x14/0x1C.
@@ -733,6 +733,11 @@ impl Akiko {
             0x08..=0x0B => {
                 put_long_byte(&mut self.intena, offset - 0x08, value);
                 self.intena &= 0xFF00_0000;
+                log::trace!(
+                    "akiko: INTENA={:08X} (intreq={:08X})",
+                    self.intena,
+                    self.intreq
+                );
             }
             0x10..=0x13 => {
                 put_long_byte(&mut self.addressdata, offset - 0x10, value);
@@ -758,6 +763,12 @@ impl Akiko {
                 }
                 self.cdcomtxcmp = value;
                 self.tx_dma_delay_cck = DMA_RESTART_DELAY_CCK;
+                log::trace!(
+                    "akiko: TXCMP={:02X} (txinx={:02X} intreq={:08X})",
+                    value,
+                    self.cdcomtxinx,
+                    self.intreq
+                );
             }
             0x1F => {
                 self.intreq &= !CDINT_RXDMADONE;
@@ -769,6 +780,12 @@ impl Akiko {
                 }
                 self.cdcomrxcmp = value;
                 self.rx_dma_delay_cck = DMA_RESTART_DELAY_CCK;
+                log::trace!(
+                    "akiko: RXCMP={:02X} (rxinx={:02X} intreq={:08X})",
+                    value,
+                    self.cdcomrxinx,
+                    self.intreq
+                );
             }
             0x20 | 0x21 => {
                 // PBX writes OR slots in; the flag gate can hold it at 0.
@@ -1312,6 +1329,13 @@ impl Akiko {
         self.receive_length += 1;
         self.receive_offset = 0;
         self.intreq |= CDINT_DRIVERECV;
+        log::trace!(
+            "akiko: return {:02x?} (rxinx={:02X} rxcmp={:02X} intreq={:08X})",
+            &self.result_buffer[..self.receive_length],
+            self.cdcomrxinx,
+            self.cdcomrxcmp,
+            self.intreq
+        );
         true
     }
 
@@ -2278,21 +2302,70 @@ mod tests {
     }
 
     #[test]
-    fn intreq_read_exposes_only_enabled_sources() {
-        // The CDINTREQ status read returns intreq AND intena: interrupt
-        // servers on the shared INT2 line read it on every entry, and a
-        // stale latched completion bit from a disabled source must not
-        // look like fresh work (the AROS cd.device server signals its
-        // task on any visible RXDMADONE).
+    fn intreq_read_returns_raw_latches() {
+        // The CDINTREQ status read returns the raw request latches
+        // regardless of INTENA, which gates only the INT2 line. Pollers
+        // of the direct DRIVE port depend on this: they spin on
+        // DRIVEXMIT/DRIVERECV without ever enabling those sources
+        // (regression example: Jim Power CD32 polls bit 30 before each
+        // PIO command byte).
         let mut chip = no_chip();
         let mut akiko = Akiko::new();
-        akiko.intreq = CDINT_RXDMADONE | CDINT_TXDMADONE;
+        akiko.intreq = CDINT_RXDMADONE | CDINT_DRIVEXMIT;
         akiko.intena = 0;
-        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), 0);
-        akiko.intena = CDINT_RXDMADONE;
-        assert_eq!(akiko.read(AKIKO_BASE + 0x04, 4, &mut chip), CDINT_RXDMADONE);
+        assert_eq!(
+            akiko.read(AKIKO_BASE + 0x04, 4, &mut chip),
+            CDINT_RXDMADONE | CDINT_DRIVEXMIT
+        );
         // The latch itself survives the read.
-        assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_TXDMADONE);
+        assert_eq!(akiko.intreq, CDINT_RXDMADONE | CDINT_DRIVEXMIT);
+    }
+
+    #[test]
+    fn pio_command_roundtrip_polls_raw_latches_with_interrupts_disabled() {
+        // A guest driving the DRIVE port directly leaves INTENA clear and
+        // spins on the CDINTREQ latches instead: DRIVEXMIT before each
+        // command byte written to $28, DRIVERECV before each response
+        // byte read back from $28 (regression example: Jim Power CD32's
+        // loader, which hangs at its intro if the poll cannot see the
+        // latches).
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+        akiko.intena = 0;
+        // The ROM's last response drain leaves the transmitter-ready latch.
+        akiko.intreq = CDINT_DRIVEXMIT;
+        // The guest switches both directions to PIO.
+        akiko.write(AKIKO_BASE + 0x24, 4, 0, &mut chip);
+
+        // LED command with the status-request bit: poll, then write, per byte.
+        for &byte in &[0x15u8, 0x81, 0x69] {
+            assert_ne!(
+                akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+                0,
+                "transmit-ready latch visible to the poll"
+            );
+            akiko.write(AKIKO_BASE + 0x28, 1, u32::from(byte), &mut chip);
+        }
+        assert_eq!(
+            akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+            0,
+            "transmitter busy while the command executes"
+        );
+        akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+
+        // Response: poll DRIVERECV, then read each byte back from $28.
+        let mut response = Vec::new();
+        while akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVERECV != 0 {
+            response.push(akiko.read(AKIKO_BASE + 0x28, 1, &mut chip) as u8);
+        }
+        assert_eq!(response, vec![0x15, 0x01, 0xE9]);
+        // The drained response re-arms the transmitter-ready latch.
+        assert_ne!(akiko.intreq & CDINT_DRIVEXMIT, 0);
     }
 
     /// Two-bank space: chip at 0 and "fast" at $200000, like a CD32 with
