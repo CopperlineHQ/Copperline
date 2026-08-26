@@ -324,7 +324,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      whether an autoconfig board ignores ec_Shutup.
 //  68: Akiko gained carried physical byte offsets for command/response packets
 //      whose visible eight-bit indices cross a page boundary.
-pub const STATE_VERSION: u32 = 68;
+//  69: the Bus gained the Agnus vertical display window flop
+//      (`diw_vertical_open`, set on a DIWSTRT.V match, reset on DIWSTOP.V).
+//      It is history-dependent and snapshots can be taken mid-frame, so it
+//      travels in the state instead of being reconstructed from registers.
+pub const STATE_VERSION: u32 = 69;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

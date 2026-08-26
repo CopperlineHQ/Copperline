@@ -155,6 +155,11 @@ impl Bus {
         // The snapshot above was captured before the frame wrap toggled
         // LOF; record the settled value for the field about to render.
         self.current_frame_render_base.long_field = self.agnus.lof;
+        // The vertical display flop carries across the wrap (a window
+        // whose DIWSTOP the beam never reaches stays open through the
+        // vertical blank); line zero's comparator matches apply like any
+        // other line start's.
+        self.reevaluate_diw_vertical_flop();
         self.current_frame_geometry = self.compute_frame_geometry();
         self.current_frame_presentation_h_window = self.compute_presentation_h_window();
         self.current_frame_presentation_v_window = self.compute_presentation_v_window();
@@ -309,14 +314,7 @@ impl Bus {
             return;
         }
         let display_start = self.display_start_vpos_for_current_control();
-        if display_start != self.agnus.vpos
-            || !display_window_contains_vpos(
-                self.denise.diwstrt,
-                self.denise.diwstop,
-                self.effective_diwhigh(),
-                self.agnus.vpos,
-            )
-        {
+        if display_start != self.agnus.vpos || !self.diw_vertical_open_at(self.agnus.vpos) {
             return;
         }
         self.capture_current_frame_display_start();
@@ -1008,12 +1006,7 @@ impl Bus {
         let display_bplcon0 = self.effective_bitplane_bplcon0_at(old_emulated_cck);
         let mode = BitplaneMode::from_bplcon0(display_bplcon0, self.aga_enabled());
         let display_planes = mode.display_planes();
-        if !display_window_contains_vpos(
-            self.denise.diwstrt,
-            self.denise.diwstop,
-            self.effective_diwhigh(),
-            vpos,
-        ) {
+        if !self.diw_vertical_open_at(vpos) {
             return;
         }
         let Some(fb_y) = visible_framebuffer_y(

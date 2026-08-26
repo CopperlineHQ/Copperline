@@ -211,6 +211,65 @@ fn wide_bitplane_hot_line_matches_dynamic_slot_arbitration() {
     }
 }
 
+/// The Agnus vertical display gate is a flop (set on a DIWSTRT.V match,
+/// reset on a DIWSTOP.V match), not a level comparison of the live
+/// registers. A program that closes its main window and rewrites the whole
+/// DIW during the closing line for a lower screen band (Kang Fu CD32's
+/// status bar) must not see fetch resume in the tail of that line: the new
+/// DIWSTRT only matches at its own later line, after every bitplane
+/// pointer write of the split has landed.
+#[test]
+fn diw_vertical_flop_ignores_mid_frame_rewrite_of_a_closed_window() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0xC200; // hires, 4 planes
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00C8;
+    // Window on lines 0xA0..0xB0, written through the register path so the
+    // flop comparators run.
+    assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0xB0C1, BeamWriteSource::Cpu));
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
+    // Crossing DIWSTRT.V sets the flop: fetch runs inside the window.
+    advance_to_line(&mut bus, 0xA8);
+    assert!(
+        line_fetches(&bus, 0xA8),
+        "display line inside the window must fetch"
+    );
+    // Crossing DIWSTOP.V clears it.
+    advance_to_line(&mut bus, 0xB0);
+    assert!(!line_fetches(&bus, 0xB0), "the DIWSTOP line must not fetch");
+    // Mid-line rewrite of the whole window, split style: the new range
+    // covers the current line, but the old DIWSTOP already reset the flop
+    // at this line's start and the new DIWSTRT only matches at 0xB1.
+    while bus.agnus.hpos < 0x20 {
+        bus.advance_chipset(1);
+    }
+    assert!(!bus.write_custom_word_from(0x08E, 0xB181, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0xC1C1, BeamWriteSource::Cpu));
+    assert!(
+        !line_fetches(&bus, 0xB0),
+        "a mid-line rewrite must not re-open the closed line (level semantics did)"
+    );
+    // The new window's own start line fetches.
+    advance_to_line(&mut bus, 0xB1);
+    assert!(
+        line_fetches(&bus, 0xB1),
+        "the rewritten window opens at its own DIWSTRT line"
+    );
+    // And its DIWSTOP line closes it again.
+    advance_to_line(&mut bus, 0xC1);
+    assert!(!line_fetches(&bus, 0xC1));
+}
+
 #[test]
 fn wide_bitplane_line_stays_dynamic_when_control_delay_crosses_wrap() {
     let mut bus = empty_bus();
