@@ -147,6 +147,19 @@ impl Deinterlacer {
         }
     }
 
+    /// Drop the weave history: the stored fields must not weave with what
+    /// comes next. The weave-phase flip and its votes reset with the
+    /// history on every drop - phase evidence gathered from one stream
+    /// says nothing about the next, and a stale flip would route a
+    /// correctly phased stream to the wrong parity until enough contrary
+    /// votes accumulated.
+    fn drop_weave_history(&mut self) {
+        self.have = [false; 2];
+        self.have2 = [false; 2];
+        self.weave_flip = false;
+        self.weave_flip_votes = 0;
+    }
+
     /// Switch motion-adaptive field merging on or off live. A change
     /// drops the weave history (fields either side of the switch present
     /// differently and must not weave together); an unchanged value is a
@@ -156,10 +169,7 @@ impl Deinterlacer {
             return;
         }
         self.enabled = enabled;
-        self.have = [false; 2];
-        self.have2 = [false; 2];
-        self.weave_flip = false;
-        self.weave_flip_votes = 0;
+        self.drop_weave_history();
     }
 
     /// Whether motion-adaptive field merging is enabled.
@@ -198,10 +208,7 @@ impl Deinterlacer {
     /// resets with it: the new stream's field pairing is unknown until its
     /// own fields provide comb evidence.
     pub fn reset_history(&mut self) {
-        self.have = [false; 2];
-        self.have2 = [false; 2];
-        self.weave_flip = false;
-        self.weave_flip_votes = 0;
+        self.drop_weave_history();
         if self.presented.is_some() {
             self.seed_presented = true;
         }
@@ -360,10 +367,7 @@ impl Deinterlacer {
             // Fields of a different scan must not weave with the old
             // history (mode switch); drop it, along with the weave-phase
             // evidence gathered from it.
-            self.have = [false; 2];
-            self.have2 = [false; 2];
-            self.weave_flip = false;
-            self.weave_flip_votes = 0;
+            self.drop_weave_history();
             self.field_rows = rows;
             self.field_width = width;
         }
@@ -383,8 +387,7 @@ impl Deinterlacer {
             // in the field; present at native height.
             self.out[..rows * width].copy_from_slice(&field[..rows * width]);
             self.out_rows = rows;
-            self.have = [false; 2];
-            self.have2 = [false; 2];
+            self.drop_weave_history();
             self.present_with_phosphor();
             return;
         }
@@ -397,8 +400,7 @@ impl Deinterlacer {
                 self.out[(2 * y + 1) * width..(2 * y + 2) * width].copy_from_slice(row);
             }
             self.out_rows = rows * 2;
-            self.have = [false; 2];
-            self.have2 = [false; 2];
+            self.drop_weave_history();
             self.present_with_phosphor();
             return;
         }
@@ -555,8 +557,7 @@ impl Deinterlacer {
                 self.field_rows = rows;
                 self.field_width = width;
             }
-            self.have = [false; 2];
-            self.have2 = [false; 2];
+            self.drop_weave_history();
             self.out_width = width;
             if !lace && !double_rows {
                 let active = rows * width;
@@ -673,8 +674,7 @@ impl Deinterlacer {
                 self.field_rows = rows;
                 self.field_width = width;
             }
-            self.have = [false; 2];
-            self.have2 = [false; 2];
+            self.drop_weave_history();
             self.out_rows = full_rows;
             self.out_width = width;
         } else {

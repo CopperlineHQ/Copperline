@@ -512,10 +512,12 @@ field each laced push: motion widens both sums about equally and fails
 the margin test, but a static picture drawn for the opposite pairing makes
 the losing sum carry the comb, and after four consecutive losing fields
 the weave phase flips (relabelling the stored field history with it). The
-flip resets with the weave history on machine swaps, resets, state loads
-and scan changes. Kang Fu CD32's laced HAM8 intro screens are the
-regression example: with the phase wrong, its thin lettering rendered as
-"every other line missing".
+flip and its votes reset whenever the weave history is dropped -
+progressive fields, machine swaps, resets, state loads, deinterlace
+toggles and scan changes alike - so a stale phase from one stream never
+routes the next stream's fields to the wrong parity. Kang Fu CD32's
+laced HAM8 intro screens are the regression example: with the phase
+wrong, its thin lettering rendered as "every other line missing".
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling
