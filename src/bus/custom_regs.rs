@@ -416,6 +416,7 @@ impl Bus {
                 // DIWHIGH), so no bitplane DMA falls inside the window and the
                 // display goes black.
                 self.denise.diwhigh_written = false;
+                self.reevaluate_diw_vertical_flop();
                 if matches!(self.agnus.revision(), AgnusRevision::Ocs)
                     && !self.current_frame_display_snapshot_taken
                     && !display_window_unprogrammed(self.denise.diwstrt, self.denise.diwstop)
@@ -440,13 +441,9 @@ impl Bus {
                 self.denise.diwstop = val;
                 self.ddf_seq_invalidate_line();
                 self.denise.diwhigh_written = false;
+                self.reevaluate_diw_vertical_flop();
                 if self.ocs_same_line_diw_start_blocked_vpos == Some(self.agnus.vpos)
-                    && !display_window_contains_vpos(
-                        self.denise.diwstrt,
-                        self.denise.diwstop,
-                        self.effective_diwhigh(),
-                        self.agnus.vpos,
-                    )
+                    && !self.diw_vertical_open_at(self.agnus.vpos)
                 {
                     self.ocs_same_line_diw_start_blocked_vpos = None;
                 }
@@ -1232,6 +1229,7 @@ impl Bus {
                     self.denise.diwhigh = val;
                     self.denise.diwhigh_written = true;
                     self.ddf_seq_invalidate_line();
+                    self.reevaluate_diw_vertical_flop();
                 }
                 false
             }

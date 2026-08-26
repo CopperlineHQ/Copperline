@@ -370,6 +370,12 @@ impl Bus {
             // most a few colour clocks, so exactly one line boundary can be
             // crossed per advance.
             self.ddf_seq_on_line_rollover(old_vpos);
+            if tick.new_frames == 0 {
+                // The vertical display flop's comparators fire at the new
+                // line's start; a frame wrap instead re-seeds the flop in
+                // begin_new_beam_frame.
+                self.reevaluate_diw_vertical_flop();
+            }
         }
         let display_start = self.display_start_vpos_for_current_control();
         if tick.new_frames == 0 && old_vpos < display_start && self.agnus.vpos >= display_start {
@@ -886,12 +892,7 @@ impl Bus {
         }
         if hpos < SLOT_MASK_BITS && self.wide_bitplane_dynamic_vpos.get() != Some(vpos) {
             if !self.wide_bitplane_hot_line.is_current(vpos) {
-                let plan = if display_window_contains_vpos(
-                    self.denise.diwstrt,
-                    self.denise.diwstop,
-                    self.effective_diwhigh(),
-                    vpos,
-                ) {
+                let plan = if self.diw_vertical_open_at(vpos) {
                     let bplcon0 = self.effective_bitplane_bplcon0();
                     self.bitplane_slot_plan_for_bplcon0(bplcon0)
                         .filter(|plan| !self.bitplane_ddfstart_missed_on_line(vpos, plan.start))
@@ -911,17 +912,12 @@ impl Bus {
     /// fetch-affecting register write, and for programmable lines beyond the
     /// precomputed 256-colour-clock mask.
     pub(super) fn dynamic_bitplane_slot_active_at(&self, vpos: u32, hpos: u32) -> bool {
-        // Bitplane DMA only runs inside the vertical display window (set at
-        // DIWSTRT.V, cleared at DIWSTOP.V), so the top-border and vertical-
-        // blank lines are free for the blitter/CPU. Rejecting this before the
-        // DDF/BPLCON0 plan lookup avoids per-color-clock cache probes on lines
-        // that cannot fetch bitplanes.
-        if !display_window_contains_vpos(
-            self.denise.diwstrt,
-            self.denise.diwstop,
-            self.effective_diwhigh(),
-            vpos,
-        ) {
+        // Bitplane DMA only runs inside the vertical display window (the
+        // flop set at DIWSTRT.V, cleared at DIWSTOP.V), so the top-border
+        // and vertical-blank lines are free for the blitter/CPU. Rejecting
+        // this before the DDF/BPLCON0 plan lookup avoids per-color-clock
+        // cache probes on lines that cannot fetch bitplanes.
+        if !self.diw_vertical_open_at(vpos) {
             return false;
         }
 

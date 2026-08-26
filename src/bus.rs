@@ -918,6 +918,23 @@ pub struct Bus {
     current_frame_display_snapshot_taken: bool,
     #[serde(skip)]
     ocs_same_line_diw_start_blocked_vpos: Option<u32>,
+    /// Agnus vertical display window flop: SET when the beam line matches
+    /// DIWSTRT.V, RESET when it matches DIWSTOP.V (reset wins on a tie).
+    /// The comparators are equality matches against the live registers, so
+    /// rewriting DIWSTRT/DIWSTOP/DIWHIGH mid-frame arms them for a LATER
+    /// line but never re-opens a window the old DIWSTOP already closed
+    /// this frame - a level `vstart <= v < vstop` test would. Kang Fu
+    /// (CD32) closes its main screen at line 284 and rewrites the whole
+    /// window plus bitplane pointers during that line for a status bar at
+    /// 285-300; the level test resumed fetching in the tail of line 284
+    /// and raced the pointer writes, shearing the bar. Seeded at each
+    /// frame wrap (and after a state load) and re-evaluated at line starts
+    /// and DIW writes; `None` means no evaluation has happened on this
+    /// timeline (unit fixtures that teleport the beam), which falls back
+    /// to the level test. Not part of the save-state schema; the load path
+    /// re-seeds it.
+    #[serde(skip)]
+    diw_vertical_open: Option<bool>,
     #[serde(skip)]
     current_frame_render_blocked: bool,
     current_frame_visible_start_vpos: u32,
@@ -2672,6 +2689,7 @@ impl Bus {
             last_frame_sprite_dma_observed: false,
             current_frame_display_snapshot_taken: false,
             ocs_same_line_diw_start_blocked_vpos: None,
+            diw_vertical_open: None,
             current_frame_render_blocked: false,
             current_frame_visible_start_vpos: RENDER_VISIBLE_START_VPOS,
             last_frame_visible_start_vpos: RENDER_VISIBLE_START_VPOS,
@@ -3855,6 +3873,7 @@ impl Bus {
         self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
         self.current_frame_display_snapshot_taken = false;
         self.ocs_same_line_diw_start_blocked_vpos = None;
+        self.seed_diw_vertical_flop_at_frame_start();
         self.current_frame_render_blocked = false;
         self.current_frame_visible_start_vpos = RENDER_VISIBLE_START_VPOS;
         self.last_frame_visible_start_vpos = RENDER_VISIBLE_START_VPOS;
@@ -4556,6 +4575,10 @@ impl Bus {
         self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.ocs_same_line_diw_start_blocked_vpos = None;
+        // The vertical display flop is skipped by the schema; re-derive it
+        // exactly as the frame wrap would have, so a resumed run holds the
+        // value the uninterrupted one had at this boundary.
+        self.seed_diw_vertical_flop_at_frame_start();
         // Per-line wide-FMODE cache eligibility is deliberately not part of
         // the save-state schema. A restored line may contain a DDF, FMODE or
         // delayed BPLCON0/DMACON transition, so rebuilding one whole-line mask
@@ -7589,6 +7612,70 @@ fn visible_framebuffer_y(
     vpos.checked_sub(visible_start_vpos)
         .map(|y| y as usize)
         .filter(|&y| y < visible_lines)
+}
+
+impl Bus {
+    /// Re-evaluate the vertical display flop (`diw_vertical_open`) against
+    /// the current beam line: called at each line start and after any
+    /// DIWSTRT/DIWSTOP/DIWHIGH write, mirroring the continuously-running
+    /// hardware comparators (an equality match on DIWSTOP.V resets the
+    /// flop, one on DIWSTRT.V sets it, reset winning a tie; any other line
+    /// leaves it alone). An unprogrammed window (both registers zero, the
+    /// power-on state) keeps the level fallback so a bare machine still
+    /// scans its whole overscan canvas.
+    pub(crate) fn reevaluate_diw_vertical_flop(&mut self) {
+        let vpos = self.agnus.vpos;
+        if display_window_unprogrammed(self.denise.diwstrt, self.denise.diwstop) {
+            self.diw_vertical_open = Some(display_window_contains_vpos(
+                self.denise.diwstrt,
+                self.denise.diwstop,
+                self.effective_diwhigh(),
+                vpos,
+            ));
+            return;
+        }
+        let diwhigh = self.effective_diwhigh();
+        let stop = u32::from(diw_v_stop(self.denise.diwstop, diwhigh));
+        let start = u32::from(diw_v_start(self.denise.diwstrt, diwhigh));
+        if vpos == stop {
+            self.diw_vertical_open = Some(false);
+        } else if vpos == start {
+            self.diw_vertical_open = Some(true);
+        }
+    }
+
+    /// Seed the vertical display flop for a frame that is starting (or a
+    /// state that was just loaded): the frame boundary uses the level test,
+    /// so a window whose DIWSTOP the beam never reaches carries open across
+    /// the wrap and a resumed timeline re-derives the same value an
+    /// uninterrupted run holds at its boundary.
+    pub(crate) fn seed_diw_vertical_flop_at_frame_start(&mut self) {
+        self.diw_vertical_open = Some(display_window_contains_vpos(
+            self.denise.diwstrt,
+            self.denise.diwstop,
+            self.effective_diwhigh(),
+            self.agnus.vpos,
+        ));
+    }
+
+    /// The vertical display gate for a beam line: the live flop for the
+    /// current line, the level approximation for any other (blitter slot
+    /// lookahead walks future lines, where the flop's history does not
+    /// exist yet) and for a timeline where no seed or comparator event has
+    /// run (unit fixtures that teleport the beam and poke registers).
+    pub(crate) fn diw_vertical_open_at(&self, vpos: u32) -> bool {
+        if vpos == self.agnus.vpos {
+            if let Some(open) = self.diw_vertical_open {
+                return open;
+            }
+        }
+        display_window_contains_vpos(
+            self.denise.diwstrt,
+            self.denise.diwstop,
+            self.effective_diwhigh(),
+            vpos,
+        )
+    }
 }
 
 fn display_window_contains_vpos(diwstrt: u16, diwstop: u16, diwhigh: DiwHigh, vpos: u32) -> bool {

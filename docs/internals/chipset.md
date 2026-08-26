@@ -250,6 +250,21 @@ only treats the display window as unprogrammed when DIWSTRT and DIWSTOP are
 both zero; a zero start paired with a non-zero stop opens the window at beam
 zero and can expose deep overscan.
 
+Vertically the window is a flop, not a level comparison: it is set when the
+beam line matches DIWSTRT.V and reset when it matches DIWSTOP.V (reset wins
+a tie), with the comparators running against the live register values. A
+mid-frame rewrite of the window therefore arms the comparators for a later
+line but never re-opens a window whose old DIWSTOP already matched this
+frame. That ordering is what makes the common copper screen-split idiom
+safe on real hardware: close the main screen at line N, spend the rest of
+line N writing the lower band's DIW, mode and bitplane pointers, and let
+the new DIWSTRT match open the band at line N+1 (Kang Fu CD32's status bar
+is the regression example; a level test resumed fetching in the tail of
+line N and raced the pointer writes). The flop is evaluated at line starts
+and after DIW writes, and re-seeded from a level test at each frame wrap so
+a window whose stop line is never reached stays open across the vertical
+blank.
+
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
 BPLCON0 LACE is set; outside interlace it holds its value, and the power-on
 state is set, so every progressive field is a long frame and reads LOF=1.

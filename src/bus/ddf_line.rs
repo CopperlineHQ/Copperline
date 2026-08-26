@@ -262,14 +262,12 @@ impl Bus {
 
         let mut state = self.ddf_seq_line_initial.get();
 
-        // Line-granular vertical flop and DMA/control refresh: the vertical
-        // display window opens at DIWSTRT.V and closes at DIWSTOP.V.
-        state.bpv = display_window_contains_vpos(
-            self.denise.diwstrt,
-            self.denise.diwstop,
-            self.effective_diwhigh(),
-            vpos,
-        );
+        // Line-granular vertical flop and DMA/control refresh: the live
+        // Agnus flop, set when the beam line matches DIWSTRT.V and cleared
+        // when it matches DIWSTOP.V. Mid-frame DIW rewrites arm the
+        // comparators for later lines; they never re-open a window the old
+        // DIWSTOP already closed this frame.
+        state.bpv = self.diw_vertical_open_at(vpos);
 
         let writes = self.ddf_seq_writes.borrow();
         // Runtime writes always land in the log, so when the log carries no
