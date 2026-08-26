@@ -3939,19 +3939,17 @@ impl Bus {
                     self.scsi_cd_ref()
                         .map(crate::scsi::ScsiCdRom::audio_playing)
                 }),
-            cd_track: self
-                .cdtv
-                .as_ref()
-                .and_then(crate::cdtv::CdtvController::current_track)
-                .or_else(|| {
-                    self.akiko
-                        .as_ref()
-                        .and_then(crate::akiko::Akiko::current_track)
-                })
-                .or_else(|| {
-                    self.scsi_cd_ref()
-                        .and_then(crate::scsi::ScsiCdRom::current_track)
-                }),
+            // Match the same presence-priority used by the LED and the media
+            // controls: an empty built-in drive remains the front-panel drive
+            // rather than falling through to an expansion CD-ROM.
+            cd_track: if let Some(cdtv) = self.cdtv.as_ref() {
+                cdtv.current_track()
+            } else if let Some(akiko) = self.akiko.as_ref() {
+                akiko.current_track()
+            } else {
+                self.scsi_cd_ref()
+                    .and_then(crate::scsi::ScsiCdRom::current_track)
+            },
             output_volume_percent: self.paula.output_volume_percent(),
         }
     }
@@ -4306,11 +4304,12 @@ impl Bus {
 
     /// Whether a disc is mounted (or waiting in the tray).
     pub fn cd_disc_inserted(&self) -> bool {
-        self.cdtv.as_ref().is_some_and(|cdtv| cdtv.has_disc())
-            || self.akiko.as_ref().is_some_and(|akiko| akiko.has_disc())
-            || self
-                .scsi_cd_ref()
-                .is_some_and(crate::scsi::ScsiCdRom::has_disc)
+        self.cdtv
+            .as_ref()
+            .map(crate::cdtv::CdtvController::has_disc)
+            .or_else(|| self.akiko.as_ref().map(crate::akiko::Akiko::has_disc))
+            .or_else(|| self.scsi_cd_ref().map(crate::scsi::ScsiCdRom::has_disc))
+            .unwrap_or(false)
     }
 
     /// Runtime disc insert with media-change notification. On CDTV the

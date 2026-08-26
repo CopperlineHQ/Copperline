@@ -10585,6 +10585,35 @@ fn front_panel_reports_host_output_volume() {
 }
 
 #[test]
+fn front_panel_cd_state_stays_on_the_primary_drive_when_it_is_empty() {
+    let path = std::env::temp_dir().join(format!(
+        "copperline-bus-front-panel-cd-{}-{}.iso",
+        std::process::id(),
+        BUS_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, vec![0u8; crate::cdrom::DATA_SECTOR_BYTES]).unwrap();
+
+    let mut sdmac = crate::sdmac::Sdmac::new();
+    sdmac.attach_drive(2, crate::scsi::ScsiCdRom::open(&path).unwrap());
+    let mut bus = empty_bus();
+    bus.attach_sdmac(sdmac);
+    assert_eq!(bus.front_panel_status().cd_track, Some(1));
+    assert!(bus.cd_disc_inserted());
+
+    // The built-in controller owns the front panel and insert/eject controls
+    // by presence, even while its tray is empty. Do not borrow the expansion
+    // drive's track or media state merely because it has a disc.
+    bus.attach_cdtv(crate::cdtv::CdtvController::new());
+    assert_eq!(bus.front_panel_status().cd_track, None);
+    assert!(!bus.cd_disc_inserted());
+    bus.cd_eject_disc();
+    assert!(bus.scsi_cd_ref().unwrap().has_disc());
+
+    drop(bus);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn joy0dat_reports_wrapping_mouse_counters() {
     let mut bus = empty_bus();
 

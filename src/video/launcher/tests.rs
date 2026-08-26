@@ -1848,6 +1848,49 @@ fn zero_floppy_drives_round_trips_as_an_a500_override() {
 }
 
 #[test]
+fn sparse_floppy_media_keeps_the_highest_bay_visible() {
+    let path = std::env::temp_dir().join(format!(
+        "copperline-launcher-sparse-{}-{}.adf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, vec![0u8; crate::floppy::ADF_SIZE]).unwrap();
+
+    let mut raw = RawConfig::default();
+    raw.machine.profile = Some("CD32".to_string());
+    raw.floppy.df2 = Some(RawFloppyDrive {
+        path: Some(path.to_string_lossy().into_owned()),
+        ..RawFloppyDrive::default()
+    });
+    let setup = MachineSetup::from_raw(&raw).expect("sparse media config loads");
+
+    assert_eq!(setup.floppy_drives, 3);
+    assert!(!setup.row_hidden(F::Df2Image));
+    assert_eq!(setup.to_raw().floppy.drives, Some(3));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn floppy_count_cannot_hide_an_image_bearing_bay() {
+    let mut setup = MachineSetup::default();
+    setup.set_path(F::Df1Image, PathBuf::from("/disks/two.adf"));
+    assert_eq!(setup.floppy_drives, 2);
+
+    setup.cycle(F::FloppyDrives, false);
+    assert_eq!(setup.floppy_drives, 2);
+    assert!(!setup.row_hidden(F::Df1Image));
+    assert_eq!(setup.to_raw().floppy.drives, Some(2));
+
+    setup.clear_path(F::Df1Image);
+    setup.cycle(F::FloppyDrives, false);
+    assert_eq!(setup.floppy_drives, 1);
+    assert!(setup.row_hidden(F::Df1Image));
+}
+
+#[test]
 fn mouse_sensitivity_round_trips_through_raw() {
     let mut s = MachineSetup::default();
     // The neutral midpoint shows as "Default" and matches the baseline, so

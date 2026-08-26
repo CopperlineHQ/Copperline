@@ -2350,7 +2350,7 @@ impl MachineSetup {
                 .or_else(|| cfg.floppy.bridges[i].as_ref().map(|b| b.write_protected))
                 .unwrap_or(true)
         });
-        let connected = cfg.floppy_connected.iter().filter(|&&c| c).count() as u8;
+        let connected = connected_floppy_bays(&cfg.floppy_connected);
         Ok(Self {
             model: cfg.machine,
             chipset: cfg.chipset,
@@ -2750,6 +2750,28 @@ impl MachineSetup {
         })
     }
 
+    /// Number of bays needed to keep every configured image visible.
+    /// Physical bridges are deliberately excluded: reducing the drive count
+    /// releases those host interfaces, while an image stays in the launcher
+    /// until the user clears it explicitly.
+    fn image_floppy_bays(&self) -> u8 {
+        self.df_playlists
+            .iter()
+            .rposition(|playlist| !playlist.is_empty())
+            .map(|idx| idx as u8 + 1)
+            .unwrap_or(0)
+    }
+
+    /// Number of bays occupied by either image media or a physical bridge.
+    fn occupied_floppy_bays(&self) -> u8 {
+        self.df_playlists
+            .iter()
+            .enumerate()
+            .rposition(|(idx, playlist)| !playlist.is_empty() || self.df_bridge[idx].is_some())
+            .map(|idx| idx as u8 + 1)
+            .unwrap_or(0)
+    }
+
     /// Convert back to a raw config, emitting only the fields that differ from
     /// the selected profile's defaults (so saved files stay minimal).
     pub fn to_raw(&self) -> RawConfig {
@@ -2829,19 +2851,8 @@ impl MachineSetup {
         raw.extended_rom = self.extended_rom.as_deref().map(path_string);
         raw.fmv_rom = self.fmv_rom.as_deref().map(path_string);
         // Floppy: cover any drive carrying media so the count never orphans it.
-        let media_max = self
-            .df_playlists
-            .iter()
-            .enumerate()
-            .rposition(|(i, p)| !p.is_empty() || self.df_bridge[i].is_some())
-            .map(|i| i as u8 + 1)
-            .unwrap_or(0);
-        let drives = self.floppy_drives.max(media_max);
-        let base_drives = base
-            .floppy_connected
-            .iter()
-            .filter(|&&connected| connected)
-            .count() as u8;
+        let drives = self.floppy_drives.max(self.occupied_floppy_bays());
+        let base_drives = connected_floppy_bays(&base.floppy_connected);
         if drives != base_drives {
             raw.floppy.drives = Some(drives);
         }
@@ -3418,19 +3429,8 @@ impl MachineSetup {
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
         self.port_devices = base.port_devices;
-        let profile_drives = base
-            .floppy_connected
-            .iter()
-            .filter(|&&connected| connected)
-            .count() as u8;
-        let media_max = self
-            .df_playlists
-            .iter()
-            .enumerate()
-            .rposition(|(i, playlist)| !playlist.is_empty() || self.df_bridge[i].is_some())
-            .map(|i| i as u8 + 1)
-            .unwrap_or(0);
-        self.floppy_drives = profile_drives.max(media_max);
+        let profile_drives = connected_floppy_bays(&base.floppy_connected);
+        self.floppy_drives = profile_drives.max(self.occupied_floppy_bays());
         if !self.has_ide() {
             self.ide_master = None;
             self.ide_master_name = None;
@@ -4713,15 +4713,19 @@ impl MachineSetup {
             F::AccelRam => self.accel_ram = cycle_nearest(&ACCEL_PRESETS, self.accel_ram, forward),
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
-                self.floppy_drives = step_u8(self.floppy_drives, forward, 0, 4);
+                let requested = step_u8(self.floppy_drives, forward, 0, 4);
                 // A bay that is no longer fitted has no business holding a
                 // physical drive open: the row is gone from the page, so
                 // nothing would say why the interface was busy the next time
                 // it was asked for.
                 #[cfg(feature = "fluxbridge")]
-                for bay in self.df_bridge.iter_mut().skip(self.floppy_drives as usize) {
+                for bay in self.df_bridge.iter_mut().skip(requested as usize) {
                     *bay = None;
                 }
+                // Images are not discarded implicitly. Keep their rows visible
+                // until the user clears them, so the displayed count and the
+                // count emitted by to_raw() cannot disagree.
+                self.floppy_drives = requested.max(self.image_floppy_bays());
             }
             F::FloppySpeed => {
                 self.floppy_speed = cycle_slice(&FLOPPY_SPEEDS, self.floppy_speed, forward)
@@ -8874,6 +8878,17 @@ fn step_u8(current: u8, forward: bool, min: u8, max: u8) -> u8 {
     } else {
         current.saturating_sub(1).max(min)
     }
+}
+
+/// A drive count represents the contiguous set DF0 through the highest
+/// connected bay, not the number of true entries. Configs without an explicit
+/// count may connect only a higher bay when media names it.
+fn connected_floppy_bays(connected: &[bool; 4]) -> u8 {
+    connected
+        .iter()
+        .rposition(|&connected| connected)
+        .map(|idx| idx as u8 + 1)
+        .unwrap_or(0)
 }
 
 fn format_mhz(mhz: f64) -> String {

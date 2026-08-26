@@ -114,7 +114,9 @@ Status Bar*):
   CD tracks, in green and blue respectively. A machine with only one kind of
   removable drive gets one full-size counter; a machine with both gets two
   vertically stacked counters, and a zero-floppy CDTV/CD32 does not show an
-  empty FDD counter. The PWR LED is lit whenever the machine is powered,
+  empty FDD counter. When a built-in CD controller and an expansion CD-ROM are
+  both fitted, the CD LED, counter, and media buttons stay assigned to the
+  built-in drive. The PWR LED is lit whenever the machine is powered,
   driven by the guest's /LED line the way it drives the LED on an A500
   rev 6 or later board: full brightness while the line is engaged (Paula's
   analogue filter on), dimmed -- not extinguished -- once the software
@@ -583,8 +585,10 @@ The layout is:
   *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
   speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
-  drives that are not enabled are hidden rather than greyed. Each drive also
-  carries a **Physical drive** tick box that hands the bay to a physical
+  drives that are not enabled are hidden rather than greyed. A drive holding
+  an image stays wired until that image is cleared, so reducing the count
+  cannot hide media that will still be present when the machine starts. Each
+  drive also carries a **Physical drive** tick box that hands the bay to a physical
   floppy drive: its media row then names the interface -- or `None` with nothing
   plugged in -- and a **Configure** button opens that drive's own page,
   headed with the built-in FluxBridge library and its version, for the
