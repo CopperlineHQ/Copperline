@@ -511,19 +511,24 @@ driver asleep waiting for a PBX interrupt that can never arrive.
 
 The drive protocol is cross-checked against both ROM drivers known to have
 run on real hardware, Kickstart's cd.device and AROS's, which pinned down
-four behaviours where the two disagree with older emulator lore: the drive
+three behaviours where the two disagree with older emulator lore: the drive
 microcontroller answers a command about a millisecond after its last byte
 rather than inside the guest's register write (drivers arm their
 completion interrupt in that window), and an enabled TX-DMA completion is
 presented before the corresponding RX completion on the half-duplex drive
 link; the TOC dump streams the track
 entries before the A0/A1/A2 session entries, since a parser may treat the
-lead-out entry as end-of-TOC; the CDINTREQ status read exposes only
-enabled sources (`intreq & intena`), because INT2 servers read it on every
-chain entry and a stale latch from a disabled source must not look like
-fresh work; and the media-status packet reports a present disc as `$83`
-(Kickstart masks the byte with 3, AROS compares it whole -- only `$83`
-satisfies both). Akiko's DMA engines drive a full 24-bit address bus (the
+lead-out entry as end-of-TOC; and the media-status packet reports a present
+disc as `$83` (Kickstart masks the byte with 3, AROS compares it whole --
+only `$83` satisfies both). The CDINTREQ status read returns the raw
+request latches; CDINTENA gates only the INT2 line. Direct-drive software
+depends on the raw view -- Jim Power's CD32 loader polls DRIVEXMIT before
+each PIO command byte with that source never enabled -- and the completion
+bits stay latched until the matching comparator register is rewritten, so
+an INT2 server that reads CDINTREQ on every chain entry must ignore
+sources it has not armed (an earlier Copperline masked the read to protect
+AROS's server from its own stale latches; that server is fixed instead,
+and the bundled ROM carries the fix). Akiko's DMA engines drive a full 24-bit address bus (the
 address registers mask to `$00FFF000`), so the rings and sector buffers
 resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
 included, which is where AROS places its `MEMF_24BITDMA` allocations when

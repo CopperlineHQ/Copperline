@@ -17,8 +17,22 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-24 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 4df19140.
+Built from source on 2026-08-26 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit 4df19140, plus
+one cd.device fix submitted upstream as pull request 1070
+(https://github.com/aros-development-team/AROS/pull/1070):
+
+- cd32.c CD32_Interrupt masks CDINTREQ with the driver's own enable state
+  (`status = readl(AKIKO_CDINTREQ) & cu->cu_IntEnable`). The Akiko
+  CDINTREQ read returns the raw request latches (WinUAE and MAME agree,
+  and CD32 titles that drive the DRIVE port directly poll latches they
+  never enable), and the completion bits stay latched until the matching
+  comparator register is rewritten, so an INT2 server that reacts to
+  sources it has not armed signals its unit task at unexpected moments
+  and desynchronises the command exchange -- a permanent CD wedge once
+  the task closes the receive comparator behind a half-delivered
+  response.
+
 Fixes Copperline contributed or depends on, all in master:
 
 - the ciab.resource port-direction fix of pull request 1063
