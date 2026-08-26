@@ -236,9 +236,8 @@ fn diw_vertical_flop_ignores_mid_frame_rewrite_of_a_closed_window() {
             bus.advance_chipset(1);
         }
     };
-    let line_fetches = |bus: &Bus, vpos: u32| {
-        (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos))
-    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
     // Crossing DIWSTRT.V sets the flop: fetch runs inside the window.
     advance_to_line(&mut bus, 0xA8);
     assert!(

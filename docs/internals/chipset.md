@@ -260,18 +260,23 @@ safe on real hardware: close the main screen at line N, spend the rest of
 line N writing the lower band's DIW, mode and bitplane pointers, and let
 the new DIWSTRT match open the band at line N+1 (Kang Fu CD32's status bar
 is the regression example; a level test resumed fetching in the tail of
-line N and raced the pointer writes). The flop is evaluated at line starts
-and after DIW writes, and re-seeded from a level test at each frame wrap so
-a window whose stop line is never reached stays open across the vertical
-blank.
+line N and raced the pointer writes). The flop is evaluated at every line
+start - the frame wrap's line zero included, with the latch itself
+carrying across the wrap, so a window whose DIWSTOP line the beam never
+reaches stays open through the vertical blank - and after DIW writes. The
+latch is part of the save state: it is history-dependent, and control
+sessions can snapshot mid-frame where no register-derived reconstruction
+is exact.
 
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
-BPLCON0 LACE is set; outside interlace it holds its value, and the power-on
-state is set, so every progressive field is a long frame and reads LOF=1.
-Holding it set matters for the phase: the first field after software
-enables LACE toggles to a short field, as on real hardware, which is the
-absolute field order that software pairing its per-field images blindly
-(without reading VPOSR) was authored against.
+BPLCON0 LACE is set; outside interlace it holds its value - the power-on
+state is set, so progressive fields normally read LOF=1, and a value
+written through VPOSW persists until the next laced toggle. Non-laced
+frame timing always uses the long frame length regardless of the latch.
+The held power-on state matters for the phase: the first field after
+software enables LACE toggles to a short field, as on real hardware,
+which is the absolute field order that software pairing its per-field
+images blindly (without reading VPOSR) was authored against.
 
 ## CIA (`cia.rs`)
 

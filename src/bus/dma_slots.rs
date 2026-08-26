@@ -372,8 +372,9 @@ impl Bus {
             self.ddf_seq_on_line_rollover(old_vpos);
             if tick.new_frames == 0 {
                 // The vertical display flop's comparators fire at the new
-                // line's start; a frame wrap instead re-seeds the flop in
-                // begin_new_beam_frame.
+                // line's start; a frame wrap runs them for line zero in
+                // begin_new_beam_frame instead (the latch itself carries
+                // across the wrap).
                 self.reevaluate_diw_vertical_flop();
             }
         }

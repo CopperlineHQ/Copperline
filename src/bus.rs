@@ -927,13 +927,16 @@ pub struct Bus {
     /// (CD32) closes its main screen at line 284 and rewrites the whole
     /// window plus bitplane pointers during that line for a status bar at
     /// 285-300; the level test resumed fetching in the tail of line 284
-    /// and raced the pointer writes, shearing the bar. Seeded at each
-    /// frame wrap (and after a state load) and re-evaluated at line starts
-    /// and DIW writes; `None` means no evaluation has happened on this
-    /// timeline (unit fixtures that teleport the beam), which falls back
-    /// to the level test. Not part of the save-state schema; the load path
-    /// re-seeds it.
-    #[serde(skip)]
+    /// and raced the pointer writes, shearing the bar. Re-evaluated at
+    /// every line start (the frame wrap's line zero included - the latch
+    /// itself carries across the wrap, so a window whose DIWSTOP the beam
+    /// never reaches stays open through the vertical blank) and after DIW
+    /// writes. `None` means no evaluation has happened on this timeline
+    /// (unit fixtures that teleport the beam and poke registers), which
+    /// falls back to the level test. Serialized: the value is
+    /// history-dependent and snapshots can be taken mid-frame (a control
+    /// session's `state.save` at a breakpoint), where no register-derived
+    /// reconstruction is exact.
     diw_vertical_open: Option<bool>,
     #[serde(skip)]
     current_frame_render_blocked: bool,
@@ -3873,7 +3876,9 @@ impl Bus {
         self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
         self.current_frame_display_snapshot_taken = false;
         self.ocs_same_line_diw_start_blocked_vpos = None;
-        self.seed_diw_vertical_flop_at_frame_start();
+        // A reset starts a fresh timeline: the flop has no history yet and
+        // falls back to the level test until a comparator event runs.
+        self.diw_vertical_open = None;
         self.current_frame_render_blocked = false;
         self.current_frame_visible_start_vpos = RENDER_VISIBLE_START_VPOS;
         self.last_frame_visible_start_vpos = RENDER_VISIBLE_START_VPOS;
@@ -4575,10 +4580,10 @@ impl Bus {
         self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.ocs_same_line_diw_start_blocked_vpos = None;
-        // The vertical display flop is skipped by the schema; re-derive it
-        // exactly as the frame wrap would have, so a resumed run holds the
-        // value the uninterrupted one had at this boundary.
-        self.seed_diw_vertical_flop_at_frame_start();
+        // The vertical display flop travels in the state (it is
+        // history-dependent, and control-session snapshots can be taken
+        // mid-frame where no register-derived reconstruction is exact), so
+        // nothing to re-derive here.
         // Per-line wide-FMODE cache eligibility is deliberately not part of
         // the save-state schema. A restored line may contain a DDF, FMODE or
         // delayed BPLCON0/DMACON transition, so rebuilding one whole-line mask
@@ -7642,20 +7647,6 @@ impl Bus {
         } else if vpos == start {
             self.diw_vertical_open = Some(true);
         }
-    }
-
-    /// Seed the vertical display flop for a frame that is starting (or a
-    /// state that was just loaded): the frame boundary uses the level test,
-    /// so a window whose DIWSTOP the beam never reaches carries open across
-    /// the wrap and a resumed timeline re-derives the same value an
-    /// uninterrupted run holds at its boundary.
-    pub(crate) fn seed_diw_vertical_flop_at_frame_start(&mut self) {
-        self.diw_vertical_open = Some(display_window_contains_vpos(
-            self.denise.diwstrt,
-            self.denise.diwstop,
-            self.effective_diwhigh(),
-            self.agnus.vpos,
-        ));
     }
 
     /// The vertical display gate for a beam line: the live flop for the

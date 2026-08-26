@@ -155,7 +155,11 @@ impl Bus {
         // The snapshot above was captured before the frame wrap toggled
         // LOF; record the settled value for the field about to render.
         self.current_frame_render_base.long_field = self.agnus.lof;
-        self.seed_diw_vertical_flop_at_frame_start();
+        // The vertical display flop carries across the wrap (a window
+        // whose DIWSTOP the beam never reaches stays open through the
+        // vertical blank); line zero's comparator matches apply like any
+        // other line start's.
+        self.reevaluate_diw_vertical_flop();
         self.current_frame_geometry = self.compute_frame_geometry();
         self.current_frame_presentation_h_window = self.compute_presentation_h_window();
         self.current_frame_presentation_v_window = self.compute_presentation_v_window();
