@@ -399,10 +399,13 @@ pub struct Akiko {
     cdcomrxinx: u8,
     cdcomtxcmp: u8,
     cdcomrxcmp: u8,
-    /// Physical byte offsets within the misc-DMA allocation. The comparator
-    /// registers expose only the low eight bits, but the DMA address counters
-    /// carry into the following page for the remainder of the current packet.
+    /// Physical TX byte offset within the misc-DMA allocation. The comparator
+    /// exposes only the low eight bits, but the TX address counter carries into
+    /// the following page for the remainder of the current packet.
     tx_dma_offset: u16,
+    /// RX byte offset within its 256-byte page. Keep this separate from the
+    /// visible comparator index so an in-flight response survives save-state
+    /// round trips, but mask it to the RX page on every DMA access.
     rx_dma_offset: u16,
     tx_dma_delay_cck: u32,
     rx_dma_delay_cck: u32,
@@ -761,7 +764,7 @@ impl Akiko {
                 if self.cdcomrxinx == self.cdcomrxcmp && self.receive_offset == 0 {
                     // New response packet/window: restart at base + index.
                     // An extension after a partial response instead preserves
-                    // the page carry in rx_dma_offset.
+                    // the current in-page position in rx_dma_offset.
                     self.rx_dma_offset = u16::from(self.cdcomrxinx);
                 }
                 self.cdcomrxcmp = value;
@@ -1329,10 +1332,10 @@ impl Akiko {
         while self.receive_offset < self.receive_length {
             self.last_rx = self.result_buffer[self.receive_offset];
             mem.dma_put(
-                self.cdrx_address + u32::from(self.rx_dma_offset),
+                self.cdrx_address + u32::from(self.rx_dma_offset & 0xFF),
                 self.last_rx,
             );
-            self.rx_dma_offset = self.rx_dma_offset.wrapping_add(1);
+            self.rx_dma_offset = self.rx_dma_offset.wrapping_add(1) & 0xFF;
             self.cdcomrxinx = self.cdcomrxinx.wrapping_add(1);
             self.receive_offset += 1;
             if self.cdcomrxinx == self.cdcomrxcmp {
@@ -1343,8 +1346,7 @@ impl Akiko {
         if self.receive_offset == self.receive_length {
             self.receive_length = 0;
             self.receive_offset = 0;
-            // Like TX, the next packet begins at base + the visible index even
-            // if this response crossed into the following physical page.
+            // The next packet begins at base + the visible index.
             self.rx_dma_offset = u16::from(self.cdcomrxinx);
             self.intreq &= !CDINT_DRIVERECV;
             self.intreq |= CDINT_DRIVEXMIT;
@@ -2545,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn response_dma_keeps_the_physical_page_carry_when_extended() {
+    fn response_dma_wraps_within_the_receive_page_when_extended() {
         let mut ring = CdAudioRing::default();
         let mut chip = vec![0u8; 64 * 1024];
         let mut akiko = Akiko::new();
@@ -2562,8 +2564,9 @@ mod tests {
         akiko.result_buffer[1] = 0x01;
         assert!(akiko.start_return_data(2));
 
-        // Deliver one byte to the old page, then extend the same response
-        // across $FF. The comparator extension must not discard the carry.
+        // Deliver one byte, then extend the same response across $FF. The RX
+        // ring is one 256-byte page; unlike TX packet fetching, it must wrap
+        // instead of spilling into the adjacent subcode page.
         akiko.write(AKIKO_BASE + 0x1F, 1, 0xFF, &mut chip);
         akiko.tick(DMA_RESTART_DELAY_CCK, &mut chip, &mut ring);
         assert_eq!(akiko.receive_offset, 1);
@@ -2572,10 +2575,14 @@ mod tests {
 
         let checksum = 0xFFu8.wrapping_sub(0x42).wrapping_sub(0x01);
         assert_eq!(
-            &chip[MISC as usize + 0xFE..MISC as usize + 0x101],
-            &[0x42, 0x01, checksum]
+            &chip[MISC as usize + 0xFE..MISC as usize + 0x100],
+            &[0x42, 0x01]
         );
-        assert_eq!(chip[MISC as usize], 0xCC, "physical address did not fold");
+        assert_eq!(
+            chip[MISC as usize], checksum,
+            "checksum wrapped to page start"
+        );
+        assert_eq!(chip[MISC as usize + 0x100], 0, "subcode page stayed clean");
         assert_eq!(akiko.cdcomrxinx, 0x01);
     }
 
