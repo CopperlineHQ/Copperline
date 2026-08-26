@@ -234,6 +234,10 @@ Inspection: `regs.get`, `regs.set {reg, value}`, `mem.read {addr, len,
 encoding?}` / `mem.write {addr, data, encoding?}` (hex default, base64
 for bulk; 1 MiB cap; side-effect-free RAM/ROM view, device windows are
 not touched), `disasm {addr?, count?}`, `custom.dump`,
+`palette.dump` (the live Denise/Lisa palette: all 256 AGA entries as their
+high and low nibble-plane words -- `custom.dump`'s COLORxx values are only
+the write latches, so this is the way to see what a banked or LOCT palette
+upload actually landed),
 `custom.read {reg}` (name or offset), `cia.get {cia: "a"|"b"}`,
 `beam.get`, `display.get`, `copper.list {addr?, max?}`, `pc_history`.
 

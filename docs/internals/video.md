@@ -149,8 +149,8 @@ than per pixel. The per-pixel decisions inside a run are unchanged -- the
 chunking is a host-CPU optimisation, not a model change.
 History-independent colour modes also resolve their complete 256-entry
 Denise/Lisa index table once for each distinct control-and-palette state in
-the frame. HAM remains on the sequential path because every output depends
-on the preceding colour. Prepared planar rows similarly share a single byte
+the frame. HAM -- HAM6 and Lisa's HAM8 alike -- remains on the sequential
+path because every output depends on the preceding colour. Prepared planar rows similarly share a single byte
 lookup when the odd and even BPLCON1 taps have the same delay; the exhaustive
 prepared-pixel/word-sampler comparison covers both that common path and
 separate dual-playfield taps.

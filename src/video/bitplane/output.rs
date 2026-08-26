@@ -32,7 +32,7 @@ impl IndexedOutputCache {
         control: ControlState,
         palette: &Palette,
     ) -> &[DenisePlayfieldOutput; 256] {
-        debug_assert!(!control.hold_and_modify());
+        debug_assert!(!control.ham());
         if let Some(idx) = self
             .entries
             .iter()

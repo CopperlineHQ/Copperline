@@ -67,6 +67,9 @@ pub enum CoreOp {
         count: usize,
     },
     CustomDump,
+    /// Dump the live Denise palette: all 256 AGA entries as their high and
+    /// low nibble-plane words (debug aid; not part of the stable surface).
+    PaletteDump,
     CustomRead {
         off: u16,
     },
@@ -193,6 +196,7 @@ impl CoreOp {
                 | CoreOp::MemRead { .. }
                 | CoreOp::Disasm { .. }
                 | CoreOp::CustomDump
+                | CoreOp::PaletteDump
                 | CoreOp::CustomRead { .. }
                 | CoreOp::CustomWriter { .. }
                 | CoreOp::ChipsetReport
@@ -738,6 +742,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             count: p.usize_or("count", 16)?.clamp(1, 256),
         }),
         "custom.dump" => core(CoreOp::CustomDump),
+        "palette.dump" => core(CoreOp::PaletteDump),
         "custom.read" => core(CoreOp::CustomRead {
             off: parse_custom_reg_param(&p)?,
         }),
@@ -1614,6 +1619,18 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 }
             }
             Ok(json!({"regs": regs}))
+        }
+        CoreOp::PaletteDump => {
+            let palette = &emu.bus().denise.palette;
+            let mut hi = Vec::with_capacity(256);
+            let mut lo = Vec::with_capacity(256);
+            for bank in 0..8 {
+                for idx in 0..32 {
+                    hi.push(Value::from(palette.read_banked(bank, idx, false)));
+                    lo.push(Value::from(palette.read_banked(bank, idx, true)));
+                }
+            }
+            Ok(json!({"hi": hi, "lo": lo}))
         }
         CoreOp::CustomRead { off } => match emu.bus().debug_custom_word(*off) {
             Some(value) => Ok(json!({

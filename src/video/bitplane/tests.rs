@@ -6702,6 +6702,84 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
 }
 
 #[test]
+fn ham8_is_hold_and_modify_but_not_ham6() {
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x0A11, // HAMEN + BPU3 (8 planes) + COLOR + ECSENA
+        ..ControlState::default()
+    };
+    assert_eq!(control.nplanes(), 8);
+    assert!(!control.hold_and_modify());
+    assert!(control.ham8());
+    assert!(control.ham());
+
+    // The same BPLCON0 without AGA decodes no eighth plane and no HAM8.
+    let ecs = ControlState {
+        bplcon0: 0x0A11,
+        ..ControlState::default()
+    };
+    assert!(!ecs.ham8());
+}
+
+/// HAM8's held colour must carry from pixel to pixel through the planned
+/// line renderer: an 8-plane HAM screen is history-dependent, so the
+/// history-free indexed output cache has to stay off. Regression example:
+/// the Super Stardust CD32 intro (HAM8 anim) rendered every modify pixel
+/// from a black hold, collapsing the picture to saturated single-channel
+/// noise.
+#[test]
+fn planned_ham8_dma_carries_hold_across_pixels() {
+    // Native x0: set op, palette entry 5 (pv $14 -> planes 3/5).
+    // Native x1: modify blue := $2A<<2 (pv $A9 -> planes 1/4/6/8).
+    // Native x2: modify red := $3F<<2 (pv $FE -> planes 2..8).
+    let plane_bits: [u16; 8] = [
+        0x4000, 0x2000, 0xA000, 0x6000, 0xA000, 0x6000, 0x2000, 0x6000,
+    ];
+    let row_words: Vec<Vec<u16>> = plane_bits.iter().map(|&word| vec![word]).collect();
+    let line_plan = DenisePlannedPlayfieldLine::new(0, 68, 74, &row_words, 3);
+    let mut control = visible_lowres_control(0x0A11);
+    control.agnus_revision = AgnusRevision::AgaAlice;
+    let mut palette = Palette::new();
+    palette.write_banked(0, 5, false, 0x0135);
+    palette.write_banked(0, 5, true, 0x0246);
+    let mut fb = vec![0; FB_PIXELS];
+    let mut playfield_mask = vec![0; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut clxdat = 0;
+
+    render_planned_playfield_line(
+        &line_plan,
+        &mut fb,
+        &mut playfield_mask,
+        &mut collision_pixels,
+        &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
+        &mut clxdat,
+        palette,
+        &[],
+        0,
+        control,
+        &[],
+        0,
+        control.bplcon1,
+        control.bplcon0,
+        false,
+        0,
+        0,
+        &h_row_for(control),
+        PAL_VISIBLE_LINE0,
+        0.0,
+        0,
+    );
+
+    // Set: entry 5 = $123456. Modify blue: $A8 | ($56 & 3) = $AA. Modify
+    // red: $FC | ($12 & 3) = $FE, holding the accumulated green and blue.
+    assert_eq!(fb[68], rgb24_to_rgba8_alpha(0x0012_3456, true));
+    assert_eq!(fb[70], rgb24_to_rgba8_alpha(0x0012_34AA, true));
+    assert_eq!(fb[72], rgb24_to_rgba8_alpha(0x00FE_34AA, true));
+}
+
+#[test]
 fn planned_ham_dma_carries_early_ddf_history_across_diw_open() {
     // Denise's HAM accumulator advances on every shifted sample; DIW only
     // selects between border and playfield output. With DDFSTRT one fetch

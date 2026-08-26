@@ -1173,8 +1173,24 @@ impl ControlState {
         self.nplanes() == 6 && self.bplcon0 & 0x0C00 == 0 && self.bplcon2 & BPLCON2_KILLEHB == 0
     }
 
+    /// HAM6: HAMEN with five or six planes, on every Denise generation.
+    /// Callers that mean "any hold-and-modify variant" (history-dependent
+    /// pixel output) must use [`Self::ham`], which also covers Lisa's HAM8.
     fn hold_and_modify(&self) -> bool {
         !self.shres() && matches!(self.nplanes(), 5 | 6) && self.bplcon0 & 0x0800 != 0
+    }
+
+    /// Lisa's HAM8: HAMEN with all eight planes, AGA only. Mirrors the
+    /// decode condition in `denise_aga_playfield_output`.
+    fn ham8(&self) -> bool {
+        self.aga() && self.nplanes() == 8 && self.bplcon0 & 0x0800 != 0
+    }
+
+    /// Any hold-and-modify variant. The pixel colour then depends on the
+    /// previous pixel's held colour, so history-free resolution (the indexed
+    /// output cache and the constant-run fast interior) must stay off.
+    fn ham(&self) -> bool {
+        self.hold_and_modify() || self.ham8()
     }
 
     fn dual_playfield(&self) -> bool {
@@ -6114,7 +6130,7 @@ fn render_planned_playfield_line_impl(
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
         let hold_final_fetch_sample = pixel_control.holds_final_lowres_fetch_sample_at_diwstop();
-        let ham_mode = output_control.hold_and_modify();
+        let ham_mode = output_control.ham();
         let indexed_outputs = if ham_mode {
             None
         } else {
@@ -6705,7 +6721,7 @@ fn manual_bpl_ham_seed_color(
         &control_segments[seg.line],
         sample_x,
     );
-    if !control.hold_and_modify() {
+    if !control.ham() {
         return rgb12_to_rgb24(color_rgb12(seg.palette[0]));
     }
     if seg.x <= 0 {
