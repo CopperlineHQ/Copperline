@@ -99,7 +99,7 @@ deterministically:
 | `--mouse-after SECS DX DY [PORT]` | Apply a relative mouse motion of (DX, DY) counter steps (default port 1) |
 | `--mouse-to-after SECS X Y [PORT]` | From SECS, steer the guest pointer to presented pixel (X, Y) by watching sprite 0 (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Set an analogue controller's stick/paddle position, 0-255 per axis (default port 2) |
-| `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`1` to `4`), so scheduled inserts can target empty external drives |
+| `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`0` to `4`), so scheduled inserts can target empty drives |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Start with the configured drive empty, then insert its configured image |
 | `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`/`.iso`/`.nrg`/`.chd`) in the machine's CD drive (CDTV, CD32, or a SCSI CD-ROM unit) |

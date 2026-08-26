@@ -204,7 +204,7 @@ revision = "OCS"      # OCS, ECS, or AGA (picks the Agnus/Denise revisions)
 video = "PAL"         # PAL or NTSC
 
 [floppy]
-# drives = 2           # wired mechanisms, 1-4; default is DF0 only
+# drives = 2           # wired mechanisms, 0-4; CDTV/CD32 default to 0, others to 1
 
 [floppy.df0]
 path = "AmigaTestKit.adf"   # DD ADF / ADZ / DMS / IPF / SCP; omit for no disk

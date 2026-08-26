@@ -110,11 +110,17 @@ Status Bar*):
   blue CD activity LED on CDTV/CD32 that lights while the drive reads data
   or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
   the LED shows CD-DA playback; its data reads ride the HDD LED with the
-  rest of the SCSI bus). A small digital counter shows the current floppy
-  track. The PWR LED is lit whenever the machine is powered, driven by the
-  guest's /LED line the way it drives the LED on an A500 rev 6 or later
-  board: full brightness while the line is engaged (Paula's analogue
-  filter on), dimmed -- not extinguished -- once the software releases it.
+  rest of the SCSI bus). Small digital counters show the current floppy and
+  CD tracks, in green and blue respectively. A machine with only one kind of
+  removable drive gets one full-size counter; a machine with both gets two
+  vertically stacked counters, and a zero-floppy CDTV/CD32 does not show an
+  empty FDD counter. When a built-in CD controller and an expansion CD-ROM are
+  both fitted, the CD LED, counter, and media buttons stay assigned to the
+  built-in drive. The PWR LED is lit whenever the machine is powered,
+  driven by the guest's /LED line the way it drives the LED on an A500
+  rev 6 or later board: full brightness while the line is engaged (Paula's
+  analogue filter on), dimmed -- not extinguished -- once the software
+  releases it.
   It follows the pin itself, so the **Audio Filter** menu override changes
   what you hear, never the LED.
 - **Per-drive floppy controls.** Every connected drive gets a disk button
@@ -576,10 +582,13 @@ The layout is:
   not know, and read from the image itself for the bundled AROS. The FMV row
   fits the physical Commodore MPEG cartridge when a 256 KiB module ROM is
   selected and is greyed on non-CD32 profiles; see [](configuration)),
-  *Floppy* (drive count and speed, then each wired drive as a
+  *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
+  speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
-  drives that are not enabled are hidden rather than greyed. Each drive also
-  carries a **Physical drive** tick box that hands the bay to a physical
+  drives that are not enabled are hidden rather than greyed. A drive holding
+  an image stays wired until that image is cleared, so reducing the count
+  cannot hide media that will still be present when the machine starts. Each
+  drive also carries a **Physical drive** tick box that hands the bay to a physical
   floppy drive: its media row then names the interface -- or `None` with nothing
   plugged in -- and a **Configure** button opens that drive's own page,
   headed with the built-in FluxBridge library and its version, for the

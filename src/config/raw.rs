@@ -1245,8 +1245,8 @@ pub(crate) struct RawAudio {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawFloppy {
-    /// Number of wired floppy drives, DF0..DFN-1. DF0 is the internal drive,
-    /// so the valid range is 1-4.
+    /// Number of wired floppy drives, DF0..DFN-1. Zero models machines with
+    /// no built-in drive, such as the CDTV and CD32; the valid range is 0-4.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) drives: Option<u8>,
     /// Drive speed percentage (100/200/400/800) or 0 for turbo.

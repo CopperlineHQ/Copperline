@@ -2084,8 +2084,12 @@ mod tests {
             parse(&["--fdd-drives", "4"])?.overrides.floppy_drives,
             Some(4)
         );
-        let err = parse(&["--floppy-drives", "0"]).unwrap_err();
-        assert!(err.to_string().contains("from 1 to 4"), "{err:#}");
+        assert_eq!(
+            parse(&["--floppy-drives", "0"])?.overrides.floppy_drives,
+            Some(0)
+        );
+        let err = parse(&["--floppy-drives", "5"]).unwrap_err();
+        assert!(err.to_string().contains("from 0 to 4"), "{err:#}");
         Ok(())
     }
 

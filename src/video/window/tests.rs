@@ -10,26 +10,28 @@ use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_tv_aperture_to_window, copy_window_present_frame, cursor_position_in_texture,
-    draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
-    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect,
-    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    plan_present_scaling_for, power_button_rect, present_height, presentation_pixels_equal,
-    presentation_source_y_offset, raw_device_qualifier_family_held, raw_device_qualifier_rawkey,
-    rawkey_is_held, rawkey_transition_is_duplicate, reboot_button_rect,
-    repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
-    shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row,
+    draw_seven_segment_digit, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
+    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel,
+    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
     tv_centre_source_offset, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
     BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
     ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
     AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
-    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
-    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
-    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X,
-    TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT,
-    TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
+    CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
+    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
+    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
+    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
+    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
+    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
+    VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -2287,6 +2289,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             true,
@@ -2330,6 +2333,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
                 fdd_track: Some(42),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             true,
@@ -2359,6 +2363,7 @@ fn power_led_is_bright_dim_or_off_by_the_led_line() {
                     fdd_track: Some(0),
                     hdd_led: None,
                     cd_led: None,
+                    cd_track: None,
                     output_volume_percent: 100,
                 },
                 powered,
@@ -2389,6 +2394,7 @@ fn status_bar_extinguishes_power_led_when_host_power_is_off() {
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             false,
@@ -2438,6 +2444,7 @@ fn status_bar_power_button_glyph_tracks_power_state() {
                     fdd_track: Some(0),
                     hdd_led: None,
                     cd_led: None,
+                    cd_track: None,
                     output_volume_percent: 100,
                 },
                 powered_on,
@@ -2565,6 +2572,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             true,
@@ -2586,6 +2594,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             true,
@@ -2609,6 +2618,7 @@ fn status_bar_draws_disk_image_button_next_to_track_counter() {
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 50,
             },
             true,
@@ -2744,6 +2754,105 @@ fn status_bar_draws_cd_buttons_only_on_cd_machines() {
         pixel(&frame, cd_eject.x + 5, cd_eject.y + 15, scale),
         BUTTON_GLYPH.to_le_bytes()
     );
+}
+
+#[test]
+fn status_bar_adapts_track_counters_to_connected_drives() {
+    let empty = track_counter_layout(&media(0, None));
+    assert!(empty.fdd.is_none());
+    assert!(empty.cd.is_none());
+
+    let floppy_only = track_counter_layout(&media(1, None));
+    assert_eq!(floppy_only.fdd.unwrap().rect, fdd_track_counter_rect());
+    assert!(floppy_only.cd.is_none());
+
+    // A physical CDTV/CD32 layout has no meaningless FDD display: the CD
+    // track gets the original full-size counter bay instead.
+    let cd_only_media = media(0, Some(true));
+    let cd_only = track_counter_layout(&cd_only_media);
+    assert!(cd_only.fdd.is_none());
+    assert_eq!(cd_only.cd.unwrap().rect, fdd_track_counter_rect());
+
+    // Expansion CD-ROM machines may have both kinds of drive. Two shallow
+    // three-digit displays stack in the same fixed-width bay and still clear
+    // the media controls.
+    let both = track_counter_layout(&media(1, Some(true)));
+    let fdd = both.fdd.unwrap();
+    let cd = both.cd.unwrap();
+    assert_eq!(fdd.rect.x, cd.rect.x);
+    assert!(fdd.rect.y + fdd.rect.h < cd.rect.y);
+    assert!(cd.rect.y + cd.rect.h <= super::status_bar_top() + super::STATUS_BAR_HEIGHT);
+    assert!(cd.rect.x + cd.rect.w <= super::MEDIA_CLUSTER_X);
+
+    let scale = 1;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let mut v = view(
+        FrontPanelStatus {
+            cd_led: Some(false),
+            cd_track: Some(12),
+            ..FrontPanelStatus::default()
+        },
+        true,
+        false,
+    );
+    v.media = cd_only_media;
+    draw_status_bar(&mut frame, &v, scale);
+
+    let counter = cd_only.cd.unwrap();
+    let hundreds = track_counter_digit_rect(counter, 0);
+    let ones = track_counter_digit_rect(counter, 2);
+    assert_eq!(
+        pixel(
+            &frame,
+            hundreds.x + hundreds.w / 2,
+            hundreds.y + hundreds.h / 2,
+            scale,
+        ),
+        CD_TRACK_SEGMENT_OFF.to_le_bytes()
+    );
+    assert_eq!(
+        pixel(&frame, ones.x + ones.w / 2, ones.y + ones.h / 2, scale,),
+        CD_TRACK_SEGMENT_ON.to_le_bytes()
+    );
+
+    // With neither kind of drive, the counter bay is untouched status-bar
+    // background rather than an orphaned FDD "---" display.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    v.media = media(0, None);
+    draw_status_bar(&mut frame, &v, scale);
+    let bay = fdd_track_counter_rect();
+    assert_eq!(
+        pixel(&frame, bay.x + 1, bay.y + 1, scale),
+        STATUS_BG.to_le_bytes()
+    );
+}
+
+#[test]
+fn narrow_seven_segment_digits_leave_right_corners_open() {
+    let scale = 1;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let digit = super::Rect {
+        x: 20,
+        y: 20,
+        w: 10,
+        h: 16,
+    };
+    draw_seven_segment_digit(
+        &mut frame,
+        digit,
+        '0',
+        (
+            TRACK_SEGMENT_ON,
+            TRACK_SEGMENT_OFF,
+            super::TRACK_SEGMENT_HIGHLIGHT,
+        ),
+        scale,
+    );
+
+    // The top and bottom horizontal strokes end before the two right-hand
+    // vertical columns. Those corner pixels therefore remain untouched.
+    assert_eq!(pixel(&frame, digit.x + 9, digit.y + 1, scale), [0; 4]);
+    assert_eq!(pixel(&frame, digit.x + 9, digit.y + 14, scale), [0; 4]);
 }
 
 #[test]
@@ -2889,6 +2998,7 @@ fn status_bar_draws_volume_control_and_maps_pointer_position() {
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 50,
             },
             true,
@@ -2919,6 +3029,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
             fdd_track: Some(42),
             hdd_led: None,
             cd_led: None,
+            cd_track: None,
             output_volume_percent: 100,
         },
         &mut last_fdd_track,
@@ -2933,6 +3044,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
             fdd_track: None,
             hdd_led: None,
             cd_led: None,
+            cd_track: None,
             output_volume_percent: 100,
         },
         &mut last_fdd_track,
@@ -2954,6 +3066,7 @@ fn status_bar_draws_at_hidpi_texture_scale() {
                 fdd_track: Some(159),
                 hdd_led: None,
                 cd_led: None,
+                cd_track: None,
                 output_volume_percent: 100,
             },
             true,

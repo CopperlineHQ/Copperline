@@ -373,7 +373,7 @@ impl FloppyController {
     }
 
     pub fn set_connected_drives(&mut self, connected: [bool; 4]) {
-        for (idx, drive) in self.drives.iter_mut().enumerate().skip(1) {
+        for (idx, drive) in self.drives.iter_mut().enumerate() {
             drive.external_id = if connected[idx] {
                 STANDARD_EXTERNAL_DRIVE_ID
             } else {
@@ -517,16 +517,14 @@ impl FloppyController {
             .map(|idx| self.track_for_drive(idx) as u8)
     }
 
-    /// Whether a drive is wired up: DF0 is the internal drive and always
-    /// present; DF1-DF3 are present when they answer the external drive-ID
-    /// protocol (configured drives get the standard ID, others read as no
-    /// drive).
+    /// Whether a drive is wired up. The connectivity marker shares the
+    /// external-ID field: DF1-DF3 return that ID over the daisy-chain
+    /// protocol, while DF0 only uses its non-zero value to represent that an
+    /// internal mechanism is fitted.
     pub fn drive_connected(&self, drive_idx: usize) -> bool {
-        drive_idx == 0
-            || self
-                .drives
-                .get(drive_idx)
-                .is_some_and(|drive| drive.external_id != 0)
+        self.drives
+            .get(drive_idx)
+            .is_some_and(|drive| drive.external_id != 0)
     }
 
     pub fn disk_inserted(&self, drive_idx: usize) -> bool {
@@ -599,6 +597,10 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        ensure!(
+            self.drive_connected(drive_idx),
+            "floppy.df{drive_idx} is not connected"
+        );
         // A bay is either a real drive or an image, never both: the bridge
         // keeps supplying the track under the head, so an image mounted on top
         // would be reported as inserted and then never read. The status bar
@@ -640,6 +642,10 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        ensure!(
+            self.drive_connected(drive_idx),
+            "floppy.df{drive_idx} is not connected"
+        );
         // A bay is either a real drive or an image, never both: the bridge
         // keeps supplying the track under the head, so an image mounted on top
         // would be reported as inserted and then never read. The status bar
@@ -679,6 +685,10 @@ impl FloppyController {
             drive_idx < self.drives.len(),
             "invalid floppy drive df{}",
             drive_idx
+        );
+        ensure!(
+            self.drive_connected(drive_idx),
+            "floppy.df{drive_idx} is not connected"
         );
         #[cfg(feature = "fluxbridge")]
         ensure!(
@@ -1025,6 +1035,9 @@ impl FloppyController {
         self.side = if val & CIAB_DSKSIDE == 0 { 1 } else { 0 };
 
         for idx in 0..self.drives.len() {
+            if !self.drive_connected(idx) {
+                continue;
+            }
             let select_mask = CIAB_DSKSEL_MASKS[idx];
             let was_selected = prev & select_mask == 0;
             let selected = val & select_mask == 0;
@@ -2178,7 +2191,9 @@ impl FloppyController {
     fn selected_drive(&self) -> Option<usize> {
         CIAB_DSKSEL_MASKS
             .iter()
-            .position(|select_mask| self.prb & select_mask == 0)
+            .enumerate()
+            .find(|(idx, select_mask)| self.drive_connected(*idx) && self.prb & **select_mask == 0)
+            .map(|(idx, _)| idx)
     }
 
     fn track_for_drive(&self, idx: usize) -> usize {

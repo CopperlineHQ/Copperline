@@ -1821,6 +1821,76 @@ fn select_model_applies_profile_defaults_and_emits_only_the_profile() {
 }
 
 #[test]
+fn cd_profiles_select_zero_drives_and_the_launcher_can_override_them() {
+    let mut s = MachineSetup::default();
+    s.select_model(Some(MachineModel::Cd32));
+    assert_eq!(s.floppy_drives, 0);
+    assert_eq!(s.to_raw().floppy.drives, None);
+    assert_eq!(s.build_config().unwrap().floppy_connected, [false; 4]);
+
+    s.cycle(F::FloppyDrives, true);
+    assert_eq!(s.floppy_drives, 1);
+    assert_eq!(s.to_raw().floppy.drives, Some(1));
+
+    s.select_model(Some(MachineModel::Cdtv));
+    assert_eq!(s.floppy_drives, 0);
+    s.select_model(Some(MachineModel::A500));
+    assert_eq!(s.floppy_drives, 1);
+}
+
+#[test]
+fn zero_floppy_drives_round_trips_as_an_a500_override() {
+    let raw: RawConfig = toml::from_str("[floppy]\ndrives = 0").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.floppy_drives, 0);
+    assert_eq!(setup.to_raw().floppy.drives, Some(0));
+    assert_eq!(setup.build_config().unwrap().floppy_connected, [false; 4]);
+}
+
+#[test]
+fn sparse_floppy_media_keeps_the_highest_bay_visible() {
+    let path = std::env::temp_dir().join(format!(
+        "copperline-launcher-sparse-{}-{}.adf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, vec![0u8; crate::floppy::ADF_SIZE]).unwrap();
+
+    let mut raw = RawConfig::default();
+    raw.machine.profile = Some("CD32".to_string());
+    raw.floppy.df2 = Some(RawFloppyDrive {
+        path: Some(path.to_string_lossy().into_owned()),
+        ..RawFloppyDrive::default()
+    });
+    let setup = MachineSetup::from_raw(&raw).expect("sparse media config loads");
+
+    assert_eq!(setup.floppy_drives, 3);
+    assert!(!setup.row_hidden(F::Df2Image));
+    assert_eq!(setup.to_raw().floppy.drives, Some(3));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn floppy_count_cannot_hide_an_image_bearing_bay() {
+    let mut setup = MachineSetup::default();
+    setup.set_path(F::Df1Image, PathBuf::from("/disks/two.adf"));
+    assert_eq!(setup.floppy_drives, 2);
+
+    setup.cycle(F::FloppyDrives, false);
+    assert_eq!(setup.floppy_drives, 2);
+    assert!(!setup.row_hidden(F::Df1Image));
+    assert_eq!(setup.to_raw().floppy.drives, Some(2));
+
+    setup.clear_path(F::Df1Image);
+    setup.cycle(F::FloppyDrives, false);
+    assert_eq!(setup.floppy_drives, 1);
+    assert!(setup.row_hidden(F::Df1Image));
+}
+
+#[test]
 fn mouse_sensitivity_round_trips_through_raw() {
     let mut s = MachineSetup::default();
     // The neutral midpoint shows as "Default" and matches the baseline, so
@@ -3356,8 +3426,11 @@ fn floppy_rows_hidden_until_wired() {
         MachineSetup::from_raw(&toml::from_str(&format!("[floppy]\ndrives = {n}")).unwrap())
             .unwrap()
     };
+    let zero = with_drives(0);
+    assert!(zero.row_hidden(F::Df0Image));
+    assert!(zero.disabled_reason(F::FloppySpeed).is_some());
     let one = with_drives(1);
-    assert!(!one.row_hidden(F::Df0Image)); // DF0: is always shown
+    assert!(!one.row_hidden(F::Df0Image));
     assert!(one.row_hidden(F::Df1Image));
     assert!(one.row_hidden(F::Df3WriteProtect));
     let three = with_drives(3);

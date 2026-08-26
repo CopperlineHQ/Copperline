@@ -580,7 +580,7 @@ where
             "--floppy-drives" | "--fdd-drives" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| anyhow!("--floppy-drives requires COUNT (1-4)"))?;
+                    .ok_or_else(|| anyhow!("--floppy-drives requires COUNT (0-4)"))?;
                 overrides.floppy_drives = Some(parse_floppy_drive_count(&value)?);
             }
             // Absent from a build without the feature, so an unknown-argument
@@ -1341,7 +1341,7 @@ fn print_help() {
          \x20                            16M; the A4000 extends to 64M\n  \
          --accelerator SIZE             CPU-slot accelerator fast RAM at $08000000 (32-bit\n  \
          \x20                            CPUs), e.g. 0, 32M, 128M\n  \
-         --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
+         --floppy-drives COUNT          wired floppy drives, 0-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
          {floppy_bridge}--host-disk DEVICE [ATTACH]    give the machine one of the host's own disks\n  \
          \x20                            (--list-disks names them); ATTACH is ide-master\n  \
@@ -1531,10 +1531,10 @@ fn parse_floppy_bridge_speed(s: &str) -> Result<u16> {
 fn parse_floppy_drive_count(s: &str) -> Result<u8> {
     let count: u8 = s
         .parse()
-        .map_err(|_| anyhow!("--floppy-drives COUNT must be an integer from 1 to 4"))?;
-    if !(1..=4).contains(&count) {
+        .map_err(|_| anyhow!("--floppy-drives COUNT must be an integer from 0 to 4"))?;
+    if count > 4 {
         return Err(anyhow!(
-            "--floppy-drives COUNT must be an integer from 1 to 4"
+            "--floppy-drives COUNT must be an integer from 0 to 4"
         ));
     }
     Ok(count)

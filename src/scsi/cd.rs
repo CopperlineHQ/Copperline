@@ -72,10 +72,11 @@ pub struct ScsiCdRom {
     /// Report a medium-change unit attention on the next command.
     unit_attention: bool,
     sense: [u8; SENSE_LEN],
-    /// Audio playback state; the position pair is meaningful outside
-    /// `Idle`.
+    /// Audio playback state.
     play: PlayPhase,
-    /// Current playback disc sector.
+    /// Current optical-head sector; this is the playback cursor while a
+    /// CD-DA operation is active and the last completed sector for data
+    /// reads.
     play_pos: u32,
     /// One past the last sector of the play range.
     play_end: u32,
@@ -114,6 +115,12 @@ impl ScsiCdRom {
         self.play == PlayPhase::Playing
     }
 
+    /// Track under the emulated optical head, or `None` while the tray is
+    /// open or a replacement disc is still travelling in it.
+    pub fn current_track(&self) -> Option<u8> {
+        self.loaded.then(|| self.track_at(self.play_pos).number)
+    }
+
     /// Whether the drive has emulated-time work in flight (playback or a
     /// tray load), so its board must not be treated as idle.
     pub fn needs_tick(&self) -> bool {
@@ -126,6 +133,8 @@ impl ScsiCdRom {
         self.loaded = false;
         self.pending = None;
         self.play = PlayPhase::Idle;
+        self.play_pos = 0;
+        self.play_end = 0;
     }
 
     /// Runtime disc swap: eject now and mount the new disc after the
@@ -151,6 +160,8 @@ impl ScsiCdRom {
                 self.path = path;
                 self.loaded = true;
                 self.unit_attention = true;
+                self.play_pos = 0;
+                self.play_end = 0;
             }
         }
         if self.play != PlayPhase::Playing {
@@ -597,6 +608,7 @@ impl ScsiCdRom {
             }
             data[(i as usize) * DATA_SECTOR_BYTES..][..DATA_SECTOR_BYTES].copy_from_slice(&buf);
         }
+        self.play_pos = (lba + count - 1) as u32;
         (ScsiExec::DataIn(data), GOOD)
     }
 
@@ -658,6 +670,7 @@ impl ScsiCdRom {
                 return self.check(SK_HARDWARE_ERROR, 0x00);
             }
         }
+        self.play_pos = (lba + count - 1) as u32;
         (ScsiExec::DataIn(data), GOOD)
     }
 
@@ -1064,6 +1077,7 @@ mod tests {
     #[test]
     fn read_cd_serves_raw_frames_with_synthesized_headers() {
         let (mut cd, paths) = mixed_disc();
+        assert_eq!(cd.current_track(), Some(1));
         // Full raw frame of a cooked data sector: sync + BCD MSF header.
         let data = data_in(&mut cd, &[0xBE, 0, 0, 0, 0, 0, 0, 0, 1, 0xF8, 0, 0]);
         assert_eq!(data.len(), RAW_SECTOR_BYTES);
@@ -1081,6 +1095,9 @@ mod tests {
         // Raw read of the audio sector returns the CD-DA frame verbatim.
         let data = data_in(&mut cd, &[0xBE, 0x04, 0, 0, 0, 4, 0, 0, 1, 0xF8, 0, 0]);
         assert!(data.iter().all(|&b| b == 0xA0));
+        assert_eq!(cd.current_track(), Some(2));
+        cd.eject();
+        assert_eq!(cd.current_track(), None);
         cleanup(&paths);
     }
 

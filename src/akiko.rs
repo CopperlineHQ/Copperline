@@ -527,6 +527,7 @@ impl Akiko {
     pub fn insert_disc(&mut self, disc: CdImage) {
         self.toc = build_toc(&disc);
         self.disc = Some(disc);
+        self.current_sector = -1;
         self.media_notify = self.cd_initialized != 0;
     }
 
@@ -558,6 +559,20 @@ impl Akiko {
                 && self.pbx != 0
                 && self.flags & CDFLAG_ENABLE != 0
                 && self.flags & CDFLAG_PBX != 0)
+    }
+
+    /// Track under the emulated optical head, or `None` with no mounted
+    /// medium. The first program track is reported before the first seek.
+    pub fn current_track(&self) -> Option<u8> {
+        self.disc.as_ref()?;
+        let sector = self.current_sector.max(0) as u32;
+        self.toc
+            .iter()
+            .skip(3)
+            .rev()
+            .find(|entry| sector >= entry.address)
+            .or_else(|| self.toc.get(3))
+            .map(|entry| entry.point)
     }
 
     /// Remove the disc: stop playback, drop buffered audio, and volunteer
@@ -824,6 +839,7 @@ impl Akiko {
                 let disc = self.pending_disc.take().unwrap();
                 self.toc = build_toc(&disc);
                 self.disc = Some(disc);
+                self.current_sector = -1;
                 self.media_notify = self.cd_initialized != 0;
                 log::info!("akiko: disc inserted (delayed), media-status notification queued");
             }
@@ -904,6 +920,7 @@ impl Akiko {
             return;
         }
         let sector = self.play_position as u32;
+        self.current_sector = self.play_position;
         if disc.is_audio_sector(sector) {
             let mut raw = [0u8; crate::cdrom::RAW_SECTOR_BYTES];
             if disc.read_audio_sector(sector, &mut raw).is_ok() {
@@ -1182,6 +1199,7 @@ impl Akiko {
             self.playing = true;
             self.play_position = seekpos;
             self.play_end = endpos;
+            self.current_sector = seekpos;
             self.audio_notify = 10; // play-start packet shortly
             log::debug!("akiko: PLAY {seekpos}..{endpos}");
         }
@@ -1712,6 +1730,27 @@ mod tests {
     }
 
     #[test]
+    fn current_track_follows_data_and_audio_positions() {
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_two_track_disc());
+        assert_eq!(akiko.current_track(), Some(1));
+
+        akiko.current_sector = 4;
+        assert_eq!(akiko.current_track(), Some(2));
+
+        akiko.current_sector = 0;
+        akiko.playing = true;
+        akiko.play_position = 4;
+        akiko.play_end = 6;
+        let mut ring = CdAudioRing::default();
+        akiko.stream_audio_sector(&mut ring);
+        assert_eq!(akiko.current_track(), Some(2));
+
+        akiko.eject_disc();
+        assert_eq!(akiko.current_track(), None);
+    }
+
+    #[test]
     fn runtime_disc_change_volunteers_media_status() {
         let mut akiko = Akiko::new();
         // Boot-time mount: the cold-start status push covers it, no
@@ -1766,6 +1805,37 @@ mod tests {
         .unwrap();
         let image = CdImage::load(&cue).unwrap();
         let _ = std::fs::remove_file(&cue);
+        image
+    }
+
+    fn test_two_track_disc() -> CdImage {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let cue: PathBuf = dir.join(format!("copperline-akiko-tracks-{pid}-{unique}.cue"));
+        let bin: PathBuf = dir.join(format!("copperline-akiko-tracks-{pid}-{unique}.bin"));
+        let mut bytes = Vec::new();
+        for s in 0u8..8 {
+            bytes.extend(std::iter::repeat_n(s, DATA_SECTOR_BYTES));
+        }
+        let mut f = std::fs::File::create(&bin).unwrap();
+        f.write_all(&bytes).unwrap();
+        std::fs::write(
+            &cue,
+            format!(
+                concat!(
+                    "FILE \"{}\" BINARY\n",
+                    "  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n",
+                    "  TRACK 02 MODE1/2048\n    INDEX 01 00:00:04\n",
+                ),
+                bin.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let image = CdImage::load(&cue).unwrap();
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
         image
     }
 

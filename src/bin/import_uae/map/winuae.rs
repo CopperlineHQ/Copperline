@@ -414,10 +414,10 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     if let Some(e) = by_key("nr_floppies") {
         seen.insert(&e.key, ());
         match e.value.trim().parse::<i64>() {
-            Ok(n) if (1..=4).contains(&n) => {
+            Ok(n) if (0..=4).contains(&n) => {
                 table(&mut doc, &["floppy"])["drives"] = toml_edit::value(n)
             }
-            _ => report.unsupported(&e.key, &e.value, "expected an integer 1-4"),
+            _ => report.unsupported(&e.key, &e.value, "expected an integer 0-4"),
         }
     }
 
@@ -1317,6 +1317,12 @@ mod tests {
         // "n blocks": -1 is 128K and 0 is 256K, neither of them "none".
         assert!(convert("chipmem_size=-1\n").contains(r#"chip = "128K""#));
         assert!(convert("chipmem_size=0\n").contains(r#"chip = "256K""#));
+    }
+
+    #[test]
+    fn a_source_machine_can_have_no_floppy_drives() {
+        let out = convert("nr_floppies=0\n");
+        assert!(out.contains("drives = 0"), "{out}");
     }
 
     #[test]

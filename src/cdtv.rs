@@ -231,6 +231,11 @@ impl CdtvController {
     pub fn insert_disc(&mut self, disc: CdImage) {
         self.disc = Some(disc);
         self.cd_media = true;
+        self.read_offset = 0;
+        self.read_length = 0;
+        self.play_position = 0;
+        self.play_end = 0;
+        self.last_play_pos = 0;
     }
 
     /// Park a disc in the tray and insert it (with the media-change
@@ -254,6 +259,15 @@ impl CdtvController {
             || self.read_length > 0
             || self.dma_on
             || self.dma_done_delay_cck >= 0
+    }
+
+    /// Track under the emulated optical head, or `None` with no mounted
+    /// medium. Data reads and CD-DA playback both advance `last_play_pos`,
+    /// so the front panel reports the controller position rather than host
+    /// elapsed time.
+    pub fn current_track(&self) -> Option<u8> {
+        self.disc.as_ref()?;
+        Some(self.track_for(self.last_play_pos.max(0) as u32).0)
     }
 
     /// Remove the disc (and any disc still waiting in the tray): stop
@@ -714,6 +728,7 @@ impl CdtvController {
                 log::debug!("cdtv: READ DATA {start} +{length} sectors");
                 self.read_offset = u64::from(start) * u64::from(self.sector_size);
                 self.read_length = u64::from(length) * u64::from(self.sector_size);
+                self.last_play_pos = i64::from(start);
                 self.cd_motor = true;
                 self.audio_status = AUDIO_STATUS_NOT_SUPPORTED;
                 self.accept(0);
@@ -1070,6 +1085,7 @@ impl CdtvController {
         let mut remaining = words;
         while remaining > 0 && self.dma_on {
             let sector = (self.read_offset / sector_size) as u32;
+            self.last_play_pos = i64::from(sector);
             let in_sector = (self.read_offset % sector_size) as usize;
             if sector != current_sector {
                 let disc = self.disc.as_mut().expect("checked above");
@@ -1406,6 +1422,20 @@ mod tests {
         assert!(cdtv.activity_led_on());
         cdtv.dma_on = false;
         assert!(!cdtv.activity_led_on());
+    }
+
+    #[test]
+    fn current_track_follows_the_optical_head_and_empty_tray() {
+        let mut cdtv = configured_controller();
+        assert_eq!(cdtv.current_track(), Some(1));
+
+        cdtv.play_range(4, 6);
+        assert_eq!(cdtv.current_track(), Some(2));
+
+        cdtv.eject_disc();
+        assert_eq!(cdtv.current_track(), None);
+        cdtv.insert_disc_after(test_disc(), 5.0);
+        assert_eq!(cdtv.current_track(), None, "a pending disc is not mounted");
     }
 
     #[test]
