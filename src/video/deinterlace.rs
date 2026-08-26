@@ -74,6 +74,15 @@ pub struct Deinterlacer {
     /// Reusable motion mask for the weave path (one flag per canvas
     /// column); kept on the struct so a laced push does not allocate.
     moved: Vec<bool>,
+    /// Weave-phase correction: when set, fields are routed to the output
+    /// parity opposite the LOF convention. Software that never observes
+    /// LOF pairs its per-field images with an arbitrary phase; the comb
+    /// detector in `update_weave_phase` flips this when the opposite
+    /// pairing is measurably smoother.
+    weave_flip: bool,
+    /// Consecutive fields of comb evidence against the current pairing;
+    /// the flip toggles once this reaches `WEAVE_FLIP_FIELDS`.
+    weave_flip_votes: u32,
     enabled: bool,
     /// CRT phosphor persistence: each presented frame keeps this fraction
     /// of the previous one (0 = off), expressed as an alpha in 0..=243
@@ -125,6 +134,8 @@ impl Deinterlacer {
             out_rows: OUT_HEIGHT,
             out_width: FB_WIDTH,
             moved: Vec::new(),
+            weave_flip: false,
+            weave_flip_votes: 0,
             enabled,
             phosphor_alpha,
             presented: (phosphor_alpha > 0).then(Vec::new),
@@ -147,6 +158,8 @@ impl Deinterlacer {
         self.enabled = enabled;
         self.have = [false; 2];
         self.have2 = [false; 2];
+        self.weave_flip = false;
+        self.weave_flip_votes = 0;
     }
 
     /// Whether motion-adaptive field merging is enabled.
@@ -181,10 +194,14 @@ impl Deinterlacer {
 
     /// Drop the weave history and phosphor trail: the next field starts a
     /// new picture (machine swap, reset, state load), so nothing from the
-    /// previous stream may weave or glow into it.
+    /// previous stream may weave or glow into it. The weave-phase flip
+    /// resets with it: the new stream's field pairing is unknown until its
+    /// own fields provide comb evidence.
     pub fn reset_history(&mut self) {
         self.have = [false; 2];
         self.have2 = [false; 2];
+        self.weave_flip = false;
+        self.weave_flip_votes = 0;
         if self.presented.is_some() {
             self.seed_presented = true;
         }
@@ -241,6 +258,87 @@ impl Deinterlacer {
         self.present_with_phosphor_elapsed(1);
     }
 
+    /// Judge the two possible weave pairings of the incoming field against
+    /// the stored opposite field and maintain [`Self::weave_flip`].
+    ///
+    /// Both assemblies share the seams between same-index rows of the two
+    /// fields, so the discriminating energy is in the cross seams: with the
+    /// current field on the upper parity the output pairs `opp[y]` with
+    /// `cur[y + 1]`, on the lower parity it pairs `cur[y]` with
+    /// `opp[y + 1]`. A wrongly phased weave of a static picture makes the
+    /// losing sum carry the comb, so the smoother sum names the pairing the
+    /// content was drawn for. Motion widens both sums roughly equally and
+    /// fails the margin test, so panning scenes do not vote. The flip
+    /// toggles only after `WEAVE_FLIP_FIELDS` consecutive losing fields,
+    /// and toggling relabels the stored field history (each kept field's
+    /// output parity flips with the routing).
+    fn update_weave_phase(&mut self, field: &[u32], rows: usize, width: usize, base_parity: usize) {
+        /// Consecutive fields of comb evidence needed to toggle the phase.
+        const WEAVE_FLIP_FIELDS: u32 = 4;
+        /// The smoother pairing must win by this ratio (denominator /
+        /// numerator of a 20% margin) before a field counts as evidence.
+        const MARGIN_NUM: u64 = 4;
+        const MARGIN_DEN: u64 = 5;
+        /// Minimum per-sample seam energy for a field to vote at all:
+        /// blank and near-blank fields say nothing about pairing.
+        const MIN_ENERGY: u64 = 4;
+
+        let parity = base_parity ^ usize::from(self.weave_flip);
+        let opposite = parity ^ 1;
+        if !self.have[opposite] || rows < 2 {
+            self.weave_flip_votes = 0;
+            return;
+        }
+        let prev_opp = &self.prev[opposite];
+        let mut cur_upper: u64 = 0;
+        let mut cur_lower: u64 = 0;
+        let mut samples: u64 = 0;
+        let diff = |a: u32, b: u32| -> u64 {
+            let d = |shift: u32| {
+                (((a >> shift) & 0xFF) as i32 - ((b >> shift) & 0xFF) as i32).unsigned_abs() as u64
+            };
+            d(0) + d(8) + d(16)
+        };
+        for y in 0..rows - 1 {
+            let cur_row = &field[y * width..(y + 1) * width];
+            let cur_next = &field[(y + 1) * width..(y + 2) * width];
+            let opp_row = &prev_opp[y * width..(y + 1) * width];
+            let opp_next = &prev_opp[(y + 1) * width..(y + 2) * width];
+            let mut x = 0;
+            while x < width {
+                cur_upper += diff(opp_row[x], cur_next[x]);
+                cur_lower += diff(cur_row[x], opp_next[x]);
+                samples += 1;
+                x += 8;
+            }
+        }
+        let (smoother_cur_upper, smaller, larger) = if cur_upper <= cur_lower {
+            (true, cur_upper, cur_lower)
+        } else {
+            (false, cur_lower, cur_upper)
+        };
+        let decisive = smaller * MARGIN_DEN <= larger * MARGIN_NUM
+            && larger >= samples * MIN_ENERGY
+            && smoother_cur_upper != (parity == 0);
+        if !decisive {
+            self.weave_flip_votes = 0;
+            return;
+        }
+        self.weave_flip_votes += 1;
+        if self.weave_flip_votes < WEAVE_FLIP_FIELDS {
+            return;
+        }
+        self.weave_flip = !self.weave_flip;
+        self.weave_flip_votes = 0;
+        // Every stored field keeps its image but its output parity label
+        // flips with the routing; swap the per-parity history so motion
+        // detection keeps comparing same-parity fields.
+        self.prev.swap(0, 1);
+        self.prev2.swap(0, 1);
+        self.have.swap(0, 1);
+        self.have2.swap(0, 1);
+    }
+
     /// Merge one rendered field of `rows` lines. `lace` and `long_field`
     /// describe the field's BPLCON0 LACE bit and Agnus LOF at its frame
     /// start. `double_rows` selects the progressive presentation: standard
@@ -260,9 +358,12 @@ impl Deinterlacer {
         let rows = rows.clamp(1, MAX_VISIBLE_LINES);
         if rows != self.field_rows || width != self.field_width {
             // Fields of a different scan must not weave with the old
-            // history (mode switch); drop it.
+            // history (mode switch); drop it, along with the weave-phase
+            // evidence gathered from it.
             self.have = [false; 2];
             self.have2 = [false; 2];
+            self.weave_flip = false;
+            self.weave_flip_votes = 0;
             self.field_rows = rows;
             self.field_width = width;
         }
@@ -302,7 +403,6 @@ impl Deinterlacer {
             return;
         }
 
-        let parity = usize::from(!long_field);
         // The lace history buffers must hold this scan's field size.
         let field_need = rows * width;
         for buf in self.prev.iter_mut().chain(self.prev2.iter_mut()) {
@@ -310,6 +410,18 @@ impl Deinterlacer {
                 buf.resize(field_need, 0);
             }
         }
+        // Field order: the hardware convention routes the long field (LOF=1)
+        // to the even (upper) output rows. Software that never observes LOF
+        // and simply ping-pongs two per-field images (Kang Fu CD32's copper
+        // chains, for one) lands on an arbitrary phase decided by which
+        // field happened to be running when its chain started - real CRTs
+        // hide the wrong phase in field-rate flicker, but a progressive
+        // weave turns it into a one-line comb through every detail. Measure
+        // which pairing produces the smoother picture and flip the weave
+        // phase when the wrong one wins repeatedly (see
+        // `update_weave_phase`).
+        self.update_weave_phase(field, rows, width, usize::from(!long_field));
+        let parity = usize::from(!long_field) ^ usize::from(self.weave_flip);
         // This field's rows land on its own parity lines.
         for y in 0..rows {
             let row = &field[y * width..(y + 1) * width];
@@ -906,6 +1018,57 @@ mod tests {
         for y in 0..FB_HEIGHT {
             assert_eq!(out_row(&d, 2 * y), 0x1000 + y as u32, "even row {y}");
             assert_eq!(out_row(&d, 2 * y + 1), 0x2000 + y as u32, "odd row {y}");
+        }
+    }
+
+    /// A 570-row picture whose 2-row strokes straddle the field pairs
+    /// (rows 1,2 mod 8): the assembly that reunites each stroke is
+    /// unambiguous, which is what the weave-phase detector measures.
+    fn straddling_stroke_picture(p: usize) -> u32 {
+        if p % 8 == 1 || p % 8 == 2 {
+            0x00FF_FFFF
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn blind_field_phase_is_detected_and_flipped() {
+        let mut d = Deinterlacer::with_options(true, 0.0);
+        // A program that never reads LOF drew its even picture rows into
+        // the SHORT field and its odd rows into the LONG field - the
+        // opposite of the hardware pairing, as a copper list chain started
+        // in an unlucky field would. The LOF-parity weave alone would comb
+        // every stroke (Kang Fu CD32's laced intro screens).
+        let long = field_filled_rows(|y| straddling_stroke_picture(2 * y + 1));
+        let short = field_filled_rows(|y| straddling_stroke_picture(2 * y));
+        for _ in 0..6 {
+            d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+            d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        }
+        for r in 2..OUT_HEIGHT - 2 {
+            assert_eq!(
+                out_row(&d, r),
+                straddling_stroke_picture(r),
+                "output row {r} after phase correction"
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_field_phase_is_left_alone() {
+        let mut d = Deinterlacer::with_options(true, 0.0);
+        // The same picture drawn with the hardware pairing (long field =
+        // upper rows) must weave correctly from the start and never flip.
+        let long = field_filled_rows(|y| straddling_stroke_picture(2 * y));
+        let short = field_filled_rows(|y| straddling_stroke_picture(2 * y + 1));
+        for _ in 0..6 {
+            d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+            d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        }
+        assert!(!d.weave_flip, "correctly phased content must not flip");
+        for r in 2..OUT_HEIGHT - 2 {
+            assert_eq!(out_row(&d, r), straddling_stroke_picture(r), "row {r}");
         }
     }
 

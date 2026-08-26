@@ -499,6 +499,23 @@ field of its own parity, and the woven line against its own
 predecessor), and the per-pixel motion mask is dilated one pixel
 sideways so dithered moving art bobs as a region instead of weaving and
 interpolating on alternate pixels.
+
+Fields are routed by the hardware convention (the long field, LOF=1,
+carries the upper output rows), but software that never observes LOF and
+simply ping-pongs two per-field images - a chained pair of copper lists,
+each repointing COP1LC at the other - lands on an arbitrary pairing
+decided by which field happened to be running when its chain started. A
+real CRT hides the wrong phase in field-rate flicker; a progressive weave
+turns it into a one-line comb through every detail. The deinterlacer
+therefore measures both pairings' cross seams against the stored opposite
+field each laced push: motion widens both sums about equally and fails
+the margin test, but a static picture drawn for the opposite pairing makes
+the losing sum carry the comb, and after four consecutive losing fields
+the weave phase flips (relabelling the stored field history with it). The
+flip resets with the weave history on machine swaps, resets, state loads
+and scan changes. Kang Fu CD32's laced HAM8 intro screens are the
+regression example: with the phase wrong, its thin lettering rendered as
+"every other line missing".
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling

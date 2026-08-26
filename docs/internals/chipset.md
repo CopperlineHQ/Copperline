@@ -250,6 +250,14 @@ only treats the display window as unprogrammed when DIWSTRT and DIWSTOP are
 both zero; a zero start paired with a non-zero stop opens the window at beam
 zero and can expose deep overscan.
 
+The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
+BPLCON0 LACE is set; outside interlace it holds its value, and the power-on
+state is set, so every progressive field is a long frame and reads LOF=1.
+Holding it set matters for the phase: the first field after software
+enables LACE toggles to a short field, as on real hardware, which is the
+absolute field order that software pairing its per-field images blindly
+(without reading VPOSR) was authored against.
+
 ## CIA (`cia.rs`)
 
 A small 8520 model used for both CIAs: I/O ports, the

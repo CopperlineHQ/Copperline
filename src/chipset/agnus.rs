@@ -1081,12 +1081,20 @@ impl Agnus {
         }
     }
 
+    /// Advance the long-frame latch at a field boundary. Agnus auto-toggles
+    /// LOF only while BPLCON0 LACE is set; outside interlace the latch keeps
+    /// its value (power-on state is set, so a progressive display runs all
+    /// long frames and reads LOF=1 in VPOSR, and a VPOSW-written value
+    /// persists). The absolute phase matters: holding LOF set through
+    /// progressive frames means the first field after software enables LACE
+    /// toggles to a SHORT field, as on real hardware. The previous model
+    /// forced LOF low between laced sequences, which started every laced
+    /// sequence on a long field and inverted the field phase against real
+    /// hardware from then on.
     pub fn update_interlace_long_frame(&mut self, lace: bool) {
         self.set_lace(lace);
         if lace {
             self.lof = !self.lof;
-        } else {
-            self.lof = false;
         }
     }
 
@@ -1655,7 +1663,9 @@ mod tests {
         assert_eq!(agnus.current_frame_lines(), 313);
         agnus.update_interlace_long_frame(false);
         assert_eq!(agnus.current_frame_lines(), 313);
-        assert!(!agnus.lof);
+        // Non-interlaced fields are all long frames: LOF stays set, so the
+        // first field after LACE is enabled toggles to a short field.
+        assert!(agnus.lof);
     }
 
     #[test]
