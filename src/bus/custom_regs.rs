@@ -117,6 +117,22 @@ impl Bus {
                 // never contaminates the bus residue below.
                 None => return 0xFFFF,
             },
+            // COPJMP1/COPJMP2: the strobe fires on the register-address
+            // decode alone, so a CPU *read* of the strobe address restarts
+            // the Copper exactly as a write does. (More generally, reading
+            // a write-only register performs a bus write of the floating
+            // data-bus residue into it -- the UAE/vAmiga model; the strobes
+            // are where software depends on it, using TST/MOVE-from to flip
+            // Copper lists mid-vblank.) The CPU still reads back the
+            // undriven bus residue.
+            0x088 => {
+                self.copjmp_strobe(1);
+                return self.data_bus;
+            }
+            0x08A => {
+                self.copjmp_strobe(2);
+                return self.data_bus;
+            }
             _ => {
                 // Write-only and unmapped custom offsets drive nothing, so
                 // the read samples the residue of the last real chip-bus
@@ -137,6 +153,18 @@ impl Bus {
         // from before the transfer.
         self.data_bus = value;
         value
+    }
+
+    /// COPJMP1/COPJMP2 strobe: reload the Copper program counter from
+    /// COP1LC/COP2LC now. Fired by any bus access to the strobe address,
+    /// read or write, since the decode acts on the address alone.
+    fn copjmp_strobe(&mut self, list: u8) {
+        self.pending_copper_frame_start = None;
+        self.copper_current_list = list;
+        self.copper.jump(match list {
+            1 => self.agnus.cop1lc,
+            _ => self.agnus.cop2lc,
+        });
     }
 
     pub(super) fn pot_pins(&self) -> PotPins {
@@ -519,15 +547,11 @@ impl Bus {
                 false
             }
             0x088 => {
-                self.pending_copper_frame_start = None;
-                self.copper_current_list = 1;
-                self.copper.jump(self.agnus.cop1lc);
+                self.copjmp_strobe(1);
                 false
             }
             0x08A => {
-                self.pending_copper_frame_start = None;
-                self.copper_current_list = 2;
-                self.copper.jump(self.agnus.cop2lc);
+                self.copjmp_strobe(2);
                 false
             }
             0x096 => {

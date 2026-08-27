@@ -462,4 +462,10 @@ probe_tests! {
     // slot (the Hamazing Hexagon left-edge regression class).
     // vAmiga-verified: byte-identical over the whole frame.
     golden_bplprobe_dat => probe("bplprobe-dat", "bplprobe-dat.bin", 16.0);
+    // The COPJMP strobes fire on a READ of the strobe address exactly as
+    // on a write: a vblank handler's COP1LC rewrite plus TST.W COPJMP1
+    // flips the running Copper list in the same frame (the Sleepwalker
+    // CD32 double-buffer flip regression class). vAmiga-verified: the
+    // stripe reads green (read strobed), not red (read inert).
+    golden_copprobe_jmpread => probe("copprobe-jmpread", "copprobe-jmpread.bin", 16.0);
 }

@@ -358,6 +358,17 @@ wait for the blitter to go idle.
 - A CPU write to COPJMP1/COPJMP2 loads the Copper program counter
   immediately, but the target list has no visible effect until the Copper
   gets DMA slots to fetch it.
+- A CPU *read* of COPJMP1/COPJMP2 fires the same strobe: the register
+  decode acts on the address alone (reading a write-only register performs
+  a bus write of the floating data-bus residue into it -- the UAE/vAmiga
+  model), while the CPU reads back the undriven bus. Vertical-blank
+  handlers rely on this (`move.l #list,COP1LC` + `tst.w COPJMP1`) to make
+  a double-buffered list swap take effect in the same frame, before
+  display fetch begins (regression example: the Sleepwalker CD32
+  logo/intro double-buffer flip, which without the read strobe shows each
+  new pose one frame early in the still-displayed buffer). Test:
+  `copjmp_strobe_fires_on_read_access`; golden probe:
+  `timing-test/copprobe-jmpread.asm` (vAmiga-verified).
 - A Copper MOVE can update COP1LC/COP2LC; a later COPJMP strobe branches
   through the *current* value. A Copper MOVE to COPJMP1/COPJMP2 spends its
   second word fetch on the strobe, then two more bus-free Copper cycles

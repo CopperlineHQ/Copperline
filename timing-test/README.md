@@ -506,7 +506,12 @@ the hold colour every visible pixel modifies. Two bands with identical
 visible fetch words render magenta and cyan from their hidden seeds
 alone, and collapse to one blue field if the history is truncated at the
 window edge -- the Lemmings 2 FES demo DMA Design logo class;
-vAmiga-verified band colours, border span per the DIW-edge photos).
+vAmiga-verified band colours, border span per the DIW-edge photos), and
+`copprobe-jmpread` (the COPJMP strobes fire on a READ of the strobe
+address exactly as on a write: each frame the CPU rewrites COP1LC and
+strobes with `tst.w COPJMP1`, so the stripe must render from the flipped
+list (green), not the vblank-restart list (red) -- the Sleepwalker CD32
+double-buffer flip class; vAmiga-verified).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
