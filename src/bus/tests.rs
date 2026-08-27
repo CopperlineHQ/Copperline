@@ -1891,7 +1891,12 @@ fn copjmp_strobe_fires_on_read_access() {
         "COP1LC write alone must not move an active Copper"
     );
 
-    let _ = bus.custom_read(0x088, 2);
+    bus.data_bus = 0xCAFE;
+    assert_eq!(
+        bus.custom_read(0x088, 2),
+        0xCAFE,
+        "the strobe address is undriven: the read must float to the residue"
+    );
     bus.advance_chipset(4);
     assert_eq!(
         bus.denise.bplcon0, 0x4200,
@@ -1900,7 +1905,12 @@ fn copjmp_strobe_fires_on_read_access() {
 
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    let _ = bus.custom_read(0x08A, 2);
+    bus.data_bus = 0xBEEF;
+    assert_eq!(
+        bus.custom_read(0x08A, 2),
+        0xBEEF,
+        "the strobe address is undriven: the read must float to the residue"
+    );
     bus.advance_chipset(4);
     assert_eq!(
         bus.denise.palette[0], 0x0999,
