@@ -475,7 +475,7 @@ impl Bus {
                 self.ddf_seq_record_ddf_write(
                     super::ddf_line::DdfSeqWriteKind::Ddfstrt(val),
                     previous,
-                    4,
+                    super::ddf_line::DDF_WRITE_COMMIT_CCK,
                 );
                 false
             }
@@ -494,7 +494,7 @@ impl Bus {
                 self.ddf_seq_record_ddf_write(
                     super::ddf_line::DdfSeqWriteKind::Ddfstop(val),
                     previous,
-                    4,
+                    super::ddf_line::DDF_WRITE_COMMIT_CCK,
                 );
                 false
             }
