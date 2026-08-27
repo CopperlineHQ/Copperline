@@ -868,15 +868,44 @@ impl Bus {
         self.denise.bplcon0
     }
 
-    pub(super) fn record_ddfstrt_write_match_miss(&mut self, ddfstrt: u16) {
+    /// Agnus starts a line's bitplane fetch from a horizontal comparator:
+    /// the DDF flop sets on the single colour clock where the counter equals
+    /// DDFSTRT. A DDFSTRT write that moves the match position to the current
+    /// colour clock or behind the beam therefore leaves the flop unset for
+    /// the rest of the line, and the line fetches nothing - the comparator
+    /// never sees its value again before the horizontal wrap. A write that
+    /// lands after the flop has already set cannot un-start the run: only
+    /// DDFSTOP ends it.
+    ///
+    /// Regression example: Microcosm's CD32 status panel repoints all seven
+    /// bitplanes and drops DDFSTRT from $2C to $18 in one copper burst that
+    /// overruns the line, so the new DDFSTRT commits at hpos ~$1E on the
+    /// panel's first line. Restarting the fetch mid-block there hands the
+    /// planes whose lo-res slot number survives the truncated block (BPL5
+    /// and BPL1, slots 6 and 7) one fetch more than the rest, and the two
+    /// pointer groups stay 8 bytes apart for the whole panel.
+    pub(super) fn record_ddfstrt_write_match_miss(&mut self, previous: u16, ddfstrt: u16) {
         let bplcon0 = self.effective_bitplane_bplcon0();
-        let ddfstart = u32::from(effective_ddf_hpos(self.agnus.revision(), bplcon0, ddfstrt));
-        if ddfstart != 0 && ddfstart == self.agnus.hpos {
-            self.bitplane_ddfstart_miss = Some(BitplaneDdfStartMiss {
-                vpos: self.agnus.vpos,
-                ddfstart,
-            });
+        let revision = self.agnus.revision();
+        let hpos = self.agnus.hpos;
+        let ddfstart = u32::from(effective_ddf_hpos(revision, bplcon0, ddfstrt));
+        if ddfstart == 0 || ddfstart > hpos {
+            // The comparator still has this line's match ahead of it.
+            return;
         }
+        let previous_start = u32::from(effective_ddf_hpos(revision, bplcon0, previous));
+        if previous_start != 0
+            && hpos > previous_start
+            && !self.bitplane_ddfstart_missed_on_line(self.agnus.vpos, previous_start)
+        {
+            // The old comparator already fired this line: the fetch sequence
+            // is running and the new DDFSTRT only applies from the next line.
+            return;
+        }
+        self.bitplane_ddfstart_miss = Some(BitplaneDdfStartMiss {
+            vpos: self.agnus.vpos,
+            ddfstart,
+        });
     }
 
     pub(super) fn bitplane_ddfstart_missed_on_line(&self, vpos: u32, ddfstart: u32) -> bool {

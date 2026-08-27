@@ -3603,6 +3603,91 @@ fn wide_fmode_dma_capture_packs_lores_slots_in_fetch_units() {
     assert_eq!(bus.display_dma_bplpt[0], 0x0100 + 48 + 0x10);
 }
 
+/// Seven lo-res planes at FMODE=3, DDFSTRT moved from $2C to $18 while the
+/// beam sits between the two comparator positions.
+fn wide_fmode_seven_plane_bus(hpos: u32) -> Bus {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003); // BPL32 | BPAGEM = 64-bit fetches
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = hpos;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x002C;
+    bus.denise.ddfstop = 0x00B0;
+    bus.denise.bplcon0 = 0x7200; // BPU=7 | COLOR: seven lo-res bitplanes
+    for plane in 0..7 {
+        let ptr = 0x1000 + plane as u32 * 0x0100;
+        bus.denise.bplpt[plane] = ptr;
+        bus.display_dma_bplpt[plane] = ptr;
+    }
+    bus
+}
+
+#[test]
+fn wide_fmode_ddfstrt_write_behind_beam_skips_the_line_for_every_plane() {
+    // The DDF flop sets on the single colour clock where the horizontal
+    // counter equals DDFSTRT. Moving DDFSTRT behind the beam before the old
+    // position has fired leaves the flop unset for the rest of the line, so
+    // no plane fetches and no pointer advances. Restarting the fetch mid-unit
+    // instead would only run the lo-res slots left in the truncated unit
+    // (BPL5 and BPL1, slots 6 and 7), desynchronising those two pointers from
+    // the other five for the rest of the display (Microcosm's CD32 status
+    // panel, whose copper burst overruns the line and commits DDFSTRT $18 at
+    // hpos ~$1E on the panel's first line).
+    let mut bus = wide_fmode_seven_plane_bus(0x1E);
+    assert!(!bus.write_custom_word_from(0x092, 0x0018, BeamWriteSource::Cpu));
+    bus.advance_chipset(0x00E3 - 0x1E);
+
+    assert!(bus.frame_captured_bitplane_rows()[0].is_none());
+    for plane in 0..7 {
+        assert_eq!(
+            bus.display_dma_bplpt[plane],
+            0x1000 + plane as u32 * 0x0100,
+            "plane {} pointer stayed put",
+            plane + 1
+        );
+    }
+
+    // Without the write the same line fetches all six units, so the check
+    // above is not vacuous.
+    let mut bus = wide_fmode_seven_plane_bus(0x1E);
+    bus.advance_chipset(0x00E3 - 0x1E);
+    let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
+    assert_eq!(row.words_per_row, 24);
+    for plane in 0..7 {
+        assert_eq!(
+            bus.display_dma_bplpt[plane],
+            0x1000 + plane as u32 * 0x0100 + 48,
+            "plane {} pointer advanced one row",
+            plane + 1
+        );
+    }
+}
+
+#[test]
+fn wide_fmode_ddfstrt_rewrite_after_the_match_keeps_the_line_fetching() {
+    // Once the comparator has fired, the run belongs to DDFSTOP: a DDFSTRT
+    // write landing behind the beam cannot un-start it. A copper that repeats
+    // the value it already programmed must not lose the line.
+    let mut bus = wide_fmode_seven_plane_bus(0x16);
+    bus.advance_chipset(0x0040 - 0x16);
+    assert!(!bus.write_custom_word_from(0x092, 0x002C, BeamWriteSource::Cpu));
+    bus.advance_chipset(0x00E3 - 0x40);
+
+    let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
+    assert_eq!(row.words_per_row, 24);
+    for plane in 0..7 {
+        assert_eq!(
+            bus.display_dma_bplpt[plane],
+            0x1000 + plane as u32 * 0x0100 + 48,
+            "plane {} pointer advanced one row",
+            plane + 1
+        );
+    }
+}
+
 #[test]
 fn ecs_bitplane_dma_capture_extends_equal_ddf_window_to_hard_stop() {
     let mut bus = empty_bus();

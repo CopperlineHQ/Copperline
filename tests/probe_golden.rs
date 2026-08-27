@@ -394,6 +394,15 @@ probe_tests! {
     // left of a standard DIW and presents the remaining 320 px edge to edge;
     // FS-UAE-verified on the equivalent live display constellation.
     golden_ddfprobe_agaorigin => probe_aga("ddfprobe-agaorigin", "ddfprobe-agaorigin.bin", 16.0);
+    // The DDF start flop sets on the single colour clock where the counter
+    // equals DDFSTRT: a write that moves the match behind the beam before
+    // the old position fired drops the whole line (the blank middle band),
+    // while a write landing after the flop set leaves the run alone (the
+    // lower band matches the control band). Restarting from the moved
+    // comparator instead desynchronises the planes whose lo-res slot
+    // survives the truncated unit (the Microcosm CD32 status-panel
+    // regression class).
+    golden_ddfprobe_ddfmiss => probe_aga("ddfprobe-ddfmiss", "ddfprobe-ddfmiss.bin", 16.0);
     // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
     // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);

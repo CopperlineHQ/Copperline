@@ -471,7 +471,7 @@ impl Bus {
                 }
                 let previous = self.denise.ddfstrt;
                 self.denise.ddfstrt = val;
-                self.record_ddfstrt_write_match_miss(val);
+                self.record_ddfstrt_write_match_miss(previous, val);
                 self.ddf_seq_record_ddf_write(
                     super::ddf_line::DdfSeqWriteKind::Ddfstrt(val),
                     previous,
