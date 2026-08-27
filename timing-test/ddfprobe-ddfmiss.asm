@@ -33,12 +33,14 @@
 ; DDFSTRT $2C -> $18 in one burst that overruns the line, so the new DDFSTRT
 ; commits at hpos ~$1E on the panel's first line.
 ;
-; Cross-check basis: derived from the DDFSTRT comparator (a single-colour-
-; clock equality match, the same model as the existing write-at-match miss)
-; and confirmed against the Microcosm panel, which renders correctly only
-; when the line is dropped.  vAmiga is OCS/ECS-only and cannot arbitrate AGA;
-; an FS-UAE/real-A1200 capture of this constellation is still wanted to pin
-; the band edges independently.
+; Cross-check basis: vAmiga 5.0b1 (its new A1200_2MB AGA setup) renders this
+; probe with the same ink/paper mask as Copperline, pixel for pixel, once the
+; two capture windows are aligned (vAmiga's raw frame starts two lines later,
+; and expands COLOR00 $008 to $000072 where Copperline replicates the nibble
+; to $000088): 0 of 202628 structural pixels differ, against 3.16% - exactly
+; the 64-line miss band - for the restart-mid-unit behaviour this replaces.
+; The band edges therefore come from an independent implementation, not from
+; the comparator model alone.
 CUST   equ $dff000
 BMP    equ $40000
 CLIST  equ $60000

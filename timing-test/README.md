@@ -459,9 +459,9 @@ DDFSTRT behind the beam before the position it replaces has fired drops the
 whole line -- the blank middle band -- while rewriting it after the flop has
 set leaves the run alone; restarting from the moved comparator instead
 truncates the first fetch unit and desynchronises the planes whose lo-res
-slot survives it, the Microcosm CD32 status-panel regression class. Derived
-from the comparator model and confirmed on the game; an FS-UAE/real-A1200
-capture is still wanted, since vAmiga cannot arbitrate AGA),
+slot survives it, the Microcosm CD32 status-panel regression class;
+vAmiga-verified on its 5.0b1 `A1200_2MB` AGA setup, which matches the
+render exactly),
 `dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible

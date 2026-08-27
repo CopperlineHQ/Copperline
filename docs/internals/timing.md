@@ -104,7 +104,8 @@ regression example: its Copper repoints seven bitplanes and drops DDFSTRT
 `$2C` to `$18` in one burst that overruns the line, committing the new value
 at hpos ~`$1E` on the panel's first line, which desynchronised BPL5 and BPL1
 (lo-res slots 6 and 7) from the other five planes and speckled the whole
-panel. Covered by the `ddfprobe-ddfmiss` golden probe.
+panel. Covered by the `ddfprobe-ddfmiss` golden probe, verified against
+vAmiga 5.0b1's `A1200_2MB` AGA setup.
 
 Slow RAM at `$C00000` is arbitrated through Agnus *like chip RAM*: a CPU
 access to slow RAM contends with DMA even though the RAM is outside the
