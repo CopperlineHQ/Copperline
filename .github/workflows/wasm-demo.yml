@@ -103,7 +103,11 @@ jobs:
           if (emu.floppy_write_protected(1) !== false || emu.export_floppy(1).length !== 901120) {
             throw new Error('browser writable floppy did not survive a save-state round trip');
           }
-          for (const invalid of [0, 5, 2.5, 257, NaN, Infinity]) {
+          const driveless = new WebEmu('A500', 'PAL', 0);
+          if ([0, 1, 2, 3].some((drive) => driveless.drive_connected(drive))) {
+            throw new Error('zero browser floppy drive count left a drive connected');
+          }
+          for (const invalid of [-1, 5, 2.5, 257, NaN, Infinity]) {
             try {
               new WebEmu('A500', 'PAL', invalid);
               throw new Error(`invalid browser floppy drive count was accepted: ${invalid}`);
