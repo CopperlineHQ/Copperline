@@ -57,11 +57,34 @@ Addresses are specified in hexadecimal (with or without `0x` or `$` prefixes).
 `COPPERLINE_DBG_IRQ=1`
 : Logs serviced interrupt levels and pending interrupt request bits.
 
+`COPPERLINE_DBG_CIA=1`
+: Logs INTENA and INTREQ writes touching the EXTER bit or master enable.
+
+`COPPERLINE_DBG_DSKLEN=1`
+: Logs every DSKLEN write (disk DMA arming) and DSKBLK interrupt completion.
+
+`COPPERLINE_DBG_SPREN=1`
+: Logs when a DMACON write clears the sprite-DMA enable bit, including the writing PC.
+
 `COPPERLINE_DBG_BLIT=LO:HI`
 : Logs Blitter operations started between `LO` and `HI` emulated seconds.
 
+`COPPERLINE_DBG_RAMDUMP=ADDR:LEN:FILE`
+: One-shot memory dump written to `FILE` the first time the debugger activates.
+
 `COPPERLINE_DBG_COPPER=auto | ADDR[:COUNT]`
 : Dumps disassembled Copper list on first debugger activation (`auto` reads `COP1LC`).
+
+`COPPERLINE_DBG_LISTCHECK=HEAD[,HEAD...]`
+: Walks Exec `List` linkage headers after every instruction to detect cycles or corruption.
+
+`COPPERLINE_DBG_EXPORT_PLANES=1`
+: Exports per-line fetched bitplane data and composite index images for frames in the active window.
+  Use `COPPERLINE_DBG_EXPORT_PLANES_DIR=DIR` to set the output directory.
+
+`COPPERLINE_DBG_FRAMESTATE=1`
+: Logs display configuration, palette, DMA state, and Denise sprite shadow/hardware registers.
+  `COPPERLINE_DBG_FRAMESTATE_FULLPAL=1` extends palette logs to all 256 AGA entries.
 
 `COPPERLINE_DBG_AFTER=SECS` / `COPPERLINE_DBG_UNTIL=SECS`
 : Restricts debugger evaluation to a specific emulated time window.
@@ -80,10 +103,35 @@ Addresses are specified in hexadecimal (with or without `0x` or `$` prefixes).
 | `COPPERLINE_DIAG_BLT_SLOTS` | Detailed Blitter pipeline slot and bus ownership trace |
 | `COPPERLINE_DIAG_IPL` | CPU cycle consumption breakdown per interrupt level |
 | `COPPERLINE_DIAG_PCSAMPLE` | Sampled PC histogram every 50 frames to locate CPU hotspots |
+| `COPPERLINE_DIAG_PCHIST` | Records recent PC execution history |
+| `COPPERLINE_DIAG_COPLEN` | Measures Copper list length |
 | `COPPERLINE_DIAG_COP_WRITES` | Logs exact landing colour-clock cycle for every Copper MOVE |
 | `COPPERLINE_DIAG_CPU_BUS` | Logs CPU chip-bus request, grant, and cycle wait states |
+| `COPPERLINE_DIAG_CPU_READS` | Logs CPU custom-register reads with bus slot and return value |
+| `COPPERLINE_DIAG_CPU_SYNC` | CPU internal cycle trace at synchronization points |
+| `COPPERLINE_DIAG_CPU_WRITES` | Logs CPU custom-register writes with bus slot and beam coordinates |
+| `COPPERLINE_DIAG_DISPLAY` | Display register change log |
+| `COPPERLINE_DIAG_CAPROW` | Per-line bitplane capture state at DDF start |
+| `COPPERLINE_DIAG_PALETTE_ROW` | Logs beam-timed COLOR writes for selected scanlines |
+| `COPPERLINE_DIAG_PALSTORE` | Logs COLOR and BPLCON3 writes at register store application |
+| `COPPERLINE_DIAG_HAM_PIXELS` | Samples DMA playfield HAM pixels on a specified beam line |
+| `COPPERLINE_DIAG_MANUAL_BPL_PIXELS` | Samples CPU/Copper BPLDAT replay pixels on a beam line |
+| `COPPERLINE_DIAG_FRAME_PIXELS` | Samples final framebuffer pixels after rendering pipeline |
+| `COPPERLINE_DIAG_SPRITES` | Sprite DMA fetch and render log |
+| `COPPERLINE_DIAG_SPRCAP` | Logs captured sprite DMA lines |
+| `COPPERLINE_DIAG_MANUAL_SPRITES` | Logs manually replayed sprite intervals and register writes |
+| `COPPERLINE_DIAG_SPRITE_PIXELS` | Samples non-transparent sprite pixels on a beam line |
+| `COPPERLINE_DIAG_BLITREGS` | Logs full Blitter register set at blit starts |
+| `COPPERLINE_TRACE_BLITTER` | Generates JSON trace of Blitter starts, polls, and IRQ latches |
+| `COPPERLINE_DIAG_POLLSTATS` | Reports most-read CIA and custom registers on screenshots/dumps |
+| `COPPERLINE_DIAG_DISK` | Disk DMA state transitions and DSKLEN writes |
 | `COPPERLINE_DIAG_FLUXBRIDGE` | Detailed physical floppy drive head stepping and MFM sector metrics |
 | `COPPERLINE_DIAG_AUDIO_NOTES` | Logs Paula channel note on/off transitions |
+| `COPPERLINE_DIAG_CRASH` | CPU empty-RAM execution and low-memory write context |
+| `COPPERLINE_DIAG_GAYLE` / `CDTV` | Gayle IDE and CDTV controller traffic |
 | `COPPERLINE_DIAG_A2091` | A2091 SCSI DMAC and WD33C93 register access trace |
 | `COPPERLINE_DIAG_A4091` | A4091 NCR53C710 SCRIPTS instruction trace |
+| `COPPERLINE_DIAG_CURSOR` | Host cursor mapping diagnostics |
+| `COPPERLINE_DUMP_BLITMEM` | Dumps chip RAM on BLTSIZE writes |
+| `COPPERLINE_DUMP_BUS_ACCOUNTING` | Per-frame chip-bus slot accounting summary |
 | `COPPERLINE_SHOT_RAW=1` | Exports unscaled 716x570 native raster framebuffer dumps |

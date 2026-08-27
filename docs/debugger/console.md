@@ -67,8 +67,8 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `DIS [ADDR] [N]` (or `D`) | Disassemble `N` instructions starting at `ADDR` (default: PC) |
 | `COPPER [PC\|ADDR] [N]` | Disassemble Copper list |
 | `CUSTOM` | Display custom chipset register summary |
-| `BLITS` | List active blits in current frame (requires Frame Analyzer) |
-| `FIND HEXBYTES [START]` | Search writable memory for byte sequence |
+| `BLITS` | List all blits started in the traced frame (with control words, size, pointers, and start/end beam positions; requires Frame Analyzer) |
+| `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
 | `WRITER ADDR` | Query last instruction that modified memory at `ADDR` |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |
 | `STACK` (or `BT`) | Heuristic stack trace of recent return addresses |

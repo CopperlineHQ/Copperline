@@ -107,9 +107,10 @@ To write to a physical disk, two requirements must be met:
 1. The physical write-protect tab on the 3.5" disk must be set to writable.
 2. `write_protected = false` (or `--floppy-bridge-writable`) must be specified in the configuration.
 
-Writes are verified and committed directly to the physical medium. Partial track
-writes that do not align with sector boundaries or index pulses will be rejected
-by the controller to protect against disk corruption.
+Writes are verified and committed directly to the physical medium. Full-track
+revolution writes can start at any rotational position. However, partial track
+writes that do not begin at the index pulse are refused because the hardware interface
+cannot accurately position an offset partial write.
 
 ## Operational differences from disk images
 

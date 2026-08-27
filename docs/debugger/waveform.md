@@ -47,7 +47,7 @@ In the **Wave** tab, enter trigger and duration parameters, then click **Arm**.
 
 Default values:
 - Trigger: `now` (immediately upon arming)
-- Duration: `1frame` (one video frame)
+- Duration: `1f` (one video frame; accepts `f` or `frames` suffix)
 - Signals: `all`
 - Default output filename: `copperline-wave-<timestamp>.vcd`
 

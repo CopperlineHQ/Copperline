@@ -20,7 +20,7 @@ Start a 68k-aware GDB (such as `m68k-amigaos-gdb` or multiarch `gdb`) and connec
 ```
 
 The target starts halted at reset. The stub supports:
-- Register reading and writing (`d0`-`d7`, `a0`-`a7`, `sr`, `pc`)
+- Register reading and writing (`d0`-`d7`, `a0`-`a5`, `fp`, `sp`, `ps`, `pc`)
 - Memory read and write operations
 - Breakpoints and watchpoints
 - Single-stepping and continuation

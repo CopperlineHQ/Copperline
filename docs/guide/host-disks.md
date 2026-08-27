@@ -25,8 +25,8 @@ Host disks (name one to --host-disk, or as [[host_disk]] device):
 Safety protections:
 - **System disk protection:** The host system's boot/root disk is automatically
   detected and blocked from attachment (`cannot be used`).
-- **Partition integrity:** Disks must contain valid partition data (such as an RDB).
-  Copperline does not invent partition tables for unpartitioned disks.
+- **Raw medium access:** The physical medium is presented to the guest as-is.
+  Copperline does not synthesize partition tables for unpartitioned media.
 
 ## Attaching a disk
 

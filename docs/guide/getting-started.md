@@ -159,5 +159,6 @@ in the root of the repository. Copy it to `copperline.toml` or pass it via `--co
 Set `RUST_LOG=debug` or `RUST_LOG=trace` in the environment to enable detailed logging.
 
 If an unhandled panic occurs, Copperline writes diagnostic output and a backtrace
-to `copperline-crash.txt` (written to the working directory or system temp folder).
+to `copperline-crash.txt` (attempted next to the executable first, falling back to
+the current working directory, and then to the system temporary directory).
 Please include this file when reporting bugs.

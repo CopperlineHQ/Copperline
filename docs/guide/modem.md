@@ -49,6 +49,10 @@ Result codes returned by the modem:
 - `BUSY`: Target refused connection.
 - `NO CARRIER`: Connection failed or disconnected.
 
+Outbound dialing performs DNS resolution and TCP connection synchronously on the
+emulation thread (with a five-second timeout once resolved), which causes a brief
+pause in emulation while the connection is established.
+
 ## Handling incoming calls
 
 To allow inbound connections, specify a listening address with `listen = "0.0.0.0:2323"`

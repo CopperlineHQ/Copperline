@@ -16,7 +16,7 @@ title = "Skyhawks"            # Application window title
 id = "skyhawks"              # Unique identifier for per-user settings/saves
 version = "1.2"              # Application version string
 
-[payload]
+[payload]                    # Exactly one payload kind
 cd = "skyhawks.iso"          # CD image (ISO, CUE/BIN, CHD)
 # adf = "skyhawks.adf"       # Floppy disk image for DF0
 # run = { files = "amiga", executable = "Skyhawks", args = "" }
@@ -41,12 +41,16 @@ icon = "icon.png"            # Custom window / application icon
 
 ### Supported payload types
 
+The `[payload]` section requires exactly one of the following:
+
 - **`cd`:** Mounts a CD image in the emulated CD drive at power-on. Persistent data
   is saved to the console's virtual NVRAM.
 - **`run`:** Amiga executable and supporting data directory. Boot assets are staged
   in the user data directory, and saves are persisted across runs.
 - **`adf`:** Standard floppy image mounted in `DF0:`.
-- **`sha256`:** Optional checksum to ensure payload files have not been modified.
+
+The optional `sha256` key verifies the checksum of file payloads (`cd` or `adf`)
+and refuses to start if the file has been modified.
 
 ## Building and packaging
 
@@ -86,8 +90,9 @@ button opens a simplified in-game menu:
 - Pause and reset controls
 - Save state slots (if enabled in manifest)
 
-User settings and save data persist in `~/.config/<id>/settings.toml` (or locally
-in portable mode).
+User configuration, game saves, NVRAM, and save states are stored in the
+per-game directory (`~/.config/<id>/` on Linux/macOS, `%APPDATA%\<id>` on Windows),
+or locally inside the application directory in portable mode.
 
 ## Automated bundle verification
 

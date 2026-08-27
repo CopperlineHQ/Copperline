@@ -2,7 +2,12 @@
 
 Copperline supports non-interactive, headless execution for continuous integration,
 automated regression testing, and scripted media capture. Headless runs execute
-without creating a window or connecting to a display server.
+unthrottled without creating a window or connecting to a display server.
+
+The exception to unthrottled, deterministic execution is when a physical floppy drive
+is attached via FluxBridge (see [Physical floppy drives](fluxbridge.md)): physical drives
+require real-time wall-clock pacing to match the mechanical drive spindle, and access
+external media that is not captured in emulator state.
 
 ## Capturing screenshots
 
@@ -121,8 +126,10 @@ Use `--rtc-frozen` to hold the RTC at the initial seed without advancing.
 - `--audio-stems DIR --audio-stems-mode LIST`: Export separate WAV stems into `DIR`.
   `LIST` is a comma-separated combination of:
   - `master`: Master mix (`DIR/master.wav`).
-  - `source`: Individual sound generators (`DIR/paula.wav`, `DIR/drivesounds.wav`,
-    `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav`, `DIR/mhi.wav`).
+  - `source`: Individual audio sources conditionally generated based on configured
+    hardware: `DIR/paula.wav` and `DIR/drivesounds.wav` are always created, while
+    `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav`, and
+    `DIR/mhi.wav` are exported only when those sound devices are fitted.
   - `channel`: Individual physical hardware channels (`DIR/paula-0.wav` through `DIR/paula-3.wav`).
 
 ## Benchmarking CPU performance

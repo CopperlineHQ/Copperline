@@ -43,8 +43,8 @@ Additional operational notes:
 - **Boot timeouts:** If the program fails to load within 60 emulated seconds (for example,
   due to a crash during OS initialization), warp mode disengages so the system state can
   be inspected.
-- **File naming:** Target filenames must use ASCII characters without spaces, quotes,
-  colons, or slashes.
+- **File naming:** Target filenames must use printable ASCII characters without quotes (`"`),
+  colons (`:`), or slashes (`/`). Spaces in executable names are supported and quoted automatically.
 - **Manual override:** Pressing the warp toggle shortcut (`Cmd+W` / `Alt+W`) cancels
   the automatic warp phase and returns to real-time execution.
 - **Physical floppy drives:** If a physical floppy drive (FluxBridge) is attached, warp
