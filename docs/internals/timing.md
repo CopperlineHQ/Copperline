@@ -90,6 +90,22 @@ unchanged line.
 Wide-FMODE lo-res slots are packed into the first eight CCKs of each
 16/32-CCK fetch unit; the rest of the unit remains available to later
 arbitration priorities.
+The value-window model still honours the DDF start comparator's single-cycle
+match. A DDFSTRT write that moves the match position to the current colour
+clock or behind the beam, before the position it replaces has fired, leaves
+that line with no start at all: the counter never returns to the new value
+before the horizontal wrap, so the line fetches nothing and no bitplane
+pointer advances. A write landing after the flop has set cannot un-start the
+run -- only DDFSTOP ends it. Restarting the fetch from the moved comparator
+instead truncates the first unit, so only the planes whose lo-res slot number
+survives it fetch, and those pointers stay one wide-fetch word ahead of the
+rest for the remainder of the display. Microcosm's CD32 status panel is the
+regression example: its Copper repoints seven bitplanes and drops DDFSTRT
+`$2C` to `$18` in one burst that overruns the line, committing the new value
+at hpos ~`$1E` on the panel's first line, which desynchronised BPL5 and BPL1
+(lo-res slots 6 and 7) from the other five planes and speckled the whole
+panel. Covered by the `ddfprobe-ddfmiss` golden probe, verified against
+vAmiga 5.0b1's `A1200_2MB` AGA setup.
 
 Slow RAM at `$C00000` is arbitrated through Agnus *like chip RAM*: a CPU
 access to slow RAM contends with DMA even though the RAM is outside the

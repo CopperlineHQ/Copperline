@@ -14,6 +14,12 @@ use crate::chipset::ddf_sequencer::{self as seq, DdfSignal, DdfState};
 
 /// Widest line the fetch table covers (PAL 227, NTSC long 228).
 pub(super) const DDF_SEQ_MAX_LINE_CCKS: usize = 232;
+
+/// Colour clocks between a DDFSTRT/DDFSTOP write slot and the clock where the
+/// new value reaches the comparators (vAmiga's `DMA_CYCLES(4)` poke delay).
+/// The wide-FMODE value-window path shares it so both fetch models classify a
+/// mid-line DDF rewrite against the same effect clock.
+pub(super) const DDF_WRITE_COMMIT_CCK: u16 = 4;
 const DDF_SEQ_SLOT_PLANE_MASK: u16 = 0x000F;
 const DDF_SEQ_SLOT_MODULO: u16 = 0x0010;
 const DDF_SEQ_SLOT_WORD_SHIFT: u32 = 5;

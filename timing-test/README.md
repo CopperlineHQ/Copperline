@@ -454,6 +454,14 @@ first 64-pixel gulp left of the standard DIW, leaving the other five gulps to
 fill its 320-pixel width exactly; its checkerboard seam and right-edge marker
 make either a hard-start clamp or the wrong six-gulp word count visible;
 FS-UAE-verified on the equivalent live display constellation),
+`ddfprobe-ddfmiss` (the DDF start comparator's single-cycle match: moving
+DDFSTRT behind the beam before the position it replaces has fired drops the
+whole line -- the blank middle band -- while rewriting it after the flop has
+set leaves the run alone; restarting from the moved comparator instead
+truncates the first fetch unit and desynchronises the planes whose lo-res
+slot survives it, the Microcosm CD32 status-panel regression class;
+vAmiga-verified on its 5.0b1 `A1200_2MB` AGA setup, which matches the
+render exactly),
 `dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible
