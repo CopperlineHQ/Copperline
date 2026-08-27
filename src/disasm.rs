@@ -28,6 +28,10 @@ struct Stream<'a> {
     base: u32,
     /// Number of words consumed so far (including the opcode word).
     words: u32,
+    /// 68020+ decode: indexed extension words with bit 8 set are the full
+    /// format (base/outer displacements, memory indirection). The 68000
+    /// and 68010 ignore that bit and always use the brief format.
+    full_ext: bool,
 }
 
 impl Stream<'_> {
@@ -107,6 +111,76 @@ fn brief_index(ext: u16) -> String {
     }
 }
 
+/// Render an indexed EA (`(d8,base,Xn)` brief format, or the 68020+ full
+/// format when bit 8 of the extension word is set and the CPU honours it),
+/// consuming any base/outer displacement words from `s`. `base` is "A0".."A7"
+/// or "PC".
+fn indexed_ea(base: &str, ext: u16, s: &mut Stream) -> String {
+    if ext & 0x0100 == 0 || !s.full_ext {
+        let d = ext as i8 as i32;
+        return format!("({},{},{})", signed_hex(d), base, brief_index(ext));
+    }
+    // Full extension word format. Word order after it: base displacement,
+    // then outer displacement (matching the execution model in the CPU
+    // core's EA calculation).
+    let base_suppress = ext & 0x0080 != 0;
+    let index_suppress = ext & 0x0040 != 0;
+    let bd = match (ext >> 4) & 3 {
+        2 => Some(s.next_word() as i16 as i32),
+        3 => Some(s.next_long() as i32),
+        _ => None, // 0 reserved, 1 null displacement
+    };
+    let i_is = ext & 7;
+    let od = if i_is != 0 {
+        match i_is & 3 {
+            2 => Some(s.next_word() as i16 as i32),
+            3 => Some(s.next_long() as i32),
+            _ => None, // null outer displacement
+        }
+    } else {
+        None
+    };
+    let index = (!index_suppress).then(|| brief_index(ext));
+    let mut inner: Vec<String> = Vec::new();
+    if let Some(bd) = bd {
+        inner.push(signed_hex(bd));
+    }
+    if !base_suppress {
+        inner.push(base.to_string());
+    }
+    if i_is == 0 {
+        // No memory indirection: (bd,base,Xn).
+        if let Some(x) = index {
+            inner.push(x);
+        }
+        if inner.is_empty() {
+            inner.push("0".to_string());
+        }
+        return format!("({})", inner.join(","));
+    }
+    // Memory indirect: pre-indexed puts the index inside the brackets,
+    // post-indexed applies it after the fetch.
+    let post_indexed = i_is & 4 != 0;
+    if !post_indexed {
+        if let Some(x) = index.clone() {
+            inner.push(x);
+        }
+    }
+    if inner.is_empty() {
+        inner.push("0".to_string());
+    }
+    let mut outer = format!("[{}]", inner.join(","));
+    if post_indexed {
+        if let Some(x) = index {
+            outer = format!("{outer},{x}");
+        }
+    }
+    if let Some(od) = od {
+        outer = format!("{outer},{}", signed_hex(od));
+    }
+    format!("({outer})")
+}
+
 /// Decode the effective address with mode/reg fields and an operand size
 /// (0=byte, 1=word, 2=long), consuming any extension words from `s`.
 fn effective_address(mode: u8, reg: u8, size: u8, s: &mut Stream) -> String {
@@ -122,13 +196,7 @@ fn effective_address(mode: u8, reg: u8, size: u8, s: &mut Stream) -> String {
         }
         6 => {
             let ext = s.next_word();
-            let d = ext as i8 as i32;
-            format!(
-                "({},{},{})",
-                signed_hex(d),
-                AN[reg as usize],
-                brief_index(ext)
-            )
+            indexed_ea(AN[reg as usize], ext, s)
         }
         7 => match reg {
             0 => {
@@ -146,8 +214,7 @@ fn effective_address(mode: u8, reg: u8, size: u8, s: &mut Stream) -> String {
             }
             3 => {
                 let ext = s.next_word();
-                let d = ext as i8 as i32;
-                format!("({},PC,{})", signed_hex(d), brief_index(ext))
+                indexed_ea("PC", ext, s)
             }
             4 => match size {
                 0 => format!("#${:X}", s.next_word() & 0xFF),
@@ -167,6 +234,7 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
         read: &read,
         base: pc,
         words: 0,
+        full_ext: !matches!(cpu_type, CpuType::M68000 | CpuType::M68010),
     };
     let op = s.next_word();
     let text = decode(op, &mut s, cpu_type);
@@ -750,6 +818,54 @@ mod tests {
     fn displacement_addressing() {
         // MOVE.W $4(A0),D0 -> 3028 0004
         assert_eq!(dis(&[0x3028, 0x0004], 0).0, "MOVE.W ($4,A0),D0");
+    }
+
+    /// Disassemble as a 68020, where indexed extension words with bit 8 set
+    /// use the full format (base/outer displacements, memory indirection).
+    fn dis020(words: &[u16], pc: u32) -> (String, u32) {
+        let mem = words.to_vec();
+        disassemble(
+            move |addr| {
+                let idx = (addr.wrapping_sub(pc) / 2) as usize;
+                mem.get(idx).copied().unwrap_or(0)
+            },
+            pc,
+            CpuType::M68EC020,
+        )
+    }
+
+    #[test]
+    fn full_extension_memory_indirect() {
+        // MOVE.W ([$25DE,A4],$C),D0: index suppressed, word base
+        // displacement, memory indirect with word outer displacement.
+        let (t, n) = dis020(&[0x3034, 0x0162, 0x25DE, 0x000C], 0);
+        assert_eq!(t, "MOVE.W ([$25DE,A4],$C),D0");
+        assert_eq!(n, 8);
+        // MOVEA.L ([$25DE,A4],$10),A0: the vectored-call form of the same EA.
+        let (t, n) = dis020(&[0x2074, 0x0162, 0x25DE, 0x0010], 0);
+        assert_eq!(t, "MOVEA.L ([$25DE,A4],$10),A0");
+        assert_eq!(n, 8);
+    }
+
+    #[test]
+    fn full_extension_pre_indexed_and_plain() {
+        // Pre-indexed with a live index register and null outer displacement.
+        let (t, n) = dis020(&[0x3034, 0x0121, 0x0040], 0);
+        assert_eq!(t, "MOVE.W ([$40,A4,D0.W]),D0");
+        assert_eq!(n, 6);
+        // No memory indirection, long base displacement: (bd32,An,Xn).
+        let (t, n) = dis020(&[0x3034, 0x0130, 0x0001, 0x2345], 0);
+        assert_eq!(t, "MOVE.W ($12345,A4,D0.W),D0");
+        assert_eq!(n, 8);
+    }
+
+    #[test]
+    fn full_extension_bit_ignored_on_68000() {
+        // The 68000 has no full-format extension words: bit 8 is ignored and
+        // the word decodes as the brief format (d8 = low byte).
+        let (t, n) = dis(&[0x3034, 0x0162, 0x25DE, 0x000C], 0);
+        assert_eq!(t, "MOVE.W ($62,A4,D0.W),D0");
+        assert_eq!(n, 4);
     }
 
     #[test]
