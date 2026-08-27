@@ -466,10 +466,11 @@ probe_tests! {
     golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
     // The vertical display window is a set/reset flop: DIWSTOP rewrites
     // behind a closed flop never re-open it, a set/reset tie resets, and
-    // an unreachable DIWSTOP holds the window open only to the frame's
-    // last raster line, which forces a reset (the Kang Fu CD32 screen-split
-    // regression class; the carried-across-vblank model this probe caught
-    // lit the whole top of the frame). vAmiga-verified byte-for-byte.
+    // an unreachable DIWSTOP holds the window open only to the video
+    // standard's fixed line 312 (PAL), which forces a reset (the Kang Fu
+    // CD32 screen-split regression class; the carried-across-vblank model
+    // this probe caught lit the whole top of the frame).
+    // vAmiga-verified byte-for-byte.
     golden_vdiwprobe_flop => probe("vdiwprobe-flop", "vdiwprobe-flop.bin", 16.0);
     // Dual-playfield sprite priority: a sprite pixel is tested against the
     // BPLCON2 code of the playfield that wins the PF1-vs-PF2 comparison
