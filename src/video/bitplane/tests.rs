@@ -6167,6 +6167,72 @@ fn bplcon2_priority_codes_place_sprite_groups_against_playfields() {
 }
 
 #[test]
+fn sprite_priority_tests_the_winning_playfield_where_both_are_opaque() {
+    // A dual-playfield pixel where both fields are opaque (mask 3) tests the
+    // sprite pair against the BPLCON2 code of the field that wins the
+    // PF1-vs-PF2 comparison (PF2PRI), matching vAmiga's one-zPF-per-pixel
+    // depth buffer (timing-test/sprprobe-dpfpri cross-checks every band,
+    // including the circular programmings below where PF2PRI and the sprite
+    // codes disagree about the field order). Regression example: Chuck
+    // Rock 2 walks the sprite-drawn player behind PF1 foreground bins over
+    // an opaque PF2 backdrop with BPLCON2=$0020 (PF1P=0, PF2P=4); resolving
+    // the combined mask against PF2P alone drew the player in front of the
+    // bins.
+    let pf1_front = ControlState {
+        bplcon2: 0x0020,
+        ..ControlState::default()
+    };
+    for sprite in 0..8 {
+        assert!(
+            !sprite_has_priority(sprite, 3, pf1_front),
+            "s{sprite} mask3"
+        );
+        assert!(
+            !sprite_has_priority(sprite, 1, pf1_front),
+            "s{sprite} mask1"
+        );
+        assert!(sprite_has_priority(sprite, 2, pf1_front), "s{sprite} mask2");
+        assert!(sprite_has_priority(sprite, 0, pf1_front), "s{sprite} mask0");
+    }
+    // The mirrored codes ($0004: sprites over PF1, PF2 over sprites) are
+    // circular at a both-opaque pixel with PF2PRI clear: PF1 beats PF2,
+    // PF2 beats the sprites, the sprites beat PF1. The winner is PF1 and
+    // its code 4 puts the sprite in front, even though PF2 alone would
+    // hide it (vAmiga-verified by the probe's $0004 band).
+    let pf2_front = ControlState {
+        bplcon2: 0x0004,
+        ..ControlState::default()
+    };
+    for sprite in 0..8 {
+        assert!(sprite_has_priority(sprite, 3, pf2_front));
+        assert!(sprite_has_priority(sprite, 1, pf2_front));
+        assert!(!sprite_has_priority(sprite, 2, pf2_front));
+    }
+    // PF2PRI flips the winning field without touching the sprite codes:
+    // the Chuck Rock 2 programming plus PF2PRI compares the sprite against
+    // PF2's code 4 at both-opaque pixels and shows it (the probe's $0060
+    // band), while PF1-only pixels still hide it.
+    let pf2pri = ControlState {
+        bplcon2: 0x0060,
+        ..ControlState::default()
+    };
+    for sprite in 0..8 {
+        assert!(sprite_has_priority(sprite, 3, pf2pri));
+        assert!(!sprite_has_priority(sprite, 1, pf2pri));
+        assert!(sprite_has_priority(sprite, 2, pf2pri));
+    }
+    // Both codes mid-chain and equal: the winner's code decides for every
+    // mask, so the leading pairs show and the trailing pairs hide.
+    let split = ControlState {
+        bplcon2: (2 << 3) | 2,
+        ..ControlState::default()
+    };
+    for sprite in 0..8 {
+        assert_eq!(sprite_has_priority(sprite, 3, split), sprite / 2 < 2);
+    }
+}
+
+#[test]
 fn attached_manual_sprites_use_four_bit_color_indexes() {
     let mut state = blank_state();
     let (pos, ctl) = sprite_control_words(

@@ -1660,12 +1660,22 @@ fn collect_sprite_lines_into(
 }
 
 pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: ControlState) -> bool {
-    if playfield == 0 {
-        return true;
-    }
+    // Denise resolves the two playfields against each other first (opacity,
+    // then PF2PRI where both are opaque) and holds only the winning field's
+    // BPLCON2 code in the depth comparison, so a sprite pixel is tested
+    // against that single code: e.g. PF1P=0 with PF2P=4 keeps an opaque PF1
+    // in front of a sprite that itself covers PF2 (vAmiga keeps one zPF value
+    // per pixel in its z-buffer; cross-checked band by band by
+    // timing-test/sprprobe-dpfpri, including the circular programmings where
+    // PF2PRI and the sprite codes disagree about the field order).
+    let winner = match playfield {
+        0 => return true,
+        3 if control.pf2_priority() => 2,
+        3 => 1,
+        pf => pf,
+    };
     let group = (sprite / 2) as u8;
-    let priority = control.playfield_priority_code(playfield);
-    group < priority.min(4)
+    group < control.playfield_priority_code(winner).min(4)
 }
 
 pub(super) fn sprite_base_framebuffer_x(
