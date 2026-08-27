@@ -879,6 +879,7 @@ session without touching the config file; the launcher's *A/V & Emu* tab
 (*Video* category) has a *Screen tint* row that does write it.
 `COPPERLINE_TINT=bw|green|...` overrides the config for a single run.
 
+(custom-wgsl-shaders)=
 ### Custom WGSL shaders
 
 Pointing `shader` at a `.wgsl` file loads a fragment shader of your own into
@@ -1475,7 +1476,7 @@ Copperline -- but a physical drive changes how the machine runs in several
 ways: writes need both the disk's tab and `write_protected = false`, the
 status bar's eject and swap do nothing for that bay, and a machine with a
 physical drive is paced to wall-clock time and is not reproducible.
-[](fluxbridge) covers the whole feature: what each option does, which mode
+[](fluxbridge.md) covers the whole feature: what each option does, which mode
 suits which disks, and what to expect of it.
 
 ## `[ide]` -- IDE hard disks
@@ -1763,7 +1764,7 @@ The disk this computer is running from is never offered and never opened,
 whatever is written here, and no RDB is synthesised over a disk that has
 none. Opening a real disk asks for permission the first time, and the host's
 volumes on it are unmounted while the machine has it. Attach read-only the
-first time: [](host-disks) covers the whole of it.
+first time: [](host-disks.md) covers the whole of it.
 
 (filesys-mounts)=
 
@@ -2006,7 +2007,7 @@ Copperline-specific setup. No other options exist yet. Omit the section
 capture and backend settings (`--audio-wav`, `--audio-stems`, device
 selection) stay command-line/config-file only and have no launcher row.
 The board's output joins the mixer as the `toccata` source for
-`--audio-stems` (see [](headless)); see [](../zorro) and
+`--audio-stems` (see [](headless.md)); see [](../zorro) and
 [](../internals/toccata) for the register model.
 
 ## `[mhi]` -- virtual MPEG audio decoder board
@@ -2033,7 +2034,7 @@ AmigaAMP (and other MHI clients) find MHI drivers by scanning `LIBS:mhi/`
 for `mhi#?.library`, so the file must sit in that drawer under a matching
 name; check the player's own `MHISupport`/`MHI-Driver` settings if it does
 not pick up the library automatically. The board's decoded output joins
-the mixer as the `mhi` source for `--audio-stems` (see [](headless)); since
+the mixer as the `mhi` source for `--audio-stems` (see [](headless.md)); since
 the board consumes each descriptor's bitstream at the decoded audio's own
 emulated-time rate, playback through it stays deterministic and
 reproducible byte-for-byte the same way `--audio-wav` captures of the rest
@@ -2217,7 +2218,7 @@ Install the Picasso96 `PicassoII.card` driver and its monitor file in the
 guest. The board starts on native Amiga pass-through and switches the
 Copperline display to RTG only while the guest enables a valid Picasso screen.
 
-`"graffityz2"` and `"graffityz3"` fit Atéo Concepts' Graffity, which reuses
+`"graffityz2"` and `"graffityz3"` fit Ateo Concepts' Graffity, which reuses
 the same CL-GD5428 core as Picasso II+ under its own autoconfig identity;
 `vram` selects `"1M"` or `"2M"` for either, same as the Picasso II family.
 `"graffityz2"` is a Zorro II board, so it works on any CPU. `"graffityz3"` is

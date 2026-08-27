@@ -6,7 +6,7 @@ implementations (`AudioSink`, `NullSink`, `CpalSink`, `WavSink`), and
 feeds. This page describes the mux/stem-capture layer; the underlying
 mixing arithmetic (channel routing, the LED filter, master volume, stereo
 width) is unchanged and still lives in `Paula::push_mixed_frame`
-(`src/chipset/paula.rs`; see [](chipset) for the Paula audio model).
+(`src/chipset/paula.rs`; see [](chipset.md) for the Paula audio model).
 
 ## Why a mux exists
 
@@ -22,9 +22,9 @@ is now an `AudioMux` instead of a bare `Box<dyn AudioSink>`, and
 what lets `--audio-stems` capture the same signal at finer granularity
 with no change to the mixing math, and is the seam boards register
 through as just another named source: the MacroSystem Toccata
-(`src/toccata.rs`, [](toccata)) was the first, feeding a `"toccata"` tap
+(`src/toccata.rs`, [](toccata.md)) was the first, feeding a `"toccata"` tap
 the same way CD-DA and MT-32 do; the MHI virtual MPEG decoder board
-(`src/mhi.rs`, [](mhi)) feeds a `"mhi"` tap the same way.
+(`src/mhi.rs`, [](mhi.md)) feeds a `"mhi"` tap the same way.
 
 ## The taps
 
@@ -40,8 +40,8 @@ the master mix -- see each entry):
 | `cdda` | Post `cd_muted` gate | Reflects audible content -- unlike the debugger's CD scope tap, which stays pre-mute for visibility |
 | `mt32` | The in-process MT-32 synth frame | Silence (`0.0, 0.0`) once the serial sink has latched `synth_silent` |
 | `coppersynth` | The in-process Coppersynth frame | Same tap and `synth_silent` latch as `mt32` -- the serial sink carries one synth at a time, and the stem is named for whichever it is |
-| `toccata` | One frame popped from `ToccataAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](toccata) |
-| `mhi` | One frame popped from `MhiAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](mhi) |
+| `toccata` | One frame popped from `ToccataAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](toccata.md) |
+| `mhi` | One frame popped from `MhiAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](mhi.md) |
 
 The **master** signal (`push_master`) is the final `out_left`/`out_right`
 after master volume and stereo width -- unchanged from what every sink has

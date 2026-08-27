@@ -1,33 +1,19 @@
-# Headless and scripted runs
+# Headless and scripted execution
 
-The emulated core is deterministic and independent of wall-clock pacing, so
-the preferred way to verify behaviour -- in CI, in regression tests, or
-while developing -- is a headless run: nothing is presented to the screen,
-the core runs unthrottled, and the result is reproducible.
+Copperline supports non-interactive, headless execution for continuous integration,
+automated regression testing, and scripted media capture. Headless runs execute
+without creating a window or connecting to a display server.
 
-Capture runs (`--screenshot-after`, `--dump-frames`) never open a window or
-connect to the host's display server at all, so they work in environments
-without one: SSH sessions, CI runners, and sandboxes that block
-window-server access.
+## Capturing screenshots
 
-The one exception to both is a machine with a physical floppy drive attached
-(see [](fluxbridge)): its platter turns in wall-clock time, so such a run
-is paced to real time rather than unthrottled, and it is not reproducible.
-
-## Screenshots
+To emulate for a specified number of emulated seconds, write a PNG screenshot, and exit:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --screenshot-after 30 /tmp/out-30s.png
 ```
 
-`--screenshot-after SECS PATH` emulates for SECS *emulated* seconds, saves
-the framebuffer as a PNG, and exits.
-
-The flag repeats, so one run can capture several moments; the run ends
-once the latest of them has been saved. Order on the command line does not
-matter, and a capture that comes due while an earlier one is still waiting
-for its frame is not lost:
+Multiple screenshots can be captured during a single execution by repeating the flag:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
@@ -36,304 +22,124 @@ for its frame is not lost:
   --screenshot-after 60 /tmp/boss.png
 ```
 
-Use `--dump-frames` instead when the moments are consecutive frames rather
-than points spread across a run.
+The process exits once the final requested screenshot has been saved.
 
-## Frame dumps
+## Dumping frame sequences
 
-For frame-to-frame rendering glitches, dump consecutive rendered frames:
+To capture consecutive frames (useful for debugging animation or beam synchronization):
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --dump-frames /tmp/frames --dump-start 24 --dump-count 120
 ```
 
-Files are written as zero-padded PNGs into the directory and the emulator
-exits after the requested count. `--dump-start` defaults to 0.
+Frames are saved as zero-padded PNG files (`000000.png`, `000001.png`, etc.) in the
+specified output directory.
 
 (save-states-headless)=
-## Save states
+## Save states in headless runs
 
-`--save-state-after SECS PATH` writes a [save state](ui.md#save-states) of
-the whole machine at SECS emulated seconds and keeps running;
-`--load-state PATH` restores one before the run starts, resuming from the
-state's emulated timeline. Together they collapse long debug loops: pay
-the boot/loading time once, then iterate from just before the scene under
-investigation.
+Save states allow fast iteration by skipping lengthy boot and loading sequences:
 
 ```sh
-# Once: snapshot 2 minutes in, just before the scene under investigation.
+# Create a snapshot at 120 emulated seconds:
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --save-state-after 120 /tmp/snapshot-120s.clstate \
-  --screenshot-after 121 /tmp/throwaway.png
+  --screenshot-after 121 /tmp/marker.png
 
-# Then iterate: each run resumes at 120s and reaches 125s in seconds.
+# Resume from snapshot to capture output at 125 seconds:
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --load-state /tmp/snapshot-120s.clstate \
   --screenshot-after 125 /tmp/scene.png
 ```
 
-`--save-state-after` repeats too, so one pass can leave snapshots at
-several points to iterate from later.
+When resuming with `--load-state`, all scheduled-input and screenshot timestamps
+remain referenced to the original emulated timeline.
 
-The core is deterministic, so a resumed run is byte-identical to an
-uninterrupted one -- screenshots from either path can be compared
-directly. Scripted-input timestamps (below) are absolute emulated time:
-after `--load-state` of a 120s state, a `--press-after 60 ...` has
-already passed and fires immediately, and a `--press-after 130 ...`
-fires 10 seconds in. Save states do not embed hard-drive or CD image
-file contents; they are reopened from their original paths.
+## Scripted input events
 
-## Scripted input
+You can schedule keyboard, mouse, and joystick inputs at specific emulated timestamps:
 
-Input can be scheduled at emulated timestamps, which composes with
-screenshots and frame dumps to drive menus, trainers, and loaders
-deterministically:
-
-| Flag | Effect |
+| Flag | Description |
 |---|---|
-| `--press-after SECS KEY` | Press and release an Amiga key (default ~100 ms hold) |
-| `--key-after SECS KEY MS` | Hold a key for exactly MS milliseconds (for modifier chords) |
-| `--click-after SECS BUTTON MS [PORT]` | Press a mouse button (`left`/`right`/`middle`) for MS milliseconds (default port 1) |
-| `--joy-after SECS BUTTON MS [PORT]` | Press a joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red` (alias `fire`)/`blue`/`green`/`yellow`/`play`/`rwd`/`ffw`) for MS milliseconds (default port 2) |
-| `--mouse-after SECS DX DY [PORT]` | Apply a relative mouse motion of (DX, DY) counter steps (default port 1) |
-| `--mouse-to-after SECS X Y [PORT]` | From SECS, steer the guest pointer to presented pixel (X, Y) by watching sprite 0 (default port 1) |
-| `--pot-after SECS X Y [PORT]` | Set an analogue controller's stick/paddle position, 0-255 per axis (default port 2) |
-| `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`0` to `4`), so scheduled inserts can target empty drives |
+| `--press-after SECS KEY` | Press and release a key (~100 ms hold) |
+| `--key-after SECS KEY MS` | Hold a key for specified duration in milliseconds |
+| `--click-after SECS BTN MS [PORT]` | Click mouse button (`left`, `right`, `middle`) for MS (default port 1) |
+| `--joy-after SECS BTN MS [PORT]` | Trigger joystick/CD32 button (`up`, `down`, `left`, `right`, `red`, `blue`, etc.) (default port 2) |
+| `--mouse-after SECS DX DY [PORT]` | Move mouse by relative delta (DX, DY) (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | Steer sprite 0 pointer to pixel coordinates (X, Y) (default port 1) |
+| `--pot-after SECS X Y [PORT]` | Set analogue paddle/pot position (0-255) (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
-| `--defer-disk-insert SECS DFN` | Start with the configured drive empty, then insert its configured image |
-| `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`/`.iso`/`.nrg`/`.chd`) in the machine's CD drive (CDTV, CD32, or a SCSI CD-ROM unit) |
-| `--script FILE` | Run scripted-input directives from a file (below) |
-| `--record-input PATH` | Record all machine-bound input for the whole run; the script is written to PATH on exit |
+| `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
+| `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.chd`) in CD drive |
+| `--script FILE` | Execute script file containing input directives |
+| `--record-input PATH` | Record all inputs to script file on exit |
 
-`KEY` is an Amiga raw key code (`0x45`, decimal also accepted) or a name:
-`ctrl`, `lalt`, `lami`, `f1`, `esc`, `left`, letter and digit keys, and so
-on. All the flags repeat, so several inputs can be queued:
+Key identifiers can be raw key codes (`0x45`) or standard names (`ctrl`, `lalt`,
+`lami`, `f1`, `esc`, alphanumeric characters).
 
-```sh
-./target/release/copperline --key-after 14.0 ctrl 500 --press-after 14.1 c
-```
+(input-recording-and-script-files)=
+### Input scripts and recording
 
-`--mouse-to-after` is the odd one out: it names a destination rather than
-a motion. The Amiga mouse port carries a quadrature encoder with no
-absolute position, and the guest turns counts into pointer pixels through
-its own acceleration curve, so a relative delta cannot be aimed at a
-button. Since the Amiga pointer is sprite 0, the flag instead watches
-where the hardware draws that sprite and corrects the motion once per
-frame until it lands, learning the pixels-per-count ratio as it goes.
-`X` and `Y` are presented pixels, the same coordinates a
-`--screenshot-after` PNG is measured in, so a target can be read straight
-off a capture. Targets run one at a time and in timestamp order, each
-holding the pointer until it arrives or gives up (about a second of
-emulated time); a guest that draws its pointer into a bitplane rather
-than a sprite logs a warning and is left alone. `input.mouse_to` in the
-[control protocol](../debugger/control.md) is the same mechanism with a
-reply.
+Input sequences can be stored in text files (one command per line without leading dashes):
 
-The controller-port flags take an optional trailing `PORT` token (`1` or
-`2`) naming the game port the event lands on, so any controller wiring set
-with `--port1`/`--port2` (see the configuration guide) can be driven:
-omitted, each flag keeps its traditional port (mouse events port 1,
-joystick/pot events port 2), so existing invocations are unchanged. The
-events drive the named port's electrical lines whatever device is
-configured there. (One consequence of the optional token: a positional
-ROM/disk path literally named `1` or `2` cannot directly follow one of
-these flags -- write it as `./1`.)
-
-```sh
-# Joystick in port 1, mouse in port 2, and inputs aimed at each.
-./target/release/copperline --port1 joystick --port2 mouse \
-  --joy-after 43 up 3000 1 --click-after 43 left 3000 2 \
-  --mouse-after 43.5 20 10 2
-```
-
-## Input recording and script files
-
-Long input sequences live in a script file instead of the command line:
-one directive per line in the flag syntax without the leading dashes,
-with `#` comments, blank lines, and double-quoted paths allowed. Only the
-scripted-input directives are accepted -- a typo cannot silently change
-emulator configuration.
-
-```
-# drive a loader prompt, then start
+```text
+# Automated test script
 joy-after 60.0 red 300
 key-after 75.0 f1 200
-insert-disk-after 90.0 df1 "disk 2.adf"
-# port-tagged forms work here too: fire on port 1, paddles on port 2
+insert-disk-after 90.0 df1 "disk2.adf"
 joy-after 95.0 red 300 1
-pot-after 96.0 50 200
 ```
 
-Run it with `--script FILE` (combines freely with the other flags).
-
-Rather than writing scripts by hand, record one: in the window,
-`Cmd+Shift+R` on macOS or `Alt+Shift+R` on Linux/Windows starts and stops a
-live-input recording, written to
-`copperline-input-<YYYYMMDDHHmmSS>.clscript` in the recordings folder (see
-[](ui.md#where-files-go)); the
-headless equivalent `--record-input PATH` records the whole run and
-writes the file on exit. Every input event that reaches the emulated
-machine is captured with its emulated timestamp -- key holds, mouse
-buttons and motion, joystick / CD32-pad controls, analogue pot positions,
-and floppy inserts -- so a manually driven session replays
-deterministically:
+Run with `--script`:
 
 ```sh
-# Play through the section by hand once...
-./target/release/copperline --config copperline.example.toml \
-  --record-input /tmp/session.clscript
-
-# ...then replay it headlessly with the same emulated inputs.
-./target/release/copperline --config copperline.example.toml --noaudio \
-  --script /tmp/session.clscript --screenshot-after 60 /tmp/check.png
+./target/release/copperline --config myconfig.toml --script test.clscript --screenshot-after 100 /tmp/out.png
 ```
 
-Recorded times are absolute emulated seconds, which makes recordings
-compose with save states: `--load-state` of a snapshot plus the script
-recorded from that point is a complete, shareable reproduction. Mouse
-motion is captured at frame granularity (one `mouse-after` per frame of
-movement); CD inserts are not recorded -- use the `[cd]` config section
-for those.
+To record an interactive session to a script file:
+- Press `Cmd+Shift+R` (macOS) or `Alt+Shift+R` (Linux/Windows) in the emulator window.
+- Or launch with `--record-input /tmp/session.clscript`.
 
-The recorder is port-aware: each port is diffed according to the device
-plugged into it (mouse buttons/motion, joystick/pad controls, or analogue
-`pot-after` positions), and a port token is emitted only when it differs
-from the directive's default -- a session on the stock mouse+joystick
-wiring records byte-identically to the pre-port-aware format. Sessions on
-other wirings note it in a `# ports: port1=... port2=...` header comment;
-replay the script together with the matching `--port1`/`--port2` flags.
-Hot-plugging a device mid-recording closes that port's open holds; the
-device change itself has no directive and is not replayed.
+## Setting a deterministic real-time clock (RTC)
 
-## A deterministic guest clock
-
-The emulated core never depends on the host clock -- with one deliberate
-exception: the battery-backed RTC mirrors host time on machines that have
-one, and an RTC-less machine boots to whatever date the guest OS invents.
-Both are wrong for testing time-dependent guest software. `--rtc-time`
-(or `[machine] rtc_time`) fits a battery clock seeded to a fixed instant --
-Unix seconds or `"YYYY-MM-DD HH:MM:SS"` -- that then ticks in *emulated*
-time, so every run boots to the same time and reads the same clock at the
-same emulated instant, on any host. `--rtc-frozen` stops it entirely.
+To test date- and time-dependent guest software, seed the RTC with a fixed timestamp:
 
 ```sh
-# Validate a TOTP generator against an RFC 6238 vector time: the guest
-# boots with the clock at 2005-03-18 01:58:29 UTC (unix 1111111109),
-# deterministically, on every run.
-./target/release/copperline --config auth.toml --noaudio \
+# Set RTC to 2005-03-18 01:58:29 UTC (Unix timestamp 1111111109):
+./target/release/copperline --config test.toml --noaudio \
   --rtc-time 1111111109 \
-  --screenshot-after 45 /tmp/code.png
+  --screenshot-after 45 /tmp/clock.png
 ```
 
-Kickstart 2.0+ loads system time from the battery clock at boot on its
-own; Kickstart 1.3 needs `SetClock LOAD` in the startup-sequence. A
-[control-protocol](../debugger/control) session can also inspect, move,
-freeze, and resume the clock mid-run with `rtc.get` / `rtc.set`.
+Use `--rtc-frozen` to hold the RTC at the initial seed without advancing.
 
-## Audio capture
+## Audio capture and stem separation
 
-- `--noaudio` runs silent (live audio is otherwise on by default).
-- `--audio-wav PATH` writes the mixed stereo output as a 32-bit float
-  44.1 kHz WAV in emulated time instead of playing it -- useful for
-  comparing audio behaviour across runs.
-- `--audio-stems DIR --audio-stems-mode LIST` writes one or more
-  granularities of stem WAV into `DIR` instead of a single mixed file
-  (still 32-bit float, 44.1 kHz). `LIST` is a comma-separated subset of:
-  - `master` -- `DIR/master.wav`, the same mixed-master signal
-    `--audio-wav` writes, just under a different name.
-  - `source` -- one file per audio source: `DIR/paula.wav`,
-    `DIR/drivesounds.wav`, and (only when this run's config plausibly
-    produces them) `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav` and `DIR/mhi.wav`.
-  - `channel` -- one file per named sub-channel of a source. In this
-    milestone only Paula exposes sub-channels: `DIR/paula-0.wav` ..
-    `DIR/paula-3.wav`, its four physical channels. `channel` is a
-    deliberate opt-in -- `source` alone never writes these.
+- `--noaudio`: Run silently.
+- `--audio-wav PATH`: Write mixed stereo output to a 32-bit float 44.1 kHz WAV file.
+- `--audio-stems DIR --audio-stems-mode LIST`: Export separate WAV stems into `DIR`.
+  `LIST` is a comma-separated combination of:
+  - `master`: Master mix (`DIR/master.wav`).
+  - `source`: Individual sound generators (`DIR/paula.wav`, `DIR/drivesounds.wav`,
+    `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav`, `DIR/mhi.wav`).
+  - `channel`: Individual physical hardware channels (`DIR/paula-0.wav` through `DIR/paula-3.wav`).
 
-  All three are independently selectable and combinable, e.g.
-  `--audio-stems-mode master,source,channel` writes every file at once.
-  A `[audio] stem_granularity` config key sets the default `LIST` so it
-  doesn't need repeating on every invocation; the CLI flag wins when
-  both are given. `--audio-stems` is mutually exclusive with
-  `--audio-wav` and with live audio, matching `--audio-wav` itself.
+## Benchmarking CPU performance
 
-  A source that this run's config says it doesn't have never gets a
-  stem file at all (not even a silent one) -- e.g. `cdda.wav` is only
-  written when a CD32/CDTV profile or a configured CD image is present.
-  This is decided once from config at startup, not from whether the
-  source stays silent during the run.
-
-  Capture is driven purely by emulated time, so it is warp-safe and
-  deterministic: two runs of the same scenario produce byte-identical
-  stem files, which makes them usable as golden files for regression
-  tests. See [](../internals/audio) for the mixer/stem architecture.
-- `--profile-live-audio SECS` runs a windowless Paula-to-cpal profiling
-  workload; combine with `COPPERLINE_AUDIO_PROFILE=1` for live-audio
-  counters (see [](../internals/peripherals)).
-
-## Benchmarking
-
-`--benchmark-until SECS` runs the deterministic core frame by frame with no
-window until the absolute emulated-time target SECS is reached, then reports
-host-CPU counters (emulated seconds advanced, wall-clock elapsed, frame
-count, frames per second) and exits:
+Measure host emulation throughput without rendering to a window:
 
 ```sh
-./target/release/copperline --config sota.example.toml --benchmark-until 30
+./target/release/copperline --config demo.toml --benchmark-until 30
 ```
 
-It is the canonical way to measure host-CPU cost while optimising the
-emulator: the core is deterministic, so the emulated workload is identical
-run to run and only the wall-clock time moves. Audio defaults to the null
-backend (pass `--audio` to keep live audio), and the mode is mutually
-exclusive with anything that needs a window or scheduled work --
-`--screenshot-after`, `--dump-frames`, `--save-state-after`,
-`--profile-live-audio`, `--record-input`, scripted input, and scheduled
-disk inserts are all rejected. `--bench-until` is an accepted alias.
+The emulator runs unthrottled for 30 emulated seconds, prints execution metrics
+(elapsed host time, emulated time, average FPS), and exits.
 
-## Live control
+## Automated compatibility testing (vAmigaTS)
 
-Scripted flags fix the whole run in advance. For a tool that needs to
-inspect, decide, and steer mid-session -- set a breakpoint, resume,
-rewind, inject input, capture the screen -- run the
-[control protocol](../debugger/control) instead: `--control ADDR` serves
-a headless machine over JSON-RPC (with `--control-token` /
-`--control-info` for the auth handoff), `--control-gui ADDR` attaches
-the same server to a normal windowed session, and the bundled
-`copperline-ctl` drives either from the shell. `--record-input` works
-with `--control` too: injected input is journaled into the same
-`.clscript` format, so an interactive control session replays
-deterministically.
-
-## Investigating a run
-
-The [headless debugger](../debugger/headless) layers on top of any of
-these runs through `COPPERLINE_DBG_*` environment variables: breakpoints,
-watchpoints, instruction traces, Copper-list dumps, and per-hit screenshots,
-all without a window.
-
-```sh
-RUST_LOG=info \
-COPPERLINE_DBG_BREAK=C033C2 COPPERLINE_DBG_DUMP=C09580:4 \
-./target/release/copperline --config copperline.example.toml --noaudio \
-  --screenshot-after 30 /tmp/out.png
-```
-
-For chip-bus timing questions, the [waveform export](../debugger/waveform)
-records a trigger-based VCD trace of the internal chipset signals during
-the same kind of run (`--waveform out.vcd --wave-trigger pc=0xC033C2
---wave-duration 20000cck`, with `--wave-signals` selecting the signal
-groups) for viewing in GTKWave.
-
-## The vAmigaTS compatibility suite
-
-An ignored integration test runs ADFs from a local
-[vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS) checkout through
-Copperline with Kickstart 1.3 in DF0:, captures screenshots after the
-suite's default 9-second wait, and can compare them against a baseline
-directory or a vAmiga reference render. Each shipped RetroShell setup is
-mirrored, including `A1200_2MB` as 68EC020/AGA/2M chip RAM and the mixed
-8372A/OCS-Denise A500 ECS scheme:
+Copperline includes a test runner for the [vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS)
+test suite:
 
 ```sh
 COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS \
@@ -342,35 +148,9 @@ COPPERLINE_VAMIGATS_FILTER=bbusy0 \
 cargo test --release --test vamiga_ts -- --ignored --nocapture
 ```
 
-Optional variables: `COPPERLINE_VAMIGATS_LIMIT=N` (cap test count),
-`COPPERLINE_VAMIGATS_SECONDS=SECS` (screenshot delay),
-`COPPERLINE_VAMIGATS_OUT=DIR` (keep generated configs and screenshots),
-`COPPERLINE_VAMIGATS_BASELINE=DIR` (require PNGs to match a baseline), and
-`COPPERLINE_VAMIGATS_VAMIGA=/path/to/vAmiga` plus
-`COPPERLINE_VAMIGATS_VAMIGA_SETUP=NAME` (render vAmiga references via its
-RetroShell regression path).
-
-The reference renderer is vAmiga's headless build (tested against v4.4 and
-the v5.0 AGA beta):
-
-```sh
-git clone https://github.com/dirkwhoffmann/vAmiga
-cmake -S vAmiga/Core -B vAmiga/Core/build -DCMAKE_BUILD_TYPE=Release
-cmake --build vAmiga/Core/build -j8   # produces VAHeadless
-```
-
-For pixel comparison run Copperline with `COPPERLINE_SHOT_RAW=1` so the
-screenshot is the native 716-wide framebuffer (the same cutout vAmiga's
-regression dump uses), then rank the divergences with the offline
-comparator, which normalises the two emulators' palette expansions and
-capture offsets:
-
-```sh
-COPPERLINE_SHOT_RAW=1 COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS COPPERLINE_VAMIGATS_OUT=/path/to/out COPPERLINE_VAMIGATS_VAMIGA=/path/to/VAHeadless cargo test --release --test vamiga_ts -- --ignored --nocapture
-
-tools/vamigats-compare.py /path/to/out | less   # worst cases first
-```
-
-A full-suite sweep with references takes about an hour; screenshot
-timing is frame-aligned in neither emulator, so tests with animating
-output show phase noise - rank first, then eyeball pairs.
+Test options:
+- `COPPERLINE_VAMIGATS_LIMIT=N`: Maximum tests to run.
+- `COPPERLINE_VAMIGATS_SECONDS=SECS`: Delay before screenshot (default: 9s).
+- `COPPERLINE_VAMIGATS_OUT=DIR`: Directory to save test screenshots.
+- `COPPERLINE_VAMIGATS_BASELINE=DIR`: Baseline directory for automated PNG comparison.
+- `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Path to reference `VAHeadless` binary.

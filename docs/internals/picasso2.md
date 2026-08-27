@@ -5,7 +5,7 @@ II boards, not a Picasso96-aware display API. The guest enumerates the real
 manufacturer/product/serial identities, programs VGA and Cirrus registers,
 writes the linear VRAM aperture, starts BitBLT operations, and controls the
 physical monitor pass-through switch. See [](../zorro) for the two-window
-autoconfig layout and [](video) for presentation.
+autoconfig layout and [](video.md) for presentation.
 
 ## Implemented controller surface
 

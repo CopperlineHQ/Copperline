@@ -1,85 +1,56 @@
 ---
 abstract: |
-  Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and
-  AGA) written in Rust. This document covers using the emulator,
-  configuring machines from the A500 to the A4000 and CD32, describing
-  Zorro expansion boards including RTG graphics and Ethernet, the
-  browser (WebAssembly) build, the interactive and headless debuggers,
-  and the internal architecture: the per-colour-clock chip-bus timing
-  model, the chipset modules, and the beam-event-replay video pipeline.
+  Copperline is an Amiga emulator (OCS, ECS, and AGA) written in Rust.
+  This documentation covers running and configuring the emulator, setting up
+  machines from the A500 to the A4000 and CD32, using expansion boards,
+  running headless test sessions, and exploring internal architecture.
 ---
 
 # Copperline
 
 Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA)
-written in Rust. Cycle-driven means the whole machine -- the 68000-family
-CPU, Agnus, Denise, Paula, the CIAs, the floppy subsystem, and the chip bus
-that ties them together -- advances on one colour-clock timeline: the chip
-bus is arbitrated per colour clock, the Copper and blitter are scheduled
-per DMA slot with the hardware bus sequences, and the Paula IPL pipe plus
-68000 interrupt sampling are modelled. That timing model is what lets
-it run the current cycle-sensitive OCS and AGA regression set, as well as
-Kickstart, Workbench, games, and CDTV/CD32 titles.
+written in Rust. The emulator advances the CPU (68000 through 68060), Agnus,
+Denise, Paula, CIAs, floppy subsystem, and chip bus on a unified colour-clock
+timeline. Bus arbitration occurs per colour clock, with Copper and blitter DMA
+scheduled according to hardware slot sequences.
 
-The project home is [copperline.dev](https://copperline.dev/); the source
-lives on [GitHub](https://github.com/CopperlineHQ/Copperline).
+The project home is [copperline.dev](https://copperline.dev/); the source code
+is hosted on [GitHub](https://github.com/CopperlineHQ/Copperline).
 
 ```{figure} images/state-of-the-art.png
 :alt: Spaceballs' State of the Art running in Copperline
 :width: 85%
 
-Spaceballs' *State of the Art* (1992), a cycle-exact OCS stress test,
-running in Copperline.
+Spaceballs' *State of the Art* (1992) running in Copperline.
 ```
 
-## Where to start
+## Documentation overview
 
-- [](guide/getting-started) -- build the emulator and boot your first
-  machine.
-- [](guide/configuration) -- the `copperline.toml` reference: machine
-  profiles (A500 through the A4000 and CD32), CPU, memory, chipset,
-  floppy, IDE/SCSI, host-directory mounts, RTG graphics, Ethernet,
-  serial/MIDI, and CD options.
-- [](guide/ui) -- the window, status bar, keyboard shortcuts, menus, and
-  gamepad calibration.
-- [](guide/fluxbridge) -- reading and writing real Amiga floppies in a
-  physical drive over the Greaseweazle driver Copperline currently includes.
-- [](guide/host-disks) -- giving the machine a real disk of this computer's
-  in place of an image, with its own RDB and partitions intact.
-- [](guide/mt32) -- configuring the built-in MT-32 synthesiser and its front
-  panel.
-- [](guide/coppersynth) -- Coppersynth, the built-in General MIDI
-  synthesiser: soundfonts, MT-32 translation, and its front panel.
-- [](guide/headless) -- scripted, deterministic runs: screenshots, frame
-  dumps, scripted input, and WAV capture.
-- [](guide/browser) -- the same core compiled to WebAssembly, hosted at
-  [copperline.dev/try](https://copperline.dev/try/): how it works and how
-  to embed it.
-- [](zorro) -- describing additional Zorro II/III expansion boards in
-  TOML metadata files.
-- [](debugger/window), [](debugger/headless), and [](debugger/gdb) -- the
-  interactive debugger window, chip-bus frame analyzer, environment-driven
-  headless debugger, and remote GDB frontend.
-- [](debugger/control) -- the JSON-RPC control protocol for driving the
-  emulator from scripts, CI, and AI agents (`--control`, `copperline-ctl`).
-- [](internals/architecture) -- how the emulator works inside, for
-  contributors.
-- [](internals/picasso2) -- the Picasso II/II+ and CL-GD5426/5428 RTG model.
-- [](internals/audio) -- the audio mixer/sink service and stem capture.
-- [](internals/toccata) -- the MacroSystem Toccata AD1848 sound board model.
-- [](internals/graffity) -- the Graffity [Zorro II]/[Zorro III] RTG model.
-- [](internals/mhi) -- the virtual MHI MPEG audio decoder board's
-  bus-agnostic mailbox register protocol.
+- [](guide/getting-started) -- Installation, build instructions, and initial setup.
+- [](guide/configuration) -- Complete `copperline.toml` reference for machine
+  profiles, memory, storage, expansion boards, and input.
+- [](guide/ui) -- Window controls, status bar, keyboard shortcuts, and gamepad mapping.
+- [](guide/whdload) -- Direct launching and library management for WHDLoad packages.
+- [](guide/run) -- Rapid testing of cross-compiled Amiga executables.
+- [](guide/fluxbridge) -- Connecting physical floppy drives via Greaseweazle hardware.
+- [](guide/host-disks) -- Attaching physical host drives and storage cards directly.
+- [](guide/mt32) -- Built-in Roland MT-32 emulation and front-panel display.
+- [](guide/coppersynth) -- Built-in General MIDI SoundFont synthesizer.
+- [](guide/modem) -- Hayes-compatible AT modem emulation over TCP.
+- [](guide/import-uae) -- Converting WinUAE, Amiberry, and FS-UAE configurations.
+- [](guide/headless) -- Scripted, non-interactive execution for automated testing and CI.
+- [](guide/browser) -- WebAssembly build and web integration details.
+- [](guide/publishing) -- Bundling standalone player packages for specific games.
+- [](zorro.md) -- Expansion bus specification and custom Zorro II/III plugin definitions.
+- [](debugger/window), [](debugger/headless), and [](debugger/gdb) -- Interactive,
+  command-line, headless, and GDB debugging tools.
+- [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation.
+- [](internals/architecture) -- Emulator internals and subsystem architecture.
 
-## Design principles
+## Core design principles
 
-Two rules shape every change in Copperline:
-
-1. **Hardware first.** There are no branches keyed to game, demo, ROM, or
-   file names. Compatibility problems are fixed by modelling the underlying
-   chip behaviour; software titles appear only as regression examples.
-2. **Determinism.** The emulated core is deterministic and independent of
-   the host: a headless unthrottled run and a real-time windowed run produce
-   the same emulated result when given the same inputs and media. That is
-   what makes headless captures reproducible, and it is also what lets the
-   debugger step backwards.
+1. **Hardware-accurate modeling.** Behavior is implemented according to chip
+   specifications rather than application-specific hacks or game title detection.
+2. **Determinism.** The emulation core executes deterministically with respect to
+   emulated clock cycles and input events. Given identical media and inputs,
+   headless runs and interactive sessions produce identical results.

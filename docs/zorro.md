@@ -74,6 +74,7 @@ The spec is validated on load (`BoardSpec::validate`,
 `src/zorro.rs`): bad sizes, unknown `zorro` versions, and unknown backing
 types are reported with the metadata file's path.
 
+(wasm-plugin-boards)=
 ## WASM plugin boards
 
 A `type = "wasm"` board is a *functional* board whose behaviour comes from an
@@ -392,6 +393,7 @@ The board autoconfigs under the Copperline manufacturer ID with product 6
 (see below). Its conformance record against the external bsdsocktest suite
 is `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
+(crypto-the-bundled-zz9k-board)=
 ## Crypto: the bundled zz9k board
 
 `[zz9k]` fits the bundled ZZ9000 SDK crypto board: a register-compatible
@@ -493,10 +495,10 @@ vertical interrupt latches at the CRTC-programmed retrace edge in emulated
 time; writing CRTC `$11` with bit 4 clear acknowledges it. The original card
 stores the board-enable bit for register compatibility but never asserts INT2.
 
-### Atéo Concepts Graffity [Zorro II] and [Zorro III]
+### Ateo Concepts Graffity [Zorro II] and [Zorro III]
 
 `[rtg] card = "graffityz2"`/`"graffityz3"` fit Graffity, a lesser-known board
-that reuses Picasso II+'s CL-GD5428 core under Atéo Concepts' own registered
+that reuses Picasso II+'s CL-GD5428 core under Ateo Concepts' own registered
 manufacturer ID 2092 (`$082C`). Both take 1 or 2 MB of VRAM (`[rtg] vram`);
 see [](internals/graffity) for the chip-level detail. Graffity ships a
 first-class Picasso96 board driver (`Graffity.card` in the classic Aminet
@@ -593,6 +595,7 @@ product `$6A`, serial `$0028001E`, 1 MiB memory-space board with DiagArea vector
 `$80` and the no-shut-up flag. Its hardware model and address map are documented in
 [](internals/peripherals).
 
+(the-copperline-manufacturer-id)=
 ## The Copperline manufacturer ID
 
 Copperline's built-in virtual boards autoconfig under manufacturer ID

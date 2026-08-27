@@ -6,7 +6,7 @@ manufacturer/product identity, programs the AD1848 codec's indexed
 registers, pushes/pulls bytes through the board's own 1024-byte FIFO, and
 polls the board's status/control register exactly as the stock
 `toccata.audio` AHI driver does. See [](../zorro) for the autoconfig window
-and [](audio) for how the board's output joins the mixer and stem capture.
+and [](audio.md) for how the board's output joins the mixer and stem capture.
 
 Modelled against WinUAE/amiberry's `sndboard.cpp` (byte-identical in both
 trees) as a **behavioural oracle**: register offsets, bit semantics, the
@@ -39,7 +39,7 @@ address decode, and the mixer-rate cadence.
   configured board.
 - **AD1848**: reg 12 is pinned to `0x0A` regardless of what's written,
   which locks the codec to plain-AD1848 mode -- no CS4231 extensions, and
-  since format bits 5/7 of reg 8 are never decoded, no µ-law/A-law, only
+  since format bits 5/7 of reg 8 are never decoded, no u-law/A-law, only
   8-bit unsigned linear and 16-bit signed linear PCM. Reg 8's crystal-select
   and divider bits produce the codec's 14 legal rates (5512-48000 Hz,
   rounded to the nearest 100 Hz the way the reference rounds); reg 6/7 are
@@ -60,7 +60,7 @@ address decode, and the mixer-rate cadence.
 ## Mixer cadence and resampling
 
 The codec's own programmed rate is independent of Copperline's fixed
-44.1 kHz mixer rate (established by the audio sink service, [](audio)).
+44.1 kHz mixer rate (established by the audio sink service, [](audio.md)).
 `Toccata::tick` runs **two** independent exact-ratio accumulators --
 each the same shape as `Paula::advance_audio`'s own -- rather than one:
 `advance_codec` at the AD1848's own active rate, and `advance_mixer` at
@@ -129,7 +129,7 @@ evaluation, the resampler's phase -- is driven purely by `tick`'s `cck`
 argument or by CPU register accesses, both already deterministic inputs.
 Nothing reads wall-clock time, so a Toccata-fitted machine is warp-safe
 and reproducible exactly like the rest of the emulated audio path (see
-[](audio)'s determinism section) -- two runs of the same scripted
+[](audio.md)'s determinism section) -- two runs of the same scripted
 scenario produce byte-identical `toccata.wav` stem captures.
 
 ## Savestates
