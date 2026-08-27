@@ -130,14 +130,14 @@ last latched -- this is hardware behaviour, not a bug.
 ## Copper (`copper.rs`)
 
 The Copper decodes MOVE/WAIT/SKIP and executes on its beam-locked fetch
-cadence (see [](timing)). It runs from Agnus beam
+cadence (see [](timing.md)). It runs from Agnus beam
 time, is gated by DMACON's COPEN, restarts from COP1LC each frame, and its
 register writes are recorded as beam events for the renderer.
 
 ## Blitter (`blitter.rs`)
 
 A scheduled per-DMA-slot engine with the hardware per-word channel
-sequences for normal, line, and fill modes; see [](timing). Normal-mode
+sequences for normal, line, and fill modes; see [](timing.md). Normal-mode
 A/B barrel-shifter carry is a datapath latch and survives BLTSIZE row
 boundaries; first/last masks, area-fill state, and modulos remain row
 scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
@@ -216,7 +216,7 @@ bits by feeding bitplane 7 into PF1 and bitplane 8 into PF2, so a 7-8
 plane dual playfield addresses palette entries 8..15 per field. The extra
 bits are gated on the AGA revision; pre-AGA chips never carry bitplanes
 7/8 and keep the exact three-bit decode. Denise state is not rendered live
--- writes become beam events that the [video pipeline](video) replays.
+-- writes become beam events that the [video pipeline](video.md) replays.
 
 BPLCON2's PF1P/PF2P priority codes behave differently on the two chip
 generations, and the split is where the evidence is. Denise draws a dual
@@ -388,7 +388,7 @@ turbo burst also refuses drives that are not ready).
 ## Known AGA/ECS gaps and non-goals
 
 Most ECS and AGA behaviour is implemented (the register notes above and
-[](video)); the chipset gaps that remain are:
+[](video.md)); the chipset gaps that remain are:
 
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP

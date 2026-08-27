@@ -1,9 +1,9 @@
 # Architecture overview
 
 This chapter is the map; the following chapters zoom into the
-[timing model](timing), the [chipset modules](chipset), the
-[video pipeline](video), the [CPU integration](cpu), the
-[peripherals](peripherals), and the [save-state format](savestate).
+[timing model](timing.md), the [chipset modules](chipset.md), the
+[video pipeline](video.md), the [CPU integration](cpu.md), the
+[peripherals](peripherals.md), and the [save-state format](savestate.md).
 
 ## Source layout
 
@@ -156,7 +156,7 @@ The flow of a frame:
    latches into an owned `RenderInput` envelope. Large immutable RAM and
    bitplane-row snapshots are reference-counted across the handoff; the
    renderer replays that frozen data, never the live chipset state
-   ([](video)).
+   ([](video.md)).
 5. In the default path `window.rs` sends `RenderInput` to the
    `copperline-render` worker while the main thread advances the next frame.
    The worker paints into a CPU framebuffer, owns the deinterlacer history,
@@ -280,7 +280,7 @@ milliseconds, because rounding a boundary time up would push the
 replayed event one frame late. The end-to-end gate is the same as for
 save states: record a scripted run, replay the recording, `cmp` the
 screenshots. User-facing usage is in
-[](../guide/headless.md#input-recording-and-script-files).
+[Input recording and scripts](../guide/headless.md#input-recording-and-script-files).
 
 ## envcfg: environment variables are start-up settings
 

@@ -5,7 +5,7 @@ idea applied consistently: **the chip bus is a single resource arbitrated
 per colour clock (CCK), and everyone pays for their slots.** Reference
 numbers come from real hardware via the `timing-test/` disk. The Copper
 and blitter timing models are documented in full below; the 68000 prefetch
-model is in [](cpu). Every rule here is backed by named regression tests in
+model is in [](cpu.md). Every rule here is backed by named regression tests in
 the inline suites (`src/chipset/copper.rs`, `blitter.rs`, `src/bus.rs`).
 
 ## Chip-bus arbitration
@@ -667,7 +667,7 @@ debits a per-frame instruction budget one of two ways, selected by
 `COPPERLINE_REAL_PACING_BUDGET=cycles|instructions` overrides the config
 for one run; the config overrides the built-in `cycles` default.
 `COPPERLINE_REAL_PACING_PROFILE=1` emits a one-second pacing log (see
-[](peripherals)). Accelerated CPUs scale the budget by
+[](peripherals.md)). Accelerated CPUs scale the budget by
 `cpu_clocks_per_cck`; fast RAM/ROM access costs are scaled with sub-CCK
 carry accumulation so fractional costs are not lost.
 
@@ -689,7 +689,7 @@ which advances the core and calls `thread::sleep` in
 device clock). During live-audio startup and rebuffering, the pacer treats the
 unfilled prebuffer as additional required lead; the large-stall self-heal
 allows for that lead so it does not cancel the refill as if it were a host
-pause. The `copperline-render` worker ([](architecture)) is a
+pause. The `copperline-render` worker ([](architecture.md)) is a
 throughput thread, not a latency one, and is left at normal priority. When the
 host is busy, a scheduler that preempts the pacer shows up as frame stutter,
 and one that preempts the audio callback shows up as an audible underrun.

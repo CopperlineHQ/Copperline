@@ -1,169 +1,79 @@
 # Debugging workflows
 
-The other chapters document each tool on its own; this one shows how
-they combine. Every walkthrough below is a real investigation shape --
-the same ones Copperline's own regressions were hunted with -- written
-against the standard tool set: the [debugger window](window), the
-[console](console), the frame analyzer, [reverse execution](reverse),
-[headless knobs](headless), and the [GDB stub](gdb).
+This chapter illustrates common debugging workflows combining the [debugger window](window),
+[console](console), Frame Analyzer, [reverse execution](reverse), [headless options](headless),
+and [GDB remote stub](gdb).
 
-All of these start the same way: get the machine *near* the problem
-cheaply, then investigate precisely. Save states are the lever --
-snapshot once just before the scene (`--save-state-after SECS out.state`
-headlessly, or from the menu), then every later experiment starts from
-`--load-state` in seconds instead of re-emulating minutes.
+## Diagnosing sprite rendering issues
 
-## A sprite vanishes
+If an on-screen sprite disappears, flickers, or displays incorrect graphics:
 
-The logo disappears mid-demo, or an in-game object flickers out.
-Sprites fail for a handful of reasons: sprite DMA got turned off, the
-sprite pointers were repointed somewhere wrong, the control words
-disarmed it, or the display window moved off it.
+1. **Pause before the failure point:** Reverse-step if necessary (`RFRAME` in the console
+   steps backward by one frame).
+2. **Inspect the Video tab:** The sprite viewer decodes positions (`SPRxPOS`, `SPRxCTL`),
+   DMA line counts, and fetched graphics.
+   - If a sprite is armed but fetches zero DMA lines, check whether sprite DMA is disabled in `DMACON`.
+   - If the sprite contains valid graphics data but renders at the wrong coordinates, inspect
+     the Copper list positioning instructions.
+3. **Trace register writes:** In the console, execute `RWATCH DMACON` to verify when and
+   where sprite DMA was modified.
+4. **Isolate layers:** In the **Video** tab, toggle individual sprite channels or bitplane
+   layers to verify which subsystem is drawing specific screen elements.
 
-1. Pause just before the vanish (reverse-step back if you overshot:
-   `RFRAME` in the console rewinds a whole frame).
-2. Debugger **Video** tab: the sprite viewer decodes all eight channels
-   -- SPRxPOS/CTL positions, DMA line counts, and a thumbnail of what
-   each channel fetched this frame. A sprite that is armed but empty
-   fetched nothing: suspect DMA. A sprite with data but a wrong
-   position: suspect the copper list that positions it.
-3. If DMA is the suspect: console `RWATCH DMACON` (or the Break tab's
-   register watch) and run. When it fires, the console names the writer
-   -- CPU instruction, Copper, or blitter -- with its address. A game
-   clearing `SPREN` deliberately looks exactly like this.
-4. If the pointers are the suspect: `RWATCH SPR0PTH` catches every
-   repoint, and the **Copper** tab shows the list that does it each
-   frame.
-5. Layer isolation confirms any theory instantly: the Video tab's
-   plane/sprite masks re-render the paused frame with channels removed,
-   so "is that object sprite 4 or a playfield trick?" is one click.
+## Investigating Copper list corruption and visual artifacts
 
-## The picture is torn or the copper list is trashed
+If the display exhibits raster splits at incorrect scanlines or corrupted palettes:
 
-A horizontal band of garbage, colours changing at the wrong line, or a
-display that falls apart after some event.
+1. **Open the Frame Analyzer:** Press `U` to enable the rendered video underlay beneath
+   the chip-bus slot heatmap.
+2. **Inspect scanline writes:** Hover over the affected scanline to decode custom register
+   writes (`COLORxx`, `BPLxPTH`) executed near that beam position.
+3. **Set a beam trap:** Set a trap at the problem scanline (e.g. `BTRAP 145` in the console
+   or **To slot** in the Frame Analyzer). Execution halts when the raster beam reaches that line.
+4. **Single-step the Copper:** Switch to the **Copper** tab and use `CStep` (`C`) to execute
+   Copper instructions sequentially across `WAIT` boundaries.
+5. **Trace memory modifications:** Use `WRITER ADDR` to scan execution history and identify
+   the last CPU or Blitter instruction that wrote to the Copper list address.
 
-1. Open the **Frame Analyzer** and enable the picture underlay (`U`):
-   the captured DMA heatmap draws over the actual frame, so a band of
-   garbage lines up visually with whatever DMA was (or was not)
-   happening there.
-2. Hover the analyzer at the first bad line: it decodes the custom
-   register writes near the beam position. A `COLORxx` write that
-   arrives a line late, or a missing `BPLxPTH` refresh, is visible
-   directly.
-3. Set a beam trap at the first bad line (`BTRAP 145` in the console,
-   or the analyzer's To-slot). The machine halts with the beam exactly
-   there; the **Copper** tab now shows what the Copper is executing at
-   that moment, live.
-4. `CSTEP` single-steps Copper instructions from there. A WAIT with a
-   wrong comparator, or a list that ran past its terminating WAIT into
-   garbage, shows up within a few steps. `CBREAK ADDR` breaks when the
-   Copper reaches a specific instruction on any frame.
-5. If the list itself is corrupt in memory: `WRITER ADDR` reverse-scans
-   execution to find the last instruction that wrote the corrupted
-   word. That answers "who trashed my copper list" in one command --
-   typically a blitter destination running long, which the attribution
-   names as such.
+## Identifying memory corruption
 
-## Something writes where it should not
+When tracking down overwritten data buffers or corrupted OS structures:
 
-Memory corruption generally: a variable, a bitmap, or OS structure gets
-stomped.
+1. **Set a memory watchpoint:** In the console, execute `WATCH ADDR` (or `WATCH ADDR BLITTER`
+   if isolating Blitter writes).
+2. **Reverse lookup:** If memory has already been corrupted, execute `WRITER ADDR` to query
+   the snapshot ring and find the instruction responsible for the write.
+3. **Bisection with save states:** Use `--save-state-after` and `--load-state` to narrow down
+   the exact timeframe when corruption occurred.
 
-1. `WATCH ADDR` sets an attributed watchpoint. Any CPU, blitter, or
-   disk-DMA write there halts the machine and names the writer. Filter
-   to one source with `WATCH ADDR BLITTER` when the CPU legitimately
-   touches the address constantly.
-2. If the corruption already happened: `WRITER ADDR` uses the reverse
-   engine to find the most recent writer without re-running anything by
-   hand.
-3. For "when did this go bad" rather than "who": binary-search with
-   save states -- load, `MEM ADDR`, and the deterministic core
-   guarantees the same answer on every replay.
+## Diagnosing Guru Meditation crashes and unhandled exceptions
 
-## Crash triage: guru meditation
+1. **Catch system alerts:** In the console, enter `CATCHALERT`. Emulation halts immediately
+   when `exec.library/Alert()` is called before the alert screen renders.
+2. **Decode alert codes:** Run `GURU` to translate the alert code in register `D7` into a
+   descriptive error message.
+3. **Inspect the call stack:** Use `STACK` and `HISTORY` in the console to inspect recent
+   subroutine calls and retired program counters. Step backward using `RSTEP` to inspect
+   state prior to the crash.
+4. **Inspect Exec tasks:** Run `TASKS` to view scheduled and waiting task queues, or `TASK <name>`
+   to inspect task stack pointers and signal allocations.
 
-The machine gurus, or worse, freezes silently.
+## Locating in-game variables (Memory search / Trainer workflow)
 
-1. Arm `CATCHALERT`. When exec's `Alert()` runs, the machine halts with
-   D7 holding the alert code -- before the flashing box is drawn, with
-   the faulting context still warm.
-2. `GURU` decodes it: deadend flag, subsystem, cause -- and for CPU
-   traps the vector name (`address error`, `illegal instruction`).
-3. `STACK` and `HISTORY` show how it got there: the call-stack scan and
-   the disassembled ring of recently retired PCs. `RSTEP` walks
-   backwards from the alert into the faulting code with full state.
-4. A **double fault** (bus/address error during exception processing)
-   cannot guru -- the CPU halts. Copperline surfaces it on screen, in
-   the console, and on the Break tab automatically; `HISTORY` is the
-   main tool from there.
-5. For OS-level context: `TASKS` shows what was scheduled, `TASK` dumps
-   the culprit in full (stack use, signals, trap vectors, its CLI
-   command), `EXECBASE` says whether exec is still dispatching at all --
-   a stuck `IDNestCnt`/`TDNestCnt` is a `Disable()`/`Forbid()` nobody
-   paired -- `CATCHTASK NAME` stops when a suspect process next gets the
-   CPU, and `SEGMENTS` maps a process's loaded hunks so addresses in
-   `HISTORY` can be attributed to a program rather than "somewhere in
-   RAM".
+1. **Initialize search:** In the console, enter `HUNT START` (or `HUNT START B` for byte search).
+2. **Filter by value:** If searching for a lives counter starting at 3, run `HUNT EQ 3`.
+3. **Update and narrow:** Change the in-game value (e.g. lose a life) and run `HUNT EQ 2`.
+4. **Review candidates:** Run `HUNT LIST` to view matching memory addresses.
+5. **Set watchpoints or modify:** Attach a watchpoint (`WATCH ADDR`) or modify the value (`POKE ADDR 9`).
 
-## Find the lives counter (memory hunting)
+## Logic analyzer waveform capture
 
-The trainer-making workflow, also the fastest way to locate any game
-variable you can influence.
+When investigating fine-grained DMA and bus arbitration timing issues:
 
-1. `HUNT START` snapshots all writable RAM (chip, slow, and Zorro
-   boards). Word width is the default; `HUNT START B` hunts bytes.
-2. You have three lives: `HUNT EQ 3`. Thousands of candidates.
-3. Lose a life, pause, `HUNT EQ 2`. The intersection is usually a
-   handful of addresses; two or three rounds isolate one. `HUNT SAME` /
-   `HUNT DIFF` filter against the previous snapshot when you cannot
-   name the value ("it changed", "it did not change").
-4. `HUNT LIST` shows the survivors with live values.
-5. From there: `WATCH ADDR` answers "what code decrements this"
-   (the death routine), and `POKE ADDR 9` tests the theory.
-
-## Source-level debugging of your own program
-
-For programs you build yourself, the GDB stub relocates symbols to the
-addresses `LoadSeg()` chose -- automatically at attach for a program
-already running (`qOffsets`), and via `monitor loadseg-break` plus a
-reattach for one the guest loads later. How much detail you get depends
-on the symbol file: a `-g` hunk executable carries function-level
-symbols, while source lines, `next`, and `print` need an
-ELF-with-DWARF sibling of the binary. The walkthrough lives in the
-[GDB chapter](gdb), "Source-Level Debugging of Amiga Programs".
-
-## See the bus like a logic analyser
-
-When the question is *interleaving* -- who owned which DMA slot, when the
-blitter stalled the CPU, where the Copper woke relative to the display
-fetch -- text traces are the wrong shape. Capture a waveform instead:
-
-```
+```text
 WAVE START glitch.vcd beam=100 2f
 ```
 
-arms a capture that triggers when the beam reaches line 100 and records two
-frames of every signal group (bus owner per colour clock, Copper PC/state,
-blitter pipeline slots and pointers, register writes, IPL/INTREQ/INTENA,
-CPU chip-bus accesses). Open `glitch.vcd` in GTKWave and read the bus
-arbitration directly off the screen; marker deltas measure in colour
-clocks. Headless runs arm the same capture with
-`--waveform glitch.vcd --wave-trigger beam=100 --wave-duration 2f`.
-[](waveform.md) has the full trigger/duration/signal reference.
-
-## Making it reproducible
-
-Any of the above is dramatically easier when the failure replays
-identically every run:
-
-- **Record the session**: `--record-input session.clscript`
-  (`Cmd+Shift+R` live) captures input on emulated time; `--script
-  session.clscript` replays it byte-identically.
-- **Headless repro**: once scripted, `--screenshot-after` /
-  `--dump-frames` plus the `COPPERLINE_DBG_*` knobs ([headless
-  chapter](headless)) turn the bug into a shell command -- the form a
-  regression test wants.
-- **Trace the suspect window**: console `TRACE START PATH` writes every
-  retired PC with beam positions to a file; diff two traces (one good
-  run, one bad) to find the first divergence.
+This arms a capture triggering at scanline 100 and records two frames of chip-bus
+activity. The resulting `.vcd` file can be opened in GTKWave to inspect exact
+cycle-by-cycle interleaving between CPU, Copper, Blitter, and DMA channels.

@@ -475,7 +475,7 @@ decodes even addresses.
   are silently discarded. Neither is an error condition -- there is no
   fault or diagnostic bit for it, matching the rest of Copperline's
   Zorro-board conventions (e.g. Toccata's undecoded-port behaviour, see
-  [](toccata)).
+  [](toccata.md)).
 - **Reserved offsets** (`0x20` and above) read as `0x0000` and discard
   writes, in every protocol version -- see the note at the top of
   [Register map](#register-map).
@@ -602,7 +602,7 @@ implementation notes below.
 
 The board consumes a descriptor's bitstream at the **decoded audio's own
 emulated-time rate**, the same principle as every other in-tree audio
-device (see [](audio)'s determinism section and [](toccata)'s "mixer
+device (see [](audio.md)'s determinism section and [](toccata.md)'s "mixer
 cadence" for the worked example): a decoded MPEG frame (1152 PCM samples
 at the stream's sample rate) is not considered "played out" -- and its
 bytes are not considered consumed from the descriptor, and
@@ -733,7 +733,7 @@ content above.
   are guaranteed identical run-to-run on one platform rather than across
   operating systems.
 - **Mixer cadence**: reuses Toccata's causal-producer/non-causal-resampler
-  split ([](toccata)'s "Mixer cadence and resampling") -- a causal
+  split ([](toccata.md)'s "Mixer cadence and resampling") -- a causal
   producer decodes and evaluates queue/interrupt state at the board's own
   paced rate into a plain FIFO of raw frames, and a separate non-causal
   `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls from that
@@ -787,7 +787,7 @@ content above.
   must not bleed into whatever plays next.
 - **Launcher**: the machine-configuration launcher's **I/O Ports** tab
   (Audio page) has a plain fit/don't-fit toggle for the board (same as
-  Toccata, see [](toccata)'s "What's out of scope" section); host-side
+  Toccata, see [](toccata.md)'s "What's out of scope" section); host-side
   audio capture/backend options stay command-line/config-file only.
 - **Large-descriptor DMA copy**: `DESC_LEN` genuinely does not truncate --
   `Mhi` copies a descriptor's full length into its bitstream buffer in

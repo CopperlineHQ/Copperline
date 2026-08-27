@@ -1,139 +1,82 @@
 # Reverse debugging
 
-Copperline can step *backwards*. Because the core is deterministic and
-already snapshots the whole machine (see [](../internals/savestate)), going
-back in time needs no special record layer the way a tool like `rr` does:
-the emulator keeps a ring of periodic in-memory snapshots, and to reach any
-earlier point it restores the nearest snapshot at or before it and replays
-forward. The reconstruction is byte-identical as long as the determinism
-preconditions below hold.
+Copperline supports reverse stepping and reverse execution. Because emulation
+is deterministic, the emulator maintains a ring of in-memory snapshots
+(see [save states](../internals/savestate.md)) and reconstructs earlier execution states by restoring the
+nearest preceding snapshot and replaying forward to the exact requested instruction
+or beam cycle.
 
-The same machinery backs three surfaces: a headless "last writer" reverse
-watchpoint for automated root-cause hunts, **&lt; Step** / **&lt; Frame** /
-**&lt; Run** controls in the [debugger window](window), and the plain
-**Rewind** hotkey on the running machine
-([](../guide/ui)).
+Reverse debugging is available through:
+- **Interactive UI:** `< Step`, `< Frame`, and `< Run` in the [debugger window](window).
+- **Console commands:** `RSTEP`, `RFRAME`, `RRUN`, and `RWATCH` in the [debugger console](console).
+- **Headless analysis:** Automated "last writer" reverse watchpoints via `COPPERLINE_DBG_RWATCH`.
+- **GDB remote stub:** Standard GDB `reverse-step` and `reverse-continue` commands.
+- **Gameplay rewind:** The `Cmd+Z` / `Alt+Z` shortcut during normal gameplay.
 
-## What it is good for
+## Headless "last writer" reverse watchpoints
 
-The recurring hard question in a timing or corruption investigation is
-"*the value at address X is wrong by the time I look -- which instruction
-produced it?*". Forward watchpoints ([](headless)) tell you about writes as
-they happen, but you have to know to watch before the damage. A reverse
-watchpoint answers the question after the fact: stop at the symptom, then
-ask for the last writer.
+When diagnosing memory corruption or unexpected state transitions, a reverse
+watchpoint identifies the instruction that last wrote to a target memory location.
 
-## Headless: the "last writer" reverse watchpoint
-
-Set `COPPERLINE_DBG_RWATCH` to an address and `COPPERLINE_DBG_UNTIL` to the
-emulated time to evaluate it at. When the run reaches that time, the
-emulator restores recent snapshots, replays with a watch on the word, and
-logs the last instruction that changed it -- then restores the live state
-and continues, so the run (and any `--screenshot-after`) is unaffected.
+Set `COPPERLINE_DBG_RWATCH` to the target address and `COPPERLINE_DBG_UNTIL` to the
+time at which the check should run:
 
 ```sh
 RUST_LOG=info \
 COPPERLINE_RTC_FIXED_SECS=1000000000 \
 COPPERLINE_DBG_RWATCH=DE488 \
 COPPERLINE_DBG_UNTIL=12.5 \
-./target/release/copperline --config X.example.toml --noaudio \
+./target/release/copperline --config demo.toml --noaudio \
   --screenshot-after 13 /tmp/out.png
 ```
+
+Example log output:
 
 ```text
 DBG RWATCH last writer of $0DE488: CAFE->0000 by pc=0x00FA37D8 pos=561401 f=40 cck=2864664
 ```
 
-The report gives the writing instruction's PC, the value transition, and
-the position/frame/colour-clock of the write. The credited PC follows the
-same rule as the forward `COPPERLINE_DBG_WATCH`: a write made by the Copper
-or blitter between two instructions lands on the next CPU instruction's PC.
+The output identifies the program counter (PC), value before and after the write,
+video frame, and colour-clock cycle of the write.
 
-### Variables
+### Environment variables
 
-`COPPERLINE_DBG_RWATCH=ADDR[:LEN]`
-: Arms the reverse watchpoint on the word at `ADDR`. Evaluated at
-  `COPPERLINE_DBG_UNTIL`, or at run end if that is unset.
+- `COPPERLINE_DBG_RWATCH=ADDR[:LEN]`: Arms reverse watchpoint for `ADDR`.
+- `COPPERLINE_DBG_UNTIL=SECS`: Emulated timestamp at which to evaluate reverse watchpoints.
+- `COPPERLINE_DBG_RR=1`: Enables the snapshot ring buffer in headless runs without a watchpoint.
+- `COPPERLINE_DBG_RR_BUDGET_MB=N`: Maximum RAM allocation for snapshot ring in MiB (default: 512).
+- `COPPERLINE_DBG_RR_INTERVAL=N`: Number of emulated video frames between snapshots (default: 5).
 
-`COPPERLINE_DBG_RR=1`
-: Arms the snapshot ring without a watchpoint, so reverse-step navigation
-  has history to work from (useful when driving the window).
+## Interactive reverse controls
 
-`COPPERLINE_DBG_RR_BUDGET_MB=N`
-: Snapshot-ring memory cap in MiB (default 512). The oldest snapshots are
-  evicted once the total exceeds it; a query for a point older than the
-  retained history reports `beyond retained snapshot history`.
+In the [debugger window](window), reverse transport controls are located on the right:
 
-`COPPERLINE_DBG_RR_INTERVAL=N`
-: Emulated frames between snapshots (default 5). Smaller means shorter
-  replays (faster reverse ops) but more memory and more forward-run
-  serialization overhead.
-
-## In the window
-
-Opening the debugger arms the ring automatically (at a conservatively large
-snapshot interval, since captures only accrue while the machine advances --
-**Run** or **Frame**, not while paused). Three reverse controls then sit at
-the right of the transport row:
-
-| Control | Effect |
+| Button | Function |
 |---|---|
-| **&lt; Frame** | Step backward to the previous emulated video frame |
-| **&lt; Step** | Step one instruction backward |
-| **&lt; Run** | Run backward to the previous stop of any kind |
+| **`< Frame`** | Step backward to previous video frame |
+| **`< Step`** | Step backward by one CPU instruction |
+| **`< Run`** | Run backward until a breakpoint or watchpoint condition is met |
 
-The status line shows the current instruction position and how much history
-is retained (`pos N  rev K snaps, M MB`). **&lt; Run** (and the console's
-`RRUN`) scans the replay for every armed stop: PC breakpoints (addresses;
-conditions and ignore counts are not re-evaluated), memory watchpoints
-(re-baselined at each snapshot, so a hit means "changed during the
-replayed interval"), register watches, beam traps, Copper breakpoints,
-exception catches, and the task catch. It lands at the most recent hit
-and reports the same stop message the forward run would have shown --
-"run backward to when this register was last written" is `RWATCH` plus
-`RRUN`. The GDB stub's `reverse-continue` keeps its protocol semantics
-(its own breakpoints only).
+`< Run` (and the console command `RRUN`) evaluates all active breakpoints,
+memory watchpoints, Copper breakpoints, and custom register traps in reverse order,
+stopping at the most recent triggering event.
 
-Interactive debug state (beam traps, Copper breakpoints, layer masks)
-survives timeline jumps: a reverse step never silently disarms the
-debugger.
+## Rewind in normal sessions
 
-Repositioning the machine into the past discards the retained history
-*after* the landing point. Those snapshots describe a timeline that will not
-happen again once new input arrives, and leaving them in the ring would let
-one be chosen as an anchor a second time. Running forward re-records from
-the landing point immediately.
+Rewind functionality can be used during gameplay:
+- Set `[emulation] rewind = true` in `copperline.toml` or enable **Rewind** in the UI menu.
+- Press `Cmd+Z` (macOS) or `Alt+Z` (Linux/Windows) to step backward by intervals
+  defined in `rewind_interval_frames`.
 
-## Rewind, outside the debugger
+## Determinism requirements for reverse replay
 
-`[emulation] rewind = true` (or the **Rewind** menu item) arms the same ring
-for ordinary use, and `Cmd+Z` / `Alt+Z` steps the machine back through it
-without pausing or opening anything. The differences from the debugger's
-reverse controls: a rewind step lands on a capture point rather than an
-exact instruction or frame, so it costs one restore and no replay, and one
-step covers `[emulation] rewind_interval_frames` of emulated time.
-`[emulation] rewind_budget_mb` caps the retained snapshots. See
-[](../guide/configuration).
+For reverse replay to be exact:
 
-## Determinism preconditions
-
-Reverse replay is exact only if everything that fed the original timeline is
-reproduced. When reverse mode is armed the emulator logs a warning if the
-first of these is unmet:
-
-- **RTC**: set `COPPERLINE_RTC_FIXED_SECS`. Otherwise the guest's real-time
-  clock reads host wall-clock time, which differs on replay and diverges.
-- **Input** (keyboard, mouse, joystick) is recorded as it is applied and
-  re-applied during replay, so scripted (`--script`, `--press-after`, ...)
-  and live window input both reconstruct. A floppy **media change** inside a
-  replayed interval cannot be reconstructed (the inserted image is host-file
-  state) and is reported with a warning.
-- **Hard-drive / CD** images are reopened by path and are externally
-  mutable, so a guest disk write after a snapshot is not rolled back by
-  restoring it. Floppy contents are part of the snapshot and are safe. Most
-  demo/root-cause targets are RAM-only and unaffected.
-- Replay must run with the **same machine config and `COPPERLINE_*`
-  environment** as the forward run (the environment is snapshotted once at
-  startup; pacing/clock knobs change the seconds-to-instruction mapping).
-
-See [](../internals/savestate) for the snapshot-ring and replay model.
+1. **RTC synchronization:** Use `--rtc-time` or `COPPERLINE_RTC_FIXED_SECS` so time
+   reads do not drift with host wall-clock time.
+2. **Deterministic input:** Input events must be repeatable (scripted input and recorded
+   interactive inputs are handled automatically).
+3. **Storage:** RAM contents and floppy disk states are captured directly in memory
+   snapshots. However, hard drive and CD images are accessed live from the host filesystem
+   and are not rolled back on restore; guest disk writes or host-side image modifications
+   occurring after a snapshot point will cause replayed execution to diverge.

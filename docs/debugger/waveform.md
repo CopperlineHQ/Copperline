@@ -1,24 +1,20 @@
-# Waveform export (VCD logic analyser)
+# Waveform export (VCD logic analyzer)
 
-Copperline can record its internal chipset signals -- beam counters, chip-bus
-owner, CPU bus accesses, Copper and blitter state, custom-register writes,
-interrupt levels, DMA activity -- into a [VCD](https://en.wikipedia.org/wiki/Value_change_dump)
-file that [GTKWave](https://gtkwave.sourceforge.net/) (or any VCD viewer)
-displays as a logic-analyser trace. Because the emulator arbitrates the chip
-bus per colour clock, the trace shows exactly which device owned every bus
-slot and how the Copper, blitter, CPU, and DMA interleave -- the view a logic
-analyser probing a real Amiga's bus would give, plus internal state no probe
-could reach.
+Copperline can record internal chipset signals -- beam counters, chip-bus owner,
+CPU bus accesses, Copper and blitter state, custom register writes, interrupt
+levels, and DMA activity -- into a standard [VCD](https://en.wikipedia.org/wiki/Value_change_dump)
+file. The resulting trace can be viewed in [GTKWave](https://gtkwave.sourceforge.net/)
+or any compatible logic analyzer trace viewer.
 
-A capture is *trigger-based* and *bounded*: it arms, waits for a trigger (a
-CPU PC, a beam position, a register write, an emulated time, or immediately),
-records for a fixed window, then finishes the file. This keeps files small
-and puts the interesting event at the start of the trace.
+Because bus arbitration in Copperline is evaluated per colour clock, exported
+traces show exact cycle interleaving between CPU, Copper, Blitter, and DMA channels.
 
-## Starting a capture
+Traces are bounded and trigger-based: the recorder arms, waits for a trigger condition,
+captures for a specified duration, and writes the output file.
 
-From the command line (works headless, e.g. together with
-`--screenshot-after`):
+## Capturing waveforms
+
+### Command line
 
 ```sh
 copperline --config game.toml --noaudio \
@@ -29,15 +25,15 @@ copperline --config game.toml --noaudio \
   --screenshot-after 30 /tmp/shot.png
 ```
 
-From the debugger console (`Cmd/Alt+K`), with the same order-free arguments:
+### Debugger console (`Cmd+K` / `Alt+K`)
 
-```
+```text
 WAVE START out.vcd pc=C033C2 20000cck cpu,bus,copper,blitter
-WAVE            (status)
-WAVE STOP       (finish early)
+WAVE                # Display capture status
+WAVE STOP           # Finish capture immediately
 ```
 
-From a live [CCP control session](control.md), using the same spec strings:
+### Control protocol (CCP)
 
 ```text
 waveform.start {"path":"out.vcd","trigger":"pc=0x00C033C2","duration":"20000cck","signals":"cpu,bus,copper,blitter"}
@@ -45,76 +41,60 @@ waveform.status
 waveform.stop
 ```
 
-From the debugger window (`Cmd/Alt+B`): the **Wave** tab has Arm and Stop
-buttons; type the same order-free spec into the entry box (empty means all
-defaults) and click Arm.
+### Debugger window (`Cmd+B` / `Alt+B`)
 
-Everything is optional: the default trigger is `now`, the default duration
-one video frame, the default signal set `all`, and an omitted path becomes
-`copperline-wave-<timestamp>.vcd` in the traces folder (see the guide's
-[Where files go](../guide/ui.md#where-files-go)).
+In the **Wave** tab, enter trigger and duration parameters, then click **Arm**.
 
-## Triggers
+Default values:
+- Trigger: `now` (immediately upon arming)
+- Duration: `1f` (one video frame; accepts `f` or `frames` suffix)
+- Signals: `all`
+- Default output filename: `copperline-wave-<timestamp>.vcd`
 
-| Spec | Fires when |
+## Trigger specifications
+
+| Trigger spec | Fires when |
 |---|---|
-| `now` | immediately on arming (default) |
-| `pc=ADDR` | the CPU retires the instruction at hex ADDR |
-| `beam=VPOS` / `beam=VPOS:HPOS` | the beam crosses the (decimal) position |
-| `reg=OFF` | a custom register is written (hex word offset, e.g. `reg=180` for COLOR00) |
-| `time=SECS` | emulated time reaches SECS (fractional ok) |
+| `now` | Immediately when armed (Default) |
+| `pc=ADDR` | CPU retires instruction at hex `ADDR` |
+| `beam=VPOS` or `beam=VPOS:HPOS` | Beam crosses decimal raster position |
+| `reg=OFFSET` | Custom register written (hex word offset, e.g. `reg=180` for `COLOR00`) |
+| `time=SECS` | Emulated time reaches `SECS` |
 
-## Durations
+## Duration formats
 
-`20000cck` (colour clocks; a bare number means cck), `2f` / `2frames`,
-`50ms`, `1.5s`. The default is one frame. A safety cap bounds any capture at
-10 emulated seconds, and an emergency stop finishes the file if it passes
-512 MB.
+- `20000cck` (or bare integer): duration in colour-clock cycles
+- `2f` or `2frames`: duration in video frames
+- `50ms`, `1.5s`: duration in emulated time
+
+A 10-second safety cap limits maximum capture length, and files are automatically
+closed if size exceeds 512 MB.
 
 ## Signal groups
 
-Select with `--wave-signals` (comma list) or the same list as a console/GUI
-token. Default: `all`.
+Select groups with `--wave-signals` (comma-separated list, default `all`):
 
-| Group | VCD variables |
+| Group | Recorded variables |
 |---|---|
 | `beam` | `vpos[15:0]`, `hpos[7:0]`, `frame[31:0]` |
-| `bus` | `owner[3:0]`, `owner_name` (string), `dmacon[15:0]`, `data[15:0]` (the shared chip data bus latch) |
-| `cpu` | `addr[23:0]`, `kind` (fetch/read/write/custom), `rw`, `wait_cck[15:0]` -- one record per granted CPU **chip-bus** slot (fast-RAM traffic never touches the chip bus) |
+| `bus` | `owner[3:0]`, `owner_name`, `dmacon[15:0]`, `data[15:0]` |
+| `cpu` | `addr[23:0]`, `kind` (fetch/read/write/custom), `rw`, `wait_cck[15:0]` |
 | `copper` | `pc[23:0]`, `state` (run/wait/skip/jump/stop) |
-| `blitter` | `busy`, `slot` (the pipeline cycle label: A/B/C/D, line-mode L1..L4, fill FI, ...), `apt/bpt/cpt/dpt[23:0]` |
-| `regs` | `off[8:0]`, `value[15:0]`, `source` (cpu/copper), `strobe` (toggles per write so identical back-to-back writes stay visible) |
-| `irq` | `ipl[2:0]` (the level presented to the CPU, after INTEN masking), `intreq[15:0]`, `intena[15:0]` |
-| `audio` | `channel[1:0]` + `strobe` per audio DMA grant |
+| `blitter` | `busy`, `slot` (pipeline phase A/B/C/D, line mode, fill), `apt/bpt/cpt/dpt[23:0]` |
+| `regs` | `off[8:0]`, `value[15:0]`, `source` (cpu/copper), `strobe` |
+| `irq` | `ipl[2:0]`, `intreq[15:0]`, `intena[15:0]` |
+| `audio` | `channel[1:0]`, `strobe` |
 
-`owner` uses the bus-accounting indices (0 refresh, 1 bitplane, 2 sprite,
-3 disk, 4 audio, 5 copper, 6 blitter, 7 cpu, 8 idle); `owner_name` carries
-the same information as text, which GTKWave shows directly on the wave.
-
-## Time base
-
-One VCD time unit is one colour clock, with timestamps relative to the
-trigger. The file declares `$timescale 1 us` -- the closest legal VCD unit --
-so cursor deltas in GTKWave read directly as colour clocks (a PAL line is
-227, a PAL frame 71,364). Signals are sampled at the chip-bus arbitration
-point, so a value change lands on the exact colour clock it took effect.
-
-## Viewing
+## Viewing in GTKWave
 
 ```sh
-gtkwave out.vcd            # macOS: brew install gtkwave
-vcd2fst out.vcd out.fst    # optional: GTKWave's compact FST format
+gtkwave out.vcd
+# Optional: convert to GTKWave fast binary format:
+vcd2fst out.vcd out.fst
 ```
 
-In GTKWave, append the signals you care about from the `copperline` scope
-tree, set `owner_name`/`state`/`slot` to ASCII display, and use marker
-deltas to measure in colour clocks.
-
-## Notes
-
-- A capture observes the machine without disturbing it: no timing changes,
-  and the hot path costs a single branch while nothing is armed.
-- Arming replaces (and finishes) any previous capture; captures do not
-  survive save-state loads.
-- The `pc=` trigger matches retired instructions, so it works with every
-  CPU model including prefetch/cache effects.
+In GTKWave:
+1. Expand the `copperline` scope in the signal tree.
+2. Add desired signals to the display.
+3. Set `owner_name`, `state`, and `slot` display format to ASCII.
+4. Use markers to measure timing intervals in colour clocks.

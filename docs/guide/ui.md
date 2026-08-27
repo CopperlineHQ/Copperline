@@ -53,6 +53,7 @@ the keyboard hardware directly behaves. `Ctrl+Amiga+Amiga` runs the
 authentic reset protocol (reset warning, then KCLK held low), so the
 reboot lands a fraction of a second after the chord, as on real hardware.
 
+(keyboard-and-controller-navigation)=
 ## Keyboard and controller navigation
 
 Everything the mouse can reach in the launcher, the menu, the status bar
@@ -131,7 +132,7 @@ Status Bar*):
   four drives the clusters stack two-up. A bay driving a physical floppy drive
   keeps its numbered disk button, so you can see the drive is there, but
   loading, swapping and ejecting do nothing for it -- the disk is in a real
-  drive, and changing it is done by hand (see [](fluxbridge)).
+  drive, and changing it is done by hand (see [](fluxbridge.md)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`/`.nrg`/`.chd`) with the proper media-change notification, and a
@@ -198,6 +199,7 @@ and the way to drive a session entirely with the mouse.
   bar button. It sits in the slot farthest from the cursor keys, so a
   missed arrow cannot fold the keyboard away mid-game.
 
+(performance-overlay)=
 ## Performance overlay
 
 `Cmd+P` (macOS) / `Alt+P`, *Video Settings > Performance*, or
@@ -509,7 +511,8 @@ Shown only when something is on the port.
   emulated machine to a file of your choosing, or restore one and continue
   from exactly that point. See below.
 
-### And last
+(and-last)=
+### Application controls
 
 - **Load Kickstart ROM...**: fit a different boot ROM. Pick a 512 KiB
   Kickstart, then optionally a second file for the extended ROM (512 KiB at
@@ -521,7 +524,7 @@ Shown only when something is on the port.
 - **Keyboard Shortcuts...**: the shortcut reference.
 - **About...**: app version plus a summary of the emulated machine -- its
   `ROM:` line names the boot ROM file and, for a released image, which
-  Kickstart it is (identified by checksum, see [](configuration)) -- and
+  Kickstart it is (identified by checksum, see [Configuration](configuration.md)) -- and
   credits including Copperline's contributors and Patreon sponsors (see
   `CREDITS.md`). Builds
   made from an untagged git commit append the short commit ID to the version
@@ -571,7 +574,7 @@ The layout is:
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
   overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
   FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
-  see `[cpu] jit` in [](configuration)),
+  see `[cpu] jit` in [Configuration](configuration.md)),
   *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed
   16-bit word -- plus chip/fast/slow/motherboard/accelerator/Zorro III RAM),
   *ROM*
@@ -581,7 +584,7 @@ The layout is:
   checksum rather than by file name -- blank for an image Copperline does
   not know, and read from the image itself for the bundled AROS. The FMV row
   fits the physical Commodore MPEG cartridge when a 256 KiB module ROM is
-  selected and is greyed on non-CD32 profiles; see [](configuration)),
+  selected and is greyed on non-CD32 profiles; see [Configuration](configuration.md)),
   *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
   speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
@@ -593,7 +596,7 @@ The layout is:
   plugged in -- and a **Configure** button opens that drive's own page,
   headed with the built-in FluxBridge library and its version, for the
   serial port, drive select, density, read mode and replay speed, greying
-  whatever the chosen interface does not honour. See [](fluxbridge)),
+  whatever the chosen interface does not honour. See [](fluxbridge.md)),
   *Storage* (IDE master/slave -- either can be a CD image instead of a hard
   disk, attaching an ATAPI CD-ROM drive there -- the SCSI controller --
   A2091, A4091, or the A3000's onboard SCSI -- and its boot ROM and units,
@@ -899,6 +902,7 @@ not silently mixed in. Two caveats:
 - CD images are likewise reopened by path; keep the cue sheet and its
   files (or the CHD) where they were.
 
+(quick-save-slots)=
 ### Quick-save slots
 
 Naming a file is the wrong interaction for the "before this jump" save you
@@ -923,6 +927,7 @@ iterate from the state in seconds instead of re-emulating minutes. The
 file format and what exactly is (and is not) captured are specified in
 [the internals chapter](../internals/savestate.md).
 
+(where-files-go)=
 ### Where files go
 
 Everything Copperline produces is kept per user rather than per working
@@ -959,6 +964,7 @@ the whole installation moves as one folder. Delete `portable.txt` to return
 to the platform location above; Copperline does not move existing files in
 either direction.
 
+(controller-ports)=
 ## Controller ports
 
 An Amiga has two game ports, and either accepts any controller. Copperline
@@ -1067,6 +1073,7 @@ Mapping...** item (see [](#input-mapping)). A held fire button can also be
 turned into a pulse train with the **Autofire** item or `[input]
 autofire_hz`.
 
+(gamepad-calibration)=
 ## Gamepad calibration
 
 Most pads work with no setup at all: a controller found in the bundled
@@ -1151,6 +1158,7 @@ resolve a stick direction reversed on a database-covered pad; the log
 suggests recalibrating when it loads such a file, and recalibrating
 once fixes it.
 
+(input-mapping)=
 ## Input mapping
 
 The keyboard also stands in for a controller, on two independent mappings so

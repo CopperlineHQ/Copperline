@@ -1,447 +1,160 @@
 # The debugger window
 
-Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or pick **Debugger**
-from the status-bar menu) to pause the machine and open the debugger
-tool window alongside the emulated display. Closing it restores the pause
-state from before it opened. The debugger, frame analyzer, and the
-command-line [console](console) are independent tool windows, so all three
-can stay open while you compare CPU/chipset state with the captured bus
-trace. Each takes its keys and clicks through its own window, and the main
-window keeps driving the Amiga: press **Run** and you can play the machine
--- keyboard, mouse, and mouse capture included -- while the tool windows
-watch it.
-Everything the debugger shows comes from
-side-effect-free peeks -- inspecting memory or registers never disturbs the
-emulated machine -- and stepping drives the same cycle-exact core as normal
-execution.
-While the machine runs, tool windows repaint at 20 Hz rather than every
-emulated frame: repainting shares the emulation thread, and a per-frame
-repaint costs enough to starve the audio output. Interaction (stepping,
-clicks, breakpoint stops) always repaints immediately.
+Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or select **Debugger** from
+the status bar menu) to pause emulation and open the debugger tool window.
+Closing the window restores the previous execution state.
+
+The debugger, Frame Analyzer, and [Console](console) operate in separate host
+windows, allowing them to remain open simultaneously while inspecting CPU,
+custom chipset, and bus activity. Emulation and register queries are non-intrusive
+and do not alter hardware state.
 
 ```{figure} ../images/ui-preview-debugger.png
 :alt: The debugger window on the CPU tab
 :width: 90%
 
-The CPU tab: register file, live disassembly, and the transport controls.
+Debugger window: register file, live disassembly, and transport controls.
 ```
 
 ## Tabs
 
-**CPU** shows the PC and SR (with decoded supervisor/IPL/CCR flags), the
-D0-D7/A0-A7 register file, a `recent` line with the last few retired PCs
-(the console's `HISTORY` command shows the full ring, disassembled), and
-a live 68000 disassembly that follows the PC, with the current
-instruction highlighted. Type a hex address in the
-`$` box and press Enter to *pin* the disassembly elsewhere; empty the box
-and press Enter to follow the PC again.
+### CPU
+Displays the 68000 register file (`D0`-`D7`, `A0`-`A7`), status register (`SR` with
+decoded flags), program counter (`PC`), and live disassembly centered on the current
+instruction. Enter a hexadecimal address in the address input box to inspect code
+elsewhere in memory; clear the box to return to the active PC.
 
-**Chipset** decodes the live custom-chip state bit by bit: the beam
-position and frame counter, DMACON / INTENA / INTREQ with bit names,
-Copper state (COP1LC/COP2LC/COPPC), the display window and fetch registers
-(BPLCONx, DIWSTRT/STOP, DDFSTRT/STOP, modulos), the bitplane and sprite
-pointers, and the full palette.
+### Chipset
+Decodes custom chipset registers in real time: raster beam position, frame counter,
+`DMACON`, `INTENA`, `INTREQ`, Copper pointers (`COP1LC`, `COP2LC`, `COPPC`), display
+window controls (`BPLCONx`, `DIWSTRT`, `DIWSTOP`, `DDFSTRT`, `DDFSTOP`), bitplane
+and sprite pointers, and color palette entries.
 
-**Copper** is a debugger for the Copper itself. The header shows
-COP1LC/COP2LC, the live Copper PC, and the execution state (running,
-waiting -- with the decoded beam position it waits for -- or stopped). The
-listing disassembles MOVE/WAIT/SKIP around the live PC (following it as
-the Copper executes; a stopped Copper shows the head of the COP1 list),
-with the current instruction highlighted and WAIT/SKIP positions resolved
-to the same decimal `v`/`h` beam coordinates the Chipset tab and Frame
-Analyzer use. Two controls sit above the listing:
+### Copper
+Dedicated Copper list inspector and disassembler. Shows `COP1LC`, `COP2LC`, active
+Copper PC, and execution state (running, waiting, or halted).
+- **CBreak +/-:** Toggles a Copper breakpoint at the specified hex address.
+- **CStep (`C`):** Steps forward by one Copper instruction (advances through `WAIT`
+  instructions to the subsequent instruction).
 
-- **CBreak +/-** toggles a *Copper breakpoint* at the hex address in the
-  `$` box. The machine stops when the Copper's PC arrives at that address
-  -- before the instruction there executes -- whether it got there by
-  sequential fetch, a COPJMP, a CPU strobe write, or the vertical-blank
-  restart. Breakpointed lines are marked `*`, and the Break tab lists them.
-- **CStep** (`C`) runs until the Copper retires one instruction: a MOVE
-  applied (or discarded by SKIP), or a WAIT/SKIP/COPJMP starting. Stepping
-  onto a WAIT parks the Copper; the next CStep runs through the wait to
-  the following instruction, so you can walk a raster effect
-  instruction by instruction. The machine pauses at the next CPU
-  instruction boundary, so the Copper can occasionally be a fetch further
-  along -- the highlight always shows exactly where it stopped.
+### Video
+Displays the active display pipeline configuration and provides bitplane and
+sprite layer isolation toggles:
+- Toggle individual bitplanes (1-8) or sprites (0-7) to isolate visual elements
+  without altering collision detection or emulation state.
+- Decodes sprite registers (`SPRxPOS`, `SPRxCTL`), armed status, and DMA line counts.
+- Displays full 32-color (OCS/ECS) or 256-color (AGA) palette grids.
 
-**Video** shows the display pipeline visually and hosts *layer
-isolation*. The header decodes BPLCON0 (depth, resolution, HAM/DPF) and
-the display/sprite DMA enables. Two toggle rows hide or show individual
-bitplanes (1-8) and sprites (0-7) in the presented picture -- the video
-analogue of the Audio tab's mutes, for answering "which layer is drawing
-*that*" by elimination. Isolation is an output-only filter: collisions,
-sprite/playfield priority, and everything the program can observe still
-use the true data, so hiding layers can never perturb the emulation (a
-sprite behind a hidden plane therefore stays occluded). Toggles re-render
-the current frame immediately while paused, through the same
-side-effect-free snapshot render the Frame Analyzer underlay uses.
-Each sprite row decodes SPRxPOS/SPRxCTL (vstart-vstop, hstart, attach,
-armed) with the number of DMA lines the sprite fetched this frame --
-zero lines with plausible-looking pointers is the classic
-copper-driven-sprite symptom -- and a thumbnail rendered from those
-captured DMA words. Below, the palette grid shows all 32 entries (or the
-full 256 on AGA) as swatches.
+### Audio
+Decodes Paula audio channels (0-3) and expansion sound devices (CD-DA, MT-32,
+Coppersynth, Toccata, MHI). Displays channel DMA state machine status, period,
+volume, active buffer pointers, and real-time audio waveform scopes. Channels
+can be muted individually.
 
-**Audio** decodes Paula's four audio channels. A header line shows DMACON
-(master DMAEN and the per-channel AUDx enable bits) and ADKCON (the audio
-attach bits for volume/period modulation). Each channel then shows its DMA
-state-machine state (Off, Manual, ManualHold, StartPending, Running), whether
-its DMA is enabled, its interrupt-pending flag, the CPU latches
-(AUDxLC/LEN/PER/VOL), and the live playback state: the current pointer, words
-remaining, the period accumulator, the output phase, and the sample currently
-on the output. A `pending:` line appears when the channel is holding a
-deferred DMA-disable (AUDxEN cleared mid-word), a deferred loop reload, a
-manual AUDxDAT write, an outstanding DMA request, or a fetched-ahead word.
-Step frames (**Frame**) to watch the state machine advance -- the Running
-line is highlighted while a channel is actively streaming samples.
+### Memory
+Hexadecimal and ASCII memory dump viewer (256 bytes per page).
+- **Find:** Searches memory for specified byte sequences.
+- **Save...:** Dumps address ranges to a file.
+- **Writer?:** Queries the reverse execution snapshot ring to identify the instruction
+  that last wrote to the specified address.
+- **Bits:** Displays raw 1-bit-per-pixel bitplane visualizations with configurable
+  stride.
 
-Each channel row also has a **Mute** button on the left and an oscilloscope on
-the right; shorter rows at the bottom do the same for every line-mixed audio
-source the machine has. The **CD-DA** row (CDTV, CD32, or a SCSI CD-ROM unit)
-is always present; the others appear only while their source is fitted:
+### IO Map
+Interactive memory map of custom chipset registers (`$DFF000` - `$DFF1FE`).
+Selecting a register decodes its individual bitfields (e.g. `DMACON`, `INTENA`,
+`BPLCON0`, `ADKCON`).
 
-- **MIDI** -- the in-process synthesizer on the serial port (the emulated
-  MT-32, with its control-ROM version, or the Coppersynth General MIDI
-  synth), with a sounding/idle state and the trace's peak level. A host
-  MIDI endpoint has no row: it sounds on the host, outside the mixer.
-- **Toccata** -- the sound board's codec output (what an AHI driver plays
-  through it): playback state, the latched sample rate and format, and the
-  board FIFO's fill level.
-- **MHI** -- the MPEG audio decoder board: transport state
-  (stopped/playing/paused/out of data), the stream's native sample rate,
-  the descriptor queue depth, and the volume/pan/bass/mid/treble param
-  latches.
-
-The oscilloscope traces a channel's output level (the DAC sample scaled by
-AUDxVOL), so both the waveform and its loudness are visible; a source row's
-scope traces that source's mixed stereo level, and when the machine's CD
-drive is a SCSI CD-ROM unit the CD row's status line reports its play
-operation (playing/paused/done, track, and MSF position). Clicking **Mute**
-silences that channel or source in the host output while leaving its trace
-drawn (greyed) so you can still see what it would play. Mutes are developer
-aids: they change only the audio you hear, never the emulated machine state,
-and are not part of a save state.
-
-**Memory** is a hex/ASCII dump, 256 bytes per page. Type a hex address in
-the `$` box and press Enter to jump there; the `<` and `>` buttons page by
-256 bytes, the mouse wheel and cursor keys scroll by 16-byte rows, and
-PageUp/PageDown by whole pages. Four buttons sit above the dump:
-
-- **Find** searches CPU-visible memory for the `$` box's hex byte pattern
-  (`4E75`, or spaced pairs like `C0 FF EE`), starting past the previous
-  hit and wrapping the decoded memory map once. The sweep covers every RAM
-  bank the machine decodes -- chip, slow, Zorro II, and on a 32-bit CPU the
-  motherboard (`$04000000`), CPU-slot (`$08000000`), and Zorro III banks --
-  plus the Kickstart and extended-ROM windows. The view jumps to the match.
-- **Save...** writes the `$` box's `ADDR LEN` (hex) region to a file via
-  a save dialog -- the GUI counterpart of `COPPERLINE_DBG_RAMDUMP`.
-- **Writer?** reports the last instruction that wrote the word at the
-  `$` box address: `$C09580: 0012->0034 by pc $C033C2 (frame 1234)`,
-  replayed from the reverse-debug snapshot ring (so it sees every bus
-  master, and costs a short replay). The result also lands on the Break
-  tab until the next stop.
-- **Bits** toggles a 1-bit-per-pixel bitplane view of the same memory:
-  set bits are drawn light, one row per stride. Type a decimal stride in
-  the `$` box when toggling to set the row width (default 40 bytes = a
-  320-pixel plane), then wheel/cursor keys scroll by rows and `<`/`>`
-  page by screenfuls. Point it at a bitplane pointer from the Chipset
-  tab to eyeball graphics data directly -- misaligned strides show as
-  the familiar diagonal shear.
-
-**IO Map** is a browsable map of the whole custom bank ($DFF000-$DFF1FE):
-every word offset with its hardware name and live value (write-only
-registers show their last-written latch, `----` marks offsets with no
-latch at all). Arrows and the mouse wheel move the selection, PageUp/Down
-change page, and the `$` box jumps to an offset (`96`) or address
-(`DFF096`). The pane below decodes the selected register's bits by name
--- DMACON's enables, INTENA/INTREQ sources, BPLCON0's mode flags and
-plane count, ADKCON, CLXCON, BEAMCON0, FMODE, and the playfield
-scroll/priority fields.
-
-**Break** manages breakpoints and watchpoints (next section) and shows the
-reason for the last stop.
+### Break
+Manages active breakpoints, memory watchpoints, and custom register write traps.
 
 ```{figure} ../images/ui-preview-debugger-break.png
 :alt: The Break tab
 :width: 90%
 
-The Break tab with a PC breakpoint, a memory watchpoint, and a
-chipset-register watch armed.
+Active PC breakpoints, memory watchpoints, and custom register traps.
 ```
 
-**Wave** arms and monitors the VCD "logic analyser" export
-([](waveform.md)): **Arm** starts a capture from the order-free spec in the
-`$` box -- any of an output path, a trigger (`PC=C033C2`, `BEAM=100:64`,
-`REG=180`, `TIME=2.5`, `NOW`), a duration (`20000CCK`, `2F`, `50MS`), and a
-signal-group list (`CPU,BUS,COPPER`); an empty box means all defaults.
-**Stop** finishes the file early. The tab shows the capture's state
-(armed / capturing with progress / done), its trigger, and where the file
-is going. The console `WAVE` command drives the same capture.
+### Wave
+Interface for arming and configuring VCD logic analyzer waveform exports (see [](waveform.md)).
 
-## Breakpoints and watchpoints
+## Breakpoints, watchpoints, and traps
 
-On the Break tab, type an address into the `$` box and toggle any of:
+From the **Break** tab, enter a target address or identifier:
 
-- **Break** -- a PC breakpoint. The machine stops *before* the instruction
-  at that address executes.
-- **Watch** -- a memory word watchpoint. The machine stops when the word
-  changes, whichever bus master wrote it, and the stop names the true
-  writer: CPU stops report the writing instruction's PC, while blitter
-  and disk-DMA writes are flagged at their write sites and report the
-  source with the beam position (`Watch $060000: 0000->BEEF (blitter
-  write, v44 h100)`). The console's `WATCH ADDR CPU|BLITTER|DISK` form
-  additionally filters a watch to one writer -- "stop only when the
-  blitter touches this" -- with other writers just moving the baseline.
-  The current value is shown live in the list.
-- **Reg** -- a chipset-register write watch. `96` and `DFF096` both mean
-  DMACON. The machine stops on *every* write, CPU or Copper, and reports
-  the writer and beam position.
-- **Beam** -- a beam trap: the machine stops when the Agnus beam reaches a
-  position. Unlike the other boxes it takes *decimal* `VPOS [HPOS]`
-  (matching the `v=`/`h=` coordinates the Chipset tab and Frame Analyzer
-  display); `HPOS` omitted means the start of the line. The check rides
-  the beam advance itself, so it fires at exact colour-clock granularity
-  and even while the CPU sits in `STOP`. A persistent beam trap re-fires
-  every frame, which makes it a raster-line single-step: resume, and the
-  machine stops at the same beam position of the next frame.
-- **Catch** -- an exception catchpoint: the machine stops when the CPU
-  enters the vector, at the handler's entry. The box takes `irq N`
-  (interrupt level 1-7, e.g. `irq 3` for the vertical blank), `trap N`
-  (TRAP #0-15), or `vec N` (any raw vector number: `vec 2` bus error,
-  `vec 4` illegal instruction, `vec 8` privilege violation). Every entry
-  path is seen -- traps, faults, and interrupts alike -- so `irq` catches
-  fire on the exact dispatch, before the handler's first instruction.
-
-**Clear all** removes everything. Breakpoints and watchpoints stay armed
-when the window is closed: a hit pauses the machine, reopens the debugger
-on the Break tab with the reason highlighted, and shows it as an on-screen
-message. A breakpoint also shows as a `*` next to its line in the CPU
-tab's disassembly.
+- **Break:** PC breakpoint. Execution halts before the instruction executes.
+- **Watch:** Memory watchpoint. Halts when memory at the specified address is modified
+  by CPU, Blitter, or DMA channels.
+- **Reg:** Custom register write trap (e.g. `DMACON` or `96`). Halts whenever CPU
+  or Copper writes to the register.
+- **Beam:** Raster beam trap. Halts when the beam reaches the specified decimal `VPOS`
+  (and optional `HPOS`).
+- **Catch:** Exception vector trap (e.g. `irq 3`, `trap 0`, `vec 2`).
 
 ### Conditional and counted breakpoints
 
-The Break box accepts more than a bare address:
+The breakpoint address field accepts conditional expressions and ignore counts:
 
-```
+```text
 ADDR [LHS OP RHS] [IGN N]
 ```
 
-- **Condition** `LHS OP RHS` -- the breakpoint only stops when it holds.
-  Operands are registers (`D0`-`D7`, `A0`-`A7`, `PC`, `SR`), a memory word
-  `M<hex>` (e.g. `MC00002`), or a bare hex immediate. A register name wins
-  over hex, so write an immediate that looks like a register with a leading
-  zero (`0D0`). Operators are `EQ NE LT GT LE GE` and `AND` (a bit test:
-  true when `LHS & RHS` is non-zero).
-- **Ignore count** `IGN N` -- skip the first `N` (hex) qualifying hits, then
-  stop on the next one. The Break list shows the running `ign hits/N`.
+- **Operands:** Registers (`D0`-`D7`, `A0`-`A7`, `PC`, `SR`), memory words (`M<hex>`, e.g. `MC00002`),
+  or hex constants.
+- **Operators:** `EQ`, `NE`, `LT`, `GT`, `LE`, `GE`, `AND` (bitwise test).
+- **Ignore count (`IGN N`):** Skips the first `N` qualifying hits.
 
-Examples: `C033C2 D0 EQ 5` stops at `$C033C2` only when `D0` is 5;
-`40 MC00002 AND 4000 IGN A` stops at `$40` once the word at `$C00002` has
-bit `$4000` set, after ten earlier qualifying passes.
+Examples:
+- `C033C2 D0 EQ 5`: Breaks at `$C033C2` only when `D0` equals 5.
+- `40 MC00002 AND 4000 IGN A`: Breaks at `$40` when bit `$4000` of word `$C00002` is set,
+  after skipping 10 occurrences.
 
 ## Transport controls
 
-| Control | Key | Effect |
+| Button | Key | Action |
 |---|---|---|
-| Run / Pause | `R` | Resume or pause the machine |
-| Step | `S` | Execute exactly one instruction (into calls) |
-| Step Over | `O` | Run a BSR/JSR/TRAP callee to completion, stopping after the call |
-| Step Out | `U` | Run until the current subroutine returns to its caller |
-| Frame | `F` | Run to the next video frame and re-render the display |
-| Line | `L` | Run to the start of the next scanline (a one-shot beam trap) |
-| Run to `$` | -- | Run until the PC reaches the address in the box |
-| &lt; Frame | -- | Step one video frame *backward* |
-| &lt; Step | -- | Step one instruction *backward* (see [](reverse)) |
-| &lt; Run | -- | Run *backward* to the previous breakpoint hit |
+| **Run / Pause** | `R` | Resume or pause emulation |
+| **Step** | `S` | Single-step one instruction |
+| **Step Over** | `O` | Step over subroutine call (`BSR`/`JSR`/`TRAP`) |
+| **Step Out** | `U` | Run until current subroutine returns |
+| **Frame** | `F` | Advance emulation by one video frame |
+| **Line** | `L` | Advance emulation to start of next scanline |
+| **`< Frame`** | -- | Step backward one video frame |
+| **`< Step`** | -- | Step backward one instruction (see [](reverse.md)) |
+| **`< Run`** | -- | Run backward to preceding breakpoint |
 
-The `R`/`S`/`O`/`U`/`F`/`L` keys act while the debugger window has the focus
-and the box is unfocused (while it is focused they are text input); in the
-main window those keys belong to the Amiga. **Run to $**, **Step Over**, **Step Out**,
-and **Line** are bounded by an instruction budget so a never-returning call
-or never-reached address cannot wedge the UI; if the budget runs out, the
-debugger stays paused. Step Out detects the return by the stack pointer
-rising past its value at entry, so nested calls and interrupt handlers do
-not end it early. If the CPU is sitting in a `STOP`, stepping fast-forwards
-device time to the interrupt that wakes it, exactly as the live core would.
+(frame-analyzer-pane)=
+## Frame Analyzer
 
-## Editing memory and registers
-
-While paused you can patch state live from the `$` box and the **Poke** /
-**Set Reg** button (the second transport row, on the Memory and CPU tabs):
-
-- On the **Memory** tab, type `ADDR VALUE` (two hex words) and click
-  **Poke** to write a 16-bit word. ROM and device windows are left
-  untouched, exactly like the GDB memory-write path.
-- On the **CPU** tab, type `REG VALUE` (e.g. `D0 1234`, `PC F80000`; `SP`
-  aliases `A7`) and click **Set Reg**.
-
-**Frame** is the tool for raster work: combined with the Chipset and Copper
-tabs it lets you single-step a Copper effect one frame at a time and watch
-the register state the beam will replay.
-
-## Frame Analyzer pane
-
-Pick **Frame Analyzer...** from the status-bar menu to pause the machine and
-open the chip-bus frame analyzer in a separate tool window, leaving the
-normal emulated display visible in the main window. It can remain open next
-to the debugger window.
-
-The pane has two tabs, two views of the same paused machine. **Beam** answers
-"what owned the chip bus at each colour clock", over the whole captured Agnus
-beam frame rather than just the TV-presented display: the trace includes
-vertical and horizontal overscan, blanking, and the visible display window.
-**Memory** answers "where in the address space is anything happening" -- see
-[the Memory tab](#frame-analyzer-memory-tab) below.
+Open the Frame Analyzer via the status bar menu to inspect chip-bus slot allocations
+and memory access patterns.
 
 ```{figure} ../images/ui-preview-frame-analyzer.png
-:alt: The Frame Analyzer with the picture underlay enabled
+:alt: The Frame Analyzer
 :width: 90%
 
-The Frame Analyzer's Beam tab: chip-bus owner heatmap over the picture
-underlay, the selected-scanline strip, and per-owner colour-clock counters.
+Frame Analyzer: chip-bus owner heatmap overlaid on rendered frame.
 ```
 
-The Beam tab's heatmap is indexed by beam position: X is `hpos` colour clocks and Y
-is `vpos` lines. Each cell records the chip-bus owner for that colour clock:
-refresh, bitplane, sprite, disk, audio, Copper, blitter, CPU, or idle. The
-white outline marks the framebuffer display area that Copperline captured for
-presentation; the orange box is the programmed display window (DIW) and the
-cyan verticals are the bitplane fetch bounds (DDFSTRT/DDFSTOP), decoded from
-the frame-start registers (mid-frame changes appear as write markers).
-Register-write markers show CPU, Copper, and interrupt-time custom-register
-writes at their beam positions -- hover a slot to inspect them: the writes
-within roughly one heatmap pixel of the pointer are decoded (writer,
-register, value, and exact beam position) under the heatmap, and the same
-readout follows the selected slot when the pointer is elsewhere.
+### Beam tab
+Displays a 2D heatmap indexed by raster beam coordinates (`X` = colour clock HPOS,
+`Y` = scanline VPOS). Each cell indicates which subsystem owned the chip bus during
+that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Refresh, Idle).
 
-Click or drag across the heatmap to select a beam slot. The cursor keys nudge
-the selector one colour clock or line at a time. The lower strip expands that
-selected scanline, so horizontal DMA contention in overscan is easier to
-inspect. The right-hand counters summarize total colour clocks per owner, the
-percentage of busy-blitter time that the blitter actually received, and which
-owners consumed cycles while the blitter was waiting.
-
-The pane has the same transport rhythm as the debugger:
-
-| Control | Key | Effect |
-|---|---|---|
-| Run / Pause | `R` | Resume or pause while continuing to collect frame traces |
-| Frame | `F` | Run exactly one frame and show the completed trace |
-| To slot | `T` | Run until the beam reaches the selected slot |
-| Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
-| Beam scrub | `B` | Show the picture only up to the selected slot |
-| Beam / Memory | `M` | Switch between the beam view and the memory heat map |
-
-**Run / Pause** and **Frame** work the same on both tabs; **To slot**, the
-underlay and the scrub belong to the beam view and are hidden on the Memory
-tab, which has no selected beam slot.
-
-Opening the pane starts a partial trace immediately; pressing **Frame**
-captures a clean full frame. Closing it restores the run/pause state selected
-inside the pane and disables the tracing hot path.
-
-While the analyzer is open, every blit started in the traced frame is
-recorded (control words, size, channel pointers, and the beam positions
-where it started and finished). The console's `BLITS` command lists them,
-and selecting a slot inside a blit's beam span names it on the
-selected-slot line -- click the brown blitter run that is eating your
-frame and see which blit it is.
-
-Click a slot (or nudge the selection with the cursor keys) and press
-**To slot** to run the machine until the beam reaches exactly that colour
-clock -- a one-shot beam trap, reported like any other debugger stop. It
-answers "what is the machine doing when the beam is *here*" directly from
-the picture: select the glitch, run to it, and inspect the CPU/Copper
-state at that moment.
-
-Ticking **Picture underlay** draws the traced frame's rendered picture under
-the heatmap, dimmed so the DMA colours stay readable: the picture shows
-through idle slots and owned slots blend their owner colour over it. That
-correlates bus activity spatially with the picture -- a bitplane fetch block
-sits over the graphics it fetches, a Copper colour split lands on the raster
-line where the picture changes. The underlay is re-rendered from the trace's
-frame in beam coordinates (none of the presentation recentring or TV masking
-is applied), so it lines up with the white display box exactly, and the extra
-render reads a snapshot only -- it never perturbs the emulation.
-
-**Beam scrub** turns the underlay into a beam-time scrubber: only what the
-CRT had drawn by the time the beam reached the selected slot shows at
-normal underlay brightness; everything past it ghosts at low brightness.
-(Enabling it with the selection still at or before the display window's
-top-left corner -- where nothing has been drawn yet -- would ghost the
-whole picture, so the selection snaps to the end of the frame instead
-and scrubbing backward peels the picture away.)
-Because Copperline's renderer replays register writes at their recorded
-beam positions, every pixel before the cursor is exactly what the display
-carried at that instant -- drag the selection (or hold a cursor key) and
-you watch the Copper build the frame line by line: palette splits snap in
-at their WAIT lines, sprites appear when their DMA lines pass, screen
-splits land where the pointers were rewritten. Combined with **To slot**,
-"scrub to the artefact, then run the machine to that exact colour clock"
-turns a what-is-the-beam-doing question into two clicks.
+- **Picture underlay (`U`):** Overlays the rendered video frame beneath the bus heatmap.
+- **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
+- **To slot (`T`):** Advances execution until the beam reaches the selected colour clock.
 
 (frame-analyzer-memory-tab)=
-### Memory tab: the memory heat map
-
-The Beam tab says what owned the chip bus at a colour clock. It does not say
-*where in memory* anything is happening, which is the question when a display
-is drawn from the wrong buffer, a decruncher writes somewhere unexpected, or
-a DMA channel is pointed at the wrong bank. The **Memory** tab (`M`) paints
-the address space instead of the beam.
+### Memory heatmap tab
 
 ```{figure} ../images/ui-preview-frame-analyzer-memory.png
-:alt: The Frame Analyzer's Memory tab showing the memory heat map
+:alt: The Frame Analyzer Memory tab
 :width: 90%
 
-The Memory tab: the address-space heat map, the window presets built from
-the machine's fitted RAM banks, the per-toucher census, and the pinned
-cell's readout.
+Frame Analyzer Memory tab displaying address space activity.
 ```
 
-The map is a 256x256 grid of cells over a window of the address space, so a
-16 MiB window gives one cell per 256 bytes and a 512 KiB chip RAM bank one
-cell per 8. Each cell is coloured by what last touched it and fades to black
-over 32 frames, so what is lit is roughly the last half second of activity
-rather than everything since the map was armed. The touchers are CPU reads
-(dull red; instruction fetches count, so the map also shows where the CPU is
-executing), CPU writes (bright red), the Copper (yellow), and the bitplane
-(blue), sprite (green) and audio (cyan) DMA channels. The legend reserves
-orange for the blitter and magenta for the disk, but those two engines are
-not yet wired into the map: their accesses go unrecorded, and a blit's
-destination stays cold unless the CPU or Copper also touches it. What is
-recorded comes from bus activity -- the map knows which engine touched
-which address, and nothing about what program is running.
-
-The buttons under the header move the window. They are built from the fitted
-machine's decoded RAM banks -- **Chip**, **Slow**, **MB** (Ramsey
-motherboard), **CPU** (accelerator/CPU-slot), and one per Zorro RAM board
-(**Z2** or **Z3**, with the base address appended when two would otherwise
-share a name) -- plus **24-bit** for the whole $000000-$FFFFFF space (chip and slow
-RAM, the custom registers, the CIAs, and the Zorro II space in one view).
-Entering the tab arms the map over chip RAM: it is the bank every chip-bus
-engine works out of and usually the smallest fitted one, so its cells cover
-the fewest bytes each. The list comes from the machine's decoded bank map
-rather than a fixed set of addresses, which is also why the window is movable
-at all: the motherboard, CPU-slot and Zorro III banks a 32-bit CPU sees live
-above the 24-bit space entirely, and a board sits wherever autoconfig put it.
-Moving the window starts a cold map, since the cells would otherwise carry
-activity from addresses they no longer name. Switching tabs does not: the
-recording survives a trip to the Beam tab and back.
-
-The column right of the map is the census and the legend at once: every
-toucher keeps a row -- cells held and the bytes they cover -- including the
-ones holding nothing, so the rows never move as activity comes and goes.
-
-Click a cell to pin it. The readout under the map names the pinned cell's
-address range, what last touched it, and how many frames ago; while the
-pointer is over the map it names the hovered cell's range instead. The cursor
-keys nudge the pinned cell one cell at a time (from the centre of the grid if
-nothing is pinned yet), clamped at the grid's edges.
-
-The map is the same one `memory.heatmap` arms over the
-[control protocol](control.md): there is one map per machine, so the last
-window request wins, whichever side made it. Closing the pane releases the
-map only if the pane owns it. The pane becomes the owner by arming a map
-where none was armed (entering the tab, or picking a preset while nothing
-is armed); any `memory.heatmap` request takes the ownership over, so a
-protocol-driven map keeps recording after the window is closed.
+The Memory tab displays a 256x256 grid representing memory activity across configured
+RAM banks (Chip, Slow, Fast, Motherboard, Zorro II/III). Cells reflect recent read/write
+activity by subsystem and fade over 32 frames.

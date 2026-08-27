@@ -1,12 +1,12 @@
 # Graffity [Zorro II]/[Zorro III] model
 
-Atéo Concepts' Graffity boards reuse the same CL-GD5428 core as
+Ateo Concepts' Graffity boards reuse the same CL-GD5428 core as
 [Picasso II+](picasso2) (`CirrusGd5426::new_gd5428`), so their register,
 VRAM, and BitBLT behaviour is identical to that model. What differs is the
 autoconfig identity and window layout -- Graffity has its own registered
 manufacturer ID (2092) and wires the switch-strobe and VGA-register ranges
 differently from Picasso II. See [](../zorro) for the autoconfig chain and
-[](video) for presentation.
+[](video.md) for presentation.
 
 ## Zorro II layout
 

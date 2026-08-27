@@ -1,169 +1,129 @@
 # Getting started
 
-To try Copperline without installing anything, a WebAssembly build runs
-in the browser at [copperline.dev/try](https://copperline.dev/try/); see
-[](browser) for what it can do. The rest of this chapter covers the
-native desktop build.
+Copperline can be run as a native desktop application or in the browser
+at [copperline.dev/try](https://copperline.dev/try/). This chapter covers
+system requirements, installation, building from source, and initial setup.
 
-## Requirements
+## System requirements
 
-- Rust 1.93+ (stable). Tested with Rust 1.96.
-- macOS, Linux, or Windows. There is no SDL2 dependency: video uses
-  `winit` + `pixels`, audio uses `cpal`, and gamepads use the pure-Rust
-  `gilrs` crate.
-- A GPU backend for presentation: Metal on macOS, DX12 on Windows, and
-  **Vulkan on Linux** (see [](#vulkan-is-required-on-linux)).
-- Fedora build dependencies:
-  `sudo dnf install alsa-lib-devel systemd-devel gcc`.
-- A boot ROM. Copperline ships with the [AROS](http://www.aros.org/)
-  open-source Kickstart replacement and boots it by default, so it runs out
-  of the box with no ROM of your own. It also boots Kickstart 1.3, 2.05, and
-  3.1 (including the CDTV and CD32 extended ROMs) as well as
-  [DiagROM](https://www.diagrom.com/). Main Kickstart images must be exactly
-  512 KiB; CDTV/CD32 extended ROM sizes are covered in
-  [](configuration#top-level).
+- **Rust:** 1.93 or newer (tested with Rust 1.96).
+- **Supported operating systems:** macOS, Linux, and Windows.
+- **Graphics backend:** Metal on macOS, Direct3D 12 on Windows, and Vulkan on Linux
+  (see [](#vulkan-is-required-on-linux)).
+- **Linux build dependencies (Fedora):** `sudo dnf install alsa-lib-devel systemd-devel gcc`.
+- **Boot ROM:** Copperline includes the open-source [AROS](http://www.aros.org/)
+  Kickstart replacement and boots it by default. It also supports official
+  Commodore Kickstart ROMs (1.3, 2.05, 3.1, plus CDTV and CD32 extended ROMs)
+  and [DiagROM](https://www.diagrom.com/). Standard Kickstart ROM images must
+  be 512 KiB.
 
 ## Installing on macOS (Homebrew)
+
+To install using Homebrew:
 
 ```sh
 brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
 brew install copperline
 ```
 
-The formula builds from source, so the binary is compiled locally and is not
-subject to macOS Gatekeeper quarantine: there is no Security & Privacy
-override to click through, unlike a downloaded prebuilt app. Use
-`brew install --HEAD copperline` to build the latest `main` instead of the
-most recent tagged release, then run `copperline` from the terminal.
+To build directly from the latest development commit:
 
-For a no-compiler install, download `Copperline-X.Y.Z-macos-universal.dmg`
-from the [releases page](https://github.com/CopperlineHQ/Copperline/releases),
-open it, and drag `Copperline.app` onto the Applications shortcut. The app is a
-universal binary that runs natively on Apple Silicon and Intel, and bundles the
-AROS boot ROM, so it runs out of the box. The image is not code-signed or
-notarized, so on first launch Gatekeeper refuses to open it; right-click (or
-Control-click) the app and choose **Open**, then confirm. macOS remembers the
-choice. If it still refuses, clear the download quarantine with
-`xattr -dr com.apple.quarantine /Applications/Copperline.app`.
+```sh
+brew install --HEAD copperline
+```
+
+Pre-built macOS application bundles (`Copperline-X.Y.Z-macos-universal.dmg`) are
+also available on the [releases page](https://github.com/CopperlineHQ/Copperline/releases).
+Mount the disk image and copy `Copperline.app` to `/Applications`. If macOS
+quarantine blocks initial launch, right-click the app and choose **Open**, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Copperline.app
+```
 
 ## Installing on Linux
 
-Two channels are provided.
+### Flatpak
 
-**Flatpak** (recommended) works on any distribution and pulls in the GPU,
-audio and portal stack from the Freedesktop runtime, so there is nothing else
-to install:
+Flatpak packages include all runtime dependencies and work across distributions:
 
 ```sh
 flatpak install flathub dev.copperline.Copperline
 flatpak run dev.copperline.Copperline
 ```
 
-**AppImage** is a single self-contained file that needs no installation:
-download `Copperline-X.Y.Z-<arch>.AppImage` from the
-[releases page](https://github.com/CopperlineHQ/Copperline/releases), then:
+### AppImage
+
+Standalone AppImage binaries are provided on the
+[releases page](https://github.com/CopperlineHQ/Copperline/releases):
 
 ```sh
 chmod +x Copperline-*.AppImage
 ./Copperline-*.AppImage
 ```
 
-Both bundle the AROS boot ROM, so they run out of the box. Packaging sources
-live in `packaging/flatpak/` and `packaging/appimage/`.
-
+(vulkan-is-required-on-linux)=
 ### Vulkan is required on Linux
 
-The display is presented through wgpu's Vulkan backend. The OpenGL fallback
-is disabled because wgpu initializes its EGL instance without a display
-handle and silently selects Mesa's "surfaceless" platform, which cannot be
-paired with an on-screen window; adapter selection then fails. The symptom is
-the window flashing open and immediately exiting with:
+On Linux, presentation uses the Vulkan backend via `wgpu`. If no Vulkan adapter
+is found, the application exits at launch.
 
-```
-ERROR copperline::video::window] pixels init failed: No suitable `wgpu::Adapter` found.
-```
+Modern GPUs generally provide hardware Vulkan support through Mesa drivers.
+For virtual machines or older hardware, install the software Vulkan driver (lavapipe):
 
-The fix is to provide a Vulkan driver. Any GPU from roughly Intel Skylake /
-2015 onward ships a hardware Vulkan driver in `mesa`. Older hardware, a
-headless host, or a VM can use the software lavapipe ICD instead:
+- **Arch Linux:** `sudo pacman -S vulkan-swrast`
+- **Debian / Ubuntu:** `sudo apt install mesa-vulkan-drivers`
+- **Fedora:** `sudo dnf install mesa-vulkan-drivers`
 
-- Arch: `sudo pacman -S vulkan-swrast`
-- Debian/Ubuntu: `sudo apt install mesa-vulkan-drivers`
-- Fedora: `sudo dnf install mesa-vulkan-drivers`
+The Flatpak build bundles lavapipe by default.
 
-Copperline renders entirely on the CPU and only asks the GPU to blit one
-framebuffer per frame, so software Vulkan is perfectly adequate. The Flatpak
-runtime already includes lavapipe, so the Flatpak needs no extra package.
-`WGPU_BACKEND` overrides backend selection if you need to force one for
-debugging.
-
-## Building
+## Building from source
 
 ```sh
 cargo build --release
 ```
 
 ```{warning}
-Always use a release build to run software. Debug builds are far too slow
-for real-time emulation.
+Always run Copperline with `--release`. Unoptimized debug builds are not fast
+enough for real-time emulation.
 ```
 
-The test suite needs no external assets:
+To run the test suite:
 
 ```sh
-cargo test                          # asset-free test suite
-cargo test --release -- --ignored   # integration tests (need local ROMs/disks)
+cargo test                          # Unit tests (no external assets required)
+cargo test --release -- --ignored   # Integration tests (requires local test media)
 ```
 
 ## First boot
+
+Run Copperline from the terminal:
 
 ```sh
 ./target/release/copperline
 ```
 
-With no arguments and no `./copperline.toml` in the current directory,
-Copperline opens the **configuration screen** -- a launcher that lets you pick
-a machine, configure everything about it, load and save `.toml` configs, and
-press **Run** to boot. See [](ui#machine-configuration-screen) for a full tour.
-The screen starts from the configuration saved with its **Save default**
-button, if you have saved one; otherwise from the built-in defaults: the
-A500 Rev 6A -- the most
-common and most-targeted Amiga: a 68000 at ~7.09 MHz, the ECS "Fatter" 8372A
-Agnus (1 MiB chip reach plus the software PAL/NTSC switch) with the original
-OCS 8362 Denise, 512 KiB chip RAM plus 512 KiB of trapdoor slow RAM, PAL, and
-the bundled AROS ROM (when no ROM is named, Copperline locates the AROS image
-that ships with it -- see [](configuration#top-level)).
+When started with no arguments and no `copperline.toml` in the current directory,
+Copperline displays the interactive launcher screen where you can configure
+machine models, memory, storage, and peripherals.
 
-Copperline boots directly, skipping the configuration screen, whenever a
-machine is specified: a `./copperline.toml` in the current directory, an
-explicit `--config` file, a ROM or override on the command line, or any
-headless/scripted run. Those runs also start from the saved default when
-neither `--config` nor `./copperline.toml` names a machine; `--factory`
-ignores it (see [](configuration)). You can reopen the configuration screen
-at any time from the menu (see [](ui#machine-configuration-screen)).
+The default configuration is an Amiga 500 (Rev 6A) with an OCS/ECS chipset,
+512 KiB chip RAM, 512 KiB slow RAM, and the bundled AROS Kickstart replacement.
 
-You can boot your own ROM with a positional argument, or point at a specific
-config file:
+To boot directly into a specific Kickstart ROM or configuration file:
 
 ```sh
 ./target/release/copperline path/to/kickstart.rom
 ./target/release/copperline --config path/to/copperline.toml
 ```
 
-The common machine knobs can also be set straight on the command line,
-without writing a config file at all -- the machine model, chipset, CPU
-(and its clock/FPU), and the chip/fast/slow RAM sizes:
+You can also specify machine parameters via command-line flags:
 
 ```sh
 ./target/release/copperline --model A1200 --fast 8M KICK31.ROM
 ```
 
-See [](configuration#command-line-overrides) for the full list.
-`copperline --help` lists every flag, and `copperline --version` prints
-the release version.
-
-A Kickstart 1.3 machine with no disk boots to the familiar insert-disk
-screen:
+See [](configuration#command-line-overrides) for the full list of CLI flags.
 
 ```{figure} ../images/kick13-insert-disk.png
 :alt: Kickstart 1.3 insert-disk screen
@@ -172,48 +132,33 @@ screen:
 Kickstart 1.3 waiting for a boot floppy.
 ```
 
-To boot a disk, add a floppy section to your config:
+To mount a floppy disk image on boot:
 
 ```toml
 rom = "KICK13.ROM"
 
 [floppy.df0]
-path = "MyGame.adf"
+path = "Game.adf"
 ```
 
-Copperline accepts plain ADF images, gzip-compressed images, single file ZIP
-archives, DMS archives, UAE extended ADFs, and read-only IPF and SCP images.
-In a windowed session you can also just drag a disk image onto the window
-to insert it -- see [](ui#drag-and-drop).
+Supported floppy formats include ADF, ADZ (gzip-compressed ADF), single-file ZIP,
+DMS, extended ADF, IPF, and SCP. In interactive sessions, disk images can also
+be inserted via drag-and-drop into the emulator window.
 
 ## Example configuration
 
-`copperline.example.toml` in the repository root is a commented reference
-covering every option -- machine profiles, CPU/FPU, memory,
-chipset, floppy/HDD/CD images, and audio. Copy it to `copperline.toml`
-(or pass it with `--config`) and edit; it doubles as a worked example for
-the options described in [](configuration).
+A fully commented example configuration is available in `copperline.example.toml`
+in the root of the repository. Copy it to `copperline.toml` or pass it via `--config`:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml
 ```
 
-## Logging
+## Logging and crash reports
 
-Copperline logs through the standard Rust `log`/`env_logger` machinery.
-`RUST_LOG=debug` (or `trace`) prints more detail from the CPU and MMIO
-layers, and is also how the [headless debugger](../debugger/headless)
-output is surfaced.
+Set `RUST_LOG=debug` or `RUST_LOG=trace` in the environment to enable detailed logging.
 
-## Crash reports
-
-If Copperline itself crashes, it writes the crash message and a backtrace
-to `copperline-crash.txt` before exiting, so the details survive launches
-where nobody is watching the terminal (double-clicking `copperline.exe` on
-Windows, desktop launchers). The file is written next to the executable
-where possible, falling back to the current working directory and then the
-system temporary directory when that location is read-only (installed
-Homebrew/AppImage/Flatpak layouts); a run from a terminal prints the path
-chosen. The first crash of a run replaces the file, and any further
-crashes in the same run are appended to it, so it always covers the most
-recent session -- attach it when filing a bug report.
+If an unhandled panic occurs, Copperline writes diagnostic output and a backtrace
+to `copperline-crash.txt` (attempted next to the executable first, falling back to
+the current working directory, and then to the system temporary directory).
+Please include this file when reporting bugs.
