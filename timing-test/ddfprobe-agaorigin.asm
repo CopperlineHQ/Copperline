@@ -15,8 +15,9 @@
 ;
 ; Cross-check basis: an FS-UAE/WinUAE-core A1200 capture of the same lo-res
 ; BPL64 $18/$B8 + standard-DIW constellation hides the full first gulp and
-; fills the window flush at both edges (2026-08-11).  vAmiga is OCS/ECS-only
-; and cannot arbitrate AGA.
+; fills the window flush at both edges (2026-08-11).  Re-verified 2026-08-27
+; on vAmiga 5.0b1's new A1200_2MB AGA setup: the render matches exactly
+; (0 of 202628 pixels differ).
 CUST   equ $dff000
 BMP    equ $40000
 CLIST  equ $60000

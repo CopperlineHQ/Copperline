@@ -418,6 +418,63 @@ Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 28 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
+### vAmiga AGA cross-check (2026-08-27)
+
+vAmiga 5.0 adds an `A1200_2MB` ("Amiga 1200, AGA Chipset, 2MB RAM") config
+scheme, so the AGA probes finally have a second reference implementation.
+From the repository root, with a vAmiga 5.0 (or newer) `VAHeadless` built:
+
+```sh
+VASM=/path/to/vasmm68k_mot ./timing-test/build.sh ddfprobe-agafold   # -> timing-test/*.adf
+VAHEADLESS=/path/to/vAmiga-5/Core/build/VAHeadless \
+  tools/vamiga-ref.sh timing-test/ddfprobe-agafold.adf 16 A1200_2MB \
+  /tmp/ddfprobe-agafold.vamiga.raw test-assets/kick13.rom
+tools/vamiga-aga-compare.py /tmp/ddfprobe-agafold.vamiga.raw \
+  timing-test/golden/ddfprobe-agafold.png
+#    0.000%  0/202628 px  dy=2 dx=0 colours=2 bijective=True
+```
+
+`vamiga-ref.sh` resolves its arguments from the repository root, so pass the
+ADF as `timing-test/<probe>.adf`. The probes take over the machine, so the
+Kickstart is immaterial (vAmigaTS's own AGA scripts boot `A1200_2MB` with a
+1.3 ROM).
+
+Compare with `tools/vamiga-aga-compare.py`, not `tools/vamigats-compare.py`:
+the latter quantizes both sides back to 4-bit guns and compares them
+component by component, which is right for the OCS/ECS cases but scores an
+exact AGA match as a difference. vAmiga runs a YUV
+brightness/contrast/saturation monitor model over the palette, so COLOR00
+`$008` leaves its framebuffer as `$000072` where Copperline replicates the
+nibble to `$000088`. The AGA comparer is transform-invariant instead: it
+requires only that the colour correspondence is a consistent bijection over
+the frame, and reports the alignment it used (vAmiga's cutout starts two beam
+lines below Copperline's row 0, the same `Y_SHIFT` the other comparer
+applies).
+
+Every figure below is the tool's own output against the committed golden:
+
+| probe | vs vAmiga 5.0b1 |
+|---|---|
+| `ddfprobe-agafold` | exact (0 / 202628) |
+| `ddfprobe-agaorigin` | exact |
+| `ddfprobe-ddfmiss` | exact |
+| `agashres-sprites` | exact |
+| `colorlag-aga` | exact |
+| `ddfprobe-agafold2` | 0.051% - one raster line (row 130) at a band edge |
+| `agaplanes` | 0.091% - one 8-px column (x 678-685) at a band's right fetch edge |
+| `rdram-aga` | 0.098% - the two band-transition lines (rows 38 and 166) |
+| `agafetch-mode` | **8.844% - the FMODE 10 band** |
+| `dblpal-hires-lace` | not comparable (DblPAL SHRES/laced canvas) |
+
+Do not re-bless `agafetch-mode` to match vAmiga. Hardware sides with
+Copperline: booting the vAmigaTS `Agnus/Registers/FMODE/fmode10` disk itself,
+Copperline reproduces the structure in that suite's real-A1200 photograph,
+while vAmiga 5.0b1 paints magenta and white inside the staircase blocks
+(3.9% / 0.5% of the lower band) where the photograph has none. The local
+vAmiga build reproduces the suite's committed `fmode10_aga.raw`
+byte-for-byte, so that is the reference's own behaviour, not a build
+artefact.
+
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
 (per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
@@ -441,7 +498,8 @@ grid -- earliness plus the 8-cck pipeline -- show the next gulp one full
 gulp left, swept against bitplane-pointer byte offsets on the Alien
 Breed II AGA playfield constellation -- the issue #248 horizontal
 scroll-jump regression class; boots the A1200/AGA machine shape,
-FS-UAE-verified band by band since vAmiga cannot arbitrate AGA),
+FS-UAE-verified band by band, and re-verified against vAmiga 5.0b1's
+`A1200_2MB` AGA setup),
 `ddfprobe-agafold2` (the fold boundary as a function of the DDFSTRT
 phase on the 64-bit fetch: the boundary saturates past the top of the
 tap range instead of wrapping, so the SANITY Roots II AGA

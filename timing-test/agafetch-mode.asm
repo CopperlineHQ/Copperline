@@ -8,6 +8,17 @@
 ; The pointer advances four bytes in every band. BPL1MOD makes the 22-word
 ; standard row consume 24 source words so the eight-word pattern repeats.
 ; Cross-checked with vAmigaTS Agnus/Registers/FMODE/fmode10 and fmode11a-o.
+;
+; DO NOT re-bless this probe to match vAmiga.  vAmiga 5.0b1's new A1200_2MB
+; AGA setup disagrees with Copperline over the FMODE 10 band exactly (rows
+; $78..$AF, 17920 of 202628 pixels; the other two bands match to the pixel),
+; and hardware sides with Copperline: running the vAmigaTS fmode10 test disk
+; itself, Copperline reproduces the structure in that suite's real-A1200
+; photograph, while vAmiga 5.0b1 renders magenta and white inside the
+; staircase blocks (3.9% / 0.5% of the lower band) where the photograph has
+; none.  vAmiga 5.0b1 reproduces the suite's committed fmode10_aga.raw
+; byte-for-byte, so this is that reference's own behaviour, not a local build
+; artefact.  Checked 2026-08-27.
 CUST    equ $dff000
 BMP     equ $40000
 CLIST   equ $60000

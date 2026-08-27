@@ -4,7 +4,9 @@
 ; applies them one hires pixel later than OCS/ECS Denise. The dense vertical
 ; comb makes a one-sample regression visible across the whole golden image.
 ; Calibrated against vAmigaTS Denise/Registers/COLOR/colorlag and its real
-; A1200 reference.
+; A1200 reference, and re-verified 2026-08-27 on vAmiga 5.0b1's A1200_2MB
+; AGA setup, which places every comb edge identically (0 of 202628 pixels
+; differ).
 CUST    equ $dff000
 CLIST   equ $60000
 

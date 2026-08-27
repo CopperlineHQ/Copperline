@@ -31,9 +31,13 @@ The repo already records the gap in its own words:
   row 22 -- a hand-carried number.
 - Row 28-30 (68060 dispatch) says outright: "real-hardware captures welcome to
   calibrate the split".
-- `ddfprobe-agafold` and `dblpal-hires-lace` are marked FS-UAE-verified only,
-  "since vAmiga cannot arbitrate AGA". For the AGA probes there is currently
-  **one** reference and no way to break a tie.
+- `dblpal-hires-lace` is FS-UAE-verified only: vAmiga 5.0 added an AGA
+  `A1200_2MB` setup (see timing-test/README.md "vAmiga AGA cross-check"), but
+  its regression screenshot is a fixed 716x285 PAL-sized raw and cannot
+  represent that probe's DblPAL SHRES/laced canvas, so it still has **one**
+  reference. The other AGA probes now have two, and where they disagree the
+  tie needs hardware: `agafetch-mode` diverges from vAmiga over the FMODE 10
+  band, and only the vAmigaTS real-A1200 photograph settles it.
 - Open items with no ground truth on file: `cpu-write-timing-class-`
   `characterization`, `akiko-sector-slot-order-no-ground-truth`,
   `sprite-dma-spren-edge-provisional-pass-race`,

@@ -29,8 +29,11 @@
 ; in raw px: +30,+32,+34,+94,+96,+126 (bands 1-6, phase 24: linear),
 ; +78,+110,+112 (bands 7-9, phase 28: linear -- the boundary saturates),
 ; +16,-16 (bands 10/13, on-grid: tap 8 linear, tap 56 folded),
-; -16,-32 (bands 11/12), -10,-18 (bands 14/15). vAmiga is OCS/ECS-only
-; and cannot arbitrate AGA; hi-res/SHRES pipeline scaling is not pinned.
+; -16,-32 (bands 11/12), -10,-18 (bands 14/15).
+; Re-verified 2026-08-27 on vAmiga 5.0b1's new A1200_2MB AGA setup: every
+; band position agrees, with one raster line of disagreement at a band edge
+; (104 of 202628 pixels, all on row 130) -- the two models place that single
+; transition line differently.  Hi-res/SHRES pipeline scaling is not pinned.
 CUST   equ $dff000
 BMP    equ $40000
 CLIST  equ $60000

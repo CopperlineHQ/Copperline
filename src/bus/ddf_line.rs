@@ -6,8 +6,9 @@
 //! fetches: missed or invalid DDFSTRT/DDFSTOP comparators, stop drains
 //! through the final fetch unit, and runs carried across line boundaries all
 //! fall out of the flop walk. Wide-FMODE (AGA quantum > 1) fetches keep the
-//! value-window plan; vAmiga (the flop model's hardware-verified source) has
-//! no AGA counterpart to transcribe.
+//! value-window plan: vAmiga, the flop model's hardware-verified source, only
+//! gained an AGA setup in 5.0, so the flop walk has never been transcribed
+//! for it.
 
 use super::*;
 use crate::chipset::ddf_sequencer::{self as seq, DdfSignal, DdfState};

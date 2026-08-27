@@ -6,7 +6,14 @@
 ;   $C0..$FF  bank 5 -> RGB $7A8B9C
 ; BANK and LOCT therefore both have to address reads like writes, and the
 ; COLORxx window must be read-only while RDRAM is active. Cross-checked with
-; vAmigaTS Denise/Registers/COLOR/rdram and its real-A1200 reference.
+; vAmigaTS Denise/Registers/COLOR/rdram and its real-A1200 reference, and
+; re-verified 2026-08-27 on vAmiga 5.0b1's A1200_2MB AGA setup: the same
+; three bands in the same order, differing only on the two band-transition
+; lines (198 of 202628 pixels, rows 38 and 166).  Compare the bands by
+; colour correspondence, not by RGB: vAmiga runs a YUV brightness/contrast/
+; saturation monitor model over the palette, so its readback bands come out
+; as $001522/$637588 where Copperline's raw nibble replication gives
+; $112233/$778899.
 CUST    equ $dff000
 
         lea CUST,a6

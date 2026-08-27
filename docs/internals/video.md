@@ -112,8 +112,9 @@ boundary saturates rather than wrapping at the gulp: arrivals slide
 monotonically later as the phase grows, so once the boundary passes the
 top of the tap range nothing folds, and an exactly on-grid start folds
 from the pipeline alone (taps at or past 16 lo-res px).
-Pinned by two golden probes, both FS-UAE-verified band by band (vAmiga
-is OCS/ECS-only and cannot arbitrate AGA): `ddfprobe-agafold` on the
+Pinned by two golden probes, both FS-UAE-verified band by band and
+re-verified against vAmiga 5.0b1's `A1200_2MB` AGA setup:
+`ddfprobe-agafold` on the
 Alien Breed II AGA playfield constellation (issue #248: lo-res BPL32,
 DDFSTRT `$24` -> earliness 8 px, boundary 24), whose scroller pairs the
 folded taps with a one-gulp pointer step and jumps 32 px for 4 of every
