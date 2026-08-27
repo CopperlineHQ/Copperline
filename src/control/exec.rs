@@ -528,15 +528,18 @@ pub enum InputCmd {
         middle: Option<bool>,
         dx: i32,
         dy: i32,
+        at_seconds: Option<f64>,
     },
     Joy {
         port: u8,
         state: JoyState,
+        at_seconds: Option<f64>,
     },
     Analogue {
         port: u8,
         x: u8,
         y: u8,
+        at_seconds: Option<f64>,
     },
 }
 
@@ -611,11 +614,12 @@ impl InputCmd {
                 middle,
                 dx,
                 dy,
+                at_seconds,
             } => {
                 for (index, state) in [(0u8, left), (1, right), (2, middle)] {
                     if let Some(pressed) = state {
                         emit(
-                            None,
+                            at_seconds,
                             InputAction::MouseButton {
                                 port,
                                 index,
@@ -625,11 +629,20 @@ impl InputCmd {
                     }
                 }
                 if dx != 0 || dy != 0 {
-                    emit(None, InputAction::MouseMove { port, dx, dy });
+                    emit(at_seconds, InputAction::MouseMove { port, dx, dy });
                 }
             }
-            InputCmd::Joy { port, state } => emit(None, InputAction::Joy { port, state }),
-            InputCmd::Analogue { port, x, y } => emit(None, InputAction::Pot { port, x, y }),
+            InputCmd::Joy {
+                port,
+                state,
+                at_seconds,
+            } => emit(at_seconds, InputAction::Joy { port, state }),
+            InputCmd::Analogue {
+                port,
+                x,
+                y,
+                at_seconds,
+            } => emit(at_seconds, InputAction::Pot { port, x, y }),
         }
         (now, later)
     }
@@ -637,6 +650,17 @@ impl InputCmd {
 
 // ---------------------------------------------------------------------
 // Parsing
+
+/// Parse the optional `at_seconds` param shared by the `input.*` methods:
+/// absent means "apply now", present schedules at that emulated time.
+fn parse_at_seconds(p: &ParamReader) -> Result<Option<f64>, CtlError> {
+    match p.f64_opt("at_seconds")? {
+        Some(t) if !t.is_finite() => Err(CtlError::invalid_params(
+            "at_seconds must be a finite number",
+        )),
+        other => Ok(other),
+    }
+}
 
 /// Parse the optional 1-based `port` param (1 or 2), defaulting to
 /// `default`, into the bus's 0-based port index.
@@ -893,14 +917,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             host(HostOp::Input(InputCmd::Key {
                 rawkey: rawkey as u8,
                 kind,
-                at_seconds: match p.f64_opt("at_seconds")? {
-                    Some(t) if !t.is_finite() => {
-                        return Err(CtlError::invalid_params(
-                            "at_seconds must be a finite number",
-                        ))
-                    }
-                    other => other,
-                },
+                at_seconds: parse_at_seconds(&p)?,
             }))
         }
         "input.mouse" => host(HostOp::Input(InputCmd::Mouse {
@@ -910,6 +927,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             middle: p.bool_opt("middle")?,
             dx: p.i32_or("dx", 0)?,
             dy: p.i32_or("dy", 0)?,
+            at_seconds: parse_at_seconds(&p)?,
         })),
         "input.mouse_to" => host(HostOp::MouseTo {
             port: parse_port_param(&p, 1)?,
@@ -937,6 +955,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 green: p.bool_or("green", false)?,
                 yellow: p.bool_or("yellow", false)?,
             },
+            at_seconds: parse_at_seconds(&p)?,
         })),
         "input.analogue" => {
             let (x, y) = (p.u32_req("x")?, p.u32_req("y")?);
@@ -947,6 +966,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 port: parse_port_param(&p, 2)?,
                 x: x as u8,
                 y: y as u8,
+                at_seconds: parse_at_seconds(&p)?,
             }))
         }
         "input.set_port" => {
