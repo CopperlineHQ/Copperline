@@ -974,6 +974,33 @@ impl CirrusGd5426 {
                 };
             }
         }
+
+        // The BLT source and destination addresses are counters, not latches:
+        // a completed transfer leaves them where it stopped. Picasso96's
+        // PicassoII.card depends on it. To fill a run it writes one 8-pixel
+        // tile, replicates it with a blit, then blits the leftover pixels
+        // reprogramming only the width and height -- the remainder is meant to
+        // land wherever the replication ended. Reloading the registers instead
+        // drops it back onto pixels already filled and leaves the tail of every
+        // run unpainted.
+        let dst_span = height.saturating_sub(1) * dst_pitch + width;
+        let src_span = height.saturating_sub(1) * src_pitch + width;
+        let dst_end = if backwards {
+            dst_start.saturating_sub(dst_span)
+        } else {
+            dst_start.saturating_add(dst_span)
+        };
+        let src_end = if backwards {
+            src_start.saturating_sub(src_span)
+        } else {
+            src_start.saturating_add(src_span)
+        };
+        self.gfx[0x28] = dst_end as u8;
+        self.gfx[0x29] = (dst_end >> 8) as u8;
+        self.gfx[0x2a] = ((dst_end >> 16) & 0x1f) as u8;
+        self.gfx[0x2c] = src_end as u8;
+        self.gfx[0x2d] = (src_end >> 8) as u8;
+        self.gfx[0x2e] = ((src_end >> 16) & 0x1f) as u8;
     }
 
     pub fn tick(&mut self, cck: u32) {
@@ -1546,5 +1573,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The fill sequence PicassoII.card uses for a run that is not a whole
+    /// number of 8-pixel tiles: write one tile, replicate it with a blit, then
+    /// blit the remainder with only the width and height reprogrammed. The
+    /// remainder has to land where the replication stopped, so the whole run
+    /// comes out filled.
+    #[test]
+    fn a_blit_leaves_the_address_registers_where_it_stopped() {
+        const TILE: usize = 24; // 8 pixels at 24 bits
+        const RUN: usize = 51; // 17 pixels: two tiles and a 3-byte remainder
+        const DST: usize = 0x1000;
+
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        for (i, byte) in chip.vram[DST..DST + TILE].iter_mut().enumerate() {
+            *byte = (i + 1) as u8;
+        }
+
+        // Replicate the tile once, covering bytes TILE..2*TILE.
+        blit_registers(&mut chip, TILE, 1, TILE, 0, DST + TILE, DST, 0x20);
+        start_blit(&mut chip);
+
+        // The remainder, reprogramming nothing but the width and height.
+        gfx(&mut chip, 0x20, (RUN - 2 * TILE - 1) as u8);
+        gfx(&mut chip, 0x21, 0);
+        gfx(&mut chip, 0x22, 0);
+        gfx(&mut chip, 0x23, 0);
+        start_blit(&mut chip);
+
+        let filled = chip.vram[DST..DST + RUN]
+            .iter()
+            .filter(|b| **b != 0)
+            .count();
+        assert_eq!(filled, RUN, "the tail of the run was left unpainted");
     }
 }
