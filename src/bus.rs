@@ -928,9 +928,10 @@ pub struct Bus {
     /// window plus bitplane pointers during that line for a status bar at
     /// 285-300; the level test resumed fetching in the tail of line 284
     /// and raced the pointer writes, shearing the bar. Re-evaluated at
-    /// every line start (the frame wrap's line zero included - the latch
-    /// itself carries across the wrap, so a window whose DIWSTOP the beam
-    /// never reaches stays open through the vertical blank) and after DIW
+    /// every line start (the video standard's fixed line 312 PAL / 262
+    /// NTSC forces a reset, so a window whose DIWSTOP the beam never
+    /// reaches stays open only to the end of its own frame; the frame
+    /// wrap's line zero then runs its own comparators) and after DIW
     /// writes. `None` means no evaluation has happened on this timeline
     /// (unit fixtures that teleport the beam and poke registers), which
     /// falls back to the level test. Serialized: the value is
@@ -7625,9 +7626,26 @@ impl Bus {
     /// DIWSTRT/DIWSTOP/DIWHIGH write, mirroring the continuously-running
     /// hardware comparators (an equality match on DIWSTOP.V resets the
     /// flop, one on DIWSTRT.V sets it, reset winning a tie; any other line
-    /// leaves it alone). An unprogrammed window (both registers zero, the
-    /// power-on state) keeps the level fallback so a bare machine still
-    /// scans its whole overscan canvas.
+    /// leaves it alone). The video standard's fixed line 312 (PAL) / 262
+    /// (NTSC) also resets the flop, winning over a DIWSTRT match on that
+    /// line, so a window whose DIWSTOP the beam never reaches stays open
+    /// only to the end of its own frame and never bleeds into the next
+    /// frame's top. On the hardwired beam schedule the comparator is the
+    /// fixed standard line exactly as vAmiga models it
+    /// (Sequencer::eolHandler, which deliberately does NOT use the current
+    /// field's last line): an interlaced short field ends one line earlier
+    /// and is not force-reset. VARBEAMEN bypasses the hardwired sync
+    /// decode, and its programmable frame may end before line 312 or run
+    /// past it mid-frame (DblPAL), so there the reset follows the
+    /// programmable frame's last line instead.
+    /// timing-test/vdiwprobe-flop pins the progressive-PAL render, where
+    /// the fixed line and the frame's last line coincide.
+    /// TODO: no hardware evidence yet pins the reset line on interlaced
+    /// short fields or programmable totals; an interlaced or VARBEAMEN
+    /// probe photographed on real hardware would.
+    /// An unprogrammed window (both registers zero, the power-on state)
+    /// keeps the level fallback so a bare machine still scans its whole
+    /// overscan canvas.
     pub(crate) fn reevaluate_diw_vertical_flop(&mut self) {
         let vpos = self.agnus.vpos;
         if display_window_unprogrammed(self.denise.diwstrt, self.denise.diwstop) {
@@ -7639,10 +7657,17 @@ impl Bus {
             ));
             return;
         }
+        let forced_reset_line = match self.agnus.programmable_frame_lines() {
+            Some(lines) => lines - 1,
+            None => match self.agnus.video_standard() {
+                VideoStandard::Pal => 312,
+                VideoStandard::Ntsc => 262,
+            },
+        };
         let diwhigh = self.effective_diwhigh();
         let stop = u32::from(diw_v_stop(self.denise.diwstop, diwhigh));
         let start = u32::from(diw_v_start(self.denise.diwstrt, diwhigh));
-        if vpos == stop {
+        if vpos == stop || vpos == forced_reset_line {
             self.diw_vertical_open = Some(false);
         } else if vpos == start {
             self.diw_vertical_open = Some(true);

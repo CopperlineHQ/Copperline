@@ -417,6 +417,22 @@ probe_tests! {
     // BPLCON3 SPRES 00/01/10/11 produces a 4:4:2:1 sprite-width staircase;
     // the final band is true 35 ns output, not another 70 ns HIRES band.
     golden_aga_shres_sprites => probe_aga("agashres-sprites", "agashres-sprites.bin", 16.0);
+    // Lisa's eight-plane dual playfield: planes 7/8 extend each field's
+    // colour index to four bits (the Zool AGA decode regression class),
+    // PF2 reads the banked palette through the BPLCON3 PF2OF offset, and
+    // sprite priority follows the same winning-field rule as OCS across
+    // the sprprobe-dpfpri band table (in-range codes only; Lisa's
+    // out-of-range colour behaviour deliberately diverges from vAmiga).
+    // vAmiga-5-verified exact (bijective, 0 differing pixels).
+    golden_dpfprobe_aga => probe_aga("dpfprobe-aga", "dpfprobe-aga.bin", 16.0);
+    // HAM8: the control bits are the two LOWEST planes, a modify replaces
+    // the top six bits of a component and holds the low two from the
+    // previous pixel, and every non-set pixel depends on the line's full
+    // history (the PR #563 indexed-cache regression class). Set-op sweep
+    // through both palette banks, R/G/B modify ramps, a history weave,
+    // and a LOCT-seeded low-bit-hold band. vAmiga-5-verified byte-exact
+    // under its identity RGB monitor palette (VAMIGA_RGB=1).
+    golden_hamprobe_ham8 => probe_aga("hamprobe-ham8", "hamprobe-ham8.bin", 16.0);
     // Lisa palette readback follows BPLCON3 BANK/LOCT and makes COLORxx
     // read-only while BPLCON2.RDRAM is set.
     golden_aga_vamigats_rdram => probe_aga("rdram-aga", "rdram-aga.bin", 16.0);
@@ -448,6 +464,14 @@ probe_tests! {
     // line; a write past HSTART cannot recall it (the Hybris panel
     // stray-dash regression class, issue #278). vAmiga-verified.
     golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
+    // The vertical display window is a set/reset flop: DIWSTOP rewrites
+    // behind a closed flop never re-open it, a set/reset tie resets, and
+    // an unreachable DIWSTOP holds the window open only to the video
+    // standard's fixed line 312 (PAL), which forces a reset (the Kang Fu
+    // CD32 screen-split regression class; the carried-across-vblank model
+    // this probe caught lit the whole top of the frame).
+    // vAmiga-verified byte-for-byte.
+    golden_vdiwprobe_flop => probe("vdiwprobe-flop", "vdiwprobe-flop.bin", 16.0);
     // Dual-playfield sprite priority: a sprite pixel is tested against the
     // BPLCON2 code of the playfield that wins the PF1-vs-PF2 comparison
     // (opacity, then PF2PRI), so where both fields are opaque the losing

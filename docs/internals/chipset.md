@@ -261,9 +261,19 @@ line N writing the lower band's DIW, mode and bitplane pointers, and let
 the new DIWSTRT match open the band at line N+1 (Kang Fu CD32's status bar
 is the regression example; a level test resumed fetching in the tail of
 line N and raced the pointer writes). The flop is evaluated at every line
-start - the frame wrap's line zero included, with the latch itself
-carrying across the wrap, so a window whose DIWSTOP line the beam never
-reaches stays open through the vertical blank - and after DIW writes. The
+start and after DIW writes; the video standard's fixed line 312 (PAL) or
+262 (NTSC) forces a reset (winning over a DIWSTRT match on that line), so
+a window whose DIWSTOP line the beam never reaches stays open only to the
+end of its own frame and the next frame's top starts closed. On the
+hardwired beam schedule the comparator is the fixed standard line,
+exactly as vAmiga models it: an interlaced short field ends one line
+earlier and is not force-reset. VARBEAMEN bypasses the hardwired sync
+decode and its programmable frame may end before line 312 or run past it
+mid-frame (DblPAL), so there the reset follows the programmable frame's
+last line instead. The `vdiwprobe-flop` golden render pins the
+progressive-PAL case, where the fixed line and the frame's last line
+coincide; no hardware evidence yet pins the reset line on short fields
+or programmable totals. The
 latch is part of the save state: it is history-dependent, and control
 sessions can snapshot mid-frame where no register-derived reconstruction
 is exact.

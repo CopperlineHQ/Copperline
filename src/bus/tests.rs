@@ -270,6 +270,116 @@ fn diw_vertical_flop_ignores_mid_frame_rewrite_of_a_closed_window() {
     assert!(!line_fetches(&bus, 0xC1));
 }
 
+/// A window whose DIWSTOP line the beam never reaches (a VSTOP below 128
+/// addresses lines 256-383) stays open only to the end of its own frame:
+/// the video standard's fixed line 312 (PAL) resets the vertical flop, so
+/// the next frame's top starts closed until the window's own DIWSTRT
+/// matches again (vAmiga compares against the same fixed standard line;
+/// timing-test/vdiwprobe-flop pins the render).
+#[test]
+fn diw_vertical_flop_resets_at_the_standards_fixed_line() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0xC200; // hires, 4 planes
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00C8;
+    // Open at line 0xA0; VSTOP $3C addresses line 316, past every PAL frame.
+    assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0x3CC1, BeamWriteSource::Cpu));
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
+    // The window opens at DIWSTRT.V and, with the stop unreachable, is
+    // still open on the line before the fixed reset line.
+    advance_to_line(&mut bus, 0xA8);
+    assert!(line_fetches(&bus, 0xA8));
+    advance_to_line(&mut bus, 311);
+    assert!(
+        line_fetches(&bus, 311),
+        "an unreachable DIWSTOP keeps the window open to the frame's end"
+    );
+    // PAL line 312 resets the flop; the next frame's top stays closed
+    // until DIWSTRT matches again.
+    advance_to_line(&mut bus, 312);
+    assert!(
+        !line_fetches(&bus, 312),
+        "the standard's fixed line 312 must reset the vertical flop"
+    );
+    advance_to_line(&mut bus, 0x30);
+    assert!(
+        !line_fetches(&bus, 0x30),
+        "the next frame's top must not inherit the open window"
+    );
+    advance_to_line(&mut bus, 0xA0);
+    assert!(
+        line_fetches(&bus, 0xA0),
+        "the window's own DIWSTRT re-opens it in the next frame"
+    );
+}
+
+/// The forced reset compares against the fixed standard line, not the
+/// current field's last line (vAmiga Sequencer::eolHandler, which
+/// deliberately does not use the field length): an interlaced PAL short
+/// field ends at line 311 without force-resetting the flop, so an
+/// unreachable-stop window carries across the short field's wrap and is
+/// cleared by the following long field's line 312. No hardware photo
+/// separates the models yet; this pins the vAmiga-aligned choice.
+#[test]
+fn diw_vertical_flop_fixed_line_reset_skips_interlaced_short_fields() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0xC204; // hires, 4 planes, LACE
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00C8;
+    bus.agnus.set_lace(true);
+    bus.agnus.lof = false; // start inside a short field (312 lines)
+    assert_eq!(bus.agnus.current_frame_lines(), 312);
+    // Open at line 0xA0; VSTOP $3C addresses line 316, never reached.
+    assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0x3CC1, BeamWriteSource::Cpu));
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
+    advance_to_line(&mut bus, 0xA8);
+    assert!(line_fetches(&bus, 0xA8));
+    // The short field's last line (311) is not the fixed reset line: the
+    // window stays open through it and across the wrap.
+    advance_to_line(&mut bus, 311);
+    assert!(
+        line_fetches(&bus, 311),
+        "a short field's last line must not force-reset the flop"
+    );
+    advance_to_line(&mut bus, 0x30);
+    assert!(
+        line_fetches(&bus, 0x30),
+        "the open window carries across the short field's wrap"
+    );
+    // The following long field reaches line 312, which resets the flop.
+    assert_eq!(bus.agnus.current_frame_lines(), 313);
+    advance_to_line(&mut bus, 312);
+    assert!(
+        !line_fetches(&bus, 312),
+        "the long field's line 312 resets the carried-open flop"
+    );
+    advance_to_line(&mut bus, 0x30);
+    assert!(
+        !line_fetches(&bus, 0x30),
+        "the field after the reset starts with the window closed"
+    );
+}
+
 #[test]
 fn wide_bitplane_line_stays_dynamic_when_control_delay_crosses_wrap() {
     let mut bus = empty_bus();

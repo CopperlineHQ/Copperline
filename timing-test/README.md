@@ -415,7 +415,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 28 takes ~20 s on an
+parallel on the available cores (the full suite of 39 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 ### vAmiga AGA cross-check (2026-08-27)
@@ -451,6 +451,14 @@ the frame, and reports the alignment it used (vAmiga's cutout starts two beam
 lines below Copperline's row 0, the same `Y_SHIFT` the other comparer
 applies).
 
+vAmiga 5 can bypass the monitor model entirely: `VAMIGA_RGB=1` makes
+`vamiga-ref.sh` select the identity RGB monitor palette before the shot, so
+the dump holds raw framebuffer bytes and compares byte-exactly against the
+Copperline capture (halve its rows, apply the two-line `Y_SHIFT`). That is
+the sharper check where available, and the only workable one for probes
+with more distinct colours than the bijection comparer accepts -- the
+`hamprobe-ham8` ramps are the example.
+
 Every figure below is the tool's own output against the committed golden:
 
 | probe | vs vAmiga 5.0b1 |
@@ -460,6 +468,8 @@ Every figure below is the tool's own output against the committed golden:
 | `ddfprobe-ddfmiss` | exact |
 | `agashres-sprites` | exact |
 | `colorlag-aga` | exact |
+| `dpfprobe-aga` | exact (bijective, 0 differing pixels) |
+| `hamprobe-ham8` | exact (byte-for-byte under `VAMIGA_RGB=1`) |
 | `ddfprobe-agafold2` | 0.051% - one raster line (row 130) at a band edge |
 | `agaplanes` | 0.091% - one 8-px column (x 678-685) at a band's right fetch edge |
 | `rdram-aga` | 0.098% - the two band-transition lines (rows 38 and 166) |
@@ -565,6 +575,28 @@ so the losing field's code is ignored where both are opaque, including
 the circular programmings where PF2PRI and the sprite codes disagree
 about the field order. The Chuck Rock 2 player-in-front-of-the-bins
 regression class; vAmiga-verified byte-for-byte over the whole frame), and
+`vdiwprobe-flop` (the vertical display window set/reset flop: a DIWSTOP
+rewrite behind a closed flop must not re-open the window, a set/reset tie
+on one line resets, and a window whose DIWSTOP line the beam never
+reaches -- VSTOP below 128 addresses lines 256-383 -- stays open only to
+the frame's last raster line, which forces a reset, so the next frame's
+top starts closed. The Kang Fu CD32 screen-split class; the probe caught
+Copperline carrying the flop across the vertical blank and lighting the
+whole top of the frame. vAmiga-verified byte-for-byte), and
+`dpfprobe-aga` (Lisa's eight-plane dual playfield: planes 7/8 extend each
+field's index to four bits -- the Zool AGA decode class, where a 3-bit
+decode flips the probe's red/blue columns to magenta/green -- PF2 reads
+the banked palette through the BPLCON3 PF2OF offset (code 6, entry 73),
+and sprite priority runs the sprprobe-dpfpri band table on AGA with
+in-range codes only, since Lisa's out-of-range colour behaviour
+deliberately diverges from vAmiga; vAmiga-5-verified exact), and
+`hamprobe-ham8` (HAM8's control bits are the two LOWEST planes and a
+modify replaces a component's top six bits while holding the low two from
+the previous pixel: a set-op sweep through both palette banks, R/G/B
+modify ramps, a history weave no per-index cache can render (the PR #563
+regression class), and a LOCT-seeded low-bit-hold band whose halves
+differ only in the held bits; vAmiga-5-verified byte-exact under the
+identity RGB monitor palette, `VAMIGA_RGB=1`), and
 `hamprobe-select` (where a mid-line BPLCON0 HAM select lands: a HAM screen
 whose every pixel is index $1F decodes as a solid blue field with HAM on
 and as a green field with white ruler marks with HAM off, and eight
