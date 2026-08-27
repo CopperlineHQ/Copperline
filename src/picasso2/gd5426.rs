@@ -13,6 +13,7 @@ use crate::chipset::paula::PAULA_CLOCK_HZ;
 
 const MAX_DIM: usize = 4096;
 const BLIT_BUSY_CCK: u32 = 16;
+const BLIT_ADDR_MASK: usize = 0x1f_ffff;
 
 const SR_CURSOR_X: u8 = 0x10;
 const SR_CURSOR_Y: u8 = 0x11;
@@ -712,6 +713,13 @@ impl CirrusGd5426 {
     }
 
     fn start_blit(&mut self) {
+        // Captured before the transfer, which leaves the address registers at
+        // its end. Logging them afterwards would print the end address for an
+        // immediate blit and the start address for a deferred system-source
+        // one, so the same line would mean two different things.
+        let dst_start = self.blit_addr(0x28);
+        let src_start = self.blit_addr(0x2c);
+
         if self.gfx[0x30] & BLIT_MODE_SYSTEM_SOURCE != 0 {
             let width = self.blit_width();
             let height = self.blit_height();
@@ -729,8 +737,8 @@ impl CirrusGd5426 {
                 "picasso2: blit {}x{} dst={:#08x} src={:#08x} mode={:#04x} rop={:#04x}",
                 self.blit_width(),
                 self.blit_height(),
-                self.blit_addr(0x28),
-                self.blit_addr(0x2c),
+                dst_start,
+                src_start,
                 self.gfx[0x30],
                 self.gfx[0x32]
             );
@@ -769,6 +777,17 @@ impl CirrusGd5426 {
         usize::from(self.gfx[low])
             | (usize::from(self.gfx[low + 1]) << 8)
             | (usize::from(self.gfx[low + 2] & 0x1f) << 16)
+    }
+
+    // The counterpart, for putting an address counter back after a transfer.
+    // The registers hold 21 bits, so an address that ran off either end comes
+    // back wrapped rather than clamped; the unused top bits of the high byte
+    // are left alone.
+    fn set_blit_addr(&mut self, low: usize, addr: usize) {
+        let addr = addr & BLIT_ADDR_MASK;
+        self.gfx[low] = addr as u8;
+        self.gfx[low + 1] = (addr >> 8) as u8;
+        self.gfx[low + 2] = (self.gfx[low + 2] & !0x1f) | ((addr >> 16) as u8 & 0x1f);
     }
 
     fn blit_pixel_bytes(&self) -> usize {
@@ -983,24 +1002,31 @@ impl CirrusGd5426 {
         // land wherever the replication ended. Reloading the registers instead
         // drops it back onto pixels already filled and leaves the tail of every
         // run unpainted.
-        let dst_span = height.saturating_sub(1) * dst_pitch + width;
-        let src_span = height.saturating_sub(1) * src_pitch + width;
-        let dst_end = if backwards {
-            dst_start.saturating_sub(dst_span)
-        } else {
-            dst_start.saturating_add(dst_span)
+        //
+        // The destination is walked byte for byte, so its counter ends a whole
+        // rectangle further on. The source is not: only a plain copy consumes
+        // it in step with the destination. Video-source colour expansion reads
+        // one byte per eight pixels and never consults the source pitch, which
+        // is what `expand_addr` has been tracking; a pattern is re-read from
+        // its fixed base every row; and a system-source blit takes its data
+        // from the host, leaving the VRAM source counter untouched.
+        let advance = |from: usize, span: usize| {
+            if backwards {
+                from.wrapping_sub(span)
+            } else {
+                from.wrapping_add(span)
+            }
         };
-        let src_end = if backwards {
-            src_start.saturating_sub(src_span)
+        let dst_end = advance(dst_start, height.saturating_sub(1) * dst_pitch + width);
+        let src_end = if pattern || system.is_some() {
+            src_start
+        } else if color_expand {
+            expand_addr
         } else {
-            src_start.saturating_add(src_span)
+            advance(src_start, height.saturating_sub(1) * src_pitch + width)
         };
-        self.gfx[0x28] = dst_end as u8;
-        self.gfx[0x29] = (dst_end >> 8) as u8;
-        self.gfx[0x2a] = ((dst_end >> 16) & 0x1f) as u8;
-        self.gfx[0x2c] = src_end as u8;
-        self.gfx[0x2d] = (src_end >> 8) as u8;
-        self.gfx[0x2e] = ((src_end >> 16) & 0x1f) as u8;
+        self.set_blit_addr(0x28, dst_end);
+        self.set_blit_addr(0x2c, src_end);
     }
 
     pub fn tick(&mut self, cck: u32) {
@@ -1595,6 +1621,8 @@ mod tests {
         // Replicate the tile once, covering bytes TILE..2*TILE.
         blit_registers(&mut chip, TILE, 1, TILE, 0, DST + TILE, DST, 0x20);
         start_blit(&mut chip);
+        assert_eq!(chip.blit_addr(0x28), DST + 2 * TILE);
+        assert_eq!(chip.blit_addr(0x2c), DST + TILE);
 
         // The remainder, reprogramming nothing but the width and height.
         gfx(&mut chip, 0x20, (RUN - 2 * TILE - 1) as u8);
@@ -1608,5 +1636,67 @@ mod tests {
             .filter(|b| **b != 0)
             .count();
         assert_eq!(filled, RUN, "the tail of the run was left unpainted");
+    }
+
+    /// Where each counter ends is mode-specific: the destination always walks a
+    /// whole rectangle, but only a plain copy consumes the source in step with
+    /// it.
+    #[test]
+    fn the_source_counter_follows_whichever_source_the_mode_reads() {
+        const DST: usize = 0x4000;
+        const SRC: usize = 0x1000;
+
+        // A plain copy walks both, several rows at a pitch.
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        blit_registers(&mut chip, 20, 4, 100, 64, DST, SRC, 0x00);
+        start_blit(&mut chip);
+        assert_eq!(chip.blit_addr(0x28), DST + 3 * 100 + 20);
+        assert_eq!(chip.blit_addr(0x2c), SRC + 3 * 64 + 20);
+
+        // Backwards, the counters run the other way. Starting below the span
+        // they wrap within the 21 bits the registers hold rather than sticking
+        // at zero, so a continuation resumes from the wrapped address.
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        blit_registers(&mut chip, 20, 1, 0, 0, 8, 8, BLIT_MODE_BACKWARDS);
+        start_blit(&mut chip);
+        assert_eq!(
+            chip.blit_addr(0x28),
+            (8usize.wrapping_sub(20)) & BLIT_ADDR_MASK
+        );
+        assert_eq!(
+            chip.blit_addr(0x2c),
+            (8usize.wrapping_sub(20)) & BLIT_ADDR_MASK
+        );
+
+        // Video-source colour expansion reads one source byte per eight pixels
+        // and ignores the source pitch: 20 pixels consume three bytes, not 20.
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        blit_registers(&mut chip, 20, 1, 100, 64, DST, SRC, BLIT_MODE_COLOR_EXPAND);
+        start_blit(&mut chip);
+        assert_eq!(chip.blit_addr(0x28), DST + 20);
+        assert_eq!(chip.blit_addr(0x2c), SRC + 3);
+
+        // A pattern is re-read from its base every row, so its counter stays.
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        blit_registers(&mut chip, 20, 4, 100, 64, DST, SRC, BLIT_MODE_PATTERN);
+        start_blit(&mut chip);
+        assert_eq!(chip.blit_addr(0x28), DST + 3 * 100 + 20);
+        assert_eq!(chip.blit_addr(0x2c), SRC);
+
+        // A system-source blit takes its data from the host, so the VRAM
+        // source counter stays put too.
+        let mut chip = CirrusGd5426::new(0x20_0000);
+        unlock(&mut chip);
+        blit_registers(&mut chip, 20, 2, 100, 64, DST, SRC, BLIT_MODE_SYSTEM_SOURCE);
+        start_blit(&mut chip);
+        for _ in 0..(20usize.next_multiple_of(4) * 2) {
+            chip.vram_write(0, 1, 0xa5);
+        }
+        assert_eq!(chip.blit_addr(0x28), DST + 100 + 20);
+        assert_eq!(chip.blit_addr(0x2c), SRC);
     }
 }
