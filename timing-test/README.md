@@ -556,6 +556,15 @@ repositions it -- while a CTL write past HSTART leaves the bar intact; the
 interventions write the channel's own control words, so the disarm is the
 only variable. The Hybris status-panel stray-dash class, issue #278;
 vAmiga-verified byte-for-byte), and
+`sprprobe-dpfpri` (dual-playfield sprite priority: four sprite bars, one
+per pair, cross a playfield whose 4-px columns cycle background / PF1-only
+/ PF2-only / both-opaque while the Copper steps BPLCON2 through seven
+priority-code bands. A sprite pixel is tested against the BPLCON2 code of
+the field that wins the PF1-vs-PF2 comparison -- opacity, then PF2PRI --
+so the losing field's code is ignored where both are opaque, including
+the circular programmings where PF2PRI and the sprite codes disagree
+about the field order. The Chuck Rock 2 player-in-front-of-the-bins
+regression class; vAmiga-verified byte-for-byte over the whole frame), and
 `hamprobe-select` (where a mid-line BPLCON0 HAM select lands: a HAM screen
 whose every pixel is index $1F decodes as a solid blue field with HAM on
 and as a green field with white ruler marks with HAM off, and eight

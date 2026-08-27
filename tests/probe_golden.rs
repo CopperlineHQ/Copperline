@@ -448,6 +448,14 @@ probe_tests! {
     // line; a write past HSTART cannot recall it (the Hybris panel
     // stray-dash regression class, issue #278). vAmiga-verified.
     golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
+    // Dual-playfield sprite priority: a sprite pixel is tested against the
+    // BPLCON2 code of the playfield that wins the PF1-vs-PF2 comparison
+    // (opacity, then PF2PRI), so where both fields are opaque the losing
+    // field's code is ignored -- including the circular programmings where
+    // PF2PRI and the sprite codes disagree about the field order (the Chuck
+    // Rock 2 player-in-front-of-the-bins regression class).
+    // vAmiga-verified byte-for-byte over the whole frame.
+    golden_sprprobe_dpfpri => probe("sprprobe-dpfpri", "sprprobe-dpfpri.bin", 16.0);
     // BPLCON0's HAM select reaches Denise in the colour-selection phase, so a
     // mid-line HAM change lands where a COLORxx write carried by the same
     // chip-bus slot would: eight bands clear HAM 16 colour clocks apart and
