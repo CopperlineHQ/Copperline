@@ -1451,6 +1451,62 @@ mod tests {
     }
 
     #[test]
+    fn joy_and_analogue_accept_at_seconds_scheduling() {
+        // input.joy/analogue/mouse share input.key's at_seconds semantics:
+        // a future timestamp defers the state change instead of applying it
+        // at submission time (a press/release pair scheduled while paused
+        // must not cancel itself out).
+        let emu = control_test_emulator();
+        let input = MachineInputState::default();
+        let (emu, input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            let press = c.result(
+                "input.joy",
+                json!({"right": true, "red": true, "at_seconds": 0.02}),
+            );
+            assert_eq!(press["scheduled"], 1);
+            let release = c.result("input.joy", json!({"at_seconds": 0.06}));
+            assert_eq!(release["scheduled"], 1);
+            let pot = c.result(
+                "input.analogue",
+                json!({"port": 1, "x": 10, "y": 200, "at_seconds": 0.02}),
+            );
+            assert_eq!(pot["scheduled"], 1);
+        });
+        assert!(
+            !emu.bus().input.ports[1].right,
+            "a future joy state must not apply at submission time"
+        );
+        assert_eq!(
+            emu.bus().input.ports[0].device,
+            crate::bus::PortDevice::Mouse
+        );
+
+        let (emu, input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            c.result("run_until", json!({"seconds": 0.04}));
+        });
+        assert!(emu.bus().input.ports[1].right);
+        assert!(emu.bus().input.ports[1].fire);
+        // The scheduled analogue event hot-plugged the paddle when it fired.
+        assert_eq!(
+            emu.bus().input.ports[0].device,
+            crate::bus::PortDevice::Analogue
+        );
+        assert!(emu.bus().input.ports[0].pot_x_ohms.is_some());
+
+        let (emu, _, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            c.result("run_until", json!({"seconds": 0.08}));
+        });
+        assert!(
+            !emu.bus().input.ports[1].right,
+            "the scheduled release must fire at its own timestamp"
+        );
+        assert!(!emu.bus().input.ports[1].fire);
+    }
+
+    #[test]
     fn future_input_from_a_closed_session_fires_under_continue() {
         let emu = control_test_emulator();
         let input = MachineInputState::default();
