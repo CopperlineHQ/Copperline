@@ -928,10 +928,11 @@ pub struct Bus {
     /// window plus bitplane pointers during that line for a status bar at
     /// 285-300; the level test resumed fetching in the tail of line 284
     /// and raced the pointer writes, shearing the bar. Re-evaluated at
-    /// every line start (the frame wrap's line zero included - the latch
-    /// itself carries across the wrap, so a window whose DIWSTOP the beam
-    /// never reaches stays open through the vertical blank) and after DIW
-    /// writes. `None` means no evaluation has happened on this timeline
+    /// every line start (the frame's last raster line forces a reset, so a
+    /// window whose DIWSTOP the beam never reaches stays open only to the
+    /// end of its own frame; the frame wrap's line zero then runs its own
+    /// comparators) and after DIW writes. `None` means no evaluation has
+    /// happened on this timeline
     /// (unit fixtures that teleport the beam and poke registers), which
     /// falls back to the level test. Serialized: the value is
     /// history-dependent and snapshots can be taken mid-frame (a control
@@ -7625,9 +7626,14 @@ impl Bus {
     /// DIWSTRT/DIWSTOP/DIWHIGH write, mirroring the continuously-running
     /// hardware comparators (an equality match on DIWSTOP.V resets the
     /// flop, one on DIWSTRT.V sets it, reset winning a tie; any other line
-    /// leaves it alone). An unprogrammed window (both registers zero, the
-    /// power-on state) keeps the level fallback so a bare machine still
-    /// scans its whole overscan canvas.
+    /// leaves it alone). The frame's last raster line also resets the flop,
+    /// winning over a DIWSTRT match on that line, so a window whose DIWSTOP
+    /// the beam never reaches stays open only to the end of its own frame
+    /// and never bleeds into the next frame's top (vAmiga forces its
+    /// vertical flipflop off at line 312 PAL / 262 NTSC the same way;
+    /// timing-test/vdiwprobe-flop pins the render). An unprogrammed window
+    /// (both registers zero, the power-on state) keeps the level fallback
+    /// so a bare machine still scans its whole overscan canvas.
     pub(crate) fn reevaluate_diw_vertical_flop(&mut self) {
         let vpos = self.agnus.vpos;
         if display_window_unprogrammed(self.denise.diwstrt, self.denise.diwstop) {
@@ -7642,7 +7648,7 @@ impl Bus {
         let diwhigh = self.effective_diwhigh();
         let stop = u32::from(diw_v_stop(self.denise.diwstop, diwhigh));
         let start = u32::from(diw_v_start(self.denise.diwstrt, diwhigh));
-        if vpos == stop {
+        if vpos == stop || vpos == self.agnus.current_frame_lines() - 1 {
             self.diw_vertical_open = Some(false);
         } else if vpos == start {
             self.diw_vertical_open = Some(true);

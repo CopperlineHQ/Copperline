@@ -270,6 +270,60 @@ fn diw_vertical_flop_ignores_mid_frame_rewrite_of_a_closed_window() {
     assert!(!line_fetches(&bus, 0xC1));
 }
 
+/// A window whose DIWSTOP line the beam never reaches (a VSTOP below 128
+/// addresses lines 256-383) stays open only to the end of its own frame:
+/// the frame's last raster line resets the vertical flop, so the next
+/// frame's top starts closed until the window's own DIWSTRT matches again
+/// (vAmiga forces its vertical flipflop off at line 312 PAL / 262 NTSC the
+/// same way; timing-test/vdiwprobe-flop pins the render).
+#[test]
+fn diw_vertical_flop_resets_at_the_frames_last_line() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0xC200; // hires, 4 planes
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00C8;
+    // Open at line 0xA0; VSTOP $3C addresses line 316, past every PAL frame.
+    assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0x3CC1, BeamWriteSource::Cpu));
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
+    let last_line = bus.agnus.current_frame_lines() - 1;
+    // The window opens at DIWSTRT.V and, with the stop unreachable, is
+    // still open on the frame's second-to-last line.
+    advance_to_line(&mut bus, 0xA8);
+    assert!(line_fetches(&bus, 0xA8));
+    advance_to_line(&mut bus, last_line - 1);
+    assert!(
+        line_fetches(&bus, last_line - 1),
+        "an unreachable DIWSTOP keeps the window open to the frame's end"
+    );
+    // The last raster line resets the flop; the next frame's top stays
+    // closed until DIWSTRT matches again.
+    advance_to_line(&mut bus, last_line);
+    assert!(
+        !line_fetches(&bus, last_line),
+        "the frame's last line must reset the vertical flop"
+    );
+    advance_to_line(&mut bus, 0x30);
+    assert!(
+        !line_fetches(&bus, 0x30),
+        "the next frame's top must not inherit the open window"
+    );
+    advance_to_line(&mut bus, 0xA0);
+    assert!(
+        line_fetches(&bus, 0xA0),
+        "the window's own DIWSTRT re-opens it in the next frame"
+    );
+}
+
 #[test]
 fn wide_bitplane_line_stays_dynamic_when_control_delay_crosses_wrap() {
     let mut bus = empty_bus();
