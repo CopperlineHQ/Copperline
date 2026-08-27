@@ -25,6 +25,14 @@
 ;   copperline --cpu 68EC020 --chipset AGA --chip 2M --noaudio \
 ;       --insert-disk-after 0 df0 dblpal-hires-lace.adf \
 ;       --screenshot-after 16 /tmp/dblpal-hires-lace.png
+;
+; Not cross-checkable against vAmiga's regression capture: this probe
+; reprograms the beam to DblPAL (HTOTAL $081, VTOTAL $23D) and renders a
+; 1432x1134 SHRES/laced canvas, while vAmiga's regression screenshot is a
+; fixed 716x285 PAL-sized raw that cannot represent it.  Both emulators do
+; place the two sprite bars in the same order with no third bar, but there is
+; no like-for-like frame to diff, so the FS-UAE provenance above stands
+; alone.  Checked on vAmiga 5.0b1, 2026-08-27.
 
 CUST        equ $dff000
 BPL1        equ $40000

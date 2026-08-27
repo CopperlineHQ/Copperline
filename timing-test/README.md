@@ -418,6 +418,45 @@ Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 28 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
+### vAmiga AGA cross-check (2026-08-27)
+
+vAmiga 5.0 adds an `A1200_2MB` ("Amiga 1200, AGA Chipset, 2MB RAM") config
+scheme, so the AGA probes finally have a second reference implementation. Run
+one with:
+
+```sh
+VAHEADLESS=/path/to/vAmiga-5/Core/build/VAHeadless \
+  tools/vamiga-ref.sh probe.adf 16 A1200_2MB /tmp/probe.raw kick31.rom
+```
+
+Compare by **colour correspondence, not RGB**: vAmiga runs a YUV
+brightness/contrast/saturation monitor model over the palette (COLOR00 `$008`
+comes out `$000072`) where Copperline replicates the nibble (`$000088`), and
+its raw frame starts two lines later than a `COPPERLINE_SHOT_RAW=1` capture.
+A raw byte diff reads ~90% even on an exact match.
+
+| probe | vs vAmiga 5.0b1 |
+|---|---|
+| `ddfprobe-agafold` | exact |
+| `ddfprobe-agaorigin` | exact |
+| `ddfprobe-ddfmiss` | exact |
+| `agashres-sprites` | exact |
+| `colorlag-aga` | exact |
+| `ddfprobe-agafold2` | one raster line at a band edge (0.05%) |
+| `agaplanes` | one 8-px column at a band's right fetch edge (0.09%) |
+| `rdram-aga` | the two band-transition lines (0.10%) |
+| `agafetch-mode` | **diverges over the FMODE 10 band (8.8%)** |
+| `dblpal-hires-lace` | not comparable (DblPAL SHRES/laced canvas) |
+
+Do not re-bless `agafetch-mode` to match vAmiga. Hardware sides with
+Copperline: booting the vAmigaTS `Agnus/Registers/FMODE/fmode10` disk itself,
+Copperline reproduces the structure in that suite's real-A1200 photograph,
+while vAmiga 5.0b1 paints magenta and white inside the staircase blocks
+(3.9% / 0.5% of the lower band) where the photograph has none. The local
+vAmiga build reproduces the suite's committed `fmode10_aga.raw`
+byte-for-byte, so that is the reference's own behaviour, not a build
+artefact.
+
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
 (per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
@@ -441,7 +480,8 @@ grid -- earliness plus the 8-cck pipeline -- show the next gulp one full
 gulp left, swept against bitplane-pointer byte offsets on the Alien
 Breed II AGA playfield constellation -- the issue #248 horizontal
 scroll-jump regression class; boots the A1200/AGA machine shape,
-FS-UAE-verified band by band since vAmiga cannot arbitrate AGA),
+FS-UAE-verified band by band, and re-verified against vAmiga 5.0b1's
+`A1200_2MB` AGA setup),
 `ddfprobe-agafold2` (the fold boundary as a function of the DDFSTRT
 phase on the 64-bit fetch: the boundary saturates past the top of the
 tap range instead of wrapping, so the SANITY Roots II AGA

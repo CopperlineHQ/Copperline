@@ -11,7 +11,9 @@
 ; The resulting 4:4:2:1 staircase is the hardware distinction under test.
 ; In particular, SPRES 11 emits 35 ns samples; treating it like SPRES 10
 ; makes the bottom two bars the same width. Cross-checked against vAmigaTS
-; Denise/Sprites/aga/simple2 and its included A1200 photograph.
+; Denise/Sprites/aga/simple2 and its included A1200 photograph, and
+; re-verified 2026-08-27 on vAmiga 5.0b1's A1200_2MB AGA setup, which
+; renders the staircase identically (0 of 202628 pixels differ).
 CUST    equ $dff000
 BMP     equ $40000
 DESC0   equ $48000

@@ -9,6 +9,9 @@
 ;   HIRES FMODE0: 4 valid / 5 invalid
 ;   SHRES FMODE3: 8 valid
 ; Cross-checked with vAmigaTS Agnus/DDF/AGADDF and Denise/Modes/shres.
+; Re-verified 2026-08-27 on vAmiga 5.0b1's A1200_2MB AGA setup: every band
+; agrees bar one eight-pixel column at a band's right fetch edge (184 of
+; 202628 pixels, rows 38-60 at x 678-685).
 CUST    equ $dff000
 BMP     equ $40000
 CLIST   equ $60000

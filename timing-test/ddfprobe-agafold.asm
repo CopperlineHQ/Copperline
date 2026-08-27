@@ -23,9 +23,12 @@
 ;
 ; FS-UAE-verified (WinUAE core, A1200/KS3.1, 2026-07-22): all 16 band
 ; positions match Copperline's render exactly (relative map 0,+2,+4,+16,
-; -44,-40,-32,-28,-108,-104,-96,-92,-64,-60,-172,-156 raw px from band 0;
-; vAmiga is OCS/ECS-only and cannot arbitrate AGA). The fold boundary and
-; the lo-res BPL32 scaling are pinned; hi-res/SHRES scaling is not.
+; -44,-40,-32,-28,-108,-104,-96,-92,-64,-60,-172,-156 raw px from band 0).
+; Re-verified 2026-08-27 on vAmiga 5.0b1's new A1200_2MB AGA setup: the
+; render matches exactly (0 of 202628 pixels differ under the colour
+; correspondence, vAmiga's raw frame starting two lines later).  The fold
+; boundary and the lo-res BPL32 scaling are pinned; hi-res/SHRES scaling is
+; not.
 CUST   equ $dff000
 BMP    equ $40000
 CLIST  equ $60000
