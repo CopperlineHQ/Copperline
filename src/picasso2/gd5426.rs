@@ -1155,6 +1155,9 @@ fn open_bus(size: usize) -> u32 {
 /// The CL-GD5426/5428 implement the 16 two-operand Boolean functions using this
 /// sparse set of ROP encodings. Pattern operations feed their pattern byte as
 /// `source`, so the same table covers the S and P rows in the data book.
+///
+/// `0x90` and `0xda` are easy to transpose: `0x90` is NOR (`~src & ~dst`) and
+/// `0xda` is NAND (`~src | ~dst`), not the other way round.
 fn apply_rop(rop: u8, source: u8, dest: u8) -> u8 {
     match rop {
         0x00 => 0,
@@ -1167,12 +1170,12 @@ fn apply_rop(rop: u8, source: u8, dest: u8) -> u8 {
         0x50 => !source & dest,
         0x59 => source ^ dest,
         0x6d => source | dest,
-        0x90 => !source | !dest,
+        0x90 => !source & !dest,
         0x95 => !(source ^ dest),
         0xad => source | !dest,
         0xd0 => !source,
         0xd6 => !source | dest,
-        0xda => !source & !dest,
+        0xda => !source | !dest,
         _ => source,
     }
 }
@@ -1516,7 +1519,10 @@ mod tests {
                 for dest in [0x00, 0x53, 0xaa, 0xff] {
                     // The Cirrus encoding is sparse rather than a compact
                     // four-bit truth table, so spell the documented Boolean
-                    // operation out independently of `apply_rop`.
+                    // operation out independently of `apply_rop`. NOR and NAND
+                    // are written as the negated OR and AND the data book names
+                    // them by, since transposing the two is the mistake this
+                    // whole test exists to catch.
                     let expect = match rop {
                         0x00 => 0,
                         0x05 => source & dest,
@@ -1528,12 +1534,12 @@ mod tests {
                         0x50 => !source & dest,
                         0x59 => source ^ dest,
                         0x6d => source | dest,
-                        0x90 => !source | !dest,
+                        0x90 => !(source | dest),
                         0x95 => !(source ^ dest),
                         0xad => source | !dest,
                         0xd0 => !source,
                         0xd6 => !source | dest,
-                        0xda => !source & !dest,
+                        0xda => !(source & dest),
                         _ => unreachable!(),
                     };
                     assert_eq!(apply_rop(rop, source, dest), expect, "rop {rop:#04x}");
