@@ -1856,6 +1856,69 @@ fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
 }
 
 #[test]
+fn copjmp_strobe_fires_on_read_access() {
+    // The COPJMP strobes decode the register address alone: a CPU READ of
+    // $DFF088/$DFF08A reloads the Copper PC exactly as a write does
+    // (reading a write-only register performs a bus write of the floating
+    // data-bus residue into it). Vertical-blank handlers rely on this to
+    // flip double-buffered Copper lists with TST.W COPJMP1 so the new
+    // list takes effect before this frame's display fetch begins.
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    let cop2 = 0x0300usize;
+    let parked = 0x0200usize;
+    write_chip_word(&mut bus, cop1, 0x0100);
+    write_chip_word(&mut bus, cop1 + 2, 0x4200);
+    write_chip_word(&mut bus, cop1 + 4, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 6, 0xFFFE);
+    write_chip_word(&mut bus, cop2, 0x0180);
+    write_chip_word(&mut bus, cop2 + 2, 0x0999);
+    write_chip_word(&mut bus, cop2 + 4, 0xFFFF);
+    write_chip_word(&mut bus, cop2 + 6, 0xFFFE);
+    write_chip_word(&mut bus, parked, 0xFFFF);
+    write_chip_word(&mut bus, parked + 2, 0xFFFE);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.copper.jump(parked as u32);
+    bus.copper_active_in_frame = true;
+    bus.agnus.vpos = 0x50;
+    bus.agnus.hpos = 0x20;
+    assert!(!bus.custom_write(0x080, 2, 0x0000));
+    assert!(!bus.custom_write(0x082, 2, cop1 as u64));
+    bus.advance_chipset(4);
+    assert_eq!(
+        bus.denise.bplcon0, 0,
+        "COP1LC write alone must not move an active Copper"
+    );
+
+    bus.data_bus = 0xCAFE;
+    assert_eq!(
+        bus.custom_read(0x088, 2),
+        0xCAFE,
+        "the strobe address is undriven: the read must float to the residue"
+    );
+    bus.advance_chipset(4);
+    assert_eq!(
+        bus.denise.bplcon0, 0x4200,
+        "a read of COPJMP1 must strobe the jump to COP1LC"
+    );
+
+    assert!(!bus.custom_write(0x084, 2, 0x0000));
+    assert!(!bus.custom_write(0x086, 2, cop2 as u64));
+    bus.data_bus = 0xBEEF;
+    assert_eq!(
+        bus.custom_read(0x08A, 2),
+        0xBEEF,
+        "the strobe address is undriven: the read must float to the residue"
+    );
+    bus.advance_chipset(4);
+    assert_eq!(
+        bus.denise.palette[0], 0x0999,
+        "a read of COPJMP2 must strobe the jump to COP2LC"
+    );
+}
+
+#[test]
 fn automatic_copper_restart_uses_live_cop1lc_at_frame_boundary() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
