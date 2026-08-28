@@ -3548,6 +3548,17 @@ impl MachineSetup {
             F::HostSocketInterface => {
                 !matches!(self.hostsocket_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            // No controller, no SCSI: the ROM and unit rows go rather than
+            // stand greyed under a setting most machines leave at None. They
+            // return the moment a controller is chosen.
+            F::ScsiRom | F::ScsiRomOdd => self.scsi_controller.is_none(),
+            F::ScsiUnit0
+            | F::ScsiUnit1
+            | F::ScsiUnit2
+            | F::ScsiUnit3
+            | F::ScsiUnit4
+            | F::ScsiUnit5
+            | F::ScsiUnit6 => self.scsi_controller.is_none(),
             // A controller is not a disk: only the units carrying one have a
             // place in the boot order, so the empty six or seven go rather
             // than standing in a column saying so.
@@ -3634,7 +3645,7 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
+            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000 or Lide"),
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
             // rom_odd is an A2091 split-EPROM option only.
