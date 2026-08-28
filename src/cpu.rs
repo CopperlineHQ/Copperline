@@ -288,6 +288,12 @@ struct CpuBus {
     /// COPPERLINE_DBG_IRQ cached time window. Interrupt acknowledge can be hot
     /// during IRQ storms, so parse the environment once at construction.
     dbg_irq_window: Option<(f64, f64)>,
+    /// Set by the sized-access fall-through around the recursive byte read
+    /// for the odd second byte of an aligned word: an unmapped byte read
+    /// with this set rides the 16-bit bus cycle its even partner already
+    /// billed. Live only inside one access, never carried across a save
+    /// state.
+    unmapped_read_continues_word: bool,
     /// Whether the most recent instruction-stream read hit the icache
     /// model. The 68060 timing model gates superscalar pairing and branch
     /// folding on a cached fetch stream. Recomputed on every fetch, never
@@ -379,6 +385,7 @@ impl M68kMachine {
                 icache: None,
                 dcache: None,
                 dbg_irq_window: debug_irq_window_setting(),
+                unmapped_read_continues_word: false,
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
@@ -3456,13 +3463,31 @@ impl CpuBus {
         if size > 1 {
             let mut value = 0u32;
             for idx in 0..size {
-                value =
-                    (value << 8) | self.read_sized_uncached(addr.wrapping_add(idx as u32), 1, kind);
+                let byte_addr = addr.wrapping_add(idx as u32);
+                // One 16-bit bus cycle covers both bytes of an aligned word.
+                // If this byte lands in unmapped space, bill it only when it
+                // starts a new cycle (the access's first byte, or an even
+                // address continuing it); the odd second byte of the same
+                // word rides the cycle already paid for. Without this, a
+                // word read of unmapped space costs two full bus cycles --
+                // exec's ROMTAG scan of the empty FMV/expansion window
+                // ($A80000+) is a word-read loop and paid double, starting
+                // the CD32 boot show seconds late.
+                self.unmapped_read_continues_word = idx != 0 && byte_addr & 1 == 1;
+                value = (value << 8) | self.read_sized_uncached(byte_addr, 1, kind);
             }
+            self.unmapped_read_continues_word = false;
             return value;
         }
 
-        self.bus.cpu_slow_external_access(1);
+        if !self.unmapped_read_continues_word {
+            // Real-CD32 probe measurement (tools/cd32-probe rows URD/ROMRD):
+            // a word-read loop over the empty $A80000 expansion window runs
+            // at exactly the Kickstart-ROM pace, 12.0 CPU clocks per
+            // iteration -- unmapped space is auto-acknowledged at ordinary
+            // external-cycle speed, not at the slower CIA/peripheral pace.
+            self.bus.cpu_external_access(1);
+        }
         // Undriven (unmapped) read: float to the last value the chip data bus
         // carried (display/audio DMA), as on the Agnus-arbitrated chip bus --
         // not a fixed all-ones pattern. `size` is always 1 here (size>1 recurses
@@ -3792,6 +3817,15 @@ impl CpuBus {
             }
             return;
         }
+        // Dropped (unmapped) write: the 020+ posts the cycle and execution
+        // continues under it. Real-CD32 probe measurement (tools/cd32-probe
+        // row UWR): a word-write loop over $A80000 runs at 8.0 CPU clocks
+        // per iteration, the same as the posted chip-write cadence -- two
+        // clocks less than the core's nominal charge, so credit that
+        // overlap here. TODO: back-to-back streams (no loop overhead) may
+        // run slightly faster than a real bus-limited write stream; a
+        // dedicated probe row would pin the streaming case.
+        self.bus.credit_cpu_posted_void_write();
         if self
             .bus
             .log_unmapped
@@ -4687,6 +4721,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -4716,6 +4751,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -4756,6 +4792,7 @@ mod tests {
                 icache: None,
                 dcache: None,
                 dbg_irq_window: None,
+                unmapped_read_continues_word: false,
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
@@ -4811,6 +4848,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -4854,6 +4892,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -4893,6 +4932,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -4941,6 +4981,7 @@ mod tests {
             icache: Some(Box::new(icache)),
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -5150,6 +5191,7 @@ mod tests {
             icache: None,
             dcache: Some(Box::new(dcache)),
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -5200,6 +5242,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -5228,6 +5271,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
@@ -5262,6 +5306,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            unmapped_read_continues_word: false,
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
