@@ -62,7 +62,18 @@ impl Bus {
             self.fixed_dma_owner_at(self.agnus.vpos, hpos)
         };
         let copper_runs = cck >= CHIP_BUS_SLOT_CCK && self.copper_comparator_runs_at(hpos);
-        let eligible = copper_runs && fixed_dma_owner.is_none();
+        // The line-end refresh access stalls the CPU and blitter but does
+        // not block a Copper fetch: the refresh RGA strobe overlaps a
+        // concurrent Copper transfer on the real chip (see
+        // `refresh_slot_active_at`). The Copper therefore treats that one
+        // fixed-DMA slot as free; if it declines the cycle, the slot stays
+        // with refresh below.
+        let copper_sees_free_slot = match fixed_dma_owner {
+            None => true,
+            Some(ChipBusOwner::Refresh) => Self::line_end_refresh_slot(hpos),
+            Some(_) => false,
+        };
+        let eligible = copper_runs && copper_sees_free_slot;
         let copper_took_bus = eligible
             && !copper_invariant_before_deadline
             && self.step_copper_eligible_slot(forced_owner.is_none(), true);
@@ -85,6 +96,12 @@ impl Bus {
         let mut owner = match forced_owner {
             Some(owner) => owner,
             None if copper_took_bus => ChipBusOwner::Copper,
+            // A Copper-declined line-end refresh slot stays with refresh:
+            // only the Copper rides the pipelined RGA cycle, never the
+            // blitter or CPU.
+            None if eligible && fixed_dma_owner.is_some() => {
+                self.scheduled_dma_owner_after_fixed(false, fixed_dma_owner)
+            }
             None if eligible => self.free_chip_bus_slot_owner(),
             None => self.scheduled_dma_owner_after_fixed(false, fixed_dma_owner),
         };
@@ -720,7 +737,29 @@ impl Bus {
         // refresh takes the first event and marks 1/3/5 plus EOL (vAmiga:
         // E2 on normal lines, E3 on NTSC long lines). The following odd slots
         // are disk (7/9/B), audio (D/F/11/13), then sprites (15...33).
+        //
+        // The line-end slot has one carve-out, applied in the arbiter (see
+        // `line_end_refresh_slot`): it stalls the CPU and blitter but does
+        // NOT block a Copper fetch. E2 sits on the Copper's even-cck fetch
+        // grid, and stealing it starves a Copper stream that saturates the
+        // line by one fetch per line: Nexus 7's plasma-zoom text reloads
+        // 128+3 palette entries per 3-line band between two beam WAITs, a
+        // chain that fits on real hardware but slips ~6 cck per band when
+        // E2 is blocked, drifting the demo's BPLCON4 sprite-bank flip into
+        // the sprite window and painting plasma streaks through the text.
+        // On the real chip the line-end refresh RGA strobe overlaps a
+        // concurrent Copper transfer (RGA pipelining); the CPU-visible
+        // stall stays, which the real-A1200 timing-test column was
+        // calibrated against.
         matches!(hpos, 0x001 | 0x003 | 0x005 | 0x0E2 | 0x0E3)
+    }
+
+    /// The line-end refresh access (E2 short lines, E3 long ones): the one
+    /// refresh slot whose RGA strobe overlaps a concurrent Copper fetch on
+    /// the real chip, so the arbiter lets the Copper through it (see
+    /// `refresh_slot_active_at`).
+    pub(super) fn line_end_refresh_slot(hpos: u32) -> bool {
+        matches!(hpos, 0x0E2 | 0x0E3)
     }
 
     pub(super) fn disk_slot_active_at(&self, hpos: u32) -> bool {
