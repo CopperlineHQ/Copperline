@@ -177,6 +177,11 @@ pub enum LauncherTab {
     /// FluxBridge settings for one bay, reached from its Configure button.
     FluxBridge,
     BootPriority,
+    /// The rest of the boot order when one page cannot hold it. A fully
+    /// fitted machine reaches thirteen drives, more than the panel has
+    /// rows for, so the list runs onto a second page reached by the
+    /// "Next Page >" button and returning via its own Back.
+    BootPriorityMore,
     HostFs,
     /// Direct WHDLoad boot (src/whdload.rs): the game to launch and what
     /// staging draws on, reached from the Storage tab.
@@ -283,7 +288,7 @@ impl LauncherTab {
             LauncherTab::Floppy => "Floppy",
             LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
-            LauncherTab::BootPriority => "Boot Priority",
+            LauncherTab::BootPriority | LauncherTab::BootPriorityMore => "Boot Priority",
             LauncherTab::HostFs => "Host Folder",
             LauncherTab::Whdload => "WHDLoad",
             // The strip's own name for it. Inside the WHDLoad pages the
@@ -325,6 +330,7 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
+            | LauncherTab::BootPriorityMore
             | LauncherTab::Lide
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard
@@ -360,6 +366,7 @@ impl LauncherTab {
             | LauncherTab::CreateHard => Some(LauncherTab::Storage),
             // Back goes to the page that sent you here, not to Storage.
             LauncherTab::CreateGeometry => Some(LauncherTab::CreateHard),
+            LauncherTab::BootPriorityMore => Some(LauncherTab::BootPriority),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
@@ -790,7 +797,6 @@ const fn row(field: LauncherField, label: &'static str, kind: RowKind) -> Row {
 pub fn field_is_bootpri(field: LauncherField) -> bool {
     BOOTPRI_ROWS
         .iter()
-        .chain(LIDE_ROWS.iter())
         .any(|r| r.field == field && r.kind == RowKind::Bootpri)
 }
 
@@ -802,6 +808,13 @@ const fn section_header(label: &'static str) -> Row {
         kind: RowKind::SectionHeader,
     }
 }
+
+/// How many drives one Boot Priority page holds. Nine is a machine without a
+/// Lide board -- two IDE bays and a full seven-unit SCSI chain -- and it is
+/// also as many rows as the panel has room for under the column titles with
+/// the "Info:" note still below them. A Lide board's drives take the list
+/// past it, and onto a second page.
+pub const BOOTPRI_PAGE_ROWS: usize = 9;
 
 /// The greyed column-title row on the Boot Priority page (see
 /// [`RowKind::BootpriHeader`]).
@@ -1051,7 +1064,7 @@ const HOSTFS_ROWS: [Row; 12] = [
 // IDE and SCSI only: lide's drives get their own priority rows on the Lide
 // page (see `LIDE_ROWS`) rather than crowding this table -- with them added
 // here the page no longer fits (`every_launcher_tab_row_fits_inside_the_panel`).
-const BOOTPRI_ROWS: [Row; 9] = [
+const BOOTPRI_ROWS: [Row; 13] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
     row(F::ScsiUnit0Boot, "SCSI unit 0", Bootpri),
@@ -1061,6 +1074,14 @@ const BOOTPRI_ROWS: [Row; 9] = [
     row(F::ScsiUnit4Boot, "SCSI unit 4", Bootpri),
     row(F::ScsiUnit5Boot, "SCSI unit 5", Bootpri),
     row(F::ScsiUnit6Boot, "SCSI unit 6", Bootpri),
+    // The Zorro IDE board's drives sit below the motherboard's and the
+    // SCSI units, which is also the order the cascade default ranks them
+    // in: a board added to a machine takes its place after what the
+    // machine already had.
+    row(F::LideDrive0Boot, "Lide drive 0", Bootpri),
+    row(F::LideDrive1Boot, "Lide drive 1", Bootpri),
+    row(F::LideDrive2Boot, "Lide drive 2", Bootpri),
+    row(F::LideDrive3Boot, "Lide drive 3", Bootpri),
 ];
 const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
@@ -1072,18 +1093,14 @@ const CD_ROWS: [Row; 3] = [
 // 2008 also hides the second ROM bank -- it has no flash banking), and each
 // drive's boot priority. Boot priority sits here rather than on the shared
 // Boot Priority page: with lide's four slots added there it stopped fitting.
-const LIDE_ROWS: [Row; 11] = [
+const LIDE_ROWS: [Row; 7] = [
     row(F::LideBoard, "Board", Cycle),
     row(F::LideRom, "Boot ROM", PathRow),
     row(F::LideRomBank2, "Boot ROM bank 2", PathRow),
     row(F::LideDrive0, "Drive 0", Drive),
-    row(F::LideDrive0Boot, "  Boot priority", Bootpri),
     row(F::LideDrive1, "Drive 1", Drive),
-    row(F::LideDrive1Boot, "  Boot priority", Bootpri),
     row(F::LideDrive2, "Drive 2", Drive),
-    row(F::LideDrive2Boot, "  Boot priority", Bootpri),
     row(F::LideDrive3, "Drive 3", Drive),
-    row(F::LideDrive3Boot, "  Boot priority", Bootpri),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
 // draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
@@ -1363,7 +1380,11 @@ pub fn rows(
         // in the same place as each sub-page's Back button, so they are not part
         // of the row grid.
         LauncherTab::Storage => Cow::Borrowed(&STORAGE_ROWS),
-        LauncherTab::BootPriority => {
+        // Both boot pages carry the same table and the same column titles;
+        // which drives each one draws is decided per drive by
+        // `MachineSetup::boot_page_of`, since only the machine knows which
+        // slots are filled.
+        LauncherTab::BootPriority | LauncherTab::BootPriorityMore => {
             // The greyed column titles, then one row per hard-disk drive.
             let mut rows = vec![bootpri_header()];
             rows.extend_from_slice(&BOOTPRI_ROWS);
@@ -3526,16 +3547,17 @@ impl MachineSetup {
                         .and_then(|drive| self.drive_holds(drive))
                         .is_none()
             }
-            // Each sits directly under the drive it belongs to, and stays
-            // on the page when that drive is empty -- greyed with "No
-            // drive" (see `disabled_reason`) rather than vanishing, so the
-            // rows do not reshuffle under the cursor as slots are filled
-            // and the indented label always has its own drive above it.
-            // Only a slot the board does not have goes, along with the
-            // drive row itself.
+            // Read on the Boot Priority page beside the SCSI units, and on
+            // the same terms: a board is not a disk, so only a slot the
+            // fitted board has *and* which carries one takes a place in the
+            // boot order. The Lide page keeps the drives themselves.
             F::LideDrive0Boot | F::LideDrive1Boot | F::LideDrive2Boot | F::LideDrive3Boot => {
-                lide_drive_index(field)
-                    .is_some_and(|i| self.lide_board.is_none_or(|b| b.max_drives() <= i))
+                lide_drive_index(field).is_none_or(|i| {
+                    self.lide_board.is_none_or(|b| b.max_drives() <= i)
+                        || Self::boot_field_drive(field)
+                            .and_then(|drive| self.drive_holds(drive))
+                            .is_none()
+                })
             }
             // Nothing to configure without a board fitted.
             F::LideRom => self.lide_board.is_none(),
@@ -5359,6 +5381,56 @@ impl MachineSetup {
         BOOTPRI_ROWS
             .iter()
             .any(|r| self.boot_field_applies(r.field))
+    }
+
+    /// Drives listed on the Boot Priority page: the two IDE bays, which stand
+    /// their ground empty, plus every SCSI unit and Lide slot carrying a disk.
+    pub fn boot_priority_row_count(&self) -> usize {
+        BOOTPRI_ROWS
+            .iter()
+            .filter(|r| !self.row_hidden(r.field))
+            .count()
+    }
+
+    /// Whether the boot order runs onto a second page -- which is also
+    /// whether the first one shows its "Next Page >" button.
+    pub fn boot_priority_has_second_page(&self) -> bool {
+        self.boot_priority_row_count() > BOOTPRI_PAGE_ROWS
+    }
+
+    /// Whether there is room under the drives for the priority-range note.
+    /// It sits below the last row of a full page, so it goes as soon as the
+    /// list needs a second one -- the drives are the page, and the range is
+    /// written beside the value box anyway.
+    pub fn boot_priority_shows_info(&self) -> bool {
+        self.has_boot_priority_rows() && !self.boot_priority_has_second_page()
+    }
+
+    /// Which Boot Priority page a drive's row falls on, or `None` for a row
+    /// that is not one of them (the column titles, and every other page's
+    /// rows). Paged by position among the drives actually listed, not by
+    /// position in the table, so a machine with a Lide board but no SCSI
+    /// keeps its four Lide drives on the first page.
+    pub fn boot_page_of(&self, field: LauncherField) -> Option<LauncherTab> {
+        if !BOOTPRI_ROWS.iter().any(|r| r.field == field) {
+            return None;
+        }
+        let rank = BOOTPRI_ROWS
+            .iter()
+            .take_while(|r| r.field != field)
+            .filter(|r| !self.row_hidden(r.field))
+            .count();
+        Some(if rank < BOOTPRI_PAGE_ROWS {
+            LauncherTab::BootPriority
+        } else {
+            LauncherTab::BootPriorityMore
+        })
+    }
+
+    /// Whether a row is drawn on `tab`: present on this machine, and -- for
+    /// the paged boot order -- belonging to this page rather than the other.
+    pub fn row_on_page(&self, tab: LauncherTab, field: LauncherField) -> bool {
+        !self.row_hidden(field) && self.boot_page_of(field).is_none_or(|page| page == tab)
     }
 
     /// Whether a drive's Bootable box is cleared -- the config's -128 sentinel,
