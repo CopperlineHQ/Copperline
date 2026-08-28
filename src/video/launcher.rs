@@ -3634,9 +3634,7 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => {
-                reason(self.has_ide(), "needs A600/A1200/A4000 (or Lide)")
-            }
+            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
             // rom_odd is an A2091 split-EPROM option only.
