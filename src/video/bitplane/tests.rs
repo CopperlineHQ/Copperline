@@ -353,16 +353,16 @@ fn sprite_color_entry_follows_bplcon4_on_aga() {
     assert_eq!(sprite_color_entry(aga_default, 0, 1, false), 17);
     assert_eq!(sprite_color_entry(aga_default, 1, 1, false), 17);
 
-    // Distinct even/odd banks: ESPRM=7 (even sprites and attached
-    // pairs at 112..), OSPRM=2 (odd sprites at 32..).
+    // Distinct even/odd banks: ESPRM=2 (even sprites at 32..), OSPRM=7
+    // (odd sprites and attached pairs at 112..).
     let aga = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,
         bplcon4: 0x0027,
         ..ControlState::default()
     };
-    assert_eq!(sprite_color_entry(aga, 0, 1, false), 112 + 1);
-    assert_eq!(sprite_color_entry(aga, 1, 1, false), 32 + 1);
-    assert_eq!(sprite_color_entry(aga, 4, 2, false), 112 + 8 + 2);
+    assert_eq!(sprite_color_entry(aga, 0, 1, false), 32 + 1);
+    assert_eq!(sprite_color_entry(aga, 1, 1, false), 112 + 1);
+    assert_eq!(sprite_color_entry(aga, 4, 2, false), 32 + 8 + 2);
     assert_eq!(sprite_color_entry(aga, 2, 9, true), 112 + 9);
 }
 
