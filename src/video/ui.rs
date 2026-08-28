@@ -9382,15 +9382,11 @@ fn draw_launcher(
     // always has its room under them, and the second page needs no second
     // copy of it.
     if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
-        // The drives that are drawn, plus the column-title row above them --
-        // the hidden ones take no space, so the note follows the last one on
-        // the page rather than the last one in the table.
-        let listed = state
-            .setup
-            .boot_priority_row_count()
-            .min(launcher::BOOTPRI_PAGE_ROWS)
-            + 1;
-        let help_top = (launcher_row_y(rect, listed + 1) + row_offset).saturating_sub(10);
+        // Below a full page of drives, whether or not this machine has one:
+        // the note keeps the same place on the page however many rows are
+        // drawn above it, rather than riding up and down with the count.
+        let below_a_full_page = launcher::BOOTPRI_PAGE_ROWS + 2;
+        let help_top = (launcher_row_y(rect, below_a_full_page) + row_offset).saturating_sub(10);
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
