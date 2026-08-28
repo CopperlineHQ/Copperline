@@ -104,16 +104,20 @@ def main():
     # data file; the audio content is never played by the probe, so its
     # byte order is irrelevant. The unpadded probe data reuses the
     # patched iso (no seek pad: the audio tracks provide the LBA range).
-    trackdir = Path(sys.argv[1]).parent
+    trackdir = Path(sys.argv[1]).resolve().parent
     (outdir / "cd32-probe-track01.iso").write_bytes(iso)
     toc = ["CD_ROM", "", "TRACK MODE1", 'DATAFILE "cd32-probe-track01.iso"', ""]
     for n in range(2, 35):
         audio = trackdir / f"Fightin' Spirit (Europe) (En,De,It) (Track {n:02d}).bin"
         assert audio.exists(), audio
+        # The source bins embed their own two-second pregap (the cue's
+        # INDEX 00 at file start, INDEX 01 at 00:02:00): START marks it
+        # so cdrdao does not generate a second one, keeping every later
+        # track and the lead-out at the original disc's positions.
         toc += [
             "TRACK AUDIO",
-            "PREGAP 0:2:0",
             f'FILE "{audio}" 0',
+            "START 0:2:0",
             "",
         ]
     (outdir / "cd32-probe-full.toc").write_text("\n".join(toc))

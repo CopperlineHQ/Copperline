@@ -650,6 +650,17 @@ impl Akiko {
         self.nvram.memory = memory;
     }
 
+    /// A power cycle stops the mechanism: the next lead-in dump pays the
+    /// full cold spin-up again. A guest reset alone keeps the disc
+    /// spinning (see `reset`), so the Bus calls this only on the
+    /// power-on path.
+    pub fn rearm_cold_spin_up(&mut self) {
+        if self.disc.is_some() {
+            self.toc_spin_up_cck =
+                (COLD_SPIN_UP_SECS * f64::from(crate::chipset::paula::PAULA_CLOCK_HZ)) as i64;
+        }
+    }
+
     /// Persist NVRAM to (and preload it from) `path`.
     pub fn set_nvram_path(&mut self, path: std::path::PathBuf) {
         self.nvram = Nvram::new(Some(path));
@@ -1891,6 +1902,30 @@ mod tests {
 
         akiko.eject_disc();
         assert_eq!(akiko.current_track(), None);
+    }
+
+    #[test]
+    fn guest_reset_keeps_the_lead_in_but_a_power_cycle_respins() {
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        assert!(akiko.toc_spin_up_cck > 0, "cold mount pays spin-up");
+        akiko.toc_spin_up_cck = 0;
+
+        // A guest reset keeps the disc spinning and the lead-in cached.
+        akiko.reset();
+        assert!(akiko.disc.is_some());
+        assert_eq!(akiko.toc_spin_up_cck, 0);
+
+        // A power cycle stops the mechanism: the next lead-in dump pays
+        // the full cold spin-up again.
+        akiko.rearm_cold_spin_up();
+        assert!(akiko.toc_spin_up_cck > 0);
+
+        // Without a disc there is nothing to spin up.
+        akiko.eject_disc();
+        akiko.toc_spin_up_cck = 0;
+        akiko.rearm_cold_spin_up();
+        assert_eq!(akiko.toc_spin_up_cck, 0);
     }
 
     #[test]

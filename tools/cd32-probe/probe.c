@@ -16,8 +16,8 @@
  *    the slow-external billing), all against the CIA E-clock via
  *    timer.device ReadEClock.
  *
- * Build: ./build.sh (m68k-amigaos-gcc, -nostartfiles; entry() must stay
- * the first function in this file).
+ * Build: ./build.sh (m68k-amigaos-gcc, -nostartfiles; start.s owns the
+ * first hunk and forwards to entry() below).
  */
 
 #include "amiga-mini.h"
@@ -107,6 +107,12 @@ static ULONG eticks(void)
 static struct MsgPort *port_init(struct MsgPort *port)
 {
     BYTE sig = AllocSignal(-1);
+    if (sig < 0) {
+        /* No free signal bit: a bogus mp_SigBit would make Wait() block
+         * forever and defeat the watchdog guarantee, so stop while the
+         * screen can still be trusted (blank = probe never ran). */
+        halt();
+    }
     bzero_(port, sizeof(*port));
     port->mp_Node.ln_Type = NT_MSGPORT;
     port->mp_SigBit = sig;

@@ -1,7 +1,8 @@
 /*
- * amiga-mini.h - the slice of the AmigaOS SDK retro32term.c needs, self
- * contained so the terminal builds with a bare m68k-amigaos-gcc even when
- * no (or a broken) NDK header set is installed. Struct layouts follow the
+ * amiga-mini.h - the slice of the AmigaOS SDK the cd32-probe needs
+ * (adapted from retro32-term's header of the same name), self contained
+ * so the probe builds with a bare m68k-amigaos-gcc even when no (or a
+ * broken) NDK header set is installed. Struct layouts follow the
  * published AmigaOS ABI (RKM/NDK 3.x, 2-byte alignment, which is the m68k
  * ABI this compiler targets); library calls go through the NDK's standard
  * LPx inline macros (<inline/macros.h>, shipped with the bebbo toolchain),

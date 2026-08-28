@@ -106,15 +106,15 @@ the calibration commits in src/cpu.rs, src/bus.rs and src/akiko.rs:
 
 | row | real CD32 | derived | Copperline after calibration |
 |---|---|---|---|
-| 00 CLITASK | 001F3170 | show fully torn down before startup-sequence; address byte-identical to Copperline's clean-path CLI | 00025700 (show still resident at entry) |
-| 01 LARGEST0 | 001B9CE0 | 1.73 MB largest free AT ENTRY | 0011FE50 (1.12 MB) |
-| 04 FANFARE0 | 00000000 | Fanfare already exited | 00187020 (alive) |
+| 00 CLITASK | 001F3170 | the show never ran: with a bootable disc in the drive the cold boot skips it entirely | 001F317x (identical) |
+| 01 LARGEST0 | 001B9CE0 | 1.73 MB largest free at entry | 001B94Ax (delta ~2 KB) |
+| 04 FANFARE0 | 00000000 | show tasks never created | 00000000 |
 | 05 BUGOPEN | 00000000 | the game's uninitialized-version call FAILS on real hardware too -- and does not matter there | 00000000 |
-| 07/08 OLDOPEN/CLOSE | 0000FDC0 / 0015D0D0 | correct teardown call blocks 2.02 s even with nothing left to free | 0000FD08 / ~2.1 s |
-| 13 ENTRYTIM | 009AE1B5 | startup-sequence reaches FSCD at 14.31 s | 12.07 s |
-| 15 RD500 | 0002BD6D | 253 ms | 284 ms |
-| 16 RD1K | 00034284 | 301 ms | 333 ms |
-| 20-22 PLxxx | 184911/1D3090/1EF0BA | 2.24/2.70/2.86 s incl. 1 s of audio: far locates flatten ~1.4-1.9 s | play path does not yet pay locates |
+| 07/08 OLDOPEN/CLOSE | 0000FDC0 / 0015D0D0 | teardown round-trip blocks 2.02 s even with nothing left to free | 0000FD0x / 2.019 s |
+| 13 ENTRYTIM | 009AE1B5 | startup-sequence reaches FSCD at 14.31 s | 14.36 s |
+| 15 RD500 | 0002BD6D | 253 ms | 329 ms |
+| 16 RD1K | 00034284 | 301 ms (433 ms on the padded disc -- mechanism spread) | 367 ms |
+| 20-22 PLxxx | 184911/1D3090/1EF0BA | 2.24/2.70/2.86 s incl. 1 s of audio | play path does not yet pay locates (~1.01 s) |
 | 23 RDRATE64 | 00049E4C | 150.0 sectors/s at 2x | 150.1/s |
 | 24 URD | 000099D7 | 12.01 clk/iter == ROM pace | 12.00 |
 | 25 ROMRD | 000099D4 | 12.0 | 12.0 |
