@@ -328,7 +328,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (`diw_vertical_open`, set on a DIWSTRT.V match, reset on DIWSTOP.V).
 //      It is history-dependent and snapshots can be taken mid-frame, so it
 //      travels in the state instead of being reconstructed from registers.
-pub const STATE_VERSION: u32 = 69;
+//  70: Akiko gained the cold/warm spin-up gate on the first lead-in dump
+//      (`toc_spin_up_cck`) and the dump-exclusive command hold
+//      (`command_deferred_for_toc`), both calibrated against a real-CD32
+//      boot video and the cd32-probe rows.
+pub const STATE_VERSION: u32 = 70;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -14,6 +14,18 @@ colour clocks:
 - Fast RAM, ROM, and other external-bus targets are billed at the CPU
   clock (`cpu_external_access`), scaled by `cpu_clocks_per_cck` with
   sub-CCK carry so accelerated clocks bill fractional costs exactly.
+- Unmapped space bills one ordinary external cycle per 16-bit bus cycle
+  the access performs (an aligned word is one cycle; a misaligned word
+  on 020+ is two), not one per byte of the sized access. Real-CD32
+  measurement (tools/cd32-probe rows URD/ROMRD/ULRD/UWR): a word-read
+  loop over the empty $A80000 expansion window runs at exactly the
+  Kickstart-ROM pace (12.0 CPU clocks per CMP.W (A4)+/DBF iteration),
+  so unmapped reads take the fast `cpu_external_access` class; dropped
+  unmapped writes are posted and earn a one-clock overlap credit so the
+  measured 8.0-clock write+DBF cadence lands. exec's ROMTAG scan
+  word-reads that window for seconds at CD32 boot, which is what made
+  the earlier per-byte slow-class billing start the boot show visibly
+  late.
 - Addresses are masked to the model's bus width: 24-bit for
   68000/68010/68EC020, 32-bit for 68020/030/040/060.
 

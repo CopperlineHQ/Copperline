@@ -3940,6 +3940,12 @@ impl Bus {
     pub fn power_on_reset(&mut self) {
         self.mem.power_on_reset_with(self.ram_init);
         self.reset_for_keyboard_reset();
+        // The warm-reset path above keeps a spinning disc's cached
+        // lead-in; a power cycle stops the mechanism, so a mounted disc
+        // pays the cold spin-up again.
+        if let Some(akiko) = self.akiko.as_mut() {
+            akiko.rearm_cold_spin_up();
+        }
     }
 
     pub fn front_panel_status(&self) -> FrontPanelStatus {
@@ -5415,6 +5421,24 @@ impl Bus {
     /// motherboard space) back against the instruction charge, on the same
     /// terms as a chip access: the timing table already allots the memory
     /// reference, so only the wait beyond it should stretch the instruction.
+    /// Overlap credit for a write the bus decodes to nothing: the 020+
+    /// posts the cycle and keeps executing, so part of the core's nominal
+    /// write-cycle charge overlaps the following instructions. Called
+    /// once per byte lane of the sized access (the unmapped fall-through
+    /// recurses per byte), crediting one clock each -- two per aligned
+    /// word -- which lands a word-write+DBF loop over the CD32's empty
+    /// $A80000 window on the measured 8.0 CPU clocks per iteration
+    /// (tools/cd32-probe row UWR; the uncredited charge runs it at 10,
+    /// and two clocks per byte overshoot to 6 through the phase
+    /// reconciliation). The 68000 has no posted writes; its nominal
+    /// charge stands.
+    pub(crate) fn credit_cpu_posted_void_write(&mut self) {
+        if !self.cpu_short_bus_cycle || !self.cpu_access_phase_sync {
+            return;
+        }
+        self.cpu_bus_overlap_clocks = self.cpu_bus_overlap_clocks.saturating_add(1);
+    }
+
     fn credit_cpu_off_chip_access(&mut self, cck: u32) {
         if !self.cpu_short_bus_cycle || !self.cpu_access_phase_sync {
             return;
