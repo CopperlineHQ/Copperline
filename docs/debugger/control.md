@@ -157,7 +157,7 @@ events.unsubscribe {"events":["serial"]}
 - `media.cd.insert {"path": "..."}`: Insert CD image.
 - `media.cd.eject`: Eject CD image.
 
-### Save states
+### State snapshot files
 - `state.save {"path": "..."}`: Snapshot machine state to file.
 - `state.load {"path": "..."}`: Restore machine state from file.
 

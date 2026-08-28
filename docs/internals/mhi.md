@@ -7,7 +7,7 @@ Interface) MPEG audio decoder board, precisely enough that the host board
 independently against it and interoperate. Where this document and either
 implementation disagree, this document wins -- fix the implementation, not
 the spec, unless the spec itself is being deliberately revised (see
-[Versioning](#versioning)).
+[Versioning](#mhi-versioning)).
 
 The protocol is deliberately **bus-agnostic**: every offset below is
 relative to the start of the board's autoconfigured window, and nothing in
@@ -87,9 +87,9 @@ autoconfig identity.
 
 - **`VERSION`** (`0x00`, RO) -- the register-protocol version this board
   implements, currently `2` (bumped from `1` by M4 -- see
-  [Versioning](#versioning)'s worked example). A guest library reads this once at
+  [Versioning](#mhi-versioning)'s worked example). A guest library reads this once at
   `FindConfigDev` time and refuses to drive a board whose major protocol
-  it does not understand (see [Versioning](#versioning)).
+  it does not understand (see [Versioning](#mhi-versioning)).
 - **`CAPS`** (`0x02`, RO) -- a bitmask of the MPEG formats and bitrate
   modes this board's decoder accepts. Bit layout:
 
@@ -118,7 +118,7 @@ autoconfig identity.
   guarantee about behavior the board's registers never described a limit
   on in the first place -- not a change to any offset, width, access
   rule, or bit meaning `VERSION` exists to gate. **M4** adds bit 6
-  (`VERSION` 2 -- see [Versioning](#versioning)), a genuine behavior
+  (`VERSION` 2 -- see [Versioning](#mhi-versioning)), a genuine behavior
   change unlike bit 5's rewording. This register is what the guest
   library's `MHIQuery` handler consults for
   `MHIQ_MPEG1`/`MHIQ_MPEG2`/`MHIQ_MPEG25`/`MHIQ_LAYER3`/
@@ -651,7 +651,7 @@ version's constants -- and it is what makes the split in
 [Porting to another emulator](#porting-to-another-emulator) below
 possible without also porting MHI-specific glue.
 
-(versioning)=
+(mhi-versioning)=
 ## Versioning
 
 `VERSION` (`0x00`) is the register-protocol's own version number, starting
@@ -724,7 +724,7 @@ default-on `mhi` build feature); it does not change any of the protocol
 content above.
 
 - **Decoder**:
-  [Symphonia](https://crates.io/crates/symphonia-bundle-mp3)'s pure-Rust
+  [Symphonia](https://github.com/pdeljanov/Symphonia)'s pure-Rust
   MPEG audio decoder (`MpaDecoder`, MPL-2.0), with only its Layer III
   feature enabled to match `CAPS`. Pure Rust is the point: the previous
   decoder (`minimp3-sys`) compiled a vendored C minimp3 whose SIMD
