@@ -645,10 +645,10 @@ The layout is:
   [](whdload.md)),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
-  sounds and volume), **Video** (start fullscreen, status bar, monitor bezel
-  style,
-  perf overlay, menu size, overscan, pixel aspect, scaling, deinterlace,
-  screen tint, phosphor, CRT shader and shader strength),
+  sounds and volume), **Video** -- the emulated picture (monitor bezel style,
+  overscan, pixel aspect, scaling, deinterlace, screen tint, phosphor, CRT
+  shader and shader strength), **Display** -- the host window (start
+  fullscreen, status bar, perf overlay, menu size),
   **Emulation**
   (power-on, realtime priority, pacing, warp speed),
   and **Paths** -- opening on Audio, and switched freely between the four.

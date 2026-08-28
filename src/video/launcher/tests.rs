@@ -3378,10 +3378,12 @@ fn av_emu_categories() {
     // Emulation are its categories.
     assert!(TABS.contains(&LauncherTab::AvAudio));
     assert!(!TABS.contains(&LauncherTab::AvVideo));
+    assert!(!TABS.contains(&LauncherTab::AvDisplay));
     assert!(!TABS.contains(&LauncherTab::AvEmulation));
     assert!(!TABS.contains(&LauncherTab::AvPaths));
     for t in [
         LauncherTab::AvVideo,
+        LauncherTab::AvDisplay,
         LauncherTab::AvEmulation,
         LauncherTab::AvPaths,
     ] {
@@ -3397,11 +3399,13 @@ fn av_emu_categories() {
         [
             ("Audio", LauncherTab::AvAudio),
             ("Video", LauncherTab::AvVideo),
+            ("Display", LauncherTab::AvDisplay),
             ("Emulation", LauncherTab::AvEmulation),
             ("Paths", LauncherTab::AvPaths),
         ]
     );
     assert_eq!(LauncherTab::AvVideo.nav_options(), nav);
+    assert_eq!(LauncherTab::AvDisplay.nav_options(), nav);
     assert!(LauncherTab::AvAudio.has_top_nav());
     assert!(LauncherTab::Storage.has_top_nav());
     assert!(!LauncherTab::System.has_top_nav());
@@ -3411,9 +3415,20 @@ fn av_emu_categories() {
     let audio = page(LauncherTab::AvAudio);
     assert!(audio.iter().any(|r| r.field == F::AudioDevice));
     assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
+    // Video is the emulated picture; Display is the host window. The
+    // fullscreen switch is the window's, the shader the picture's.
     assert!(page(LauncherTab::AvVideo)
         .iter()
+        .any(|r| r.field == F::Shader));
+    assert!(page(LauncherTab::AvVideo)
+        .iter()
+        .all(|r| r.field != F::StartFullscreen));
+    assert!(page(LauncherTab::AvDisplay)
+        .iter()
         .any(|r| r.field == F::StartFullscreen));
+    assert!(page(LauncherTab::AvDisplay)
+        .iter()
+        .all(|r| r.field != F::Bezel));
     assert!(page(LauncherTab::AvEmulation)
         .iter()
         .any(|r| r.field == F::PowerOn));
