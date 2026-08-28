@@ -640,9 +640,18 @@ impl Bus {
             // (its idle halves, sleeping WAITs, gaps). The shared
             // step_eligible_slot keeps prediction and execution from
             // drifting apart.
-            let slot_grantable =
-                quantum >= CHIP_BUS_SLOT_CCK && self.fixed_dma_owner_at(vpos, hpos).is_none();
-            let copper_blocks = if !slot_grantable {
+            let fixed_owner = self.fixed_dma_owner_at(vpos, hpos);
+            let slot_grantable = quantum >= CHIP_BUS_SLOT_CCK && fixed_owner.is_none();
+            // The live arbiter's line-end refresh carve-out, mirrored: the
+            // Copper fetches through the E2/E3 refresh access, so the clone
+            // must fetch there too or it falls a word behind the live
+            // Copper. The slot stays non-grantable, so the blitter still
+            // never consumes it.
+            let copper_may_fetch = slot_grantable
+                || (quantum >= CHIP_BUS_SLOT_CCK
+                    && matches!(fixed_owner, Some(ChipBusOwner::Refresh))
+                    && Self::line_end_refresh_slot(hpos));
+            let copper_blocks = if !copper_may_fetch {
                 // Fixed DMA owns this color clock, but the Copper's WAIT/SKIP
                 // comparator keeps running (mirrors the live path's
                 // comparator-only advance with allow_fetch=false).

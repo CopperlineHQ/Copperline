@@ -2467,7 +2467,7 @@ fn copper_wait_wakeup_yields_free_cycle_after_late_match() {
 }
 
 #[test]
-fn copper_line_end_bus_lockout_defers_transfer_past_the_wrap() {
+fn copper_line_end_lockout_defers_fetch_to_the_refresh_slot() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
     let start_vpos = 0x40;
@@ -10168,6 +10168,40 @@ fn blitter_completion_prediction_matches_actual_with_running_copper() {
     // The predicted completion (which simulates the Copper's cadence on a
     // clone via the shared step primitive) must match when the blitter
     // actually finishes once executed, or wake-up scheduling would drift.
+    let predicted = bus.next_blitter_completion_cck().expect("blitter deadline");
+    assert!(predicted > 1);
+    bus.advance_chipset(predicted - 1);
+    assert!(bus.blitter.busy);
+    bus.advance_chipset(1);
+    assert!(!bus.blitter.busy);
+}
+
+#[test]
+fn blitter_completion_prediction_matches_actual_across_the_refresh_slot() {
+    // The same prediction-equals-execution contract with the Copper stream
+    // crossing the line wrap: the live arbiter lets the Copper fetch
+    // through the E2 line-end refresh access, so the predictor's cloned
+    // Copper must fetch there too or it runs a word behind the live
+    // machine and misplaces where the stream ends - and with it, which
+    // color clocks the blitter wins after the Copper goes to sleep. The
+    // blit stays inside BLITTER_DEADLINE_SLOT_SCAN_LIMIT so the exact
+    // predictor (not its conservative fallback) is what is under test.
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    for i in 0..10usize {
+        write_chip_word(&mut bus, cop1 + i * 4, 0x0180);
+        write_chip_word(&mut bus, cop1 + i * 4 + 2, 0x0000);
+    }
+    write_chip_word(&mut bus, cop1 + 40, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 42, 0xFFFE);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x0C0;
+    bus.copper.jump(cop1 as u32);
+    bus.blitter.bltcon0 = 0x09F0; // A->D copy: every slot needs the bus
+    bus.blitter
+        .start_scheduled((12 << 6) | 2, &bus.mem.chip_ram);
+
     let predicted = bus.next_blitter_completion_cck().expect("blitter deadline");
     assert!(predicted > 1);
     bus.advance_chipset(predicted - 1);
