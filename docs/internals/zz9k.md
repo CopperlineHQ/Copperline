@@ -113,6 +113,7 @@ u32, 48-byte inline payload. The board echoes `request_id`, `opcode`, and
 `user_cookie` into the completion (the transport matches on all three) and
 sets `status` to the result. Error completions carry an empty payload.
 
+(capability-bits)=
 ### Capability bits
 
 The descriptor and `QUERY_CAPS` advertise `0x7D07`: MAILBOX (1<<0),

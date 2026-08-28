@@ -90,6 +90,7 @@ events.unsubscribe {"events":["serial"]}
 
 ### Session management
 - `hello {"token": "..."}`: Handshake and protocol version query.
+- `auth {"token": "..."}`: Authenticate active connection.
 - `status`: Returns emulation state, frame counters, and host execution timing.
 - `shutdown`: Terminates the emulator process.
 
@@ -102,6 +103,7 @@ events.unsubscribe {"events":["serial"]}
 - `step_frame {"n": 1}`: Step video frames.
 - `run_until {"pc" | "vpos" | "frame" | "cck" | "seconds" | "stable_frames"}`: Run until condition.
 - `pause`: Pause active execution.
+- `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
 
 ### Reverse execution
 - `reverse_step {"n": 1}`: Step backward by instruction.
@@ -110,13 +112,28 @@ events.unsubscribe {"events":["serial"]}
 - `last_writer {"addr": "..."}`: Find the instruction that last wrote to memory address.
 
 ### State inspection and modification
-- `regs.get` / `regs.set`: Read or modify 68000 registers.
-- `mem.read` / `mem.write`: Read or modify memory (supports hex or base64 encoding).
-- `custom.read` / `custom.dump`: Query custom chipset registers.
+- `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68000 registers.
+- `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory.
+- `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
+- `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
+- `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
 - `palette.dump`: Query active 32-color or 256-color palette.
-- `cia.get`: Query CIA-A and CIA-B timer and port states.
+- `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
-- `copper.list`: Disassemble Copper instructions.
+- `display.get`: Query active display parameters, viewport size, and pixel format.
+- `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
+- `copper.list {"addr": ..., "max": ...}`: Disassemble Copper instructions.
+- `pc_history`: Return recently executed instruction addresses.
+
+### Diagnostics and profiling
+- `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.
+- `smc.detect {"enabled": ..., "clear": ...}` / `smc.report`: Arm or query self-modifying code detector.
+- `fault.inject {"addr": ..., "len": ..., "on": "read"|"write"|"both", "count": ...}`: Inject memory bus faults.
+- `fault.list` / `fault.clear`: List or clear active memory bus faults.
+- `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable or configure address-space access tracking.
+- `memory.heatmap.report {"path": "..."}`: Export memory access heatmap.
+- `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
+- `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`).
@@ -125,19 +142,31 @@ events.unsubscribe {"events":["serial"]}
 - `break.clear`: Remove all breakpoints.
 
 ### Input injection
-- `input.key {"rawkey": ..., "action": "press"|"release"|"tap"}`: Inject keyboard events.
-- `input.mouse {"dx": ..., "dy": ..., "left": ..., "right": ...}`: Inject mouse motion/buttons.
-- `input.mouse_to {"x": ..., "y": ...}`: Steer pointer to screen pixel coordinates via sprite 0.
-- `input.joy {"up": ..., "down": ..., "red": ...}`: Inject joystick / CD32 button state.
-- `input.set_port {"port": 1|2, "device": "mouse"|"joystick"|"cd32"|"analogue"|"none"}`: Change port device.
+- `input.key {"rawkey": ..., "action": "press"|"release"|"tap", "hold_ms": ..., "at_seconds": ...}`: Inject keyboard events.
+- `input.mouse {"dx": ..., "dy": ..., "left": ..., "right": ..., "middle": ..., "port": 1|2, "at_seconds": ...}`: Inject mouse motion/buttons.
+- `input.mouse_to {"x": ..., "y": ..., "port": 1|2, "tolerance": ..., "max_frames": ...}`: Steer pointer to screen pixel coordinates via sprite 0.
+- `input.joy {"up": ..., "down": ..., "left": ..., "right": ..., "red": ..., "blue": ..., "green": ..., "yellow": ..., "play": ..., "rwd": ..., "ffw": ..., "port": 1|2, "at_seconds": ...}`: Inject joystick / CD32 button state.
+- `input.analogue {"x": ..., "y": ..., "port": 1|2, "at_seconds": ...}`: Set analogue paddle/pot position (0-255).
+- `input.set_port {"port": 1|2, "device": "mouse"|"gamepad-mouse"|"joystick"|"cd32"|"analogue"|"none"}`: Change port device.
+- `input.get_ports`: Query active controller port device assignments.
 
 ### Media management
 - `media.floppy.insert {"drive": 0, "path": "...", "write_protected": true}`: Insert floppy disk image.
 - `media.floppy.eject {"drive": 0}`: Eject floppy disk.
+- `media.floppy.query`: Query connected floppy drives, mounted disk images, and write-protection status.
 - `media.cd.insert {"path": "..."}`: Insert CD image.
 - `media.cd.eject`: Eject CD image.
+
+### Save states
+- `state.save {"path": "..."}`: Snapshot machine state to file.
+- `state.load {"path": "..."}`: Restore machine state from file.
 
 ### Framebuffer capture
 - `capture.screenshot {"path": "..."}`: Write PNG screenshot of framebuffer.
 - `capture.digest`: Return FNV-1a hash digest of current frame.
 - `capture.region_digest {"x": ..., "y": ..., "w": ..., "h": ...}`: Return hash of screen region.
+
+### Streaming events
+- `events.subscribe {"events": [...], "frame_interval": ..., "frame_digest": ...}`: Subscribe to asynchronous event stream.
+- `events.unsubscribe {"events": [...]}`: Unsubscribe from events.
+- `events.list`: List active event subscriptions.

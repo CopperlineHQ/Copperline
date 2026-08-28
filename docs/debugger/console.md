@@ -78,6 +78,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `TRACE STOP` | Stop instruction trace logging |
 | `WAVE START [ARGS]` | Arm VCD logic analyzer capture (see [](waveform.md)) |
 | `WAVE STOP` | Stop VCD capture |
+| `HELP [CMD]` (or `?`) | Display command summary or detailed command syntax |
 
 ### Memory delta search (Trainer / Value hunter)
 

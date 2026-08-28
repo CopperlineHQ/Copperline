@@ -68,9 +68,26 @@ range checks as the equivalent TOML fields:
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
 | `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
+| `--run-ahead FRAMES` | `[emulation] run_ahead_frames` | run-ahead latency reduction: `0` (off) to `4` |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
+| `--perf-overlay` | `[display] perf_overlay` | show performance overlay at start |
 | `--menu-scale SIZE` | `[display] menu_scale` | size of the pop-up menu: `1x` (default) or `2x` |
+| `--rtc-time TIME` | `[machine] rtc_time` | seed battery clock with Unix seconds or `"YYYY-MM-DD HH:MM[:SS]"` |
+| `--rtc-frozen` | `[machine] rtc_frozen` | stop seeded clock at `--rtc-time` exactly |
+| `--audio` / `--noaudio` | `[audio] output_enabled` | enable (default) or disable real-time audio |
+| `--audio-device NAME` | `[audio] output_device` | host audio output device (substring match) |
+| `--audio-channel-mode MODE` | `[audio] channel_mode` | `stereo` (default) or `mono` |
+| `--audio-stereo-separation PCT` | `[audio] stereo_separation` | stereo width `0`-`100` (`100` default, `0` = mono) |
+| `--audio-filter MODE` | `[audio] audio_filter` | Paula filter: `auto` (default), `on`, `off` |
+| `--serial MODE` | `[serial] mode` | `off`, `stdout`, `midi`, `tcp`, `tcp-connect`, `pty`, `modem` |
+| `--parallel DEVICE` | `[parallel] device` | `none`, `printer`, `sampler` |
+| `--a2065-net BACKEND` | `[a2065] net` | `none`, `loopback`, `nat`, `bridge` |
+| `--a2065-interface NAME` | `[a2065] interface` | bridge adapter name (implies `--a2065-net bridge`) |
+| `--hostsocket-net BACKEND` | `[hostsocket] net` | `none`, `loopback`, `nat`, `bridge`, `host` |
+| `--hostsocket-interface NAME` | `[hostsocket] interface` | bridge adapter name (implies `--hostsocket-net bridge`) |
+| `--host-disk DEVICE [ATTACH]` | `[[host_disk]]` | attach host storage device read-write |
+| `--host-disk-read-only DEVICE [ATTACH]` | `[[host_disk]]` | attach host storage device read-only (default) |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:

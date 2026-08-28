@@ -142,10 +142,14 @@ requestAnimationFrame(renderLoop);
 - `insert_floppy(driveIndex, diskBytes, label)`: Insert read-only floppy image.
 - `insert_floppy_writable(driveIndex, diskBytes, label)`: Insert writable in-memory floppy image.
 - `export_floppy(driveIndex)`: Export current in-memory floppy image as `Uint8Array`.
-- `key_down(rawCode)` / `key_up(rawCode)`: Send Amiga raw key events.
-- `mouse_move(dx, dy)`: Inject relative mouse motion.
-- `mouse_button(button, down)`: Set mouse button state (`0` = Left, `1` = Right, `2` = Middle).
-- `joystick_button(port, button, down)`: Set joystick / CD32 button state.
+- `eject_floppy(driveIndex)`: Eject floppy image from drive.
+- `key_event(code, pressed)`: Send W3C keyboard event code (e.g., `"KeyA"`, `"Digit1"`).
+- `key_raw(rawCode, pressed)`: Send Amiga raw key scan code.
+- `mouse_delta(dx, dy)`: Inject relative mouse motion.
+- `mouse_button(button, pressed)`: Set mouse button state (`0` = Left, `1` = Right, `2` = Middle).
+- `set_joystick_port(port, up, down, left, right, fire1, fire2)`: Set joystick directional and fire state (0-based port).
+- `set_cd32_buttons_port(port, red, blue, green, yellow, play, rwd, ffw)`: Set CD32 pad button state (0-based port).
+- `set_port_device(port, device)`: Configure controller port device (`"mouse"`, `"joystick"`, `"cd32"`, etc.).
 - `save_state()`: Export full machine state as `Uint8Array`.
 - `load_state(stateBytes)`: Restore machine state from `Uint8Array`.
 

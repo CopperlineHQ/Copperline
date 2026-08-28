@@ -44,6 +44,7 @@ guest-side and why.
   time, at the decoded-audio rate -- see [Determinism and timing](#determinism-and-timing)),
   never *how*.
 
+(register-map)=
 ## Register map
 
 All registers are 16-bit and word-aligned; addresses are offsets within the
@@ -81,6 +82,7 @@ future protocol versions (M3's seek support, a wider param space, etc.)
 without moving the board to a bigger window, which would change its
 autoconfig identity.
 
+(capability-version-registers)=
 ### Capability/version registers
 
 - **`VERSION`** (`0x00`, RO) -- the register-protocol version this board
@@ -203,6 +205,7 @@ INT2, level-sensitive: the line is asserted whenever `(INTREQ & INTENA) !=
   on power-on/reset. The guest library must set the bits it wants before
   it can expect INT2 to fire.
 
+(descriptor-queue-and-doorbell)=
 ### Descriptor queue and doorbell
 
 The board holds a FIFO queue of up to `QUEUE_DEPTH` descriptors, each an
@@ -286,6 +289,7 @@ records:
   `MHIAllocDecoder` model) must resynchronize its local counter to `0`
   rather than compute a delta across the reset.
 
+(param-latches)=
 ### Param latches
 
 MHI's tone/volume/panning controls (`MHISetParam`) are modeled as a
@@ -447,6 +451,7 @@ decoder's own reservoir does.
   uses for the LED filter, reused here rather than inventing a second
   filter-processing convention in the same codebase).
 
+(access-size-and-alignment)=
 ## Access size and alignment
 
 The window behaves like a 16-bit peripheral: every register above is a
@@ -485,6 +490,7 @@ decodes even addresses.
   described above, and every other register is freely, repeatedly
   pollable.
 
+(out-of-data-semantics)=
 ## Out-of-data semantics
 
 `STATUS` transitions to `OUT_OF_DATA` (`3`) exactly when playback drains
@@ -532,6 +538,7 @@ guest-visible contract changes -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
 still only ever advance in whole-descriptor, whole-frame steps -- only the
 emulated wall-clock-adjacent pacing of how many ticks that takes.
 
+(seek-entry-hardening)=
 ### Seek-entry hardening
 
 MHI itself has no seek call -- the ABI is exactly `MHIAllocDecoder`/
@@ -598,6 +605,7 @@ mid-frame. The exact bound is an implementation choice, not part of this
 protocol's guest-visible contract -- Copperline's is documented in its own
 implementation notes below.
 
+(determinism-and-timing)=
 ## Determinism and timing
 
 The board consumes a descriptor's bitstream at the **decoded audio's own
@@ -618,6 +626,7 @@ byte-for-byte and makes `--audio-wav`/stem captures of its output
 deterministic across runs, the same guarantee every other Copperline
 audio path already gives.
 
+(the-mhi-api-board-split)=
 ## The MHI-API/board split
 
 This board's registers are deliberately **innocent of MHI's own
@@ -642,6 +651,7 @@ version's constants -- and it is what makes the split in
 [Porting to another emulator](#porting-to-another-emulator) below
 possible without also porting MHI-specific glue.
 
+(versioning)=
 ## Versioning
 
 `VERSION` (`0x00`) is the register-protocol's own version number, starting
@@ -675,6 +685,7 @@ board and a new board agree on what an old guest sees there) -- exactly
 the "new fields land at previously-reserved offsets" case this section
 describes as not needing special-casing beyond the bump itself.
 
+(porting-to-another-emulator)=
 ## Porting to another emulator
 
 Everything above is expressed purely in terms of the autoconfigured
