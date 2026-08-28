@@ -2870,14 +2870,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/m68k/m68k-0.11.0.crate",
-        "sha256": "825375341ee9ceda9695888bb620fe27a0db82eb69005ba7bdb8ebe7d85ae53e",
-        "dest": "cargo/vendor/m68k-0.11.0"
+        "url": "https://static.crates.io/crates/m68k/m68k-0.11.6.crate",
+        "sha256": "5aaedc7710ba71202eb3f539c1be37f171083c17253c26a9eba5f96d24137095",
+        "dest": "cargo/vendor/m68k-0.11.6"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"825375341ee9ceda9695888bb620fe27a0db82eb69005ba7bdb8ebe7d85ae53e\", \"files\": {}}",
-        "dest": "cargo/vendor/m68k-0.11.0",
+        "contents": "{\"package\": \"5aaedc7710ba71202eb3f539c1be37f171083c17253c26a9eba5f96d24137095\", \"files\": {}}",
+        "dest": "cargo/vendor/m68k-0.11.6",
         "dest-filename": ".cargo-checksum.json"
     },
     {
