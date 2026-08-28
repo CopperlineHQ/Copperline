@@ -1806,39 +1806,33 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     fn sample(&self, control: ControlState, native_x: usize) -> DeniseBitplaneSample {
         let nplanes = control.nplanes().min(self.plane_words.len());
         let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
-        self.sample_prepared(nplanes, &delays, 0, native_x)
+        self.sample_prepared(nplanes, &delays, native_x)
     }
 
     /// `sample` with the control-derived inputs hoisted out: the playfield
     /// pixel loop runs this per output pixel, so the plane count and the
     /// per-plane scroll delays are computed once per control run instead.
     ///
-    /// `min_fetch_x` is the first fetched-pixel index that the display window
-    /// actually shows (the renderer's `native_x_offset`). When the display
-    /// window opens to the right of the DDF-derived fetch origin
-    /// (`native_x_offset > 0`, e.g. a narrow DIWSTRT), the bitplane shifter has
-    /// already clocked those leading pixels out into the left border by the
-    /// time the window opens. BPLCON1 scroll must not pull that shifted-out
-    /// pre-fetch back into view: the scrolled-in region at the window's left
-    /// edge is background, matching the standard `native_x_offset == 0` case
-    /// where `native_x < delay` already yields background. (Kickstart 3.1's
-    /// insert-disk screen leaves an uninitialised word at the bitplane base,
-    /// which would otherwise scroll a stray fleck into the top-left corner.)
+    /// The BPLCON1 scroll delay taps pixels the shifter loaded earlier on the
+    /// same scanline, so a display window opening to the right of the fetch
+    /// origin (`native_x_offset > 0`, e.g. a narrow DIWSTRT) legitimately
+    /// scrolls the pre-window fetch into view -- on every line, a bitplane-DMA
+    /// block's first line included (ddfprobe-blockscroll, vAmiga-verified).
+    /// Only a tap reaching before the line's own fetch stream
+    /// (`native_x < delay`) yields background.
     fn sample_prepared(
         &self,
         nplanes: usize,
         delays: &[i32; 8],
-        min_fetch_x: usize,
         native_x: usize,
     ) -> DeniseBitplaneSample {
-        self.sample_prepared_with_final_fetch_hold(nplanes, delays, min_fetch_x, native_x, false)
+        self.sample_prepared_with_final_fetch_hold(nplanes, delays, native_x, false)
     }
 
     fn sample_prepared_with_final_fetch_hold(
         &self,
         nplanes: usize,
         delays: &[i32; 8],
-        min_fetch_x: usize,
         native_x: usize,
         hold_final_fetch_sample: bool,
     ) -> DeniseBitplaneSample {
@@ -1847,7 +1841,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
                 pixels,
                 nplanes,
                 delays,
-                min_fetch_x,
                 native_x,
                 hold_final_fetch_sample,
             );
@@ -1855,7 +1848,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         self.sample_plane_words_with_final_fetch_hold(
             nplanes,
             delays,
-            min_fetch_x,
             native_x,
             hold_final_fetch_sample,
         )
@@ -1866,7 +1858,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         pixels: &[u8],
         nplanes: usize,
         delays: &[i32; 8],
-        min_fetch_x: usize,
         native_x: usize,
         hold_final_fetch_sample: bool,
     ) -> DeniseBitplaneSample {
@@ -1878,7 +1869,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         );
 
         let (pf1_active, pf1_fetch_x) = if available_planes != 0 {
-            self.sample_fetch_x(delays[0], min_fetch_x, native_x, hold_final_fetch_sample)
+            self.sample_fetch_x(delays[0], native_x, hold_final_fetch_sample)
         } else {
             (false, None)
         };
@@ -1900,7 +1891,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             };
         }
         let (pf2_active, pf2_fetch_x) = if available_planes >= 2 {
-            self.sample_fetch_x(delays[1], min_fetch_x, native_x, hold_final_fetch_sample)
+            self.sample_fetch_x(delays[1], native_x, hold_final_fetch_sample)
         } else {
             (false, None)
         };
@@ -1922,7 +1913,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     fn sample_fetch_x(
         &self,
         delay: i32,
-        min_fetch_x: usize,
         native_x: usize,
         hold_final_fetch_sample: bool,
     ) -> (bool, Option<usize>) {
@@ -1930,9 +1920,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             return (true, None);
         }
         let fetch_x = (native_x as i32 - delay) as usize;
-        if fetch_x < min_fetch_x {
-            return (true, None);
-        }
         if fetch_x < self.fetched_pixels {
             return (true, Some(fetch_x));
         }
@@ -1946,7 +1933,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         &self,
         nplanes: usize,
         delays: &[i32; 8],
-        min_fetch_x: usize,
         native_x: usize,
         hold_final_fetch_sample: bool,
     ) -> DeniseBitplaneSample {
@@ -1962,10 +1948,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
                 continue;
             }
             let fetch_x = (native_x as i32 - delay) as usize;
-            if fetch_x < min_fetch_x {
-                active = true;
-                continue;
-            }
             // The DMA fetch slots decide which word reaches Denise, but the
             // display shifter sees that word as a complete latched sample.
             // Do not expose the first word plane-by-plane at a late DDF edge.
@@ -5002,10 +4984,6 @@ fn render_from_input_with_scratch(
                 export_index = Some(vec![0u8; EXPORT_W * rows]);
             }
         }
-        // Tracks the last line that actually drew bitplanes, so a line whose
-        // predecessor was border can suppress BPLCON1 scroll pulling leading
-        // same-line pre-fetch samples into view.
-        let mut last_playfield_line: Option<usize> = None;
         let mut indexed_output_cache = IndexedOutputCache::default();
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
@@ -5279,7 +5257,6 @@ fn render_from_input_with_scratch(
                     }
                 }
             }
-            let block_start = last_playfield_line != Some(y.wrapping_sub(1));
             let dma_output_start_x = bitplane_dma_output_start_x(
                 base_controls[y],
                 row_control_segments,
@@ -5298,7 +5275,6 @@ fn render_from_input_with_scratch(
             );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
-            last_playfield_line = Some(y);
             render_planned_playfield_line_with_subpixels(
                 &line_plan,
                 fb,
@@ -5316,7 +5292,6 @@ fn render_from_input_with_scratch(
                 control_segment_idx,
                 base_controls[y].bplcon1,
                 base_controls[y].bplcon0,
-                block_start,
                 bpl_output_start_x,
                 carried_open_ext_fb,
                 &h_window_rows[y],
@@ -5682,7 +5657,6 @@ fn fast_playfield_run_interior(
     native_per_pixel: usize,
     pixel_fetch_start_native_x: usize,
     native_x_offset: usize,
-    min_fetch_x: usize,
     delays: &[i32; 8],
     nplanes: usize,
     ham_mode: bool,
@@ -5738,7 +5712,7 @@ fn fast_playfield_run_interior(
     let q_lo = q_of_x_ceil(x as i64)
         .max(q_of_x_ceil(bpl_output_start_x as i64))
         .max(pfsn)
-        .max(min_fetch_x as i64 + delay + pfsn - nxo);
+        .max(delay + pfsn - nxo);
 
     // Exclusive: the last sample must keep every repeated pixel inside the
     // display span, stay inside the run, and fetch strictly inside the
@@ -5752,7 +5726,7 @@ fn fast_playfield_run_interior(
         return None;
     }
     let f0 = q_lo - pfsn + nxo - delay;
-    debug_assert!(f0 >= min_fetch_x as i64);
+    debug_assert!(f0 >= 0);
     let x_lo = x_start + q_lo * pr;
     let x_hi = x_start + q_hi * pr;
     Some((x_lo as usize, x_hi as usize, f0 as usize, planes_mask))
@@ -5830,7 +5804,6 @@ fn render_planned_playfield_line(
     control_segment_idx: usize,
     base_scroll_bplcon1: u16,
     base_ham_bplcon0: u16,
-    suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
     carried_open_ext_fb: usize,
     h_row: &HWindowRow,
@@ -5856,7 +5829,6 @@ fn render_planned_playfield_line(
         control_segment_idx,
         base_scroll_bplcon1,
         base_ham_bplcon0,
-        suppress_prefetch_scroll_fill,
         bpl_output_start_x,
         carried_open_ext_fb,
         h_row,
@@ -5884,7 +5856,6 @@ fn render_planned_playfield_line_with_subpixels(
     control_segment_idx: usize,
     base_scroll_bplcon1: u16,
     base_ham_bplcon0: u16,
-    suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
     carried_open_ext_fb: usize,
     h_row: &HWindowRow,
@@ -5910,7 +5881,6 @@ fn render_planned_playfield_line_with_subpixels(
         control_segment_idx,
         base_scroll_bplcon1,
         base_ham_bplcon0,
-        suppress_prefetch_scroll_fill,
         bpl_output_start_x,
         carried_open_ext_fb,
         h_row,
@@ -5939,7 +5909,6 @@ fn render_planned_playfield_line_scalar(
     control_segment_idx: usize,
     base_scroll_bplcon1: u16,
     base_ham_bplcon0: u16,
-    suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
     carried_open_ext_fb: usize,
     h_row: &HWindowRow,
@@ -5966,7 +5935,6 @@ fn render_planned_playfield_line_scalar(
         control_segment_idx,
         base_scroll_bplcon1,
         base_ham_bplcon0,
-        suppress_prefetch_scroll_fill,
         bpl_output_start_x,
         carried_open_ext_fb,
         h_row,
@@ -5994,7 +5962,6 @@ fn render_planned_playfield_line_impl(
     mut control_segment_idx: usize,
     base_scroll_bplcon1: u16,
     base_ham_bplcon0: u16,
-    suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
     carried_open_ext_fb: usize,
     h_row: &HWindowRow,
@@ -6111,17 +6078,6 @@ fn render_planned_playfield_line_impl(
         let native_x_offset = pixel_control
             .native_x_offset(pixel_diw_h_start, pixel_repeat)
             .saturating_sub(carried_open_ext_fb / pixel_repeat * native_per_pixel);
-        // BPLCON1 scroll fills the window's left edge from Denise's current
-        // scanline shifter state. At the first line of a bitplane-DMA block,
-        // no earlier playfield stream was active before the window opened, so
-        // do not pull leading pre-fetch samples into view. Contiguous rows may
-        // still expose same-line samples that were fetched before DIW opened,
-        // but never a previous scanline's tail.
-        let min_fetch_x = if suppress_prefetch_scroll_fill {
-            native_x_offset
-        } else {
-            0
-        };
         let shres = pixel_control.shres();
         let canvas_scale = active_canvas_scale();
         let out_w = FB_WIDTH * canvas_scale;
@@ -6160,7 +6116,6 @@ fn render_planned_playfield_line_impl(
                 native_per_pixel,
                 pixel_fetch_start_native_x,
                 native_x_offset,
-                min_fetch_x,
                 &delays,
                 nplanes,
                 ham_mode,
@@ -6234,8 +6189,7 @@ fn render_planned_playfield_line_impl(
                 // hold colour the first visible pixel modifies.
                 let preroll_stop = native_x.min(plan.fetched_pixels);
                 while next_ham_native_x < preroll_stop {
-                    let skipped =
-                        plan.sample_prepared(nplanes, &delays, min_fetch_x, next_ham_native_x);
+                    let skipped = plan.sample_prepared(nplanes, &delays, next_ham_native_x);
                     denise_playfield_output(
                         output_control,
                         &palette,
@@ -6247,7 +6201,7 @@ fn render_planned_playfield_line_impl(
             }
             if !visible_sample {
                 if ham_mode {
-                    let sample = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
+                    let sample = plan.sample_prepared(nplanes, &delays, native_x);
                     denise_playfield_output(
                         output_control,
                         &palette,
@@ -6266,8 +6220,8 @@ fn render_planned_playfield_line_impl(
                 continue;
             }
             let (sample, output, shres_pair, shres_sample_pair) = if shres {
-                let left = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
-                let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
+                let left = plan.sample_prepared(nplanes, &delays, native_x);
+                let right = plan.sample_prepared(nplanes, &delays, native_x + 1);
                 let (left_out, right_out) = if let Some(outputs) = indexed_outputs {
                     let left_out =
                         cached_indexed_output(outputs, left.idx & plane_mask, &mut ham_color);
@@ -6293,7 +6247,6 @@ fn render_planned_playfield_line_impl(
                 let sample = plan.sample_prepared_with_final_fetch_hold(
                     nplanes,
                     &delays,
-                    min_fetch_x,
                     native_x,
                     hold_final_fetch_sample,
                 );

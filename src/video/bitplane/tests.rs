@@ -1726,29 +1726,25 @@ fn prepared_planar_pixels_match_word_sampler_for_all_playfield_taps() {
 
     for nplanes in 0..=8 {
         for delays in &delay_sets {
-            for min_fetch_x in [0, 7, 47] {
-                for native_x in 0..=64 {
-                    for hold_final_fetch_sample in [false, true] {
-                        let expected = word_plan.sample_prepared_with_final_fetch_hold(
-                            nplanes,
-                            delays,
-                            min_fetch_x,
-                            native_x,
-                            hold_final_fetch_sample,
-                        );
-                        let actual = pixel_plan.sample_prepared_with_final_fetch_hold(
-                            nplanes,
-                            delays,
-                            min_fetch_x,
-                            native_x,
-                            hold_final_fetch_sample,
-                        );
-                        assert_eq!(
-                            actual, expected,
-                            "nplanes={nplanes} delays={delays:?} min_fetch_x={min_fetch_x} \
-                             native_x={native_x} hold={hold_final_fetch_sample}"
-                        );
-                    }
+            for native_x in 0..=64 {
+                for hold_final_fetch_sample in [false, true] {
+                    let expected = word_plan.sample_prepared_with_final_fetch_hold(
+                        nplanes,
+                        delays,
+                        native_x,
+                        hold_final_fetch_sample,
+                    );
+                    let actual = pixel_plan.sample_prepared_with_final_fetch_hold(
+                        nplanes,
+                        delays,
+                        native_x,
+                        hold_final_fetch_sample,
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "nplanes={nplanes} delays={delays:?} \
+                         native_x={native_x} hold={hold_final_fetch_sample}"
+                    );
                 }
             }
         }
@@ -1796,7 +1792,6 @@ fn late_lowres_ddf_reaches_diwstop_with_undelayed_planes_active() {
     let sample = plan.sample_prepared_with_final_fetch_hold(
         control.nplanes(),
         &delays,
-        0,
         native_x,
         control.holds_final_lowres_fetch_sample_at_diwstop(),
     );
@@ -1851,7 +1846,6 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -2005,7 +1999,12 @@ fn aga_extended_bplcon1_delay_blanks_until_current_line_sample() {
 }
 
 #[test]
-fn bplcon1_delay_drops_prefetch_samples_at_block_start() {
+fn bplcon1_delay_scrolls_same_line_prefetch_into_view() {
+    // The scroll delay taps pixels the shifter loaded earlier on the same
+    // scanline, so samples fetched before the display window opens scroll
+    // into view on every line -- a bitplane-DMA block's first line included
+    // (ddfprobe-blockscroll, vAmiga-verified). Only a tap reaching before
+    // the line's own fetch stream yields background.
     let control = ControlState {
         bplcon0: 0x1000,
         bplcon1: 3,
@@ -2015,9 +2014,10 @@ fn bplcon1_delay_drops_prefetch_samples_at_block_start() {
     let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
     let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
 
-    assert_eq!(line.sample_prepared(1, &delays, 0, 3).idx, 1);
-    assert_eq!(line.sample_prepared(1, &delays, 2, 3).idx, 0);
-    assert_eq!(line.sample_prepared(1, &delays, 2, 5).idx, 1);
+    assert_eq!(line.sample_prepared(1, &delays, 2).idx, 0);
+    assert_eq!(line.sample_prepared(1, &delays, 3).idx, 1);
+    assert_eq!(line.sample_prepared(1, &delays, 5).idx, 1);
+    assert_eq!(line.sample_prepared(1, &delays, 6).idx, 0);
 }
 
 #[test]
@@ -6700,7 +6700,6 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -6752,7 +6751,6 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -6829,7 +6827,6 @@ fn planned_ham8_dma_carries_hold_across_pixels() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -6893,7 +6890,6 @@ fn planned_ham_dma_carries_early_ddf_history_across_diw_open() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -6951,7 +6947,6 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -7019,7 +7014,6 @@ fn ham_select_lands_in_the_colour_write_domain() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -7064,7 +7058,6 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -7107,7 +7100,6 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -7150,7 +7142,6 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -7189,7 +7180,6 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         0,
         control.bplcon1,
         control.bplcon0,
-        false,
         0,
         0,
         &h_row_for(control),
@@ -8813,7 +8803,6 @@ fn fast_playfield_interior_matches_scalar_oracle() {
         for entry in 0..32 {
             palette.write_ocs(entry, (rand() & 0x0FFF) as u16);
         }
-        let suppress = r & 0x4000_0000_0000_0000 != 0;
         let bpl_output_start_x = x0 + [0usize, 6, 34][((r >> 58) as usize) % 3];
         let carried_open_ext_fb = [0usize, 8, 48][((r >> 56) as usize) % 3];
 
@@ -8852,7 +8841,6 @@ fn fast_playfield_interior_matches_scalar_oracle() {
                 0,
                 control.bplcon1,
                 control.bplcon0,
-                suppress,
                 bpl_output_start_x,
                 carried_open_ext_fb,
                 &h_row_for(control),
@@ -8920,7 +8908,6 @@ fn fast_playfield_interior_engages_for_standard_screens() {
         control.native_samples_per_framebuffer_pixel(),
         control.fetch_start_native_x(diw_h_start, pixel_repeat),
         control.native_x_offset(diw_h_start, pixel_repeat),
-        0,
         &delays,
         4,
         false,

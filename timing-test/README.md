@@ -501,6 +501,14 @@ DIW narrower than the fetch: one lo-res pixel = 2 hi-res px per scroll
 step, nibble bit 3 ignored, and the row-end overlap words exactly
 clipped at the DIW stop; the KS 2.05 first-text-column wrap regression
 class, vAmiga-verified band by band),
+`ddfprobe-blockscroll` (BPLCON1 scroll fill on the first line of a
+bitplane-DMA block: on the same late-DDF narrow-DIW constellation the
+scroll delay taps the shifter pixels loaded by the line's own pre-window
+fetch, so a block's first line renders its scrolled-in left edge exactly
+like the interior lines, whether the block is gated by a copper DMACON
+BPLEN write with the vertical DIW held open or by DIWSTRT vstart
+reopening the closed window -- the Super Skidmarks CD32 menu corner-notch
+regression class; vAmiga-verified exact),
 `ddfprobe-agafold` (the AGA wide-FMODE scroll fold: an off-grid DDFSTRT
 is masked down to the fetch-unit grid and the data arrives early, so
 scroll taps at or past the arrival distance on Denise's absolute reload

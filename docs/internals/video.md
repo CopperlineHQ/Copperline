@@ -130,10 +130,14 @@ not yet externally verified; only lo-res is pinned.
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
-colour index 0. Block-start lines also suppress samples fetched before DIW
-opened, because no earlier playfield stream was active before the visible gate.
-Contiguous rows may expose same-line samples that were fetched before DIW
-opened, but the scroll-in never comes from a previous scanline's tail. AGA's
+colour index 0. Same-line samples fetched before DIW opened do scroll into
+view, on every line alike: the delay taps pixels the shifter loaded from the
+line's own pre-window fetch, so the first line of a bitplane-DMA block --
+whether gated by a copper DMACON BPLEN write or by DIWSTRT's vertical
+comparator -- renders its scrolled-in left edge exactly like the interior
+lines (`ddfprobe-blockscroll`, vAmiga-verified; the Super Skidmarks CD32
+menu corner-notch regression class). The scroll-in still never comes from a
+previous scanline's tail. AGA's
 extended BPLCON1 delays can exceed one 16-bit shifter word; the extra leading
 gap also stays background until current-line samples reach Lisa.
 A BPLCON1 write whose normal register position is already at or beyond DIW's
