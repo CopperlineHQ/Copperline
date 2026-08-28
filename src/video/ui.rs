@@ -9385,7 +9385,11 @@ fn draw_launcher(
         // The drives that are drawn, plus the column-title row above them --
         // the hidden ones take no space, so the note follows the last one on
         // the page rather than the last one in the table.
-        let listed = state.setup.boot_priority_row_count() + 1;
+        let listed = state
+            .setup
+            .boot_priority_row_count()
+            .min(launcher::BOOTPRI_PAGE_ROWS)
+            + 1;
         let help_top = (launcher_row_y(rect, listed + 1) + row_offset).saturating_sub(10);
         draw_panel_text(
             frame,
