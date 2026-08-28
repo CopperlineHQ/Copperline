@@ -65,8 +65,14 @@ project:
         - file: internals/timing.md
         - file: internals/chipset.md
         - file: internals/video.md
+        - file: internals/audio.md
         - file: internals/cpu.md
         - file: internals/peripherals.md
+        - file: internals/toccata.md
+        - file: internals/mhi.md
+        - file: internals/zz9k.md
+        - file: internals/picasso2.md
+        - file: internals/graffity.md
         - file: internals/savestate.md
         - file: internals/reference-docs.md
   exports:
@@ -102,8 +108,14 @@ project:
         - internals/timing.md
         - internals/chipset.md
         - internals/video.md
+        - internals/audio.md
         - internals/cpu.md
         - internals/peripherals.md
+        - internals/toccata.md
+        - internals/mhi.md
+        - internals/zz9k.md
+        - internals/picasso2.md
+        - internals/graffity.md
         - internals/savestate.md
         - internals/reference-docs.md
 site:

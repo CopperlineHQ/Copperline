@@ -19,7 +19,7 @@ drive support:
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,net-nat,net-bridge,mt32,cpu-jit,profile-stats"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,mt32,coppersynth,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb"
 ```
 
 ## Configuration

@@ -6,7 +6,7 @@ system requirements, installation, building from source, and initial setup.
 
 ## System requirements
 
-- **Rust:** 1.93 or newer (tested with Rust 1.96).
+- **Rust:** 1.95 or newer (tested with Rust 1.96).
 - **Supported operating systems:** macOS, Linux, and Windows.
 - **Graphics backend:** Metal on macOS, Direct3D 12 on Windows, and Vulkan on Linux
   (see [](#vulkan-is-required-on-linux)).
