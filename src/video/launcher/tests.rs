@@ -5028,7 +5028,6 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
     // positions.
     assert_eq!(s.boot_priority_row_count(), 6);
     assert!(!s.boot_priority_has_second_page());
-    assert!(s.boot_priority_shows_info());
     assert_eq!(
         s.boot_page_of(F::LideDrive3Boot),
         Some(LauncherTab::BootPriority)
@@ -5051,7 +5050,6 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
     }
     assert_eq!(s.boot_priority_row_count(), 13);
     assert!(s.boot_priority_has_second_page());
-    assert!(!s.boot_priority_shows_info());
 
     // Two IDE bays and seven SCSI units fill the first page exactly; all
     // four Lide drives fall onto the second.

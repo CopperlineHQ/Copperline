@@ -692,7 +692,7 @@ The layout is:
   from. The two IDE bays come first, then the SCSI units, then the Lide
   board's drives. More drives than one page holds run onto a second, reached
   by **Next Page >** beside the Back button; that page's own **< Back**
-  returns to the first.
+  returns to the first. The note below the rows stays on the first page.
   Drives you add here with no priority of their own cascade so they do not tie:
   the first is 0 (just under DF0:'s 5), and each later one drops below the
   floppies -- -35, -40, -45. A drive already carrying a priority in the config

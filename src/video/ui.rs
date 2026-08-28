@@ -9378,7 +9378,10 @@ fn draw_launcher(
     }
     // The Boot Priority page spells out the valid priority range below the
     // rows, under a dimmed "Info:" heading.
-    if state.tab == LauncherTab::BootPriority && state.setup.boot_priority_shows_info() {
+    // The first page only: a page holds nine drives at most, so the note
+    // always has its room under them, and the second page needs no second
+    // copy of it.
+    if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
         // The drives that are drawn, plus the column-title row above them --
         // the hidden ones take no space, so the note follows the last one on
         // the page rather than the last one in the table.

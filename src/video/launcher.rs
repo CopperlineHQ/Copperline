@@ -5398,14 +5398,6 @@ impl MachineSetup {
         self.boot_priority_row_count() > BOOTPRI_PAGE_ROWS
     }
 
-    /// Whether there is room under the drives for the priority-range note.
-    /// It sits below the last row of a full page, so it goes as soon as the
-    /// list needs a second one -- the drives are the page, and the range is
-    /// written beside the value box anyway.
-    pub fn boot_priority_shows_info(&self) -> bool {
-        self.has_boot_priority_rows() && !self.boot_priority_has_second_page()
-    }
-
     /// Which Boot Priority page a drive's row falls on, or `None` for a row
     /// that is not one of them (the column titles, and every other page's
     /// rows). Paged by position among the drives actually listed, not by
