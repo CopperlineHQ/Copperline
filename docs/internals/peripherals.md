@@ -500,7 +500,26 @@ The optical sector clock and the firmware command transport are separate:
 sector payloads retain their physical 75/150 Hz cadence, while the drive's
 cached TOC is returned over the command ring at 600 packets/second. This lets
 CDStrap receive a coherent TOC during its first media probe, including on
-CD32 discs mastered with the older CDTV trademark boot layout.
+CD32 discs mastered with the older CDTV trademark boot layout. Two mechanism
+behaviours gate that transport, both pinned against a real CD32 (a filmed
+cold boot plus the `tools/cd32-probe` rows): a freshly loaded disc pays the
+mechanism's spin-up before the first lead-in dump delivers entries (~8.8 s
+from a cold power-on, ~3.5 s for a change on a warm drive; a guest reset
+keeps the disc spinning, so warm reboots skip it), and an in-flight dump is
+finished before the drive acts on the next queued command. Together these
+hold the KS driver's first TOC transaction -- and every io queued behind
+it, the boot screen's one-shot CD_CHANGESTATE included -- open until the
+disc is genuinely readable, which is why a real CD32 with a bootable disc
+inserted at power-on goes straight from the Kickstart grey screen to the
+boot display without ever starting the fly-in show, and why the emulated
+cold boot now reaches the startup-sequence within 50 ms of the filmed real
+machine (14.36 s vs 14.31 s). A data locate
+also pays the tray mechanism's real seek time, calibrated against a real
+CD32 with `tools/cd32-probe`: a +500-sector hop costs 253 ms, +1000 costs
+301 ms, and long strokes flatten out around 1.4 s (WinUAE bills a single
+sector slot). Only a seamless continuation of the running stream skips the
+relocate. The measured 2x sequential rate (150.0 sectors/s) matches the
+model exactly.
 
 READ DATA's end MSF is exclusive. At that boundary the PBX path retains one
 final position-bearing raw frame, matching the sector already buffered by a
@@ -533,12 +552,15 @@ address registers mask to `$00FFF000`), so the rings and sector buffers
 resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
 included, which is where AROS places its `MEMF_24BITDMA` allocations when
 fast RAM exists -- not just chip RAM. The command/status comparator indices
-are eight-bit, but the physical DMA byte counter retains its page carry for
-the remainder of a packet. Kickstart relies on this when it copies a packet
-contiguously across index `$FF`; folding the physical address at the same point
-reads stale bytes from the start of the page. The next parsed packet rebases
-the counter to its visible index, even if the producer queued several packets
-under one comparator value.
+are eight-bit and the DMA addresses fold to their 256-byte pages on every
+access, TX and RX alike: Kickstart's command producer uses eight-bit index
+arithmetic, so a packet whose bytes straddle index `$FF` wraps to the start
+of the TX page (a register trace of the boot screen's LED packets shows the
+straddling packet's checksum at page offset 0 -- carrying the address into
+the following page instead reads unrelated memory and fails the packet's
+checksum, and the resulting error reply aborts the driver's TOC read).
+The next parsed packet rebases the counter to its visible index, even if the
+producer queued several packets under one comparator value.
 
 `cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
 MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks;

@@ -85,6 +85,17 @@ const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
 /// lets the controller deliver that table inside the boot ROM's first media
 /// probe. Sector data and CD-DA remain at their physical 75/150 Hz cadence.
 const CCK_PER_TOC_PACKET: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 600;
+/// Cold spin-up: emulated seconds from power-on mount until the lead-in
+/// TOC is readable. Back-solved from a real-CD32 boot video (Kickstart
+/// grey until ~11.5 s, boot screen, startup-sequence entry at 14.31 s
+/// per the cd32-probe ENTRYTIM row) against the calibrated CPU and
+/// locate models.
+const COLD_SPIN_UP_SECS: f64 = 8.8;
+
+/// Warm spin-up after a runtime disc change: the drive is already
+/// powered and settles faster than a cold start.
+const WARM_SPIN_UP_SECS: f64 = 3.5;
+
 /// TX/RX DMA restart delay: ~3 scanlines, expressed in colour clocks.
 const DMA_RESTART_DELAY_CCK: u32 = 3 * 227;
 
@@ -399,9 +410,11 @@ pub struct Akiko {
     cdcomrxinx: u8,
     cdcomtxcmp: u8,
     cdcomrxcmp: u8,
-    /// Physical TX byte offset within the misc-DMA allocation. The comparator
-    /// exposes only the low eight bits, but the TX address counter carries into
-    /// the following page for the remainder of the current packet.
+    /// TX byte offset within its 256-byte page. Like rx_dma_offset it is
+    /// kept separate from the visible comparator index for save-state
+    /// stability and masked to the page on every DMA access: the index
+    /// registers are eight-bit and Kickstart's command producer wraps a
+    /// packet's bytes at index $FF.
     tx_dma_offset: u16,
     /// RX byte offset within its 256-byte page. Keep this separate from the
     /// visible comparator index so an in-flight response survives save-state
@@ -428,6 +441,20 @@ pub struct Akiko {
     /// (as the real drive does on a disc change) once the channel is idle.
     media_notify: bool,
     door: u8,
+    /// Colour clocks until the mechanism has spun the freshly loaded disc
+    /// up and read its lead-in: until this expires the drive acks a TOC
+    /// request but delivers no entries, which is what holds the KS
+    /// driver's first TOC transaction (and every io queued behind it,
+    /// the CDUI's one-shot CD_CHANGESTATE included) open until the disc
+    /// is really readable. Real-CD32 video of a cold boot with a disc in
+    /// the drive shows ~10 s of Kickstart grey before the boot screen;
+    /// the CD32's mechanism is famously slow to spin up. A warm guest
+    /// reset keeps the drive spinning and the lead-in cached, so reset()
+    /// clears the gate.
+    toc_spin_up_cck: i64,
+    /// A parsed command is waiting for an in-flight lead-in dump to
+    /// finish before the drive acts on it (see the hold in `tick`).
+    command_deferred_for_toc: bool,
     toc_counter: i32,
     data_offset: i64,
     /// Exclusive end sector supplied by the drive's READ DATA command.
@@ -467,6 +494,8 @@ impl Default for Akiko {
             toc: Vec::new(),
             pending_disc: None,
             insert_delay_cck: -1,
+            toc_spin_up_cck: 0,
+            command_deferred_for_toc: false,
             intreq: 0,
             intena: 0,
             subcodeoffset: 0,
@@ -532,6 +561,8 @@ impl Akiko {
         self.disc = Some(disc);
         self.current_sector = -1;
         self.media_notify = self.cd_initialized != 0;
+        self.toc_spin_up_cck =
+            (COLD_SPIN_UP_SECS * f64::from(crate::chipset::paula::PAULA_CLOCK_HZ)) as i64;
     }
 
     /// Park a disc in the tray and mount it after `secs` of emulated tray
@@ -604,6 +635,10 @@ impl Akiko {
     /// System reset: clear controller state but keep the mounted disc
     /// and the NVRAM contents.
     pub fn reset(&mut self) {
+        // A guest reset does not stop the mechanism: the disc keeps
+        // spinning and the lead-in stays cached, which is why a warm
+        // CD32 reboot reaches the boot screen far faster than a cold
+        // power-on (toc_spin_up_cck stays cleared below).
         let disc = self.disc.take();
         let toc = std::mem::take(&mut self.toc);
         let path = self.nvram.path.take();
@@ -757,8 +792,8 @@ impl Akiko {
                     && (self.command_active != 0 || self.command_length == 0)
                 {
                     // A fresh DMA window starts at base + the visible index.
-                    // If a comparator stopped in the middle of a command,
-                    // retain the carried address when the guest extends it.
+                    // Mid-command comparator extensions leave the offset in
+                    // place; both fold to the same page position on access.
                     self.tx_dma_offset = u16::from(self.cdcomtxinx);
                 }
                 self.cdcomtxcmp = value;
@@ -861,6 +896,17 @@ impl Akiko {
                 self.disc = Some(disc);
                 self.current_sector = -1;
                 self.media_notify = self.cd_initialized != 0;
+                // A tray insert before the host driver has spoken to the
+                // drive is a disc sitting in the drive at power-on: the
+                // mechanism does its full cold spin-up. A change on a
+                // warmed-up drive settles faster.
+                let spin_up = if self.cd_initialized < 2 {
+                    COLD_SPIN_UP_SECS
+                } else {
+                    WARM_SPIN_UP_SECS
+                };
+                self.toc_spin_up_cck =
+                    (spin_up * f64::from(crate::chipset::paula::PAULA_CLOCK_HZ)) as i64;
                 log::info!("akiko: disc inserted (delayed), media-status notification queued");
             }
         }
@@ -876,6 +922,19 @@ impl Akiko {
                     // ring drains; the host cannot send another one
                     // meanwhile (can_send_command gates on both).
                     self.command_active = 1;
+                } else if self.toc_counter >= 0 {
+                    // A lead-in dump is in flight (or pending behind
+                    // the spin-up gate): the drive's microcontroller
+                    // finishes streaming it before it acts on the next
+                    // queued command. Executing the follow-up mid-dump
+                    // delivers its reply early, and the KS driver's
+                    // dump wait -- which waits on reply-or-TOC-complete
+                    // -- aborts and reports "no disc" to the CDUI's
+                    // one-shot CD_CHANGESTATE, starting the boot-screen
+                    // show a real cold boot with a disc inserted never
+                    // shows. Parked outside command_active so the dump
+                    // itself keeps streaming.
+                    self.command_deferred_for_toc = true;
                 } else if self.intreq & self.intena & CDINT_TXDMADONE != 0 {
                     // The three-wire drive link is half duplex. Akiko may
                     // already have the drive's reply buffered, but it does
@@ -891,6 +950,11 @@ impl Akiko {
             }
         }
 
+        if self.command_deferred_for_toc && self.toc_counter < 0 {
+            self.command_deferred_for_toc = false;
+            self.command_active = 1;
+        }
+
         self.read_counter_cck -= cck as i32;
         if self.read_counter_cck <= 0 {
             self.read_counter_cck += (CCK_PER_CD_FRAME / self.speed.max(1)) as i32;
@@ -901,10 +965,16 @@ impl Akiko {
             }
         }
 
+        if self.toc_spin_up_cck > 0 {
+            self.toc_spin_up_cck -= i64::from(cck);
+        }
         self.frame_counter_cck -= cck as i32;
         if self.frame_counter_cck <= 0 {
             self.frame_counter_cck += CCK_PER_TOC_PACKET as i32;
-            self.frame_sync = true;
+            // No lead-in data until the mechanism has spun up: the TOC
+            // request stays acknowledged but unanswered, like the real
+            // drive's long first read of a cold disc.
+            self.frame_sync = self.toc_spin_up_cck <= 0;
         }
 
         if self.flush_cd_audio {
@@ -1045,7 +1115,13 @@ impl Akiko {
         if !self.can_send_command() {
             return;
         }
-        let byte = mem.dma_get(self.cdtx_address + u32::from(self.tx_dma_offset));
+        // The TX address folds to the 256-byte command page, like RX: the
+        // comparator index registers are eight-bit, and Kickstart's command
+        // producer wraps a packet's bytes at index $FF (register trace: an
+        // idle-screen LED packet at txinx $FE..$00 lands its checksum at
+        // page offset 0, and carrying the address into the following page
+        // reads garbage there and fails the packet's checksum).
+        let byte = mem.dma_get(self.cdtx_address + u32::from(self.tx_dma_offset & 0xFF));
         self.add_command_byte(byte);
         self.tx_dma_offset = self.tx_dma_offset.wrapping_add(1);
         self.cdcomtxinx = self.cdcomtxinx.wrapping_add(1);
@@ -1093,9 +1169,9 @@ impl Akiko {
             self.unknown_command
         );
         self.command_length = 0;
-        // The page carry belongs to the packet just parsed. A later command
-        // queued under the same comparator starts at base + the visible index,
-        // exactly where the ROM's producer copied it.
+        // The next packet starts at base + the visible index, exactly where
+        // the ROM's producer copied it (the producer's index arithmetic is
+        // eight-bit, so this equals the masked DMA offset).
         self.tx_dma_offset = u16::from(self.cdcomtxinx);
         self.result_buffer = [0; 32];
 
@@ -1202,16 +1278,57 @@ impl Akiko {
             self.data_offset = seekpos;
             self.data_end = endpos;
             let distance = (self.current_sector - seekpos).unsigned_abs();
-            self.seek_delay = if distance < 100 {
+            // Real-CD32 locate curve, measured with tools/cd32-probe on
+            // the Chinon O-658 mechanism (1-sector reads at fixed
+            // distances, min of 3, both burned discs): 254 ms at +500,
+            // ~300-430 ms at +1000, 579 ms at +10000, 1.02 s at
+            // +100000, 1.37 s at +200000. Piecewise-linear through
+            // those anchors in 1x sector frames (13.3 ms), scaled by
+            // the configured speed because the delay counter decrements
+            // once per output sector slot while the mechanism's time is
+            // physical. Only a seamless continuation of the running
+            // stream (the head is already there) skips the relocate.
+            // WinUAE bills near seeks at a single slot, which the real
+            // drive cannot do.
+            const LOCATE_ANCHORS: [(u64, u32); 5] = [
+                (0, 19),
+                (1_000, 26),
+                (10_000, 44),
+                (100_000, 77),
+                (200_000, 102),
+            ];
+            self.seek_delay = if distance <= 2 {
                 1
             } else {
-                ((distance / 1000) + 10).min(100) as u32
+                let mut frames = LOCATE_ANCHORS[LOCATE_ANCHORS.len() - 1].1;
+                for pair in LOCATE_ANCHORS.windows(2) {
+                    let ((d0, f0), (d1, f1)) = (pair[0], pair[1]);
+                    if distance <= d1 {
+                        let span = (d1 - d0).max(1);
+                        frames = f0 + ((f1 - f0) as u64 * (distance - d0) / span) as u32;
+                        break;
+                    }
+                }
+                frames * self.speed.max(1)
             };
             log::debug!("akiko: READ DATA {seekpos}..{endpos} speed {}x", self.speed);
             self.result_buffer[1] |= 0x02;
         } else if seekpos < 0 {
             // Play command with a lead-in address: a TOC dump.
             self.toc_counter = 0;
+        } else if !self
+            .disc
+            .as_ref()
+            .is_some_and(|d| d.is_audio_sector(seekpos as u32))
+        {
+            // A play aimed at a data track: the real firmware refuses
+            // (cd32-probe on a burned data-only disc reads io_Error 36
+            // for every play row) and volunteers the play-failed
+            // notification instead of starting the stream.
+            self.toc_counter = -1;
+            self.result_buffer[1] = 0x42;
+            self.audio_notify = -3;
+            log::debug!("akiko: PLAY {seekpos}..{endpos} refused (data track)");
         } else {
             // Audio play: stream CD-DA into the host mixer from here.
             self.toc_counter = -1;
@@ -2565,12 +2682,13 @@ mod tests {
     }
 
     #[test]
-    fn command_dma_keeps_the_physical_page_carry_through_a_packet_wrap() {
-        // Kickstart copies each command linearly from base + its software
-        // producer index, even when the visible eight-bit index wraps. Akiko's
-        // physical DMA counter carries into the following page for the rest of
-        // that packet; wrapping the address itself reads stale data
-        // from the start of the TX page.
+    fn command_dma_folds_to_the_transmit_page_through_a_packet_wrap() {
+        // Kickstart's command producer uses eight-bit index arithmetic, so a
+        // packet whose bytes straddle index $FF wraps to the start of the
+        // 256-byte TX page (register trace: an idle-screen LED packet at
+        // txinx $FE..$00 lands its checksum at page offset 0). Akiko's DMA
+        // address folds the same way; carrying into the following page reads
+        // unrelated memory there and fails the packet's checksum.
         let mut ring = CdAudioRing::default();
         let mut chip = vec![0u8; 128 * 1024];
         let mut akiko = Akiko::new();
@@ -2589,10 +2707,13 @@ mod tests {
         let tx_base = (MISC | 0x200) as usize;
         let mut checksum = 0xFFu8;
         for (i, byte) in command.iter().copied().enumerate() {
-            chip[tx_base + 0xF8 + i] = byte;
+            chip[tx_base + (0xF8 + i) % 256] = byte;
             checksum = checksum.wrapping_sub(byte);
         }
-        chip[tx_base + 0xF8 + command.len()] = checksum;
+        chip[tx_base + (0xF8 + command.len()) % 256] = checksum;
+        // Poison the byte past the page end: a carried (non-folding) DMA
+        // address would read this instead of the wrapped payload.
+        chip[tx_base + 0x100] = 0x5A;
         let end = 0xF8u8.wrapping_add(command.len() as u8 + 1);
         akiko.write(AKIKO_BASE + 0x1D, 1, u32::from(end), &mut chip);
 
@@ -2603,13 +2724,14 @@ mod tests {
         assert!(!akiko.checksum_error);
         assert_eq!(akiko.data_offset, 0, "the READ command executed");
 
-        // A later packet starts from base + the visible index again; the page
-        // carry belongs only to the completed packet.
+        // A later packet starts from base + the visible index.
         akiko.receive_length = 0;
         akiko.receive_offset = 0;
         akiko.command_active = 0;
         let next = [0x15, 0x00, 0xEA];
-        chip[tx_base + end as usize..tx_base + end as usize + next.len()].copy_from_slice(&next);
+        for (i, byte) in next.iter().copied().enumerate() {
+            chip[tx_base + (end as usize + i) % 256] = byte;
+        }
         let next_end = end.wrapping_add(next.len() as u8);
         akiko.write(AKIKO_BASE + 0x1D, 1, u32::from(next_end), &mut chip);
         for _ in 0..8 {
@@ -2673,12 +2795,17 @@ mod tests {
         akiko.cdcomtxcmp = 0xFE;
         let tx_base = (MISC | 0x200) as usize;
 
-        // The first LED packet crosses the physical page; the second is
-        // already queued at base + its wrapped software index. One comparator
-        // window covers both packets, so only the parser boundary can rebase
-        // the physical DMA address for the second one.
-        chip[tx_base + 0xFE..tx_base + 0x101].copy_from_slice(&[0x15, 0x00, 0xEA]);
+        // The first LED packet wraps at the page end (its checksum lands at
+        // page offset 0, where the producer's eight-bit index arithmetic put
+        // it); the second is queued right behind it. One comparator window
+        // covers both packets, and the parser boundary rebases the DMA
+        // address for the second one.
+        chip[tx_base + 0xFE..tx_base + 0x100].copy_from_slice(&[0x15, 0x00]);
+        chip[tx_base] = 0xEA;
         chip[tx_base + 0x01..tx_base + 0x04].copy_from_slice(&[0x25, 0x01, 0xD9]);
+        // Poison the byte past the page end: a carried (non-folding) DMA
+        // address would read this instead of the wrapped checksum.
+        chip[tx_base + 0x100] = 0x5A;
         akiko.write(AKIKO_BASE + 0x1D, 1, 0x04, &mut chip);
 
         for _ in 0..16 {
@@ -2731,6 +2858,8 @@ mod tests {
         let mut chip = vec![0u8; 64 * 1024];
         let mut akiko = Akiko::new();
         akiko.insert_disc(test_disc());
+        // The test drive is already spun up with its lead-in read.
+        akiko.toc_spin_up_cck = 0;
         akiko.tick(2048, &mut chip, &mut ring);
         akiko.cd_initialized = 2;
         akiko.receive_length = 0;
@@ -2772,6 +2901,8 @@ mod tests {
             let mut chip = vec![0u8; 64 * 1024];
             let mut akiko = Akiko::new();
             akiko.insert_disc(test_disc());
+            // The test drive is already spun up with its lead-in read.
+            akiko.toc_spin_up_cck = 0;
             akiko.tick(2048, &mut chip, &mut ring);
             akiko.cd_initialized = 2;
             akiko.receive_length = 0;
@@ -2805,6 +2936,8 @@ mod tests {
         let mut chip = vec![0u8; 64 * 1024];
         let mut akiko = Akiko::new();
         akiko.insert_disc(test_disc());
+        // The test drive is already spun up with its lead-in read.
+        akiko.toc_spin_up_cck = 0;
         akiko.tick(2048, &mut chip, &mut ring);
         akiko.cd_initialized = 2;
         akiko.receive_length = 0;
