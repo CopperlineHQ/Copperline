@@ -438,6 +438,19 @@ probe_tests! {
     golden_aga_vamigats_rdram => probe_aga("rdram-aga", "rdram-aga.bin", 16.0);
     // Lisa lands COLORxx changes one hires pixel after OCS/ECS Denise.
     golden_aga_vamigats_colorlag => probe_aga("colorlag-aga", "colorlag-aga.bin", 16.0);
+    // BPLCON4 sprite palette banks: even sprites read the ESPRM high
+    // nibble, odd sprites and attached pairs the OSPRM low nibble (the
+    // Nexus 7 lamp-base regression class, where the swapped decode put an
+    // even sprite on unset odd-bank entries). Colours vAmiga-verified
+    // bijectively exact per band.
+    golden_sprprobe_banks => probe_aga("sprprobe-banks", "sprprobe-banks.bin", 16.0);
+    // Copper per-band slot budget across the line-end refresh access: the
+    // $E2 refresh cycle stalls the CPU/blitter but must not block a Copper
+    // fetch, or a saturated per-band MOVE stream loses one fetch per line
+    // and its beam WAITs stop re-locking (the Nexus 7 plasma-zoom streak
+    // regression class). vAmiga is not a valid reference here (see the
+    // probe header).
+    golden_copprobe_eol => probe_aga("copprobe-eol", "copprobe-eol.bin", 16.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
