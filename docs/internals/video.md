@@ -136,7 +136,7 @@ line's own pre-window fetch, so the first line of a bitplane-DMA block --
 whether gated by a copper DMACON BPLEN write or by DIWSTRT's vertical
 comparator -- renders its scrolled-in left edge exactly like the interior
 lines (`ddfprobe-blockscroll`, vAmiga-verified; the Super Skidmarks CD32
-menu corner-notch regression class). Only the scroll-in never comes from a
+menu corner-notch regression class). The scroll-in still never comes from a
 previous scanline's tail. AGA's
 extended BPLCON1 delays can exceed one 16-bit shifter word; the extra leading
 gap also stays background until current-line samples reach Lisa.

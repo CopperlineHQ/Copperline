@@ -4984,9 +4984,6 @@ fn render_from_input_with_scratch(
                 export_index = Some(vec![0u8; EXPORT_W * rows]);
             }
         }
-        // Tracks the last line that actually drew bitplanes, so a line whose
-        // predecessor was border can suppress BPLCON1 scroll pulling leading
-        // same-line pre-fetch samples into view.
         let mut indexed_output_cache = IndexedOutputCache::default();
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
