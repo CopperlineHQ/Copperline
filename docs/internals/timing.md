@@ -17,8 +17,16 @@ contend for the slots it leaves free. (The function tests audio before
 disk, which is equivalent because their fixed slots never overlap.)
 
 1. **Memory refresh** -- fixed odd slots 1/3/5 plus the line-end refresh
-   slot (E2, or E3 on NTSC long lines). Refresh only ever uses odd slots,
-   which is why it never collides with the Copper's even-slot cadence.
+   slot (E2, or E3 on NTSC long lines). The 1/3/5 slots sit on the odd
+   parity the Copper never fetches from; the line-end slot lands on the
+   Copper's even-slot cadence but stalls only the CPU and blitter -- the
+   refresh RGA strobe overlaps a concurrent Copper transfer on the real
+   chip, so the arbiter lets a Copper fetch through it
+   (`line_end_refresh_slot` in `src/bus/dma_slots.rs`). A Copper stream
+   that saturates the line needs that clock: Nexus 7's plasma-zoom text
+   reloads 128+3 palette entries per 3-line band between two beam WAITs,
+   and blocking E2 slips the chain ~6 cck per band until its BPLCON4
+   sprite-bank flip drifts into the sprite window.
 2. **Disk DMA** -- fixed slots 7/9/B, when DSKEN is set and a transfer is
    live.
 3. **Audio DMA** -- one fixed slot per Paula channel (D/F/11/13), claimed

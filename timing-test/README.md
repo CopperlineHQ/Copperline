@@ -618,7 +618,21 @@ vAmiga-verified band colours, border span per the DIW-edge photos), and
 address exactly as on a write: each frame the CPU rewrites COP1LC and
 strobes with `tst.w COPJMP1`, so the stripe must render from the flipped
 list (green), not the vblank-restart list (red) -- the Sleepwalker CD32
-double-buffer flip class; vAmiga-verified).
+double-buffer flip class; vAmiga-verified), and
+`sprprobe-banks` (BPLCON4 sprite palette banks: seven sprite bars --
+six unattached, one attached pair -- under four BPLCON4 bands whose
+hue-coded banks show even sprites reading the ESPRM high nibble, odd
+sprites and the attached pair the OSPRM low nibble; a swapped decode
+mirrors the two split bands -- the Nexus 7 lamp-base class;
+vAmiga-verified bijectively exact per band, with vAmiga drawing the DMA
+bars one line low in this constellation, see the probe header), and
+`copprobe-eol` (the Copper's per-band slot budget across the line-end
+refresh access: five zones of 3-line bands step a saturated MOVE stream's
+length by one, and marker columns lock only while the $E2 cycle stays
+fetchable -- it stalls the CPU and blitter, never a Copper fetch. Losing
+$E2 flips the $A5 zone into a staircase and steepens the rest -- the
+Nexus 7 plasma-zoom streak class; vAmiga is NOT a valid reference here,
+see the probe header).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not

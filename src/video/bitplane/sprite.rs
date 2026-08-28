@@ -119,10 +119,10 @@ impl<'a> SpriteLineSampler<'a> {
 }
 
 /// Sprite colour entry in the palette store. AGA bases the lookup on the
-/// BPLCON4 ESPRM low nibble (even sprites / attached pairs) or OSPRM high
-/// nibble (odd sprites); pre-AGA uses the classic 16..31 block. Attached pairs
-/// use the 4-bit pixel index directly; unattached sprites add the pair's
-/// 4-colour offset.
+/// BPLCON4 ESPRM high nibble (even sprites) or OSPRM low nibble (odd
+/// sprites, and attached pairs, which display through the odd channel);
+/// pre-AGA uses the classic 16..31 block. Attached pairs use the 4-bit
+/// pixel index directly; unattached sprites add the pair's 4-colour offset.
 pub(super) fn sprite_color_entry(
     control: ControlState,
     sprite: usize,
@@ -135,7 +135,7 @@ pub(super) fn sprite_color_entry(
         (sprite / 2) * 4 + idx as usize
     };
     if control.aga() {
-        let nibble = if attached || sprite & 1 == 0 {
+        let nibble = if attached || sprite & 1 == 1 {
             control.bplcon4 & 0x0F
         } else {
             (control.bplcon4 >> 4) & 0x0F
