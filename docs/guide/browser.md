@@ -146,10 +146,10 @@ requestAnimationFrame(renderLoop);
 - `key_event(code, pressed)`: Send W3C keyboard event code (e.g., `"KeyA"`, `"Digit1"`).
 - `key_raw(rawCode, pressed)`: Send Amiga raw key scan code.
 - `mouse_delta(dx, dy)`: Inject relative mouse motion.
-- `mouse_button(button, pressed)`: Set mouse button state (`0` = Left, `1` = Right, `2` = Middle).
-- `set_joystick_port(port, up, down, left, right, fire1, fire2)`: Set joystick directional and fire state (0-based port).
-- `set_cd32_buttons_port(port, red, blue, green, yellow, play, rwd, ffw)`: Set CD32 pad button state (0-based port).
-- `set_port_device(port, device)`: Configure controller port device (`"mouse"`, `"joystick"`, `"cd32"`, etc.).
+- `mouse_button(button, pressed)`: Set mouse button state (`0` = Left, `1` = Middle, `2` = Right, matching `MouseEvent.button`).
+- `set_joystick_port(port, up, down, left, right, fire, button2)`: Set joystick directional and fire button state (`port` 1 or 2).
+- `set_cd32_buttons_port(port, play, rwd, ffw, green, yellow)`: Set CD32 pad extra button state (`port` 1 or 2; red/blue map to `fire`/`button2` via `set_joystick_port`).
+- `set_port_device(port, device)`: Configure controller port device (`port` 1 or 2, e.g., `"mouse"`, `"joystick"`, `"cd32"`, `"analogue"`, `"none"`).
 - `save_state()`: Export full machine state as `Uint8Array`.
 - `load_state(stateBytes)`: Restore machine state from `Uint8Array`.
 
