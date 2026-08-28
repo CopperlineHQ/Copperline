@@ -377,6 +377,13 @@ probe_tests! {
     // at the DIW stop (the KS 2.05 first-text-column regression class);
     // vAmiga-verified band by band.
     golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 16.0);
+    // The BPLCON1 scroll delay taps pixels the shifter loaded from the same
+    // line's pre-window fetch, so the scrolled-in left edge appears on a
+    // bitplane-DMA block's first line exactly as on its interior lines --
+    // whether the block is gated by a copper DMACON BPLEN write or by
+    // DIWSTRT vstart reopening the vertical window (the Super Skidmarks
+    // CD32 menu corner-notch regression class); vAmiga-verified exact.
+    golden_ddfprobe_blockscroll => probe_ecs("ddfprobe-blockscroll", "ddfprobe-blockscroll.bin", 16.0);
     // AGA wide-FMODE off-grid DDFSTRT scroll fold: taps at or past the
     // data-arrival distance (earliness + the 8-cck fetch-to-comparator
     // pipeline) show the next gulp, one gulp left (the Alien Breed II
