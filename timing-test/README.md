@@ -62,7 +62,8 @@ $ACCE1B02) the walk covers the LARGEST fast region, the one that dominates
 a real table build. The header records the Copperline predicted columns for
 an A4000 with a 50 MHz 68060 (CPU-card RAM), a 25 MHz 68040 and a 25 MHz
 68030 (`tt-a4000-060/-040/-030.toml`), plus REAL columns captured on the
-maintainer's A4000 (BFG9060 68060/50, and a RAM-less 68040/25) with
+maintainer's A4000 (BFG9060 68060/50, a RAM-less A3640 68040/25, and a
+25 MHz Commodore 68030 CPU-slot board) with
 per-row verdicts: the 040's plain execution is over-billed ~2-2.5x while
 buses and traps are under-billed, fast RAM is three distinct speed classes
 on real silicon (CPU-card / motherboard / Zorro III), and the CPU-slot

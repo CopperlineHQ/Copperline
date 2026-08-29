@@ -1,4 +1,4 @@
-# A4000 with a 50 MHz 68060 CPU card carrying 64M of local RAM, 16M of
+# A4000 with a 50 MHz 68060 CPU card carrying 64M of local RAM, 2M of
 # Ramsey motherboard RAM, and a 128M Zorro III RAM board: the emulated
 # mirror of the maintainer's real A4000/BFG9060/ZZ9000 for the accelprobe
 # real-hardware comparison (rows discover the regions from the exec MemList,

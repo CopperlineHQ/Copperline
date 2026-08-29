@@ -1,4 +1,4 @@
-# A4000 with a 25 MHz 68030 CPU card (no local RAM), 16M motherboard RAM
+# A4000 with a 25 MHz 68030 CPU card (no local RAM), 2M motherboard RAM
 # and a 128M Zorro III board: the 030 column of the accelprobe comparison.
 rom = "../test-assets/Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
 [machine]

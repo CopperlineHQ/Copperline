@@ -32,7 +32,7 @@
 ;
 ; Rows (values are E-clock ticks unless stated; 0 = skipped/absent,
 ; $FFFFFFFF = the instruction faulted -- an emulator-support signal):
-;   row 0  signature $ACCE1B01 (accelprobe v1)
+;   row 0  signature $ACCE1B02 (v1 captures read $ACCE1B01)
 ;   row 1  detected CPU: $20 / $30 / $40 / $60 (from live probes, not exec)
 ;   row 2  exec AttnFlags (raw word, captured before takeover)
 ;   row 3  68060 PCR readback (else 0)
@@ -50,7 +50,8 @@
 ;   row 15 cpushl dc,(a0) stride-16 walk    x4096  over fast region 1 (040/060)
 ;   row 16 chip  read  move.l stride 16     x4096  (64K window, line-fill rate)
 ;   row 17 chip  write move.l stride 16     x4096
-;   row 18 fast region 1 base address (MemList order; 0 = absent)
+;   row 18 fast region 1 base address (MemList order, first three
+;          regions displayed; 0 = absent)
 ;   row 19 fast1 read  move.l stride 16     x4096
 ;   row 20 fast1 write move.l stride 16     x4096
 ;   row 21 fast region 2 base address
@@ -59,7 +60,10 @@
 ;   row 24 fast region 3 base address
 ;   row 25 fast3 read
 ;   row 26 fast3 write
-;   row 27 composite page walk, FULL        x512 pages over fast1 (040/060):
+;   row 27 composite page walk, FULL        x512 pages (040/060) over the
+;          LARGEST fast region of the whole MemList (tracked even past the
+;          three displayed regions; stack in fast region 1, so rows 27-29
+;          are skipped when region 1 cannot host it):
 ;          movem push/pop + 2 vector calls + trap/rte + page read +
 ;          descriptor write + cpushl, one 4K page per iteration
 ;   row 28 composite, no trap               x512  (27-28 isolates the trap)
@@ -236,6 +240,8 @@ ATTNF   equ     $4f81a          ; word: exec AttnFlags
 FAULTF  equ     $4f81c          ; word: set by the skip handlers
 CPUTYP  equ     $4f81e          ; word: $20/$30/$40/$60
 SAVSP   equ     $4f820          ; long: SP save for the fast-stack rows
+LARGLO  equ     $4f824          ; long: largest fast region, MH_LOWER
+LARGHI  equ     $4f828          ; long: largest fast region, MH_UPPER
 DESCT   equ     $58000
 SSTACK  equ     $5e000
 CHIPW   equ     $60000
@@ -255,6 +261,8 @@ boot:
         move.w  296(a6),ATTNF   ; ExecBase->AttnFlags
         lea     REGTBL,a0
         moveq   #0,d3
+        clr.l   LARGLO          ; largest fast region seen so far
+        clr.l   LARGHI
         move.l  322(a6),a1      ; ExecBase->MemList lh_Head
 .ml     move.l  (a1),d0         ; ln_Succ (0 on the tail node: done)
         beq     .mld
@@ -262,10 +270,18 @@ boot:
         and.w   #4,d1           ; MEMF_FAST
         beq     .mln
         cmp.w   #3,d3
-        bhs     .mln
+        bhs     .mlg            ; table full: still track the largest
         move.l  20(a1),(a0)+    ; MH_LOWER
         move.l  24(a1),(a0)+    ; MH_UPPER
         addq.w  #1,d3
+.mlg    move.l  24(a1),d1       ; the composite walks the LARGEST fast
+        sub.l   20(a1),d1       ; region of the whole list, not only the
+        move.l  LARGHI,d2       ; three the base/read/write rows display
+        sub.l   LARGLO,d2
+        cmp.l   d2,d1
+        bls     .mln
+        move.l  20(a1),LARGLO
+        move.l  24(a1),LARGHI
 .mln    movea.l d0,a1
         bra     .ml
 .mld    move.w  d3,REGCNT
@@ -296,10 +312,13 @@ boot:
         lea     stub2(pc),a0
         move.l  a0,(a1)
 
-        ; A 68000 has no VBR and no caches to probe; this is an accelerator
-        ; probe, so just show the signature rows and stop (border stays red).
+        ; This is an accelerator probe: it needs the 020+ MOVEC set and a
+        ; cache to put into a defined state. A 68000 has neither; a 68010
+        ; would pass a VBR check but then misreport as a $20 after both
+        ; feature probes fault, so gate on the 68020/030/040 AttnFlags
+        ; bits and send everything below them to the signature-only path.
         move.w  ATTNF,d0
-        and.w   #$000f,d0       ; AFB_68010|020|030|040
+        and.w   #$000e,d0       ; AFB_68020|68030|68040
         bne     .cpu_ok
         bra     unsupported
 .cpu_ok
@@ -568,8 +587,10 @@ boot:
         movea.l d0,a0
         movea.l #DESCT,a1
         lea     vecblk(pc),a2
-        move.l  sp,SAVSP                ; the real walk's supervisor stack
-        bsr     fast1w                  ; sits in fast RAM: match it
+        bsr     fast1w                  ; the real walk's supervisor stack
+        tst.l   d0                      ; sits in fast RAM: match it, and
+        beq     .r27s                   ; skip when region 1 cannot host it
+        move.l  sp,SAVSP
         movea.l d0,sp
         adda.l  #$18000,sp
         cnop    0,4
@@ -604,8 +625,10 @@ boot:
         movea.l d0,a0
         movea.l #DESCT,a1
         lea     vecblk(pc),a2
+        bsr     fast1w                  ; the real walk's supervisor stack
+        tst.l   d0                      ; sits in fast RAM: match it, and
+        beq     .r28s                   ; skip when region 1 cannot host it
         move.l  sp,SAVSP
-        bsr     fast1w
         movea.l d0,sp
         adda.l  #$18000,sp
         cnop    0,4
@@ -637,8 +660,10 @@ boot:
         movea.l d0,a0
         movea.l #DESCT,a1
         lea     vecblk(pc),a2
+        bsr     fast1w                  ; the real walk's supervisor stack
+        tst.l   d0                      ; sits in fast RAM: match it, and
+        beq     .r29s                   ; skip when region 1 cannot host it
         move.l  sp,SAVSP
-        bsr     fast1w
         movea.l d0,sp
         adda.l  #$18000,sp
         cnop    0,4
@@ -815,27 +840,15 @@ regwin: move.l  d1,-(sp)
 ; boot-time MMU table build. The composite's STACK stays in region 1
 ; (fast1w), matching the v1 060 column's stack placement.
 compbase:
-        movem.l d1-d3/a0,-(sp)
-        moveq   #0,d2                   ; best size
-        moveq   #0,d3                   ; best lower
-        move.w  REGCNT,d1
-        subq.w  #1,d1
-        bmi     .cbd
-        lea     REGTBL,a0
-.cbl    move.l  4(a0),d0                ; upper
-        sub.l   (a0),d0                 ; - lower
-        cmp.l   d2,d0
-        bls     .cbn
-        move.l  d0,d2
-        move.l  (a0),d3
-.cbn    addq.l  #8,a0
-        dbra    d1,.cbl
-.cbd    moveq   #0,d0
-        cmp.l   #$220000,d2             ; window + 2M walk + slack
-        blo     .cbo
-        move.l  d3,d0
+        move.l  d1,-(sp)
+        moveq   #0,d0
+        move.l  LARGHI,d1               ; largest fast region of the WHOLE
+        sub.l   LARGLO,d1               ; MemList (tracked at capture time)
+        cmp.l   #$220000,d1             ; window + 2M walk + slack
+        blo     .cbd
+        move.l  LARGLO,d0
         add.l   #$20000,d0              ; clear of that region's window
-.cbo    movem.l (sp)+,d1-d3/a0
+.cbd    move.l  (sp)+,d1
         rts
 
 ; regread/regwrite: stride-16 move.l over the 64K window at a0; d0 = ticks.

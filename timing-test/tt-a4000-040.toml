@@ -1,5 +1,5 @@
 # A4000 with a 25 MHz 68040 CPU card WITHOUT local RAM (fast regions are
-# the 16M Ramsey motherboard RAM and a 128M Zorro III board), matching the
+# the 2M Ramsey motherboard RAM and a 128M Zorro III board), matching the
 # maintainer's RAM-less real 040 card for the accelprobe comparison.
 rom = "../test-assets/Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
 [machine]
