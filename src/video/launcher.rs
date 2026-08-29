@@ -1059,11 +1059,10 @@ const HOSTFS_ROWS: [Row; 12] = [
     row(F::Filesys3Boot, "  Boot priority", Cycle),
     row(F::Filesys3ReadOnly, "  Access", Cycle),
 ];
-// One boot-priority row per hard-disk drive, matching the Storage tab's drive
-// rows. Greyed when the matching slot holds no image.
-// IDE and SCSI only: lide's drives get their own priority rows on the Lide
-// page (see `LIDE_ROWS`) rather than crowding this table -- with them added
-// here the page no longer fits (`every_launcher_tab_row_fits_inside_the_panel`).
+// One boot-priority row per hard-disk drive. The IDE bays stand their
+// ground greyed when empty; a SCSI unit or Lide slot is listed only once it
+// carries a disk (`row_hidden`). More rows than one page holds run onto a
+// second page -- see `MachineSetup::boot_page_of`.
 const BOOTPRI_ROWS: [Row; 13] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
@@ -1075,9 +1074,9 @@ const BOOTPRI_ROWS: [Row; 13] = [
     row(F::ScsiUnit5Boot, "SCSI unit 5", Bootpri),
     row(F::ScsiUnit6Boot, "SCSI unit 6", Bootpri),
     // The Zorro IDE board's drives sit below the motherboard's and the
-    // SCSI units, which is also the order the cascade default ranks them
-    // in: a board added to a machine takes its place after what the
-    // machine already had.
+    // SCSI units. The cascade default ranks by this order too, though it
+    // seeds each priority when its drive is added -- drives filled out of
+    // table order can still tie, as they always could across families.
     row(F::LideDrive0Boot, "Lide drive 0", Bootpri),
     row(F::LideDrive1Boot, "Lide drive 1", Bootpri),
     row(F::LideDrive2Boot, "Lide drive 2", Bootpri),
@@ -1088,11 +1087,11 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
-// The `[lide]` Storage sub-page: board personality, boot ROM(s), up to four
-// drives (RIPPLE's two channels; RIDE/AT-Bus 2008 hide slots 2-3, and AT-Bus
-// 2008 also hides the second ROM bank -- it has no flash banking), and each
-// drive's boot priority. Boot priority sits here rather than on the shared
-// Boot Priority page: with lide's four slots added there it stopped fitting.
+// The `[lide]` Storage sub-page: board personality, boot ROM(s), and up to
+// four drives (RIPPLE's two channels; RIDE/AT-Bus 2008 hide slots 2-3, and
+// AT-Bus 2008 also hides the second ROM bank -- it has no flash banking).
+// The drives' boot priorities live on the shared Boot Priority page with
+// every other drive's, in `BOOTPRI_ROWS`.
 const LIDE_ROWS: [Row; 7] = [
     row(F::LideBoard, "Board", Cycle),
     row(F::LideRom, "Boot ROM", PathRow),
@@ -5398,11 +5397,27 @@ impl MachineSetup {
         self.boot_priority_row_count() > BOOTPRI_PAGE_ROWS
     }
 
+    /// The page a session should stand on after this setup replaced the one
+    /// it was looking at (Load..., Defaults): the same page, unless that
+    /// page no longer exists -- the second boot page with nothing left on
+    /// it falls back to the first rather than standing empty.
+    pub fn settle_tab(&self, tab: LauncherTab) -> LauncherTab {
+        if tab == LauncherTab::BootPriorityMore && !self.boot_priority_has_second_page() {
+            LauncherTab::BootPriority
+        } else {
+            tab
+        }
+    }
+
     /// Which Boot Priority page a drive's row falls on, or `None` for a row
     /// that is not one of them (the column titles, and every other page's
     /// rows). Paged by position among the drives actually listed, not by
     /// position in the table, so a machine with a Lide board but no SCSI
     /// keeps its four Lide drives on the first page.
+    ///
+    /// Only meaningful for a row that is listed: asked about a hidden one
+    /// it answers with the page of the rank the row *would* take. Callers
+    /// go through [`Self::row_on_page`], which checks `row_hidden` first.
     pub fn boot_page_of(&self, field: LauncherField) -> Option<LauncherTab> {
         if !BOOTPRI_ROWS.iter().any(|r| r.field == field) {
             return None;

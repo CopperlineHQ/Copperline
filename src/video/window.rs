@@ -6097,6 +6097,8 @@ impl App {
                     let model = state.setup.model();
                     state.setup = MachineSetup::default();
                     state.setup.select_model(model);
+                    // The defaults have no second boot page to stand on.
+                    state.tab = state.setup.settle_tab(state.tab);
                     state.setup.refresh_host_devices();
                     state.status = Some(StatusMessage::ok("Reset to defaults"));
                 }

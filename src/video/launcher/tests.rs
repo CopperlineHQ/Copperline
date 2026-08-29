@@ -5077,6 +5077,37 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
         assert!(drawn <= BOOTPRI_PAGE_ROWS + 1, "{tab:?} draws {drawn}");
     }
 
+    // The table itself fits the two pages that exist -- the compile-time
+    // bound behind `boot_page_of`'s two-page answer. A drive class that
+    // pushes past this needs a third page, not a silent pile-up.
+    assert!(BOOTPRI_ROWS.len() <= 2 * BOOTPRI_PAGE_ROWS);
+    // And with every slot filled, each page really draws no more than its
+    // share -- the same filter the draw path uses, not a re-stated cap.
+    let per_page: Vec<usize> = [LauncherTab::BootPriority, LauncherTab::BootPriorityMore]
+        .iter()
+        .map(|&tab| {
+            BOOTPRI_ROWS
+                .iter()
+                .filter(|r| s.row_on_page(tab, r.field))
+                .count()
+        })
+        .collect();
+    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, 4]);
+
+    // A setup swapped in under the panel (Load..., Defaults) may have no
+    // second page; the tab it was standing on settles back to the first.
+    assert_eq!(
+        s.settle_tab(LauncherTab::BootPriorityMore),
+        LauncherTab::BootPriorityMore,
+        "a full machine keeps its second page"
+    );
+    let empty = MachineSetup::default();
+    assert_eq!(
+        empty.settle_tab(LauncherTab::BootPriorityMore),
+        LauncherTab::BootPriority
+    );
+    assert_eq!(empty.settle_tab(LauncherTab::Lide), LauncherTab::Lide);
+
     // Back on the second page returns to the first, not to Storage.
     assert_eq!(
         LauncherTab::BootPriorityMore.parent_tab(),
