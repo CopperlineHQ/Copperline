@@ -5867,8 +5867,8 @@ fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -
 /// tells you where everything is would be the wrong thing to play down.
 fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
     // The soundfont row reads the same way: unset means the bundled
-    // bank, centred and dimmed as a default rather than left-aligned
-    // as if it were a chosen path.
+    // bank, dimmed as Copperline's answer and reading from the left
+    // like the bundled ROM defaults do.
     #[cfg(feature = "coppersynth")]
     if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_none();
