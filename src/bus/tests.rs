@@ -4366,6 +4366,23 @@ fn ocs_display_window_zero_start_opens_from_beam_zero() {
 }
 
 #[test]
+fn empty_vertical_display_window_is_closed_on_every_line() {
+    // DIWSTRT.V == DIWSTOP.V (parked on line 301 via DIWHIGH, the Nexus 7
+    // scene-blanking programming): the flop's set and reset comparators tie
+    // on that line and reset wins, so the window never opens. The level
+    // approximation must agree, not wrap the tie into an always-open window.
+    let diwhigh = DiwHigh::ecs_explicit(0x2101);
+    assert_eq!(diw_v_start(0x2D81, diwhigh), 301);
+    assert_eq!(diw_v_stop(0x2DC1, diwhigh), 301);
+    for vpos in 0..313 {
+        assert!(
+            !display_window_contains_vpos(0x2D81, 0x2DC1, diwhigh, vpos),
+            "vpos {vpos} must be outside an empty vertical window"
+        );
+    }
+}
+
+#[test]
 fn ecs_diwhigh_write_zero_selects_direct_display_window_msbs() {
     let mut bus = empty_bus();
     bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);

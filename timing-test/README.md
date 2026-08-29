@@ -591,6 +591,14 @@ the frame's last raster line, which forces a reset, so the next frame's
 top starts closed. The Kang Fu CD32 screen-split class; the probe caught
 Copperline carrying the flop across the vertical blank and lighting the
 whole top of the frame. vAmiga-verified byte-for-byte), and
+`vdiwprobe-empty` (a whole-frame empty window, DIWSTRT.V == DIWSTOP.V
+parked on line 301 via DIWHIGH, never opens: no bitplane may display
+anywhere -- and because the frame captures no DMA rows at all, every row
+rides the synthesized register-derived render path, where a level window
+test read the tie as a full wrap-around window and lit the frame with
+undisplayed buffer contents. BRDRSPRT sprites stay visible over the
+closed frame -- the Nexus 7 scene-transition corrupted-ball class;
+vAmiga-5-verified bijectively exact), and
 `dpfprobe-aga` (Lisa's eight-plane dual playfield: planes 7/8 extend each
 field's index to four bits -- the Zool AGA decode class, where a 3-bit
 decode flips the probe's red/blue columns to magenta/green -- PF2 reads

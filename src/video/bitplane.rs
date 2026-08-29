@@ -1039,8 +1039,16 @@ impl ControlState {
         }
         let start = self.diw_v_start() as i32;
         let mut stop = self.diw_v_stop() as i32;
+        // DIWSTRT.V == DIWSTOP.V never opens: the vertical flop's set and
+        // reset comparators both match on that line and reset wins the tie
+        // (Bus::reevaluate_diw_vertical_flop; vdiwprobe-flop's tie band).
+        // The wrap below would otherwise read the empty window as a full
+        // wrap-around one and light every line of the frame.
+        if start == stop {
+            return false;
+        }
         let mut v = visible_line0 + line as i32;
-        if stop <= start {
+        if stop < start {
             stop += 0x100;
             if v < start {
                 v += 0x100;

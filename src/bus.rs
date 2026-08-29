@@ -7726,8 +7726,15 @@ fn display_window_contains_vpos(diwstrt: u16, diwstop: u16, diwhigh: DiwHigh, vp
     }
     let start = diw_v_start(diwstrt, diwhigh) as u32;
     let mut stop = diw_v_stop(diwstop, diwhigh) as u32;
+    // DIWSTRT.V == DIWSTOP.V never opens: both flop comparators match on
+    // the same line and reset wins the tie (reevaluate_diw_vertical_flop),
+    // so the level approximation must read the empty window as closed,
+    // not as a full wrap-around one.
+    if start == stop {
+        return false;
+    }
     let mut v = vpos;
-    if stop <= start {
+    if stop < start {
         stop += 0x100;
         if v < start {
             v += 0x100;

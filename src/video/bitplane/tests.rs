@@ -1035,6 +1035,32 @@ fn display_window_uses_diwhigh_upper_vertical_bits() {
 }
 
 #[test]
+fn empty_vertical_display_window_never_contains_a_line() {
+    // DIWSTRT.V == DIWSTOP.V (parked on line 301 via DIWHIGH, the Nexus 7
+    // scene-blanking programming): the vertical flop's set and reset
+    // comparators tie and reset wins, so no row of the frame is inside the
+    // window. The renderer's level approximation must read the tie as
+    // closed rather than wrapping it into an always-open window; a frame
+    // like this fetches nothing, so every row rides the synthesized
+    // register-derived path and this gate is all that blanks it
+    // (timing-test/vdiwprobe-empty pins the full render).
+    let control = ControlState {
+        diwstrt: 0x2D81,
+        diwstop: 0x2DC1,
+        diwhigh: DiwHigh::ecs_explicit(0x2101),
+        ..ControlState::default()
+    };
+    assert_eq!(control.diw_v_start(), 301);
+    assert_eq!(control.diw_v_stop(), 301);
+    for line in 0..280 {
+        assert!(
+            !control.display_window_contains_line(line, PAL_VISIBLE_LINE0),
+            "line {line} must stay border under an empty vertical window"
+        );
+    }
+}
+
+#[test]
 fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
     let base = ControlState {
         diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16,
