@@ -8252,12 +8252,17 @@ fn draw_launcher_row(
                 let (host, port): (Option<String>, Option<u16>) = (None, None);
                 // The listen box's default host is real -- the loopback
                 // the run would bind -- so it shows it. Dialing out has no
-                // sensible default host, so Connect keeps the prompt.
+                // sensible default host, so Connect keeps the prompt. (The
+                // fields only exist with `midi`; without it this whole arm
+                // is dead, `is_serial_addr` being always false.)
+                #[cfg(feature = "midi")]
                 let host_hint = if r.field == LauncherField::SerialConnect {
                     "Host/IP"
                 } else {
                     crate::config::SERIAL_DEFAULT_HOST
                 };
+                #[cfg(not(feature = "midi"))]
+                let host_hint = crate::config::SERIAL_DEFAULT_HOST;
                 draw_serial_half_box(
                     frame,
                     host_box,
