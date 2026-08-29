@@ -1030,13 +1030,24 @@ fn the_serial_address_box_hit_tests_to_its_own_edit() {
     // The serial page sits under the I/O Ports nav row, so its rows
     // start a nav block lower.
     let row_y = launcher_row_y(rect, index) + LAUNCH_NAV_BLOCK_H;
-    let box_rect = launcher_text_rect(rect, row_y, LauncherField::SerialConnect);
+    let (host_box, port_box) = launcher_serial_addr_rects(rect, row_y);
     assert_eq!(
-        ui.control_at((box_rect.x as i32 + 4, box_rect.y as i32 + 4)),
-        Some(UiControl::LauncherSerialAddrEdit(
+        ui.control_at((host_box.x as i32 + 4, host_box.y as i32 + 4)),
+        Some(UiControl::LauncherSerialHostEdit(
             LauncherField::SerialConnect
         ))
     );
+    assert_eq!(
+        ui.control_at((port_box.x as i32 + 4, port_box.y as i32 + 4)),
+        Some(UiControl::LauncherSerialPortEdit(
+            LauncherField::SerialConnect
+        ))
+    );
+    // The pair spans the steppers' run exactly: host starts at the left
+    // arrows' left edge, port ends at the right arrows' right edge.
+    let (prev, _, next) = launcher_cycle_rects(rect, row_y);
+    assert_eq!(host_box.x, prev.x);
+    assert_eq!(port_box.x + port_box.w, next.x + next.w);
 }
 
 #[test]
@@ -2679,7 +2690,7 @@ fn panels_render_into_their_rects() {
         while state.setup.serial_mode() != crate::config::SerialMode::TcpConnect {
             state.setup.cycle(LauncherField::SerialMode, true);
         }
-        state.begin_edit_serial_addr(LauncherField::SerialConnect);
+        state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
         for c in "bbs.example.com:1337".chars() {
             state.edit_push(c);
         }

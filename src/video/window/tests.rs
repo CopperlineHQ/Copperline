@@ -4697,16 +4697,14 @@ fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
 
     let mut app = test_app();
     app.open_launcher();
-    // Dial the serial port out and type an address with no port in it.
+    // Dial the serial port out and type a port no run can take.
     match app.ui.panel.as_mut() {
         Some(Panel::Launcher(state)) => {
             while state.setup.serial_mode() != SerialMode::TcpConnect {
                 state.setup.cycle(LauncherField::SerialMode, true);
             }
-            state.begin_edit_serial_addr(LauncherField::SerialConnect);
-            for c in "no-port".chars() {
-                state.edit_push(c);
-            }
+            state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+            state.edit_push('0');
         }
         _ => panic!("launcher did not open"),
     }
@@ -4720,7 +4718,7 @@ fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
             assert_eq!(state.setup.serial_mode(), SerialMode::TcpConnect);
             assert_eq!(
                 state.editing(),
-                Some(EditTarget::SerialAddr(LauncherField::SerialConnect))
+                Some(EditTarget::SerialPort(LauncherField::SerialConnect))
             );
             assert!(state.status.is_some(), "the rejection is explained");
         }

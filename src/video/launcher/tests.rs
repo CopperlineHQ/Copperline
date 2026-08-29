@@ -2471,9 +2471,15 @@ fn modem_listen_round_trips_through_raw() {
 fn typing_a_serial_connect_address_sets_it_and_round_trips() {
     let mut state = LauncherState::new(MachineSetup::default());
     state.setup.serial_mode = SerialMode::TcpConnect;
-    state.begin_edit_serial_addr(LauncherField::SerialConnect);
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
     assert_eq!(state.edit_buffer(), "", "an unset box starts empty");
-    for c in "bbs.example.com:1337".chars() {
+    for c in "bbs.example.com".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    assert!(state.editing().is_none());
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    for c in "1337".chars() {
         state.edit_push(c);
     }
     state.edit_commit();
@@ -2487,41 +2493,102 @@ fn typing_a_serial_connect_address_sets_it_and_round_trips() {
     assert_eq!(raw.serial.mode.as_deref(), Some("tcp-connect"));
     assert_eq!(raw.serial.connect.as_deref(), Some("bbs.example.com:1337"));
 
-    // Re-opening the box starts from the address it holds, not from a
+    // Re-opening a box starts from the half it holds, not from a
     // placeholder, so an edit is a correction rather than a retype.
-    state.begin_edit_serial_addr(LauncherField::SerialConnect);
-    assert_eq!(state.edit_buffer(), "bbs.example.com:1337");
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
+    assert_eq!(state.edit_buffer(), "bbs.example.com");
+    state.edit_cancel();
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    assert_eq!(state.edit_buffer(), "1337");
     state.edit_cancel();
 }
 
 #[cfg(feature = "midi")]
 #[test]
-fn a_serial_address_without_a_port_keeps_the_focus() {
+fn half_a_serial_address_completes_with_the_defaults() {
     let mut state = LauncherState::new(MachineSetup::default());
-    for bad in ["bbs.example.com", "bbs.example.com:sixty", ":1337"] {
-        state.begin_edit_serial_addr(LauncherField::SerialConnect);
+    state.setup.serial_mode = SerialMode::Tcp;
+    // A host on its own takes the default port...
+    state.begin_edit_serial_addr(LauncherField::SerialListen, false);
+    for c in "0.0.0.0".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    // The session keeps only what was typed; the config a Save writes (and
+    // a Run uses) gets the default port filled in.
+    assert_eq!(state.setup.serial_listen.as_deref(), Some("0.0.0.0"));
+    assert_eq!(
+        state.setup.to_raw().serial.listen.as_deref(),
+        Some(&*format!("0.0.0.0:{}", crate::config::SERIAL_DEFAULT_PORT))
+    );
+    // ...and emptying the host leaves the port on the default host.
+    state.begin_edit_serial_addr(LauncherField::SerialListen, true);
+    for c in "2323".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    state.begin_edit_serial_addr(LauncherField::SerialListen, false);
+    for _ in 0..16 {
+        state.edit_backspace();
+    }
+    state.edit_commit();
+    assert_eq!(state.setup.serial_listen.as_deref(), Some(":2323"));
+    assert_eq!(
+        state.setup.to_raw().serial.listen.as_deref(),
+        Some(&*format!("{}:2323", crate::config::SERIAL_DEFAULT_HOST))
+    );
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn a_port_out_of_range_keeps_the_focus() {
+    let mut state = LauncherState::new(MachineSetup::default());
+    for bad in ["0", "65536", "99999"] {
+        state.begin_edit_serial_addr(LauncherField::SerialListen, true);
         for c in bad.chars() {
             state.edit_push(c);
         }
         state.edit_commit();
         assert_eq!(
             state.editing(),
-            Some(EditTarget::SerialAddr(LauncherField::SerialConnect)),
+            Some(EditTarget::SerialPort(LauncherField::SerialListen)),
             "{bad} was accepted"
         );
         assert!(state.status.is_some(), "{bad} was refused silently");
-        assert_eq!(state.setup.serial_connect, None);
+        assert_eq!(state.setup.serial_listen, None);
         state.edit_cancel();
     }
-    // A bracketed IPv6 literal is a host:port even though it is full of
-    // colons: only the one after the closing bracket separates the port.
-    state.begin_edit_serial_addr(LauncherField::SerialConnect);
-    for c in "[::1]:1337".chars() {
-        state.edit_push(c);
-    }
+    // Deleting the port is not an error: it reverts to the default.
+    state.begin_edit_serial_addr(LauncherField::SerialListen, true);
     state.edit_commit();
     assert!(state.editing().is_none());
-    assert_eq!(state.setup.serial_connect.as_deref(), Some("[::1]:1337"));
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn an_ipv6_host_keeps_its_brackets_in_the_stored_address() {
+    let mut state = LauncherState::new(MachineSetup::default());
+    // A bare IPv6 literal is full of colons, so the stored spelling wraps
+    // it in brackets; typed with brackets they come off and go back on.
+    for typed in ["::1", "[::1]"] {
+        state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
+        for c in typed.chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert!(state.editing().is_none());
+        state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+        for c in "1337".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert_eq!(state.setup.serial_connect.as_deref(), Some("[::1]:1337"));
+        // The host box re-opens on the bare literal.
+        state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
+        assert_eq!(state.edit_buffer(), "::1");
+        state.edit_cancel();
+        state.setup.serial_connect = None;
+    }
 }
 
 #[cfg(feature = "midi")]
@@ -2538,7 +2605,12 @@ fn emptying_a_serial_address_box_unsets_it() {
         state.setup.value_label(LauncherField::SerialListen),
         "0.0.0.0:2323"
     );
-    state.begin_edit_serial_addr(LauncherField::SerialListen);
+    state.begin_edit_serial_addr(LauncherField::SerialListen, false);
+    for _ in 0..64 {
+        state.edit_backspace();
+    }
+    state.edit_commit();
+    state.begin_edit_serial_addr(LauncherField::SerialListen, true);
     for _ in 0..64 {
         state.edit_backspace();
     }
@@ -2553,19 +2625,87 @@ fn emptying_a_serial_address_box_unsets_it() {
 
 #[cfg(feature = "midi")]
 #[test]
-fn a_serial_address_box_takes_only_printable_characters() {
+fn a_dial_out_port_needs_no_privilege() {
+    // Telnet's 23 is the canonical BBS port; dialing out binds nothing,
+    // so the low-port gate is the listen box's alone and the Connect box
+    // takes it whoever runs the process.
     let mut state = LauncherState::new(MachineSetup::default());
-    state.begin_edit_serial_addr(LauncherField::SerialListen);
-    // A space is not part of an address, and neither is a control code.
-    for c in "127.0.0.1 :\t12\n34".chars() {
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    for c in "23".chars() {
         state.edit_push(c);
     }
-    assert_eq!(state.edit_buffer(), "127.0.0.1:1234");
+    state.edit_commit();
+    assert!(state.editing().is_none(), "port 23 dial-out was refused");
+    assert_eq!(state.setup.serial_connect.as_deref(), Some(":23"));
+    // And no host is invented for it: the half-address reaches the config
+    // as typed, and the run explains what is missing.
+    assert_eq!(state.setup.to_raw().serial.connect.as_deref(), Some(":23"));
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn old_style_host_port_typed_into_the_host_box_finds_both_halves() {
+    // The single box took host:port for years; fingers will keep typing
+    // it. A trailing :digits on a colon-free head routes each half where
+    // it belongs, while a bare IPv6 literal keeps its colons.
+    let mut state = LauncherState::new(MachineSetup::default());
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
+    for c in "bbs.example.com:2323".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    assert!(state.editing().is_none());
+    assert_eq!(
+        state.setup.serial_connect.as_deref(),
+        Some("bbs.example.com:2323")
+    );
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    assert_eq!(state.edit_buffer(), "2323");
+    state.edit_cancel();
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn an_address_the_launcher_did_not_write_passes_through_untouched() {
+    // A hand-written config can hold what the boxes would never store; the
+    // round trip must not quietly repair it into a bind the config never
+    // named -- the run fails loudly instead, as it always did.
+    for weird in ["localhost:telnet", "::1", "127.0.0.1:70000"] {
+        let state = LauncherState::new(MachineSetup {
+            serial_mode: SerialMode::Tcp,
+            serial_listen: Some(weird.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            state.setup.to_raw().serial.listen.as_deref(),
+            Some(weird),
+            "{weird} was rewritten"
+        );
+    }
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn the_serial_boxes_take_only_what_their_half_can_hold() {
+    let mut state = LauncherState::new(MachineSetup::default());
+    // A space is not part of a host, and neither is a control code.
+    state.begin_edit_serial_addr(LauncherField::SerialListen, false);
+    for c in "127. 0\t.0.1\n".chars() {
+        state.edit_push(c);
+    }
+    assert_eq!(state.edit_buffer(), "127.0.0.1");
     // And the box has an end: a stuck key cannot grow it without bound.
-    for _ in 0..SERIAL_ADDR_MAX * 2 {
+    for _ in 0..SERIAL_HOST_MAX * 2 {
         state.edit_push('9');
     }
-    assert_eq!(state.edit_buffer().chars().count(), SERIAL_ADDR_MAX);
+    assert_eq!(state.edit_buffer().chars().count(), SERIAL_HOST_MAX);
+    state.edit_cancel();
+    // The port box is digits only, and no wider than a port.
+    state.begin_edit_serial_addr(LauncherField::SerialListen, true);
+    for c in "6x5-5.3 599".chars() {
+        state.edit_push(c);
+    }
+    assert_eq!(state.edit_buffer(), "65535");
     state.edit_cancel();
 }
 
