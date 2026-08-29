@@ -3314,12 +3314,12 @@ fn sub_pages_of_hdd_cd() {
     assert_eq!(
         storage_nav,
         [
+            LauncherTab::Cd,
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
+            LauncherTab::Lide,
             LauncherTab::BootPriority,
             LauncherTab::CreateFloppy,
-            LauncherTab::Cd,
-            LauncherTab::Lide,
         ]
     );
 

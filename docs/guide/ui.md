@@ -611,8 +611,11 @@ The layout is:
   makes new ADF and HDF images (see below); **CD** (image, insert delay,
   CD32 NVRAM); and **Lide**, the built-in `[lide]` Zorro II IDE board --
   personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
-  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image). Each
-  sub-page has a **< Back** button in that block that returns to Storage),
+  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image);
+  **Boot Priority**, which sets each drive's
+  synthesized-RDB boot priority (see below); and **Create Image...**, which
+  makes new ADF and HDF images (see below). Each sub-page has a **< Back**
+  button in that block that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, networking, and audio boards, each

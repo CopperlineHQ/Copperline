@@ -409,16 +409,16 @@ impl LauncherTab {
 
 /// The Storage tab's top nav links (its sub-pages), left to right.
 const STORAGE_NAV: &[(&str, LauncherTab)] = &[
+    // The first row is the hardware -- what a machine can have attached.
+    ("CD", LauncherTab::Cd),
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
-    ("Boot Priority", LauncherTab::BootPriority),
-    // Last of the four, because it is the one entry that makes something
-    // rather than attaching something: nothing on its pages describes this
-    // machine, which is why they are pages of their own.
-    ("Create Image...", LauncherTab::CreateFloppy),
-    // Four to a row, so these two wrap onto a second.
-    ("CD", LauncherTab::Cd),
     ("Lide", LauncherTab::Lide),
+    // Four to a row, so the second holds what is done with it: the boot
+    // order across everything above, and the one entry that makes
+    // something rather than attaching something.
+    ("Boot Priority", LauncherTab::BootPriority),
+    ("Create Image...", LauncherTab::CreateFloppy),
 ];
 
 /// The workshop's two pages. Reached from Storage, so they show a Back
