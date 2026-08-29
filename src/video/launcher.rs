@@ -409,16 +409,16 @@ impl LauncherTab {
 
 /// The Storage tab's top nav links (its sub-pages), left to right.
 const STORAGE_NAV: &[(&str, LauncherTab)] = &[
+    // The first row is the hardware -- what a machine can have attached.
+    ("CD", LauncherTab::Cd),
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
-    ("Boot Priority", LauncherTab::BootPriority),
-    // Last of the four, because it is the one entry that makes something
-    // rather than attaching something: nothing on its pages describes this
-    // machine, which is why they are pages of their own.
-    ("Create Image...", LauncherTab::CreateFloppy),
-    // Four to a row, so these two wrap onto a second.
-    ("CD", LauncherTab::Cd),
     ("Lide", LauncherTab::Lide),
+    // Four to a row, so the second holds what is done with it: the boot
+    // order across everything above, and the one entry that makes
+    // something rather than attaching something.
+    ("Boot Priority", LauncherTab::BootPriority),
+    ("Create Image...", LauncherTab::CreateFloppy),
 ];
 
 /// The workshop's two pages. Reached from Storage, so they show a Back
@@ -3548,6 +3548,18 @@ impl MachineSetup {
             F::HostSocketInterface => {
                 !matches!(self.hostsocket_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            // No controller, no SCSI: the ROM and unit rows go rather than
+            // stand greyed under a setting most machines leave at None. They
+            // return the moment a controller is chosen.
+            F::ScsiRom
+            | F::ScsiRomOdd
+            | F::ScsiUnit0
+            | F::ScsiUnit1
+            | F::ScsiUnit2
+            | F::ScsiUnit3
+            | F::ScsiUnit4
+            | F::ScsiUnit5
+            | F::ScsiUnit6 => self.scsi_controller.is_none(),
             // A controller is not a disk: only the units carrying one have a
             // place in the boot order, so the empty six or seven go rather
             // than standing in a column saying so.
@@ -3634,28 +3646,17 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => {
-                reason(self.has_ide(), "needs A600/A1200/A4000 (or Lide)")
-            }
-            // The ROM and drives belong to the fitted controller; greyed with
-            // none. The A3000's motherboard SCSI has no ROM of its own, and
-            // rom_odd is an A2091 split-EPROM option only.
+            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000 or Lide"),
+            // The ROM and drives belong to the fitted controller, and with
+            // none the rows are hidden outright (`row_hidden`), so only a
+            // fitted-but-unsuitable controller is ever explained here: the
+            // A3000's motherboard SCSI has no ROM of its own, and rom_odd
+            // is an A2091 split-EPROM option only.
             F::ScsiRom => reason(
                 self.scsi_controller
                     .is_some_and(ScsiController::is_zorro_board),
-                if self.scsi_controller.is_some() {
-                    "Zorro boards only"
-                } else {
-                    "no controller"
-                },
+                "Zorro boards only",
             ),
-            F::ScsiUnit0
-            | F::ScsiUnit1
-            | F::ScsiUnit2
-            | F::ScsiUnit3
-            | F::ScsiUnit4
-            | F::ScsiUnit5
-            | F::ScsiUnit6 => reason(self.scsi_controller.is_some(), "no controller"),
             F::ScsiRomOdd => reason(
                 self.scsi_controller == Some(ScsiController::A2091),
                 "A2091 only",

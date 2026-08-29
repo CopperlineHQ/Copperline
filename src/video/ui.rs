@@ -5867,8 +5867,8 @@ fn launcher_path_buttons(setup: &launcher::MachineSetup, field: LauncherField) -
 /// tells you where everything is would be the wrong thing to play down.
 fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) -> bool {
     // The soundfont row reads the same way: unset means the bundled
-    // bank, centred and dimmed as a default rather than left-aligned
-    // as if it were a chosen path.
+    // bank, dimmed as Copperline's answer and reading from the left
+    // like the bundled ROM defaults do.
     #[cfg(feature = "coppersynth")]
     if field == LauncherField::CsynthSoundfont {
         return setup.path(field).is_none();
@@ -8008,14 +8008,7 @@ fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> Gre
         // has no drive-select line, but with no interface at all there is
         // nothing to say.
         F::BridgeCable if setup.bridge_interface_selected() => GreyedAs::DimmedValue,
-        F::ScsiUnit0
-        | F::ScsiUnit1
-        | F::ScsiUnit2
-        | F::ScsiUnit3
-        | F::ScsiUnit4
-        | F::ScsiUnit5
-        | F::ScsiUnit6
-        | F::BridgeDevice
+        F::BridgeDevice
         | F::BridgePort
         | F::BridgeCable
         | F::BridgeDensity
@@ -8717,23 +8710,24 @@ fn draw_launcher_row(
             let inherits = launcher_path_inherits(setup, r.field);
             let (value_color, text_x) = if inherits {
                 let text_w = text.chars().count() * font::GLYPH_W;
-                // The bundled-ROM defaults read from the left like a
-                // chosen path would, just dimmed; the SoundFont default
-                // sits in line with the cycle value column, centred
-                // under the arrows of the rows around it; the Paths
-                // page's inherited rows keep their centred `(default)`.
-                if matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom) {
+                // The bundled defaults -- the ROMs' and the SoundFont's --
+                // read from the left like a chosen path would, just dimmed;
+                // the Paths page's inherited rows keep their centred
+                // `(default)`.
+                let reads_left = matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom)
+                    || {
+                        #[cfg(feature = "coppersynth")]
+                        {
+                            r.field == LauncherField::CsynthSoundfont
+                        }
+                        #[cfg(not(feature = "coppersynth"))]
+                        {
+                            false
+                        }
+                    };
+                if reads_left {
                     (PANEL_TEXT_DIM, value_x)
                 } else {
-                    #[cfg(feature = "coppersynth")]
-                    if r.field == LauncherField::CsynthSoundfont {
-                        let (_, value_box, _) = launcher_cycle_rects(rect, row_y);
-                        let x = value_box.x + value_box.w.saturating_sub(text_w) / 2;
-                        (PANEL_TEXT_DIM, x)
-                    } else {
-                        (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
-                    }
-                    #[cfg(not(feature = "coppersynth"))]
                     (PANEL_TEXT_DIM, value_x + avail.saturating_sub(text_w) / 2)
                 }
             } else {

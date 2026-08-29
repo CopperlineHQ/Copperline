@@ -3314,12 +3314,12 @@ fn sub_pages_of_hdd_cd() {
     assert_eq!(
         storage_nav,
         [
+            LauncherTab::Cd,
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
+            LauncherTab::Lide,
             LauncherTab::BootPriority,
             LauncherTab::CreateFloppy,
-            LauncherTab::Cd,
-            LauncherTab::Lide,
         ]
     );
 
@@ -3432,6 +3432,40 @@ fn av_emu_categories() {
     assert!(page(LauncherTab::AvEmulation)
         .iter()
         .any(|r| r.field == F::PowerOn));
+}
+
+#[test]
+fn scsi_rows_hidden_until_a_controller_is_chosen() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    let scsi_rows = [
+        F::ScsiRom,
+        F::ScsiRomOdd,
+        F::ScsiUnit0,
+        F::ScsiUnit1,
+        F::ScsiUnit2,
+        F::ScsiUnit3,
+        F::ScsiUnit4,
+        F::ScsiUnit5,
+        F::ScsiUnit6,
+    ];
+    // No controller: the ROM and unit rows go rather than stand greyed.
+    assert_eq!(s.scsi_controller, None);
+    for f in scsi_rows {
+        assert!(s.row_hidden(f), "{f:?} shown with no controller");
+    }
+    // Choosing one brings every row back...
+    s.cycle(F::ScsiController, true);
+    assert!(s.scsi_controller.is_some());
+    for f in scsi_rows {
+        assert!(!s.row_hidden(f), "{f:?} hidden with a controller fitted");
+    }
+    // ...and cycling back to None takes them away again.
+    s.cycle(F::ScsiController, false);
+    assert_eq!(s.scsi_controller, None);
+    for f in scsi_rows {
+        assert!(s.row_hidden(f), "{f:?} shown after the controller left");
+    }
 }
 
 #[test]

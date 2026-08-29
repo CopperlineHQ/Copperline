@@ -598,21 +598,24 @@ The layout is:
   serial port, drive select, density, read mode and replay speed, greying
   whatever the chosen interface does not honour. See [](fluxbridge.md)),
   *Storage* (IDE master/slave -- either can be a CD image instead of a hard
-  disk, attaching an ATAPI CD-ROM drive there -- the SCSI controller --
-  A2091, A4091, or the A3000's onboard SCSI -- and its boot ROM and units,
-  a unit likewise a CD image attaching a SCSI CD-ROM drive; a block of buttons at
-  the top links to six sub-pages: **Host Folder**, for host directories
+  disk, attaching an ATAPI CD-ROM drive there -- and the SCSI controller --
+  A2091, A4091, or the A3000's onboard SCSI. Its boot ROM and unit rows, a
+  unit likewise a CD image attaching a SCSI CD-ROM drive, appear once a
+  controller is chosen and are hidden with none, the same way disabled
+  floppy drives are; a block of buttons at
+  the top links to six sub-pages: **CD** (image, insert delay,
+  CD32 NVRAM); **Host Folder**, for host directories
   served live as AmigaDOS volumes (up to four mounts, each with a boot
   priority and a read-write/read-only **Access** field -- the config file
   itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
   the first four); **Host Disk**, for a real disk of this computer's (see
-  [](host-disks.md)); **Boot Priority**, which sets each drive's
-  synthesized-RDB boot priority (see below); **Create Image...**, which
-  makes new ADF and HDF images (see below); **CD** (image, insert delay,
-  CD32 NVRAM); and **Lide**, the built-in `[lide]` Zorro II IDE board --
+  [](host-disks.md)); **Lide**, the built-in `[lide]` Zorro II IDE board --
   personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
-  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image). Each
-  sub-page has a **< Back** button in that block that returns to Storage),
+  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image);
+  **Boot Priority**, which sets each drive's
+  synthesized-RDB boot priority (see below); and **Create Image...**, which
+  makes new ADF and HDF images (see below). Each sub-page has a **< Back**
+  button in that block that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, networking, and audio boards, each
@@ -675,7 +678,7 @@ The layout is:
   Kickstart from 1.2 onward can read with no guest-side setup).
   A setting that does not apply to the chosen machine is greyed and
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
-  and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
+  and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000 or Lide" for
   IDE.
 - **Boot Priority sub-page** (from *Storage*). One row per hard-disk drive,
   under **Drive** / **Priority** / **Status** columns, setting the `de_BootPri`
