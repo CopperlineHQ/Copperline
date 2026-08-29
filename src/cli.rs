@@ -3,7 +3,7 @@
 //! Command-line argument parsing for the Copperline binary: the flag
 //! grammar, `--script` file expansion, and the parsed `CliArgs` shape.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
 use copperline::config::ConfigOverrides;
@@ -26,6 +26,13 @@ pub struct CliArgs {
     /// `--run-args STRING`: extra guest command-line arguments appended to
     /// the `--run` program's invocation.
     pub run_args: Option<String>,
+    /// `--warp-boot`: warp boot -- run unpaced from power-on until the
+    /// boot storage has been idle for `[emulation] warp_boot_idle`
+    /// emulated seconds, then resume real-time pacing (src/warpboot.rs).
+    pub warp_boot: bool,
+    /// `--warp-until SECS`: warp boot until an absolute emulated
+    /// timestamp instead of the storage-idle heuristic.
+    pub warp_until: Option<f64>,
     /// `--screenshot-after SECS PATH`: save the framebuffer after SECS
     /// emulated seconds. Repeatable, like the scheduled-input flags: every
     /// occurrence is captured, and the run ends once the last one has
@@ -325,6 +332,8 @@ where
     let mut rom_path: Option<PathBuf> = None;
     let mut whdload: Option<PathBuf> = None;
     let mut run: Option<PathBuf> = None;
+    let mut warp_boot = false;
+    let mut warp_until: Option<f64> = None;
     let mut run_args: Option<String> = None;
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
@@ -468,6 +477,20 @@ where
                     .next()
                     .ok_or_else(|| anyhow!("--run-args requires an argument string"))?;
                 run_args = Some(v);
+            }
+            "--warp-boot" => {
+                warp_boot = true;
+            }
+            "--warp-until" => {
+                let secs: f64 = next_arg(
+                    &mut args,
+                    "--warp-until requires SECS",
+                    "--warp-until SECS must be a number",
+                )?;
+                if secs <= 0.0 || !secs.is_finite() {
+                    bail!("--warp-until SECS must be a positive number of emulated seconds");
+                }
+                warp_until = Some(secs);
             }
             "--model" => {
                 overrides.model = Some(
@@ -1217,6 +1240,8 @@ where
         rom_path,
         whdload,
         run,
+        warp_boot,
+        warp_until,
         run_args,
         screenshot_after,
         save_state_after,
@@ -1324,6 +1349,9 @@ fn print_help() {
          \x20                            the host, unthrottled until the OS loads it\n  \
          \x20                            (see docs/guide/run.md)\n  \
          --run-args STRING              extra guest command-line arguments for --run\n  \
+         --warp-boot                    warp the boot: unthrottled until the boot storage has\n  \
+         \x20                            been idle for [emulation] warp_boot_idle seconds\n  \
+         --warp-until SECS              warp the boot until an absolute emulated time\n  \
          --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
          \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \

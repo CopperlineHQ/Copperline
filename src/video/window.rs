@@ -1056,6 +1056,11 @@ pub struct App {
     /// LoadSeg observer feeding the warp-launch gate. Only meaningful
     /// while `warp_launch` is Some.
     warp_launch_tracker: crate::amigaos::LibraryTracker,
+    /// Warp boot (`--warp-boot`/`--warp-until`): warp from power-on until
+    /// the storage-idle or timestamp condition holds, then return to
+    /// real-time pacing (src/warpboot.rs). One-shot; None once finished
+    /// or cancelled. Host-side only, never serialized.
+    warp_boot: Option<crate::warpboot::WarpBootGate>,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -1869,6 +1874,7 @@ impl App {
         cd_insert_after: Vec<(f32, PathBuf)>,
         record_input: Option<PathBuf>,
         run_warp_target: Option<crate::runprog::WarpLaunch>,
+        warp_boot_gate: Option<crate::warpboot::WarpBootGate>,
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
         overscan: Overscan,
@@ -2023,6 +2029,7 @@ impl App {
             pending_auto_cd_inserts: cd_insert_after,
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
+            warp_boot: warp_boot_gate,
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -3452,6 +3459,7 @@ impl ApplicationHandler for App {
         self.request_redraw();
         self.arm_scheduled_events();
         self.engage_warp_launch();
+        self.engage_warp_boot();
     }
 
     fn window_event(
@@ -4726,6 +4734,12 @@ impl ApplicationHandler for App {
                 // The warp-launch gate ends its warp the frame the guest
                 // loads the target program.
                 if self.poll_warp_launch() {
+                    burst_complete = false;
+                    break;
+                }
+                // The warp-boot gate ends its warp the frame its
+                // timestamp or storage-idle condition holds.
+                if self.poll_warp_boot() {
                     burst_complete = false;
                     break;
                 }

@@ -1013,6 +1013,32 @@ fn main() -> Result<()> {
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
     let run_warp_target = if headless_capture { None } else { run_warp };
+    // The general warp-boot gate (--warp-boot / --warp-until,
+    // src/warpboot.rs): same interactive-session-only rule. --run has its
+    // own gate with a sharper end condition, so combining them is a
+    // configuration error rather than a fight between two gates.
+    let warp_until = cli.warp_until.or(cfg.emulation.warp_until);
+    let warp_boot = cli.warp_boot || cfg.emulation.warp_boot;
+    let warp_boot_gate = match (warp_boot, warp_until) {
+        (false, None) => None,
+        _ if cli.run.is_some() => {
+            anyhow::bail!("--warp-boot/--warp-until cannot combine with --run, which already warp-boots until the program loads");
+        }
+        (true, Some(_)) => {
+            anyhow::bail!("--warp-boot and --warp-until are mutually exclusive: pick the storage-idle heuristic or the fixed timestamp");
+        }
+        (false, Some(secs)) => Some(copperline::warpboot::WarpBootGate::new(
+            copperline::warpboot::WarpBootCondition::Until(secs),
+        )),
+        (true, None) => Some(copperline::warpboot::WarpBootGate::new(
+            copperline::warpboot::WarpBootCondition::StorageIdle(cfg.emulation.warp_boot_idle),
+        )),
+    };
+    let warp_boot_gate = if headless_capture {
+        None
+    } else {
+        warp_boot_gate
+    };
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
@@ -1030,6 +1056,7 @@ fn main() -> Result<()> {
         cli.cd_insert_after,
         cli.record_input,
         run_warp_target,
+        warp_boot_gate,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),
@@ -1162,6 +1189,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
         None,
         None,
         std::array::from_fn(|_| Vec::new()),

@@ -78,6 +78,23 @@ pacing_budget = "cycles"
 # it live from Warp Settings > Warp Limit or Cmd+Shift+W / Alt+Shift+W.
 # warp_speed = "max"
 
+# Warp boot: run unpaced (audio muted) from power-on until the boot storage
+# -- the floppy and hard-disk activity the front-panel LEDs show -- has been
+# idle for warp_boot_idle emulated seconds, then resume real-time pacing.
+# Same idea as --run's automatic warp launch, for any configuration that
+# boots from its own media (a Workbench install, a hard-disk setup, a CD).
+# The idle threshold must outlast the boot's longest storage-quiet stretch:
+# a big-RAM machine's SetPatch MMU table build keeps the disk idle for
+# seconds while the CPU walks every page of fitted RAM. The manual warp
+# toggle cancels the phase; headless captures are already unpaced and
+# ignore it. CD audio does not count as activity.
+# warp_boot = false
+# warp_boot_idle = 10
+
+# Warp boot until an absolute emulated timestamp instead: deterministic,
+# for a setup whose boot time is known (mutually exclusive with warp_boot).
+# warp_until = 12.0
+
 # Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
 # item) can step the machine back through it. Off by default because it is
 # not free: every rewind_interval_frames the whole machine is serialized, and

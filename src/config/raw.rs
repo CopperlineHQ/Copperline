@@ -1056,6 +1056,21 @@ pub(crate) struct RawEmulation {
     /// UI warp/turbo speed: "2x", "4x", "8x", "16x", or "max" (default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warp_speed: Option<String>,
+    /// Warp boot: run unpaced from power-on until the boot storage has
+    /// been idle for `warp_boot_idle` emulated seconds (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) warp_boot: Option<bool>,
+    /// The storage-idle threshold for `warp_boot`, in emulated seconds
+    /// (default 10). Must outlast the boot's longest storage-quiet
+    /// stretch (a big-RAM machine's SetPatch MMU table build keeps the
+    /// disk idle for seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) warp_boot_idle: Option<f64>,
+    /// Warp boot until an absolute emulated timestamp, in seconds.
+    /// Deterministic alternative to `warp_boot`; the two are mutually
+    /// exclusive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) warp_until: Option<f64>,
     /// Record rewind history from power-on (default false), so the rewind
     /// hotkey works outside the debugger.
     #[serde(skip_serializing_if = "Option::is_none")]

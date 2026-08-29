@@ -364,6 +364,9 @@ power_on = true            # false = start powered off at the test screen
 pacing_budget = "cycles"   # "cycles" (hardware-accurate) or "instructions"
 realtime_priority = false  # true = raise the pacer/audio thread priority
 warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
+warp_boot = false          # warp the boot until storage goes idle
+warp_boot_idle = 10        # ...for this many emulated seconds
+# warp_until = 12.0        # or warp until an absolute emulated time
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
@@ -412,6 +415,26 @@ carried no information.)
   out and still presents at vsync. Adjust it live from the **Warp Limit**
   menu item or `Cmd+Shift+W` / `Alt+Shift+W` (see [The window and its
   controls](ui.md)).
+- `warp_boot = true` warps the boot: from power-on the machine runs unpaced
+  with audio muted -- exactly like the automatic warp launch `--run` performs
+  -- until the boot storage (the floppy and hard-disk activity the
+  front-panel LEDs show) has been idle for `warp_boot_idle` emulated seconds
+  (default 10), then real-time pacing and audio resume. A hard-disk setup
+  like AmigaVision lands at its menu in a couple of wall-clock seconds.
+  Landing a few emulated seconds late is free -- the extra idle time passes
+  at warp speed -- but the idle threshold must outlast the boot's longest
+  storage-quiet stretch: a big-RAM machine's boot-time MMU table build keeps
+  the disk idle for seconds while the CPU walks every page of fitted RAM, so
+  raise `warp_boot_idle` if the warp ends early on such a machine. CD audio
+  deliberately does not count as activity (CD *data* traffic rides the
+  hard-disk LED), so a menu's background CD-DA cannot hold the warp forever;
+  a boot whose storage never settles gives up after 600 emulated seconds.
+  `warp_until = SECS` is the deterministic alternative: warp until an
+  absolute emulated timestamp, for a setup whose boot time is known. The two
+  are mutually exclusive, `--warp-boot`/`--warp-until` set them from the
+  command line, the manual warp toggle cancels the phase, headless captures
+  (already unpaced end to end) ignore both, and `--run` (whose own warp
+  launch ends at a sharper condition) cannot combine with them.
 - `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
   and the **Rewind** menu item can step the whole machine backward through
   it. It rides the same deterministic snapshot ring as the debugger's reverse

@@ -115,6 +115,24 @@ impl TryFrom<RawConfig> for Config {
                 None => defaults.emulation.warp_speed,
                 Some(s) => parse_warp_speed(s)?,
             },
+            warp_boot: raw
+                .emulation
+                .warp_boot
+                .unwrap_or(defaults.emulation.warp_boot),
+            warp_boot_idle: match raw.emulation.warp_boot_idle {
+                None => defaults.emulation.warp_boot_idle,
+                Some(secs) if secs > 0.0 && secs.is_finite() => secs,
+                Some(secs) => {
+                    bail!("[emulation] warp_boot_idle must be a positive number of seconds, got {secs}")
+                }
+            },
+            warp_until: match raw.emulation.warp_until {
+                None => defaults.emulation.warp_until,
+                Some(secs) if secs > 0.0 && secs.is_finite() => Some(secs),
+                Some(secs) => {
+                    bail!("[emulation] warp_until must be a positive number of seconds, got {secs}")
+                }
+            },
             rewind: raw.emulation.rewind.unwrap_or(defaults.emulation.rewind),
             rewind_budget_mb: match raw.emulation.rewind_budget_mb {
                 None => defaults.emulation.rewind_budget_mb,

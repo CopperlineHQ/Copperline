@@ -4165,6 +4165,7 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         None,
         None,
+        None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
         crate::config::Overscan::Full,
@@ -8737,4 +8738,51 @@ fn pacer_counts_a_slip_when_it_reanchors_past_the_catchup_limit() {
         Some(crate::timebase::Instant::now() - crate::timebase::Duration::from_secs(10));
     app.emu.step_frame().expect("step");
     assert_eq!(app.emu.perf_counters().pacer_slips, 1);
+}
+
+/// The general warp-boot gate (src/warpboot.rs) wired through the app:
+/// engaging unpaces the machine and mutes live audio, the poll holds the
+/// warp until the emulated-time condition, and finishing re-paces and
+/// clears the one-shot gate. The pure state machine is covered in
+/// warpboot.rs; this drives the real App plumbing against a live
+/// emulator.
+#[test]
+fn warp_boot_gate_warps_until_the_timestamp_then_repaces() {
+    let mut app = test_app();
+    app.powered_on = true;
+    app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+        crate::warpboot::WarpBootCondition::Until(0.05),
+    ));
+    app.engage_warp_boot();
+    assert!(!app.emu.paced(), "the boot phase runs unpaced");
+    assert!(
+        !app.poll_warp_boot(),
+        "the gate holds before the target time"
+    );
+
+    while app.emu.bus().emulated_seconds() < 0.05 {
+        app.emu.step_frame().expect("frame");
+    }
+    assert!(app.poll_warp_boot(), "the gate ends at the target time");
+    assert!(app.emu.paced(), "real-time pacing resumes");
+    assert!(app.warp_boot.is_none(), "the gate is one-shot");
+
+    // A second poll after the phase ended is a no-op.
+    assert!(!app.poll_warp_boot());
+}
+
+/// The manual warp toggle cancels a pending warp-boot gate: one press
+/// means normal-speed, audible emulation, not a fight with the gate.
+#[test]
+fn manual_warp_toggle_cancels_the_warp_boot_gate() {
+    let mut app = test_app();
+    app.powered_on = true;
+    app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+        crate::warpboot::WarpBootCondition::StorageIdle(10.0),
+    ));
+    app.engage_warp_boot();
+    assert!(!app.emu.paced());
+    app.toggle_warp();
+    assert!(app.warp_boot.is_none(), "the toggle cancels the gate");
+    assert!(app.emu.paced(), "one press lands on paced, audible");
 }

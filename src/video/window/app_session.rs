@@ -117,6 +117,82 @@ impl App {
         self.sync_live_audio_suspension();
     }
 
+    /// Start the general warp-boot phase (`--warp-boot`/`--warp-until`,
+    /// src/warpboot.rs): run unpaced with live audio muted until the
+    /// storage-idle or timestamp condition holds. Same contract as the
+    /// `--run` warp launch: a machine that refuses to unpace (a bridged
+    /// physical drive) still runs the gate at normal speed with audio
+    /// live, and the phase is one-shot per session.
+    pub(super) fn engage_warp_boot(&mut self) {
+        let engage = match &self.warp_boot {
+            Some(gate) => self.powered_on && !gate.started(),
+            None => false,
+        };
+        if !engage {
+            return;
+        }
+        self.emu.set_paced(false);
+        let unpaced = !self.emu.paced();
+        let now = self.emu.bus().emulated_seconds();
+        let gate = self.warp_boot.as_mut().expect("checked above");
+        gate.engage(now, unpaced);
+        if unpaced {
+            info!("warp boot: warping {}", gate.describe());
+        } else {
+            info!(
+                "warp boot: physical floppy drive attached; booting at normal speed ({})",
+                gate.describe()
+            );
+        }
+        self.sync_live_audio_suspension();
+    }
+
+    /// One warp-boot poll, once per retired emulated frame (inside the
+    /// warp burst the gate must not lag the condition by a thousand
+    /// frames). Returns true when the boot phase just ended, so the
+    /// burst breaks and pacing takes effect at this frame.
+    pub(super) fn poll_warp_boot(&mut self) -> bool {
+        let Some(gate) = &mut self.warp_boot else {
+            return false;
+        };
+        if !gate.started() {
+            return false;
+        }
+        // Storage activity as the front panel shows it: the floppy LED and
+        // the (non-draining, timestamp-latched) HDD LED. CD-DA playback is
+        // deliberately not activity -- CD data traffic rides the HDD LED,
+        // and a menu's background audio must not hold the warp forever.
+        let panel = self.emu.bus().front_panel_status();
+        let storage_active = panel.fdd_led_on || panel.hdd_led == Some(true);
+        let now = self.emu.bus().emulated_seconds();
+        match gate.note(now, storage_active) {
+            crate::warpboot::WarpBootOutcome::Waiting => false,
+            crate::warpboot::WarpBootOutcome::Done => {
+                info!("warp boot: done at {now:.1}s emulated; real-time pacing resumes");
+                self.finish_warp_boot();
+                self.show_osd("Warp boot: done");
+                true
+            }
+            crate::warpboot::WarpBootOutcome::TimedOut => {
+                warn!(
+                    "warp boot: storage never settled within {:.0} emulated seconds;                      resuming real-time pacing anyway",
+                    crate::warpboot::WARP_BOOT_TIMEOUT_SECS
+                );
+                self.finish_warp_boot();
+                self.show_osd("Warp boot: storage never settled, warp off");
+                true
+            }
+        }
+    }
+
+    /// End the warp-boot phase: back to real-time pacing (set_paced
+    /// re-anchors the pacing clock) and live audio.
+    pub(super) fn finish_warp_boot(&mut self) {
+        self.warp_boot = None;
+        self.emu.set_paced(true);
+        self.sync_live_audio_suspension();
+    }
+
     /// Toggle warp speed: emulation runs unpaced (as fast as the host
     /// allows) until switched back, when pacing re-anchors to "now".
     pub(super) fn toggle_warp(&mut self) {
@@ -126,6 +202,10 @@ impl App {
         if self.warp_launch.take().is_some() {
             self.sync_live_audio_suspension();
             info!("warp launch: cancelled by manual warp toggle");
+        }
+        if self.warp_boot.take().is_some() {
+            self.sync_live_audio_suspension();
+            info!("warp boot: cancelled by manual warp toggle");
         }
         let warp = self.emu.paced();
         self.emu.set_paced(!warp);
@@ -749,7 +829,8 @@ impl App {
         // The warp-launch catch-up is silent: unpaced Paula output is
         // fast-forward noise, and the machine snaps back to live audio
         // the moment the launch finishes (or is cancelled).
-        let warp_launching = self.warp_launch.as_ref().is_some_and(|l| l.engaged);
+        let warp_launching = self.warp_launch.as_ref().is_some_and(|l| l.engaged)
+            || self.warp_boot.as_ref().is_some_and(|g| g.engaged);
         let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_launching;
         self.emu.set_live_audio_suspended(suspended);
     }
