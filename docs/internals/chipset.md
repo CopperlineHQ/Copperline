@@ -294,6 +294,18 @@ normally blanks uncaptured rows had nothing to say. The
 (vAmiga-verified bijectively); `vdiwprobe-flop`'s tie band pins the
 mid-frame one.
 
+A tie only guarantees the window never opens, though: rewriting the
+registers to a tie mid-frame over a flop an earlier DIWSTRT match
+already set changes nothing until the beam reaches the shared comparator
+line, where reset wins. The level approximation cannot see that history,
+so everywhere the renderer consults it, a row whose DMA capture recorded
+a fetch overrides it as open -- the capture is the Agnus flop's own
+per-line record -- and the level test decides only rows where nothing
+was fetched. The same applies on the bus side: the live collision replay
+takes the current line's flop, and only the future-line lookahead falls
+back to the level test. The `vdiwprobe-tieopen` golden render pins the
+tie-over-an-open-flop case (vAmiga-verified).
+
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
 BPLCON0 LACE is set; outside interlace it holds its value - the power-on
 state is set, so progressive fields normally read LOF=1, and a value

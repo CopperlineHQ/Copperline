@@ -830,6 +830,7 @@ fn enforce_h_window_closed_intervals(
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
     h_window_rows: &[HWindowRow],
+    captured_open_rows: &[bool],
     visible_line0: i32,
     rows: usize,
 ) {
@@ -880,7 +881,9 @@ fn enforce_h_window_closed_intervals(
                     .min()
                     .unwrap_or(FB_WIDTH)
                     .min(closed_end);
-                if !control.display_window_contains_line(y, visible_line0) {
+                if !(captured_open_rows.get(y).copied().unwrap_or(false)
+                    || control.display_window_contains_line(y, visible_line0))
+                {
                     // Row is outside the vertical window here: already border.
                     sx = next_bound;
                     continue;
@@ -1043,7 +1046,11 @@ impl ControlState {
         // reset comparators both match on that line and reset wins the tie
         // (Bus::reevaluate_diw_vertical_flop; vdiwprobe-flop's tie band).
         // The wrap below would otherwise read the empty window as a full
-        // wrap-around one and light every line of the frame.
+        // wrap-around one and light every line of the frame. This level
+        // test cannot see a flop an earlier DIWSTRT already opened (a
+        // mid-frame rewrite to a tie leaves it open until the shared
+        // comparator line): rows the DMA capture recorded override it via
+        // `captured_open` at every consumer (vdiwprobe-tieopen).
         if start == stop {
             return false;
         }
@@ -1770,6 +1777,11 @@ struct DenisePlannedPlayfieldLine<'a> {
     plane_words: &'a [Vec<u16>],
     pixels: Option<&'a [u8]>,
     fetched_pixels: usize,
+    /// The row's DMA capture recorded a fetch, so the Agnus vertical flop
+    /// was open on it whatever the level test makes of the row's register
+    /// values (a mid-frame DIWSTRT.V == DIWSTOP.V rewrite leaves an
+    /// already-open flop open until the shared comparator line).
+    captured_open: bool,
 }
 
 impl<'a> DenisePlannedPlayfieldLine<'a> {
@@ -1788,6 +1800,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             plane_words,
             pixels: None,
             fetched_pixels,
+            captured_open: false,
         }
     }
 
@@ -1798,6 +1811,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         plane_words: &'a [Vec<u16>],
         pixels: &'a [u8],
         fetched_pixels: usize,
+        captured_open: bool,
     ) -> Self {
         debug_assert_eq!(pixels.len(), fetched_pixels);
         Self {
@@ -1807,6 +1821,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             plane_words,
             pixels: Some(pixels),
             fetched_pixels,
+            captured_open,
         }
     }
 
@@ -3138,15 +3153,19 @@ fn line_has_valid_ddf_window(
             .any(|segment| segment.control.has_valid_ddf_window())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_display_window_anchor(
     anchor: &mut Option<usize>,
     control: ControlState,
     line: usize,
     visible_line0: i32,
+    captured_open: bool,
     run_start: usize,
     run_stop: usize,
 ) {
-    if run_start >= run_stop || !control.display_window_contains_line(line, visible_line0) {
+    if run_start >= run_stop
+        || !(captured_open || control.display_window_contains_line(line, visible_line0))
+    {
         return;
     }
     let (window_x_start, _) = control.display_window_x();
@@ -3180,6 +3199,7 @@ fn line_display_window_bounds(
     control_segments: &[ControlSegment],
     line: usize,
     visible_line0: i32,
+    captured_open: bool,
     h_row: &HWindowRow,
 ) -> Option<LineDisplayWindowBounds> {
     // Horizontal reach from the comparator flip-flop model: a window that
@@ -3190,10 +3210,17 @@ fn line_display_window_bounds(
     if env_start >= env_stop {
         return None;
     }
-    // Vertical window: open if any control active on the line has it open.
-    let vertical_open = std::iter::once(&base_control)
-        .chain(control_segments.iter().map(|seg| &seg.control))
-        .any(|control| control.display_window_contains_line(line, visible_line0));
+    // Vertical window: a row whose DMA capture recorded a fetch is open
+    // whatever the level test says of its register values -- the capture is
+    // the Agnus flop's own history, and a mid-frame rewrite to
+    // DIWSTRT.V == DIWSTOP.V leaves an already-open flop open until the
+    // shared comparator line, which the level test cannot see. Rows
+    // without a capture fall back to the level test: open if any control
+    // active on the line has it open.
+    let vertical_open = captured_open
+        || std::iter::once(&base_control)
+            .chain(control_segments.iter().map(|seg| &seg.control))
+            .any(|control| control.display_window_contains_line(line, visible_line0));
     if !vertical_open {
         return None;
     }
@@ -3211,6 +3238,7 @@ fn line_display_window_bounds(
             control,
             line,
             visible_line0,
+            captured_open,
             run_start,
             run_stop,
         );
@@ -3222,6 +3250,7 @@ fn line_display_window_bounds(
         control,
         line,
         visible_line0,
+        captured_open,
         run_start,
         FB_WIDTH,
     );
@@ -4847,6 +4876,21 @@ fn render_from_input_with_scratch(
         }
     }
     let has_captured_bitplane_rows = captured_bitplane_rows.iter().any(Option::is_some);
+    // Rows where the DMA capture recorded a fetch: the Agnus vertical flop
+    // was open there, whatever the level test makes of the row's register
+    // values. These rows override the register-derived vertical window
+    // gate everywhere the renderer consults it -- a mid-frame rewrite to
+    // DIWSTRT.V == DIWSTOP.V leaves an already-open flop open until the
+    // shared comparator line, and only the capture carries that history
+    // (timing-test/vdiwprobe-tieopen pins the render).
+    let captured_open_rows: Vec<bool> = (0..rows)
+        .map(|y| {
+            captured_bitplane_rows
+                .get(y)
+                .and_then(Option::as_ref)
+                .is_some()
+        })
+        .collect();
     let captured_sprite_lines = armed_captured_sprite_lines.as_ref();
     let sprite_display_enable_x_by_y = input.sprite_display_enable_x_by_y.as_slice();
     let sprite_dma_observed = input.sprite_dma_observed;
@@ -4995,6 +5039,7 @@ fn render_from_input_with_scratch(
         let mut indexed_output_cache = IndexedOutputCache::default();
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
+            let row_captured_open = captured_open_rows[y];
             let Some(LineDisplayWindowBounds {
                 x_start,
                 x_stop,
@@ -5004,6 +5049,7 @@ fn render_from_input_with_scratch(
                 row_control_segments,
                 y,
                 visible_line0,
+                row_captured_open,
                 &h_window_rows[y],
             )
             else {
@@ -5280,6 +5326,7 @@ fn render_from_input_with_scratch(
                 &row_words[..nplanes],
                 &row_pixels,
                 fetched_pixels,
+                row_captured_open,
             );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
@@ -5376,6 +5423,7 @@ fn render_from_input_with_scratch(
         &base_controls,
         &control_segments,
         &dma_output_start_x_by_line,
+        &captured_open_rows,
         &mut ham_select_pixels,
         visible_line0,
         input.emulated_seconds,
@@ -5463,6 +5511,7 @@ fn render_from_input_with_scratch(
         &base_controls,
         &control_segments,
         &h_window_rows,
+        &captured_open_rows,
         visible_line0,
         rows,
     );
@@ -6089,7 +6138,8 @@ fn render_planned_playfield_line_impl(
         let shres = pixel_control.shres();
         let canvas_scale = active_canvas_scale();
         let out_w = FB_WIDTH * canvas_scale;
-        let line_visible = pixel_control.display_window_contains_line(plan.y, visible_line0);
+        let line_visible =
+            plan.captured_open || pixel_control.display_window_contains_line(plan.y, visible_line0);
         let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
@@ -6595,6 +6645,7 @@ fn render_manual_bpl_segments_with_visible_line0(
         base_controls,
         control_segments,
         dma_output_start_x_by_line,
+        &[],
         &mut ham_select_pixels,
         visible_line0,
         emulated_seconds,
@@ -6615,6 +6666,7 @@ fn render_manual_bpl_segments_with_visible_line0_and_scratch(
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
     dma_output_start_x_by_line: &[Option<usize>],
+    captured_open_rows: &[bool],
     ham_select_pixels: &mut Vec<u8>,
     visible_line0: i32,
     emulated_seconds: f64,
@@ -6654,6 +6706,7 @@ fn render_manual_bpl_segments_with_visible_line0_and_scratch(
             base_controls,
             control_segments,
             dma_output_start_x_by_line,
+            captured_open_rows.get(seg.line).copied().unwrap_or(false),
             &mut ham_color,
             &mut ham_select,
             ham_select_pixels,
@@ -6715,6 +6768,7 @@ fn draw_manual_bpl_word(
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
     dma_output_start_x_by_line: &[Option<usize>],
+    captured_open: bool,
     ham_color: &mut u32,
     ham_select: &mut u8,
     ham_select_pixels: &mut [u8],
@@ -6775,7 +6829,7 @@ fn draw_manual_bpl_word(
             let pixel_control =
                 control_at_x(base_controls[seg.line], &control_segments[seg.line], x);
             let (window_x_start, window_x_stop) = pixel_control.display_window_x();
-            pixel_control.display_window_contains_line(seg.line, visible_line0)
+            (captured_open || pixel_control.display_window_contains_line(seg.line, visible_line0))
                 && x >= window_x_start
                 && x < window_x_stop
         });
@@ -6831,7 +6885,8 @@ fn draw_manual_bpl_word(
             let pixel_control =
                 control_at_x(base_controls[seg.line], &control_segments[seg.line], x);
             let (window_x_start, window_x_stop) = pixel_control.display_window_x();
-            if !pixel_control.display_window_contains_line(seg.line, visible_line0)
+            if !(captured_open
+                || pixel_control.display_window_contains_line(seg.line, visible_line0))
                 || x < window_x_start
                 || x >= window_x_stop
             {

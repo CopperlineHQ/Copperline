@@ -599,6 +599,12 @@ test read the tie as a full wrap-around window and lit the frame with
 undisplayed buffer contents. BRDRSPRT sprites stay visible over the
 closed frame -- the Nexus 7 scene-transition corrupted-ball class;
 vAmiga-5-verified bijectively exact), and
+`vdiwprobe-tieopen` (a DIWSTRT.V == DIWSTOP.V tie armed mid-frame over
+an ALREADY-OPEN vertical flop changes nothing until the shared
+comparator line, where reset wins: the rows between the rewrite and
+that line keep fetching and displaying, so the renderer takes the row's
+DMA capture as the vertical authority and reads the tie as closed only
+where nothing was fetched; vAmiga-verified), and
 `dpfprobe-aga` (Lisa's eight-plane dual playfield: planes 7/8 extend each
 field's index to four bits -- the Zool AGA decode class, where a 3-bit
 decode flips the probe's red/blue columns to magenta/green -- PF2 reads

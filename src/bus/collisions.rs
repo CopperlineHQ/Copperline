@@ -389,6 +389,11 @@ impl Bus {
         let sprite_index = self.current_frame_collision_sprite_index.as_ref().unwrap();
         let sprite_display_enable_x =
             self.current_frame_sprite_display_enable_x_by_y[fb_y].map(|x| x as i32);
+        // The vertical display gate for the line is the live Agnus flop,
+        // not a level test of the register values: a mid-frame rewrite to
+        // DIWSTRT.V == DIWSTOP.V leaves an already-open flop open until
+        // the shared comparator line, which only the flop's history knows.
+        let vertical_open = self.diw_vertical_open_at(vpos);
         let clxdat = live_manual_bpl_collision_bits_in_range(
             frame_base,
             bpldat_index,
@@ -398,6 +403,7 @@ impl Bus {
             vpos as i32,
             x_start,
             x_stop,
+            vertical_open,
             sprite_display_enable_x,
         );
         self.denise.or_clxdat(clxdat);

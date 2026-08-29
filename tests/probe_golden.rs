@@ -500,6 +500,13 @@ probe_tests! {
     // corrupted-ball regression class). BRDRSPRT sprites stay visible
     // over the closed frame.
     golden_vdiwprobe_empty => probe_aga("vdiwprobe-empty", "vdiwprobe-empty.bin", 16.0);
+    // A DIWSTRT.V == DIWSTOP.V tie armed mid-frame over an ALREADY-OPEN
+    // vertical flop changes nothing until the shared comparator line
+    // (where reset wins): the rows between the rewrite and that line keep
+    // fetching and displaying, so the renderer must take the row's DMA
+    // capture as the vertical authority and read the tie as closed only
+    // where nothing was fetched.
+    golden_vdiwprobe_tieopen => probe("vdiwprobe-tieopen", "vdiwprobe-tieopen.bin", 16.0);
     // Dual-playfield sprite priority: a sprite pixel is tested against the
     // BPLCON2 code of the playfield that wins the PF1-vs-PF2 comparison
     // (opacity, then PF2PRI), so where both fields are opaque the losing
