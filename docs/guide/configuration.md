@@ -1232,7 +1232,7 @@ button.
 mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, or modem
 # midi_out = "FluidSynth"  # midi mode: host destination, "mt32", or "coppersynth"
 # midi_in = "Keystation"   # midi mode: host source, or "mt32"
-# listen = "127.0.0.1:9000"  # tcp mode: bind address; modem mode: incoming-call address
+# listen = "127.0.0.1:1234"  # tcp mode: bind address; modem mode: incoming-call address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 # telnet = false           # modem mode: AT*T1 telnet NVT translation, on by default
 # session = "bbs-demo.session"  # modem mode: replay a scripted session instead of TCP
@@ -1255,7 +1255,7 @@ Paula's serial in/out is connected:
   ROMs at all and brings its own `coppersynth_*` keys with it; see
   [the Coppersynth chapter](coppersynth.md).
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
-  device. `listen` sets the bind address (default `127.0.0.1:9000`);
+  device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
 - `tcp-connect` -- the outbound counterpart of `tcp`: at startup the
   serial port dials the remote named by `connect` (required, `host:port`)
@@ -1344,7 +1344,7 @@ session (and implies `mode = "modem"`), and `--midi-out NAME`/
 of this interactively: **Device / Mode** picks the mode, and the mode brings
 its own address box with it -- **Connect** under `tcp-connect` for the
 remote to dial, **Listen** under `tcp` for the local bind address (it shows
-the `127.0.0.1:9000` default until something else is typed). Either box
+the `127.0.0.1:1234` default until something else is typed). Either box
 takes a `host:port`, with an IPv6 literal in brackets
 (`[::1]:1337`); clearing it unsets the key. The in-window
 **MIDI In / MIDI Out** menu items select the MIDI endpoints. Under `modem`,

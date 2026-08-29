@@ -629,7 +629,7 @@ The layout is:
   mode needs -- **Connect** (`tcp-connect`) for where to dial, or
   **Listen** (`tcp`, `modem`) for the local bind address -- as a pair of
   boxes, host and port, each typed into by clicking it. A box left empty
-  keeps its greyed default (`127.0.0.1`, port `9000`), and emptying one
+  keeps its greyed default (`127.0.0.1`, port `1234`), and emptying one
   reverts it; the port takes 1-65535, and on macOS and Linux ports below
   1025 need Copperline run as root; the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its

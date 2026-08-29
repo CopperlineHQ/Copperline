@@ -920,13 +920,13 @@ pub struct SerialConfig {
 /// Where [`SerialMode::Tcp`] listens with no `[serial] listen` of its own:
 /// the loopback interface on the port UAE's `TCP:` serial device uses, so a
 /// terminal pointed at either lands in the same place.
-pub const SERIAL_TCP_DEFAULT_LISTEN: &str = "127.0.0.1:9000";
+pub const SERIAL_TCP_DEFAULT_LISTEN: &str = "127.0.0.1:1234";
 
 /// The host half a serial address defaults to when only a port is typed.
 pub const SERIAL_DEFAULT_HOST: &str = "127.0.0.1";
 /// The port half a serial address defaults to when only a host is typed --
 /// also the port of [`SERIAL_TCP_DEFAULT_LISTEN`].
-pub const SERIAL_DEFAULT_PORT: u16 = 9000;
+pub const SERIAL_DEFAULT_PORT: u16 = 1234;
 
 /// How the MT-32's front-panel display is lit.
 ///
