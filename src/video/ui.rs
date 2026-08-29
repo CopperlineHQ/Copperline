@@ -816,7 +816,8 @@ pub enum UiControl {
     /// A free-text box on a Create Image page (a volume or device name).
     LauncherNewImageEdit(LauncherField),
     /// A serial TCP address box on the I/O Ports tab (Connect or Listen).
-    LauncherSerialAddrEdit(LauncherField),
+    LauncherSerialHostEdit(LauncherField),
+    LauncherSerialPortEdit(LauncherField),
     /// The fixed RAM power-on word on the Memory tab.
     LauncherRamPatternEdit,
     /// The Create button on a Create Image page.
@@ -4499,10 +4500,6 @@ const LAUNCH_PATH_VALUE_W: usize = 216;
 const LAUNCH_NAME_W: usize = 96;
 /// Width of the FFS/OFS toggle button on a drive row (just "FFS"/"OFS").
 const LAUNCH_FS_W: usize = 40;
-/// Width of the serial TCP address box. Far wider than a volume name's,
-/// because a host name and a port together are a long string and the port
-/// is at the far end of it -- the part a reader most needs to see.
-const LAUNCH_ADDR_W: usize = LAUNCH_PATH_VALUE_W;
 const LAUNCH_REMOVE_W: usize = 70;
 const LAUNCH_CONTROL_H: usize = 20;
 
@@ -4651,17 +4648,14 @@ fn launcher_nav_rows(slots: usize) -> usize {
 }
 
 /// A free-text value box: where a value would sit, at the width its content
-/// needs -- a volume or device name on a Create Image row, or the longer
-/// `host:port` of a serial address on the I/O Ports tab.
+/// needs -- a volume or device name on a Create Image row. (The serial
+/// addresses draw their own host/port pair: [`launcher_serial_addr_rects`].)
 fn launcher_text_rect(rect: Rect, row_y: usize, field: LauncherField) -> Rect {
+    let _ = field;
     Rect {
         x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
         y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
-        w: if LauncherState::is_serial_addr(field) {
-            LAUNCH_ADDR_W
-        } else {
-            LAUNCH_NAME_W
-        },
+        w: LAUNCH_NAME_W,
         h: LAUNCH_CONTROL_H,
     }
 }
@@ -4746,11 +4740,90 @@ fn indefinite_article(size: &str) -> &'static str {
 fn value_box_control(field: LauncherField) -> UiControl {
     if field == LauncherField::RamPattern {
         UiControl::LauncherRamPatternEdit
-    } else if LauncherState::is_serial_addr(field) {
-        UiControl::LauncherSerialAddrEdit(field)
     } else {
+        // The serial addresses draw their own pair of boxes and never come
+        // through here.
         UiControl::LauncherNewImageEdit(field)
     }
+}
+
+/// The two boxes of a serial address row -- `[host] : [port]` -- spanning
+/// exactly the run of the steppers above them: from the left edge of a `<`
+/// to the right edge of a `>`, so the pair reads as one column with them.
+fn launcher_serial_addr_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
+    let y = row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2;
+    let x = launcher_control_x(rect);
+    let total = LAUNCH_ARROW_W + LAUNCH_VALUE_W + LAUNCH_ARROW_W;
+    // Five digits and their padding; the host takes what the colon leaves.
+    let port_w = SERIAL_PORT_DIGITS * font::GLYPH_W + 8;
+    let host = Rect {
+        x,
+        y,
+        w: total - port_w - font::GLYPH_W - 8,
+        h: LAUNCH_CONTROL_H,
+    };
+    let port = Rect {
+        x: x + total - port_w,
+        y,
+        w: port_w,
+        h: LAUNCH_CONTROL_H,
+    };
+    (host, port)
+}
+
+/// The widest port is five digits.
+const SERIAL_PORT_DIGITS: usize = 5;
+
+/// Draw one half of a serial address pair: an edit box that shows its
+/// greyed default while untouched.
+#[allow(clippy::too_many_arguments)]
+fn draw_serial_half_box(
+    frame: &mut [u8],
+    box_rect: Rect,
+    state: &LauncherState,
+    control: UiControl,
+    typing: bool,
+    value: Option<String>,
+    placeholder: &str,
+    scale: usize,
+) {
+    draw_rect_bevel(
+        frame,
+        scale_rect(box_rect, scale),
+        BUTTON_EDGE_DARK,
+        BUTTON_EDGE_LIGHT,
+        scale,
+    );
+    light_edit_box(frame, box_rect, control, typing, scale);
+    let avail = box_rect.w.saturating_sub(8);
+    if typing {
+        draw_edit_line(
+            frame,
+            box_rect.x + 4,
+            box_rect.y + 6,
+            state.edit_buffer(),
+            state.edit_caret().at(),
+            PANEL_TEXT_HILIGHT,
+            PANEL_BG,
+            avail,
+            scale,
+        );
+        return;
+    }
+    let (text, color) = match value {
+        Some(v) => (v, PANEL_TEXT),
+        None => (placeholder.to_string(), PANEL_TEXT_DIM),
+    };
+    let shown = truncate_to_width(&text, avail);
+    draw_panel_text(
+        frame,
+        box_rect.x + 4,
+        box_rect.y + 6,
+        &shown,
+        color,
+        1,
+        scale,
+    );
 }
 
 /// Light a text box the focus is standing on.
@@ -5615,7 +5688,8 @@ fn control_field(control: UiControl) -> Option<LauncherField> {
         | UiControl::LauncherDriveNameEdit(field)
         | UiControl::LauncherDriveFilesystemToggle(field)
         | UiControl::LauncherNewImageEdit(field)
-        | UiControl::LauncherSerialAddrEdit(field)
+        | UiControl::LauncherSerialHostEdit(field)
+        | UiControl::LauncherSerialPortEdit(field)
         | UiControl::LauncherNewImageCreate(field)
         | UiControl::LauncherDriveBootpriEdit(field)
         | UiControl::LauncherDriveBootToggle(field) => field,
@@ -6455,7 +6529,15 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                 // Non-interactive rows.
                 RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
                 RowKind::Text => {
-                    if launcher_text_rect(rect, row_y, r.field).contains(pos) {
+                    if LauncherState::is_serial_addr(r.field) {
+                        let (host_box, port_box) = launcher_serial_addr_rects(rect, row_y);
+                        if host_box.contains(pos) {
+                            return Some(UiControl::LauncherSerialHostEdit(r.field));
+                        }
+                        if port_box.contains(pos) {
+                            return Some(UiControl::LauncherSerialPortEdit(r.field));
+                        }
+                    } else if launcher_text_rect(rect, row_y, r.field).contains(pos) {
                         // The same widget serves two stores: a Create Image
                         // word, and a serial address on the machine.
                         return Some(value_box_control(r.field));
@@ -8160,15 +8242,56 @@ fn draw_launcher_row(
         // Drawn above with an early return.
         RowKind::SectionHeader | RowKind::BootpriHeader | RowKind::RomInfo => {}
         RowKind::Text => {
-            draw_launcher_value_box(
-                frame,
-                launcher_text_rect(rect, row_y, r.field),
-                state,
-                r.field,
-                disabled,
-                false,
-                scale,
-            );
+            if LauncherState::is_serial_addr(r.field) {
+                // `[host] : [port]`, each half its own box with its greyed
+                // default, the colon between them furniture.
+                let (host_box, port_box) = launcher_serial_addr_rects(rect, row_y);
+                #[cfg(feature = "midi")]
+                let (host, port) = state.setup.serial_addr_parts(r.field);
+                #[cfg(not(feature = "midi"))]
+                let (host, port): (Option<String>, Option<u16>) = (None, None);
+                draw_serial_half_box(
+                    frame,
+                    host_box,
+                    state,
+                    UiControl::LauncherSerialHostEdit(r.field),
+                    matches!(state.editing(),
+                        Some(launcher::EditTarget::SerialHost(f)) if f == r.field),
+                    host,
+                    "Host/IP",
+                    scale,
+                );
+                draw_panel_text(
+                    frame,
+                    host_box.x + host_box.w + 4,
+                    row_y + 8,
+                    ":",
+                    PANEL_TEXT_DIM,
+                    1,
+                    scale,
+                );
+                draw_serial_half_box(
+                    frame,
+                    port_box,
+                    state,
+                    UiControl::LauncherSerialPortEdit(r.field),
+                    matches!(state.editing(),
+                        Some(launcher::EditTarget::SerialPort(f)) if f == r.field),
+                    port.map(|p| p.to_string()),
+                    &crate::config::SERIAL_DEFAULT_PORT.to_string(),
+                    scale,
+                );
+            } else {
+                draw_launcher_value_box(
+                    frame,
+                    launcher_text_rect(rect, row_y, r.field),
+                    state,
+                    r.field,
+                    disabled,
+                    false,
+                    scale,
+                );
+            }
         }
         RowKind::Size => {
             // A number to type, with the unit written beside it. The unit

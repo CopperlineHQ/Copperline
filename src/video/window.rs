@@ -5665,14 +5665,17 @@ impl App {
                     state.begin_edit_new_image(field);
                 }
             }
-            UiControl::LauncherSerialAddrEdit(field) => {
+            UiControl::LauncherSerialHostEdit(field) | UiControl::LauncherSerialPortEdit(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     // Reaching for the other address box ends the typing in
-                    // this one, the way Enter does; an address it refuses
+                    // this one, the way Enter does; a value it refuses
                     // keeps the focus where the mistake is.
                     state.edit_commit();
                     if state.editing().is_none() {
-                        state.begin_edit_serial_addr(field);
+                        state.begin_edit_serial_addr(
+                            field,
+                            matches!(control, UiControl::LauncherSerialPortEdit(_)),
+                        );
                     }
                 }
             }

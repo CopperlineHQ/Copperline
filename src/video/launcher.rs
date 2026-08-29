@@ -2689,6 +2689,30 @@ impl MachineSetup {
         }
     }
 
+    /// The halves of a serial address, either absent while untouched.
+    #[cfg(feature = "midi")]
+    pub fn serial_addr_parts(&self, field: LauncherField) -> (Option<String>, Option<u16>) {
+        self.serial_addr(field)
+            .map(split_host_port)
+            .unwrap_or((None, None))
+    }
+
+    /// Replace one half of a serial address, keeping the other. Emptying
+    /// both empties the whole (the key leaves a saved config); a half on
+    /// its own is completed with the defaults the run would use.
+    #[cfg(feature = "midi")]
+    pub fn set_serial_addr_part(
+        &mut self,
+        field: LauncherField,
+        host: Option<Option<String>>,
+        port: Option<Option<u16>>,
+    ) {
+        let (cur_host, cur_port) = self.serial_addr_parts(field);
+        let host = host.unwrap_or(cur_host);
+        let port = port.unwrap_or(cur_port);
+        self.set_serial_addr(field, join_host_port(host.as_deref(), port));
+    }
+
     /// Whether the selected Ethernet backend carries traffic on the host's
     /// schedule rather than the emulated clock, breaking byte-identical
     /// replay (the I/O Ports tab shows a warning). The loopback backend
@@ -3165,8 +3189,11 @@ impl MachineSetup {
         }
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
-        raw.serial.listen = self.serial_listen.clone();
-        raw.serial.connect = self.serial_connect.clone();
+        // A half-typed address leaves here whole: the config file and the
+        // run get the defaults filled in, while the session keeps only what
+        // was typed so emptying a box reverts it.
+        raw.serial.listen = self.serial_listen.as_deref().map(complete_host_port);
+        raw.serial.connect = self.serial_connect.as_deref().map(complete_host_port);
         // Compared against the resolved value, not the raw tri-state: the
         // toggle is a plain on/off, so "unset" and "explicitly off" look
         // the same to it and must not produce a spurious `telnet = false`
@@ -4393,14 +4420,16 @@ impl MachineSetup {
             #[cfg(feature = "midi")]
             F::SerialConnect => self
                 .serial_connect
-                .clone()
+                .as_deref()
+                .map(complete_host_port)
                 .unwrap_or_else(|| "(host:port)".to_string()),
             // The listen address does have a default, so an empty box shows
             // the address the run would actually bind.
             #[cfg(feature = "midi")]
             F::SerialListen => self
                 .serial_listen
-                .clone()
+                .as_deref()
+                .map(complete_host_port)
                 .unwrap_or_else(|| crate::config::SERIAL_TCP_DEFAULT_LISTEN.to_string()),
             #[cfg(feature = "midi")]
             F::MidiOut => {
@@ -6154,8 +6183,10 @@ pub enum EditTarget {
     DriveBootpri(LauncherField),
     /// A word typed on a Create Image page: a volume name or a device name.
     NewImageText(LauncherField),
-    /// A `host:port` typed into the Serial section's Connect or Listen box.
-    SerialAddr(LauncherField),
+    /// The host half of a Serial section address (Connect or Listen).
+    SerialHost(LauncherField),
+    /// The port half of a Serial section address: up to five digits.
+    SerialPort(LauncherField),
     /// The fixed 16-bit RAM power-on word on the Memory page.
     RamPattern,
 }
@@ -6379,10 +6410,11 @@ pub enum CaretMove {
     End,
 }
 
-/// The most an address box accepts: a DNS name is up to 253 characters
-/// (254 with a trailing root dot), and ":65535" is six more. Anything
-/// longer cannot be a host:port, so the box stops there.
-const SERIAL_ADDR_MAX: usize = 260;
+/// The most the host box accepts: a DNS name is up to 253 characters.
+/// Anything longer cannot be a host, so the box stops there.
+const SERIAL_HOST_MAX: usize = 253;
+/// The most the port box accepts: ports are five digits at the widest.
+const SERIAL_PORT_MAX: usize = 5;
 
 /// Why a typed serial address is not the `host:port` the TCP modes need,
 /// or `None` when it is one.
@@ -6391,23 +6423,65 @@ const SERIAL_ADDR_MAX: usize = 260;
 /// a host that is merely down should not stop the address being typed. What
 /// it does catch is the shape, so a missing or unreadable port is refused
 /// while the box still has the focus to fix it in.
-fn serial_addr_error(addr: &str) -> Option<String> {
-    let Some((host, port)) = addr.rsplit_once(':') else {
-        return Some(format!("\"{addr}\" has no port: type host:port"));
-    };
-    // An IPv6 literal is full of colons, so it is written in brackets and
-    // only the colon after the closing one separates the port.
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    if host.is_empty() {
-        return Some(format!("\"{addr}\" has no host: type host:port"));
+/// The two halves of a stored `host:port`, either absent. An IPv6 literal
+/// is stored in brackets so only the colon after the closing one separates
+/// the port; the brackets come off here and go back on in [`join_host_port`].
+fn split_host_port(addr: &str) -> (Option<String>, Option<u16>) {
+    if let Some(rest) = addr.strip_prefix('[') {
+        // A bracketed IPv6 literal, with a port after the bracket or not.
+        if let Some((host, tail)) = rest.split_once(']') {
+            let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
+            return ((!host.is_empty()).then(|| host.to_string()), port);
+        }
     }
-    if port.parse::<u16>().is_err() {
-        return Some(format!("\"{port}\" is not a port number (0-65535)"));
+    match addr.rsplit_once(':') {
+        Some((host, port)) => (
+            (!host.is_empty()).then(|| host.to_string()),
+            port.parse().ok(),
+        ),
+        None => ((!addr.is_empty()).then(|| addr.to_string()), None),
     }
-    None
+}
+
+/// A host in its stored spelling: brackets around anything a colon could
+/// be mistaken inside.
+fn bracket_host(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// The typed halves, stored exactly as typed -- a host alone stands alone,
+/// a port alone keeps its leading colon -- so emptied halves revert and
+/// an untouched pair stays out of the config. The absent halves are only
+/// filled in (with [`crate::config::SERIAL_DEFAULT_HOST`] /
+/// [`crate::config::SERIAL_DEFAULT_PORT`]) by [`complete_host_port`], on
+/// the way to a saved config or a run.
+fn join_host_port(host: Option<&str>, port: Option<u16>) -> Option<String> {
+    match (host, port) {
+        (None, None) => None,
+        (Some(h), None) => Some(bracket_host(h)),
+        (None, Some(p)) => Some(format!(":{p}")),
+        (Some(h), Some(p)) => Some(format!("{}:{p}", bracket_host(h))),
+    }
+}
+
+/// The address a run can use: the absent halves filled with their defaults.
+fn complete_host_port(addr: &str) -> String {
+    let (host, port) = split_host_port(addr);
+    let host = host.unwrap_or_else(|| crate::config::SERIAL_DEFAULT_HOST.to_string());
+    let port = port.unwrap_or(crate::config::SERIAL_DEFAULT_PORT);
+    format!("{}:{port}", bracket_host(&host))
+}
+
+/// Whether this process may bind the privileged ports. Only asked on the
+/// hosts that restrict them.
+#[cfg(unix)]
+fn can_bind_low_ports() -> bool {
+    // SAFETY: geteuid takes nothing, returns the effective uid, cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// The largest size the box accepts, in whichever unit is showing.
@@ -7648,7 +7722,11 @@ impl LauncherState {
     pub fn typing_in_value_box(&self, field: LauncherField) -> bool {
         matches!(
             self.editing,
-            Some(EditTarget::NewImageText(f) | EditTarget::SerialAddr(f)) if f == field
+            Some(
+                EditTarget::NewImageText(f)
+                | EditTarget::SerialHost(f)
+                | EditTarget::SerialPort(f)
+            ) if f == field
         ) || field == F::RamPattern && self.editing == Some(EditTarget::RamPattern)
     }
 
@@ -7949,20 +8027,31 @@ impl LauncherState {
         self.status = None;
     }
 
-    /// Focus a serial TCP address box, seeding the buffer with the address
-    /// it holds. An unset box starts empty rather than from what it shows:
-    /// the default listen address and the "(host:port)" prompt are both
-    /// placeholders, not values to be typed over.
-    pub fn begin_edit_serial_addr(&mut self, field: LauncherField) {
+    /// Focus half of a serial TCP address, seeding the buffer with the
+    /// value that half holds. An unset half starts empty rather than from
+    /// what it shows: the greyed prompts are placeholders, not values to
+    /// be typed over.
+    pub fn begin_edit_serial_addr(&mut self, field: LauncherField, port_half: bool) {
         if !Self::is_serial_addr(field) {
             return;
         }
         self.edit_buffer.clear();
         #[cfg(feature = "midi")]
-        if let Some(addr) = self.setup.serial_addr(field) {
-            self.edit_buffer.push_str(addr);
+        {
+            let (host, port) = self.setup.serial_addr_parts(field);
+            if port_half {
+                if let Some(p) = port {
+                    self.edit_buffer.push_str(&p.to_string());
+                }
+            } else if let Some(h) = host {
+                self.edit_buffer.push_str(&h);
+            }
         }
-        self.editing = Some(EditTarget::SerialAddr(field));
+        self.editing = Some(if port_half {
+            EditTarget::SerialPort(field)
+        } else {
+            EditTarget::SerialHost(field)
+        });
         self.edit_caret = Caret::end_of(&self.edit_buffer);
         self.status = None;
     }
@@ -8210,12 +8299,17 @@ impl LauncherState {
                 return;
             }
         }
-        // An address is a run of printable characters with no spaces in it:
-        // a name or a numeric literal, a colon, and a port. Brackets and
-        // colons are in there for IPv6, so nothing narrower than "graphic"
-        // would do.
-        if let EditTarget::SerialAddr(_) = target {
-            if !c.is_ascii_graphic() || self.edit_buffer.chars().count() >= SERIAL_ADDR_MAX {
+        // A host is a run of printable characters with no spaces in it: a
+        // name or a numeric literal. Colons are in there for a bare IPv6
+        // literal, so nothing narrower than "graphic" would do.
+        if let EditTarget::SerialHost(_) = target {
+            if !c.is_ascii_graphic() || self.edit_buffer.chars().count() >= SERIAL_HOST_MAX {
+                return;
+            }
+        }
+        // A port is digits, and no more of them than 65535 is wide.
+        if let EditTarget::SerialPort(_) = target {
+            if !c.is_ascii_digit() || self.edit_buffer.chars().count() >= SERIAL_PORT_MAX {
                 return;
             }
         }
@@ -8379,26 +8473,58 @@ impl LauncherState {
                 self.edit_buffer.clear();
                 return;
             }
-            EditTarget::SerialAddr(field) => {
-                // An emptied box means "unset": the dial-out address goes
-                // away, and the listen address returns to the default. A
-                // typed one has to be a host:port or it keeps the focus,
-                // the same as a rejected drive name -- the mode is bound to
-                // fail at Run otherwise, and this is where it can be fixed.
+            EditTarget::SerialHost(field) => {
+                // An emptied box means "unset": the half reverts to its
+                // greyed default. Brackets around an IPv6 literal are the
+                // stored spelling's business, not the typist's.
                 let typed = self.edit_buffer.trim();
-                let addr = if typed.is_empty() {
+                let host = (!typed.is_empty()).then(|| {
+                    typed
+                        .strip_prefix('[')
+                        .and_then(|h| h.strip_suffix(']'))
+                        .unwrap_or(typed)
+                        .to_string()
+                });
+                #[cfg(feature = "midi")]
+                self.setup.set_serial_addr_part(field, Some(host), None);
+                #[cfg(not(feature = "midi"))]
+                let _ = (field, host);
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
+            EditTarget::SerialPort(field) => {
+                // Emptied, the port reverts to its default. A typed one has
+                // to be a port this run can actually take, or it keeps the
+                // focus where the mistake is -- the mode is bound to fail at
+                // Run otherwise.
+                let typed = self.edit_buffer.trim();
+                let port = if typed.is_empty() {
                     None
                 } else {
-                    if let Some(err) = serial_addr_error(typed) {
-                        self.status = Some(StatusMessage::err(err));
-                        return;
+                    match typed.parse::<u32>() {
+                        Ok(p @ 1..=65535) => {
+                            #[cfg(unix)]
+                            if p < 1025 && !can_bind_low_ports() {
+                                self.status = Some(StatusMessage::err(format!(
+                                    "port {p} needs root: run with sudo, or use 1025-65535"
+                                )));
+                                return;
+                            }
+                            Some(p as u16)
+                        }
+                        _ => {
+                            self.status = Some(StatusMessage::err(format!(
+                                "\"{typed}\" is not a port number (1-65535)"
+                            )));
+                            return;
+                        }
                     }
-                    Some(typed.to_string())
                 };
                 #[cfg(feature = "midi")]
-                self.setup.set_serial_addr(field, addr);
+                self.setup.set_serial_addr_part(field, None, Some(port));
                 #[cfg(not(feature = "midi"))]
-                let _ = (field, addr);
+                let _ = (field, port);
                 self.editing = None;
                 self.edit_buffer.clear();
                 return;
@@ -8427,7 +8553,8 @@ impl LauncherState {
             // These commit above and return, so nothing is left to do here.
             EditTarget::DriveBootpri(_)
             | EditTarget::NewImageText(_)
-            | EditTarget::SerialAddr(_)
+            | EditTarget::SerialHost(_)
+            | EditTarget::SerialPort(_)
             | EditTarget::RamPattern => {}
         }
     }
