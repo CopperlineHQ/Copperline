@@ -353,14 +353,18 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::BootPriorityMore,
         LauncherTab::Lide,
         LauncherTab::AvVideo,
+        LauncherTab::AvDisplay,
         LauncherTab::AvEmulation,
+        LauncherTab::AvPaths,
     ];
     for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
         // The row grid always ends above the status line; on tabs with a top
-        // nav it starts a nav block lower, leaving it less room.
+        // nav it starts a nav block lower, leaving it less room -- two nav
+        // rows' worth where the nav wraps (the A/V pages' five chips, the
+        // Storage links), which is what the draw path reserves too.
         let bound = launcher_status_y(rect);
         let row_offset = if tab.has_top_nav() {
-            LAUNCH_NAV_BLOCK_H
+            launcher_nav_block_h(tab)
         } else {
             0
         };
@@ -3150,6 +3154,20 @@ fn panels_render_into_their_rects() {
     };
     draw(&mut frame, scale, &ui, None, None);
     save(&frame, "launcher-av-video");
+
+    // The Display category: the host window's own settings, under the same
+    // nav row (which wraps -- five categories, four to a row).
+    let mut frame = vec![0u8; w * h * 4];
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.tab = LauncherTab::AvDisplay;
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::Launcher(Box::new(state))),
+    };
+    draw(&mut frame, scale, &ui, None, None);
+    save(&frame, "launcher-av-display");
 
     // The Floppy tab with two drives wired in: each drive is a greyed "DFn:"
     // heading with indented settings; DF2/DF3 are hidden until enabled.

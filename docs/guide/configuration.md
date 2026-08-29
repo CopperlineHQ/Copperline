@@ -876,7 +876,7 @@ display, one line per data point (see
 Cmd+P (macOS) / Alt+P toggles it live for the rest of the session without
 touching the config, `--perf-overlay` shows it for one run, and
 `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single run; the
-launcher's *Perf overlay* row (*A/V & Emu*, *Video*) writes it. Like the
+launcher's *Perf overlay* row (*A/V & Emu*, *Display*) writes it. Like the
 transient message overlay it is presentation only: screenshots, frame
 dumps, and recordings never include it.
 
@@ -1004,7 +1004,7 @@ shader never fails the config, and never stops the machine from running.
 whole menu, rows and text together. It is a start-up preference:
 *Video Settings > Menu Size* changes it live without altering the saved
 value, `--menu-scale` sets it on the command line, and the launcher's A/V &
-Emu page (Video category) has a *Menu size* picker for the same.
+Emu page (Display category) has a *Menu size* picker for the same.
 
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
@@ -1012,7 +1012,7 @@ preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
 `Cmd+Shift+F` / `Alt+Shift+F` for the status bar, plus their menu items --
 still flip either live without changing the saved value. On the command line
 `--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
-`--hide-status-bar` set the status bar; the launcher's A/V & Emu page (Video
+`--hide-status-bar` set the status bar; the launcher's A/V & Emu page (Display
 category) has *Start fullscreen* and *Status bar* toggles for the same. Left
 unset they keep the defaults: windowed, status bar shown.
 

@@ -216,6 +216,10 @@ pub enum LauncherTab {
     /// `AvAudio.label()` is therefore the strip's "A/V & Emu", not "Audio".
     AvAudio,
     AvVideo,
+    /// The host window and its furniture -- fullscreen at start, the status
+    /// bar, the perf overlay, menu size -- as distinct from `AvVideo`, which
+    /// is the emulated picture itself.
+    AvDisplay,
     AvEmulation,
     /// Where Copperline keeps what it produces and where its file dialogs
     /// open. Its rows are the configuration's `[paths]` section, saved
@@ -307,6 +311,7 @@ impl LauncherTab {
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvAudio => "A/V & Emu",
             LauncherTab::AvVideo => "Video",
+            LauncherTab::AvDisplay => "Display",
             LauncherTab::AvEmulation => "Emulation",
             LauncherTab::AvPaths => "Paths",
             LauncherTab::CreateFloppy => "Floppy Disk",
@@ -336,9 +341,10 @@ impl LauncherTab {
             | LauncherTab::CreateHard
             | LauncherTab::CreateGeometry => LauncherTab::Storage,
             LauncherTab::FluxBridge => LauncherTab::Floppy,
-            LauncherTab::AvVideo | LauncherTab::AvEmulation | LauncherTab::AvPaths => {
-                LauncherTab::AvAudio
-            }
+            LauncherTab::AvVideo
+            | LauncherTab::AvDisplay
+            | LauncherTab::AvEmulation
+            | LauncherTab::AvPaths => LauncherTab::AvAudio,
             LauncherTab::IoParallel | LauncherTab::IoNetworking | LauncherTab::IoAudio => {
                 LauncherTab::IoPorts
             }
@@ -380,6 +386,7 @@ impl LauncherTab {
             LauncherTab::Storage => STORAGE_NAV,
             LauncherTab::AvAudio
             | LauncherTab::AvVideo
+            | LauncherTab::AvDisplay
             | LauncherTab::AvEmulation
             | LauncherTab::AvPaths => AV_NAV,
             LauncherTab::IoPorts
@@ -446,7 +453,9 @@ const IO_NAV: &[(&str, LauncherTab)] = &[
 const AV_NAV: &[(&str, LauncherTab)] = &[
     ("Audio", LauncherTab::AvAudio),
     ("Video", LauncherTab::AvVideo),
+    ("Display", LauncherTab::AvDisplay),
     ("Emulation", LauncherTab::AvEmulation),
+    // Four to a row, so this one wraps onto a second.
     ("Paths", LauncherTab::AvPaths),
 ];
 
@@ -1227,14 +1236,13 @@ const SOUND_ROWS: [Row; 2] = [
 ];
 #[cfg(not(feature = "mhi"))]
 const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
-// The A/V & Emu tab is split into three categories switched via the top nav row.
+// The A/V & Emu tab is split into five categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 13] = [
-    row(F::StartFullscreen, "Start fullscreen", Cycle),
-    row(F::ShowStatusBar, "Status bar", Cycle),
+// The emulated picture, in signal order -- what the monitor is fed and how
+// it is drawn -- with the shader pair last, since strength greys off the
+// shader. The host window's own settings are DISPLAY_ROWS.
+const VIDEO_ROWS: [Row; 9] = [
     row(F::Bezel, "Monitor bezel", Cycle),
-    row(F::PerfOverlay, "Perf overlay", Cycle),
-    row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Scaling, "Scaling", Cycle),
@@ -1243,6 +1251,14 @@ const VIDEO_ROWS: [Row; 13] = [
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
+];
+
+// The host window and its furniture, as distinct from the picture inside it.
+const DISPLAY_ROWS: [Row; 4] = [
+    row(F::StartFullscreen, "Start fullscreen", Cycle),
+    row(F::ShowStatusBar, "Status bar", Cycle),
+    row(F::PerfOverlay, "Perf overlay", Cycle),
+    row(F::MenuScale, "Menu size", Cycle),
 ];
 const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioDevice, "Audio output", Cycle),
@@ -1412,6 +1428,7 @@ pub fn rows(
         // sibling categories, switched via the top nav row.
         LauncherTab::AvAudio => Cow::Borrowed(&AUDIO_ROWS),
         LauncherTab::AvVideo => Cow::Borrowed(&VIDEO_ROWS),
+        LauncherTab::AvDisplay => Cow::Borrowed(&DISPLAY_ROWS),
         LauncherTab::AvEmulation => Cow::Borrowed(&EMULATION_ROWS),
         LauncherTab::AvPaths => Cow::Borrowed(&PATHS_ROWS),
     }

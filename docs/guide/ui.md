@@ -229,7 +229,7 @@ presentation only: screenshots, frame dumps, and recordings never include
 it. While a video recording is running the block steps below the `REC`
 badge. `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single
 run, and `--perf-overlay` shows it from the command line; the launcher's
-*Perf overlay* row (*A/V & Emu*, *Video*) makes it stick. The same
+*Perf overlay* row (*A/V & Emu*, *Display*) makes it stick. The same
 counters are exported through the control protocol's `status` reply for
 headless runs (see [](../debugger/control)).
 
@@ -294,7 +294,7 @@ Opening the menu also releases a captured mouse.
 
 **Menu Size** under *Video Settings* draws the whole menu at 1x or 2x. The
 start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
-the launcher's A/V & Emu page (Video category).
+the launcher's A/V & Emu page (Display category).
 
 Tool windows are separate native windows so the emulated display remains visible;
 the debugger and frame analyzer can be open at the same time. They take their
@@ -642,13 +642,13 @@ The layout is:
   [](whdload.md)),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
-  sounds and volume), **Video** (start fullscreen, status bar, monitor bezel
-  style,
-  perf overlay, menu size, overscan, pixel aspect, scaling, deinterlace,
-  screen tint, phosphor, CRT shader and shader strength),
+  sounds and volume), **Video** -- the emulated picture (monitor bezel style,
+  overscan, pixel aspect, scaling, deinterlace, screen tint, phosphor, CRT
+  shader and shader strength), **Display** -- the host window (start
+  fullscreen, status bar, perf overlay, menu size),
   **Emulation**
   (power-on, realtime priority, pacing, warp speed),
-  and **Paths** -- opening on Audio, and switched freely between the four.
+  and **Paths** -- opening on Audio, and switched freely between the five.
   The Paths page edits the `[paths]` section of the configuration (see
   [](configuration.md)): the base folder on top, then one row per folder.
   A row reads `(default)` until a folder is chosen for it; **Browse** picks
