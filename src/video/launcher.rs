@@ -6469,8 +6469,15 @@ fn join_host_port(host: Option<&str>, port: Option<u16>) -> Option<String> {
 }
 
 /// The address a run can use: the absent halves filled with their defaults.
+/// Only the spellings this launcher itself stores are completed; an address
+/// the split cannot rebuild -- a hand-written `host:notaport`, an
+/// unbracketed IPv6 literal -- passes through untouched, so it still fails
+/// loudly at Run instead of silently binding a port the config never named.
 fn complete_host_port(addr: &str) -> String {
     let (host, port) = split_host_port(addr);
+    if join_host_port(host.as_deref(), port).as_deref() != Some(addr) {
+        return addr.to_string();
+    }
     let host = host.unwrap_or_else(|| crate::config::SERIAL_DEFAULT_HOST.to_string());
     let port = port.unwrap_or(crate::config::SERIAL_DEFAULT_PORT);
     format!("{}:{port}", bracket_host(&host))
@@ -6478,7 +6485,7 @@ fn complete_host_port(addr: &str) -> String {
 
 /// Whether this process may bind the privileged ports. Only asked on the
 /// hosts that restrict them.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "midi"))]
 fn can_bind_low_ports() -> bool {
     // SAFETY: geteuid takes nothing, returns the effective uid, cannot fail.
     unsafe { libc::geteuid() == 0 }
@@ -8477,7 +8484,34 @@ impl LauncherState {
                 // An emptied box means "unset": the half reverts to its
                 // greyed default. Brackets around an IPv6 literal are the
                 // stored spelling's business, not the typist's.
-                let typed = self.edit_buffer.trim();
+                let typed = self.edit_buffer.trim().to_string();
+                let typed = typed.as_str();
+                // The old single box took host:port, and fingers remember.
+                // A lone trailing :digits on a colon-free head is that
+                // habit, not an IPv6 literal, so the halves go where they
+                // belong -- through the port's own checks.
+                if let Some((head, tail)) = typed.rsplit_once(':') {
+                    if !head.is_empty()
+                        && !head.contains(':')
+                        && !tail.is_empty()
+                        && tail.chars().all(|c| c.is_ascii_digit())
+                    {
+                        let Some(port) = self.checked_port(field, tail) else {
+                            return;
+                        };
+                        #[cfg(feature = "midi")]
+                        self.setup.set_serial_addr_part(
+                            field,
+                            Some(Some(head.to_string())),
+                            Some(Some(port)),
+                        );
+                        #[cfg(not(feature = "midi"))]
+                        let _ = (field, port);
+                        self.editing = None;
+                        self.edit_buffer.clear();
+                        return;
+                    }
+                }
                 let host = (!typed.is_empty()).then(|| {
                     typed
                         .strip_prefix('[')
@@ -8498,28 +8532,15 @@ impl LauncherState {
                 // to be a port this run can actually take, or it keeps the
                 // focus where the mistake is -- the mode is bound to fail at
                 // Run otherwise.
-                let typed = self.edit_buffer.trim();
+                let typed = self.edit_buffer.trim().to_string();
+                let typed = typed.as_str();
                 let port = if typed.is_empty() {
                     None
                 } else {
-                    match typed.parse::<u32>() {
-                        Ok(p @ 1..=65535) => {
-                            #[cfg(unix)]
-                            if p < 1025 && !can_bind_low_ports() {
-                                self.status = Some(StatusMessage::err(format!(
-                                    "port {p} needs root: run with sudo, or use 1025-65535"
-                                )));
-                                return;
-                            }
-                            Some(p as u16)
-                        }
-                        _ => {
-                            self.status = Some(StatusMessage::err(format!(
-                                "\"{typed}\" is not a port number (1-65535)"
-                            )));
-                            return;
-                        }
-                    }
+                    let Some(p) = self.checked_port(field, typed) else {
+                        return;
+                    };
+                    Some(p)
                 };
                 #[cfg(feature = "midi")]
                 self.setup.set_serial_addr_part(field, None, Some(port));
@@ -8556,6 +8577,33 @@ impl LauncherState {
             | EditTarget::SerialHost(_)
             | EditTarget::SerialPort(_)
             | EditTarget::RamPattern => {}
+        }
+    }
+
+    /// A typed port, checked: in range, and -- for the listen address,
+    /// the only one this process binds -- allowed to this process. A
+    /// dial-out port needs no privilege on any host, telnet's 23 included.
+    /// `None` sets the refusal message and keeps the focus.
+    fn checked_port(&mut self, field: LauncherField, typed: &str) -> Option<u16> {
+        match typed.parse::<u32>() {
+            Ok(p @ 1..=65535) => {
+                #[cfg(all(unix, feature = "midi"))]
+                if p < 1025 && field == LauncherField::SerialListen && !can_bind_low_ports() {
+                    self.status = Some(StatusMessage::err(format!(
+                        "port {p} needs root: run with sudo, or use 1025-65535"
+                    )));
+                    return None;
+                }
+                #[cfg(not(all(unix, feature = "midi")))]
+                let _ = field;
+                Some(p as u16)
+            }
+            _ => {
+                self.status = Some(StatusMessage::err(format!(
+                    "\"{typed}\" is not a port number (1-65535)"
+                )));
+                None
+            }
         }
     }
 

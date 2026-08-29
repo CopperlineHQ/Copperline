@@ -1342,11 +1342,12 @@ session (and implies `mode = "modem"`), and `--midi-out NAME`/
 `--midi-in NAME` imply `mode = "midi"`. The launcher's **I/O Ports** tab
 (Serial Port page) sets all
 of this interactively: **Device / Mode** picks the mode, and the mode brings
-its own address box with it -- **Connect** under `tcp-connect` for the
-remote to dial, **Listen** under `tcp` for the local bind address (it shows
-the `127.0.0.1:1234` default until something else is typed). Either box
-takes a `host:port`, with an IPv6 literal in brackets
-(`[::1]:1337`); clearing it unsets the key. The in-window
+its own address with it -- **Connect** under `tcp-connect` for the
+remote to dial, **Listen** under `tcp` for the local bind address -- as a
+pair of boxes, host and port. A box left empty shows its greyed default
+(host `127.0.0.1` on Listen, port `1234`) and an emptied box reverts to it;
+an IPv6 literal is typed bare or in brackets, and the saved key spells it
+bracketed (`[::1]:1337`). Emptying both boxes unsets the key. The in-window
 **MIDI In / MIDI Out** menu items select the MIDI endpoints. Under `modem`,
 the page shows the same **Listen** box (the incoming-call address above)
 plus a **Telnet** toggle for `telnet`; the phonebook has no row and stays

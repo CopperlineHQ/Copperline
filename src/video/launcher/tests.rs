@@ -2625,6 +2625,64 @@ fn emptying_a_serial_address_box_unsets_it() {
 
 #[cfg(feature = "midi")]
 #[test]
+fn a_dial_out_port_needs_no_privilege() {
+    // Telnet's 23 is the canonical BBS port; dialing out binds nothing,
+    // so the low-port gate is the listen box's alone and the Connect box
+    // takes it whoever runs the process.
+    let mut state = LauncherState::new(MachineSetup::default());
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    for c in "23".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    assert!(state.editing().is_none(), "port 23 dial-out was refused");
+    assert_eq!(state.setup.serial_connect.as_deref(), Some(":23"));
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn old_style_host_port_typed_into_the_host_box_finds_both_halves() {
+    // The single box took host:port for years; fingers will keep typing
+    // it. A trailing :digits on a colon-free head routes each half where
+    // it belongs, while a bare IPv6 literal keeps its colons.
+    let mut state = LauncherState::new(MachineSetup::default());
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, false);
+    for c in "bbs.example.com:2323".chars() {
+        state.edit_push(c);
+    }
+    state.edit_commit();
+    assert!(state.editing().is_none());
+    assert_eq!(
+        state.setup.serial_connect.as_deref(),
+        Some("bbs.example.com:2323")
+    );
+    state.begin_edit_serial_addr(LauncherField::SerialConnect, true);
+    assert_eq!(state.edit_buffer(), "2323");
+    state.edit_cancel();
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn an_address_the_launcher_did_not_write_passes_through_untouched() {
+    // A hand-written config can hold what the boxes would never store; the
+    // round trip must not quietly repair it into a bind the config never
+    // named -- the run fails loudly instead, as it always did.
+    for weird in ["localhost:telnet", "::1", "127.0.0.1:70000"] {
+        let state = LauncherState::new(MachineSetup {
+            serial_mode: SerialMode::Tcp,
+            serial_listen: Some(weird.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            state.setup.to_raw().serial.listen.as_deref(),
+            Some(weird),
+            "{weird} was rewritten"
+        );
+    }
+}
+
+#[cfg(feature = "midi")]
+#[test]
 fn the_serial_boxes_take_only_what_their_half_can_hold() {
     let mut state = LauncherState::new(MachineSetup::default());
     // A space is not part of a host, and neither is a control code.

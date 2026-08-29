@@ -4754,8 +4754,9 @@ fn launcher_serial_addr_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
     let y = row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2;
     let x = launcher_control_x(rect);
     let total = LAUNCH_ARROW_W + LAUNCH_VALUE_W + LAUNCH_ARROW_W;
-    // Five digits and their padding; the host takes what the colon leaves.
-    let port_w = SERIAL_PORT_DIGITS * font::GLYPH_W + 8;
+    // Five digits, a cell for the caret while typing, and padding; the
+    // host takes what the colon leaves.
+    let port_w = (SERIAL_PORT_DIGITS + 1) * font::GLYPH_W + 8;
     let host = Rect {
         x,
         y,
