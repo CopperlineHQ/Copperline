@@ -1220,7 +1220,7 @@ const SOUND_ROWS: [Row; 2] = [
 ];
 #[cfg(not(feature = "mhi"))]
 const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
-// The A/V & Emu tab is split into three categories switched via the top nav row.
+// The A/V & Emu tab is split into five categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
 // The emulated picture, in signal order -- what the monitor is fed and how
 // it is drawn -- with the shader pair last, since strength greys off the

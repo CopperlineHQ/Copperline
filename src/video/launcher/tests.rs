@@ -3374,8 +3374,8 @@ fn sub_pages_of_hdd_cd() {
 #[test]
 fn av_emu_categories() {
     use LauncherField as F;
-    // Only "A/V & Emu" (the Audio default) is a strip tab; Video and
-    // Emulation are its categories.
+    // Only "A/V & Emu" (the Audio default) is a strip tab; Video, Display,
+    // Emulation and Paths are its categories.
     assert!(TABS.contains(&LauncherTab::AvAudio));
     assert!(!TABS.contains(&LauncherTab::AvVideo));
     assert!(!TABS.contains(&LauncherTab::AvDisplay));

@@ -354,13 +354,16 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::AvVideo,
         LauncherTab::AvDisplay,
         LauncherTab::AvEmulation,
+        LauncherTab::AvPaths,
     ];
     for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
         // The row grid always ends above the status line; on tabs with a top
-        // nav it starts a nav block lower, leaving it less room.
+        // nav it starts a nav block lower, leaving it less room -- two nav
+        // rows' worth where the nav wraps (the A/V pages' five chips, the
+        // Storage links), which is what the draw path reserves too.
         let bound = launcher_status_y(rect);
         let row_offset = if tab.has_top_nav() {
-            LAUNCH_NAV_BLOCK_H
+            launcher_nav_block_h(tab)
         } else {
             0
         };
