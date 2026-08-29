@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate packaging/flatpak/cargo-sources.json from the committed
 # Cargo.lock. Flathub builds run offline, so every crate Copperline depends
-# on must be listed here as a vendored source. Run this whenever Cargo.lock
-# changes (a dependency is added, removed or bumped); CI fails if the file is
-# stale (see .github/workflows/flatpak.yml).
+# on must be listed here as a vendored source. The output is intentionally
+# untracked: CI runs this before every Flatpak build, and maintainers run it
+# before copying the packaging files into a Flathub submission.
 #
 # Requires python3 and network access (to fetch the generator script). The
 # generator itself only reads Cargo.lock; it does not download crates.

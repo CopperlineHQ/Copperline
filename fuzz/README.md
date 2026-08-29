@@ -30,9 +30,11 @@ payload. Whenever `savestate::STATE_VERSION` changes, regenerate and commit
 that seed from this directory:
 
 ```sh
-cargo +nightly run --locked --example generate_savestate_seed
+cargo +nightly run --example generate_savestate_seed
 ```
 
-The `ci.yml` fuzz job builds every target (`cargo fuzz build --locked`) so the
-harnesses cannot rot; it does not run long campaigns. Sustained runs are
-a local or scheduled-job concern.
+The fuzz crate follows the root Copperline package by path, so its `Cargo.lock`
+is generated locally and ignored rather than committing a second copy of the
+root dependency graph. The `ci.yml` fuzz job generates that lock and builds
+every target (`cargo fuzz build`) so the harnesses cannot rot; it does not run
+long campaigns. Sustained runs are a local or scheduled-job concern.
