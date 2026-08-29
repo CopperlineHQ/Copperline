@@ -1103,8 +1103,12 @@ pub struct App {
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
-    /// CursorMoved. Kept only for the COPPERLINE_DIAG_CURSOR click trace, which
-    /// needs the un-mapped coordinate alongside the mapped pixel.
+    /// CursorMoved while the pointer is inside the window (cleared on
+    /// CursorLeft). The redraw re-maps `cursor_pos` from it whenever the
+    /// presentation layout changes under a stationary pointer (autocrop
+    /// latch adoption, a menu suspending the crop), and the
+    /// COPPERLINE_DIAG_CURSOR click trace logs it alongside the mapped
+    /// pixel.
     last_cursor_phys: Option<winit::dpi::PhysicalPosition<f64>>,
     volume_dragging: bool,
     /// A scroll arrow held down: which control, and when its next repeat is
@@ -3844,6 +3848,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } => {
                 let previous_cursor_pos = self.cursor_pos;
                 self.cursor_pos = None;
+                self.last_cursor_phys = None;
                 self.last_display_cursor_pos = None;
                 self.volume_dragging = false;
                 self.analyzer_dragging = false;
@@ -4142,6 +4147,16 @@ impl ApplicationHandler for App {
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
                     return;
                 }
+                // The presentation layout can change under a stationary
+                // pointer -- the autocrop latch adopting a new crop, a menu
+                // suspending it, a toggle -- and every such change requests
+                // a redraw, so re-mapping the cached host position here
+                // keeps hover and click hit-testing aligned with the
+                // pixels this frame actually shows.
+                let autocrop_src = self.autocrop_canvas_src();
+                if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
+                    self.cursor_pos = main_cursor_position(r, autocrop_src, phys);
+                }
                 let status = status_with_latched_fdd_track(
                     self.emu.bus().front_panel_status(),
                     &mut self.last_fdd_track,
@@ -4192,7 +4207,6 @@ impl ApplicationHandler for App {
                 // every frame rather than mirrored from the clicks.
                 let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
-                let autocrop_src = self.autocrop_canvas_src();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
                     // through its own texture in the GPU render pass below.

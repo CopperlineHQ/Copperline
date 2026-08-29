@@ -692,18 +692,21 @@ pub(super) fn main_present_layout(
     autocrop_src: Option<(usize, usize, usize, usize)>,
 ) -> PresentLayout {
     let surface = (r.surface_size.0.max(1), r.surface_size.1.max(1));
-    let plan = main_present_plan(r);
     let Some(crop) = autocrop_src.filter(|(_, _, w, h)| *w > 0 && *h > 0) else {
         return PresentLayout {
             src_canvas: (0, 0, FB_WIDTH, window_present_height()),
             display_dst: main_clip_rect(r),
-            filter: plan.filter(),
+            filter: main_present_plan(r).filter(),
             chrome_dst: None,
         };
     };
+    // The *requested* setting, not the classic plan's resolved multiple:
+    // a surface too small for the whole canvas can still hold a whole
+    // multiple of the crop (a 700-wide window around a 640-wide game),
+    // and autocrop_layout takes its own fit against the crop.
     autocrop_layout(
         surface,
-        plan.multiple.is_some(),
+        integer_scaling_requested(),
         crop,
         window_present_height() - present_height(),
     )

@@ -8679,6 +8679,13 @@ fn autocrop_layout_refits_the_multiple_against_the_crop() {
     assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
     assert!(layout.display_dst.2 <= 600);
 
+    // A surface too small for the whole 716-wide canvas still holds a
+    // whole multiple of a 640-wide crop: the fit is the crop's own, not
+    // an inherited fallback from the classic full-canvas plan.
+    let layout = super::autocrop_layout((700, 500), true, (38, 69, 640, 400), 44);
+    assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
+    assert_eq!((layout.display_dst.2, layout.display_dst.3), (640, 400));
+
     // Smooth scaling keeps the sharp-bilinear fit of the crop.
     let layout = super::autocrop_layout((2000, 1200), false, (38, 69, 640, 400), 0);
     assert_eq!(layout.chrome_dst, None);
