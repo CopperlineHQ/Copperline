@@ -1165,12 +1165,7 @@ impl App {
         // A tool window shows panel text, not the emulated picture, so it
         // always takes the aspect-preserving fit -- integer scaling is a
         // setting for the machine's display.
-        let pixels = match build_pixels_for_window(
-            window.clone(),
-            texture_scale,
-            false,
-            ScalingMode::Fill,
-        ) {
+        let pixels = match build_pixels_for_window(window.clone(), texture_scale, false) {
             Ok(p) => p,
             Err(e) => {
                 warn!("tool window pixels init failed: {e}");

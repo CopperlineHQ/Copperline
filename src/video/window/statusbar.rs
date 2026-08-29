@@ -1923,7 +1923,15 @@ pub(super) fn edge(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
 /// texture after the frame is captured, so it is never recorded.
 /// `corner_inset` is the same figure the other two overlays take: the
 /// badge shares the performance readout's corner and loses it the same way.
-pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize, corner_inset: usize) {
+/// `anchor` is the visible display region in canvas pixels `(x, y, w,
+/// h)` -- the whole display classically, the crop rect under autocrop --
+/// so the badge stays in the corner the viewer actually sees.
+pub(super) fn draw_record_badge(
+    frame: &mut [u8],
+    texture_scale: usize,
+    corner_inset: usize,
+    anchor: (usize, usize, usize, usize),
+) {
     let s = texture_scale;
     let px = 2 * s;
     let pad = 4 * s;
@@ -1936,8 +1944,8 @@ pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize, corner_i
     let text_h = font::text_height(px);
     let box_w = dot_d + gap + text_w + 2 * pad;
     let box_h = text_h + 2 * pad;
-    let box_x = (FB_WIDTH * s).saturating_sub(margin + corner_inset + box_w);
-    let box_y = margin + corner_inset;
+    let box_x = ((anchor.0 + anchor.2) * s).saturating_sub(margin + corner_inset + box_w);
+    let box_y = anchor.1 * s + margin + corner_inset;
 
     fill_rect_blend(
         frame,
@@ -2001,6 +2009,7 @@ pub(super) fn draw_perf_overlay(
     texture_scale: usize,
     below_record_badge: bool,
     corner_inset: usize,
+    anchor: (usize, usize, usize, usize),
 ) {
     let s = texture_scale;
     let px = crate::video::menu_scale().factor() * s;
@@ -2021,9 +2030,10 @@ pub(super) fn draw_perf_overlay(
     let box_h = lines.len() * text_h + lines.len().saturating_sub(1) * line_gap + 2 * pad;
     // Away from the top-right corner on both axes, for the same reason and
     // by the same figure as the OSD leaves the bottom-left one.
-    let box_x = (FB_WIDTH * s).saturating_sub(margin + corner_inset + box_w);
+    let box_x = ((anchor.0 + anchor.2) * s).saturating_sub(margin + corner_inset + box_w);
     let record_badge_h = font::text_height(2 * s) + 2 * (4 * s);
-    let box_y = corner_inset
+    let box_y = anchor.1 * s
+        + corner_inset
         + if below_record_badge {
             margin + record_badge_h + 4 * s
         } else {
@@ -2066,23 +2076,27 @@ pub(super) fn draw_osd(
     warning: bool,
     texture_scale: usize,
     corner_inset: usize,
+    anchor: (usize, usize, usize, usize),
 ) {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels
     let pad = 4 * s;
     let margin = 8 * s;
     let fw = texture_width(s);
-    // Above the MT-32 panel as well as the status bar: the message belongs
-    // over the picture, not over the instrument under it.
-    let display_h = present_height() * s;
+    // The bottom-left of the visible display region (`anchor`, in canvas
+    // pixels: the whole display classically, the crop rect under
+    // autocrop): above the MT-32 panel as well as the status bar, since
+    // the message belongs over the picture, not the instrument under it.
+    let anchor_right = ((anchor.0 + anchor.2) * s).min(fw);
+    let display_h = (anchor.1 + anchor.3) * s;
 
-    let text_w =
-        font::text_width(text, px).min(fw.saturating_sub(2 * margin + corner_inset + 2 * pad));
+    let text_w = font::text_width(text, px)
+        .min(anchor_right.saturating_sub(anchor.0 * s + 2 * margin + corner_inset + 2 * pad));
     let text_h = font::text_height(px);
     let box_h = text_h + 2 * pad;
-    let box_x = margin + corner_inset;
+    let box_x = anchor.0 * s + margin + corner_inset;
     // What is left of the width once the box has come in off the corner.
-    let box_w = (text_w + 2 * pad).min(fw.saturating_sub(box_x + margin));
+    let box_w = (text_w + 2 * pad).min(anchor_right.saturating_sub(box_x + margin));
     let box_y = display_h.saturating_sub(margin + box_h + corner_inset);
 
     fill_rect_blend(

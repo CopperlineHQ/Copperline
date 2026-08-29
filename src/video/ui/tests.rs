@@ -3079,6 +3079,7 @@ fn panels_render_into_their_rects() {
         ],
         pixel_aspect: PixelAspect::Tv,
         scaling: crate::config::DisplayScaling::Smooth,
+        autocrop: false,
         tv_centre: crate::config::TvCentre::default(),
         tv_centre_applies: true,
         shader: crate::config::ShaderKind::None,

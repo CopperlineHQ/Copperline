@@ -42,6 +42,7 @@ pub enum MenuAction {
     // Video.
     SetPixelAspect(PixelAspect),
     SetDisplayScaling(DisplayScaling),
+    ToggleAutocrop,
     SetShader(ShaderKind),
     SetTint(Tint),
     SetMenuScale(MenuScale),
@@ -467,6 +468,9 @@ pub struct MenuState<'a> {
     pub port_devices: [PortDevice; 2],
     pub pixel_aspect: PixelAspect,
     pub scaling: DisplayScaling,
+    /// Whether the window presentation crops to the programmed display
+    /// window ([display] autocrop).
+    pub autocrop: bool,
     /// Where the TV presentation centres the picture, and whether the
     /// control applies (it is a TV-aperture nudge, so full overscan has
     /// nothing for it to move).
@@ -781,6 +785,7 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
         MenuRow::submenu("Scaling", scaling_rows(s)),
+        MenuRow::toggle("Autocrop", MenuAction::ToggleAutocrop, s.autocrop),
         centring_row(s),
         MenuRow::submenu("CRT Shader", shader_rows(s)),
         shader_strength_row(s),
@@ -807,6 +812,7 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
         MenuRow::submenu("Scaling", scaling_rows(s)),
+        MenuRow::toggle("Autocrop", MenuAction::ToggleAutocrop, s.autocrop),
         centring_row(s),
         MenuRow::submenu("CRT Shader", shader_rows(s)),
         shader_strength_row(s),
@@ -1330,6 +1336,7 @@ mod tests {
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
+            autocrop: false,
             tv_centre: TvCentre::default(),
             tv_centre_applies: true,
             shader: ShaderKind::None,

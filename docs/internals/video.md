@@ -573,6 +573,37 @@ surface: the field is presented at a TV-like 4:3 aspect plus the
 is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
 
+The emulator window is drawn onto the surface by its own scaling pass
+(`window/scaler.rs`), not the `pixels` crate's built-in renderer (the tool
+windows keep the built-in Fill renderer). The built-in renderer can only
+place the texture at whole multiples of *itself*, which welds the displayed
+integer multiple to the texture's supersample factor and capped fullscreen
+integer scaling at 4x on large displays; the scaler pass takes the
+destination rect and filter as inputs instead, so the planned multiple is
+drawn whatever the texture factor is. Point sampling stays exact past the
+cap because the CPU present copy replicates each canvas pixel into an
+S-wide texel block: every sample inside a canvas pixel reads the same
+colour, and sample centres can never land on a canvas-pixel boundary
+(`window/scaler.rs` carries the arithmetic). The smooth filter is the same
+texel-snapped sharp bilinear the built-in Fill renderer used, in the pass's
+own WGSL. `PresentLayout` (`window/present.rs`) is the single source for
+the pass's draws, the cursor mapping and the overlay anchors.
+
+`[display] autocrop` presents through the same pass with a second draw:
+the display quad samples the content sub-rect of the canvas -- derived
+each frame from the programmed display window the renderer painted with
+(`RenderResult::content_rect`, carried through the same shifts
+`post_process_rendered_field` applies and inverted through the same
+row/column maps the present copy uses) -- and the chrome band (panels and
+status bar) is drawn separately along the surface bottom at its width-fit
+scale. `AutocropLatch` smooths the per-frame envelope: growth is adopted
+immediately, border-only frames hold the previous crop (like the aperture
+latch), and a strictly smaller envelope is adopted only after holding
+steady for its stability window, so screen transitions do not pump the
+zoom. The crop suspends itself whenever another pass owns the display
+rect (open overlays, the bezel and CRT presets, RTG scanout) and for
+programmable scans; captures never see it.
+
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have
 arrived first. `pixels` rebuilds its swapchain from the size the last
@@ -704,8 +735,8 @@ against a real emulator instance in the unit tests.
 
 The optional tube emulation (`[display] shader`, off by default) is a second
 pass inside the same `pixels` `render_with` closure the RTG texture uses:
-the scaling renderer draws the composited buffer first, then `CrtShader`
-re-draws the display rectangle through a fragment shader. Its viewport is
+the presentation scaler pass draws the composited buffer first, then
+`CrtShader` re-draws the display rectangle through a fragment shader. Its viewport is
 the display sub-rect of the letterboxed clip rect -- the clip rect scaled by
 `present_height() / window_present_height()`, the same multiply-then-divide
 the RTG display rect uses so the two land identically -- and it samples only
@@ -778,7 +809,7 @@ screenshots, frame dumps, video recording, CCP capture and the web frontend
 all read the CPU presentation buffer, and the shader only ever writes to the
 surface. Strength 0 makes every preset's arithmetic an exact identity, but
 the pass is still a resample through a plain linear sampler where the
-scaling renderer uses a texel-snapped sharp bilinear, so it is marginally
+scaler pass uses a texel-snapped sharp bilinear, so it is marginally
 softer at magnification than the pass-through; `ShaderKind::None` skips the
 pass entirely and is the only zero-cost path.
 

@@ -688,14 +688,16 @@ The fit is taken in whole canvas pixels against the physical surface --
 the canvas is re-rendered at whatever factor fits, rather than drawn at
 whole multiples of a fixed high-DPI texture -- so every step exists on
 every display: a 2x-DPI laptop whose screen holds three physical pixels
-per canvas pixel but not four gets the 3x picture, and fractional desktop
-scales such as 150% take their whole physical multiples the same way. The
-status bar and menus are rendered at the fitted factor too, so they stay
-sharp at any step (the factor is capped at 4x; larger fits continue as
-whole multiples of the 4x canvas). Only when the window is too small for
-even a 1:1 copy -- smaller than the canvas itself in physical pixels --
-does the picture fall back to the smooth fit rather than cropping to what
-fits. RTG board modes follow the setting too: their frame is scaled
+per canvas pixel but not four gets the 3x picture, fractional desktop
+scales such as 150% take their whole physical multiples the same way,
+and a 5K or 6K display in fullscreen fills as much of its height as the
+next whole multiple allows (the internal render factor is capped at 4x,
+but the displayed multiple is not -- the display's pixels stay exact
+whole blocks past the cap; only the status bar and menus, drawn at the
+capped factor, are resampled there). Only when the window is too small
+for even a 1:1 copy -- smaller than the canvas itself in physical pixels
+-- does the picture fall back to the smooth fit rather than cropping to
+what fits. RTG board modes follow the setting too: their frame is scaled
 from its own native resolution, so a 640x480 board screen is drawn at 1x,
 2x, 3x of *those* pixels inside the display area.
 
@@ -709,6 +711,27 @@ onto 537 rows for the 4:3 shape before presentation. The monitor-bezel mode
 the window by design and is not itself integer-exact. The menu's *Video
 Settings > Scaling* item switches modes live without touching the config;
 there is no environment-variable override.
+
+`autocrop` (default off) crops the window presentation to the display
+window the hardware actually programs, instead of the fixed TV aperture:
+most games drive well under the full scan (a 320x200 display uses 400 of
+the 570 woven lines), and cropping the unused border lets the picture
+fill far more of a 16:9 or 21:9 screen -- with `scaling = "integer"` the
+whole-number fit is retaken against the cropped picture, so a 200-line
+game often earns a full multiple more than the uncropped canvas would.
+The crop is derived every frame from the programmed display window (the
+same per-line model the renderer paints with, so mid-frame rewrites and
+DIW tricks are already folded in), grows instantly when a program opens
+a larger display, and tightens only after a smaller one has held steady
+for about half a second, so screen transitions do not pump the zoom.
+The status bar and any instrument panels keep their size in a band along
+the window bottom. A window-presentation setting only: screenshots,
+frame dumps and recordings always keep their configured aperture.
+Automatically suspended where it cannot apply -- while a menu or panel
+is open, under a monitor bezel or CRT preset (the tube look frames the
+whole glass), for RTG board scanout, and for programmable multisync
+scans. The menu's *Video Settings > Autocrop* toggle flips it live
+without touching the config.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

@@ -326,6 +326,7 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.scaling,
             Some(s) => parse_display_scaling(s)?,
         };
+        let autocrop = raw.display.autocrop.unwrap_or(defaults.autocrop);
         let deinterlace = raw.display.deinterlace.unwrap_or(defaults.deinterlace);
         let phosphor = match raw.display.phosphor {
             None => defaults.phosphor,
@@ -1244,6 +1245,7 @@ impl TryFrom<RawConfig> for Config {
             tv_centre,
             pixel_aspect,
             scaling,
+            autocrop,
             deinterlace,
             phosphor,
             shader,

@@ -983,6 +983,7 @@ fn main() -> Result<()> {
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     video::set_display_scaling(cfg.scaling);
+    video::set_autocrop(cfg.autocrop);
     video::set_menu_scale(cfg.menu_scale);
     // A fascia belongs to a machine that carries the instrument: with the
     // serial port out of MIDI mode, or another device chosen, the strip
@@ -1142,6 +1143,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     // the default aspect and scaling; the machine it starts applies its own
     // (see start_configured_machine).
     video::set_display_scaling(config::DisplayScaling::Smooth);
+    video::set_autocrop(false);
     // The launcher opens before a machine config is built, so the menu size
     // comes straight off the raw file.
     video::set_menu_scale(raw_cfg.menu_scale());

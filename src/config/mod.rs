@@ -307,6 +307,12 @@ pub struct Config {
     /// [`DisplayScaling`]. Orthogonal to `pixel_aspect`, which decides what
     /// the canvas itself is.
     pub scaling: DisplayScaling,
+    /// Crop the window presentation to the display window the hardware
+    /// programs (`[display] autocrop`, default off), so a display using
+    /// fewer lines than the full scan fills more of the window -- the
+    /// Amiberry-style autocrop. A window-presentation setting only:
+    /// captures always keep their configured aperture.
+    pub autocrop: bool,
     /// Motion-adaptive deinterlacing of LACE content (on by default).
     /// Off, every field is plain line-doubled as it arrives, which shows
     /// interlace bob/flicker like a real TV without persistence.
@@ -2348,6 +2354,7 @@ impl Default for Config {
             tv_centre: TvCentre::default(),
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
+            autocrop: false,
             deinterlace: true,
             phosphor: 0.0,
             shader: ShaderMode::None,

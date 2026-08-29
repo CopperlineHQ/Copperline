@@ -248,6 +248,7 @@ impl RawConfig {
             &overlay.display.pixel_aspect,
         );
         take(&mut self.display.scaling, &overlay.display.scaling);
+        take(&mut self.display.autocrop, &overlay.display.autocrop);
         take(&mut self.display.menu_scale, &overlay.display.menu_scale);
         take(&mut self.display.shader, &overlay.display.shader);
         take(
@@ -314,6 +315,11 @@ pub(crate) struct RawDisplay {
     /// -number multiples of the canvas, centred, point-sampled).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) scaling: Option<String>,
+    /// Crop the window presentation to the display window the hardware
+    /// programs (default false). Window-only; captures keep their
+    /// configured aperture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) autocrop: Option<bool>,
     /// Motion-adaptive deinterlacing of interlaced content (default
     /// true); false line-doubles every field as it arrives.
     #[serde(skip_serializing_if = "Option::is_none")]

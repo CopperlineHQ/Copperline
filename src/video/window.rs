@@ -213,9 +213,10 @@ const MAX_TEXTURE_SCALE: usize = 2;
 /// Cap on the integer-scaling supersample factor, which follows the window
 /// fit rather than the host DPI (see `plan_present_scaling`). Bounds the
 /// backing texture and the per-frame present copy on very large displays;
-/// at 4x the canvas the picture is already 2864 physical pixels wide, and
-/// beyond it PixelPerfect's own whole multiples of the capped texture keep
-/// the fit integer.
+/// at 4x the canvas the texture is already 2864 physical pixels wide. The
+/// *displayed* multiple is not capped: the scaler pass draws the planned
+/// multiple whatever the texture factor, and its point sampling of the
+/// replicated display region stays exact past the cap (see `scaler`).
 const MAX_INTEGER_TEXTURE_SCALE: usize = 4;
 const STATUS_BAR_HEIGHT: usize = 44;
 /// How long the pointer rests on a menu category before it opens.
@@ -941,6 +942,12 @@ pub struct App {
     /// presentation geometry instead of snapping to the full framebuffer,
     /// so the picture does not jump at every Kickstart mode change.
     presentation_latch: PresentationLatch,
+    /// The smoothed playfield content envelope the autocrop presentation
+    /// shows, in woven presentation-buffer space (see [`AutocropLatch`]);
+    /// `None` until a standard frame has painted playfield.
+    present_content_rect: Option<bitplane::ContentRect>,
+    /// The grow-fast/shrink-stable smoothing behind it.
+    autocrop_latch: AutocropLatch,
     /// Whether the presented frame came from a programmable (multisync) scan
     /// rather than a woven 15 kHz one. Those fields reach the presentation
     /// buffer at their native height, so neither the CRT pass nor its
@@ -1460,6 +1467,11 @@ struct Render {
     window: Arc<Window>,
     pixels: Pixels<'static>,
     texture_scale: usize,
+    /// The pass that puts the composited buffer on the surface (see
+    /// [`scaler`]): the emulator window's replacement for the `pixels`
+    /// built-in scaling renderer, so the displayed integer multiple is
+    /// not welded to the texture's supersample factor.
+    scaler: scaler::PresentScaler,
     /// Native-resolution RTG display texture, drawn over the UI buffer in
     /// the `pixels` render pass (see [`rtg_texture`]). Present whenever the
     /// window is (its pipeline uses the same GPU device as `pixels`).
@@ -1583,6 +1595,10 @@ struct RenderWorkerResult {
     /// frames keep the previous geometry.
     tv_aperture: TvApertureFrame,
     programmable: bool,
+    /// Playfield content envelope in woven presentation-buffer space (x
+    /// in framebuffer pixels, y in woven rows), for the autocrop
+    /// presentation; `None` for border-only or programmable frames.
+    content_rect: Option<bitplane::ContentRect>,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
 }
@@ -1973,6 +1989,8 @@ impl App {
             rtg_present_dims: None,
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
             presentation_latch: PresentationLatch::default(),
+            present_content_rect: None,
+            autocrop_latch: AutocropLatch::default(),
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
@@ -3352,11 +3370,12 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
         let inner = window.inner_size();
-        let (texture_scale, scaling_mode) = plan_present_scaling(
+        let texture_scale = plan_present_scaling(
             integer_scaling_requested(),
             window.scale_factor(),
             (inner.width.max(1), inner.height.max(1)),
-        );
+        )
+        .texture_scale;
         // On Linux, restrict wgpu to the Vulkan backend. wgpu's GL fallback
         // initializes its EGL instance without a display handle (pixels uses
         // InstanceDescriptor::new_without_display_handle), so EGL drops to the
@@ -3370,23 +3389,22 @@ impl ApplicationHandler for App {
         // Other platforms keep wgpu's default backend set (Metal on macOS,
         // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
         // type-checked on every host.
-        let pixels =
-            match build_pixels_for_window(window.clone(), texture_scale, true, scaling_mode) {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("pixels init failed: {e}");
-                    if cfg!(target_os = "linux") {
-                        error!(
-                            "Copperline requires a Vulkan driver on Linux. Update your GPU \
+        let pixels = match build_pixels_for_window(window.clone(), texture_scale, true) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("pixels init failed: {e}");
+                if cfg!(target_os = "linux") {
+                    error!(
+                        "Copperline requires a Vulkan driver on Linux. Update your GPU \
                          drivers, or install a software Vulkan ICD (lavapipe): \
                          'vulkan-swrast' on Arch, 'mesa-vulkan-drivers' on Debian/Ubuntu, \
                          'mesa-vulkan-drivers' (or 'vulkan-loader') on Fedora."
-                        );
-                    }
-                    event_loop.exit();
-                    return;
+                    );
                 }
-            };
+                event_loop.exit();
+                return;
+            }
+        };
         info!(
             "window + pixels surface ready ({}x{}, texture {}x{})",
             inner.width,
@@ -3394,6 +3412,7 @@ impl ApplicationHandler for App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        let scaler = scaler::PresentScaler::new(pixels.device(), pixels.render_texture_format());
         let rtg_texture =
             rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
         let mut crt_shader =
@@ -3423,6 +3442,7 @@ impl ApplicationHandler for App {
             window,
             pixels,
             texture_scale,
+            scaler,
             rtg_texture,
             crt_shader,
             bezel_shader,
@@ -3738,10 +3758,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let previous_cursor_pos = self.cursor_pos;
                 self.last_cursor_phys = Some(position);
+                let autocrop_src = self.autocrop_canvas_src();
                 let pos = self
                     .render
                     .as_ref()
-                    .and_then(|r| cursor_texture_position(&r.pixels, position, r.texture_scale));
+                    .and_then(|r| main_cursor_position(r, autocrop_src, position));
                 // A button held on the dial turns it by following the hand
                 // round the face.
                 #[cfg(feature = "mt32")]
@@ -4099,13 +4120,11 @@ impl ApplicationHandler for App {
                 // resizes the surface via the Resized event that follows, but
                 // the backing texture is sized FB_WIDTH x window height
                 // times an integer supersample factor captured at window
-                // creation. Left stale, cursor_texture_position maps clicks
-                // against a texture extent that no longer matches the surface,
-                // so a status-bar click is mis-classified as a display click
-                // and grabs the mouse. Re-plan for the new scale (which also
-                // re-fits integer scaling, whose factor tracks the surface
-                // rather than the DPI); the Resized event that follows
-                // recomputes the scaling matrix from it.
+                // creation. Left stale, the UI drawn into it keeps the old
+                // monitor's crispness. Re-plan for the new scale (which also
+                // re-fits integer scaling's texture factor, which tracks the
+                // surface rather than the DPI); the redraw recomputes the
+                // clip rect from the same plan.
                 if let Some(r) = self.render.as_mut() {
                     let surface = r.window.inner_size();
                     if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
@@ -4173,6 +4192,7 @@ impl ApplicationHandler for App {
                 // every frame rather than mirrored from the clicks.
                 let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
+                let autocrop_src = self.autocrop_canvas_src();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
                     // through its own texture in the GPU render pass below.
@@ -4298,10 +4318,14 @@ impl ApplicationHandler for App {
                         self.shader_strength,
                         r.texture_scale,
                     );
+                    // The corner overlays anchor to the display region the
+                    // viewer actually sees: the whole display classically,
+                    // the crop rect while autocrop presents.
+                    let overlay_anchor = autocrop_src.unwrap_or((0, 0, FB_WIDTH, present_height()));
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.
-                        draw_record_badge(frame, r.texture_scale, corner);
+                        draw_record_badge(frame, r.texture_scale, corner, overlay_anchor);
                     }
                     if self.perf_overlay {
                         draw_perf_overlay(
@@ -4310,10 +4334,18 @@ impl ApplicationHandler for App {
                             r.texture_scale,
                             recording,
                             corner,
+                            overlay_anchor,
                         );
                     }
                     if let Some((text, warning)) = &osd {
-                        draw_osd(frame, text, *warning, r.texture_scale, corner);
+                        draw_osd(
+                            frame,
+                            text,
+                            *warning,
+                            r.texture_scale,
+                            corner,
+                            overlay_anchor,
+                        );
                     }
                     // The focus lights its control the way the pointer
                     // does, breathing between the two.
@@ -4326,6 +4358,17 @@ impl ApplicationHandler for App {
                     if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
                         ui::draw_drop_hint(frame, r.texture_scale);
                     }
+                    // The scaler pass draws the composited buffer with this
+                    // layout; every overlay pass below keys its viewport off
+                    // the same display rect, and the cursor mapping inverts
+                    // the same layout, so all of them agree by construction.
+                    // The branches that draw over the display (RTG, CRT,
+                    // bezel) only run when autocrop is suspended, so their
+                    // layout is the classic whole-texture letterbox.
+                    let layout = main_present_layout(r, autocrop_src);
+                    let present_clip = layout.display_dst;
+                    let present_draws = layout.draws();
+                    let scaler = &mut r.scaler;
                     let render_result = if rtg_gpu {
                         // Draw the UI buffer, then overdraw the display region
                         // with the native RTG texture (GPU-scaled). The display
@@ -4335,11 +4378,18 @@ impl ApplicationHandler for App {
                         // The board frame is drawn straight to the surface,
                         // so integer scaling applies to it in its own native
                         // pixels rather than through the canvas texture the
-                        // scaling renderer letterboxed above.
+                        // scaler pass letterboxed above.
                         let integer_scaling = integer_scaling_requested();
                         r.pixels.render_with(|encoder, target, ctx| {
-                            ctx.scaling_renderer.render(encoder, target);
-                            let (cx, cy, cw, ch) = ctx.scaling_renderer.clip_rect();
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
+                            );
+                            let (cx, cy, cw, ch) = present_clip;
                             let disp_h = ch as f32 * present_height() as f32
                                 / window_present_height() as f32;
                             rtg.render(
@@ -4393,11 +4443,18 @@ impl ApplicationHandler for App {
                         let bezel_shader = &mut r.bezel_shader;
                         let sticker_pass = &mut r.sticker_pass;
                         r.pixels.render_with(|encoder, target, ctx| {
-                            ctx.scaling_renderer.render(encoder, target);
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
+                            );
                             let (uniforms, viewport) = crt_shader::uniforms_for(
                                 kind,
                                 strength,
-                                ctx.scaling_renderer.clip_rect(),
+                                present_clip,
                                 present_height(),
                                 window_present_height(),
                                 (ctx.texture_extent.width, ctx.texture_extent.height),
@@ -4453,7 +4510,17 @@ impl ApplicationHandler for App {
                             Ok(())
                         })
                     } else {
-                        r.pixels.render()
+                        r.pixels.render_with(|encoder, target, ctx| {
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
+                            );
+                            Ok(())
+                        })
                     };
                     if let Err(e) = render_result {
                         error!("pixels.render: {e}");
@@ -6200,6 +6267,7 @@ mod kbdpanel;
 mod mt32panel;
 mod present;
 mod rtg_texture;
+mod scaler;
 pub(in crate::video) mod statusbar;
 mod stickers;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};

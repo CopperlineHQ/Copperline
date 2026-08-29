@@ -511,6 +511,49 @@ impl App {
         self.request_redraw();
     }
 
+    /// The content rect the autocrop presentation crops to, in canvas
+    /// pixels of the display region -- or `None` whenever the classic
+    /// whole-canvas layout must present instead: autocrop off, no
+    /// content yet, or a frame the crop does not apply to. An open
+    /// overlay suspends it (menus and panels draw into the display
+    /// region against the full canvas mapping, like the CRT and RTG
+    /// passes suspend themselves); the bezel and the CRT presets frame
+    /// the whole glass, so the tube look wins while one is on; RTG
+    /// board frames and programmable scans present their own geometry.
+    pub(super) fn autocrop_canvas_src(&self) -> Option<(usize, usize, usize, usize)> {
+        if !crate::video::autocrop()
+            || self.ui.active()
+            || self.rtg_present_dims.is_some()
+            || self.present_programmable
+            || self.present_width != FB_WIDTH
+            || self.bezel.is_on()
+            || self.crt_shader_kind != crate::config::ShaderKind::None
+        {
+            return None;
+        }
+        canvas_content_rect(
+            self.present_content_rect?,
+            self.present_rows,
+            self.overscan,
+            self.tv_centre,
+            self.present_tv_aperture_rows,
+            present_height(),
+        )
+    }
+
+    /// Switch the autocrop presentation live. Purely a scaler-pass
+    /// input -- the canvas, texture and window are untouched -- so
+    /// nothing needs rebuilding; the next redraw draws the other layout.
+    pub(super) fn apply_autocrop(&mut self, autocrop: bool) {
+        if autocrop == crate::video::autocrop() {
+            return;
+        }
+        crate::video::set_autocrop(autocrop);
+        self.show_osd(format!("Autocrop: {}", if autocrop { "on" } else { "off" }));
+        self.main_presentation_dirty = true;
+        self.request_redraw();
+    }
+
     /// Nudge the TV-presentation centring (Video Settings -> Screen
     /// Centring), the front-panel H-CENTER/V-CENTER knobs of a real
     /// monitor. A live presentation change like the bezel toggle: captures
@@ -621,6 +664,8 @@ impl App {
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;
         self.presentation_latch.reset();
+        self.autocrop_latch.reset();
+        self.present_content_rect = None;
         self.last_main_redraw_state = None;
         self.main_presentation_dirty = true;
         let _ = self.collect_threaded_render_results(false);
@@ -637,6 +682,17 @@ impl App {
                 self.render_recycle_fb = result.presentation_fb;
             }
             return false;
+        }
+
+        // Advance the autocrop smoothing on every rendered frame, reused
+        // ones included: a static screen is exactly what lets a smaller
+        // envelope prove itself stable. A change to the *presented* crop
+        // must repaint even when the pixels themselves are unchanged
+        // (the shrink adoption fires on the Nth identical frame).
+        let smoothed = self.autocrop_latch.resolve(result.content_rect);
+        if smoothed != self.present_content_rect {
+            self.present_content_rect = smoothed;
+            self.main_presentation_dirty = true;
         }
 
         if result.reused_previous {
@@ -806,6 +862,8 @@ impl App {
             // buffer instead of producing the first returning chipset frame.
             self.render_generation = self.render_generation.wrapping_add(1);
             self.presentation_latch.reset();
+            self.autocrop_latch.reset();
+            self.present_content_rect = None;
         }
         self.rtg_present_dims = Some((native_w, native_h));
         self.main_presentation_dirty = true;
@@ -852,7 +910,7 @@ impl App {
         } else {
             0
         };
-        bitplane::render(self.emu.bus_mut(), &mut self.fb);
+        let field_content = bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
         let field_rows = post_process_rendered_field(
@@ -878,6 +936,18 @@ impl App {
             !geometry.programmable,
             &mut next_present_fb,
         );
+        let smoothed = self.autocrop_latch.resolve(woven_content_rect(
+            field_content,
+            geometry.programmable,
+            visible_start_vpos,
+            h_shift,
+            FB_WIDTH * canvas_scale,
+            rows,
+        ));
+        if smoothed != self.present_content_rect {
+            self.present_content_rect = smoothed;
+            self.main_presentation_dirty = true;
+        }
         let next_tv_aperture_rows = self
             .presentation_latch
             .resolve_tv_aperture(standard_tv_aperture_frame(geometry, rows, &base));
