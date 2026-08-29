@@ -1035,6 +1035,55 @@ fn display_window_uses_diwhigh_upper_vertical_bits() {
 }
 
 #[test]
+fn empty_vertical_display_window_never_contains_a_line() {
+    // DIWSTRT.V == DIWSTOP.V (parked on line 301 via DIWHIGH, the Nexus 7
+    // scene-blanking programming): the vertical flop's set and reset
+    // comparators tie and reset wins, so no row of the frame is inside the
+    // window. The renderer's level approximation must read the tie as
+    // closed rather than wrapping it into an always-open window; a frame
+    // like this fetches nothing, so every row rides the synthesized
+    // register-derived path and this gate is all that blanks it
+    // (timing-test/vdiwprobe-empty pins the full render).
+    let control = ControlState {
+        diwstrt: 0x2D81,
+        diwstop: 0x2DC1,
+        diwhigh: DiwHigh::ecs_explicit(0x2101),
+        ..ControlState::default()
+    };
+    assert_eq!(control.diw_v_start(), 301);
+    assert_eq!(control.diw_v_stop(), 301);
+    for line in 0..280 {
+        assert!(
+            !control.display_window_contains_line(line, PAL_VISIBLE_LINE0),
+            "line {line} must stay border under an empty vertical window"
+        );
+    }
+}
+
+#[test]
+fn captured_dma_row_overrides_tie_valued_vertical_window() {
+    // A tie written mid-frame over an already-open flop keeps the window
+    // open until the shared comparator line; the rows scanned in between
+    // carry a DMA capture, which overrides the level test's tie-as-closed
+    // reading (timing-test/vdiwprobe-tieopen pins the full render).
+    let control = ControlState {
+        diwstrt: 0x9781,
+        diwstop: 0x97C1,
+        ..ControlState::default()
+    };
+    assert_eq!(control.diw_v_start(), control.diw_v_stop());
+    let h_rows = compute_h_window_rows(&[control], &[Vec::new()], PAL_VISIBLE_LINE0);
+    assert!(
+        line_display_window_bounds(control, &[], 0, PAL_VISIBLE_LINE0, true, &h_rows[0]).is_some(),
+        "a captured row must stay visible under tie-valued registers"
+    );
+    assert!(
+        line_display_window_bounds(control, &[], 0, PAL_VISIBLE_LINE0, false, &h_rows[0]).is_none(),
+        "an uncaptured row under a tie must stay border"
+    );
+}
+
+#[test]
 fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
     let base = ControlState {
         diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16,
@@ -1055,8 +1104,9 @@ fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
         std::slice::from_ref(&segments.to_vec()),
         PAL_VISIBLE_LINE0,
     );
-    let bounds = line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, &h_rows[0])
-        .expect("window open");
+    let bounds =
+        line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, false, &h_rows[0])
+            .expect("window open");
     assert_eq!((bounds.x_start, bounds.x_stop), narrowed.display_window_x());
     assert_eq!(bounds.carried_open_ext_fb, 0);
 }
@@ -1084,7 +1134,8 @@ fn carried_open_h_window_extends_paint_to_fetch_origin() {
     // Flip-flop never clears: the whole line is one open run.
     assert_eq!(h_rows[0].open_runs(), &[(0, FB_WIDTH)]);
     assert_eq!(h_rows[0].comparator_anchor, None);
-    let bounds = line_display_window_bounds(control, &[], 0, 48, &h_rows[0]).expect("window open");
+    let bounds =
+        line_display_window_bounds(control, &[], 0, 48, false, &h_rows[0]).expect("window open");
     // Paint extends left of the $C0 anchor to the fetch-derived origin
     // (the standard display left edge), restoring the hidden samples.
     assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
@@ -1117,7 +1168,8 @@ fn carried_open_row_that_closes_and_reopens_still_reveals_the_left_data() {
     // Row 1 entered open (carried), closed at $91, reopened at $C0.
     assert_eq!(h_rows[1].open_runs(), &[(0, close_x), (anchor_x, FB_WIDTH)]);
     assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
-    let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
+    let bounds =
+        line_display_window_bounds(control, &[], 1, 48, false, &h_rows[1]).expect("window open");
     // Paint still starts at the fetch origin; the per-pixel window gate
     // and the closed-interval border mask hide the closed gap.
     assert_eq!(bounds.x_start, STANDARD_VISIBLE_X0);
@@ -1143,7 +1195,8 @@ fn reachable_diwstop_keeps_the_window_clip() {
     // Row 1 (a line whose predecessor closed the flip-flop) opens at the
     // comparator anchor.
     assert_eq!(h_rows[1].comparator_anchor, Some(anchor_x));
-    let bounds = line_display_window_bounds(control, &[], 1, 48, &h_rows[1]).expect("window open");
+    let bounds =
+        line_display_window_bounds(control, &[], 1, 48, false, &h_rows[1]).expect("window open");
     assert_eq!(bounds.x_start, anchor_x);
     assert_eq!(bounds.carried_open_ext_fb, 0);
 }
@@ -1432,6 +1485,7 @@ fn closed_interval_repaint_follows_copper_color00_writes() {
         &base_controls,
         &control_segments,
         &h_window_rows,
+        &[],
         PAL_VISIBLE_LINE0,
         1,
     );
@@ -1717,6 +1771,7 @@ fn prepared_planar_pixels_match_word_sampler_for_all_playfield_taps() {
         &plane_words,
         &pixels,
         fetched_pixels,
+        false,
     );
     let delay_sets: [[i32; 8]; 3] = [
         [0; 8],
@@ -8813,6 +8868,7 @@ fn fast_playfield_interior_matches_scalar_oracle() {
             &planes,
             &prepared,
             fetched_pixels,
+            false,
         );
 
         let render = |fast: bool| {
@@ -8894,6 +8950,7 @@ fn fast_playfield_interior_engages_for_standard_screens() {
         &planes,
         &prepared,
         fetched_pixels,
+        false,
     );
 
     let pixel_repeat = control.framebuffer_pixel_repeat();

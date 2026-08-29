@@ -7726,8 +7726,20 @@ fn display_window_contains_vpos(diwstrt: u16, diwstop: u16, diwhigh: DiwHigh, vp
     }
     let start = diw_v_start(diwstrt, diwhigh) as u32;
     let mut stop = diw_v_stop(diwstop, diwhigh) as u32;
+    // DIWSTRT.V == DIWSTOP.V never opens: both flop comparators match on
+    // the same line and reset wins the tie (reevaluate_diw_vertical_flop),
+    // so the level approximation must read the empty window as closed,
+    // not as a full wrap-around one. The approximation cannot see a flop
+    // an earlier DIWSTRT already opened this frame (a mid-frame rewrite
+    // to a tie leaves it open until the shared comparator line); callers
+    // that can know the flop's history -- the live flop for the current
+    // line, the frame's DMA capture for rendered rows -- prefer it over
+    // this level test.
+    if start == stop {
+        return false;
+    }
     let mut v = vpos;
-    if stop <= start {
+    if stop < start {
         stop += 0x100;
         if v < start {
             v += 0x100;
@@ -9269,6 +9281,7 @@ fn live_sprite_playfield_collision_bits_in_range(
     clxdat
 }
 
+#[allow(clippy::too_many_arguments)]
 fn live_manual_bpl_collision_bits_in_range(
     frame_base: RenderRegisterSnapshot,
     bpldat_index: &BeamEventIndex,
@@ -9278,6 +9291,7 @@ fn live_manual_bpl_collision_bits_in_range(
     beam_y: i32,
     x_start: i32,
     x_stop: i32,
+    vertical_open: bool,
     display_enable_x: Option<i32>,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
@@ -9326,6 +9340,7 @@ fn live_manual_bpl_collision_bits_in_range(
                 x_start,
                 x_stop,
                 MAX_MANUAL_BPL_NATIVE_SAMPLES,
+                vertical_open,
                 display_enable_x,
             );
         }
@@ -9352,6 +9367,7 @@ fn live_collision_aga_decode(agnus_revision: AgnusRevision) -> bool {
     matches!(agnus_revision, AgnusRevision::AgaAlice)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn live_manual_bpl_word_collision_bits(
     planes: [u16; 8],
     frame_base: RenderRegisterSnapshot,
@@ -9363,6 +9379,7 @@ fn live_manual_bpl_word_collision_bits(
     x_start: i32,
     x_stop: i32,
     max_native_samples: usize,
+    vertical_open: bool,
     display_enable_x: Option<i32>,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
@@ -9437,17 +9454,14 @@ fn live_manual_bpl_word_collision_bits(
                     continue;
                 }
                 let pixel_control = control_replay.control_for_x(x);
-                if !display_window_contains_vpos(
-                    pixel_control.diwstrt,
-                    pixel_control.diwstop,
-                    pixel_control.diwhigh,
-                    beam_y as u32,
-                ) || !live_display_window_contains_x(
-                    pixel_control.diwstrt,
-                    pixel_control.diwstop,
-                    pixel_control.diwhigh,
-                    x,
-                ) {
+                if !vertical_open
+                    || !live_display_window_contains_x(
+                        pixel_control.diwstrt,
+                        pixel_control.diwstop,
+                        pixel_control.diwhigh,
+                        x,
+                    )
+                {
                     continue;
                 }
                 if collision.pf1_match && collision.pf2_match {

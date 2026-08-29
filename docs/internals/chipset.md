@@ -278,6 +278,34 @@ latch is part of the save state: it is history-dependent, and control
 sessions can snapshot mid-frame where no register-derived reconstruction
 is exact.
 
+The tie has a deliberate use: parking DIWSTRT.V and DIWSTOP.V on the same
+line (below the visible area, via DIWHIGH's high bits) programs a window
+that never opens, blanking every bitplane for the frame while the program
+redraws its buffers. Sprites have no bitplane vertical comparator, so a
+backdrop kept on BPLCON3.BRDRSPRT sprites stays on screen across the
+blank (Nexus 7 blanks its scene transitions this way, DIWSTRT.V =
+DIWSTOP.V = 301, over a sprite spiral backdrop). The renderer's
+register-derived level approximation of the flop must read the tie as
+closed too: reading it as a wrap-around window painted such frames with
+buffer contents the hardware never fetched, and because a never-open
+frame captures no DMA rows at all, the DMA-capture authority that
+normally blanks uncaptured rows had nothing to say. The
+`vdiwprobe-empty` golden render pins this whole-frame case
+(vAmiga-verified bijectively); `vdiwprobe-flop`'s tie band pins the
+mid-frame one.
+
+A tie only guarantees the window never opens, though: rewriting the
+registers to a tie mid-frame over a flop an earlier DIWSTRT match
+already set changes nothing until the beam reaches the shared comparator
+line, where reset wins. The level approximation cannot see that history,
+so everywhere the renderer consults it, a row whose DMA capture recorded
+a fetch overrides it as open -- the capture is the Agnus flop's own
+per-line record -- and the level test decides only rows where nothing
+was fetched. The same applies on the bus side: the live collision replay
+takes the current line's flop, and only the future-line lookahead falls
+back to the level test. The `vdiwprobe-tieopen` golden render pins the
+tie-over-an-open-flop case (vAmiga-verified).
+
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
 BPLCON0 LACE is set; outside interlace it holds its value - the power-on
 state is set, so progressive fields normally read LOF=1, and a value
