@@ -1,0 +1,17 @@
+# A4000 with a 25 MHz 68040 CPU card WITHOUT local RAM (fast regions are
+# the 16M Ramsey motherboard RAM and a 128M Zorro III board), matching the
+# maintainer's RAM-less real 040 card for the accelprobe comparison.
+rom = "../test-assets/Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
+[machine]
+profile = "A4000"
+[cpu]
+model = "68040"
+clock_mhz = 25
+[memory]
+motherboard = "2M"
+z3 = "128M"
+[emulation]
+speed = "real"
+[floppy.df0]
+path = "accelprobe.adf"
+write_protected = true

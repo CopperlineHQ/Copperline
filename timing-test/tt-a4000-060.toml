@@ -1,0 +1,20 @@
+# A4000 with a 50 MHz 68060 CPU card carrying 64M of local RAM, 16M of
+# Ramsey motherboard RAM, and a 128M Zorro III RAM board: the emulated
+# mirror of the maintainer's real A4000/BFG9060/ZZ9000 for the accelprobe
+# real-hardware comparison (rows discover the regions from the exec MemList,
+# so exact sizes only matter for which rows appear).
+rom = "../test-assets/Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
+[machine]
+profile = "A4000"
+[cpu]
+model = "68060"
+clock_mhz = 50
+[memory]
+motherboard = "2M"
+accelerator = "64M"
+z3 = "128M"
+[emulation]
+speed = "real"
+[floppy.df0]
+path = "accelprobe.adf"
+write_protected = true
