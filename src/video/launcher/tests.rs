@@ -2637,6 +2637,9 @@ fn a_dial_out_port_needs_no_privilege() {
     state.edit_commit();
     assert!(state.editing().is_none(), "port 23 dial-out was refused");
     assert_eq!(state.setup.serial_connect.as_deref(), Some(":23"));
+    // And no host is invented for it: the half-address reaches the config
+    // as typed, and the run explains what is missing.
+    assert_eq!(state.setup.to_raw().serial.connect.as_deref(), Some(":23"));
 }
 
 #[cfg(feature = "midi")]

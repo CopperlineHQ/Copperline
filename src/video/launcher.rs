@@ -3192,8 +3192,8 @@ impl MachineSetup {
         // A half-typed address leaves here whole: the config file and the
         // run get the defaults filled in, while the session keeps only what
         // was typed so emptying a box reverts it.
-        raw.serial.listen = self.serial_listen.as_deref().map(complete_host_port);
-        raw.serial.connect = self.serial_connect.as_deref().map(complete_host_port);
+        raw.serial.listen = self.serial_listen.as_deref().map(complete_listen);
+        raw.serial.connect = self.serial_connect.as_deref().map(complete_connect);
         // Compared against the resolved value, not the raw tri-state: the
         // toggle is a plain on/off, so "unset" and "explicitly off" look
         // the same to it and must not produce a spurious `telnet = false`
@@ -4421,7 +4421,7 @@ impl MachineSetup {
             F::SerialConnect => self
                 .serial_connect
                 .as_deref()
-                .map(complete_host_port)
+                .map(complete_connect)
                 .unwrap_or_else(|| "(host:port)".to_string()),
             // The listen address does have a default, so an empty box shows
             // the address the run would actually bind.
@@ -4429,7 +4429,7 @@ impl MachineSetup {
             F::SerialListen => self
                 .serial_listen
                 .as_deref()
-                .map(complete_host_port)
+                .map(complete_listen)
                 .unwrap_or_else(|| crate::config::SERIAL_TCP_DEFAULT_LISTEN.to_string()),
             #[cfg(feature = "midi")]
             F::MidiOut => {
@@ -6468,19 +6468,35 @@ fn join_host_port(host: Option<&str>, port: Option<u16>) -> Option<String> {
     }
 }
 
-/// The address a run can use: the absent halves filled with their defaults.
-/// Only the spellings this launcher itself stores are completed; an address
-/// the split cannot rebuild -- a hand-written `host:notaport`, an
-/// unbracketed IPv6 literal -- passes through untouched, so it still fails
-/// loudly at Run instead of silently binding a port the config never named.
-fn complete_host_port(addr: &str) -> String {
+/// The address a run can use: the absent halves filled with their
+/// defaults. `default_host` is the field's own -- loopback for the listen
+/// addresses, and `None` for Connect, which has no host to assume: a
+/// port-only Connect passes through partial and the run refuses it with
+/// its own "needs a remote address" explanation rather than dialing a
+/// host nobody named. An address the split cannot rebuild -- a
+/// hand-written `host:notaport`, an unbracketed IPv6 literal -- passes
+/// through untouched too, so it still fails loudly at Run instead of
+/// silently binding a port the config never named.
+fn complete_host_port(addr: &str, default_host: Option<&str>) -> String {
     let (host, port) = split_host_port(addr);
     if join_host_port(host.as_deref(), port).as_deref() != Some(addr) {
         return addr.to_string();
     }
-    let host = host.unwrap_or_else(|| crate::config::SERIAL_DEFAULT_HOST.to_string());
+    let Some(host) = host.or_else(|| default_host.map(str::to_string)) else {
+        return addr.to_string();
+    };
     let port = port.unwrap_or(crate::config::SERIAL_DEFAULT_PORT);
     format!("{}:{port}", bracket_host(&host))
+}
+
+/// [`complete_host_port`] with the listen addresses' loopback default.
+fn complete_listen(addr: &str) -> String {
+    complete_host_port(addr, Some(crate::config::SERIAL_DEFAULT_HOST))
+}
+
+/// [`complete_host_port`] for the dial-out address: no host is assumed.
+fn complete_connect(addr: &str) -> String {
+    complete_host_port(addr, None)
 }
 
 /// Whether this process may bind the privileged ports. Only asked on the
@@ -8587,12 +8603,15 @@ impl LauncherState {
     fn checked_port(&mut self, field: LauncherField, typed: &str) -> Option<u16> {
         match typed.parse::<u32>() {
             Ok(p @ 1..=65535) => {
+                // A warning, not a refusal: the effective uid is only a
+                // hint (Linux grants low ports via CAP_NET_BIND_SERVICE
+                // and ip_unprivileged_port_start too), so the bind at Run
+                // stays the authority and says so itself if it disagrees.
                 #[cfg(all(unix, feature = "midi"))]
                 if p < 1025 && field == LauncherField::SerialListen && !can_bind_low_ports() {
                     self.status = Some(StatusMessage::err(format!(
-                        "port {p} needs root: run with sudo, or use 1025-65535"
+                        "port {p} usually needs root on macOS/Linux; the run will say if it cannot bind"
                     )));
-                    return None;
                 }
                 #[cfg(not(all(unix, feature = "midi")))]
                 let _ = field;
