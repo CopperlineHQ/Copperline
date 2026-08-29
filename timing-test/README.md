@@ -47,6 +47,34 @@ operand's transfer width, since the A1200 moves any span up to four
 bytes across its 32-bit chip bus in one cycle; the header says what
 would be needed to settle that.
 
+`./build.sh accelprobe` builds `accelprobe.adf`, a 32-row probe for
+accelerator CPUs (68020/030/040/060): exception round trips (supervisor
+stack in chip vs fast RAM), call and MOVEM costs, CPUSHL, and the raw
+read/write rate of the chip window plus every fast-RAM region the machine
+actually has -- the probe walks the exec MemList at boot, so one binary
+adapts to whichever CPU card and RAM mix is fitted (CPU-card, motherboard,
+Zorro III) and reports each region's base address alongside its numbers.
+Rows 27-29 replicate, primitive by primitive, the per-4K-page sequence the
+SetPatch/68040.library/mmu.library boot-time MMU table build performs
+(observed by tracing a real mmu.library run), which is why big-RAM machines
+pause at boot: that walk's cost scales with fitted RAM; from v2 (signature
+$ACCE1B02) the walk covers the LARGEST fast region, the one that dominates
+a real table build. The header records the Copperline predicted columns for
+an A4000 with a 50 MHz 68060 (CPU-card RAM), a 25 MHz 68040 and a 25 MHz
+68030 (`tt-a4000-060/-040/-030.toml`), plus REAL columns captured on the
+maintainer's A4000 (BFG9060 68060/50, a RAM-less A3640 68040/25, and a
+25 MHz Commodore 68030 CPU-slot board) with
+per-row verdicts: the 040's plain execution is over-billed ~2-2.5x while
+buses and traps are under-billed, fast RAM is three distinct speed classes
+on real silicon (CPU-card / motherboard / Zorro III), and the CPU-slot
+bridge makes a real chip-RAM read cost ~2.5-3.4 us. When adding columns,
+capture the 9600-baud serial stream, or type numbers from the CRT, never
+read them off a photo by eye. Boot it from
+a cold start and expect to power-cycle afterwards: the region rows scribble
+on fast RAM, so the OS is gone once the probe runs. The probe detects the
+CPU itself (MOVEC PCR/ITT0 probes with fault recovery) and sets a defined
+cache state per family; on a plain 68000 it renders only its signature rows.
+
 ## Running
 
 - **Copperline:** `copperline --config timing-test.toml --screenshot-after 12 out.png`
