@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.18.0" date="2026-08-29">
+      <description>
+        <p>A CD release: the Commodore CD32 Full Motion Video module plays Video CD and MPEG titles, the CD32 drive model and CPU bus timings are calibrated against a real machine with a purpose-built probe disc, CDXL video plays from cooked ISOs, and CD images extend to Nero NRG and cue sheets with WAVE and MP3 audio tracks. Also: a WinUAE/Amiberry/FS-UAE configuration converter, a Hayes/WiModem232 modem personality on the serial port with inbound calls and reproducible scripted sessions, run-ahead input-latency reduction, AGA 35 ns SHRES sprites and wide-fetch/palette fidelity cross-checked against vAmiga 5, a second drive and writable floppy images in the browser demo, bundled lide.device boot ROMs, hardened media and save-state parsers, and a broad set of Agnus/Denise display-window, sprite, Copper and floppy accuracy fixes.</p>
+      </description>
+    </release>
     <release version="0.17.0" date="2026-08-22">
       <description>
         <p>An audio release: Coppersynth, a built-in SoundFont General MIDI sound module in the style of a Roland Sound Canvas with an MT-32 translation layer and SC-55 front panel, a MacroSystem Toccata AD1848 sound board for AHI, an MHI MPEG audio decoder board, per-source audio stem capture and a per-source Audio tab in the debugger. Also: CD32 discs boot on the bundled AROS ROM with no Kickstart (Akiko drive-protocol and DMA fixes plus three upstream AROS series), a publisher kit that builds standalone single-game players, gamepads that work out of the box from a bundled controller database with keyboard and gamepad navigation of the whole UI, a redesigned About page and launcher sweep, Graffity RTG boards, a ZZ9000 SDK crypto accelerator board, a Zorro IDE activity LED, and Denise horizontal display-window and raster-centring accuracy fixes.</p>
