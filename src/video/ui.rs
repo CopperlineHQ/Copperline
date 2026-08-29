@@ -8008,14 +8008,7 @@ fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> Gre
         // has no drive-select line, but with no interface at all there is
         // nothing to say.
         F::BridgeCable if setup.bridge_interface_selected() => GreyedAs::DimmedValue,
-        F::ScsiUnit0
-        | F::ScsiUnit1
-        | F::ScsiUnit2
-        | F::ScsiUnit3
-        | F::ScsiUnit4
-        | F::ScsiUnit5
-        | F::ScsiUnit6
-        | F::BridgeDevice
+        F::BridgeDevice
         | F::BridgePort
         | F::BridgeCable
         | F::BridgeDensity

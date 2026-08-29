@@ -3551,8 +3551,9 @@ impl MachineSetup {
             // No controller, no SCSI: the ROM and unit rows go rather than
             // stand greyed under a setting most machines leave at None. They
             // return the moment a controller is chosen.
-            F::ScsiRom | F::ScsiRomOdd => self.scsi_controller.is_none(),
-            F::ScsiUnit0
+            F::ScsiRom
+            | F::ScsiRomOdd
+            | F::ScsiUnit0
             | F::ScsiUnit1
             | F::ScsiUnit2
             | F::ScsiUnit3
@@ -3646,25 +3647,16 @@ impl MachineSetup {
                 )
             }
             F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000 or Lide"),
-            // The ROM and drives belong to the fitted controller; greyed with
-            // none. The A3000's motherboard SCSI has no ROM of its own, and
-            // rom_odd is an A2091 split-EPROM option only.
+            // The ROM and drives belong to the fitted controller, and with
+            // none the rows are hidden outright (`row_hidden`), so only a
+            // fitted-but-unsuitable controller is ever explained here: the
+            // A3000's motherboard SCSI has no ROM of its own, and rom_odd
+            // is an A2091 split-EPROM option only.
             F::ScsiRom => reason(
                 self.scsi_controller
                     .is_some_and(ScsiController::is_zorro_board),
-                if self.scsi_controller.is_some() {
-                    "Zorro boards only"
-                } else {
-                    "no controller"
-                },
+                "Zorro boards only",
             ),
-            F::ScsiUnit0
-            | F::ScsiUnit1
-            | F::ScsiUnit2
-            | F::ScsiUnit3
-            | F::ScsiUnit4
-            | F::ScsiUnit5
-            | F::ScsiUnit6 => reason(self.scsi_controller.is_some(), "no controller"),
             F::ScsiRomOdd => reason(
                 self.scsi_controller == Some(ScsiController::A2091),
                 "A2091 only",
