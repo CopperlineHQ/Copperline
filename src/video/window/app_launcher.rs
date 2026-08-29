@@ -1034,6 +1034,9 @@ impl App {
                 Ok(setup) => {
                     if let Some(state) = self.launcher_state_mut() {
                         state.setup = setup;
+                        // The page being looked at may not exist under the
+                        // loaded machine (the second boot page, emptied).
+                        state.tab = state.setup.settle_tab(state.tab);
                         // Re-read host device lists so the loaded setup's pickers
                         // are populated, not stuck on "Default"/"None".
                         state.setup.refresh_host_devices();

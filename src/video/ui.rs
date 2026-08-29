@@ -5736,6 +5736,15 @@ fn launcher_nav_block_h(tab: launcher::LauncherTab) -> usize {
     LAUNCH_NAV_BLOCK_H + (rows - 1) * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP)
 }
 
+/// The Boot Priority page's paging button, when it has one: the first page
+/// offers the rest of the order, and only while there is a rest to offer.
+/// The second page needs none -- its Back button already goes to the first.
+fn boot_page_button(state: &LauncherState) -> Option<(&'static str, launcher::LauncherTab)> {
+    (state.tab == launcher::LauncherTab::BootPriority
+        && state.setup.boot_priority_has_second_page())
+    .then_some(("Next Page >", launcher::LauncherTab::BootPriorityMore))
+}
+
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
 /// sitting to the right of the priority stepper on a Boot Priority row.
 fn launcher_bootable_rect(rect: Rect, row_y: usize) -> Rect {
@@ -6444,7 +6453,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             state.setup.midi_out_is_csynth(),
         )
         .iter()
-        .filter(|r| !state.setup.row_hidden(r.field))
+        .filter(|r| state.setup.row_on_page(state.tab, r.field))
         .enumerate()
         {
             if !state.row_applies(r.field) {
@@ -6821,6 +6830,12 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     }
     for (i, &(_, target)) in state.tab.nav_options().iter().enumerate() {
         if launcher_nav_button_rect(rect, slot + i).contains(pos) {
+            return Some(UiControl::LauncherNavTab(target));
+        }
+    }
+    // The boot order's paging button, drawn in the slot after Back.
+    if let Some((_, target)) = boot_page_button(state) {
+        if launcher_nav_button_rect(rect, slot).contains(pos) {
             return Some(UiControl::LauncherNavTab(target));
         }
     }
@@ -8139,13 +8154,13 @@ fn draw_launcher_row(
             Some(GreyedAs::DimmedValue | GreyedAs::DimmedReason)
         ) {
             if greyed_as != Some(GreyedAs::Blank) {
-                // Where the value the row cannot have would sit: flush
-                // against the right edge of the stepper's left arrow, so
-                // every reason shares one margin whatever its length.
-                let (prev, _, _) = launcher_cycle_rects(rect, row_y);
+                // Where the value the row cannot have would sit: the control
+                // column's own left edge, so a reason lines up with the
+                // values above and below it rather than standing in from
+                // them by the width of a stepper arrow.
                 draw_panel_text(
                     frame,
-                    prev.x + prev.w,
+                    launcher_control_x(rect),
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
@@ -9229,7 +9244,7 @@ fn draw_launcher(
             state.setup.midi_out_is_csynth(),
         )
         .iter()
-        .filter(|r| !state.setup.row_hidden(r.field))
+        .filter(|r| state.setup.row_on_page(state.tab, r.field))
         .enumerate()
         {
             draw_launcher_row(frame, rect, state, r, i, row_offset, hover, scale);
@@ -9261,6 +9276,18 @@ fn draw_launcher(
             target == state.tab,
             lit(hover, UiControl::LauncherNavTab(target)),
             false,
+            scale,
+        );
+    }
+    // The rest of the boot order, when there is more of it than one page
+    // holds. Next to Back, in the slot a sibling link would have taken.
+    if let Some((label, target)) = boot_page_button(state) {
+        draw_text_button(
+            frame,
+            launcher_nav_button_rect(rect, slot),
+            label,
+            true,
+            lit(hover, UiControl::LauncherNavTab(target)),
             scale,
         );
     }
@@ -9351,20 +9378,15 @@ fn draw_launcher(
     }
     // The Boot Priority page spells out the valid priority range below the
     // rows, under a dimmed "Info:" heading.
+    // The first page only: a page holds nine drives at most, so the note
+    // always has its room under them, and the second page needs no second
+    // copy of it.
     if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
-        let help_top = (launcher_row_y(
-            rect,
-            launcher::rows(
-                LauncherTab::BootPriority,
-                state.setup.parallel_device(),
-                state.setup.serial_mode(),
-                state.setup.midi_out_is_mt32(),
-                state.setup.midi_out_is_csynth(),
-            )
-            .len()
-                + 1,
-        ) + row_offset)
-            .saturating_sub(10);
+        // Below a full page of drives, whether or not this machine has one:
+        // the note keeps the same place on the page however many rows are
+        // drawn above it, rather than riding up and down with the count.
+        let below_a_full_page = launcher::BOOTPRI_PAGE_ROWS + 2;
+        let help_top = (launcher_row_y(rect, below_a_full_page) + row_offset).saturating_sub(10);
         draw_panel_text(
             frame,
             launcher_pane_x(rect),

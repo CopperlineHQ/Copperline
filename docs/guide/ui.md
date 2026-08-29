@@ -606,16 +606,13 @@ The layout is:
   priority and a read-write/read-only **Access** field -- the config file
   itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
   the first four); **Host Disk**, for a real disk of this computer's (see
-  [](host-disks.md)); **Boot Priority**, which sets each IDE/SCSI drive's
+  [](host-disks.md)); **Boot Priority**, which sets each drive's
   synthesized-RDB boot priority (see below); **Create Image...**, which
   makes new ADF and HDF images (see below); **CD** (image, insert delay,
   CD32 NVRAM); and **Lide**, the built-in `[lide]` Zorro II IDE board --
-  personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), up to four drives (two
-  on RIDE/AT-Bus 2008, any of which can likewise be a CD image), and each
-  drive's own boot priority, kept on this page
-  rather than the shared Boot Priority one so the board's up-to-four drives
-  fit alongside it. Each sub-page has a **< Back** button in that block
-  that returns to Storage),
+  personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
+  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image). Each
+  sub-page has a **< Back** button in that block that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, networking, and audio boards, each
@@ -690,8 +687,12 @@ The layout is:
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
   A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM"),
-  with no stepper to reach for. A SCSI unit appears only once it carries a
-  disk, so the page lists what the machine can actually boot from.
+  with no stepper to reach for. A SCSI unit or Lide drive appears only once
+  it carries a disk, so the page lists what the machine can actually boot
+  from. The two IDE bays come first, then the SCSI units, then the Lide
+  board's drives. More drives than one page holds run onto a second, reached
+  by **Next Page >** beside the Back button; that page's own **< Back**
+  returns to the first. The note below the rows stays on the first page.
   Drives you add here with no priority of their own cascade so they do not tie:
   the first is 0 (just under DF0:'s 5), and each later one drops below the
   floppies -- -35, -40, -45. A drive already carrying a priority in the config

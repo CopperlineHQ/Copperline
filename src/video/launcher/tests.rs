@@ -3687,21 +3687,32 @@ fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
     s.set_path(F::LideDrive1, PathBuf::from("ch0-slave.hdf"));
     s.set_drive_bootpri(F::LideDrive0Boot, Some(5));
 
-    // Boot priority sits on the Lide page itself, not the shared Boot
-    // Priority page (see LIDE_ROWS's comment) -- so `has_boot_priority_rows`
-    // (which only tracks IDE/SCSI) is untouched by these two lide drives.
-    assert!(!s.has_boot_priority_rows());
+    // Boot priority lives on the shared Boot Priority page with every other
+    // drive's, so a filled Lide slot puts a row there.
+    assert!(s.has_boot_priority_rows());
     assert_eq!(s.value_label(F::LideDrive0Boot), "5");
     assert_eq!(s.disabled_reason(F::LideDrive1Boot), None);
-    // An empty slot keeps its boot row, greyed rather than hidden, so the
-    // page does not reshuffle as slots are filled.
-    assert!(!s.row_hidden(F::LideDrive2Boot));
-    assert_eq!(s.disabled_reason(F::LideDrive2Boot), Some("No drive"));
+    // Two IDE bays, which stand their ground empty, and the two Lide slots
+    // now carrying a disk. No SCSI controller is fitted here.
+    assert_eq!(s.boot_priority_row_count(), 4);
+    // An empty slot has nothing to order, so it takes no place in the list
+    // -- the same terms a SCSI unit is listed on.
+    assert!(s.row_hidden(F::LideDrive2Boot));
     // A slot the fitted board does not have goes entirely, drive row and
     // boot row together.
     s.cycle(F::LideBoard, true); // RIDE: one channel
     assert!(s.row_hidden(F::LideDrive2));
     assert!(s.row_hidden(F::LideDrive2Boot));
+    // The Lide page itself is drives and ROM only now.
+    assert!(!rows(
+        LauncherTab::Lide,
+        Default::default(),
+        Default::default(),
+        false,
+        false
+    )
+    .iter()
+    .any(|r| r.kind == RowKind::Bootpri));
     s.cycle(F::LideBoard, true); // AT-Bus 2008
     s.cycle(F::LideBoard, true); // None
     s.cycle(F::LideBoard, true); // back to RIPPLE for the round trip below
@@ -4958,5 +4969,152 @@ fn editing_a_drive_name_commits_to_the_setup() {
     assert_eq!(
         state.setup.drive_name(LauncherField::ScsiUnit0),
         Some("WORK")
+    );
+}
+
+/// Every drive that can boot lands on the Boot Priority page, and the Lide
+/// board's drives land after the machine's own -- which is also the order
+/// the cascade default ranks them in.
+#[test]
+fn lide_drives_take_their_place_after_ide_and_scsi_in_the_boot_order() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    s.select_model(Some(MachineModel::A1200));
+    s.set_path(F::IdeMaster, PathBuf::from("ide0.hdf"));
+    s.cycle(F::LideBoard, true); // RIPPLE: two channels, four drives
+    s.set_path(F::LideDrive0, PathBuf::from("lide0.hdf"));
+
+    let listed: Vec<_> = rows(
+        LauncherTab::BootPriority,
+        Default::default(),
+        Default::default(),
+        false,
+        false,
+    )
+    .iter()
+    .filter(|r| s.row_on_page(LauncherTab::BootPriority, r.field))
+    .map(|r| r.field)
+    .collect();
+    // The column titles, both IDE bays (the empty one stands its ground),
+    // then the one filled Lide slot. The empty Lide slots take no place.
+    assert_eq!(
+        listed,
+        vec![
+            F::SectionHeader,
+            F::IdeMasterBoot,
+            F::IdeSlaveBoot,
+            F::LideDrive0Boot
+        ]
+    );
+    assert_eq!(s.boot_priority_row_count(), 3);
+}
+
+/// The boot order runs onto a second page only when it outgrows the first,
+/// and a drive's page follows its position among the drives actually listed
+/// -- not its position in the table.
+#[test]
+fn a_long_boot_order_pages_and_a_short_one_does_not() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    s.select_model(Some(MachineModel::A1200));
+    s.cycle(F::LideBoard, true); // RIPPLE
+    for f in [F::LideDrive0, F::LideDrive1, F::LideDrive2, F::LideDrive3] {
+        s.set_path(f, PathBuf::from("lide.hdf"));
+    }
+
+    // Two IDE bays and four Lide drives: six rows, one page, and the note
+    // still has room under them. No SCSI in between, so every Lide drive
+    // stays on the first page -- paging counts drives listed, not table
+    // positions.
+    assert_eq!(s.boot_priority_row_count(), 6);
+    assert!(!s.boot_priority_has_second_page());
+    assert_eq!(
+        s.boot_page_of(F::LideDrive3Boot),
+        Some(LauncherTab::BootPriority)
+    );
+
+    // Fill the SCSI chain as well and the order outgrows one page. The
+    // first nine drives stay; the rest move over, and the note goes to
+    // make room for them.
+    s.cycle(F::ScsiController, true);
+    for f in [
+        F::ScsiUnit0,
+        F::ScsiUnit1,
+        F::ScsiUnit2,
+        F::ScsiUnit3,
+        F::ScsiUnit4,
+        F::ScsiUnit5,
+        F::ScsiUnit6,
+    ] {
+        s.set_path(f, PathBuf::from("scsi.hdf"));
+    }
+    assert_eq!(s.boot_priority_row_count(), 13);
+    assert!(s.boot_priority_has_second_page());
+
+    // Two IDE bays and seven SCSI units fill the first page exactly; all
+    // four Lide drives fall onto the second.
+    for f in [F::IdeMasterBoot, F::IdeSlaveBoot, F::ScsiUnit6Boot] {
+        assert_eq!(s.boot_page_of(f), Some(LauncherTab::BootPriority), "{f:?}");
+    }
+    for f in [
+        F::LideDrive0Boot,
+        F::LideDrive1Boot,
+        F::LideDrive2Boot,
+        F::LideDrive3Boot,
+    ] {
+        assert_eq!(
+            s.boot_page_of(f),
+            Some(LauncherTab::BootPriorityMore),
+            "{f:?}"
+        );
+    }
+    // Neither page draws more rows than one holds.
+    for tab in [LauncherTab::BootPriority, LauncherTab::BootPriorityMore] {
+        let drawn = rows(tab, Default::default(), Default::default(), false, false)
+            .iter()
+            .filter(|r| s.row_on_page(tab, r.field))
+            .count();
+        assert!(drawn <= BOOTPRI_PAGE_ROWS + 1, "{tab:?} draws {drawn}");
+    }
+
+    // The table itself fits the two pages that exist -- the compile-time
+    // bound behind `boot_page_of`'s two-page answer. A drive class that
+    // pushes past this needs a third page, not a silent pile-up.
+    assert!(BOOTPRI_ROWS.len() <= 2 * BOOTPRI_PAGE_ROWS);
+    // And with every slot filled, each page really draws no more than its
+    // share -- the same filter the draw path uses, not a re-stated cap.
+    let per_page: Vec<usize> = [LauncherTab::BootPriority, LauncherTab::BootPriorityMore]
+        .iter()
+        .map(|&tab| {
+            BOOTPRI_ROWS
+                .iter()
+                .filter(|r| s.row_on_page(tab, r.field))
+                .count()
+        })
+        .collect();
+    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, 4]);
+
+    // A setup swapped in under the panel (Load..., Defaults) may have no
+    // second page; the tab it was standing on settles back to the first.
+    assert_eq!(
+        s.settle_tab(LauncherTab::BootPriorityMore),
+        LauncherTab::BootPriorityMore,
+        "a full machine keeps its second page"
+    );
+    let empty = MachineSetup::default();
+    assert_eq!(
+        empty.settle_tab(LauncherTab::BootPriorityMore),
+        LauncherTab::BootPriority
+    );
+    assert_eq!(empty.settle_tab(LauncherTab::Lide), LauncherTab::Lide);
+
+    // Back on the second page returns to the first, not to Storage.
+    assert_eq!(
+        LauncherTab::BootPriorityMore.parent_tab(),
+        Some(LauncherTab::BootPriority)
+    );
+    assert_eq!(
+        LauncherTab::BootPriority.parent_tab(),
+        Some(LauncherTab::Storage)
     );
 }

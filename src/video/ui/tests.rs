@@ -350,6 +350,7 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::HostFs,
         LauncherTab::Whdload,
         LauncherTab::BootPriority,
+        LauncherTab::BootPriorityMore,
         LauncherTab::Lide,
         LauncherTab::AvVideo,
         LauncherTab::AvEmulation,
@@ -366,7 +367,19 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         for &device in &devices {
             for &mode in &modes {
                 let rows = launcher::rows(tab, device, mode, false, false);
-                for (i, r) in rows.iter().enumerate() {
+                // The boot order is paged: both of its pages carry the whole
+                // table, and each draws its own share of it under the column
+                // titles. A page never shows more than that many rows, so
+                // that is what has to fit -- see `BOOTPRI_PAGE_ROWS`.
+                let drawn = if matches!(
+                    tab,
+                    LauncherTab::BootPriority | LauncherTab::BootPriorityMore
+                ) {
+                    rows.len().min(launcher::BOOTPRI_PAGE_ROWS + 1)
+                } else {
+                    rows.len()
+                };
+                for (i, r) in rows.iter().take(drawn).enumerate() {
                     let row_y = launcher_row_y(rect, i) + row_offset;
                     let (prev, value, next) = launcher_cycle_rects(rect, row_y);
                     let (browse, clear) = launcher_path_rects(rect, row_y);
@@ -1007,7 +1020,7 @@ fn the_serial_address_box_hit_tests_to_its_own_edit() {
         state.setup.midi_out_is_csynth(),
     )
     .iter()
-    .filter(|r| !state.setup.row_hidden(r.field))
+    .filter(|r| state.setup.row_on_page(state.tab, r.field))
     .position(|r| r.field == LauncherField::SerialConnect)
     .expect("no Connect row in tcp-connect mode");
     // The serial page sits under the I/O Ports nav row, so its rows
@@ -1045,7 +1058,7 @@ fn fixed_ram_pattern_box_hit_tests_to_its_own_edit() {
         state.setup.midi_out_is_csynth(),
     )
     .iter()
-    .filter(|r| !state.setup.row_hidden(r.field))
+    .filter(|r| state.setup.row_on_page(state.tab, r.field))
     .position(|r| r.field == LauncherField::RamPattern)
     .expect("no fixed RAM pattern row on Memory page");
     let row_y = launcher_row_y(rect, index);
@@ -2976,6 +2989,51 @@ fn panels_render_into_their_rects() {
     draw(&mut frame, scale, &ui, None, None);
     save(&frame, "launcher-boot-priority");
 
+    // The same page on a machine with every bay filled: two IDE drives, a
+    // full seven-unit SCSI chain and a RIPPLE board's four, which is more
+    // boot order than one page holds. The first page fills and offers the
+    // rest; the second carries them under the same column titles.
+    let mut full = launcher::MachineSetup::default();
+    full.select_model(Some(MachineModel::A1200));
+    full.cycle(LauncherField::ScsiController, true);
+    full.cycle(LauncherField::LideBoard, true);
+    for f in [
+        LauncherField::IdeMaster,
+        LauncherField::IdeSlave,
+        LauncherField::ScsiUnit0,
+        LauncherField::ScsiUnit1,
+        LauncherField::ScsiUnit2,
+        LauncherField::ScsiUnit3,
+        LauncherField::ScsiUnit4,
+        LauncherField::ScsiUnit5,
+        LauncherField::ScsiUnit6,
+        LauncherField::LideDrive0,
+        LauncherField::LideDrive1,
+        LauncherField::LideDrive2,
+        LauncherField::LideDrive3,
+    ] {
+        full.set_path(f, std::path::PathBuf::from("disk.hdf"));
+    }
+    for (tab, name) in [
+        (LauncherTab::BootPriority, "launcher-boot-priority-full"),
+        (
+            LauncherTab::BootPriorityMore,
+            "launcher-boot-priority-page2",
+        ),
+    ] {
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(full.clone());
+        state.tab = tab;
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        save(&frame, name);
+    }
+
     // The runtime menu, opened over a running machine: the top level,
     // with a category open beside it.
     let mut frame = vec![0u8; w * h * 4];
@@ -3318,7 +3376,7 @@ fn panels_render_into_their_rects() {
             }
             let idx = launcher::rows(tab, Default::default(), Default::default(), false, false)
                 .iter()
-                .filter(|r| !setup.row_hidden(r.field))
+                .filter(|r| setup.row_on_page(tab, r.field))
                 .position(|r| r.field == field && r.kind == kind)
                 .expect("the field has a visible row");
             let mut state = LauncherState::new(setup);
