@@ -58,6 +58,23 @@ pub enum WarpBootOutcome {
     TimedOut,
 }
 
+/// Build the gate a resolved configuration's settings ask for.
+/// `warp_until` wins; the both-set case is rejected by shared config
+/// validation (and the CLI path re-checks the merged flag/TOML combo).
+pub fn gate_from_settings(
+    warp_boot: bool,
+    warp_boot_idle: f64,
+    warp_until: Option<f64>,
+) -> Option<WarpBootGate> {
+    match (warp_boot, warp_until) {
+        (_, Some(secs)) => Some(WarpBootGate::new(WarpBootCondition::Until(secs))),
+        (true, None) => Some(WarpBootGate::new(WarpBootCondition::StorageIdle(
+            warp_boot_idle,
+        ))),
+        (false, None) => None,
+    }
+}
+
 /// The boot-phase state machine: warp from power-on until the condition
 /// holds, then hand back to real-time pacing.
 pub struct WarpBootGate {

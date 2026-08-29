@@ -175,7 +175,7 @@ impl App {
             }
             crate::warpboot::WarpBootOutcome::TimedOut => {
                 warn!(
-                    "warp boot: storage never settled within {:.0} emulated seconds;                      resuming real-time pacing anyway",
+                    "warp boot: storage never settled within {:.0} emulated seconds; resuming real-time pacing anyway",
                     crate::warpboot::WARP_BOOT_TIMEOUT_SECS
                 );
                 self.finish_warp_boot();
@@ -196,16 +196,26 @@ impl App {
     /// Toggle warp speed: emulation runs unpaced (as fast as the host
     /// allows) until switched back, when pacing re-anchors to "now".
     pub(super) fn toggle_warp(&mut self) {
-        // A manual warp toggle during a warp launch takes the session
-        // back: cancel the launch so one press means normal-speed,
-        // audible emulation, not a fight with the gate.
+        // A manual warp toggle during a warp launch or warp boot takes
+        // the session back: one press means normal-speed, audible
+        // emulation -- a complete action, not a second toggle on top. On
+        // a machine that refused to unpace (a bridged physical drive)
+        // the gate is pending while the emulator is still paced, and
+        // falling through would read that press as "warp on".
+        let mut cancelled = false;
         if self.warp_launch.take().is_some() {
-            self.sync_live_audio_suspension();
             info!("warp launch: cancelled by manual warp toggle");
+            cancelled = true;
         }
         if self.warp_boot.take().is_some() {
-            self.sync_live_audio_suspension();
             info!("warp boot: cancelled by manual warp toggle");
+            cancelled = true;
+        }
+        if cancelled {
+            self.emu.set_paced(true);
+            self.sync_live_audio_suspension();
+            self.show_osd("Warp off");
+            return;
         }
         let warp = self.emu.paced();
         self.emu.set_paced(!warp);
@@ -1001,9 +1011,10 @@ impl App {
             // still holds them, so no permission is asked twice.
             self.attach_configured_host_disks();
             info!("power button: machine powered on (cold boot)");
-            // A --run session that started powered off begins its warp
-            // launch at the first power-on.
+            // A session that started powered off begins its warp launch
+            // (--run) or warp boot at the first power-on.
             self.engage_warp_launch();
+            self.engage_warp_boot();
         }
         self.request_redraw();
     }
@@ -1082,13 +1093,19 @@ impl App {
         // goes, so the cold-boot machine starts with the caps up and
         // nothing latched against the machine that just stopped.
         self.release_keyboard_panel_holds();
-        // A pending warp launch dies with the machine; give the pacing
-        // back so the next power-on runs at normal speed.
+        // A pending warp launch or warp boot dies with the machine; give
+        // the pacing back so the next power-on runs at normal speed.
         if let Some(launch) = self.warp_launch.take() {
             if launch.engaged {
                 self.emu.set_paced(true);
             }
             info!("warp launch: cancelled by power off");
+        }
+        if let Some(gate) = self.warp_boot.take() {
+            if gate.engaged {
+                self.emu.set_paced(true);
+            }
+            info!("warp boot: cancelled by power off");
         }
         self.powered_on = false;
         self.paused = false;

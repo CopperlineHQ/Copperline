@@ -136,6 +136,9 @@ fn main() -> Result<()> {
         Vec::new(),
         None,
         run_warp_target,
+        // Publisher bundles boot their staged program via the warp launch
+        // above; the general warp-boot gate is not exposed here.
+        None,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),

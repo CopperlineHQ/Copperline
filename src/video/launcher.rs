@@ -2343,6 +2343,11 @@ pub struct MachineSetup {
     /// The config screen has no control for run-ahead yet, but must preserve
     /// a value loaded from TOML or the CLI when it rebuilds RawConfig.
     run_ahead_frames: u8,
+    /// No config-screen controls yet either; preserved across the round
+    /// trip like run_ahead_frames (src/warpboot.rs).
+    warp_boot: bool,
+    warp_boot_idle: f64,
+    warp_until: Option<f64>,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2635,6 +2640,9 @@ impl MachineSetup {
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
             run_ahead_frames: cfg.emulation.run_ahead_frames,
+            warp_boot: cfg.emulation.warp_boot,
+            warp_boot_idle: cfg.emulation.warp_boot_idle,
+            warp_until: cfg.emulation.warp_until,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -3203,6 +3211,15 @@ impl MachineSetup {
         }
         if self.run_ahead_frames != base.emulation.run_ahead_frames {
             raw.emulation.run_ahead_frames = Some(self.run_ahead_frames);
+        }
+        if self.warp_boot != base.emulation.warp_boot {
+            raw.emulation.warp_boot = Some(self.warp_boot);
+        }
+        if self.warp_boot_idle != base.emulation.warp_boot_idle {
+            raw.emulation.warp_boot_idle = Some(self.warp_boot_idle);
+        }
+        if self.warp_until != base.emulation.warp_until {
+            raw.emulation.warp_until = self.warp_until;
         }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
