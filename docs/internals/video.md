@@ -591,12 +591,14 @@ the pass's draws, the cursor mapping and the overlay anchors.
 
 `[display] autocrop` presents through the same pass with a second draw:
 the display quad samples the content sub-rect of the canvas -- derived
-each frame from the programmed display window the renderer painted with
-(`RenderResult::content_rect`, carried through the same shifts
+each frame from the display-window rows that carry fetched bitplane data
+(`RenderResult::content_rect`: the renderer's own per-line window model
+intersected with the captured rows, so a window left open around a
+shorter picture crops to the picture; carried through the same shifts
 `post_process_rendered_field` applies and inverted through the same
 row/column maps the present copy uses) -- and the chrome band (panels and
-status bar) is drawn separately along the surface bottom at its width-fit
-scale. `AutocropLatch` smooths the per-frame envelope: growth is adopted
+status bar) is drawn separately, bottom-anchored at exactly the size the
+classic letterbox gives it, so the band never eats what the crop gains. `AutocropLatch` smooths the per-frame envelope: growth is adopted
 immediately, border-only frames hold the previous crop (like the aperture
 latch), and a strictly smaller envelope is adopted only after holding
 steady for its stability window, so screen transitions do not pump the

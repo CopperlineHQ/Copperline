@@ -719,11 +719,14 @@ the 570 woven lines), and cropping the unused border lets the picture
 fill far more of a 16:9 or 21:9 screen -- with `scaling = "integer"` the
 whole-number fit is retaken against the cropped picture, so a 200-line
 game often earns a full multiple more than the uncropped canvas would.
-The crop is derived every frame from the programmed display window (the
-same per-line model the renderer paints with, so mid-frame rewrites and
-DIW tricks are already folded in), grows instantly when a program opens
-a larger display, and tightens only after a smaller one has held steady
-for about half a second, so screen transitions do not pump the zoom.
+The crop is derived every frame from the display-window rows that carry
+fetched bitplane data (the same per-line model the renderer paints
+with, so mid-frame rewrites and DIW tricks are already folded in --
+and a window left open around a shorter picture, as Kickstart's
+256-line default routinely is, crops to the picture, not the window).
+It grows instantly when a program opens a larger display, and tightens
+only after a smaller one has held steady for about half a second, so
+screen transitions do not pump the zoom.
 The status bar and any instrument panels keep their size in a band along
 the window bottom. A window-presentation setting only: screenshots,
 frame dumps and recordings always keep their configured aperture.

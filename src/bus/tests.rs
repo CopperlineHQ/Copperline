@@ -4633,11 +4633,13 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
 
 #[test]
 fn render_reports_the_playfield_content_envelope() {
-    // One plane inside a 96-line vertical window (VSTOP 0x8C, high bit
-    // set by value, so no wraparound term). The returned envelope is
-    // what the presentation-side autocrop feeds on: the display window
-    // the hardware programs, whether or not every window row fetched
-    // data -- a game's border rows belong to its picture shape.
+    // One plane fetching two rows inside a much taller programmed
+    // window (VSTOP 0x8C, high bit set by value, so no wraparound
+    // term). The returned envelope is what the presentation-side
+    // autocrop feeds on: the display-window rows that carry fetched
+    // bitplane data, not the bare window -- Kickstart routinely leaves
+    // the 256-line window open around a 200-line picture, and cropping
+    // must tighten to the picture, not the window.
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.denise.diwstrt = 0x2C81;
@@ -4669,9 +4671,9 @@ fn render_reports_the_playfield_content_envelope() {
 
     let mut fb = vec![0; FB_PIXELS];
     let content = bitplane::render(&mut bus, &mut fb).expect("playfield painted");
-    // The programmed window rows (0x2C..0x8C), and a column span that
-    // holds the painted pixel and stays on the canvas.
-    assert_eq!((content.y0, content.y1), (0, 0x8C - 0x2C));
+    // The two fetched rows -- not the 96 the window spans -- and a
+    // column span that holds the painted pixel and stays on the canvas.
+    assert_eq!((content.y0, content.y1), (0, 2));
     assert!(content.x0 <= STANDARD_VISIBLE_X0 + 2);
     assert!(content.x1 > STANDARD_VISIBLE_X0 + 2);
     assert!(content.x1 <= FB_WIDTH);

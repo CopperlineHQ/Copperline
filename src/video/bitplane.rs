@@ -5096,20 +5096,34 @@ fn render_from_input_with_scratch(
             // This row paints playfield: fold its display-window span into
             // the frame's content envelope. Purely an accumulation for the
             // presentation-side autocrop; the paint below is untouched.
-            content_rect = Some(match content_rect {
-                None => ContentRect {
-                    x0: x_start,
-                    x1: x_stop,
-                    y0: y,
-                    y1: y + 1,
-                },
-                Some(rect) => ContentRect {
-                    x0: rect.x0.min(x_start),
-                    x1: rect.x1.max(x_stop),
-                    y0: rect.y0.min(y),
-                    y1: rect.y1.max(y + 1),
-                },
-            });
+            // Only rows that carry fetched bitplane data count: the
+            // display window is routinely left open past the last fetched
+            // line (a 200-line game inside the Kickstart 256-line window),
+            // and those rows show border or repeated data, not picture --
+            // the crop should tighten to the picture the way the eye
+            // does. A frame with no captures at all (the RAM re-fetch
+            // compatibility path) counts every window row instead.
+            let row_has_fetched_data = !has_captured_bitplane_rows
+                || captured_bitplane_rows
+                    .get(y)
+                    .and_then(Option::as_ref)
+                    .is_some();
+            if row_has_fetched_data {
+                content_rect = Some(match content_rect {
+                    None => ContentRect {
+                        x0: x_start,
+                        x1: x_stop,
+                        y0: y,
+                        y1: y + 1,
+                    },
+                    Some(rect) => ContentRect {
+                        x0: rect.x0.min(x_start),
+                        x1: rect.x1.max(x_stop),
+                        y0: rect.y0.min(y),
+                        y1: rect.y1.max(y + 1),
+                    },
+                });
+            }
             // A captured sequencer run with a comparator-anchored origin is
             // the authority for the row's word count: mid-row DDF rewrites
             // logged as control segments describe windows the sequencer
@@ -5591,6 +5605,16 @@ fn render_from_input_with_scratch(
     scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
     scratch.h_window_rows = h_window_rows;
     scratch.ham_select_pixels = ham_select_pixels;
+    // COPPERLINE_DIAG_AUTOCROP: log the per-frame content envelope the
+    // autocrop presentation feeds on, in field canvas coordinates. The
+    // tool for judging what a title's crop will be from a headless run.
+    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP") {
+        log::info!(
+            "[DIAG_AUTOCROP] secs={:.3} content_rect={:?}",
+            input.emulated_seconds,
+            content_rect
+        );
+    }
     RenderResult {
         timing: render_timing,
         clxdat,

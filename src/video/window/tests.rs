@@ -8653,16 +8653,16 @@ fn autocrop_latch_grows_fast_and_shrinks_only_when_stable() {
 #[test]
 fn autocrop_layout_refits_the_multiple_against_the_crop() {
     // A 200-line lo-res game (400 woven rows, 640 canvas px wide) on a
-    // 2000x1200 surface with the 44-row status bar.
-    let layout = super::autocrop_layout((2000, 1200), true, (38, 69, 640, 400), 44);
-    // The band: 44 canvas rows at the 2000/716 width fit.
-    let hb = (44u64 * 2000 / FB_WIDTH as u64) as u32;
-    assert_eq!(layout.chrome_dst, Some((0, 1200 - hb, 2000, hb)));
-    // The crop fits 2x whole (min(2000/640, 1078/400) = 2), centred in
-    // the region above the band.
+    // 2000x1200 surface, above a pre-sized 100-row chrome band (the
+    // caller sizes the band at the classic letterbox scale).
+    let chrome = (30u32, 1100u32, 1940u32, 100u32);
+    let layout = super::autocrop_layout((2000, 1200), true, (38, 69, 640, 400), Some(chrome));
+    // The band passes through untouched, and the crop fits 2x whole
+    // (min(2000/640, 1100/400) = 2), centred in the region above it.
+    assert_eq!(layout.chrome_dst, Some(chrome));
     assert_eq!(
         layout.display_dst,
-        ((2000 - 1280) / 2, (1200 - hb - 800) / 2, 1280, 800)
+        ((2000 - 1280) / 2, (1100 - 800) / 2, 1280, 800)
     );
     assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
     assert_eq!(layout.src_canvas, (38, 69, 640, 400));
@@ -8675,19 +8675,19 @@ fn autocrop_layout_refits_the_multiple_against_the_crop() {
     );
 
     // Without a whole multiple the crop falls back to its smooth fit.
-    let layout = super::autocrop_layout((600, 500), true, (38, 69, 640, 400), 44);
+    let layout = super::autocrop_layout((600, 500), true, (38, 69, 640, 400), None);
     assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
     assert!(layout.display_dst.2 <= 600);
 
     // A surface too small for the whole 716-wide canvas still holds a
     // whole multiple of a 640-wide crop: the fit is the crop's own, not
     // an inherited fallback from the classic full-canvas plan.
-    let layout = super::autocrop_layout((700, 500), true, (38, 69, 640, 400), 44);
+    let layout = super::autocrop_layout((700, 500), true, (38, 69, 640, 400), None);
     assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
     assert_eq!((layout.display_dst.2, layout.display_dst.3), (640, 400));
 
     // Smooth scaling keeps the sharp-bilinear fit of the crop.
-    let layout = super::autocrop_layout((2000, 1200), false, (38, 69, 640, 400), 0);
+    let layout = super::autocrop_layout((2000, 1200), false, (38, 69, 640, 400), None);
     assert_eq!(layout.chrome_dst, None);
     assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
     // Aspect preserved: 640x400 into 2000x1200 is height-limited.

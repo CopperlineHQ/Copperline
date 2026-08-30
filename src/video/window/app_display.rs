@@ -549,7 +549,16 @@ impl App {
             return;
         }
         crate::video::set_autocrop(autocrop);
-        self.show_osd(format!("Autocrop: {}", if autocrop { "on" } else { "off" }));
+        // Turning it on under a bezel or CRT preset changes nothing on
+        // screen (the tube look owns the glass and the crop suspends
+        // itself); say so, or the toggle looks broken.
+        let suspended =
+            self.bezel.is_on() || self.crt_shader_kind != crate::config::ShaderKind::None;
+        self.show_osd(match (autocrop, suspended) {
+            (true, true) => "Autocrop: on (suspended while a bezel or CRT shader is on)",
+            (true, false) => "Autocrop: on",
+            (false, _) => "Autocrop: off",
+        });
         self.main_presentation_dirty = true;
         self.request_redraw();
     }

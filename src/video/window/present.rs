@@ -700,42 +700,43 @@ pub(super) fn main_present_layout(
             chrome_dst: None,
         };
     };
+    // The chrome band keeps exactly the size and position the classic
+    // letterbox gives it -- only bottom-anchored -- so toggling autocrop
+    // resizes the picture, never the bar, and the band can never eat
+    // more height than the crop gains (a surface-width bar on a 5K
+    // fullscreen would be over 300 rows tall).
+    let chrome_rows = window_present_height() - present_height();
+    let classic = main_clip_rect(r);
+    let chrome_dst = (chrome_rows > 0 && classic.3 > 0).then(|| {
+        let h =
+            ((u64::from(classic.3) * chrome_rows as u64 / window_present_height().max(1) as u64)
+                as u32)
+                .clamp(1, surface.1);
+        (classic.0, surface.1 - h, classic.2, h)
+    });
     // The *requested* setting, not the classic plan's resolved multiple:
     // a surface too small for the whole canvas can still hold a whole
     // multiple of the crop (a 700-wide window around a 640-wide game),
     // and autocrop_layout takes its own fit against the crop.
-    autocrop_layout(
-        surface,
-        integer_scaling_requested(),
-        crop,
-        window_present_height() - present_height(),
-    )
+    autocrop_layout(surface, integer_scaling_requested(), crop, chrome_dst)
 }
 
 /// The autocrop layout, pure of the live globals: `crop` (canvas pixels
-/// of the display region) placed on `surface`, with `chrome_rows` canvas
-/// rows of panels and status bar kept as a band along the surface
-/// bottom.
+/// of the display region) placed on `surface`, above the already-sized
+/// `chrome_dst` band (panels and status bar; `None` when there is no
+/// chrome to show).
 ///
-/// The chrome band spans the surface at the width-fit scale the classic
-/// width-limited letterbox gives it. Integer scaling re-fits against the
-/// crop -- a display using fewer lines earns a larger whole multiple,
-/// which is the point of the feature -- and falls back to the smooth fit
-/// of the crop when not even 1x fits, exactly as the classic layout
-/// falls back.
+/// Integer scaling re-fits against the crop -- a display using fewer
+/// lines earns a larger whole multiple, which is the point of the
+/// feature -- and falls back to the smooth fit of the crop when not
+/// even 1x fits, exactly as the classic layout falls back.
 pub(super) fn autocrop_layout(
     surface: (u32, u32),
     integer: bool,
     crop: (usize, usize, usize, usize),
-    chrome_rows: usize,
+    chrome_dst: Option<(u32, u32, u32, u32)>,
 ) -> PresentLayout {
-    let (chrome_dst, avail_h) = if chrome_rows > 0 {
-        let hb = ((chrome_rows as u64 * u64::from(surface.0) / FB_WIDTH as u64) as u32)
-            .clamp(1, surface.1.saturating_sub(1).max(1));
-        (Some((0, surface.1 - hb, surface.0, hb)), surface.1 - hb)
-    } else {
-        (None, surface.1)
-    };
+    let avail_h = surface.1 - chrome_dst.map_or(0, |(_, _, _, h)| h.min(surface.1));
     let avail = (surface.0, avail_h.max(1));
     let multiple = integer
         .then(|| (avail.0 as usize / crop.2).min(avail.1 as usize / crop.3))
