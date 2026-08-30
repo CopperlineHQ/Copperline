@@ -3180,6 +3180,19 @@ fn panels_render_into_their_rects() {
     draw(&mut frame, scale, &ui, None, None);
     save(&frame, "launcher-av-display");
 
+    // The Emulation category: pacing, warp speed, and the warp-boot rows.
+    let mut frame = vec![0u8; w * h * 4];
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.tab = LauncherTab::AvEmulation;
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::Launcher(Box::new(state))),
+    };
+    draw(&mut frame, scale, &ui, None, None);
+    save(&frame, "launcher-av-emulation");
+
     // The Floppy tab with two drives wired in: each drive is a greyed "DFn:"
     // heading with indented settings; DF2/DF3 are hidden until enabled.
     let mut frame = vec![0u8; w * h * 4];
