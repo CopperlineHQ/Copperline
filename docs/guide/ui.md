@@ -354,14 +354,16 @@ belongs to the Amiga.
   underneath. The start-up mode is
   `[display] scaling`, which also notes which pixel-aspect pairing is
   fully pixel-exact (see [Configuration](configuration.md)).
-- **Autocrop**: crop the presentation to the display window the hardware
-  programs, so a game driving fewer lines than the full scan fills more
+- **Autocrop**: crop the presentation to the picture the hardware
+  fetches, so a game driving fewer lines than the full scan fills more
   of a wide screen; with integer scaling the whole-number fit is retaken
   against the crop. The status bar and panels keep their size in a band
-  along the window bottom. Presentation-only (captures keep their
-  aperture), and suspended while a menu or panel is open, under a bezel
-  or CRT preset, and for RTG or programmable scans. The start-up value
-  is `[display] autocrop` (see [Configuration](configuration.md)).
+  pinned along the window bottom; an open menu or panel widens the
+  picture to the full display area while it is up, and the band stays
+  put. Presentation-only (captures keep their aperture), and suspended
+  under a bezel or CRT preset and for RTG or programmable scans. The
+  start-up value is `[display] autocrop`
+  (see [Configuration](configuration.md)).
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
   **Picture Left/Right** step one lo-res pixel (up to 16 each way),

@@ -727,14 +727,16 @@ and a window left open around a shorter picture, as Kickstart's
 It grows instantly when a program opens a larger display, and tightens
 only after a smaller one has held steady for about half a second, so
 screen transitions do not pump the zoom.
-The status bar and any instrument panels keep their size in a band along
-the window bottom. A window-presentation setting only: screenshots,
-frame dumps and recordings always keep their configured aperture.
-Automatically suspended where it cannot apply -- while a menu or panel
-is open, under a monitor bezel or CRT preset (the tube look frames the
-whole glass), for RTG board scanout, and for programmable multisync
-scans. The menu's *Video Settings > Autocrop* toggle flips it live
-without touching the config.
+The status bar and any instrument panels keep their size in a band
+pinned along the window bottom; opening a menu or panel widens the
+picture to the full display area while it is up (so nothing of the
+overlay is cropped away) and the band stays put. A
+window-presentation setting only: screenshots, frame dumps and
+recordings always keep their configured aperture. Automatically
+suspended where it cannot apply -- under a monitor bezel or CRT preset
+(the tube look frames the whole glass), for RTG board scanout, and for
+programmable multisync scans. The menu's *Video Settings > Autocrop*
+toggle flips it live without touching the config.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

@@ -602,9 +602,14 @@ classic letterbox gives it, so the band never eats what the crop gains. `Autocro
 immediately, border-only frames hold the previous crop (like the aperture
 latch), and a strictly smaller envelope is adopted only after holding
 steady for its stability window, so screen transitions do not pump the
-zoom. The crop suspends itself whenever another pass owns the display
-rect (open overlays, the bezel and CRT presets, RTG scanout) and for
-programmable scans; captures never see it.
+zoom. While the mode is on, the layout never snaps back to the classic
+letterbox: an open menu or panel (which draws into the display region
+against the full canvas mapping) widens the display quad to the whole
+region instead of suspending, so the overlay stays fully visible and the
+chrome band stays pinned rather than hopping to the letterbox's centred
+bar. Only another pass owning the display rect falls back to the classic
+layout -- the bezel and CRT presets, RTG scanout -- along with
+programmable scans; captures never see the crop.
 
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have

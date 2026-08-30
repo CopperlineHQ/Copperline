@@ -511,18 +511,23 @@ impl App {
         self.request_redraw();
     }
 
-    /// The content rect the autocrop presentation crops to, in canvas
-    /// pixels of the display region -- or `None` whenever the classic
-    /// whole-canvas layout must present instead: autocrop off, no
-    /// content yet, or a frame the crop does not apply to. An open
-    /// overlay suspends it (menus and panels draw into the display
-    /// region against the full canvas mapping, like the CRT and RTG
-    /// passes suspend themselves); the bezel and the CRT presets frame
-    /// the whole glass, so the tube look wins while one is on; RTG
-    /// board frames and programmable scans present their own geometry.
+    /// The rect the autocrop presentation shows of the display region,
+    /// in canvas pixels -- or `None` whenever the classic whole-canvas
+    /// layout must present instead: autocrop off, or a frame the mode
+    /// does not apply to (the bezel and the CRT presets frame the whole
+    /// glass, so the tube look wins while one is on; RTG board frames
+    /// and programmable scans present their own geometry).
+    ///
+    /// While the mode is on, the layout never falls back to the classic
+    /// letterbox: an open menu or panel, or a session with no content
+    /// yet, widens the rect to the full display region instead. The
+    /// overlays draw into the display region against the full canvas
+    /// mapping, so this keeps them entirely visible -- and it keeps the
+    /// status-bar band pinned to the window bottom, rather than hopping
+    /// between the bottom-anchored band and the letterbox's centred bar
+    /// every time a menu opens.
     pub(super) fn autocrop_canvas_src(&self) -> Option<(usize, usize, usize, usize)> {
         if !crate::video::autocrop()
-            || self.ui.active()
             || self.rtg_present_dims.is_some()
             || self.present_programmable
             || self.present_width != FB_WIDTH
@@ -531,13 +536,23 @@ impl App {
         {
             return None;
         }
-        canvas_content_rect(
-            self.present_content_rect?,
-            self.present_rows,
-            self.overscan,
-            self.tv_centre,
-            self.present_tv_aperture_rows,
-            present_height(),
+        let full = (0, 0, FB_WIDTH, present_height());
+        if self.ui.active() {
+            return Some(full);
+        }
+        let Some(content) = self.present_content_rect else {
+            return Some(full);
+        };
+        Some(
+            canvas_content_rect(
+                content,
+                self.present_rows,
+                self.overscan,
+                self.tv_centre,
+                self.present_tv_aperture_rows,
+                present_height(),
+            )
+            .unwrap_or(full),
         )
     }
 
