@@ -714,6 +714,8 @@ pub enum LauncherField {
     PacingBudget,
     RealtimePriority,
     Warp,
+    WarpBoot,
+    WarpBootIdle,
     // Input
     Joystick,
     MouseSensitivity,
@@ -1269,18 +1271,22 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 #[cfg(not(feature = "game-library"))]
-const EMULATION_ROWS: [Row; 4] = [
+const EMULATION_ROWS: [Row; 6] = [
     row(F::PowerOn, "Power on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
+    row(F::WarpBoot, "Warp boot", Cycle),
+    row(F::WarpBootIdle, "Warp boot idle", Cycle),
 ];
 #[cfg(feature = "game-library")]
-const EMULATION_ROWS: [Row; 5] = [
+const EMULATION_ROWS: [Row; 7] = [
     row(F::PowerOn, "Power on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
+    row(F::WarpBoot, "Warp boot", Cycle),
+    row(F::WarpBootIdle, "Warp boot idle", Cycle),
     // Off, the strip loses its WHDLoad entry and the pages behind it stop
     // doing anything at all -- no database read, no cover worker, no scan.
     row(F::WhdloadEnabled, "WHDLoad", Cycle),
@@ -1563,6 +1569,11 @@ const CPUS: [CpuModel; 7] = [
     CpuModel::M68040,
     CpuModel::M68060,
 ];
+/// Storage-idle thresholds for the Warp boot row, in emulated seconds.
+/// The threshold must outlast the boot's longest storage-quiet stretch
+/// (a big-RAM machine's MMU table build keeps the disk idle for seconds),
+/// hence the range up to two minutes.
+const WARP_BOOT_IDLE_PRESETS: [f64; 7] = [5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0];
 const CLOCK_PRESETS: [f64; 10] = [
     7.09, 14.0, 14.18, 25.0, 28.0, 33.0, 40.0, 50.0, 100.0, 200.0,
 ];
@@ -4438,6 +4449,14 @@ impl MachineSetup {
                 PacingBudget::Instructions => "Instructions".to_string(),
             },
             F::Warp => self.warp.label().to_string(),
+            F::WarpBoot => match (self.warp_until, self.warp_boot) {
+                // A warp_until from the TOML shows as its own state; the
+                // panel's own two states are Off and storage-idle.
+                (Some(secs), _) => format!("Until {secs:.0}s"),
+                (None, true) => "Storage idle".to_string(),
+                (None, false) => "Off".to_string(),
+            },
+            F::WarpBootIdle => format!("{:.0}s", self.warp_boot_idle),
             F::Joystick => self.joystick_input_mode.menu_label().to_string(),
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::MouseCapture => match self.mouse_capture {
@@ -4872,6 +4891,23 @@ impl MachineSetup {
                 self.pacing_budget = cycle_slice(&PACINGS, self.pacing_budget, forward)
             }
             F::Warp => self.warp = cycle_slice(&WARPS, self.warp, forward),
+            F::WarpBoot => {
+                // Two panel states, Off and storage-idle (the boot warps
+                // until the floppy/HDD LEDs have been quiet for the idle
+                // threshold below). A timestamp warp (warp_until, set from
+                // TOML or --warp-until) shows as a third state; the modes
+                // are mutually exclusive, so one press clears it and lands
+                // on Off in either direction.
+                if self.warp_until.take().is_some() {
+                    self.warp_boot = false;
+                } else {
+                    self.warp_boot = !self.warp_boot;
+                }
+            }
+            F::WarpBootIdle => {
+                self.warp_boot_idle =
+                    cycle_floats(&WARP_BOOT_IDLE_PRESETS, self.warp_boot_idle, forward)
+            }
             F::Joystick => {
                 self.joystick_input_mode =
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)

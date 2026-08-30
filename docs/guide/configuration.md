@@ -434,7 +434,10 @@ carried no information.)
   are mutually exclusive, `--warp-boot`/`--warp-until` set them from the
   command line, the manual warp toggle cancels the phase, headless captures
   (already unpaced end to end) ignore both, and `--run` (whose own warp
-  launch ends at a sharper condition) cannot combine with them.
+  launch ends at a sharper condition) cannot combine with them. The
+  launcher's *Warp boot* and *Warp boot idle* rows (*A/V & Emu*,
+  *Emulation*) edit the storage-idle mode; a `warp_until` loaded from a
+  config shows there as its own *Until Ns* state, which one press clears.
 - `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
   and the **Rewind** menu item can step the whole machine backward through
   it. It rides the same deterministic snapshot ring as the debugger's reverse

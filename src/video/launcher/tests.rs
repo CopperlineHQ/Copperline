@@ -8,6 +8,29 @@ fn run_ahead_frames_survives_the_config_screen_round_trip() {
 }
 
 #[test]
+fn warp_boot_rows_cycle_and_round_trip() {
+    let raw: RawConfig = toml::from_str("").unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    // Default: off, nothing emitted.
+    assert_eq!(setup.to_raw().emulation.warp_boot, None);
+    setup.cycle(F::WarpBoot, true);
+    assert_eq!(setup.to_raw().emulation.warp_boot, Some(true));
+    setup.cycle(F::WarpBootIdle, true); // 10s -> 15s
+    assert_eq!(setup.to_raw().emulation.warp_boot_idle, Some(15.0));
+    setup.cycle(F::WarpBoot, true); // back to off
+    assert_eq!(setup.to_raw().emulation.warp_boot, None);
+
+    // A TOML warp_until shows as its own state; one press clears it (the
+    // modes are mutually exclusive) and lands on Off.
+    let raw: RawConfig = toml::from_str("[emulation]\nwarp_until = 12.0\n").unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    setup.cycle(F::WarpBoot, true);
+    let out = setup.to_raw();
+    assert_eq!(out.emulation.warp_until, None);
+    assert_eq!(out.emulation.warp_boot, None);
+}
+
+#[test]
 fn warp_boot_settings_survive_the_config_screen_round_trip() {
     // No config-screen controls yet, same as run-ahead: a saved default
     // opening in the launcher must not silently shed them on Run/Save.
