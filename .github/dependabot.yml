@@ -4,7 +4,8 @@ updates:
   # depend on the root package by path, so updating a shared dependency in
   # only one lockfile leaves the others unable to build with --locked.
   # group-by makes one PR per non-patch dependency across every affected
-  # directory; patch releases stay in one consolidated PR.
+  # directory; patch releases stay in one consolidated PR. The fuzz lockfile
+  # is derived in CI because its path dependency mirrors the entire root graph.
   - package-ecosystem: cargo
     directories:
       - /

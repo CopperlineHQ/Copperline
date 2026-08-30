@@ -2,9 +2,8 @@ name: Flatpak
 
 # Builds the Flatpak bundle and runs flatpak-builder-lint, the same gate
 # Flathub applies to submissions, so manifest/metadata regressions are caught
-# before a Flathub PR. Also verifies cargo-sources.json is in sync with
-# Cargo.lock, since a stale vendored-crate list silently breaks the offline
-# build only on Flathub's servers.
+# before a Flathub PR. The vendored-crate list is generated from Cargo.lock for
+# every build, so dependency PRs cannot leave the offline inputs stale.
 on:
   push:
     branches: [main]
@@ -25,22 +24,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cargo-sources-fresh:
-    name: cargo-sources.json is current
+  cargo-sources:
+    name: Generate cargo-sources.json
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Regenerate and diff
-        run: |
-          ./packaging/flatpak/generate-cargo-sources.sh
-          if ! git diff --quiet packaging/flatpak/cargo-sources.json; then
-            echo "::error::cargo-sources.json is stale; run packaging/flatpak/generate-cargo-sources.sh and commit the result."
-            git --no-pager diff --stat packaging/flatpak/cargo-sources.json
-            exit 1
-          fi
+      - name: Generate vendored-crate sources
+        run: ./packaging/flatpak/generate-cargo-sources.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-cargo-sources
+          path: packaging/flatpak/cargo-sources.json
+          if-no-files-found: error
 
   build:
     name: Build and lint bundle
+    needs: cargo-sources
     runs-on: ubuntu-latest
     # The flatpak-github-actions image ships flatpak-builder, the Freedesktop
     # runtime/SDK matching the manifest, and flatpak-builder-lint.
@@ -49,6 +48,10 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: flatpak-cargo-sources
+          path: packaging/flatpak
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: copperline.flatpak

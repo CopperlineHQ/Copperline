@@ -2,6 +2,14 @@
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+# The fuzz crate follows the root package by path. Its lockfile is derived in
+# CI so root dependency updates cannot leave a second committed graph stale.
+/fuzz/Cargo.lock
+
+# Generated from the root Cargo.lock immediately before Flatpak builds and
+# Flathub submissions; keeping the large mechanical file untracked avoids
+# requiring dependency bots to update a non-Cargo artifact.
+/packaging/flatpak/cargo-sources.json
 
 # Maintainer-local AI-assistant instruction files: kept locally, not part of
 # the repo. The committed AGENTS.md (and its CLAUDE.md symlink) points agents

@@ -142,11 +142,11 @@ brew test copperlinehq/copperline/copperline
 Linux distribution uses two channels (see `packaging/`).
 
 **Flatpak / Flathub** (`packaging/flatpak/`) is the primary channel. After a
-release commit lands, refresh the vendored crate list if dependencies changed
-and point the manifest at the tag:
+release commit lands, generate the untracked vendored crate list and point the
+manifest at the tag:
 
 ```sh
-./packaging/flatpak/generate-cargo-sources.sh   # if Cargo.lock changed
+./packaging/flatpak/generate-cargo-sources.sh
 ```
 
 Set `tag:` and `commit:` in `dev.copperline.Copperline.yaml` to the release,

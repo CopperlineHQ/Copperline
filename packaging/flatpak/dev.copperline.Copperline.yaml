@@ -13,6 +13,7 @@
 # Local build and test:
 #   flatpak install flathub org.freedesktop.Platform//25.08 \
 #       org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+#   ./packaging/flatpak/generate-cargo-sources.sh
 #   flatpak run org.flatpak.Builder --force-clean --user --install \
 #       --install-deps-from=flathub --repo=repo builddir \
 #       packaging/flatpak/dev.copperline.Copperline.yaml
@@ -142,8 +143,8 @@ modules:
       - type: dir
         path: ../..
       # Vendored crate archives + cargo config pointing at the offline
-      # registry. Regenerate with packaging/flatpak/generate-cargo-sources.sh
-      # whenever Cargo.lock changes.
+      # registry. CI and local/Flathub packaging generate this untracked file
+      # from Cargo.lock immediately before the build.
       - cargo-sources.json
       # WHDLoad support archives, fetched by flatpak-builder with pinned
       # checksums (kept in step with tools/fetch-whdload.sh; whdload.de's

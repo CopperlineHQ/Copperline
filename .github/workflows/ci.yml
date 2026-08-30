@@ -92,20 +92,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Generate the fuzz lockfile
+        working-directory: fuzz
+        run: |
+          # This test-only workspace follows the root crate by path. Derive its
+          # lockfile from the current manifests so a root Dependabot update
+          # cannot leave a second committed dependency graph stale.
+          cargo generate-lockfile
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: Verify the fuzz lockfile and build all targets
+      - name: Build all fuzz targets
         working-directory: fuzz
-        run: |
-          # cargo-fuzz 0.13.2 does not expose Cargo's --locked flag. Resolve
-          # the workspace under --locked first, then prove the build left the
-          # committed lockfile unchanged.
-          cargo metadata --locked --format-version 1 > /dev/null
-          cargo fuzz build
-          git diff --exit-code -- Cargo.lock
+        run: cargo fuzz build
 
   msrv:
     name: MSRV (rust-version)

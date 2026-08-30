@@ -8,7 +8,7 @@ submission consists of.
 | `dev.copperline.Copperline.yaml` | Flatpak manifest (build steps, runtime, permissions) |
 | `dev.copperline.Copperline.metainfo.xml` | AppStream metadata (store listing, screenshots, release notes) |
 | `dev.copperline.Copperline.desktop` | Desktop-menu entry |
-| `cargo-sources.json` | Vendored crate archives for the offline build (generated) |
+| `cargo-sources.json` | Vendored crate archives for the offline build (generated and ignored) |
 | `generate-cargo-sources.sh` | Regenerates `cargo-sources.json` from `Cargo.lock` |
 
 ## Why cargo-sources.json exists
@@ -16,20 +16,22 @@ submission consists of.
 Flathub builds run with no network access, so Cargo cannot fetch crates from
 crates.io. `cargo-sources.json` lists every dependency as a vendored source
 plus a Cargo config that points Cargo at that offline registry. It is
-generated from the committed `Cargo.lock`; regenerate it whenever the lockfile
-changes:
+generated from the committed `Cargo.lock`. It is deliberately not committed:
+CI regenerates it for every bundle, and local/Flathub builds create it with:
 
 ```sh
 ./packaging/flatpak/generate-cargo-sources.sh
 ```
 
-CI (`.github/workflows/flatpak.yml`) fails if the committed file is stale.
+The file must exist beside the manifest before invoking `flatpak-builder`.
 
 ## Build and test locally (on Linux)
 
 ```sh
 flatpak install flathub org.freedesktop.Platform//25.08 \
     org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+./packaging/flatpak/generate-cargo-sources.sh
 
 flatpak run org.flatpak.Builder --force-clean --user --install \
     --install-deps-from=flathub --repo=repo builddir \
