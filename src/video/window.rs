@@ -946,6 +946,10 @@ pub struct App {
     /// shows, in woven presentation-buffer space (see [`AutocropLatch`]);
     /// `None` until a standard frame has painted playfield.
     present_content_rect: Option<bitplane::ContentRect>,
+    /// The last layout the COPPERLINE_DIAG_AUTOCROP trace logged, so the
+    /// trace reports changes rather than every redraw. Unused while the
+    /// flag is off.
+    last_diag_layout: Option<PresentLayout>,
     /// The grow-fast/shrink-stable smoothing behind it.
     autocrop_latch: AutocropLatch,
     /// Whether the presented frame came from a programmable (multisync) scan
@@ -1994,6 +1998,7 @@ impl App {
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
             presentation_latch: PresentationLatch::default(),
             present_content_rect: None,
+            last_diag_layout: None,
             autocrop_latch: AutocropLatch::default(),
             present_programmable: false,
             render: None,
@@ -4380,6 +4385,25 @@ impl ApplicationHandler for App {
                     // bezel) only run when autocrop is suspended, so their
                     // layout is the classic whole-texture letterbox.
                     let layout = main_present_layout(r, autocrop_src);
+                    // COPPERLINE_DIAG_AUTOCROP: the window half of the
+                    // renderer-side envelope trace -- the exact rects the
+                    // scaler pass draws this frame, logged when they
+                    // change. Together the two lines say whether a crop
+                    // was derived and whether the presentation used it.
+                    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
+                        && self.last_diag_layout != Some(layout)
+                    {
+                        info!(
+                            "[DIAG_AUTOCROP] layout surface={:?} src_canvas={:?} \
+                             display_dst={:?} chrome_dst={:?} filter={:?}",
+                            r.surface_size,
+                            layout.src_canvas,
+                            layout.display_dst,
+                            layout.chrome_dst,
+                            layout.filter,
+                        );
+                        self.last_diag_layout = Some(layout);
+                    }
                     let present_clip = layout.display_dst;
                     let present_draws = layout.draws();
                     let scaler = &mut r.scaler;
