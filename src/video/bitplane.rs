@@ -5607,11 +5607,15 @@ fn render_from_input_with_scratch(
     scratch.ham_select_pixels = ham_select_pixels;
     // COPPERLINE_DIAG_AUTOCROP: log the per-frame content envelope the
     // autocrop presentation feeds on, in field canvas coordinates. The
-    // tool for judging what a title's crop will be from a headless run.
+    // tool for judging what a title's crop will be from a headless run;
+    // `programmable` says when the presentation will decline to crop
+    // however good the envelope looks (multisync scans present their
+    // own window in full).
     if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP") {
         log::info!(
-            "[DIAG_AUTOCROP] secs={:.3} content_rect={:?}",
+            "[DIAG_AUTOCROP] secs={:.3} programmable={} content_rect={:?}",
             input.emulated_seconds,
+            geometry.programmable,
             content_rect
         );
     }
