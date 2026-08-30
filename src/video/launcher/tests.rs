@@ -8,6 +8,23 @@ fn run_ahead_frames_survives_the_config_screen_round_trip() {
 }
 
 #[test]
+fn warp_boot_settings_survive_the_config_screen_round_trip() {
+    // No config-screen controls yet, same as run-ahead: a saved default
+    // opening in the launcher must not silently shed them on Run/Save.
+    let raw: RawConfig =
+        toml::from_str("[emulation]\nwarp_boot = true\nwarp_boot_idle = 15.0\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    let out = setup.to_raw();
+    assert_eq!(out.emulation.warp_boot, Some(true));
+    assert_eq!(out.emulation.warp_boot_idle, Some(15.0));
+    assert_eq!(out.emulation.warp_until, None);
+
+    let raw: RawConfig = toml::from_str("[emulation]\nwarp_until = 12.5\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.warp_until, Some(12.5));
+}
+
+#[test]
 fn ram_initialisation_controls_cycle_and_round_trip() {
     let raw: RawConfig = toml::from_str("[memory]\ninit = \"random:0xBEEF\"\n").unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();

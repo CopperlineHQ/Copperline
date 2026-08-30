@@ -32,6 +32,9 @@ copperline --model A1200 --fast 8M KICK31.ROM --run build/demo
 ## Fast-forward boot (Warp mode)
 
 In interactive windowed sessions, `--run` automatically enables warp mode during boot.
+(For a configuration that boots from its own media rather than through
+`--run`, the same idea is available as `--warp-boot` / `--warp-until`; see
+[Configuration](configuration.md).)
 The emulator runs unthrottled with audio muted until the guest OS loads the executable
 (tracked at the `LoadSeg` call before executing the first instruction). Once loaded,
 emulation and audio immediately return to normal real-time playback.

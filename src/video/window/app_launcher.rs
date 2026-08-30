@@ -1480,6 +1480,16 @@ impl App {
         self.powered_on = true;
         self.cpu_halted = false;
         self.paused = false;
+        // The machine's configured warp boot ([emulation] warp_boot /
+        // warp_until) starts fresh with the machine: run_machine is the
+        // launcher path's power-on, so construct and engage the gate here
+        // the way main.rs does for a direct CLI launch.
+        self.warp_boot = crate::warpboot::gate_from_settings(
+            cfg.emulation.warp_boot,
+            cfg.emulation.warp_boot_idle,
+            cfg.emulation.warp_until,
+        );
+        self.engage_warp_boot();
         self.reset_render_pipeline();
         // The last overlay set here is the one that gets drawn, so a shader
         // or sticker folder that failed to load has to travel in this

@@ -120,6 +120,7 @@ pub mod timestamp;
 pub mod timetravel;
 pub mod toccata;
 pub mod video;
+pub mod warpboot;
 pub mod wasm_manifest;
 #[cfg(feature = "wasm-boards")]
 pub mod wasmboard;

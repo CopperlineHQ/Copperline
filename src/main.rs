@@ -804,6 +804,27 @@ fn main() -> Result<()> {
     // builds.
     #[cfg(not(feature = "gdb"))]
     let _ = &run_prog_name;
+    // --warp-boot/--warp-until (src/warpboot.rs): validate the flag combos
+    // before any mode dispatch, so a bad combination errors even on the
+    // gdb/control/benchmark paths that return early below. The TOML-level
+    // both-set case is rejected by shared config validation; this merged
+    // check also catches a CLI flag against a config-file setting. --run
+    // has its own gate with a sharper end condition, so combining them is
+    // a configuration error rather than a fight between two gates.
+    let warp_until = cli.warp_until.or(cfg.emulation.warp_until);
+    let warp_boot = cli.warp_boot || cfg.emulation.warp_boot;
+    if (warp_boot || warp_until.is_some()) && cli.run.is_some() {
+        return Err(anyhow!(
+            "--warp-boot/--warp-until cannot combine with --run, which already \
+             warp-boots until the program loads"
+        ));
+    }
+    if warp_boot && warp_until.is_some() {
+        return Err(anyhow!(
+            "--warp-boot and --warp-until are mutually exclusive: pick the \
+             storage-idle heuristic or the fixed timestamp"
+        ));
+    }
     if cli.load_state.is_some() {
         // A save state restores the full ROM image, so a Kickstart file is not
         // required to load one. Still resolve the bundled-AROS sentinel when
@@ -1013,6 +1034,17 @@ fn main() -> Result<()> {
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
     let run_warp_target = if headless_capture { None } else { run_warp };
+    // The general warp-boot gate: interactive sessions only, same rule as
+    // the --run gate above (a capture run is already unpaced end to end).
+    let warp_boot_gate = if headless_capture {
+        None
+    } else {
+        copperline::warpboot::gate_from_settings(
+            warp_boot,
+            cfg.emulation.warp_boot_idle,
+            warp_until,
+        )
+    };
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
@@ -1030,6 +1062,7 @@ fn main() -> Result<()> {
         cli.cd_insert_after,
         cli.record_input,
         run_warp_target,
+        warp_boot_gate,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),
@@ -1162,6 +1195,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
         None,
         None,
         std::array::from_fn(|_| Vec::new()),

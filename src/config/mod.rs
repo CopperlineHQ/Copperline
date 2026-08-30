@@ -1238,7 +1238,8 @@ impl LideConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// No Eq: `warp_boot_idle`/`warp_until` are f64 thresholds.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Emulation {
     /// Whether the machine starts running (powered on) at launch. When
     /// false, the emulator sits powered off showing a test screen until
@@ -1259,6 +1260,17 @@ pub struct Emulation {
     /// as an output frame-skip level. See [`WarpSpeed`]. Adjustable at runtime
     /// from the Emulator menu and the keyboard.
     pub warp_speed: WarpSpeed,
+    /// Warp boot: run unpaced from power-on until the boot storage
+    /// (floppy/HDD LEDs) has been idle for [`Emulation::warp_boot_idle`]
+    /// emulated seconds, then resume real-time pacing. Windowed sessions
+    /// only (headless runs are already unpaced); the manual warp hotkey
+    /// cancels it. Mutually exclusive with `warp_until` and `--run`.
+    pub warp_boot: bool,
+    /// The storage-idle threshold for `warp_boot`, in emulated seconds.
+    pub warp_boot_idle: f64,
+    /// Warp boot until an absolute emulated timestamp instead: the
+    /// deterministic variant for a setup whose boot time is known.
+    pub warp_until: Option<f64>,
     /// Record rewind history from power-on, so the rewind hotkey and menu item
     /// work without opening the debugger. Off by default: capturing costs a
     /// whole-machine serialize every `rewind_interval_frames` and the retained
@@ -2281,6 +2293,9 @@ impl Default for Config {
                 pacing_budget: PacingBudget::Cycles,
                 realtime_priority: false,
                 warp_speed: WarpSpeed::default(),
+                warp_boot: false,
+                warp_boot_idle: 10.0,
+                warp_until: None,
                 rewind: false,
                 rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
                 rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,
