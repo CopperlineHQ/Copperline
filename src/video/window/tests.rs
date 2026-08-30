@@ -8550,6 +8550,8 @@ fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
     )
     .expect("content inside the aperture maps");
     assert!(w > 0 && h > 0);
+    // The rect stays on the canvas.
+    assert!(x + w <= FB_WIDTH && y + h <= canvas_rows);
     // Forward-map the returned row range: rows inside land in the
     // content interval, the rows just outside do not.
     let src_of = |canvas_y: usize| {
