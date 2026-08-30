@@ -4388,14 +4388,33 @@ impl ApplicationHandler for App {
                     // COPPERLINE_DIAG_AUTOCROP: the window half of the
                     // renderer-side envelope trace -- the exact rects the
                     // scaler pass draws this frame, logged when they
-                    // change. Together the two lines say whether a crop
-                    // was derived and whether the presentation used it.
+                    // change, with the mode spelled out: a classic layout
+                    // must say WHY it is classic (toggle off, or which
+                    // condition suspended the crop), because the envelope
+                    // line prints whether or not the mode is on and the
+                    // difference is invisible from it alone.
                     if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
                         && self.last_diag_layout != Some(layout)
                     {
+                        let mode = if !crate::video::autocrop() {
+                            "off"
+                        } else if self.rtg_present_dims.is_some() {
+                            "suspended(rtg)"
+                        } else if self.present_programmable {
+                            "suspended(programmable)"
+                        } else if self.present_width != FB_WIDTH {
+                            "suspended(canvas-width)"
+                        } else if self.bezel.is_on() {
+                            "suspended(bezel)"
+                        } else if self.crt_shader_kind != crate::config::ShaderKind::None {
+                            "suspended(crt-shader)"
+                        } else {
+                            "active"
+                        };
                         info!(
-                            "[DIAG_AUTOCROP] layout surface={:?} src_canvas={:?} \
+                            "[DIAG_AUTOCROP] layout mode={} surface={:?} src_canvas={:?} \
                              display_dst={:?} chrome_dst={:?} filter={:?}",
+                            mode,
                             r.surface_size,
                             layout.src_canvas,
                             layout.display_dst,
