@@ -4452,11 +4452,11 @@ impl MachineSetup {
             F::WarpBoot => match (self.warp_until, self.warp_boot) {
                 // A warp_until from the TOML shows as its own state; the
                 // panel's own two states are Off and storage-idle.
-                (Some(secs), _) => format!("Until {secs:.0}s"),
+                (Some(secs), _) => format!("Until {}", format_secs(secs)),
                 (None, true) => "Storage idle".to_string(),
                 (None, false) => "Off".to_string(),
             },
-            F::WarpBootIdle => format!("{:.0}s", self.warp_boot_idle),
+            F::WarpBootIdle => format_secs(self.warp_boot_idle),
             F::Joystick => self.joystick_input_mode.menu_label().to_string(),
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::MouseCapture => match self.mouse_capture {
@@ -9233,6 +9233,18 @@ fn connected_floppy_bays(connected: &[bool; 4]) -> u8 {
         .rposition(|&connected| connected)
         .map(|idx| idx as u8 + 1)
         .unwrap_or(0)
+}
+
+/// A seconds label that keeps a fractional configured value visible
+/// ("12.5s") while the whole-second presets stay terse ("10s"). The
+/// config accepts arbitrary positive seconds, so the panel must not
+/// round a loaded value into a different-looking timestamp.
+fn format_secs(secs: f64) -> String {
+    if secs.fract().abs() < 1e-6 {
+        format!("{secs:.0}s")
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn format_mhz(mhz: f64) -> String {

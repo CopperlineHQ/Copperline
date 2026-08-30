@@ -22,9 +22,14 @@ fn warp_boot_rows_cycle_and_round_trip() {
 
     // A TOML warp_until shows as its own state; one press clears it (the
     // modes are mutually exclusive) and lands on Off.
-    let raw: RawConfig = toml::from_str("[emulation]\nwarp_until = 12.0\n").unwrap();
+    let raw: RawConfig = toml::from_str("[emulation]\nwarp_until = 12.5\n").unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    // A fractional configured timestamp is shown as configured, not
+    // rounded into a different-looking one.
+    assert_eq!(setup.value_label(F::WarpBoot), "Until 12.5s");
     setup.cycle(F::WarpBoot, true);
+    assert_eq!(setup.value_label(F::WarpBoot), "Off");
+    assert_eq!(setup.value_label(F::WarpBootIdle), "10s");
     let out = setup.to_raw();
     assert_eq!(out.emulation.warp_until, None);
     assert_eq!(out.emulation.warp_boot, None);
