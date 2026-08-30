@@ -165,7 +165,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
 # Formatting-preserving TOML writer, so the generated config can carry
 # per-setting comments (copperline-import-uae only).
-toml_edit = { version = "0.22", optional = true }
+toml_edit = { version = "0.25", optional = true }
 # The game library's HTTP client (src/gamelib/openretro.rs) is declared per
 # platform, with the other per-target dependencies below: its TLS backend
 # differs by what each host can build without a C toolchain.
