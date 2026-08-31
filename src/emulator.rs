@@ -1793,6 +1793,14 @@ impl Emulator {
         {
             chunk = chunk.min(self.instructions_for_cia_ticks(ticks).max(1));
         }
+        // An interrupt already latched in INTREQ but still inside its
+        // IPL-pin recognition pipe is invisible to the CPU right now, and a
+        // halted CPU has nothing else to wake it: without this bound the nap
+        // sleeps straight past the moment the pipe delivers, and the handler
+        // is entered a whole nap late instead of a few colour clocks late.
+        if let Some(cck) = bus.next_irq_visible_cck() {
+            cap_cck(cck, &mut chunk);
+        }
         if let Some(cck) = bus.floppy.next_completion_cck(bus.agnus.dmacon) {
             cap_cck(cck, &mut chunk);
         }

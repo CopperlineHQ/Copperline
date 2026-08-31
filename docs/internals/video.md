@@ -243,6 +243,21 @@ sprite DMA and crossing an empty sprite pair slot is not enough to make
 captured DMA authoritative; the frame must contain actual fetched or held
 sprite data.
 
+Sprite DMA runs from the top of the field, above the render window, so the
+lines between the vertical-blank sprite-DMA start (PAL line $19, NTSC $14)
+and the display start are reconstructed by a replay in `frame_capture.rs`
+rather than by the live capture path. That replay is paced by the beam --
+each of a line's sixteen sprite slots runs as the beam passes it, with the
+frame's DMACON, SPRxPT and SPRxPOS/CTL writes applied in between -- because
+a fetch reads chip RAM, and chip RAM keeps changing. Batching the whole
+pre-display span at the display start instead let a descriptor rewritten by
+the vertical-blank interrupt reach a control-word fetch the hardware had
+already made lines earlier, latching the wrong vertical comparators for the
+rest of the field. Ghostown's Spooky Town is the regression example: it
+paints its credit-scroll background by multiplexing four sprites five times
+per line from the Copper, and lost one channel to that stale fetch on
+alternate frames.
+
 A DMA fetch arms the channel as it lands, but the serializer still only
 copies the latches when the horizontal comparator fires, so a SPRxCTL write
 between the fetch slot and HSTART cancels the fetched line outright: it is

@@ -145,7 +145,24 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
-modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
+modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
+
+The IPL pipe (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) holds a newly raised source
+invisible to the CPU for the propagation through the level encoder to the
+pins. Two properties matter beyond its length. Each source pipes
+**independently** -- every source has its own path to the pins, so one
+asserting cannot hold back another already on its way; a single countdown
+restarted by each new source stretched an earlier interrupt's delay by the
+later one's. And the pipe **bounds an idle STOP nap**: a halted CPU has
+nothing but the IPL pins to wake it, so the idle fast-forward
+([](cpu.md)) must stop at the pipe's delivery point rather than sleeping on
+to the next unrelated device event. Together these kept handler entry within
+the few colour clocks the pipe is worth instead of jittering it across tens
+of raster lines, which is what a demo notices when it schedules work
+relative to a fixed raster line (Ghostown's Spooky Town updates its sprite
+descriptors immediately after the vertical-blank sprite fetch).
+
+The rest of Paula:
 
 - **Audio**: four channels running the HRM per-channel state machine
   (states 000/001/101/010/011): AUDxDAT arrivals, the period counter,
