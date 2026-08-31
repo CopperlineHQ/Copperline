@@ -28,7 +28,7 @@ fn warp_boot_rows_cycle_and_round_trip() {
     // rounded into a different-looking one.
     assert_eq!(setup.value_label(F::WarpBoot), "Until 12.5s");
     setup.cycle(F::WarpBoot, true);
-    assert_eq!(setup.value_label(F::WarpBoot), "Off");
+    assert_eq!(setup.value_label(F::WarpBoot), "Disabled");
     assert_eq!(setup.value_label(F::WarpBootIdle), "10s");
     let out = setup.to_raw();
     assert_eq!(out.emulation.warp_until, None);
