@@ -993,6 +993,11 @@ pub struct App {
     /// the machine sits powered off until the status-bar power button
     /// is clicked. Distinct from the emulated (CIA-driven) power LED.
     powered_on: bool,
+    /// Whether the next `run_machine` keeps the configuration's own
+    /// `power_on` rather than the Run button's power-it-on. Set around the
+    /// two automatic launches (`auto_launch_if_asked`, Load...): nobody
+    /// pressed Run there, so nobody overrode the file.
+    run_honors_power_on: bool,
     /// Host-level pause state. When true the emulator does not step but
     /// stays powered on, so the last rendered frame is held on screen and
     /// emulation resumes from the same point when unpaused.
@@ -1999,6 +2004,7 @@ impl App {
             render_recycle_input: None,
             cpu_halted: false,
             powered_on,
+            run_honors_power_on: false,
             paused: false,
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,

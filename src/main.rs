@@ -729,16 +729,27 @@ fn main() -> Result<()> {
     // The modem's stored profile (AT&W/ATZ) is the frontend's to ask for
     // too, same promise as the synth's battery-backed memory above.
     copperline::modem::profile::set_persistence(!cli.factory);
+    // With nothing specified, open the configuration screen instead of
+    // booting a default machine. Decided before the config is validated --
+    // not just before the bundled ROM resolves -- so the launcher opens
+    // even when no Kickstart/AROS is present *and* when the saved default
+    // no longer validates (a floppy image gone missing, say): the screen
+    // is where such a config gets fixed, and its Run button is where the
+    // error shows. An auto-launching default rides the same rule -- its
+    // failed run lands back on the open screen rather than exiting. (A
+    // bare launcher start has no --rom to fold in: launcher_requested
+    // requires its absence.)
+    if launcher_requested(&cli) {
+        return run_configuration_screen(load_raw_config(
+            cli.config_path.as_deref(),
+            &cli.overrides,
+            cli.factory,
+        )?);
+    }
+
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());
-    }
-
-    // With nothing specified, open the configuration screen instead of booting
-    // a default machine. Decided before resolving the bundled ROM so the
-    // launcher opens even when no Kickstart/AROS is present.
-    if launcher_requested(&cli) {
-        return run_configuration_screen(raw_cfg);
     }
 
     let mut cfg = cfg.with_rom_override(cli.rom_path.clone());
@@ -1379,6 +1390,21 @@ fn load_config(
     overrides: &ConfigOverrides,
     factory: bool,
 ) -> Result<(Config, config::RawConfig)> {
+    let raw = load_raw_config(explicit, overrides, factory)?;
+    let cfg = Config::try_from(raw.clone())?;
+    Ok((cfg, raw))
+}
+
+/// The raw half of [`load_config`]: find and parse the file, put its
+/// `[paths]` in force, validate nothing. The configuration screen starts
+/// from this -- validation belongs to its Run button, where a missing
+/// floppy image is a status line to fix rather than an exit before the
+/// screen that could fix it ever opens.
+fn load_raw_config(
+    explicit: Option<&Path>,
+    overrides: &ConfigOverrides,
+    factory: bool,
+) -> Result<config::RawConfig> {
     // Resolve which file (if any) backs the config: the explicit --config
     // path, then ./copperline.toml if present, then the configuration saved
     // with Save default, otherwise the built-in defaults. CLI overrides
@@ -1405,14 +1431,13 @@ fn load_config(
         None
     };
     let raw = Config::load_raw(path, overrides)?;
-    // Before the conversion, not after: `Config::try_from` resolves the
-    // implicit battery-RAM backing files through the paths in force, so
-    // adopting afterwards would site this run's NVRAM by the previous
-    // answer. Whatever this host cannot reach is dropped here and inherits
+    // Before any conversion: `Config::try_from` resolves the implicit
+    // battery-RAM backing files through the paths in force, so adopting
+    // afterwards would site this run's NVRAM by the previous answer.
+    // Whatever this host cannot reach is dropped here and inherits
     // instead, so a config naming somebody else's memory stick still starts.
     copperline::paths::adopt(raw.paths());
-    let cfg = Config::try_from(raw.clone())?;
-    Ok((cfg, raw))
+    Ok(raw)
 }
 
 #[cfg(test)]
