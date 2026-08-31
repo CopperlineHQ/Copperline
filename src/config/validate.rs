@@ -1229,7 +1229,11 @@ impl TryFrom<RawConfig> for Config {
                 .extended_rom
                 .map(PathBuf::from)
                 .or(defaults.extended_rom_path),
-            fmv_rom_path: raw.fmv_rom.map(PathBuf::from).or(defaults.fmv_rom_path),
+            fmv_rom_path: match raw.fmv_rom.as_deref() {
+                Some("") => None,
+                Some(path) => Some(PathBuf::from(path)),
+                None => defaults.fmv_rom_path,
+            },
             cd_image_path: raw.cd.image.map(PathBuf::from),
             cd_insert_delay_secs,
             cd32_nvram_path: raw
@@ -1715,6 +1719,10 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu_clock_mhz = 14.18;
             d.floppy_connected = [false; 4];
             d.akiko = true;
+            #[cfg(feature = "cd32-fmv")]
+            {
+                d.fmv_rom_path = Some(PathBuf::from(BUNDLED_FMV_ROM));
+            }
             // The bundled controller: lowlevel.library expects the pad's
             // serial button protocol on port 2.
             d.port_devices[1] = PortDevice::Cd32Pad;

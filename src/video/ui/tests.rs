@@ -3458,6 +3458,67 @@ fn panels_render_into_their_rects() {
         }
     }
 
+    // The FMV module's action is live even with no custom path: Remove writes
+    // the explicit empty-slot state, then the same button offers Default and
+    // restores the bundled ROM. This is a tri-state module control, not an
+    // ordinary path Clear that goes dead while the default is in force.
+    {
+        let probe = |setup: launcher::MachineSetup| {
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::Rom;
+            let panel = Panel::Launcher(Box::new(state));
+            let rect = panel_rect(&panel);
+            let setup = match &panel {
+                Panel::Launcher(state) => &state.setup,
+                _ => unreachable!(),
+            };
+            let idx = launcher::rows(
+                LauncherTab::Rom,
+                Default::default(),
+                Default::default(),
+                false,
+                false,
+            )
+            .iter()
+            .filter(|r| setup.row_on_page(LauncherTab::Rom, r.field))
+            .position(|r| r.field == LauncherField::FmvRom)
+            .expect("the FMV ROM row is visible on CD32");
+            let nav = if LauncherTab::Rom.has_top_nav() {
+                launcher_nav_block_h(LauncherTab::Rom)
+            } else {
+                0
+            };
+            let row_y = launcher_row_y(rect, idx) + nav;
+            let (_, action) = launcher_path_rects(rect, row_y);
+            let control = panel_control_at(
+                &panel,
+                (
+                    (action.x + action.w / 2) as i32,
+                    (action.y + action.h / 2) as i32,
+                ),
+            );
+            (launcher_clear_label(setup, LauncherField::FmvRom), control)
+        };
+
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(MachineModel::Cd32));
+        assert_eq!(
+            probe(setup.clone()),
+            (
+                "Remove",
+                Some(UiControl::LauncherClear(LauncherField::FmvRom))
+            )
+        );
+        setup.toggle_fmv_module();
+        assert_eq!(
+            probe(setup),
+            (
+                "Default",
+                Some(UiControl::LauncherClear(LauncherField::FmvRom))
+            )
+        );
+    }
+
     // The confirm over Reset default answers every click on the panel:
     // Yes only on its own button, and anything else -- Run included --
     // cancels. A question about deleting something must not be

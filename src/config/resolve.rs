@@ -166,6 +166,7 @@ pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     // An A4091 may want its bundled ROM regardless of what Kickstart is in use.
     resolve_bundled_a4091_rom(cfg)?;
     resolve_bundled_lide_rom(cfg)?;
+    resolve_bundled_fmv_rom(cfg)?;
     if cfg.rom_path != Path::new(BUNDLED_AROS_ROM) {
         return Ok(());
     }
@@ -185,6 +186,26 @@ pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     );
     cfg.rom_path = aros.main;
     cfg.extended_rom_path.get_or_insert(aros.extended);
+    Ok(())
+}
+
+/// Resolve the CD32 profile's bundled open FMV cartridge ROM. Keeping this
+/// beside the other bundled-ROM resolution makes save states, About text, and
+/// the machine builder all see the concrete installed path.
+fn resolve_bundled_fmv_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.fmv_rom_path.as_deref() != Some(Path::new(BUNDLED_FMV_ROM)) {
+        return Ok(());
+    }
+    let rom = crate::romsearch::find_bundled_fmv().ok_or_else(|| {
+        anyhow!(
+            "the CD32 profile's bundled FMV ROM was not found. Set fmv_rom = \"\" \
+             to leave the module unfitted, name another 256 KiB FMV ROM, or install \
+             {} next to the binary or under share/copperline/fmv/.",
+            crate::romsearch::FMV_ROM_FILE
+        )
+    })?;
+    log::info!("using bundled open CD32 FMV ROM ({})", rom.display());
+    cfg.fmv_rom_path = Some(rom);
     Ok(())
 }
 

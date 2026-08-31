@@ -30,6 +30,10 @@ Copperline.app/Contents/Resources/aros. AROS is freely redistributable; see the
 LICENSE next to the ROM. To use a real Kickstart instead, point a config file
 at it, or load it at runtime from the menu (Load Kickstart ROM...).
 
+The CD32 profile also fits Copperline's bundled open Full Motion Video ROM
+from Contents/Resources/fmv. Set fmv_rom = "" in a config to leave that
+cartridge unfitted.
+
 Configuration
 -------------
 copperline.example.toml is a starting point. Copy it, edit the paths to your

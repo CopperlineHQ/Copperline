@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Locating the bundled AROS ROM. AROS (the AROS Research Operating System)
-//! ships an open-source, freely redistributable Kickstart replacement for the
-//! m68k that Copperline boots when the user has not supplied a ROM of their
-//! own. Unlike a real Kickstart it can legally travel with the program, so it
-//! is installed alongside the binary (the Homebrew formula drops it under
-//! `share/copperline/aros/`) and located here at start-up.
+//! Locating bundled, freely redistributable ROM assets. AROS supplies the
+//! default m68k boot ROM; Copperline's open CD32 FMV image supplies the
+//! optional cartridge's default. Unlike Commodore ROMs, both can legally ship
+//! alongside the binary under `share/copperline/{aros,fmv}/`.
 //!
 //! AROS is consumed as two halves, exactly as WinUAE and FS-UAE take it: a
 //! 512 KiB main ROM that overlays at $F80000 like any Kickstart, plus a
@@ -17,6 +15,9 @@ use std::path::{Path, PathBuf};
 pub const AROS_MAIN_FILE: &str = "aros-amiga-m68k-rom.bin";
 /// Extended ROM file name (maps at $E00000).
 pub const AROS_EXT_FILE: &str = "aros-amiga-m68k-ext.bin";
+
+/// Copperline's freely redistributable CD32 FMV cartridge ROM.
+pub const FMV_ROM_FILE: &str = "copperline-fmv.rom";
 
 /// A located pair of bundled AROS ROM files.
 pub struct BundledAros {
@@ -61,6 +62,32 @@ fn aros_pair_in(dir: &Path) -> Option<BundledAros> {
     let main = dir.join(AROS_MAIN_FILE);
     let extended = dir.join(AROS_EXT_FILE);
     (main.is_file() && extended.is_file()).then_some(BundledAros { main, extended })
+}
+
+/// Locate the bundled open CD32 FMV ROM. Native packages install it in an
+/// `fmv` directory beside the executable's other ROM assets; the environment
+/// override keeps development and downstream packaging testable.
+pub fn find_bundled_fmv() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = crate::envcfg::var("COPPERLINE_FMV_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("fmv"));
+            if let Some(parent) = bin_dir.parent() {
+                dirs.push(parent.join("Resources").join("fmv"));
+                dirs.push(parent.join("share").join("copperline").join("fmv"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("assets").join("fmv"));
+
+    dirs.into_iter()
+        .map(|dir| dir.join(FMV_ROM_FILE))
+        .find(|rom| rom.is_file())
 }
 
 /// Bundled open-source A4091 autoboot ROM, used when a config fits an A4091

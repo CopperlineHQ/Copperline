@@ -5659,7 +5659,11 @@ impl App {
             UiControl::LauncherClear(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_cancel();
-                    state.setup.clear_path(field);
+                    if field == LauncherField::FmvRom {
+                        state.setup.toggle_fmv_module();
+                    } else {
+                        state.setup.clear_path(field);
+                    }
                     state.status = None;
                 }
             }

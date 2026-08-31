@@ -20,15 +20,17 @@ publish = false
 [workspace]
 
 [dependencies]
-# The interactive frontend, the CPU JIT, and MP3 cue-sheet tracks (a
-# bundled CD image may package its audio that way), and nothing else: no
-# control server, no GDB stub, no launcher-library HTTP/TLS stack, no
-# wasmtime, no synthesizers -- a shipped game exposes no debugging surface
-# and carries no dependency it does not use.
+# The interactive frontend, the CPU JIT, MP3 cue-sheet tracks (a bundled CD
+# image may package its audio that way), and the CD32 FMV cartridge whose
+# open ROM ships in publisher bundles. Nothing else: no control server, no
+# GDB stub, no launcher-library HTTP/TLS stack, no wasmtime, no synthesizers
+# -- a shipped game exposes no debugging surface and carries no dependency it
+# does not use.
 copperline = { path = "../..", default-features = false, features = [
     "frontend",
     "cpu-jit",
     "cd-mp3",
+    "cd32-fmv",
 ] }
 anyhow = "1"
 log = "0.4"

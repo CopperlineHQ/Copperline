@@ -82,6 +82,11 @@ modules:
         -t ${FLATPAK_DEST}/share/copperline/aros/
       - install -Dm644 assets/aros/LICENSE
         ${FLATPAK_DEST}/share/copperline/aros/LICENSE
+      # Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+      - install -Dm644 assets/fmv/copperline-fmv.rom
+        -t ${FLATPAK_DEST}/share/copperline/fmv/
+      - install -Dm644 assets/fmv/README.md
+        -t ${FLATPAK_DEST}/share/copperline/fmv/
       # Bundled open-source A4091 autoboot ROM (default when a config fits an
       # A4091 without naming a ROM); romsearch.rs resolves it via
       # <prefix>/share/copperline/a4091.

@@ -61,6 +61,13 @@ foreach ($f in @(
     Copy-Item "assets\aros\$f" (Join-Path $arosDir $f)
 }
 
+# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+$fmvDir = Join-Path $stage "fmv"
+New-Item -ItemType Directory -Force -Path $fmvDir | Out-Null
+foreach ($f in @("copperline-fmv.rom", "README.md")) {
+    Copy-Item (Join-Path "assets\fmv" $f) (Join-Path $fmvDir $f)
+}
+
 # Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
 # without naming a ROM); romsearch.rs probes a sibling a4091\ next to the exe.
 $a4091Dir = Join-Path $stage "a4091"

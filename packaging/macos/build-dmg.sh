@@ -93,6 +93,12 @@ for f in \
   cp "assets/aros/$f" "$app/Contents/Resources/aros/$f"
 done
 
+# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+mkdir -p "$app/Contents/Resources/fmv"
+for f in copperline-fmv.rom README.md; do
+  cp "assets/fmv/$f" "$app/Contents/Resources/fmv/$f"
+done
+
 # Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
 # without naming a ROM); romsearch.rs resolves Contents/Resources/a4091. Keep
 # its exact provenance, component inventory, and redistribution notices beside

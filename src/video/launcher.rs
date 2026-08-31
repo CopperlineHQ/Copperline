@@ -2051,10 +2051,12 @@ pub struct MachineSetup {
     mb_ram: usize,
     accel_ram: usize,
     z3_ram: usize,
-    // ROM (None = bundled AROS for the boot ROM, none for extended)
+    // ROM (None = bundled default for the boot and CD32 FMV ROMs)
     rom: Option<PathBuf>,
     extended_rom: Option<PathBuf>,
     fmv_rom: Option<PathBuf>,
+    /// An explicit `fmv_rom = ""` leaves the CD32 cartridge slot empty.
+    fmv_rom_disabled: bool,
     // Floppy
     floppy_drives: u8,
     /// `[floppy] speed`: a percentage (100/200/400/800) or 0 for turbo.
@@ -2437,7 +2439,12 @@ impl MachineSetup {
             z3_ram: cfg.z3_ram_bytes,
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
-            fmv_rom: raw.fmv_rom.as_deref().map(PathBuf::from),
+            fmv_rom: raw
+                .fmv_rom
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            fmv_rom_disabled: raw.fmv_rom.as_deref() == Some(""),
             floppy_drives: raw.floppy.drives.unwrap_or(connected).min(4),
             floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
@@ -2929,7 +2936,11 @@ impl MachineSetup {
         // ROM
         raw.rom = self.rom.as_deref().map(path_string);
         raw.extended_rom = self.extended_rom.as_deref().map(path_string);
-        raw.fmv_rom = self.fmv_rom.as_deref().map(path_string);
+        raw.fmv_rom = match self.fmv_rom.as_deref() {
+            Some(path) => Some(path_string(path)),
+            None if self.fmv_rom_disabled => Some(String::new()),
+            None => None,
+        };
         // Floppy: cover any drive carrying media so the count never orphans it.
         let drives = self.floppy_drives.max(self.occupied_floppy_bays());
         let base_drives = connected_floppy_bays(&base.floppy_connected);
@@ -3538,6 +3549,7 @@ impl MachineSetup {
         if model != Some(MachineModel::Cd32) {
             self.cd32_nvram = None;
             self.fmv_rom = None;
+            self.fmv_rom_disabled = false;
         }
         // The motherboard SCSI leaves with the motherboard; the drives stay and
         // land on the default Zorro board instead.
@@ -3877,6 +3889,20 @@ impl MachineSetup {
     /// bundled default the row reads as one.
     pub fn scsi_controller_is_a4091(&self) -> bool {
         matches!(self.scsi_controller, Some(ScsiController::A4091))
+    }
+
+    /// Whether the CD32 FMV cartridge was explicitly removed rather than
+    /// left to inherit the bundled open ROM.
+    pub fn fmv_rom_disabled(&self) -> bool {
+        self.fmv_rom_disabled
+    }
+
+    /// Switch the CD32 FMV row between the bundled module and an empty slot.
+    /// A named replacement is removed along with the module; the next press
+    /// restores the bundled default.
+    pub fn toggle_fmv_module(&mut self) {
+        self.fmv_rom = None;
+        self.fmv_rom_disabled = !self.fmv_rom_disabled;
     }
 
     /// The current path of a path field, if any.
@@ -4654,6 +4680,8 @@ impl MachineSetup {
             F::WhdloadWhdPackage | F::WhdloadSkickPackage => self.path_label(field, "(none)"),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
+            F::FmvRom if self.fmv_rom_disabled => "(no FMV module)".to_string(),
+            F::FmvRom => self.path_label(field, "(bundled open FMV ROM)"),
             // The A4091 autoboots from a bundled open-source ROM when no
             // image names one; the other controllers have no such default.
             F::ScsiRom if self.scsi_controller_is_a4091() => {
@@ -5231,7 +5259,10 @@ impl MachineSetup {
             F::CsynthSoundfont => self.csynth_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
-            F::FmvRom => self.fmv_rom = Some(path),
+            F::FmvRom => {
+                self.fmv_rom = Some(path);
+                self.fmv_rom_disabled = false;
+            }
             F::Df0Image => self.set_floppy(0, path),
             F::Df1Image => self.set_floppy(1, path),
             F::Df2Image => self.set_floppy(2, path),
@@ -5303,7 +5334,10 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
-            F::FmvRom => self.fmv_rom = None,
+            F::FmvRom => {
+                self.fmv_rom = None;
+                self.fmv_rom_disabled = false;
+            }
             F::Mt32ControlRom => self.mt32_control_rom = None,
             #[cfg(feature = "coppersynth")]
             F::CsynthSoundfont => self.csynth_soundfont = None,
