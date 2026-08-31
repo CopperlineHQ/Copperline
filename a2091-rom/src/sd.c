@@ -1409,6 +1409,14 @@ scsidirect_complete(struct scsipi_xfer *xs)
 {
     int             rc   = translate_xs_error(xs);
     struct SCSICmd *scmd = xs->xs_callback_arg;
+    ULONG           actual = scmd->scsi_Length;
+
+    if (xs->resid > 0) {
+        if ((ULONG)xs->resid >= actual)
+            actual = 0;
+        else
+            actual -= (ULONG)xs->resid;
+    }
 
     /* Check if we used a bounce buffer (xs->data differs from original) */
     if (xs->data != (u_char *)scmd->scsi_Data && xs->datalen > 0) {
@@ -1418,7 +1426,7 @@ scsidirect_complete(struct scsipi_xfer *xs)
 
         /* For reads, copy data back from bounce buffer */
         if (rc == 0 && (xs->xs_control & XS_CTL_DATA_IN))
-            CopyMem(bounce_buf, orig_buf, xs->datalen);
+            CopyMem(bounce_buf, orig_buf, actual);
 
         FreeMem(bounce_buf, xs->datalen);
         chan->chan_bounce_allocated -= xs->datalen;
@@ -1427,8 +1435,8 @@ scsidirect_complete(struct scsipi_xfer *xs)
         Signal(chan->chan_task, chan->chan_sig_mask);
     }
 
-    scmd->scsi_Status    = rc;
-    scmd->scsi_Actual    = scmd->scsi_Length;
+    scmd->scsi_Status    = xs->status;
+    scmd->scsi_Actual    = actual;
     scmd->scsi_CmdActual = scmd->scsi_CmdLength;
 
     if (rc != 0) {

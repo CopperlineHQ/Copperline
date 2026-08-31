@@ -121,6 +121,7 @@ DiagEntry
         move.l  #(16*1024-16),d0
         bsr     RomFetch32At
         move.l  d0,d2
+        bra.s   .gorelocate
 
 .no_resident
         unlk    a4      ; deallocate ReadHandle

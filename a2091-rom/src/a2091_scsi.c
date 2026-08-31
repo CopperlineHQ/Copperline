@@ -388,8 +388,7 @@ a2091_run_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
     }
 
     a2091_complete(xs,
-                   (status == SCSI_CHECK || status == SCSI_BUSY)
-                       ? XS_BUSY : XS_NOERROR,
+                   status == SCSI_OK ? XS_NOERROR : XS_BUSY,
                    status, xs->datalen - transferred);
 }
 

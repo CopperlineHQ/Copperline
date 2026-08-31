@@ -717,7 +717,7 @@ irq_and_timer_handler(void)
 
     /* Process the failure completion queue, if anything is present */
     scsipi_completion_poll(chan);
-    return ((mask & int_mask) ? 1 : 0);
+    return ((mask & timer_mask) ? 1 : 0);
 }
 
 static void __saveds

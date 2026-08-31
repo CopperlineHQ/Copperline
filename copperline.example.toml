@@ -427,8 +427,9 @@ slow = "512K"
 #
 # controller picks the host adapter:
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
-#             Needs an A590/A2091 boot ROM (6.6+, 16K/32K; rom_odd takes the
-#             odd half of a split even/odd EPROM dump).
+#             Omit rom to load the bundled open-source 64K A2091 ROM. External
+#             A590/A2091 ROMs may be 16K, 32K, or 64K; rom_odd takes the odd
+#             half of a split even/odd EPROM dump.
 #   "a4091" - Zorro III, NCR 53C710. The boot ROM is a raw A4091 EPROM image;
 #             omit to load the bundled open-source A4091 ROM.
 #   "a3000" - the A3000's built-in SCSI, and the default on that machine.
@@ -436,7 +437,7 @@ slow = "512K"
 #             from an RDB drive.
 # [scsi]
 # controller = "a2091"
-# rom = "a2091-v6.6.rom"
+# rom = "a2091-v7.0.rom"  # optional replacement for the bundled open ROM
 # unit0 = "workbench.hdf"
 # unit1 = "data.hdf"
 # unit2 = "game.cue"

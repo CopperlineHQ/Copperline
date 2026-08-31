@@ -7,7 +7,7 @@ the sources in `a2091-rom/`.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `copperline-a2091.rom` | 65,536 bytes | `4bf1ab8411ac19b360d06c59f4640ddc8f430b55e616927cd31d20b77a7fd3f4` |
+| `copperline-a2091.rom` | 65,536 bytes | `548158ad7b629896bebec3167b24d44868676fb7af2f7f0ceac246c0f59ca512` |
 
 The image is board-linear from A2091 offset `$2000`; its first 8 KiB are
 erased because that physical range is shadowed by the board registers. For
