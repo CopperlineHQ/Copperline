@@ -1029,10 +1029,16 @@ impl App {
             .set_title("Load configuration")
             .add_filter("Copperline config", &["toml"])
             .pick_file();
+        let mut run_at_once = false;
         if let Some(path) = picked {
             match MachineSetup::load_from(&path) {
                 Ok(setup) => {
                     if let Some(state) = self.launcher_state_mut() {
+                        // `[emulation] auto_launch`: the file asks to run
+                        // the moment it is opened, configuration screen
+                        // skipped. Loaded first so a failed run leaves the
+                        // launcher showing the loaded setup and the error.
+                        run_at_once = setup.auto_launch();
                         state.setup = setup;
                         // The page being looked at may not exist under the
                         // loaded machine (the second boot page, emptied).
@@ -1063,6 +1069,9 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+        if run_at_once {
+            self.launcher_run();
+        }
     }
 
     /// Open or put away the Save menu. Every other click while it is up
@@ -1231,6 +1240,19 @@ impl App {
     /// WHDLoad staging, AROS resolution, audio-device and
     /// machine-construction errors all stay in the panel as a status line;
     /// only success swaps the live machine.
+    /// Run the opened configuration at once when it asks for that --
+    /// `[emulation] auto_launch` in the file the launcher opened showing.
+    /// Called once at startup, after the launcher opens: the screen is
+    /// skipped, and if the run fails the launcher is still there under it
+    /// with the error on its status line. Command-line launches never come
+    /// this way at all.
+    pub fn auto_launch_if_asked(&mut self) {
+        let asked = self.launcher_state().is_some_and(|s| s.setup.auto_launch());
+        if asked {
+            self.launcher_run();
+        }
+    }
+
     pub(super) fn launcher_run(&mut self) {
         // Capture a name/option typed but not yet committed with Enter. A
         // value the commit refuses keeps the focus and blocks the run,

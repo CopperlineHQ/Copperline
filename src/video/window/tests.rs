@@ -4728,6 +4728,45 @@ fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
 }
 
 #[test]
+fn auto_launch_runs_only_when_the_config_asks() {
+    use crate::video::launcher::LauncherField;
+
+    // Off (the default): opening the launcher and asking leaves it open,
+    // exactly as today.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    app.auto_launch_if_asked();
+    assert!(
+        matches!(&app.ui.panel, Some(Panel::Launcher(_))),
+        "an ordinary config must still show the configuration screen"
+    );
+    assert!(!app.powered_on);
+
+    // On: the ask runs the machine at once. The test machine's config
+    // fails validation the same way a bad Run click would, which is the
+    // observable half we can assert headlessly: the run was *attempted*
+    // (an error status appears) rather than the screen simply sitting.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    if let Some(Panel::Launcher(state)) = app.ui.panel.as_mut() {
+        state.setup.cycle(LauncherField::AutoLaunch, true);
+        state
+            .setup
+            .set_path(LauncherField::Df0Image, PathBuf::from("/no/such/disk.adf"));
+    }
+    app.auto_launch_if_asked();
+    match &app.ui.panel {
+        Some(Panel::Launcher(state)) => assert!(
+            state.status.as_ref().is_some(),
+            "auto_launch should have attempted the run"
+        ),
+        _ => {}
+    }
+}
+
+#[test]
 fn launcher_run_keeps_panel_open_on_error() {
     use crate::video::launcher::LauncherField;
 

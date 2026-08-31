@@ -711,6 +711,7 @@ pub enum LauncherField {
     FloppySounds,
     FloppyVolume,
     PowerOn,
+    AutoLaunch,
     PacingBudget,
     RealtimePriority,
     Warp,
@@ -1271,8 +1272,9 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 #[cfg(not(feature = "game-library"))]
-const EMULATION_ROWS: [Row; 6] = [
+const EMULATION_ROWS: [Row; 7] = [
     row(F::PowerOn, "Power on startup", Cycle),
+    row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
@@ -1280,8 +1282,9 @@ const EMULATION_ROWS: [Row; 6] = [
     row(F::WarpBootIdle, "Warp boot idle", Cycle),
 ];
 #[cfg(feature = "game-library")]
-const EMULATION_ROWS: [Row; 7] = [
+const EMULATION_ROWS: [Row; 8] = [
     row(F::PowerOn, "Power on startup", Cycle),
+    row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
@@ -2350,6 +2353,7 @@ pub struct MachineSetup {
     floppy_sounds: bool,
     floppy_volume: u8,
     power_on: bool,
+    auto_launch: bool,
     pacing_budget: PacingBudget,
     realtime_priority: bool,
     warp: WarpSpeed,
@@ -2654,6 +2658,7 @@ impl MachineSetup {
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
             power_on: cfg.emulation.power_on,
+            auto_launch: cfg.emulation.auto_launch,
             pacing_budget: cfg.emulation.pacing_budget,
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
@@ -2720,6 +2725,14 @@ impl MachineSetup {
 
     pub fn midi_out_is_csynth(&self) -> bool {
         crate::config::midi_out_is_csynth(self.midi_out.as_deref())
+    }
+
+    /// Whether this configuration asks the launcher to run it the moment
+    /// it is opened -- `[emulation] auto_launch`. The command line never
+    /// consults it: a machine given on the command line was never going to
+    /// see the configuration screen this skips.
+    pub fn auto_launch(&self) -> bool {
+        self.auto_launch
     }
 
     pub fn serial_mode(&self) -> SerialMode {
@@ -3222,6 +3235,9 @@ impl MachineSetup {
         if self.power_on != base.emulation.power_on {
             raw.emulation.power_on = Some(self.power_on);
         }
+        if self.auto_launch != base.emulation.auto_launch {
+            raw.emulation.auto_launch = Some(self.auto_launch);
+        }
         if self.pacing_budget != base.emulation.pacing_budget {
             raw.emulation.pacing_budget = Some(pacing_name(self.pacing_budget).to_string());
         }
@@ -3524,6 +3540,7 @@ impl MachineSetup {
         self.floppy_sounds = base.audio.floppy_sounds;
         self.floppy_volume = base.audio.floppy_sounds_volume;
         self.power_on = base.emulation.power_on;
+        self.auto_launch = base.emulation.auto_launch;
         self.pacing_budget = base.emulation.pacing_budget;
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
@@ -3877,6 +3894,7 @@ impl MachineSetup {
             #[cfg(feature = "midi")]
             F::SerialTelnet => self.serial_telnet,
             F::PowerOn => self.power_on,
+            F::AutoLaunch => self.auto_launch,
             F::RealtimePriority => self.realtime_priority,
             F::Toccata => self.toccata,
             #[cfg(feature = "mhi")]
@@ -4418,6 +4436,7 @@ impl MachineSetup {
             F::Deinterlace => enabled_label(self.deinterlace),
             F::FloppySounds => enabled_label(self.floppy_sounds),
             F::PowerOn => enabled_label(self.power_on),
+            F::AutoLaunch => enabled_label(self.auto_launch),
             F::RealtimePriority => enabled_label(self.realtime_priority),
             F::Toccata => enabled_label(self.toccata),
             #[cfg(feature = "mhi")]
@@ -4903,6 +4922,7 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
             F::PowerOn => self.power_on = !self.power_on,
+            F::AutoLaunch => self.auto_launch = !self.auto_launch,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             F::Toccata => self.toccata = !self.toccata,
             #[cfg(feature = "mhi")]

@@ -376,6 +376,7 @@ section uses the same Rev 6A defaults; select `A500OCS` or set
 ```toml
 [emulation]
 power_on = true            # false = start powered off at the test screen
+auto_launch = false        # true = the launcher runs this file at once
 pacing_budget = "cycles"   # "cycles" (hardware-accurate) or "instructions"
 realtime_priority = false  # true = raise the pacer/audio thread priority
 warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
@@ -398,6 +399,12 @@ carried no information.)
   until you click the status-bar power button -- useful for arming video
   capture first. The power button cold-boots (reinitialising RAM according to
   `[memory] init`).
+- `auto_launch = true` makes the launcher run this configuration the moment
+  it opens it -- starting Copperline with it as the saved default boots the
+  machine with no configuration screen first, and the launcher's **Load...**
+  button does the same. The launcher's **A/V & Emu -> Emulation -> Run on
+  startup** row sets it. It only concerns the launcher: a machine given on
+  the command line never shows the screen this key skips.
 - `pacing_budget` selects how real-time pacing budgets CPU work per frame:
   `"cycles"` (default) charges each instruction its actual 68000 cycle cost
   plus chip-bus waits, matching real hardware speed; `"instructions"` uses a

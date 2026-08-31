@@ -49,6 +49,12 @@ rom = "kickstart.rom"
 # that cold test-screen state.
 power_on = true
 
+# When true, the launcher runs this configuration the moment it opens it:
+# starting Copperline with this file as the saved default boots straight
+# into the machine, and Load... in the launcher does the same. Only the
+# launcher reads it -- command-line launches are unaffected.
+auto_launch = false
+
 # Real-mode pacing budget. "cycles" (default) clocks the CPU by each
 # instruction's actual m68k cycle cost plus chip-bus waits, matching real
 # 68000 speed (the core's 68000 cycle counts are now accurate).

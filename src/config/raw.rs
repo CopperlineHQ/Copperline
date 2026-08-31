@@ -1048,6 +1048,12 @@ pub(crate) struct RawEmulation {
     pub(crate) speed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) power_on: Option<bool>,
+    /// Skip the configuration screen when this file is opened in the
+    /// launcher and run the machine at once (default false). Only the
+    /// launcher reads it; a machine started from the command line is
+    /// already past the screen this key skips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_launch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pacing_budget: Option<String>,
     /// Best-effort realtime-like thread priority for the pacer and audio

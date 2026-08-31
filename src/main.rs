@@ -1228,6 +1228,9 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         copperline::sampler::SamplerRequest::default(),
     );
     app.open_launcher();
+    // `[emulation] auto_launch` in the configuration the launcher opened
+    // showing: straight to the machine, no configuration screen first.
+    app.auto_launch_if_asked();
     app.run()
 }
 
