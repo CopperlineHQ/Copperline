@@ -1029,10 +1029,16 @@ impl App {
             .set_title("Load configuration")
             .add_filter("Copperline config", &["toml"])
             .pick_file();
+        let mut run_at_once = false;
         if let Some(path) = picked {
             match MachineSetup::load_from(&path) {
                 Ok(setup) => {
                     if let Some(state) = self.launcher_state_mut() {
+                        // `[emulation] auto_launch`: the file asks to run
+                        // the moment it is opened, configuration screen
+                        // skipped. Loaded first so a failed run leaves the
+                        // launcher showing the loaded setup and the error.
+                        run_at_once = setup.auto_launch();
                         state.setup = setup;
                         // The page being looked at may not exist under the
                         // loaded machine (the second boot page, emptied).
@@ -1063,6 +1069,11 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+        if run_at_once {
+            self.run_honors_power_on = true;
+            self.launcher_run();
+            self.run_honors_power_on = false;
+        }
     }
 
     /// Open or put away the Save menu. Every other click while it is up
@@ -1225,6 +1236,25 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+    }
+
+    /// Run the opened configuration at once when it asks for that --
+    /// `[emulation] auto_launch` in the file the launcher opened showing.
+    /// Called once at startup, after the launcher opens: the screen is
+    /// skipped, and if the run fails the launcher is still there under it
+    /// with the error on its status line. Command-line launches never come
+    /// this way at all.
+    ///
+    /// An automatic run keeps the file's own `power_on`: nobody pressed
+    /// Run, so nobody overrode a configuration that wants to start at the
+    /// test screen.
+    pub fn auto_launch_if_asked(&mut self) {
+        let asked = self.launcher_state().is_some_and(|s| s.setup.auto_launch());
+        if asked {
+            self.run_honors_power_on = true;
+            self.launcher_run();
+            self.run_honors_power_on = false;
+        }
     }
 
     /// Build and start the configured machine (the Run button). Validation,
@@ -1478,19 +1508,28 @@ impl App {
         }
         self.ui.menu_open = false;
         self.ui.panel = None;
-        self.powered_on = true;
+        // Pressing Run is a statement -- start it -- so the button powers
+        // on whatever `power_on` says. An automatic launch pressed nothing:
+        // it keeps the configuration's own power state, the same one a
+        // command-line start of the same file would have.
+        self.powered_on = !self.run_honors_power_on || cfg.emulation.power_on;
         self.cpu_halted = false;
         self.paused = false;
         // The machine's configured warp boot ([emulation] warp_boot /
         // warp_until) starts fresh with the machine: run_machine is the
         // launcher path's power-on, so construct and engage the gate here
-        // the way main.rs does for a direct CLI launch.
+        // the way main.rs does for a direct CLI launch. A machine starting
+        // powered off keeps the gate armed instead; the power button's
+        // first press engages it, exactly as it does for a CLI start.
         self.warp_boot = crate::warpboot::gate_from_settings(
             cfg.emulation.warp_boot,
             cfg.emulation.warp_boot_idle,
             cfg.emulation.warp_until,
         );
-        self.engage_warp_boot();
+        if self.powered_on {
+            self.engage_warp_boot();
+        }
+        self.sync_live_audio_suspension();
         self.reset_render_pipeline();
         // The last overlay set here is the one that gets drawn, so a shader
         // or sticker folder that failed to load has to travel in this

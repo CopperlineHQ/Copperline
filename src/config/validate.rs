@@ -120,6 +120,10 @@ impl TryFrom<RawConfig> for Config {
                 .emulation
                 .power_on
                 .unwrap_or(defaults.emulation.power_on),
+            auto_launch: raw
+                .emulation
+                .auto_launch
+                .unwrap_or(defaults.emulation.auto_launch),
             pacing_budget: match raw.emulation.pacing_budget.as_deref() {
                 None => defaults.emulation.pacing_budget,
                 Some(s) => parse_pacing_budget(s)?,

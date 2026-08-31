@@ -4727,6 +4727,82 @@ fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
 }
 
 #[test]
+fn auto_launch_runs_only_when_the_config_asks() {
+    use crate::video::launcher::LauncherField;
+
+    // Off (the default): opening the launcher and asking leaves it open,
+    // exactly as today.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    app.auto_launch_if_asked();
+    assert!(
+        matches!(&app.ui.panel, Some(Panel::Launcher(_))),
+        "an ordinary config must still show the configuration screen"
+    );
+    assert!(!app.powered_on);
+
+    // On: the ask runs the machine at once. The test machine's config
+    // fails validation the same way a bad Run click would, which is the
+    // observable half we can assert headlessly: the run was *attempted*
+    // (an error status appears) rather than the screen simply sitting.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    if let Some(Panel::Launcher(state)) = app.ui.panel.as_mut() {
+        state.setup.cycle(LauncherField::AutoLaunch, true);
+        state
+            .setup
+            .set_path(LauncherField::Df0Image, PathBuf::from("/no/such/disk.adf"));
+    }
+    app.auto_launch_if_asked();
+    if let Some(Panel::Launcher(state)) = &app.ui.panel {
+        assert!(
+            state.status.as_ref().is_some(),
+            "auto_launch should have attempted the run"
+        );
+    }
+    assert!(
+        !app.run_honors_power_on,
+        "the one-shot intent must not leak into a later manual Run"
+    );
+}
+
+#[test]
+fn an_automatic_run_keeps_the_configured_power_state() {
+    // Exercised at run_machine, below the staging that needs a live audio
+    // device (which CI has none of): the launcher's two automatic paths
+    // set `run_honors_power_on` around launcher_run, and run_machine is
+    // where the flag lands.
+    let mut raw = crate::config::RawConfig::default();
+    raw.emulation.power_on = Some(false);
+    raw.emulation.warp_boot = Some(true);
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+
+    // An automatic run keeps power_on = false: the machine sits at the
+    // test screen -- the state a command-line start of the same file gives
+    // -- with the warp-boot gate armed for the power button, not engaged.
+    let mut app = test_app();
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_honors_power_on = true;
+    app.run_machine(emu, &cfg, raw.clone());
+    assert!(!app.powered_on, "power_on = false was overridden");
+    let gate = app.warp_boot.as_ref().expect("warp-boot gate constructed");
+    assert!(
+        !gate.engaged,
+        "the gate belongs to the first power-on, not to a powered-off machine"
+    );
+
+    // The manual Run button keeps its meaning: pressing it IS the power-on,
+    // and the gate engages with the machine it starts.
+    let mut app = test_app();
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+    assert!(app.powered_on, "the Run button powers on regardless");
+    assert!(app.warp_boot.as_ref().is_some_and(|g| g.engaged));
+}
+
+#[test]
 fn launcher_run_keeps_panel_open_on_error() {
     use crate::video::launcher::LauncherField;
 

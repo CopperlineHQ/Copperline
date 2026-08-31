@@ -1263,6 +1263,12 @@ pub struct Emulation {
     /// the status-bar power button is clicked -- handy for arming video
     /// capture beforehand. The power button cold-boots the machine.
     pub power_on: bool,
+    /// Whether opening this configuration in the launcher runs it at once,
+    /// skipping the configuration screen (default false). Read only by the
+    /// launcher -- at startup for the default configuration, and by its
+    /// Load... button -- never by a machine started from the command line,
+    /// which was never going to show the screen anyway.
+    pub auto_launch: bool,
     /// How real-mode pacing debits its per-frame instruction budget. See
     /// `PacingBudget`. The `COPPERLINE_REAL_PACING_BUDGET` env var overrides
     /// this for one run.
@@ -2307,6 +2313,7 @@ impl Default for Config {
             cpu_jit: false,
             emulation: Emulation {
                 power_on: true,
+                auto_launch: false,
                 pacing_budget: PacingBudget::Cycles,
                 realtime_priority: false,
                 warp_speed: WarpSpeed::default(),

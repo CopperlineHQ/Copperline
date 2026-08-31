@@ -28,7 +28,7 @@ fn warp_boot_rows_cycle_and_round_trip() {
     // rounded into a different-looking one.
     assert_eq!(setup.value_label(F::WarpBoot), "Until 12.5s");
     setup.cycle(F::WarpBoot, true);
-    assert_eq!(setup.value_label(F::WarpBoot), "Off");
+    assert_eq!(setup.value_label(F::WarpBoot), "Disabled");
     assert_eq!(setup.value_label(F::WarpBootIdle), "10s");
     let out = setup.to_raw();
     assert_eq!(out.emulation.warp_until, None);
@@ -3693,6 +3693,35 @@ fn scsi_rows_hidden_until_a_controller_is_chosen() {
     for f in scsi_rows {
         assert!(s.row_hidden(f), "{f:?} shown after the controller left");
     }
+}
+
+#[test]
+fn auto_launch_round_trips_and_defaults_off() {
+    use LauncherField as F;
+    // Off by default, and an untouched setup writes no key.
+    let s = MachineSetup::default();
+    assert!(!s.auto_launch());
+    assert!(s.to_raw().emulation.auto_launch.is_none());
+
+    // Toggled on, it survives the round trip.
+    let mut s = s;
+    s.cycle(F::AutoLaunch, true);
+    assert!(s.auto_launch());
+    let raw = s.to_raw();
+    assert_eq!(raw.emulation.auto_launch, Some(true));
+    assert!(MachineSetup::from_raw(&raw).unwrap().auto_launch());
+
+    // And the row sits directly below Power on startup on the Emulation
+    // page, as its sibling.
+    let page = rows(
+        LauncherTab::AvEmulation,
+        ParallelDevice::None,
+        SerialMode::default(),
+        false,
+        false,
+    );
+    let power = page.iter().position(|r| r.field == F::PowerOn).unwrap();
+    assert_eq!(page[power + 1].field, F::AutoLaunch);
 }
 
 #[test]

@@ -665,7 +665,9 @@ The layout is:
   shader and shader strength), **Display** -- the host window (start
   fullscreen, status bar, perf overlay, menu size),
   **Emulation**
-  (power-on, realtime priority, pacing, warp speed),
+  (power-on, run on startup -- `[emulation] auto_launch`, the launcher
+  running an opened configuration at once -- realtime priority, pacing,
+  warp speed),
   and **Paths** -- opening on Audio, and switched freely between the five.
   The Paths page edits the `[paths]` section of the configuration (see
   [](configuration.md)): the base folder on top, then one row per folder.
