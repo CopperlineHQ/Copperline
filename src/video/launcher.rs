@@ -3891,6 +3891,20 @@ impl MachineSetup {
         matches!(self.scsi_controller, Some(ScsiController::A4091))
     }
 
+    /// Whether the CD32 FMV cartridge was explicitly removed rather than
+    /// left to inherit the bundled open ROM.
+    pub fn fmv_rom_disabled(&self) -> bool {
+        self.fmv_rom_disabled
+    }
+
+    /// Switch the CD32 FMV row between the bundled module and an empty slot.
+    /// A named replacement is removed along with the module; the next press
+    /// restores the bundled default.
+    pub fn toggle_fmv_module(&mut self) {
+        self.fmv_rom = None;
+        self.fmv_rom_disabled = !self.fmv_rom_disabled;
+    }
+
     /// The current path of a path field, if any.
     pub fn path(&self, field: LauncherField) -> Option<&Path> {
         match field {

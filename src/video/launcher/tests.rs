@@ -1269,6 +1269,27 @@ fn fmv_rom_explicit_opt_out_survives_a_launcher_round_trip() {
 }
 
 #[test]
+fn fmv_module_action_switches_between_an_empty_slot_and_the_bundled_default() {
+    let mut setup = MachineSetup::default();
+    setup.select_model(Some(MachineModel::Cd32));
+
+    setup.toggle_fmv_module();
+    assert!(setup.fmv_rom_disabled());
+    assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
+    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+
+    setup.toggle_fmv_module();
+    assert!(!setup.fmv_rom_disabled());
+    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert_eq!(setup.to_raw().fmv_rom, None);
+
+    setup.set_path(F::FmvRom, PathBuf::from("replacement.rom"));
+    setup.toggle_fmv_module();
+    assert_eq!(setup.path(F::FmvRom), None);
+    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+}
+
+#[test]
 fn the_machine_type_cycle_reports_which_machine_it_means() {
     use crate::config::WhdloadMachine as M;
     let mut setup = MachineSetup::default();

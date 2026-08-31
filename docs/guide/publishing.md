@@ -4,7 +4,8 @@ Copperline can be built as a standalone game player -- a lightweight executable
 configured for a single game without the launcher or debugger interface.
 
 The distributable package contains the player executable, the game assets stored
-as an external sidecar file, the open-source AROS boot ROM pair, and license documentation.
+as an external sidecar file, the open-source AROS boot ROM pair, the open CD32
+FMV cartridge ROM, and license documentation.
 
 ## The game manifest
 

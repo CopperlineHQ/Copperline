@@ -584,7 +584,9 @@ The layout is:
   checksum rather than by file name -- blank for an image Copperline does
   not know, and read from the image itself for the bundled AROS. The FMV row
   shows the bundled open ROM by default on CD32, accepts another 256 KiB module
-  ROM, and is greyed on non-CD32 profiles; see [Configuration](configuration.md),
+  ROM, and has a **Remove** / **Default** action for leaving the cartridge slot
+  empty or restoring the bundled module. It is greyed on non-CD32 profiles;
+  see [Configuration](configuration.md),
   *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
   speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;

@@ -5950,8 +5950,9 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
     }
     // The ROMs with bundled defaults read the same way: unset means the
     // bundled image, dimmed as Copperline's answer.
-    if field == LauncherField::Rom {
-        return setup.path(field).is_none();
+    if matches!(field, LauncherField::Rom | LauncherField::FmvRom) {
+        return setup.path(field).is_none()
+            && (field != LauncherField::FmvRom || !setup.fmv_rom_disabled());
     }
     if field == LauncherField::ScsiRom {
         return setup.scsi_controller_is_a4091() && setup.path(field).is_none();
@@ -5968,7 +5969,27 @@ fn launcher_clear_enabled(setup: &launcher::MachineSetup, field: LauncherField) 
     if field.is_paths_field() {
         return true;
     }
+    if field == LauncherField::FmvRom {
+        return true;
+    }
     setup.path(field).is_some()
+}
+
+/// The FMV path row's second button controls the physical module, not just a
+/// pathname: it must be usable from the bundled-default state so the launcher
+/// can write `fmv_rom = ""`, and usable again to restore that default.
+fn launcher_clear_label(setup: &launcher::MachineSetup, field: LauncherField) -> &'static str {
+    if field == LauncherField::FmvRom {
+        if setup.fmv_rom_disabled() {
+            "Default"
+        } else {
+            "Remove"
+        }
+    } else if field.is_paths_field() {
+        "Reset"
+    } else {
+        "Clear"
+    }
 }
 
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
@@ -8851,17 +8872,19 @@ fn draw_launcher_row(
                 // read from the left like a chosen path would, just dimmed;
                 // the Paths page's inherited rows keep their centred
                 // `(default)`.
-                let reads_left = matches!(r.field, LauncherField::Rom | LauncherField::ScsiRom)
-                    || {
-                        #[cfg(feature = "coppersynth")]
-                        {
-                            r.field == LauncherField::CsynthSoundfont
-                        }
-                        #[cfg(not(feature = "coppersynth"))]
-                        {
-                            false
-                        }
-                    };
+                let reads_left = matches!(
+                    r.field,
+                    LauncherField::Rom | LauncherField::FmvRom | LauncherField::ScsiRom
+                ) || {
+                    #[cfg(feature = "coppersynth")]
+                    {
+                        r.field == LauncherField::CsynthSoundfont
+                    }
+                    #[cfg(not(feature = "coppersynth"))]
+                    {
+                        false
+                    }
+                };
                 if reads_left {
                     (PANEL_TEXT_DIM, value_x)
                 } else {
@@ -8883,18 +8906,15 @@ fn draw_launcher_row(
                 );
             }
             if has_clear {
-                // "Reset" where the row goes back to a default rather
-                // than being emptied -- the Paths page. Everywhere else
-                // the button clears, and says so (the SoundFont row's
-                // clear also lands on the bundled default, but it wears
-                // the same word as its neighbours).
-                let resets = r.field.is_paths_field();
-                let label = if resets { "Reset" } else { "Clear" };
+                // "Reset" where a Paths row goes back to its default. The
+                // FMV module names its physical Remove / Default action;
+                // other rows clear, including the SoundFont row whose clear
+                // also lands on a bundled default.
                 let enabled = launcher_clear_enabled(setup, r.field);
                 draw_text_button(
                     frame,
                     clear,
-                    label,
+                    launcher_clear_label(setup, r.field),
                     enabled,
                     lit(hover, UiControl::LauncherClear(r.field)),
                     scale,
