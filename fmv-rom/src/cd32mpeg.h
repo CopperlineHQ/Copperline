@@ -39,6 +39,11 @@ struct MPEGDeviceInfo {
     UBYTE mdi_Name[256];
 };
 
+struct MPEGVideoParamsSet {
+    UWORD mvp_Fade;
+    UWORD mvp_DisplayType;
+};
+
 struct CD32MPEGBase {
     struct Device device;
     struct ExecBase *sys_base;
@@ -57,6 +62,7 @@ struct CD32MPEGBase {
 };
 
 BOOL fmv_open(struct CD32MPEGBase *base);
+void fmv_set_visible(struct CD32MPEGBase *base, BOOL visible);
 void fmv_queue_play(struct CD32MPEGBase *base, struct IOMPEGReq *request);
 LONG fmv_abort(struct IOMPEGReq *request);
 

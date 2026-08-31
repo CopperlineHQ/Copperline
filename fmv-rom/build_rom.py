@@ -31,19 +31,19 @@ CL450_ENTRY_OFFSET = 0x7622
 CL450_BASE_OFFSET = 0x7624
 CL450_CHUNK_COUNT_OFFSET = 0x762A
 
-BUILD_ID = b"$VER: Copperline open CD32 FMV ROM 1.0 (30.08.2026)\0"
+BUILD_ID = b"$VER: Copperline open CD32 FMV ROM 1.2 (31.08.2026)\0"
 
 
 def build_rom(driver_hunk: Path | None = None) -> bytes:
     """Return a deterministic 256 KiB FMV cartridge image.
 
-    The cartridge contains its own open cd32mpeg.device for Kickstart and
-    AROS builds which execute expansion diagnostics. AROS PR #1089 carries a
-    matching system-ROM device and deliberately skips the legacy cartridge
-    diagnostic. Copperline initializes its command-level CL450 model when
-    CPU_CONTROL is enabled and does not execute uploaded IMEM/TMEM, so an
-    empty, correctly described firmware container is sufficient and contains
-    no proprietary microcode.
+    The cartridge contains its own open cd32mpeg.device, videocd.library, and
+    Video CD cdstrap for Kickstart builds which execute expansion diagnostics.
+    AROS PR #1089 carries a matching system-ROM device and deliberately skips
+    the legacy cartridge diagnostic. Copperline initializes its command-level
+    CL450 model when CPU_CONTROL is enabled and does not execute uploaded
+    IMEM/TMEM, so an empty, correctly described firmware container is
+    sufficient and contains no proprietary microcode.
     """
 
     rom = bytearray(b"\xFF" * ROM_SIZE)
@@ -135,13 +135,14 @@ def validate_rom(rom: bytes) -> None:
         match_tag, end_skip = struct.unpack_from(">II", rom, offset + 2)
         if match_tag == address:
             residents.append((address, end_skip))
-    if not residents:
-        raise ValueError("driver has no self-matching resident tag")
-    if not any(address < end_skip <= 0x200000 + FIRMWARE_HEADER_OFFSET
+    if len(residents) != 3:
+        raise ValueError("module does not contain all three self-matching resident tags")
+    if not all(address < end_skip <= 0x200000 + FIRMWARE_HEADER_OFFSET
                for address, end_skip in residents):
-        raise ValueError("driver resident has an invalid end-skip pointer")
-    if b"cd32mpeg.device\0" not in rom:
-        raise ValueError("driver resident name is missing")
+        raise ValueError("module resident has an invalid end-skip pointer")
+    for name in (b"cd32mpeg.device\0", b"videocd.library\0", b"cdstrap\0"):
+        if name not in rom:
+            raise ValueError(f"resident name is missing: {name[:-1].decode()}")
 
 
 def main() -> None:

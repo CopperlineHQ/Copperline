@@ -409,8 +409,8 @@ wait for the blitter to go idle.
   handoff regression example (`t=165s`/`t=180s` frame dumps).
 
 Copper writes to "dangerous" registers are gated by COPCON's CDANG bit.
-References: HRM [Coprocessor
-Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_2.html).
+References: HRM [Coprocessor Hardware, chapter
+2](https://erikarn.github.io/amiga/docs/Amiga_Hardware_Reference_Manual_3rd_edition.pdf).
 
 A 68000 byte write drives the byte onto both halves of the data bus, and
 the custom chips latch the full 16-bit word (they have no byte lanes), so
@@ -630,8 +630,8 @@ from normal-mode disabled-channel idle phases blocked by fixed DMA. Those
 phases still stall as micro-cycles, but they no longer make the nice blitter
 yield earlier to the CPU.
 
-References: HRM [Blitter
-Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_6.html).
+References: HRM [Blitter Hardware, chapter
+6](https://erikarn.github.io/amiga/docs/Amiga_Hardware_Reference_Manual_3rd_edition.pdf).
 
 ## Interrupt-recognition latency
 

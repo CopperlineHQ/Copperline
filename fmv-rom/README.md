@@ -2,9 +2,10 @@
 
 This directory builds Copperline's deterministic, freely redistributable
 256 KiB replacement ROM for the CD32 Full Motion Video cartridge. The image
-contains a valid expansion DiagArea, a clean-room `cd32mpeg.device`, and an
-empty CL450 firmware container. It contains no Commodore code and no
-proprietary CL450 microcode.
+contains a valid expansion DiagArea, a clean-room `cd32mpeg.device`, a
+clean-room `videocd.library`, a Video CD autoboot/player resident, and an empty
+CL450 firmware container. It contains no Commodore code and no proprietary
+CL450 microcode.
 
 The resident implements the Cannon Fodder request subset recovered from
 [AROS pull request 1089](https://github.com/aros-development-team/AROS/pull/1089):
@@ -13,7 +14,8 @@ device discovery/open, device information, video parameters, asynchronous
 register interfaces and streams 2328-byte Mode-2 sectors through the host
 system's standard `cd.device` `CD_READ` command. Consequently the same image
 runs Cannon Fodder under CD32 Kickstart 3.1 without containing a replacement
-`cd.device` or `cdstrap`.
+`cd.device`. Its version 41 `cdstrap` claims Video CDs but chains the displaced
+CD32 extended-ROM strap for all other media.
 
 AROS PR 1089 instead carries a matching system-ROM `cd32mpeg.device` and
 deliberately skips the cartridge diagnostic to prevent Commodore's legacy ROM
@@ -30,29 +32,30 @@ make
 make bundle
 ```
 
-The pinned Amiga GCC toolchain builds `build/cd32mpeg.device`; `hunk.py`
-relocates its code/data into the cartridge ROM and its BSS into the module's
-reserved RAM. `build_rom.py` writes `build/copperline-fmv.rom`, checks the
-fixed layout, and pads unused space with `0xFF`. `make bundle` copies the exact
-output to `assets/fmv/copperline-fmv.rom`.
+The pinned Amiga GCC toolchain builds one HUNK containing all three residents;
+`hunk.py` relocates its code/data into the cartridge ROM and its BSS into the
+module's reserved RAM. `build_rom.py` writes `build/copperline-fmv.rom`, checks
+the fixed layout and three self-matching resident tags, and pads unused space
+with `0xFF`. `make bundle` copies the exact output to
+`assets/fmv/copperline-fmv.rom`.
 
 The build takes no proprietary ROM or media as input. Current bundled image:
 
 - Size: 262,144 bytes.
-- SHA-256: `44378167fa07f5260e9f0baea9d737672e9fe395b8fa6cd25cd9654d04649aa7`.
+- SHA-256: `615634dec8d6583e39edbae523762db0e06193742fa43ffda463a5d0818714e7`.
 - DiagArea: offset `0x80`, name `config_mpeg`; its diagnostic entry installs
   the cartridge's autoinit resident on systems which execute it.
-- Resident: `cd32mpeg.device` 41.0, located from the configured board with
-  `FindConfigDev(514, 106)`.
+- Residents: `cd32mpeg.device` 41.0, located from the configured board with
+  `FindConfigDev(514, 106)`, `videocd.library` 41.0, and `cdstrap` 41.0.
 - CL450 container signature: `0xC3C301FD` at `0x761C`, with zero entry, base,
   and chunks.
 
 The source and generated ROM are GPL-3.0-or-later. See the repository root
 `LICENSE` and `assets/fmv/README.md`.
 
-## AROS draft-PR integration
+## AROS integration
 
-PR 1089's first `CD_READXL` implementation drains ready Akiko PBX slots by
+PR 1089's first `CD_READXL` implementation drained ready Akiko PBX slots by
 slot number. Akiko fills the highest armed slot first, so a re-armed high slot
 can contain a newer sector while an older low slot is still pending. The AROS
 author incorporated Copperline's fix as PR commit
@@ -75,11 +78,17 @@ Fodder disc passed on both supported boot environments:
   and non-silent stereo.
 
 Video Creator v1.1 reaches the same application screen as the proprietary ROM
-and opens the decoder. A Philips Video CD reaches only the stock CD32 boot
-screen with this ROM; the proprietary cartridge's `videocd.library`, player,
-and strap are intentionally outside the game-ROM milestone. They remain the
-optional Video CD phase documented in `FMV-ROM-REPLACEMENT-PLAN.md`.
+and opens the decoder. On 2026-08-31, the guest-side probe opened the new
+`videocd.library` under CD32 Kickstart, classified the Philips Media Retail
+Sampler '95 as type 4, and parsed its two video tracks and 45 entry points.
+The same disc now cold-boots directly into the cartridge player: its two
+tracks and durations are shown, Red starts a 352x240 stream, and Blue aborts
+the asynchronous request and returns to the menu. A non-Video-CD cold boot of
+Cannon Fodder still chains to the stock strap and reaches its 352x288 intro.
+AROS PR 1089 deliberately skips cartridge diagnostics; consequently these
+cartridge residents are installed by Kickstart only, while AROS continues to
+use its system-ROM MPEG device.
 
 See [NOTES-api.md](NOTES-api.md) for the recovered request ABI and the root
-[FMV-ROM-REPLACEMENT-PLAN.md](../FMV-ROM-REPLACEMENT-PLAN.md) for design and
-remaining optional work.
+[FMV-ROM-REPLACEMENT-PLAN.md](../FMV-ROM-REPLACEMENT-PLAN.md) for the design
+and remaining compatibility work.

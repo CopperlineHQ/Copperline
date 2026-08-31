@@ -2,9 +2,10 @@
 
 `copperline-fmv.rom` is Copperline's freely redistributable 256 KiB ROM for
 the CD32 Full Motion Video cartridge. It contains a clean-room GPLv3+
-`cd32mpeg.device`, a valid expansion DiagArea, and an empty CL450 firmware
-container. Copperline models the CL450 command interface but does not execute
-the cartridge's proprietary microcode, so no Commodore code or firmware is
+`cd32mpeg.device`, a clean-room `videocd.library`, a Video CD autoboot/player
+resident, a valid expansion DiagArea, and an empty CL450 firmware container.
+Copperline models the CL450 command interface but does not execute the
+cartridge's proprietary microcode, so no Commodore code or firmware is
 included.
 
 The preferred source is the adjacent repository directory `fmv-rom/`; rebuild
@@ -29,5 +30,9 @@ Compatibility validated on 2026-08-30:
   diagnostic to prevent the legacy Commodore ROM replacing AROS's
   `cd.device`.
 
-Video CD disc menus require the optional `videocd.library`/player phase and
-are not part of this first standalone game-ROM milestone.
+Under CD32 Kickstart, the library classifies and parses Video CD metadata; the
+Philips Media Retail Sampler '95 probe returns two video tracks and 45 entry
+points. Its version 41 `cdstrap` cold-boots that disc to a controller-driven
+track menu; Red plays a track and Blue aborts playback and returns to the
+menu. Non-Video-CD media chain to the displaced stock strap. AROS PR 1089
+skips cartridge diagnostics, so it does not install these residents.

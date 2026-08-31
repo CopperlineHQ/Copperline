@@ -498,16 +498,25 @@ bitstream, prediction frames, and presentation state are serialized directly,
 so a resumed headless run produces the same frames without retaining the
 already-decoded program stream.
 
-`fmv-rom/` builds the bundled open 256 KiB image. Its DiagArea installs an
-autoinit `cd32mpeg.device` under CD32 Kickstart 3.1; the worker configures the
-host `cd.device` for 2328-byte Mode-2 sectors, reads them in chronological LSN
-order with standard `CD_READ`, separates system/PES data, and feeds the two
-decoder ports. Under AROS PR 1089 the system-ROM device is used instead and
-the cartridge diagnostic is deliberately skipped to keep the legacy
-Commodore ROM from replacing AROS's `cd.device`. Both paths use the cartridge's
-empty CL450 container. Starting `CPU_CONTROL` is the boundary at which
-Copperline marks its command-level CL450 model ready, so no proprietary
-microcode is copied or executed.
+`fmv-rom/` builds the bundled open 256 KiB image. Its DiagArea installs three
+residents under CD32 Kickstart 3.1: `cd32mpeg.device`, `videocd.library`, and
+a version 41 `cdstrap`. The device worker configures the host `cd.device` for
+2328-byte Mode-2 sectors, reads them in chronological LSN order with standard
+`CD_READ`, separates system/PES data, and feeds the two decoder ports. The
+library temporarily selects 2048-byte sectors, reads White Book INFO.VCD and
+ENTRIES.VCD at LSN 150/151, obtains track boundaries with `CD_TOCLSN`, and
+restores the prior drive configuration before returning. The strap replaces
+the CD32 extended ROM's lower-version resident in place, claims only White
+Book media, and chains the displaced init entry for normal game discs. A
+claimed disc starts a controller-driven task which lists the parsed tracks,
+submits asynchronous `PLAYLSN`, and aborts it on Blue before hiding the
+decoder overlay and redrawing the menu. Under AROS PR 1089 the system-ROM MPEG
+device is used instead and the cartridge diagnostic is deliberately skipped
+to keep the legacy Commodore ROM from replacing AROS's `cd.device`; that also
+means the cartridge library and player are not installed on AROS. Both paths
+use the cartridge's empty CL450 container. Starting
+`CPU_CONTROL` is the boundary at which Copperline marks its command-level
+CL450 model ready, so no proprietary microcode is copied or executed.
 
 The matching AROS PR includes Copperline's ordering fix as commit `ebfc7d9`.
 Akiko allocates the highest armed PBX slot first; when a high slot is re-armed

@@ -13,9 +13,11 @@ all: $(ROM)
 $(ROM): build_rom.py hunk.py $(DRIVER)
 	$(PYTHON) build_rom.py --driver-hunk $(DRIVER) --output $@
 
-$(DRIVER): src/cd32mpeg.c src/decoder.c src/cd32mpeg.h
+$(DRIVER): src/cd32mpeg.c src/decoder.c src/videocd.c src/player.c \
+		src/cd32mpeg.h src/videocd.h src/player.h
 	mkdir -p build
-	$(CC) $(CFLAGS) src/cd32mpeg.c src/decoder.c -lamiga -o $@
+	$(CC) $(CFLAGS) src/cd32mpeg.c src/decoder.c src/videocd.c src/player.c \
+		-lamiga -o $@
 
 bundle: $(ROM)
 	mkdir -p ../assets/fmv

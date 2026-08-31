@@ -88,6 +88,21 @@ COPPERLINE_FMV_KICKSTART_EXT_ROM=/path/to/cd32-extended.rom \
 cargo test --release --test cd32_fmv_aros -- --ignored --nocapture
 ```
 
+`tests/cd32_videocd.rs` has two CD32 Kickstart real-media regressions. The
+first boots the committed guest probe, opens the cartridge's
+`videocd.library` by its public LVO table, and checks the Philips Media Retail
+Sampler '95 metadata. The second cold-boots the same disc into the player,
+presses Red, checks sustained 352x240 decoding, presses Blue, and verifies the
+menu returns. Build and bundle the ROM plus the probe first, then run:
+
+```sh
+COPPERLINE_FMV_ROM=/path/to/copperline-fmv.rom \
+COPPERLINE_FMV_VIDEOCD_CUE=/path/to/Philips-Sampler.cue \
+COPPERLINE_FMV_KICKSTART_ROM=/path/to/cd32-kickstart.rom \
+COPPERLINE_FMV_KICKSTART_EXT_ROM=/path/to/cd32-extended.rom \
+cargo test --release --test cd32_videocd -- --ignored --nocapture
+```
+
 ### Modem end to end
 
 `tests/modem_e2e.rs` closes the one gap `src/modem/`'s exhaustive unit
