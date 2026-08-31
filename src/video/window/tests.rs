@@ -4771,24 +4771,22 @@ fn auto_launch_runs_only_when_the_config_asks() {
 
 #[test]
 fn an_automatic_run_keeps_the_configured_power_state() {
-    use crate::video::launcher::LauncherField;
+    // Exercised at run_machine, below the staging that needs a live audio
+    // device (which CI has none of): the launcher's two automatic paths
+    // set `run_honors_power_on` around launcher_run, and run_machine is
+    // where the flag lands.
+    let mut raw = crate::config::RawConfig::default();
+    raw.emulation.power_on = Some(false);
+    raw.emulation.warp_boot = Some(true);
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
 
-    // power_on = false + auto_launch: the machine starts, but sits powered
-    // off at the test screen -- the same state a command-line start of the
-    // same file gives -- with the warp-boot gate armed for the power button
-    // rather than engaged.
+    // An automatic run keeps power_on = false: the machine sits at the
+    // test screen -- the state a command-line start of the same file gives
+    // -- with the warp-boot gate armed for the power button, not engaged.
     let mut app = test_app();
-    app.open_launcher();
-    if let Some(Panel::Launcher(state)) = app.ui.panel.as_mut() {
-        state.setup.cycle(LauncherField::AutoLaunch, true);
-        state.setup.cycle(LauncherField::PowerOn, true); // on -> off
-        state.setup.cycle(LauncherField::WarpBoot, true); // off -> storage idle
-    }
-    app.auto_launch_if_asked();
-    assert!(
-        app.ui.panel.is_none(),
-        "the automatic run should have started the machine"
-    );
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_honors_power_on = true;
+    app.run_machine(emu, &cfg, raw.clone());
     assert!(!app.powered_on, "power_on = false was overridden");
     let gate = app.warp_boot.as_ref().expect("warp-boot gate constructed");
     assert!(
@@ -4796,15 +4794,13 @@ fn an_automatic_run_keeps_the_configured_power_state() {
         "the gate belongs to the first power-on, not to a powered-off machine"
     );
 
-    // The manual Run button keeps its meaning: pressing it IS the power-on.
+    // The manual Run button keeps its meaning: pressing it IS the power-on,
+    // and the gate engages with the machine it starts.
     let mut app = test_app();
-    app.open_launcher();
-    if let Some(Panel::Launcher(state)) = app.ui.panel.as_mut() {
-        state.setup.cycle(LauncherField::PowerOn, true); // on -> off
-    }
-    app.launcher_run();
-    assert!(app.ui.panel.is_none());
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
     assert!(app.powered_on, "the Run button powers on regardless");
+    assert!(app.warp_boot.as_ref().is_some_and(|g| g.engaged));
 }
 
 #[test]
