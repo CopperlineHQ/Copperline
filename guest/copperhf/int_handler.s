@@ -27,11 +27,27 @@
 
 #include "copperhf_board.h"
 
-#define LVO_REPLYMSG -378	| exec.library/ReplyMsg (exec_lib.i FUNCDEF
-				| order, cross-checked against this project's
-				| own confirmed anchors: AddIntServer -168,
-				| FindTask -294, Wait -318, Signal -324,
-				| AllocSignal -330, FreeSignal -336).
+// exec.library/ReplyMsg (exec_lib.i FUNCDEF order, cross-checked against
+// this project's own confirmed anchors: AddIntServer -168, FindTask -294,
+// Wait -318, Signal -324, AllocSignal -330, FreeSignal -336).
+//
+// HARD-WON: this comment must be a C-style `//`/`/* */` comment that the C
+// preprocessor itself strips, never a same-line trailing `|`-style Amiga-asm
+// comment on the #define line -- cpp does not recognise `|` as a comment
+// introducer, so a trailing `| ...` on a #define's own line becomes part of
+// the macro's *replacement text*. Expanding `jsr LVO_REPLYMSG(a6)` then
+// produced `jsr -378 | exec.library/ReplyMsg (exec_lib.i FUNCDEF(a6)`, and
+// the assembler's own `|`-comment stripping ate the trailing `(a6)` along
+// with the rest of the line -- silently assembling `jsr -378` as an
+// absolute-short JSR to 0xFFFFFE86 instead of `jsr -378(a6)` (register
+// indirect with displacement), with a6 never consulted at all. Confirmed
+// against this exact toolchain's objdump: `4eb8 fe86` (JSR (xxx).W) instead
+// of the intended `4eae fe86` (JSR d16(A6)). The result guru'd on the very
+// first INTB_PORTS interrupt after AddIntServer -- an F-line "Emulator/
+// Coprocessor error" at PC=0xFFFFFE86, since that unmapped high address
+// reads back as the 0xFFFF "nothing here" pattern every other unmapped
+// offset in this project uses, which happens to decode as an F-line opcode.
+#define LVO_REPLYMSG -378
 
 	.text
 	.globl	_chf_int_handler
