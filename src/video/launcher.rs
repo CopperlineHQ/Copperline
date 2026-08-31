@@ -4496,10 +4496,11 @@ impl MachineSetup {
             F::Warp => self.warp.label().to_string(),
             F::WarpBoot => match (self.warp_until, self.warp_boot) {
                 // A warp_until from the TOML shows as its own state; the
-                // panel's own two states are Off and storage-idle.
+                // panel's own two states are Disabled -- the word every
+                // other toggle on the page uses -- and storage-idle.
                 (Some(secs), _) => format!("Until {}", format_secs(secs)),
                 (None, true) => "Storage idle".to_string(),
-                (None, false) => "Off".to_string(),
+                (None, false) => "Disabled".to_string(),
             },
             F::WarpBootIdle => format_secs(self.warp_boot_idle),
             F::Joystick => self.joystick_input_mode.menu_label().to_string(),
