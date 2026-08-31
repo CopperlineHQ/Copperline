@@ -285,6 +285,23 @@ static BOOL initialize_decoders(struct CD32MPEGBase *base)
     return TRUE;
 }
 
+void fmv_set_visible(struct CD32MPEGBase *base, BOOL visible)
+{
+    volatile UBYTE *board;
+    volatile UWORD *io;
+    volatile UWORD *video;
+    UWORD blank;
+
+    if (!base->initialized || !base->board_addr)
+        return;
+    board = base->board_addr;
+    io = (volatile UWORD *)(board + FMV_IO_OFFSET);
+    video = (volatile UWORD *)(board + FMV_VIDEO_REG_OFFSET);
+    blank = visible ? 0 : 1;
+    cl450_command(video, CL450_CMD_SET_BLANK, &blank, 1);
+    *io = visible ? 0x7000 : 0x3200;
+}
+
 static BOOL feed_decoder(
     struct CD32MPEGBase *base,
     struct IORequest *request,
@@ -602,6 +619,7 @@ BOOL fmv_open(struct CD32MPEGBase *base)
 
 void fmv_queue_play(struct CD32MPEGBase *base, struct IOMPEGReq *request)
 {
+    fmv_set_visible(base, TRUE);
     request->iomr_Req.io_Flags &= ~(IOF_QUICK | FMV_REQUEST_ABORTED);
     PutMsg(base->worker_port, &request->iomr_Req.io_Message);
 }

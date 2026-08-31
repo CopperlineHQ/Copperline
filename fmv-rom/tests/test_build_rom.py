@@ -38,7 +38,22 @@ class OpenFmvRomTests(unittest.TestCase):
         self.assertLess(target, 0x200000 + build_rom.FIRMWARE_HEADER_OFFSET)
         self.assertEqual(self.rom[at + boot : at + boot + 4], bytes.fromhex("70004e75"))
         self.assertIn(b"cd32mpeg.device\0", self.rom)
+        self.assertIn(b"videocd.library\0", self.rom)
         self.assertIn(struct.pack(">H", 0x4AFC), self.rom)
+
+    def test_image_contains_three_self_matching_residents(self) -> None:
+        residents = []
+        for offset in range(
+            build_rom.DRIVER_OFFSET, build_rom.FIRMWARE_HEADER_OFFSET - 10, 2
+        ):
+            if struct.unpack_from(">H", self.rom, offset)[0] != 0x4AFC:
+                continue
+            address = 0x200000 + offset
+            match_tag = struct.unpack_from(">I", self.rom, offset + 2)[0]
+            if match_tag == address:
+                residents.append(address)
+        self.assertEqual(len(residents), 3)
+        self.assertIn(b"cdstrap\0", self.rom)
 
     def test_rebuild_is_byte_deterministic(self) -> None:
         driver = Path(os.environ["FMV_DRIVER_HUNK"])

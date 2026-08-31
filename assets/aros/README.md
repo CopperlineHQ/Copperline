@@ -19,7 +19,8 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 Built from source on 2026-08-30 from AROS upstream master
 (https://github.com/aros-development-team/AROS) at commit `6b5933dc`, plus
-draft pull request 1089 through commit `ebfc7d9`.
+the pull request 1089 implementation through commit `ebfc7d9`. Pull request
+1089 has since merged upstream.
 
 PR 1089 adds the open `cd32mpeg.device`, Mode-2 continuous `CD_READXL`, and a
 diagnostic-ROM gate which prevents Commodore's cartridge from replacing the

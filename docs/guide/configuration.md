@@ -159,13 +159,18 @@ the CL450 video and L64111 MPEG Layer II audio decoders through guest code, not
 through a per-title host shortcut. The launcher's **ROM** tab exposes the same
 setting as **FMV module ROM** and labels the bundled default explicitly.
 
-The open ROM contains the Cannon Fodder-compatible `cd32mpeg.device` and works
-with CD32 Kickstart 3.1. The bundled AROS carries the matching PR 1089 driver,
-including Copperline's chronological-CDXL fix as upstream commit `ebfc7d9`.
-Neither path ships Commodore code or CL450 microcode; Copperline's
-command-level CL450 model does not execute the uploaded firmware. The optional
-Video CD menu/player libraries from the original cartridge are not yet
-replaced.
+The open ROM contains the Cannon Fodder-compatible `cd32mpeg.device` and a
+standards-based `videocd.library`, and works with CD32 Kickstart 3.1. The
+library classifies an inserted Video CD and parses its album, track, and entry
+metadata. On CD32 Kickstart its version 41 `cdstrap` autoboots Video CDs to a
+track menu: use up/down to select, Red to play, and Blue to stop or leave the
+player. Non-Video-CD media chain to the stock CD32 strap and boot normally.
+The bundled AROS carries the matching PR 1089 MPEG device, including
+Copperline's chronological-CDXL fix as upstream commit `ebfc7d9`, but
+deliberately skips cartridge diagnostics, so the cartridge library and player
+are currently a Kickstart path. Neither path ships Commodore code or CL450
+microcode; Copperline's command-level CL450 model does not execute the
+uploaded firmware.
 
 Copperline also names the ROM it is given. A ROM file's name is whatever its
 dumper called it, so the image is identified by checksum against a table of
@@ -1946,9 +1951,11 @@ by the same path.
 
 CD32 FMV-enhanced titles use the same Akiko media path and the CD32 profile
 fits the bundled open module automatically. Naming top-level `fmv_rom`
-overrides that image; an empty value removes the module. Raw Video CD movie
-discs still need player software such as the original cartridge's optional
-`videocd.library` and menu, which the open game-ROM milestone does not supply.
+overrides that image; an empty value removes the module. Under CD32 Kickstart,
+raw Video CD movie discs auto-launch the open cartridge's track player; use
+up/down, Red, and Blue to select, play, and stop. The AROS system-ROM path
+deliberately skips the cartridge diagnostic and therefore does not install
+that player.
 
 A cue sheet's `FILE` lines may be `BINARY` (raw sector images, single- or
 multi-file) or, for audio tracks, `WAVE` and `MP3` -- the packaged form a

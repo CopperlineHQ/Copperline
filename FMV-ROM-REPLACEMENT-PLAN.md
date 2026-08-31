@@ -1,6 +1,6 @@
 # Open-source CD32 FMV ROM replacement: project plan
 
-Status: GAMES MVP IMPLEMENTED; OPTIONAL VIDEO CD WORK REMAINS. Written 2026-08-26 after the investigation that diagnosed why
+Status: GAMES MVP AND VIDEO CD PLAYER/AUTOBOOT IMPLEMENTED. Written 2026-08-26 after the investigation that diagnosed why
 the original `cd32fmv.rom` breaks CD boot under the bundled AROS ROM (see
 "Ground truth" below). Work started 2026-08-30 after AROS pull request 1089
 provided the Cannon Fodder `cd32mpeg.device` subset and the required Mode-2
@@ -8,12 +8,12 @@ continuous-CD path.
 
 The implemented `fmv-rom/` milestone is now a standalone, open 256 KiB
 cartridge ROM. It contains the Cannon Fodder-compatible `cd32mpeg.device`, a
-real DiagArea resident entry, the chip bring-up path, and a standard Mode-2
-`CD_READ` streamer for Kickstart 3.1. AROS PR 1089 supplies its matching
-system-ROM driver and intentionally skips cartridge diagnostics; both paths
-use the same valid but empty CL450 firmware container because Copperline does
-not execute uploaded CL450 IMEM/TMEM. No Commodore code or microcode is
-copied.
+clean-room `videocd.library`, a Video CD player/autoboot strap, a real DiagArea
+resident entry, the chip bring-up path, and a standard Mode-2 `CD_READ`
+streamer for Kickstart 3.1. AROS PR 1089 supplies its matching system-ROM
+driver and intentionally skips cartridge diagnostics; both paths use the same
+valid but empty CL450 firmware container because Copperline does not execute
+uploaded CL450 IMEM/TMEM. No Commodore code or microcode is copied.
 
 The milestone was validated on 2026-08-30 under both CD32 Kickstart 3.1 and an
 AROS ROM built from PR 1089 through chronological-CDXL commit `ebfc7d9`, plus
@@ -47,7 +47,6 @@ CD32 Full Motion Video cartridge ROM (`cd32fmv.rom`, exactly 256 KiB), so that:
   dummy upload works under emulation. Real-cartridge support would need a
   "bring your own microcode" side-load (WHDLoad-kickstart style) and is a
   later, optional phase.
-- Video CD / movie-disc playback UI. Phase 6, optional.
 - Replacing `cd.device`. The host system's driver (Kickstart's or AROS's) is
   used for all CD access. This is a deliberate architectural difference from
   the original ROM and is what makes the replacement AROS-safe (see below).
@@ -126,8 +125,10 @@ live DeviceList) but never creates AROS's CDFS boot node
 (`cdRegisterVolume` -> `AddBootNode`), and the also-spliced Commodore
 `cdstrap` cannot boot a CD in an AROS world -> dosboot sits on the
 insert-media screen. Separate fix tracked for AROS upstream: bump AROS's
-cd.device resident version above 40. The replacement ROM ships NO cd.device
-and NO cdstrap, so it cannot collide regardless.
+cd.device resident version above 40. The replacement ROM ships no
+`cd.device`. Its version 41 `cdstrap` is reached only on Kickstart because
+AROS deliberately skips cartridge diagnostics; it claims Video CDs and chains
+the displaced system strap for every other disc.
 
 ## Hardware contract (what the guest driver must program)
 
@@ -212,10 +213,10 @@ them up by name; the first two are the completed games MVP):
 3. Future compatibility: `mpegplayer.library` -- the higher-level API on top
    of `cd32mpeg.device` + host `cd.device` streaming. Cannon Fodder opens the
    device directly, so this is not part of the completed games MVP.
-4. (Phase 6, optional) `videocd.library` + a movie-disc boot/player UI and a
-   cdstrap-equivalent for autobooting movie discs on a bare CD32.
+4. `videocd.library` + a movie-disc boot/player UI and a `cdstrap` equivalent
+   for autobooting movie discs on a bare CD32. Implemented in Phase 6.
 
-Explicitly NOT shipped: `cd.device`, `cdstrap`.
+Explicitly NOT shipped: `cd.device`.
 
 Image layout: 256 KiB exactly (Copperline validates the size --
 `config/validate.rs`; `fmv_rom` is CD32-profile-only). DiagArea at $80 to
@@ -362,23 +363,35 @@ Phase 4.
 - Keep the three baseline recipes from the 2026-08-25 investigation as
   fixed regression points (below).
 
-### Phase 5 -- AROS-side enablement -- PATCHED AND VALIDATED, UPSTREAM PENDING
+### Phase 5 -- AROS-side enablement -- MERGED AND VALIDATED
 
 1. Upstream AROS: bump `arch/m68k-amiga/devs/cd/cd.conf` version above 40
    (fixes the ORIGINAL ROM's collision too; independent of this project but
    shares the test rig). Local AROS tree: `~/Programming/Git/AmigaMe/aros-build/AROS`;
    prior upstreaming flow in memory files (AROS PRs #1018, #1034, #1051, #1063).
 2. PR 1089 supplies the required Mode-2/`CD_READXL` path. Copperline's fix for
-   the original numeric PBX drain was incorporated into the draft as commit
+   the original numeric PBX drain was incorporated before merge as commit
    `ebfc7d9`; it orders each snapshot by raw-sector MSF so normal DMA/task
    interleaving cannot swap adjacent sectors. Run the rest of the Phase 4
    matrix under AROS as more titles become available.
 
-### Phase 6 -- optional: VideoCD player + movie-disc boot (3+ weeks)
+### Phase 6 -- VideoCD player + movie-disc boot -- COMPLETE
 
-`videocd.library`, a minimal player UI, and a strap resident to autoboot
-movie discs. Also the place to reconsider real-hardware support via
-user-supplied CL450 microcode.
+The clean-room resident `videocd.library` preserves the observed six-vector
+ABI, classifies a Video CD through `cd.device`, parses INFO.VCD/ENTRIES.VCD and
+the TOC, and returns allocated disc/track tag lists. A guest probe under CD32
+Kickstart validates the Philips sampler's two tracks and 45 entry points.
+
+The version 41 `cdstrap` replaces the extended-ROM version 40 entry, claims
+only Video CDs, and chains the displaced init routine for every other disc. A
+cold-booted Video CD starts a 320x256 track menu. Up/down select, Red submits
+an asynchronous `MPEGCMD_PLAYLSN`, and Blue aborts playback and returns to the
+menu. The Philips sampler regression decodes its first 352x240 stream and
+verifies both the playing frame and restored menu; the Cannon Fodder
+Kickstart regression proves the non-Video-CD fallback remains intact.
+
+Real-hardware support still requires a separate user-supplied CL450 microcode
+design because the bundled empty container is intentionally emulator-only.
 
 ### Phase 7 -- Copperline bundling -- COMPLETE
 
@@ -424,8 +437,8 @@ AROS serial debug (expansion/diag/romboot prints) arrives on the default
 - SCR/PTS sync fidelity. The emulator's CL450 model is command-level; if a
   title depends on fine SCR behavior the model lacks, extend the model with
   a regression (hardware-first: cite the CL450 manual).
-- The AROS CDXL-ordering fix is part of draft PR 1089 as commit `ebfc7d9` but
-  remains pending until the PR itself is accepted upstream.
+- The AROS CDXL-ordering fix merged with PR 1089 as commit `ebfc7d9`; retain
+  the real-media regression because adjacent-sector swaps are timing-sensitive.
 - Titles detecting the module by probing ROM contents (e.g. checksumming or
   reading strings at fixed offsets) rather than by API -- would surface in
   Phase 0/4; handle case by case, never by title-keyed branches.
