@@ -161,9 +161,15 @@ fn drive_deselect_prb(motor_on: bool) -> u8 {
 }
 
 fn read_external_drive_id(ctrl: &mut FloppyController, idx: usize) -> u32 {
+    // Motor on, then off: the MTR line is set while every drive is
+    // deselected and latched by the following select edge. Raising MTR in
+    // the same write that selects the drive would not stop the motor (the
+    // latch samples MTR low on the near side of its edge), so the motor-off
+    // step raises MTR first.
     ctrl.write_prb(drive_deselect_prb(true));
     ctrl.write_prb(drive_select_prb(idx, true));
     ctrl.write_prb(drive_deselect_prb(true));
+    ctrl.write_prb(drive_deselect_prb(false));
     ctrl.write_prb(drive_select_prb(idx, false));
     ctrl.write_prb(drive_deselect_prb(false));
 
@@ -465,7 +471,8 @@ fn empty_internal_drive_keeps_disk_change_asserted_until_media_steps() -> Result
     ctrl.write_prb(inward_high);
     let status = ctrl.cia_a_status_bits();
     assert_eq!(status & CIAA_DSKCHANGE, 0);
-    assert_ne!(status & CIAA_DSKRDY, 0);
+    // Motor off at cylinder 0: the internal drive's /RDY mirrors /TRK0.
+    assert_eq!(status & CIAA_DSKRDY, 0);
 
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
@@ -583,6 +590,16 @@ fn cia_status_ready_line_tracks_motor_spinup_and_off() -> Result<()> {
     let mut ctrl = FloppyController::from_config(&cfg)?;
     let selected_motor_on = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
     let selected_motor_off = !CIAB_DSKSEL0;
+
+    // Park the head on cylinder 1 first: with the motor off the internal
+    // drive's /RDY mirrors /TRK0, which at cylinder 0 would hide the
+    // motor-driven ready line this test is about.
+    ctrl.write_prb(selected_motor_off & !CIAB_DSKDIREC);
+    ctrl.write_prb(selected_motor_off & !CIAB_DSKDIREC & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_motor_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(0xFF);
 
     ctrl.write_prb(selected_motor_on);
     assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
@@ -1024,15 +1041,194 @@ fn a_machine_with_no_floppy_drives_leaves_the_bus_unanswered() {
 }
 
 #[test]
-fn internal_df0_motor_follows_selected_motor_line_level() {
+fn internal_df0_motor_latches_mtr_on_select_falling_edge() {
     let mut ctrl = FloppyController::default();
 
+    // Select with MTR low from the all-deselected idle state: the SEL
+    // falling edge latches the motor on.
     ctrl.write_prb(drive_select_prb(0, true));
+    assert!(ctrl.drives[0].motor_on);
+    // Raising MTR while the drive stays selected is not an edge: ignored.
+    ctrl.write_prb(drive_select_prb(0, false));
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(drive_select_prb(0, true));
+    assert!(ctrl.drives[0].motor_on);
+
+    // Stopping the motor needs the same dance with MTR high on both sides
+    // of the select edge.
+    ctrl.write_prb(drive_deselect_prb(false));
     assert!(ctrl.drives[0].motor_on);
     ctrl.write_prb(drive_select_prb(0, false));
     assert!(!ctrl.drives[0].motor_on);
+    // ...and dropping MTR while selected does not restart it.
     ctrl.write_prb(drive_select_prb(0, true));
+    assert!(!ctrl.drives[0].motor_on);
+}
+
+#[test]
+fn internal_df0_motor_survives_prb_shadow_restore_with_mtr_high() {
+    // A trackloader's motor-on routine: deselect all with MTR as it was
+    // ($F9), select DF0 with MTR low ($71, the latching edge), then write
+    // back its stale PRB shadow ($F1: still selected, MTR high) before
+    // polling CIA-A /RDY. The drive must keep spinning and report ready
+    // once up to speed.
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("spooky.adf"), true)
+        .unwrap();
+
+    ctrl.write_prb(0xF9);
+    assert!(!ctrl.drives[0].motor_on);
+    ctrl.write_prb(0x71);
     assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xF1);
+    assert!(ctrl.drives[0].motor_on);
+
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+}
+
+#[test]
+fn internal_df0_motor_starts_when_sel_and_mtr_drop_in_one_write() {
+    // Both lines fall in the same CIA write: the latch sees MTR low on the
+    // far side of its clock edge and the motor starts. Stopping it in one
+    // write (MTR rising with the select edge) does not work: the latch saw
+    // MTR low before the edge.
+    let mut ctrl = FloppyController::default();
+
+    ctrl.write_prb(0x77);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0x7F);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xF7);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(0xF7);
+    assert!(!ctrl.drives[0].motor_on);
+}
+
+#[test]
+fn internal_df0_rdy_mirrors_track0_while_motor_is_off() {
+    // The internal mechanism has no drive-ID circuit: with the motor off its
+    // /RDY output follows the /TRK0 sensor, media or not. With the motor on
+    // it is the spun-up platter, whatever the cylinder.
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("trk0.adf"), true)
+        .unwrap();
+    let selected_off = !CIAB_DSKSEL0;
+    let selected_on = selected_off & !CIAB_DSKMOTOR;
+
+    ctrl.write_prb(selected_off);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Step inward: off cylinder 0, /RDY goes high with the motor still off.
+    ctrl.write_prb(selected_off & !CIAB_DSKDIREC);
+    ctrl.write_prb(selected_off & !CIAB_DSKDIREC & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Motor on: /RDY is the platter, asserted once up to speed.
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(selected_on);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Motor off again at cylinder 1: high. Step back out to 0: low again.
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(selected_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(selected_off & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_off);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // An external unit keeps answering with its ID bit instead.
+    ctrl.set_connected_drives([true, true, false, false]);
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(drive_select_prb(1, false));
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+}
+
+/// The reference the sync index must reproduce: walk the revolution one
+/// cell at a time from `from` and report how many cells until a 16-bit
+/// window equal to `sync` has been read in full.
+fn bits_until_sync_by_scan(rev: &TrackRev, from: usize, sync: u16) -> Option<usize> {
+    if rev.bit_len == 0 {
+        return None;
+    }
+    let mut window = 0u16;
+    for i in 0..15 {
+        let b = (from + rev.bit_len * 16 - 15 + i) % rev.bit_len;
+        window = (window << 1) | u16::from(rev.bit(b));
+    }
+    for step in 0..rev.bit_len {
+        window = (window << 1) | u16::from(rev.bit((from + step) % rev.bit_len));
+        if window == sync {
+            return Some(step + 1);
+        }
+    }
+    None
+}
+
+#[test]
+fn sync_index_matches_cell_scan_across_wrap_and_sync_changes() {
+    // Deterministic pseudo-random revolutions, including a bit length that is
+    // not a word multiple so windows straddle the wrap, and sync words that
+    // never occur.
+    let mut seed = 0x2545_F491_u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for &(words, bit_len) in &[(64usize, 1024usize), (40, 633), (2, 32), (1, 16), (3, 41)] {
+        let data: Vec<u16> = (0..words)
+            .map(|_| {
+                if next() % 5 == 0 {
+                    0x4489
+                } else {
+                    next() as u16
+                }
+            })
+            .collect();
+        let rev = TrackRev::new(data, bit_len, 64);
+        for &sync in &[0x4489u16, 0x4489 ^ 0x0100, 0xFFFF, 0x0000, 0x5224] {
+            for from in 0..bit_len {
+                assert_eq!(
+                    rev.bits_until_sync(from, sync),
+                    bits_until_sync_by_scan(&rev, from, sync),
+                    "words={words} bit_len={bit_len} sync={sync:#06x} from={from}"
+                );
+            }
+        }
+    }
+
+    // A standard AmigaDOS track: the head parked anywhere finds the next
+    // $4489 exactly where the scan does, and an offset that is many
+    // revolutions ahead is folded like the scan folds it.
+    let rev = TrackRev::new(encode_adf_track(0, &vec![0u8; ADF_SIZE]), 6334 * 16, 64);
+    for from in [
+        0usize,
+        1,
+        15,
+        16,
+        17,
+        5000,
+        6334 * 16 - 1,
+        6334 * 16 * 3 + 7,
+    ] {
+        assert_eq!(
+            rev.bits_until_sync(from, 0x4489),
+            bits_until_sync_by_scan(&rev, from % rev.bit_len, 0x4489),
+            "from={from}"
+        );
+    }
+    assert!(rev.bits_until_sync(0, 0x4489).is_some());
+    assert_eq!(rev.bits_until_sync(0, 0x1234), None);
 }
 
 #[test]
@@ -1655,8 +1851,10 @@ fn read_dma_with_motor_off_pends_until_the_motor_starts() -> Result<()> {
     assert!(!ctrl.tick(MOTOR_READY_CCK * 3, dmacon, &mut chip_ram));
     assert_eq!(read_chip_word(&chip_ram, 0), 0);
 
-    // Starting the motor spins the platter up and the pending transfer
-    // completes with the track data.
+    // Starting the motor (MTR low while deselected, latched by the select
+    // edge) spins the platter up and the pending transfer completes with
+    // the track data.
+    ctrl.write_prb(!CIAB_DSKMOTOR);
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
     let mut completed = false;
@@ -2016,7 +2214,7 @@ fn motor_off_blocks_read_dma_until_next_spinup() -> Result<()> {
     assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
     ctrl.write_prb(0xFF);
     ctrl.write_prb(selected_motor_off);
-    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    assert!(!ctrl.drives[0].motor_on);
 
     ctrl.set_dskpt_low(0);
     let len = DSKLEN_DMAEN | 1;

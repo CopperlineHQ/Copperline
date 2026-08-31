@@ -416,6 +416,18 @@ The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
 
+The motor is a latch inside every drive, the internal DF0 included: /MTR is
+sampled by the drive's own /SEL falling edge and the MTR level while the
+drive stays selected is ignored, which is why trackdisk and the trackloaders
+deselect, set MTR, then reselect. A write that drops SEL and MTR together
+starts the motor (the latch sees MTR low on one side of the edge); stopping
+it needs MTR high on both sides of the edge -- the rule WinUAE and vAmiga
+derived from hardware. A loader that restores a stale PRB shadow with MTR
+high while the drive remains selected therefore leaves the motor running
+(Ghostown's Spooky Town does this under Kickstart 1.3). External units run
+their drive-ID shift register off the same select edges while the motor is
+off; DF0 has no ID circuit.
+
 Disk DMA against a mechanism that cannot deliver cells -- no media in the
 drive, or the motor line off -- arms normally and then pends: Paula has no
 readiness interlock and waits for data forever, so the guest's own timeout
