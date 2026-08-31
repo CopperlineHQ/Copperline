@@ -1810,6 +1810,63 @@ fn intena_unmask_of_latched_exter_arms_recognition_delay() {
 }
 
 #[test]
+fn a_later_interrupt_source_does_not_postpone_one_already_in_the_pipe() {
+    // Every source has its own path through the level encoder, so one
+    // asserting cannot hold back another already on its way to the pins. A
+    // single shared countdown restarted by each new source stretched the first
+    // source's delay by the second's, which on a machine with several active
+    // sources jittered handler entry across whole raster lines.
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 20;
+    bus.paula.intena = INT_MASTER | INT_VERTB | INT_BLIT;
+
+    bus.paula.intreq = INT_VERTB;
+    bus.note_irq_latches_changed();
+    assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+    // A second source asserts half way through the first one's pipe.
+    bus.advance_chipset(10);
+    bus.paula.intreq |= INT_BLIT;
+    bus.note_irq_latches_changed();
+
+    // The first source still arrives on its own schedule.
+    bus.advance_chipset(10);
+    assert_ne!(
+        bus.cpu_visible_intreq() & INT_VERTB,
+        0,
+        "the later source postponed one already in the pipe"
+    );
+    assert_eq!(bus.cpu_visible_intreq() & INT_BLIT, 0);
+
+    bus.advance_chipset(10);
+    assert_ne!(bus.cpu_visible_intreq() & INT_BLIT, 0);
+}
+
+#[test]
+fn an_interrupt_in_the_recognition_pipe_bounds_an_idle_cpu_nap() {
+    // A halted CPU has nothing but the IPL pins to wake it, so the pipe delay
+    // has to bound the idle fast-forward. Without this the nap ran to the next
+    // unrelated device event and the handler was entered a whole nap late --
+    // tens of raster lines, not the few colour clocks the pipe is worth.
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 20;
+    bus.paula.intena = INT_MASTER | INT_VERTB;
+
+    assert_eq!(bus.next_irq_visible_cck(), None);
+
+    bus.paula.intreq = INT_VERTB;
+    bus.note_irq_latches_changed();
+    assert_eq!(bus.next_irq_visible_cck(), Some(20));
+
+    bus.advance_chipset(8);
+    assert_eq!(bus.next_irq_visible_cck(), Some(12));
+
+    bus.advance_chipset(12);
+    assert_eq!(bus.next_irq_visible_cck(), None);
+    assert_ne!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+}
+
+#[test]
 fn intena_unmask_of_latched_vertb_arms_recognition_delay() {
     let mut bus = empty_bus();
     bus.irq_latency_setting = 65;
@@ -7601,6 +7658,59 @@ fn sprite_dma_capture_keeps_sprite_seven_when_ddfstrt_matches_sprite_slot() {
 }
 
 #[test]
+fn vertical_blank_sprite_control_fetch_reads_chip_ram_at_its_own_beam_time() {
+    // Agnus latches each channel's POS/CTL at the vertical-blank reset line
+    // (PAL $19), long before the display window opens. Software that rewrites
+    // its sprite descriptor buffer from the vertical-blank interrupt -- after
+    // that fetch but before the display -- cannot change what the channel
+    // already read. Replaying the whole pre-display span in one batch at the
+    // display start sampled chip RAM far too late and latched the rewritten
+    // words instead, which left the channel's vertical comparators pointing at
+    // the wrong lines for the rest of the field.
+    let mut bus = empty_bus();
+    let sprite = 7usize;
+    let ptr = 0x0400usize;
+    let (pos, ctl) = sprite_control_words(0x2C, 0x80, 0x0080);
+    write_chip_word(&mut bus, ptr, pos);
+    write_chip_word(&mut bus, ptr + 2, ctl);
+
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.current_frame_render_base.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.denise.sprpt[sprite] = ptr as u32;
+    bus.display_dma_sprpt[sprite] = ptr as u32;
+    bus.sprite_dma_frame_start_ptr[sprite] = ptr as u32;
+
+    // Sweep the beam from the top of the field past the reset line.
+    bus.agnus.vpos = 0;
+    bus.agnus.hpos = 0;
+    while bus.agnus.vpos < 0x1A {
+        bus.advance_chipset(2);
+    }
+
+    // The vertical-blank interrupt now rewrites the descriptor buffer.
+    write_chip_word(&mut bus, ptr, 0xFFFF);
+    write_chip_word(&mut bus, ptr + 2, 0x0000);
+
+    // Carry on into the display window, which is where the pre-display span
+    // used to be replayed in one batch.
+    while bus.agnus.vpos < 0x2D {
+        bus.advance_chipset(2);
+    }
+
+    let state = bus.display_dma_sprite_state[sprite];
+    assert_eq!(
+        state.vstrt, 0x2C,
+        "vstart came from the rewritten descriptor"
+    );
+    assert_eq!(
+        state.vstop, 0x80,
+        "vstop came from the rewritten descriptor"
+    );
+}
+
+#[test]
 fn sprite_dma_capture_repeats_last_fetched_line_after_dma_disable_until_vstop() {
     let mut bus = empty_bus();
     let sprite_ptr = 0x0100usize;
@@ -10946,6 +11056,30 @@ fn unplugging_a_device_releases_its_lines_but_keeps_the_counters() {
     assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
     assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
     assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0);
+}
+
+#[test]
+fn machine_reset_restarts_the_pre_display_sprite_dma_replay() {
+    // The replay cursor indexes the field's render-event log and the sprite
+    // DMA pointers, all of which the reset clears. A cursor carried across
+    // would resume part way down a field that no longer exists, so the first
+    // field after a reset would skip its pre-display sprite DMA.
+    let mut bus = empty_bus();
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.current_frame_render_base.dmacon = DMACON_DMAEN | DMACON_SPREN;
+
+    bus.advance_sprite_dma_replay_to(0x20, 0);
+    assert!(bus.sprite_dma_replay.started);
+    assert_ne!(bus.sprite_dma_replay.vpos, 0);
+
+    bus.reset_for_keyboard_reset();
+
+    assert!(!bus.sprite_dma_replay.started);
+    assert_eq!(bus.sprite_dma_replay.vpos, 0);
+    assert_eq!(bus.sprite_dma_replay.slot_idx, 0);
+    assert_eq!(bus.sprite_dma_replay.event_idx, 0);
 }
 
 #[test]

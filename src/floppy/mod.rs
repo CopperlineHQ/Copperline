@@ -472,7 +472,17 @@ impl FloppyController {
         if drive.cylinder != 0 {
             bits |= CIAA_DSKTRACK0;
         }
-        if !drive.rdy_line_asserted() {
+        // The internal DF0 mechanism has no drive-ID circuit; with its motor
+        // off, the /RDY line it presents mirrors the /TRK0 sensor instead
+        // (the behaviour WinUAE derived from A500/A2000 hardware, where the
+        // external units answer with their ID shift register). With the
+        // motor on, /RDY is the spun-up platter as on every drive.
+        let rdy_asserted = if idx == 0 && !drive.motor_on {
+            drive.cylinder == 0
+        } else {
+            drive.rdy_line_asserted()
+        };
+        if !rdy_asserted {
             bits |= CIAA_DSKRDY;
         }
         bits
@@ -1044,15 +1054,28 @@ impl FloppyController {
             let select_activated = !was_selected && selected;
             let select_deactivated = was_selected && !selected;
 
-            if idx == 0 {
-                if selected {
-                    let motor_on = val & CIAB_DSKMOTOR == 0;
+            // Every Amiga drive, the internal DF0 included, feeds /MTR into
+            // a latch clocked by its own /SEL falling edge: the motor state
+            // changes only at the instant the drive becomes selected, and
+            // the level of the MTR line while it stays selected is ignored.
+            // That is why trackdisk.device and every trackloader deselect,
+            // set MTR, then reselect -- and why a loader may restore an
+            // old PRB shadow with MTR high right after that sequence
+            // without stopping the motor it just started (Spooky Town's
+            // loader does exactly this under Kickstart 1.3). A write that
+            // drops SEL and MTR together starts the motor -- the latch sees
+            // MTR low on one side of the edge -- while stopping it needs MTR
+            // high on both sides, the rule WinUAE and vAmiga derived from
+            // hardware. External units additionally run the drive-ID shift
+            // register off the same edges; DF0 has no ID circuit.
+            if select_activated {
+                let motor_on = (prev & CIAB_DSKMOTOR == 0) || (val & CIAB_DSKMOTOR == 0);
+                if idx == 0 {
                     self.drives[idx].set_motor(motor_on);
+                } else {
+                    self.drives[idx].latch_mtrxd(motor_on);
                 }
-            } else if select_activated {
-                let motor_on = val & CIAB_DSKMOTOR == 0;
-                self.drives[idx].latch_mtrxd(motor_on);
-            } else if select_deactivated {
+            } else if idx != 0 && select_deactivated {
                 self.drives[idx].advance_external_id();
             }
 
@@ -3198,6 +3221,19 @@ struct TrackRev {
     words: Vec<u16>,
     bit_len: usize,
     word_cck: u32,
+    /// Every bit offset at which a 16-bit window ending there equals the
+    /// sync word the index was built for, in ascending order. Derived from
+    /// `words`, so it is built lazily on first use and neither serialized
+    /// nor part of the emulated state; a save state rebuilds it on demand,
+    /// and a DSKSYNC change replaces it.
+    #[serde(skip)]
+    sync_index: std::cell::RefCell<Option<SyncIndex>>,
+}
+
+#[derive(Clone)]
+struct SyncIndex {
+    sync: u16,
+    ends: Vec<u32>,
 }
 
 impl TrackRev {
@@ -3216,6 +3252,7 @@ impl TrackRev {
             words: vec![0xFFFF; bit_len.div_ceil(16)],
             bit_len,
             word_cck: word_cck.max(1),
+            sync_index: Default::default(),
         }
     }
 
@@ -3225,6 +3262,7 @@ impl TrackRev {
             words,
             bit_len,
             word_cck: word_cck.max(1),
+            sync_index: Default::default(),
         }
     }
 
@@ -3272,25 +3310,53 @@ impl TrackRev {
     /// Bit distance from `from` to the next bit-aligned 16-bit window equal to
     /// `sync`, scanning forward within the revolution (wrapping once). Returns
     /// the number of bits until the matched window's last bit has been read.
+    ///
+    /// Answered from a per-sync-word index of matching window ends, so the
+    /// cost is a binary search rather than a walk over the ~100k cells of a
+    /// revolution: the STOP-state pacer asks this on every idle slice while
+    /// a trackloader waits on DSKSYNC, and a linear scan there multiplies
+    /// into seconds of host time per track (the Spooky Town loader ran at
+    /// half real time through its loading phase).
     fn bits_until_sync(&self, from: usize, sync: u16) -> Option<usize> {
         if self.bit_len == 0 {
             return None;
         }
+        let from = from % self.bit_len;
+        let mut cache = self.sync_index.borrow_mut();
+        if cache.as_ref().is_none_or(|index| index.sync != sync) {
+            *cache = Some(self.build_sync_index(sync));
+        }
+        let index = cache.as_ref().expect("sync index was just built");
+        if index.ends.is_empty() {
+            return None;
+        }
+        let pos = index.ends.partition_point(|&end| (end as usize) < from);
+        let end = match index.ends.get(pos) {
+            Some(&end) => end as usize,
+            None => index.ends[0] as usize + self.bit_len,
+        };
+        Some(end - from + 1)
+    }
+
+    /// Every bit offset `end` in the revolution at which the 16-bit window
+    /// covering bits `end-15..=end` (wrapping at `bit_len`, as the head sees
+    /// it) equals `sync`.
+    fn build_sync_index(&self, sync: u16) -> SyncIndex {
+        let mut ends = Vec::new();
         let mut window = 0u16;
-        // Prime the 15 bits before `from` so the first compared window ends at
-        // `from` (the bit about to be read).
-        for i in 0..15 {
-            let b = (from + self.bit_len - 15 + i) % self.bit_len;
+        // Prime with the 15 cells that precede bit 0: the tail of the
+        // revolution, so a window straddling the wrap is compared too.
+        for back in (1..=15).rev() {
+            let b = (self.bit_len - back % self.bit_len) % self.bit_len;
             window = (window << 1) | u16::from(self.bit(b));
         }
-        for step in 0..self.bit_len {
-            let b = (from + step) % self.bit_len;
-            window = (window << 1) | u16::from(self.bit(b));
+        for end in 0..self.bit_len {
+            window = (window << 1) | u16::from(self.bit(end));
             if window == sync {
-                return Some(step + 1);
+                ends.push(end as u32);
             }
         }
-        None
+        SyncIndex { sync, ends }
     }
 }
 

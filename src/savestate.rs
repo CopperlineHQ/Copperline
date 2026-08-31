@@ -332,7 +332,15 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (`toc_spin_up_cck`) and the dump-exclusive command hold
 //      (`command_deferred_for_toc`), both calibrated against a real-CD32
 //      boot video and the cd32-probe rows.
-pub const STATE_VERSION: u32 = 70;
+//  71: the Bus gained two pieces of beam-timed interrupt/sprite state.
+//      `sprite_dma_replay` is the pre-display sprite-DMA replay cursor
+//      (line, slot, render-event index and running DMACON): that replay is
+//      now paced by the beam rather than batched at the display start, and a
+//      snapshot can be taken part way through the pre-display window, so the
+//      cursor has to travel with the state. `irq_latency_visible_at` replaces
+//      the single IPL-pipe countdown with one delivery deadline per interrupt
+//      source, in absolute colour clocks.
+pub const STATE_VERSION: u32 = 71;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

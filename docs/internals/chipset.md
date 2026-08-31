@@ -145,7 +145,24 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
-modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
+modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
+
+The IPL pipe (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) holds a newly raised source
+invisible to the CPU for the propagation through the level encoder to the
+pins. Two properties matter beyond its length. Each source pipes
+**independently** -- every source has its own path to the pins, so one
+asserting cannot hold back another already on its way; a single countdown
+restarted by each new source stretched an earlier interrupt's delay by the
+later one's. And the pipe **bounds an idle STOP nap**: a halted CPU has
+nothing but the IPL pins to wake it, so the idle fast-forward
+([](cpu.md)) must stop at the pipe's delivery point rather than sleeping on
+to the next unrelated device event. Together these kept handler entry within
+the few colour clocks the pipe is worth instead of jittering it across tens
+of raster lines, which is what a demo notices when it schedules work
+relative to a fixed raster line (Ghostown's Spooky Town updates its sprite
+descriptors immediately after the vertical-blank sprite fetch).
+
+The rest of Paula:
 
 - **Audio**: four channels running the HRM per-channel state machine
   (states 000/001/101/010/011): AUDxDAT arrivals, the period counter,
@@ -415,6 +432,18 @@ per-protection profiles are modelled.
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
+
+The motor is a latch inside every drive, the internal DF0 included: /MTR is
+sampled by the drive's own /SEL falling edge and the MTR level while the
+drive stays selected is ignored, which is why trackdisk and the trackloaders
+deselect, set MTR, then reselect. A write that drops SEL and MTR together
+starts the motor (the latch sees MTR low on one side of the edge); stopping
+it needs MTR high on both sides of the edge -- the rule WinUAE and vAmiga
+derived from hardware. A loader that restores a stale PRB shadow with MTR
+high while the drive remains selected therefore leaves the motor running
+(Ghostown's Spooky Town does this under Kickstart 1.3). External units run
+their drive-ID shift register off the same select edges while the motor is
+off; DF0 has no ID circuit.
 
 Disk DMA against a mechanism that cannot deliver cells -- no media in the
 drive, or the motor line off -- arms normally and then pends: Paula has no
