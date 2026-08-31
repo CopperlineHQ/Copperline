@@ -1149,6 +1149,19 @@ fn display_scaling_parses_and_defaults_to_smooth() -> Result<()> {
 }
 
 #[test]
+fn display_autocrop_parses_and_defaults_off() -> Result<()> {
+    assert!(!parse_config("")?.autocrop);
+    let cfg = parse_config(
+        r#"
+            [display]
+            autocrop = true
+            "#,
+    )?;
+    assert!(cfg.autocrop);
+    Ok(())
+}
+
+#[test]
 fn display_phosphor_parses_and_rejects_out_of_range() -> Result<()> {
     assert_eq!(parse_config("")?.phosphor, 0.0);
     let cfg = parse_config(

@@ -140,6 +140,20 @@ pub fn display_scaling() -> crate::config::DisplayScaling {
     }
 }
 
+/// Whether the window presentation crops to the display window the
+/// hardware programs (`[display] autocrop`, runtime-toggled by the
+/// menu's Autocrop item). Main thread only, like
+/// [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
+static AUTOCROP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_autocrop(autocrop: bool) {
+    AUTOCROP.store(autocrop, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn autocrop() -> bool {
+    AUTOCROP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the status bar is hidden, so the emulated display scales to fill the
 /// whole window. Toggled live from the window/menu (main thread only, like
 /// [`SQUARE_PIXEL_ASPECT`]); the atomic only satisfies `static` safety.

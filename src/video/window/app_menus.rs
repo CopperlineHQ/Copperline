@@ -123,6 +123,7 @@ impl App {
             ],
             pixel_aspect: crate::video::pixel_aspect(),
             scaling: crate::video::display_scaling(),
+            autocrop: crate::video::autocrop(),
             tv_centre: self.tv_centre,
             tv_centre_applies: self.overscan == Overscan::Tv,
             shader: self.crt_shader_kind,
@@ -288,6 +289,7 @@ impl App {
 
             A::SetPixelAspect(aspect) => self.apply_pixel_aspect(aspect),
             A::SetDisplayScaling(scaling) => self.apply_display_scaling(scaling),
+            A::ToggleAutocrop => self.apply_autocrop(!crate::video::autocrop()),
             A::StepTvCentre(dh, dv) => self.step_tv_centre(dh, dv),
             A::ResetTvCentre => {
                 self.tv_centre = crate::config::TvCentre::default();

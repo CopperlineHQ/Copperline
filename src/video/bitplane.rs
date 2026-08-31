@@ -4297,6 +4297,20 @@ impl RenderInput {
     }
 }
 
+/// The display-window envelope the frame's playfield painted, in field
+/// canvas coordinates: `x0..x1` framebuffer pixels, `y0..y1` rendered
+/// field rows (both half-open). The hardware-derived source for the
+/// presentation-side autocrop -- rows and spans come from the same
+/// per-line display-window bounds the painter runs, so mid-frame DIW
+/// rewrites and carried-open flops are already folded in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentRect {
+    pub x0: usize,
+    pub x1: usize,
+    pub y0: usize,
+    pub y1: usize,
+}
+
 /// Outputs of `render_from_input`. Render timing is always recorded back on
 /// the main thread. `clxdat` is applied only by the synchronous wrapper; the
 /// threaded path completes CPU-visible Denise collision state at frame end
@@ -4305,6 +4319,9 @@ pub struct RenderResult {
     pub timing: VideoRenderFrameTiming,
     pub clxdat: u16,
     pub(crate) chip_ram_reads: Option<Vec<ChipRamReadDependency>>,
+    /// Playfield content envelope of this field, or `None` for a
+    /// border-only frame (see [`ContentRect`]).
+    pub content_rect: Option<ContentRect>,
 }
 
 /// Large renderer work buffers retained per host thread. The browser calls
@@ -4382,7 +4399,9 @@ impl SpriteSubpixelState {
 /// Paint the just-finished frame through the synchronous compatibility path.
 /// The render itself is a pure function of the owned snapshot
 /// (`render_from_input`); this wrapper owns the remaining bus coupling.
-pub fn render(bus: &mut Bus, fb: &mut [u32]) {
+/// Returns the frame's playfield content envelope (see [`ContentRect`]);
+/// callers with no use for it just drop the value.
+pub fn render(bus: &mut Bus, fb: &mut [u32]) -> Option<ContentRect> {
     // This path re-snapshots the bus every frame; keep one RenderInput per
     // thread so its buffers are reused instead of reallocated each time.
     thread_local! {
@@ -4405,7 +4424,8 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) {
             .as_mut()
             .expect("scratch render input present")
             .release_shared_frame_data();
-    });
+        result.content_rect
+    })
 }
 
 /// Synchronous render wrapper with exact previous-frame reuse. Returns true
@@ -4949,6 +4969,7 @@ fn render_from_input_with_scratch(
         });
 
     let playfield_started = render_timing_start();
+    let mut content_rect: Option<ContentRect> = None;
     if (has_captured_bitplane_rows || state.bplpt[0] != 0)
         && any_bitplane_control
         && (has_captured_bitplane_rows || any_bitplane_dma_control)
@@ -5071,6 +5092,37 @@ fn render_from_input_with_scratch(
             let dma_planes = line_max_dma_planes(control, row_control_segments);
             if !line_has_valid_ddf_window(control, row_control_segments) {
                 continue;
+            }
+            // This row paints playfield: fold its display-window span into
+            // the frame's content envelope. Purely an accumulation for the
+            // presentation-side autocrop; the paint below is untouched.
+            // Only rows that carry fetched bitplane data count: the
+            // display window is routinely left open past the last fetched
+            // line (a 200-line game inside the Kickstart 256-line window),
+            // and those rows show border or repeated data, not picture --
+            // the crop should tighten to the picture the way the eye
+            // does. A frame with no captures at all (the RAM re-fetch
+            // compatibility path) counts every window row instead.
+            let row_has_fetched_data = !has_captured_bitplane_rows
+                || captured_bitplane_rows
+                    .get(y)
+                    .and_then(Option::as_ref)
+                    .is_some();
+            if row_has_fetched_data {
+                content_rect = Some(match content_rect {
+                    None => ContentRect {
+                        x0: x_start,
+                        x1: x_stop,
+                        y0: y,
+                        y1: y + 1,
+                    },
+                    Some(rect) => ContentRect {
+                        x0: rect.x0.min(x_start),
+                        x1: rect.x1.max(x_stop),
+                        y0: rect.y0.min(y),
+                        y1: rect.y1.max(y + 1),
+                    },
+                });
             }
             // A captured sequencer run with a comparator-anchored origin is
             // the authority for the row's word count: mid-row DDF rewrites
@@ -5553,10 +5605,25 @@ fn render_from_input_with_scratch(
     scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
     scratch.h_window_rows = h_window_rows;
     scratch.ham_select_pixels = ham_select_pixels;
+    // COPPERLINE_DIAG_AUTOCROP: log the per-frame content envelope the
+    // autocrop presentation feeds on, in field canvas coordinates. The
+    // tool for judging what a title's crop will be from a headless run;
+    // `programmable` says when the presentation will decline to crop
+    // however good the envelope looks (multisync scans present their
+    // own window in full).
+    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP") {
+        log::info!(
+            "[DIAG_AUTOCROP] secs={:.3} programmable={} content_rect={:?}",
+            input.emulated_seconds,
+            geometry.programmable,
+            content_rect
+        );
+    }
     RenderResult {
         timing: render_timing,
         clxdat,
         chip_ram_reads,
+        content_rect,
     }
 }
 

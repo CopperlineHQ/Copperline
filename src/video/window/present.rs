@@ -27,6 +27,7 @@ struct RepeatedPresentationMetadata {
     present_width: usize,
     tv_aperture: TvApertureFrame,
     programmable: bool,
+    content_rect: Option<bitplane::ContentRect>,
 }
 
 /// Exact previous-frame detector owned by the render worker. The bitplane
@@ -123,6 +124,7 @@ pub(super) fn render_job_to_presentation(
             present_width: metadata.present_width,
             tv_aperture: metadata.tv_aperture,
             programmable: metadata.programmable,
+            content_rect: metadata.content_rect,
             input,
         };
     }
@@ -157,11 +159,20 @@ pub(super) fn render_job_to_presentation(
         !geometry.programmable,
         &mut presentation_fb,
     );
+    let content_rect = woven_content_rect(
+        render_result.content_rect,
+        geometry.programmable,
+        visible_start_vpos,
+        h_shift,
+        canvas_width,
+        present_rows,
+    );
     let metadata = RepeatedPresentationMetadata {
         present_rows,
         present_width,
         tv_aperture: standard_tv_aperture_frame(geometry, present_rows, &base),
         programmable: geometry.programmable,
+        content_rect,
     };
     repeated_frame_cache.note_rendered(&input, &mut render_result, settings, phosphor, metadata);
     RenderWorkerResult {
@@ -174,7 +185,181 @@ pub(super) fn render_job_to_presentation(
         present_width,
         tv_aperture: metadata.tv_aperture,
         programmable: metadata.programmable,
+        content_rect,
         input,
+    }
+}
+
+/// Map the renderer's field-space content envelope into woven
+/// presentation-buffer space: the same shifts
+/// `post_process_rendered_field` applied to the pixels (vertical
+/// centring, horizontal recentring), then each field row onto its two
+/// woven rows. Programmable scans present their own window in full and
+/// never autocrop, so they map to `None`.
+pub(super) fn woven_content_rect(
+    rect: Option<bitplane::ContentRect>,
+    programmable: bool,
+    visible_start_vpos: u32,
+    h_shift: usize,
+    canvas_width: usize,
+    present_rows: usize,
+) -> Option<bitplane::ContentRect> {
+    rect.filter(|_| !programmable)
+        .map(|rect| {
+            let y_off = presentation_source_y_offset(visible_start_vpos);
+            let x0 = rect.x0.saturating_sub(h_shift).min(canvas_width);
+            let x1 = rect.x1.saturating_sub(h_shift).clamp(x0, canvas_width);
+            let y0 = (2 * (rect.y0 + y_off)).min(present_rows);
+            let y1 = (2 * (rect.y1 + y_off)).clamp(y0, present_rows);
+            bitplane::ContentRect { x0, x1, y0, y1 }
+        })
+        .filter(|rect| rect.x1 > rect.x0 && rect.y1 > rect.y0)
+}
+
+/// Map a woven-space content envelope into canvas coordinates -- the
+/// space of the texture's display region -- by inverting the same row
+/// and column mapping `copy_window_present_frame` used for this frame's
+/// branch. Returns `(x, y, w, h)` in canvas pixels, or `None` when no
+/// canvas pixel shows content (crop everything away and there is nothing
+/// to present).
+///
+/// The inversion scans the canvas axes against the copy's forward maps
+/// rather than deriving closed forms: a few hundred iterations, run only
+/// when autocrop is presenting, and immune to drifting out of agreement
+/// with the copy it mirrors.
+pub(super) fn canvas_content_rect(
+    content: bitplane::ContentRect,
+    src_rows: usize,
+    overscan: Overscan,
+    tv_centre: TvCentre,
+    tv_aperture_rows: Option<usize>,
+    canvas_rows: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let (mut y_min, mut y_max) = (None, None);
+    let (mut x_min, mut x_max) = (None, None);
+    match tv_aperture_rows {
+        Some(aperture_rows) if overscan == Overscan::Tv => {
+            let (x_off, y_off) = tv_centre_source_offset(tv_centre);
+            for y in 0..canvas_rows {
+                let src = tv_aperture_source_row(y, canvas_rows, 1, aperture_rows)
+                    .map(|crop_y| (TV_PRESENT_SOURCE_Y + crop_y) as i32 + y_off)
+                    .filter(|src| (content.y0 as i32..content.y1 as i32).contains(src));
+                if src.is_some() {
+                    y_min.get_or_insert(y);
+                    y_max = Some(y);
+                }
+            }
+            let square = canvas_rows == crate::video::PRESENT_HEIGHT_SQUARE;
+            for x in 0..FB_WIDTH {
+                let src = if square {
+                    (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH)
+                        .contains(&x)
+                        .then(|| TV_CAPTURED_SOURCE_X as i32 + x_off + (x - TV_LIVE_PAD_X) as i32)
+                } else {
+                    // The glass resample's source centre for this canvas
+                    // column (`tv_glass_sample`'s 8.8 sample point).
+                    let s = (TV_CAPTURED_SOURCE_X as i64 + x_off as i64) * 256
+                        + ((2 * x as i64 + 1) * (TV_CAPTURED_WIDTH as i64) * 256)
+                            / (2 * FB_WIDTH as i64)
+                        - 128;
+                    Some((s >> 8) as i32)
+                };
+                if src.is_some_and(|src| (content.x0 as i32..content.x1 as i32).contains(&src)) {
+                    x_min.get_or_insert(x);
+                    x_max = Some(x);
+                }
+            }
+        }
+        _ => {
+            for y in 0..canvas_rows {
+                let src = screenshot::scaled_source_row(y, src_rows, canvas_rows);
+                if (content.y0..content.y1).contains(&src) {
+                    y_min.get_or_insert(y);
+                    y_max = Some(y);
+                }
+            }
+            x_min = Some(content.x0.min(FB_WIDTH - 1));
+            x_max = Some(content.x1.saturating_sub(1).min(FB_WIDTH - 1));
+        }
+    }
+    let (x0, x1, y0, y1) = (x_min?, x_max?, y_min?, y_max?);
+    Some((x0, y0, x1 + 1 - x0, y1 + 1 - y0))
+}
+
+/// Presentation smoothing for the autocrop rect. Per-frame content
+/// envelopes jitter -- loaders blank the screen, screen transitions
+/// rebuild the copper list over a frame or two, games flip between
+/// differently-sized displays -- and the presented crop must not pump
+/// with them. The latch grows immediately (content must never be cut)
+/// to the union of the old and new envelopes, holds through border-only
+/// frames like the aperture latch does, and shrinks only after the
+/// smaller envelope has held steady for [`Self::SHRINK_STABLE_FRAMES`]
+/// consecutive rendered frames.
+#[derive(Default)]
+pub(super) struct AutocropLatch {
+    active: Option<bitplane::ContentRect>,
+    candidate: Option<bitplane::ContentRect>,
+    stable_frames: u32,
+}
+
+impl AutocropLatch {
+    /// Rendered frames a strictly-smaller envelope must persist for
+    /// before the presentation tightens onto it: about half a second of
+    /// PAL frames, long enough to sit out a screen transition.
+    pub(super) const SHRINK_STABLE_FRAMES: u32 = 25;
+
+    pub(super) fn resolve(
+        &mut self,
+        frame: Option<bitplane::ContentRect>,
+    ) -> Option<bitplane::ContentRect> {
+        let Some(frame) = frame else {
+            // Border-only frame: keep presenting the previous crop, and
+            // keep any shrink candidate's clock running from zero again
+            // once content returns.
+            self.candidate = None;
+            self.stable_frames = 0;
+            return self.active;
+        };
+        let Some(active) = self.active else {
+            self.active = Some(frame);
+            return self.active;
+        };
+        let contained = frame.x0 >= active.x0
+            && frame.x1 <= active.x1
+            && frame.y0 >= active.y0
+            && frame.y1 <= active.y1;
+        if !contained {
+            self.active = Some(bitplane::ContentRect {
+                x0: active.x0.min(frame.x0),
+                x1: active.x1.max(frame.x1),
+                y0: active.y0.min(frame.y0),
+                y1: active.y1.max(frame.y1),
+            });
+            self.candidate = None;
+            self.stable_frames = 0;
+        } else if frame != active {
+            if self.candidate == Some(frame) {
+                self.stable_frames += 1;
+                if self.stable_frames >= Self::SHRINK_STABLE_FRAMES {
+                    self.active = Some(frame);
+                    self.candidate = None;
+                    self.stable_frames = 0;
+                }
+            } else {
+                self.candidate = Some(frame);
+                self.stable_frames = 1;
+            }
+        } else {
+            self.candidate = None;
+            self.stable_frames = 0;
+        }
+        self.active
+    }
+
+    /// Forget the crop across a presentation discontinuity (power cycle,
+    /// RTG entry), like `PresentationLatch::reset`.
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -378,46 +563,67 @@ pub(super) fn texture_scale_for_factor(scale_factor: f64) -> usize {
     (scale_factor.round() as usize).clamp(1, MAX_TEXTURE_SCALE)
 }
 
-/// The presentation plan for a window: the supersample factor its backing
-/// texture is rendered at, and the `pixels` scaling mode that puts the
-/// texture on the surface. The pure form of [`plan_present_scaling`], with
-/// the canvas size (in canvas pixels) passed in.
+/// The presentation plan for the emulator window: the supersample factor
+/// its backing texture is rendered at, and the whole-canvas-pixel
+/// multiple integer scaling draws it at (`None` for the smooth fit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PresentPlan {
+    /// Supersample factor of the backing texture.
+    pub(super) texture_scale: usize,
+    /// Whole number of physical surface pixels per canvas pixel, or
+    /// `None` for the smooth aspect fit.
+    pub(super) multiple: Option<usize>,
+}
+
+impl PresentPlan {
+    /// How the scaler pass resamples the texture for this plan.
+    pub(super) fn filter(&self) -> scaler::ScaleFilter {
+        match self.multiple {
+            Some(_) => scaler::ScaleFilter::Nearest,
+            None => scaler::ScaleFilter::SharpBilinear,
+        }
+    }
+}
+
+/// The presentation plan for a window, with the canvas size (in canvas
+/// pixels) passed in: the pure form of [`plan_present_scaling`].
 ///
-/// Smooth scaling supersamples by the rounded host DPI factor and fits with
-/// filtering. Integer scaling instead takes the fit in whole *canvas*
-/// pixels against the physical surface: the factor is the largest whole
-/// number of physical pixels per canvas pixel that fits, the canvas is
-/// rendered at that factor, and `ScalingMode::PixelPerfect` draws the
-/// texture 1:1 and point-sampled. Deriving the texture from the fit rather
-/// than the DPI is what makes every whole multiple reachable: a
-/// DPI-supersampled texture can only be drawn at whole multiples of
-/// *itself*, which on a 2x display skips every odd number of physical
-/// pixels per canvas pixel -- a Retina laptop tall enough for a 3x picture
-/// but not a 4x one would show no zoom at all. The factor is capped at
-/// `MAX_INTEGER_TEXTURE_SCALE` to bound the texture and the per-frame
-/// present copy; past the cap, PixelPerfect's own whole multiples of the
-/// capped texture keep the fit integer (`floor` at that stage, so the
-/// result never exceeds the surface).
+/// Smooth scaling supersamples by the rounded host DPI factor and fits
+/// with the sharp-bilinear filter. Integer scaling instead takes the fit
+/// in whole *canvas* pixels against the physical surface: the multiple
+/// is the largest whole number of physical pixels per canvas pixel that
+/// fits, and the scaler pass draws the picture at exactly that multiple.
+/// Deriving the multiple from the fit rather than the DPI is what makes
+/// every whole multiple reachable -- a Retina laptop tall enough for a
+/// 3x picture but not a 4x one gets its 3x. The texture factor follows
+/// the multiple up to `MAX_INTEGER_TEXTURE_SCALE`, which bounds the
+/// texture and the per-frame present copy on very large displays; a
+/// multiple past the cap is still drawn in full, because point-sampling
+/// the replicated display region is exact whether or not the texture
+/// factor divides the multiple (see `scaler`).
 ///
 /// A surface smaller than the canvas has no whole multiple to offer
-/// (PixelPerfect floors its scale at 1 and would crop), so it falls back to
-/// the smooth plan -- shrinking the picture beats cropping it.
+/// (drawing at 1x would crop), so it falls back to the smooth plan --
+/// shrinking the picture beats cropping it.
 pub(super) fn plan_present_scaling_for(
     integer_requested: bool,
     scale_factor: f64,
     surface: (u32, u32),
     canvas: (u32, u32),
-) -> (usize, ScalingMode) {
+) -> PresentPlan {
     if integer_requested && canvas.0 > 0 && canvas.1 > 0 {
         let fit = (surface.0 / canvas.0).min(surface.1 / canvas.1) as usize;
         if fit >= 1 {
-            return (
-                fit.min(MAX_INTEGER_TEXTURE_SCALE),
-                ScalingMode::PixelPerfect,
-            );
+            return PresentPlan {
+                texture_scale: fit.min(MAX_INTEGER_TEXTURE_SCALE),
+                multiple: Some(fit),
+            };
         }
     }
-    (texture_scale_for_factor(scale_factor), ScalingMode::Fill)
+    PresentPlan {
+        texture_scale: texture_scale_for_factor(scale_factor),
+        multiple: None,
+    }
 }
 
 /// [`plan_present_scaling_for`] against the live canvas: `FB_WIDTH` by the
@@ -426,13 +632,184 @@ pub(super) fn plan_present_scaling(
     integer_requested: bool,
     scale_factor: f64,
     surface: (u32, u32),
-) -> (usize, ScalingMode) {
+) -> PresentPlan {
     plan_present_scaling_for(
         integer_requested,
         scale_factor,
         surface,
         (FB_WIDTH as u32, window_present_height() as u32),
     )
+}
+
+/// The live plan for the emulator window, from its configured surface
+/// size and the current scaling setting. Recomputed where it is needed
+/// rather than stored, so it can never lag a resize or a toggle.
+pub(super) fn main_present_plan(r: &Render) -> PresentPlan {
+    plan_present_scaling(
+        integer_scaling_requested(),
+        r.window.scale_factor(),
+        (r.surface_size.0.max(1), r.surface_size.1.max(1)),
+    )
+}
+
+/// The surface rect the emulator window's picture is drawn into: the
+/// scaler pass's destination, and the rect cursor mapping inverts.
+pub(super) fn main_clip_rect(r: &Render) -> (u32, u32, u32, u32) {
+    scaler::clip_rect_for(
+        (r.surface_size.0.max(1), r.surface_size.1.max(1)),
+        (FB_WIDTH as u32, window_present_height() as u32),
+        main_present_plan(r).multiple,
+    )
+}
+
+/// The emulator window's presentation layout: what part of the canvas
+/// the display draw shows, where it and the chrome band land on the
+/// surface, and how they are filtered. One function feeds the scaler
+/// pass, the cursor mapping and the overlay anchors, so all three agree
+/// by construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PresentLayout {
+    /// The canvas sub-rect the display draw samples, in logical canvas
+    /// pixels `(x, y, w, h)`. The whole window canvas -- chrome included
+    /// -- in the classic layout; the autocrop rect (display region only)
+    /// when cropping.
+    pub(super) src_canvas: (usize, usize, usize, usize),
+    /// Where that lands on the surface, physical pixels.
+    pub(super) display_dst: (u32, u32, u32, u32),
+    pub(super) filter: scaler::ScaleFilter,
+    /// The chrome band's destination when the layout splits it from the
+    /// display (autocrop only): the texture rows below `present_height`
+    /// drawn across the surface bottom.
+    pub(super) chrome_dst: Option<(u32, u32, u32, u32)>,
+}
+
+/// The layout for the current frame. `autocrop_src` is the content rect
+/// to crop to, in canvas pixels of the display region, or `None` for the
+/// classic whole-canvas letterbox (autocrop off, suspended, or nothing
+/// to crop to).
+pub(super) fn main_present_layout(
+    r: &Render,
+    autocrop_src: Option<(usize, usize, usize, usize)>,
+) -> PresentLayout {
+    let surface = (r.surface_size.0.max(1), r.surface_size.1.max(1));
+    let Some(crop) = autocrop_src.filter(|(_, _, w, h)| *w > 0 && *h > 0) else {
+        return PresentLayout {
+            src_canvas: (0, 0, FB_WIDTH, window_present_height()),
+            display_dst: main_clip_rect(r),
+            filter: main_present_plan(r).filter(),
+            chrome_dst: None,
+        };
+    };
+    // The chrome band keeps exactly the size and position the classic
+    // letterbox gives it -- only bottom-anchored -- so toggling autocrop
+    // resizes the picture, never the bar, and the band can never eat
+    // more height than the crop gains (a surface-width bar on a 5K
+    // fullscreen would be over 300 rows tall).
+    let chrome_rows = window_present_height() - present_height();
+    let classic = main_clip_rect(r);
+    let chrome_dst = (chrome_rows > 0 && classic.3 > 0).then(|| {
+        let h =
+            ((u64::from(classic.3) * chrome_rows as u64 / window_present_height().max(1) as u64)
+                as u32)
+                .clamp(1, surface.1);
+        (classic.0, surface.1 - h, classic.2, h)
+    });
+    // The *requested* setting, not the classic plan's resolved multiple:
+    // a surface too small for the whole canvas can still hold a whole
+    // multiple of the crop (a 700-wide window around a 640-wide game),
+    // and autocrop_layout takes its own fit against the crop.
+    autocrop_layout(surface, integer_scaling_requested(), crop, chrome_dst)
+}
+
+/// The autocrop layout, pure of the live globals: `crop` (canvas pixels
+/// of the display region) placed on `surface`, above the already-sized
+/// `chrome_dst` band (panels and status bar; `None` when there is no
+/// chrome to show).
+///
+/// Integer scaling re-fits against the crop -- a display using fewer
+/// lines earns a larger whole multiple, which is the point of the
+/// feature -- and falls back to the smooth fit of the crop when not
+/// even 1x fits, exactly as the classic layout falls back.
+pub(super) fn autocrop_layout(
+    surface: (u32, u32),
+    integer: bool,
+    crop: (usize, usize, usize, usize),
+    chrome_dst: Option<(u32, u32, u32, u32)>,
+) -> PresentLayout {
+    let avail_h = surface.1 - chrome_dst.map_or(0, |(_, _, _, h)| h.min(surface.1));
+    let avail = (surface.0, avail_h.max(1));
+    let multiple = integer
+        .then(|| (avail.0 as usize / crop.2).min(avail.1 as usize / crop.3))
+        .filter(|fit| *fit >= 1);
+    let display_dst = scaler::clip_rect_for(avail, (crop.2 as u32, crop.3 as u32), multiple);
+    PresentLayout {
+        src_canvas: crop,
+        display_dst,
+        filter: if multiple.is_some() {
+            scaler::ScaleFilter::Nearest
+        } else {
+            scaler::ScaleFilter::SharpBilinear
+        },
+        chrome_dst,
+    }
+}
+
+impl PresentLayout {
+    /// The scaler-pass draws this layout amounts to. The classic layout
+    /// is one whole-texture draw; the autocrop layout samples the crop's
+    /// uv sub-rect and adds the chrome band below it.
+    pub(super) fn draws(&self) -> Vec<scaler::ScalerDraw> {
+        let canvas_h = window_present_height() as f32;
+        let (sx, sy, sw, sh) = self.src_canvas;
+        let mut draws = vec![scaler::ScalerDraw {
+            src: [
+                sx as f32 / FB_WIDTH as f32,
+                sy as f32 / canvas_h,
+                sw as f32 / FB_WIDTH as f32,
+                sh as f32 / canvas_h,
+            ],
+            dst: self.display_dst,
+            filter: self.filter,
+        }];
+        if let Some(chrome_dst) = self.chrome_dst {
+            let chrome_rows = (window_present_height() - present_height()) as f32;
+            draws.push(scaler::ScalerDraw {
+                src: [
+                    0.0,
+                    present_height() as f32 / canvas_h,
+                    1.0,
+                    chrome_rows / canvas_h,
+                ],
+                dst: chrome_dst,
+                filter: scaler::ScaleFilter::SharpBilinear,
+            });
+        }
+        draws
+    }
+
+    /// Invert the layout for a host cursor position: surface physical
+    /// pixels to logical canvas pixels, or `None` outside both rects.
+    pub(super) fn cursor_position(
+        &self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) -> Option<(i32, i32)> {
+        let (sx, sy, sw, sh) = self.src_canvas;
+        if let Some((x, y)) = cursor_position_in_texture(
+            (position.x, position.y),
+            self.display_dst,
+            (sw as u32, sh as u32),
+        ) {
+            return Some(((sx + x) as i32, (sy + y) as i32));
+        }
+        let chrome_dst = self.chrome_dst?;
+        let chrome_rows = window_present_height() - present_height();
+        let (x, y) = cursor_position_in_texture(
+            (position.x, position.y),
+            chrome_dst,
+            (FB_WIDTH as u32, chrome_rows as u32),
+        )?;
+        Some((x as i32, (present_height() + y) as i32))
+    }
 }
 
 /// Whether the emulator window presents at whole-number scale
@@ -443,28 +820,25 @@ pub(super) fn integer_scaling_requested() -> bool {
 }
 
 /// Re-plan the emulator window's presentation for the given surface size
-/// (physical pixels), its live canvas and the scaling setting: apply the
-/// scaling mode and, when the planned supersample factor or the canvas
-/// underneath it changed, resize the backing texture to match.
-///
-/// `set_scaling_mode` only stores the mode: the scaling matrix and the clip
-/// rect are recomputed by the next `resize_surface`/`resize_buffer`, so a
-/// caller whose own resize is not the next thing to run must re-apply the
-/// current surface size itself.
+/// (physical pixels), its live canvas and the scaling setting: when the
+/// planned supersample factor or the canvas underneath it changed, resize
+/// the backing texture to match. The destination rect and filter are not
+/// stored anywhere -- the redraw recomputes them from the same plan.
 ///
 /// On `Ok` the texture and `r.texture_scale` agree with the plan; on `Err`
-/// both keep their old extent, like `resize_buffer` (the stored mode is
-/// re-decided by the next call, and the matrix never saw it).
+/// both keep their old extent, like `resize_buffer`. The scaler pass draws
+/// the planned rect either way: its point sampling does not need the
+/// texture factor to match the multiple.
 pub(super) fn sync_main_present_scaling(
     r: &mut Render,
     surface: (u32, u32),
 ) -> std::result::Result<(), pixels::TextureError> {
-    let (scale, mode) = plan_present_scaling(
+    let plan = plan_present_scaling(
         integer_scaling_requested(),
         r.window.scale_factor(),
         (surface.0.max(1), surface.1.max(1)),
     );
-    r.pixels.set_scaling_mode(mode);
+    let scale = plan.texture_scale;
     let want = (texture_width(scale) as u32, texture_height(scale) as u32);
     let have = r.pixels.context().texture_extent;
     if (have.width, have.height) != want {
@@ -526,7 +900,6 @@ pub(super) fn build_pixels_for_window(
     window: Arc<Window>,
     texture_scale: usize,
     vsync: bool,
-    scaling_mode: ScalingMode,
 ) -> std::result::Result<Pixels<'static>, pixels::Error> {
     let inner = window.inner_size();
     let surface = (inner.width.max(1), inner.height.max(1));
@@ -544,11 +917,13 @@ pub(super) fn build_pixels_for_window(
         builder
     };
     let mut pixels = builder.build()?;
-    pixels.set_scaling_mode(scaling_mode);
-    // The scaling matrix and clip rect stay the builder's PixelPerfect ones
-    // until a resize recomputes them. Re-apply the surface size so the cursor
-    // mapping and the render scissor agree with the mode just set from the
-    // first frame, not the first resize.
+    // The tool windows draw through the built-in Fill renderer (the
+    // emulator window's own scaler pass ignores the mode). The scaling
+    // matrix and clip rect stay the builder's defaults until a resize
+    // recomputes them; re-apply the surface size so the cursor mapping
+    // and the render scissor agree with the mode from the first frame,
+    // not the first resize.
+    pixels.set_scaling_mode(ScalingMode::Fill);
     pixels.resize_surface(surface.0, surface.1)?;
     Ok(pixels)
 }
@@ -570,8 +945,9 @@ pub(in crate::video) fn scale_rect(rect: Rect, scale: usize) -> Rect {
     }
 }
 
-/// Map a host cursor position (surface physical pixels) into a logical canvas
-/// position, or None outside the presented picture.
+/// Map a host cursor position (surface physical pixels) into a *tool*
+/// window's logical canvas position, or None outside the presented
+/// picture.
 ///
 /// Deliberately not pixels' `window_pos_to_pixel`: that helper re-centres
 /// through `min(texture, surface) / 2`, which is only correct while the
@@ -596,6 +972,21 @@ pub(super) fn cursor_texture_position(
         (context.texture_extent.width, context.texture_extent.height),
     )?;
     Some(((x / texture_scale) as i32, (y / texture_scale) as i32))
+}
+
+/// The emulator window's cursor mapping: host surface position to logical
+/// canvas position, or None outside the presented picture. The emulator
+/// window is drawn by the scaler pass, not the built-in renderer, so the
+/// rects inverted here are the same [`PresentLayout`] rects the pass
+/// draws into, and the mapping lands directly in logical canvas pixels.
+/// `autocrop_src` must be the same crop the redraw presents
+/// (`App::autocrop_canvas_src`), so clicks land where the picture is.
+pub(super) fn main_cursor_position(
+    r: &Render,
+    autocrop_src: Option<(usize, usize, usize, usize)>,
+    position: winit::dpi::PhysicalPosition<f64>,
+) -> Option<(i32, i32)> {
+    main_present_layout(r, autocrop_src).cursor_position(position)
 }
 
 /// The pure half of [`cursor_texture_position`]: position and clip rect in

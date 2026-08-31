@@ -4632,6 +4632,61 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
 }
 
 #[test]
+fn render_reports_the_playfield_content_envelope() {
+    // One plane fetching two rows inside a much taller programmed
+    // window (VSTOP 0x8C, high bit set by value, so no wraparound
+    // term). The returned envelope is what the presentation-side
+    // autocrop feeds on: the display-window rows that carry fetched
+    // bitplane data, not the bare window -- Kickstart routinely leaves
+    // the 256-line window open around a 200-line picture, and cropping
+    // must tighten to the picture, not the window.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x8CC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0048;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    bus.denise.bplpt[0] = 0x0100;
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    for y in 0..2 {
+        bus.current_frame_bitplane_rows[y] = Some(CapturedBitplaneRow {
+            nplanes: 1,
+            words_per_row: 3,
+            fetch_origin_cck: None,
+            planes: [
+                vec![0x4000, 0, 0],
+                vec![0; 3],
+                vec![0; 3],
+                vec![0; 3],
+                vec![0; 3],
+                vec![0; 3],
+                Vec::new(),
+                Vec::new(),
+            ],
+        });
+    }
+
+    let mut fb = vec![0; FB_PIXELS];
+    let content = bitplane::render(&mut bus, &mut fb).expect("playfield painted");
+    // The two fetched rows -- not the 96 the window spans -- and a
+    // column span that holds the painted pixel and stays on the canvas.
+    assert_eq!((content.y0, content.y1), (0, 2));
+    assert!(content.x0 <= STANDARD_VISIBLE_X0 + 2);
+    assert!(content.x1 > STANDARD_VISIBLE_X0 + 2);
+    assert!(content.x1 <= FB_WIDTH);
+
+    // A border-only frame (no planes anywhere) reports no envelope.
+    let mut bus = empty_bus();
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    let mut fb = vec![0; FB_PIXELS];
+    assert!(bitplane::render(&mut bus, &mut fb).is_none());
+}
+
+#[test]
 fn hblank_tail_color_write_paints_following_row_from_left_edge() {
     // A copper COLOR00 write in the horizontal-blank tail (hpos < 0x12)
     // belongs to the previous output row's invisible tail; the following

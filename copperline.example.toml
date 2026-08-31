@@ -605,6 +605,12 @@ video = "PAL"
 # at multiples of their own native resolution, and falls back to the smooth
 # fit when the window is too small for even 1x rather than cropping.
 # Pair it with pixel_aspect = "square" for a fully pixel-exact picture.
+# autocrop: crop the window presentation to the display window the
+# hardware programs (default false), so a game using fewer lines than the
+# full scan fills more of a 16:9/21:9 screen; with integer scaling the
+# whole-number fit is retaken against the crop. Window-only (captures
+# keep their aperture); composes with the CRT shader presets, and is
+# suspended under a bezel, for RTG scanout and for programmable scans.
 # deinterlace: motion-adaptive weaving of interlaced displays (default
 # true); false line-doubles every field, showing interlace bob/flicker like
 # a bare TV.
@@ -650,6 +656,7 @@ video = "PAL"
 # tv_v_centre = 0
 # pixel_aspect = "tv"
 # scaling = "smooth"
+# autocrop = false
 # deinterlace = true
 # phosphor = 0.4
 # shader = "none"

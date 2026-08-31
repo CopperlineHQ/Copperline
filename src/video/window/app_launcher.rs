@@ -1372,6 +1372,7 @@ impl App {
         self.tv_centre = cfg.tv_centre;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         self.apply_display_scaling(cfg.scaling);
+        self.apply_autocrop(cfg.autocrop);
         // Apply the configured start-up window state; the runtime toggles
         // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the
         // surface/window resize stays in one place.

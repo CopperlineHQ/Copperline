@@ -97,15 +97,16 @@ impl App {
     }
 
     /// COPPERLINE_DIAG_CURSOR: trace how the most recent click maps from host
-    /// physical coordinates through the scaling renderer's clip rect into a
-    /// texture/region hit. The tool for diagnosing mouse capture on DPI scale
+    /// physical coordinates through the scaler pass's clip rect into a
+    /// canvas/region hit. The tool for diagnosing mouse capture on DPI scale
     /// changes and mixed-scale monitors (see the ScaleFactorChanged handler):
     /// if a status-bar click logs region=display(->capture), the surface and
-    /// texture extents have drifted out of agreement.
+    /// clip rect have drifted out of agreement.
     pub(super) fn log_cursor_diag(&self, button: MouseButton) {
         if !crate::envcfg::flag("COPPERLINE_DIAG_CURSOR") {
             return;
         }
+        let autocrop_src = self.autocrop_canvas_src();
         let Some(r) = self.render.as_ref() else {
             return;
         };
@@ -113,9 +114,13 @@ impl App {
         let inner = r.window.inner_size();
         let phys = self.last_cursor_phys;
         let context = r.pixels.context();
-        let clip = context.scaling_renderer.clip_rect();
+        // The rect the display quad is actually drawn into -- the crop's
+        // under autocrop, the classic letterbox otherwise -- so the trace
+        // shows the same mapping the position below went through.
+        let layout = main_present_layout(r, autocrop_src);
+        let clip = layout.display_dst;
         let texture = (context.texture_extent.width, context.texture_extent.height);
-        let pos = phys.and_then(|p| cursor_texture_position(&r.pixels, p, r.texture_scale));
+        let pos = phys.and_then(|p| layout.cursor_position(p));
         let region = match pos {
             Some(p) if cursor_in_status_bar(p) => "status_bar",
             Some(p) if cursor_in_display(p) => "display(->capture)",

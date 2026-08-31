@@ -5,7 +5,6 @@
 //! and keep full access to the parent's private items via `super::`.
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
-use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
@@ -8434,49 +8433,268 @@ fn cursor_mapping_rejects_pillarbox_clicks() {
 }
 
 /// `[display] scaling = "integer"` fits in whole *canvas* pixels against
-/// the physical surface, and the supersample factor follows that fit: the
-/// canvas is rendered at the fitted factor and PixelPerfect draws it 1:1.
-/// Deriving the factor from the fit rather than the host DPI is what makes
-/// odd physical multiples reachable -- a DPI-supersampled texture can only
-/// be drawn at whole multiples of itself, which on a 2x display skips 1x
-/// and 3x physical pixels per canvas pixel. Only a surface smaller than the
-/// canvas (no whole multiple at all; PixelPerfect would crop) falls back to
-/// the smooth DPI-supersampled Fill plan.
+/// the physical surface: the multiple is the fit itself, uncapped, and
+/// the supersample factor follows it up to `MAX_INTEGER_TEXTURE_SCALE`.
+/// Deriving the multiple from the fit rather than the host DPI is what
+/// makes odd physical multiples reachable -- a DPI-supersampled texture
+/// can only be drawn at whole multiples of itself, which on a 2x display
+/// skips 1x and 3x physical pixels per canvas pixel. Only a surface
+/// smaller than the canvas (no whole multiple at all; 1x would crop)
+/// falls back to the smooth DPI-supersampled plan.
 #[test]
 fn integer_scaling_fits_in_whole_canvas_pixels() {
-    // ScalingMode is not PartialEq, so extract the planned factor and
-    // whether the integer mode was chosen rather than comparing values.
     let plan = |requested, dpi, surface| {
-        let (scale, mode) = plan_present_scaling_for(requested, dpi, surface, (716, 581));
-        (scale, matches!(mode, ScalingMode::PixelPerfect))
+        let plan = plan_present_scaling_for(requested, dpi, surface, (716, 581));
+        (plan.texture_scale, plan.multiple)
     };
 
     // A 2x-DPI laptop panel (3024x1964) holds three whole canvas pixels per
     // axis but not four: an odd multiple a 2x texture could never reach.
-    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, true));
+    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, Some(3)));
     // The canvas-sized window on the same panel: exactly 2x physical.
-    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, true));
+    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, Some(2)));
     // A window shrunk below the default still holds one physical pixel per
     // canvas pixel, so it stays integer (small and crisp) instead of
     // falling back to smooth.
-    assert_eq!(plan(true, 2.0, (1000, 840)), (1, true));
+    assert_eq!(plan(true, 2.0, (1000, 840)), (1, Some(1)));
     // The 150% fractional-DPI desktop's canvas-sized window (1.5x physical)
     // holds a whole 1x too -- under the old texture-multiple fit this was a
     // forced smooth fallback.
-    assert_eq!(plan(true, 1.5, (1074, 872)), (1, true));
+    assert_eq!(plan(true, 1.5, (1074, 872)), (1, Some(1)));
     // The exact-fit boundary, and one pixel short in either dimension:
-    // below the canvas there is no whole multiple, and PixelPerfect would
-    // crop, so the plan is the smooth one (DPI-supersampled Fill).
-    assert_eq!(plan(true, 2.0, (716, 581)), (1, true));
-    assert_eq!(plan(true, 2.0, (715, 581)), (2, false));
-    assert_eq!(plan(true, 2.0, (716, 580)), (2, false));
-    // A huge surface caps the supersample; PixelPerfect's own whole
-    // multiples of the capped texture carry on above it.
-    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, true));
+    // below the canvas there is no whole multiple, and 1x would crop, so
+    // the plan is the smooth one (DPI-supersampled sharp bilinear).
+    assert_eq!(plan(true, 2.0, (716, 581)), (1, Some(1)));
+    assert_eq!(plan(true, 2.0, (715, 581)), (2, None));
+    assert_eq!(plan(true, 2.0, (716, 580)), (2, None));
+    // A huge surface caps the supersample factor but not the multiple:
+    // the scaler pass draws the full fit from the capped texture (a 5K
+    // display fits 7x across but only 5x down with this canvas).
+    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, Some(8)));
+    assert_eq!(plan(true, 2.0, (5120, 2880)), (4, Some(4)));
+    assert_eq!(plan(true, 2.0, (6016, 3384)), (4, Some(5)));
 
-    // Smooth never leaves Fill or the DPI factor, whatever the room.
-    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, false));
-    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, false));
+    // Smooth never leaves the DPI factor or gains a multiple, whatever
+    // the room.
+    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, None));
+    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, None));
+}
+
+/// The renderer's field-space content envelope reaches presentation
+/// space through the exact shifts the pixels took: vertical centring by
+/// `presentation_source_y_offset`, horizontal recentring by `h_shift`,
+/// then each field row onto its two woven rows. Programmable scans never
+/// map (they present their own window in full).
+#[test]
+fn woven_content_rect_applies_the_post_process_shifts_and_weaves() {
+    use crate::video::bitplane::ContentRect;
+    let rect = ContentRect {
+        x0: 100,
+        x1: 500,
+        y0: 30,
+        y1: 230,
+    };
+    let y_off = super::presentation_source_y_offset(0x2C);
+
+    let woven = super::woven_content_rect(Some(rect), false, 0x2C, 10, FB_WIDTH, 570)
+        .expect("standard frame maps");
+    assert_eq!((woven.x0, woven.x1), (90, 490));
+    assert_eq!((woven.y0, woven.y1), (2 * (30 + y_off), 2 * (230 + y_off)));
+
+    // Programmable scans and border-only frames give nothing to crop to.
+    assert_eq!(
+        super::woven_content_rect(Some(rect), true, 0x2C, 0, FB_WIDTH, 570),
+        None
+    );
+    assert_eq!(
+        super::woven_content_rect(None, false, 0x2C, 0, FB_WIDTH, 570),
+        None
+    );
+
+    // The woven rows clamp to the frame actually presented, and a rect
+    // shifted entirely off the canvas collapses to None rather than an
+    // inverted interval.
+    let low = ContentRect {
+        x0: 0,
+        x1: 4,
+        y0: 280,
+        y1: 285,
+    };
+    assert_eq!(
+        super::woven_content_rect(Some(low), false, 0x2C, 8, FB_WIDTH, 570),
+        None
+    );
+}
+
+/// The canvas-space inversion agrees with the copy it mirrors: every
+/// canvas row and column the rect includes maps into the content
+/// interval under the forward TV-aperture mapping, and the rows just
+/// outside it do not.
+#[test]
+fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
+    use crate::video::bitplane::ContentRect;
+    let aperture_rows = TV_PAL_PRESENT_HEIGHT;
+    let canvas_rows = crate::video::PRESENT_HEIGHT_TV;
+    let content = ContentRect {
+        x0: 120,
+        x1: 620,
+        y0: 100,
+        y1: 400,
+    };
+    let (x, y, w, h) = super::canvas_content_rect(
+        content,
+        570,
+        Overscan::Tv,
+        crate::config::TvCentre::default(),
+        Some(aperture_rows),
+        canvas_rows,
+    )
+    .expect("content inside the aperture maps");
+    assert!(w > 0 && h > 0);
+    // The rect stays on the canvas.
+    assert!(x + w <= FB_WIDTH && y + h <= canvas_rows);
+    // Forward-map the returned row range: rows inside land in the
+    // content interval, the rows just outside do not.
+    let src_of = |canvas_y: usize| {
+        super::tv_aperture_source_row(canvas_y, canvas_rows, 1, aperture_rows)
+            .map(|crop_y| TV_PRESENT_SOURCE_Y + crop_y)
+    };
+    for canvas_y in y..y + h {
+        let src = src_of(canvas_y).expect("aperture row");
+        assert!(
+            (content.y0..content.y1).contains(&src),
+            "canvas row {canvas_y} maps to {src}, outside content"
+        );
+    }
+    if y > 0 {
+        let src = src_of(y - 1).expect("aperture row");
+        assert!(!(content.y0..content.y1).contains(&src));
+    }
+    if let Some(src) = src_of(y + h) {
+        assert!(!(content.y0..content.y1).contains(&src));
+    }
+
+    // The plain (full-overscan) branch is a straight row map: content
+    // rows come back as themselves when the canvas matches the source.
+    let (px, py, pw, ph) = super::canvas_content_rect(
+        content,
+        570,
+        Overscan::Full,
+        crate::config::TvCentre::default(),
+        None,
+        570,
+    )
+    .expect("plain branch maps");
+    assert_eq!((px, py, pw, ph), (120, 100, 500, 300));
+
+    // Content entirely outside the aperture (deep top overscan) crops to
+    // nothing rather than a degenerate rect.
+    let off_glass = ContentRect {
+        x0: 120,
+        x1: 620,
+        y0: 0,
+        y1: TV_PRESENT_SOURCE_Y / 2,
+    };
+    assert_eq!(
+        super::canvas_content_rect(
+            off_glass,
+            570,
+            Overscan::Tv,
+            crate::config::TvCentre::default(),
+            Some(aperture_rows),
+            canvas_rows,
+        ),
+        None
+    );
+}
+
+/// The autocrop latch grows immediately (content must never be cut),
+/// holds through border-only frames, and shrinks only after the smaller
+/// envelope has held steady for its stability window.
+#[test]
+fn autocrop_latch_grows_fast_and_shrinks_only_when_stable() {
+    use crate::video::bitplane::ContentRect;
+    let rect = |y0: usize, y1: usize| ContentRect {
+        x0: 100,
+        x1: 600,
+        y0,
+        y1,
+    };
+    let mut latch = super::AutocropLatch::default();
+
+    // First content adopts outright.
+    assert_eq!(latch.resolve(Some(rect(100, 400))), Some(rect(100, 400)));
+    // Growth is immediate, to the union.
+    assert_eq!(latch.resolve(Some(rect(50, 400))), Some(rect(50, 400)));
+    // A border-only frame holds the crop.
+    assert_eq!(latch.resolve(None), Some(rect(50, 400)));
+    // A smaller envelope has to persist before the crop tightens...
+    for _ in 0..super::AutocropLatch::SHRINK_STABLE_FRAMES - 1 {
+        assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(50, 400)));
+    }
+    // ...and adopts on the Nth consecutive frame.
+    assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(100, 350)));
+
+    // A shrink candidate interrupted by a different frame starts over.
+    let mut latch = super::AutocropLatch::default();
+    latch.resolve(Some(rect(50, 400)));
+    for _ in 0..super::AutocropLatch::SHRINK_STABLE_FRAMES - 1 {
+        latch.resolve(Some(rect(100, 350)));
+    }
+    assert_eq!(latch.resolve(Some(rect(50, 400))), Some(rect(50, 400)));
+    assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(50, 400)));
+
+    // Reset forgets everything, like a power cycle.
+    latch.reset();
+    assert_eq!(latch.resolve(None), None);
+}
+
+/// The autocrop layout splits the chrome band off at the width-fit
+/// scale, and integer scaling re-fits its whole multiple against the
+/// crop rather than the full canvas -- the display using fewer lines is
+/// what earns the larger multiple.
+#[test]
+fn autocrop_layout_refits_the_multiple_against_the_crop() {
+    // A 200-line lo-res game (400 woven rows, 640 canvas px wide) on a
+    // 2000x1200 surface, above a pre-sized 100-row chrome band (the
+    // caller sizes the band at the classic letterbox scale).
+    let chrome = (30u32, 1100u32, 1940u32, 100u32);
+    let layout = super::autocrop_layout((2000, 1200), true, (38, 69, 640, 400), Some(chrome));
+    // The band passes through untouched, and the crop fits 2x whole
+    // (min(2000/640, 1100/400) = 2), centred in the region above it.
+    assert_eq!(layout.chrome_dst, Some(chrome));
+    assert_eq!(
+        layout.display_dst,
+        ((2000 - 1280) / 2, (1100 - 800) / 2, 1280, 800)
+    );
+    assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
+    assert_eq!(layout.src_canvas, (38, 69, 640, 400));
+
+    // The classic full canvas only fits 1x on the same surface: the crop
+    // doubled the picture.
+    assert_eq!(
+        super::scaler::clip_rect_for((2000, 1200), (716, 581), Some(1)).2,
+        716
+    );
+
+    // Without a whole multiple the crop falls back to its smooth fit.
+    let layout = super::autocrop_layout((600, 500), true, (38, 69, 640, 400), None);
+    assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
+    assert!(layout.display_dst.2 <= 600);
+
+    // A surface too small for the whole 716-wide canvas still holds a
+    // whole multiple of a 640-wide crop: the fit is the crop's own, not
+    // an inherited fallback from the classic full-canvas plan.
+    let layout = super::autocrop_layout((700, 500), true, (38, 69, 640, 400), None);
+    assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
+    assert_eq!((layout.display_dst.2, layout.display_dst.3), (640, 400));
+
+    // Smooth scaling keeps the sharp-bilinear fit of the crop.
+    let layout = super::autocrop_layout((2000, 1200), false, (38, 69, 640, 400), None);
+    assert_eq!(layout.chrome_dst, None);
+    assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
+    // Aspect preserved: 640x400 into 2000x1200 is height-limited.
+    assert_eq!(layout.display_dst.3, 1200);
 }
 
 /// A redraw that finds the host window at a size the surface was not
@@ -8592,6 +8810,12 @@ fn perf_overlay_lines_format_one_data_point_per_line() {
     );
 }
 
+/// The classic overlay anchor: the whole display region, what every
+/// call site passes while autocrop is not presenting.
+fn full_anchor() -> (usize, usize, usize, usize) {
+    (0, 0, crate::video::FB_WIDTH, super::present_height())
+}
+
 #[test]
 fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let scale = 1;
@@ -8601,7 +8825,7 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let probe_y = margin + 2;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, false, 0);
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, full_anchor());
     // The backing box reaches the top-right margin corner...
     assert_ne!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
     // ...and the top-left of the display is untouched.
@@ -8610,12 +8834,12 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     // With the record badge up the block starts below it, leaving the
     // badge's corner rows alone.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, true, 0);
+    super::draw_perf_overlay(&mut frame, &lines, scale, true, 0, full_anchor());
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
 
     // Nothing to draw is a no-op, not a stray empty box.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &[], scale, false, 0);
+    super::draw_perf_overlay(&mut frame, &[], scale, false, 0, full_anchor());
     assert!(frame.iter().all(|&b| b == 0));
 
     // A monitor front and a bowed preset round that corner away, so the
@@ -8634,7 +8858,7 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
         "the inset must clear the probe to be tested"
     );
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, false, inset);
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, inset, full_anchor());
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
     assert_ne!(
         pixel(&frame, probe_x - inset, probe_y + inset, scale),
@@ -8683,7 +8907,7 @@ fn the_overlays_leave_the_corner_on_both_axes() {
     // The message is in the bottom-left corner: in from the left and up
     // from the foot of the picture, by the inset on each.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_osd(&mut frame, "corner", false, scale, inset);
+    super::draw_osd(&mut frame, "corner", false, scale, inset, full_anchor());
     let (x0, _, _, y1) = bounds(&frame);
     assert_eq!(x0, margin + inset, "the OSD did not come in from the left");
     assert_eq!(
@@ -8694,7 +8918,7 @@ fn the_overlays_leave_the_corner_on_both_axes() {
 
     // The badge and the readout share the top-right one.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_record_badge(&mut frame, scale, inset);
+    super::draw_record_badge(&mut frame, scale, inset, full_anchor());
     let (_, x1, y0, _) = bounds(&frame);
     assert_eq!(
         x1,
@@ -8704,7 +8928,14 @@ fn the_overlays_leave_the_corner_on_both_axes() {
     assert_eq!(y0, margin + inset, "the record badge did not drop");
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &["50.0 fps".to_string()], scale, false, inset);
+    super::draw_perf_overlay(
+        &mut frame,
+        &["50.0 fps".to_string()],
+        scale,
+        false,
+        inset,
+        full_anchor(),
+    );
     let (_, x1, y0, _) = bounds(&frame);
     assert_eq!(
         x1,

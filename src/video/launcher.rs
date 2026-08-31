@@ -698,6 +698,7 @@ pub enum LauncherField {
     Overscan,
     PixelAspect,
     Scaling,
+    Autocrop,
     Tint,
     Deinterlace,
     Phosphor,
@@ -1243,11 +1244,12 @@ const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
 // The emulated picture, in signal order -- what the monitor is fed and how
 // it is drawn -- with the shader pair last, since strength greys off the
 // shader. The host window's own settings are DISPLAY_ROWS.
-const VIDEO_ROWS: [Row; 9] = [
+const VIDEO_ROWS: [Row; 10] = [
     row(F::Bezel, "Monitor bezel", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Scaling, "Scaling", Cycle),
+    row(F::Autocrop, "Autocrop", Cycle),
     row(F::Deinterlace, "Deinterlace", Cycle),
     row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
@@ -2308,6 +2310,9 @@ pub struct MachineSetup {
     pixel_aspect: PixelAspect,
     /// How the canvas is scaled into the window ([display] scaling).
     scaling: DisplayScaling,
+    /// Crop the presentation to the programmed display window
+    /// ([display] autocrop).
+    autocrop: bool,
     /// Motion-adaptive interlace weaving ([display] deinterlace).
     deinterlace: bool,
     phosphor: f32,
@@ -2629,6 +2634,7 @@ impl MachineSetup {
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             scaling: cfg.scaling,
+            autocrop: cfg.autocrop,
             deinterlace: cfg.deinterlace,
             phosphor: cfg.phosphor,
             shader: cfg.shader.clone(),
@@ -3153,6 +3159,9 @@ impl MachineSetup {
         if self.scaling != base.scaling {
             raw.display.scaling = Some(display_scaling_name(self.scaling).to_string());
         }
+        if self.autocrop != base.autocrop {
+            raw.display.autocrop = Some(self.autocrop);
+        }
         if self.deinterlace != base.deinterlace {
             raw.display.deinterlace = Some(self.deinterlace);
         }
@@ -3499,6 +3508,7 @@ impl MachineSetup {
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
         self.scaling = base.scaling;
+        self.autocrop = base.autocrop;
         self.deinterlace = base.deinterlace;
         self.phosphor = base.phosphor;
         // The remembered user-shader path survives: it came from the config
@@ -3871,6 +3881,7 @@ impl MachineSetup {
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar,
+            F::Autocrop => self.autocrop,
             F::Deinterlace => self.deinterlace,
             F::PerfOverlay => self.perf_overlay,
             F::Mt32Panel => self.mt32_panel,
@@ -4418,6 +4429,7 @@ impl MachineSetup {
             F::StartFullscreen => enabled_label(self.start_fullscreen),
             F::ShowStatusBar => enabled_label(self.show_status_bar),
             F::PerfOverlay => enabled_label(self.perf_overlay),
+            F::Autocrop => enabled_label(self.autocrop),
             F::Deinterlace => enabled_label(self.deinterlace),
             F::FloppySounds => enabled_label(self.floppy_sounds),
             F::PowerOn => enabled_label(self.power_on),
@@ -4902,6 +4914,7 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
+            F::Autocrop => self.autocrop = !self.autocrop,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
             F::PowerOn => self.power_on = !self.power_on,
