@@ -3885,10 +3885,13 @@ impl MachineSetup {
         }
     }
 
-    /// Whether the SCSI controller is the A4091, whose boot ROM has a
-    /// bundled default the row reads as one.
-    pub fn scsi_controller_is_a4091(&self) -> bool {
-        matches!(self.scsi_controller, Some(ScsiController::A4091))
+    /// The bundled-ROM label for the selected SCSI controller.
+    pub fn scsi_bundled_rom_label(&self) -> Option<&'static str> {
+        match self.scsi_controller {
+            Some(ScsiController::A2091) => Some("(bundled open A2091 ROM)"),
+            Some(ScsiController::A4091) => Some("(bundled A4091 ROM)"),
+            _ => None,
+        }
     }
 
     /// Whether the CD32 FMV cartridge was explicitly removed rather than
@@ -4682,10 +4685,9 @@ impl MachineSetup {
             F::Rom => self.path_label(field, "(bundled AROS)"),
             F::FmvRom if self.fmv_rom_disabled => "(no FMV module)".to_string(),
             F::FmvRom => self.path_label(field, "(bundled open FMV ROM)"),
-            // The A4091 autoboots from a bundled open-source ROM when no
-            // image names one; the other controllers have no such default.
-            F::ScsiRom if self.scsi_controller_is_a4091() => {
-                self.path_label(field, "(bundled A4091 ROM)")
+            // Both Zorro SCSI boards have bundled open autoboot ROMs.
+            F::ScsiRom if self.scsi_bundled_rom_label().is_some() => {
+                self.path_label(field, self.scsi_bundled_rom_label().unwrap())
             }
             // A fitted lide board defaults to a bundled ROM: lide.rom for
             // RIPPLE/RIDE, lide-atbus.rom for AT-Bus 2008 -- not the same

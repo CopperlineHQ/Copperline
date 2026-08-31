@@ -2353,7 +2353,7 @@ fn z3_ram_parses_with_32_bit_cpu_and_validates_size() -> Result<()> {
 }
 
 #[test]
-fn scsi_section_parses_units_and_requires_the_boot_rom() -> Result<()> {
+fn scsi_section_parses_units_and_defaults_to_the_bundled_boot_rom() -> Result<()> {
     let cfg = parse_config(
         r#"
             [scsi]
@@ -2374,16 +2374,17 @@ fn scsi_section_parses_units_and_requires_the_boot_rom() -> Result<()> {
         Some(Path::new("data.hdf"))
     );
 
-    // Drives without the boot ROM cannot work: the ROM carries the
-    // scsi.device driver.
-    let err = parse_config(
+    // A fitted A2091 needs a ROM because it carries scsi.device. When the
+    // user does not name one, validation selects Copperline's bundled open
+    // replacement.
+    let cfg = parse_config(
         r#"
             [scsi]
             unit0 = "workbench.hdf"
             "#,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("boot ROM"), "{err:#}");
+    )?;
+    assert_eq!(cfg.scsi.controller, ScsiController::A2091);
+    assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new(BUNDLED_A2091_ROM)));
 
     // SCSI works on any machine model (no Gayle requirement). This also
     // exercises the deprecated `model` alias for `[machine] profile`.
@@ -2729,7 +2730,14 @@ fn cd32_without_fmv_override_resolves_the_bundled_rom() -> Result<()> {
 /// An A4091 without a named ROM falls back to the bundled one: validation
 /// leaves the sentinel in place, and resolution swaps in the real path.
 #[test]
-fn a4091_without_rom_defaults_to_the_bundled_rom() -> Result<()> {
+fn zorro_scsi_controllers_without_rom_default_to_bundled_roms() -> Result<()> {
+    // No [scsi] section means no fitted controller. The controller enum still
+    // carries its A2091 personality default for callers which later attach a
+    // disk, but validation must not turn that alone into a board.
+    let cfg = parse_config("")?;
+    assert_eq!(cfg.scsi.controller, ScsiController::A2091);
+    assert!(!cfg.scsi.enabled());
+
     let cfg = parse_config(
         r#"
             [scsi]
@@ -2768,16 +2776,46 @@ fn a4091_without_rom_defaults_to_the_bundled_rom() -> Result<()> {
     )?;
     assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new("custom-a4091.rom")));
 
-    // The A2091 has no bundled ROM, so it still errors without one.
-    let err = parse_config(
+    // The A2091 has its own bundled open ROM and resolves independently.
+    let mut cfg = parse_config(
         r#"
             [scsi]
             controller = "a2091"
             unit0 = "workbench.hdf"
             "#,
+    )?;
+    assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new(BUNDLED_A2091_ROM)));
+    resolve_bundled_rom(&mut cfg)?;
+    let rom = cfg.scsi.rom.as_deref().expect("resolved A2091 rom");
+    assert!(rom.ends_with(crate::romsearch::A2091_ROM_FILE), "{rom:?}");
+    assert_ne!(rom, Path::new(BUNDLED_A2091_ROM));
+
+    // Explicit merged/split images still win over the bundled default.
+    let cfg = parse_config(
+        r#"
+            [scsi]
+            controller = "a2091"
+            rom = "custom-even.rom"
+            rom_odd = "custom-odd.rom"
+            "#,
+    )?;
+    assert_eq!(cfg.scsi.rom.as_deref(), Some(Path::new("custom-even.rom")));
+    assert_eq!(
+        cfg.scsi.rom_odd.as_deref(),
+        Some(Path::new("custom-odd.rom"))
+    );
+
+    // Naming only the odd half is still an error; the bundled merged ROM
+    // must not be silently paired with it as though it were the even half.
+    let err = parse_config(
+        r#"
+            [scsi]
+            controller = "a2091"
+            rom_odd = "custom-odd.rom"
+            "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("boot ROM"), "{err:#}");
+    assert!(err.to_string().contains("rom_odd needs rom"), "{err:#}");
     Ok(())
 }
 

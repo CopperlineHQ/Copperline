@@ -10,6 +10,9 @@ metadata files without writing any Rust. The built-in `[memory] fast` and
 the device-board notes below and the `[scsi]` section of
 [](guide/configuration); the third `[scsi]` choice, the A3000's
 motherboard SDMAC, is silicon at `$DD0000` rather than a Zorro board).
+Both Zorro controllers have freely redistributable bundled autoboot ROMs;
+the A2091 image is built from `a2091-rom/` and installed under
+`share/copperline/a2091/`.
 
 There are two board kinds:
 

@@ -59,6 +59,9 @@ class Copperline < Formula
     # fits an A4091 without naming a ROM): <prefix>/share/copperline/a4091.
     (pkgshare/"a4091").install Dir["assets/a4091/*"]
 
+    # Copperline's open A2091/A590 autoboot ROM.
+    (pkgshare/"a2091").install Dir["assets/a2091/*"]
+
     # Install the bundled open-source lide.device autoboot ROM and
     # CD-filesystem bank (default for a fitted [lide] board without a named
     # rom/rom_bank2): <prefix>/share/copperline/lide.
