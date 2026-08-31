@@ -25,6 +25,32 @@ use std::collections::VecDeque;
 /// Unit slots. Matches `CHF_UNITS`/`CHF_NUM_UNITS` in the shared header.
 pub const NUM_UNITS: usize = 7;
 
+/// The guest-side boot ROM (`guest/copperhf/README.md`): a DiagArea plus an
+/// exec device stub (Open/Close/Expunge/BeginIO/AbortIO + an INT2
+/// completion server), built from `guest/copperhf/{entry.s,device.c,
+/// int_handler.s}` and installed by `make` in that directory. A plain
+/// `cargo build` just embeds this committed artifact; rebuilding needs the
+/// dockerized cross-GCC (`guest/toolchain.mk`).
+pub const COPPERHF_ROM: &[u8] = include_bytes!("../assets/copperhf/copperhf_rom.bin");
+
+/// ROM window offset: matches `guest/copperhf/entry.s`'s own `+8` bias
+/// (`_diag_entry-_entry_table+8`, hard-coded there against this exact
+/// constant) and the filesys/hostsocket convention of leaving the window's
+/// first 8 bytes unused ahead of the entry table, even though copperhf has
+/// no seglist-header need of its own (see `crate::filesys::ROM_OFFSET`).
+pub const ROM_OFFSET: usize = 0x0008;
+/// The DiagArea (`BoardSpec::copperhf` points `diag_vec` here): embedded in
+/// the ROM at file offset 0x40 (`entry.s`'s `_diag_area`, `.org 0x40`), so
+/// window-relative it sits at `ROM_OFFSET + 0x40` -- same derivation as
+/// `crate::filesys::DIAG_OFFSET` / `crate::hostsocket::DIAG_OFFSET`. A unit
+/// test below locks the byte at this offset to `entry.s`'s own
+/// `da_Config` value, so the two files cannot silently drift apart.
+pub const DIAG_OFFSET: u16 = ROM_OFFSET as u16 + 0x40;
+/// End of the ROM/DiagArea window: the register block starts at
+/// `CHF_MAGIC` (0x4000) and the ROM is served read-only strictly below it
+/// (`guest/copperhf/Makefile`'s own build-time budget assertion).
+const ROM_WINDOW_END: u32 = CHF_MAGIC;
+
 // Register offsets -- see guest/copperhf/copperhf_board.h.
 const CHF_MAGIC: u32 = 0x4000;
 const CHF_VERSION: u32 = 0x4004;
@@ -517,8 +543,32 @@ fn dma_write_bytes(host: &mut DeviceHost, addr: u32, data: &[u8]) -> bool {
     true
 }
 
+/// One byte of the ROM window: the actual ROM byte if `off` (window-
+/// relative) falls inside `ROM_OFFSET..ROM_OFFSET + COPPERHF_ROM.len()`,
+/// otherwise `0xFF` -- matching every other unmapped offset on this board
+/// (`read_word`/`read_long`'s own `0xFFFF`/`0xFFFF_FFFF` fallthrough), so a
+/// read that straddles the ROM's end or probes the unused bytes ahead of
+/// `ROM_OFFSET` reads as the same "nothing here" pattern instead of
+/// panicking or wrapping into unrelated register offsets.
+fn rom_byte(off: u32) -> u8 {
+    (off as usize)
+        .checked_sub(ROM_OFFSET)
+        .and_then(|i| COPPERHF_ROM.get(i))
+        .copied()
+        .unwrap_or(0xFF)
+}
+
+/// A big-endian `size`-byte (1, 2, or 4) read assembled from [`rom_byte`],
+/// for any window offset in `0..ROM_WINDOW_END`.
+fn rom_read(off: u32, size: usize) -> u32 {
+    (0..size as u32).fold(0, |acc, i| (acc << 8) | u32::from(rom_byte(off + i)))
+}
+
 impl ZorroDevice for CopperhfBoard {
     fn read(&mut self, off: u32, size: usize, _host: &mut DeviceHost) -> u32 {
+        if off < ROM_WINDOW_END {
+            return rom_read(off, size);
+        }
         match size {
             4 => self.read_long(off),
             2 => u32::from(self.read_word(off)),
@@ -527,6 +577,11 @@ impl ZorroDevice for CopperhfBoard {
     }
 
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
+        // The ROM window is read-only: writes below CHF_MAGIC are silently
+        // dropped, same as a real write-protected boot ROM.
+        if off < ROM_WINDOW_END {
+            return;
+        }
         match size {
             4 => self.write_long(off, value, host),
             2 => self.write_word(off, value as u16, host),
@@ -535,6 +590,9 @@ impl ZorroDevice for CopperhfBoard {
     }
 
     fn peek_word(&self, off: u32) -> Option<u16> {
+        if off < ROM_WINDOW_END {
+            return Some(rom_read(off, 2) as u16);
+        }
         match off {
             CHF_MAGIC => Some((CHF_MAGIC_VALUE >> 16) as u16),
             _ if off == CHF_MAGIC + 2 => Some(CHF_MAGIC_VALUE as u16),
@@ -1083,5 +1141,107 @@ mod tests {
     fn kind_identifies_the_board() {
         let board = CopperhfBoard::new();
         assert_eq!(board.kind(), "copperhf");
+    }
+
+    // -- M2: boot ROM serving -------------------------------------------
+
+    #[test]
+    fn rom_is_readable_at_window_offset_zero_and_matches_the_included_bytes() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        // Window offset 0 is below ROM_OFFSET (the unused bytes ahead of
+        // the entry table on this board, unlike filesys's fake seglist
+        // header there) -- reads as the unmapped 0xFF pattern.
+        assert_eq!(board.read(0, 2, &mut host), 0xFFFF);
+        for (i, chunk) in COPPERHF_ROM.chunks(2).enumerate() {
+            let off = ROM_OFFSET as u32 + (i as u32) * 2;
+            let expected = if chunk.len() == 2 {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from(chunk[0]) << 8 | 0xFF
+            };
+            assert_eq!(
+                board.read(off, 2, &mut host) as u16,
+                expected,
+                "mismatch at ROM offset {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn rom_peek_word_matches_read_and_has_no_side_effects() {
+        let board = CopperhfBoard::new();
+        let expected = u16::from_be_bytes([COPPERHF_ROM[0], COPPERHF_ROM[1]]);
+        assert_eq!(
+            ZorroDevice::peek_word(&board, ROM_OFFSET as u32),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn rom_reads_past_its_end_but_below_the_register_block_are_unmapped() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let past_end = ROM_OFFSET as u32 + COPPERHF_ROM.len() as u32;
+        assert!(
+            past_end < ROM_WINDOW_END,
+            "fixture assumes ROM has headroom"
+        );
+        assert_eq!(board.read(past_end, 2, &mut host), 0xFFFF);
+        assert_eq!(board.read(ROM_WINDOW_END - 2, 4, &mut host), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn rom_writes_are_silently_ignored() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let before = board.read(ROM_OFFSET as u32, 2, &mut host);
+        board.write(ROM_OFFSET as u32, 2, 0xDEAD, &mut host);
+        assert_eq!(board.read(ROM_OFFSET as u32, 2, &mut host), before);
+    }
+
+    #[test]
+    fn diag_offset_points_at_a_diagarea_with_a_nonzero_bootpoint() {
+        // DIAG_OFFSET must land inside the ROM (not past its end) and its
+        // da_Config byte must carry DAC_WORDWIDE | DAC_CONFIGTIME (0x90),
+        // matching entry.s's `_diag_area` -- DAC_CONFIGTIME additionally
+        // requires a non-zero da_BootPoint, the hard-won Kickstart 3.x trap
+        // entry.s's own header comment documents.
+        let d = DIAG_OFFSET as usize - ROM_OFFSET; // ROM-file-relative
+        assert!(d + 10 <= COPPERHF_ROM.len());
+        assert_eq!(
+            COPPERHF_ROM[d], 0x90,
+            "da_Config must be DAC_WORDWIDE|DAC_CONFIGTIME"
+        );
+        let da_size = u16::from_be_bytes([COPPERHF_ROM[d + 2], COPPERHF_ROM[d + 3]]) as usize;
+        let da_boot = u16::from_be_bytes([COPPERHF_ROM[d + 6], COPPERHF_ROM[d + 7]]) as usize;
+        assert!(
+            da_boot != 0 && da_boot < da_size,
+            "da_BootPoint must be non-zero"
+        );
+        assert!(d + da_size <= COPPERHF_ROM.len());
+    }
+
+    #[test]
+    fn register_block_still_works_with_the_rom_present() {
+        // The ROM's addition must not disturb the M1 register protocol at
+        // all: identity registers and a full read/write round trip both
+        // still behave exactly as the M1 tests above already assert.
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("rom-coexist", 16));
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_MAGIC, 4, &mut host), CHF_MAGIC_VALUE);
+
+        let ptr = 0x1000u32;
+        let data_addr = 0x2000u32;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, data_addr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 512);
     }
 }

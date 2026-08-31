@@ -332,11 +332,13 @@ impl BoardSpec {
 
     /// The copperhf.device virtual block-storage board (`[copperhf]`):
     /// manufacturer [`COPPERLINE_MANUFACTURER_ID`], product
-    /// [`PRODUCT_COPPERHF`], a 64K Zorro II I/O window. M1 has no boot ROM
-    /// yet (`diag_vec: None`) -- the register protocol at `guest/copperhf/
-    /// copperhf_board.h` is reachable once the guest side finds the board
-    /// via `FindConfigDev`, same as HostSocket/MHI; the autoboot DiagArea
-    /// lands in M2. `slot` is the index of the matching
+    /// [`PRODUCT_COPPERHF`], a 64K Zorro II I/O window. `diag_vec` points at
+    /// the boot ROM's DiagArea (`crate::copperhf::DIAG_OFFSET`), landed in
+    /// M2: a guest that already knows the device's name can
+    /// `OpenDevice("copperhf.device", ...)` and drive the register
+    /// protocol at `guest/copperhf/copperhf_board.h` once expansion has
+    /// DiagPoint-ed the board -- no partition mounter/autoboot volume yet,
+    /// that is M3. `slot` is the index of the matching
     /// [`crate::copperhf::CopperhfBoard`] device in `Bus::devices`.
     pub fn copperhf(slot: usize) -> Self {
         Self {
@@ -352,7 +354,7 @@ impl BoardSpec {
             chained: false,
             no_shutup: false,
             window: 0,
-            diag_vec: None,
+            diag_vec: Some(crate::copperhf::DIAG_OFFSET),
         }
     }
 

@@ -1732,8 +1732,8 @@ emulator-only board with no real-hardware counterpart, the Copperline
 equivalent of WinUAE's `uaehf.device`. It exists to move data at zero
 emulated cost: rather than modelling a real chip's register timing and
 DMA behaviour like `[ide]`, `[scsi]`, and `[lide]` do, it is a purpose-built
-Copperline device, so it has no boot ROM to point at and no host-adapter
-choice to make.
+Copperline device with a purpose-built register protocol and no
+host-adapter choice to make.
 
 Up to **seven units** (0-6), each taking the same bare-path/table drive form
 as `[ide]`/`[scsi]`/`[lide]`: RDB images, bare partition hardfiles
@@ -1756,12 +1756,14 @@ command set behind it. Attach CD images to `[scsi]` or `[ide]`/`[lide]`
 instead.
 
 The guest sees `copperhf.device` with unit numbers 0-6, matching the
-`unitN` key numbering. The board, its register-level protocol, and the boot
-ROM/device driver that make it bootable are landing in later milestones
-alongside the Rust-side device implementation (see `COPPERHF-DEVICE-PLAN.md`
-in the repository root), with a `docs/internals/copperhf.md` reference to
-follow once the protocol is final; for now the `[copperhf]` section only
-validates and carries the configured units.
+`unitN` key numbering. The board carries a boot ROM (a DiagArea plus a
+working `copperhf.device` exec-device stub), so a program that already
+knows the device's name can `OpenDevice("copperhf.device", unit, ...)` and
+drive it -- but nothing yet mounts an attached unit as a DOS volume or
+offers it in the Early Startup boot menu; that arrives with the partition
+mounter in a later milestone (see `COPPERHF-DEVICE-PLAN.md` in the
+repository root). See [](../internals/copperhf) for the board, the register
+protocol, and the device stub's current behaviour in full.
 
 ## `[lide]` -- a lide.device-compatible Zorro II IDE board
 
