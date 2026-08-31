@@ -241,6 +241,11 @@ pub struct Config {
     /// drive images on SCSI IDs 0-6. The Zorro boards autoconfig on the chain
     /// and carry their own boot ROM and scsi.device; the A3000's does not.
     pub scsi: ScsiConfig,
+    /// Copperline's virtual hardfile controller (`[copperhf]`): up to seven
+    /// units of `copperhf.device`, the same drive-descriptor shape as
+    /// `[ide]`/`[scsi]`/`[lide]` but with no real-hardware counterpart and
+    /// no boot ROM key of its own.
+    pub copperhf: CopperhfConfig,
     /// `lide.device`-compatible Zorro II IDE board (`[lide]`): RIPPLE, RIDE,
     /// or AT-Bus 2008, autoconfigs on the chain like the SCSI boards. Drives
     /// may be hard disks or ATAPI CD-ROMs. A fitted board with no ROM named
@@ -1202,6 +1207,27 @@ impl ScsiConfig {
     /// which validation gives the bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
+    }
+}
+
+/// `[copperhf]`: Copperline's own virtual hardfile controller
+/// (`copperhf.device`), analogous to WinUAE's `uaehf.device` -- an
+/// emulator-only board with no real-hardware counterpart, moving data at
+/// zero emulated cost instead of modelling a real chip's register timing.
+/// RDB and RDB-less images are handled identically to `[ide]`/`[scsi]`/
+/// `[lide]` through the shared hardfile layer. Guest-visible as
+/// `copperhf.device` units 0-6; see `docs/internals/copperhf.md` (added in a
+/// later milestone) for the register-level protocol.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CopperhfConfig {
+    /// Drive images by unit number (0-6).
+    pub units: [Option<DriveImage>; 7],
+}
+
+impl CopperhfConfig {
+    /// Whether a `[copperhf]` section configured any unit at all.
+    pub fn enabled(&self) -> bool {
+        self.units.iter().any(Option::is_some)
     }
 }
 
@@ -2354,6 +2380,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
+            copperhf: CopperhfConfig::default(),
             lide: LideConfig::default(),
             a2065_net: None,
             toccata: false,
@@ -2407,6 +2434,7 @@ impl Config {
         if self.ide.master.is_some()
             || self.ide.slave.is_some()
             || self.scsi.units.iter().any(Option::is_some)
+            || self.copperhf.units.iter().any(Option::is_some)
             || self.lide.drives.iter().any(Option::is_some)
         {
             return Some("hard-drive or ATAPI image");

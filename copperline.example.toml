@@ -479,6 +479,22 @@ slow = "512K"
 # drive0 = "workbench.hdf"
 # drive1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
 
+# Copperline's own virtual hardfile controller, copperhf.device -- an
+# emulator-only board with no real-hardware counterpart (the Copperline
+# equivalent of WinUAE's uaehf.device), for a high-performance hard disk with
+# none of a real chip's register timing to model. Up to seven units, same
+# bare-path/table drive form as [ide]/[scsi]/[lide]: RDB HDFs, bare partition
+# hardfiles, gzip-compressed hardfiles (.hdz), and host directories all work
+# the same way, RDB and RDB-less images handled identically to the other
+# controllers. Hard disks only -- a CD image path (.cue/.iso/.nrg/.chd) is
+# rejected; attach CD images to [scsi] or [ide]/[lide] instead. No rom key:
+# the board's boot ROM and device driver are built into Copperline itself
+# (arriving in a later milestone -- see COPPERHF-DEVICE-PLAN.md), not a
+# loadable image.
+# [copperhf]
+# unit0 = "workbench.hdf"
+# unit1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
+
 
 [chipset]
 

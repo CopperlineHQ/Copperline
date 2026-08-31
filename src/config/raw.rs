@@ -73,6 +73,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) scsi: RawScsi,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) copperhf: RawCopperhf,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) lide: RawLide,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
@@ -783,6 +785,31 @@ pub(crate) struct RawScsi {
     pub(crate) unit6: Option<RawDrive>,
 }
 
+/// `[copperhf]` `copperhf.device`-compatible virtual hardfile controller: a
+/// Copperline-specific high-performance board with no real-hardware
+/// counterpart (analogous to WinUAE's `uaehf.device`), up to seven units
+/// sharing the same drive-descriptor shape as `[ide]`/`[scsi]`/`[lide]`. No
+/// boot ROM key: the board's DiagArea and device driver are built into
+/// Copperline itself, not a loadable image (see `COPPERHF-DEVICE-PLAN.md`).
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawCopperhf {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit0: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit1: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit2: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit3: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit4: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit5: Option<RawDrive>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unit6: Option<RawDrive>,
+}
+
 /// `[lide]` `lide.device`-compatible Zorro II IDE board.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1377,4 +1404,20 @@ pub(super) fn drive_image(raw: RawDrive) -> Result<DriveImage> {
         boot_pri: raw.bootpri.unwrap_or(HARDFILE_DEFAULT_BOOT_PRI),
         filesystem,
     })
+}
+
+/// Convert a parsed `[copperhf]` unit entry into a `DriveImage`, on top of
+/// [`drive_image`]'s validation: `[copperhf]` serves hard disks only, so a
+/// path recognised as a CD image is rejected rather than silently attaching
+/// a unit with no working command set behind it.
+pub(super) fn copperhf_drive_image(raw: RawDrive) -> Result<DriveImage> {
+    let path = PathBuf::from(&raw.path);
+    if crate::config::is_cd_image_path(&path) {
+        bail!(
+            "[copperhf] {}: copperhf.device serves hard disks only, not CD images \
+             (attach this to [scsi] or [ide]/[lide] instead)",
+            path.display()
+        );
+    }
+    drive_image(raw)
 }

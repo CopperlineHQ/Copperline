@@ -672,6 +672,23 @@ impl TryFrom<RawConfig> for Config {
             errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
         }
 
+        // `[copperhf]`: Copperline's own virtual hardfile controller. Same
+        // drive-descriptor shape as `[ide]`/`[scsi]`/`[lide]`, but it serves
+        // hard disks only -- there is no ATAPI/SCSI-CDROM emulation behind
+        // it, so a CD image extension is rejected here rather than silently
+        // attaching nothing useful.
+        let copperhf = CopperhfConfig {
+            units: [
+                raw.copperhf.unit0.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit1.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit2.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit3.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit4.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit5.map(copperhf_drive_image).transpose()?,
+                raw.copperhf.unit6.map(copperhf_drive_image).transpose()?,
+            ],
+        };
+
         let lide_board = match raw.lide.board.as_deref() {
             None => crate::ide_zorro::LidePersonality::Ripple,
             Some(raw_board) => match raw_board.trim().to_ascii_lowercase().as_str() {
@@ -1259,6 +1276,7 @@ impl TryFrom<RawConfig> for Config {
             audio,
             ide,
             scsi,
+            copperhf,
             lide,
             a2065_net,
             toccata,

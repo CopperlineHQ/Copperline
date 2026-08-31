@@ -32,6 +32,7 @@ pub mod chipset;
 pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
+pub mod copperhf;
 pub mod cpu;
 pub mod crashlog;
 pub mod debugger;

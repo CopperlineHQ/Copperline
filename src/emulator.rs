@@ -2676,6 +2676,32 @@ pub fn build_machine(
         );
         devices.push(crate::zorro_device::BoardDevice::IdeZorro(board));
     }
+    // copperhf.device virtual hardfile controller (`[copperhf]`): up to
+    // seven units, each opened exactly like an `[ide]`/`[scsi]` unit (same
+    // `DriveImage` shape, same `DH{unit}` naming convention) so a bare
+    // hardfile boots identically regardless of which controller it is
+    // attached to. Failing to open a configured unit's image is fatal, not
+    // a warning, matching the IDE/SCSI attach blocks above: a unit named in
+    // the config has no image to fall back on.
+    if cfg.copperhf.enabled() {
+        let slot = devices.len();
+        let mut board = crate::copperhf::CopperhfBoard::new();
+        for (unit, drive) in cfg.copperhf.units.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            let disk = crate::harddrive::HardDriveImage::open(
+                &drive.path,
+                &format!("DH{unit}"),
+                "copperhf",
+                drive.volume_name.as_deref(),
+                drive.boot_pri,
+                drive.filesystem,
+            )?;
+            board.attach_unit(unit, disk);
+        }
+        zorro.add_board(crate::zorro::BoardSpec::copperhf(slot))?;
+        info!("copperhf: virtual hardfile controller on the Zorro chain (slot {slot})");
+        devices.push(crate::zorro_device::BoardDevice::Copperhf(board));
+    }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
     #[cfg(feature = "wasm-boards")]
