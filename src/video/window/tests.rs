@@ -4757,12 +4757,11 @@ fn auto_launch_runs_only_when_the_config_asks() {
             .set_path(LauncherField::Df0Image, PathBuf::from("/no/such/disk.adf"));
     }
     app.auto_launch_if_asked();
-    match &app.ui.panel {
-        Some(Panel::Launcher(state)) => assert!(
+    if let Some(Panel::Launcher(state)) = &app.ui.panel {
+        assert!(
             state.status.as_ref().is_some(),
             "auto_launch should have attempted the run"
-        ),
-        _ => {}
+        );
     }
 }
 
