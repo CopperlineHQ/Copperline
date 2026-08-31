@@ -70,6 +70,22 @@ protocol contract itself (chunked PIO, interrupt-reason register,
 error/sense mapping, mixed disk+ATAPI buses) is covered without assets by
 the unit tests in `src/ata.rs`.
 
+### Open A2091 ROM autoboot
+
+`tests/a2091_boot.rs` fits the bundled clean-room A2091/A590 ROM in three
+end-to-end boots. The asset-free AROS case boots a directory-built FFS volume;
+the Kickstart 1.3 case boots an OFS volume and needs `KICK13.ROM`; the Kickstart
+3.1 case boots a real RDB Workbench image through the WD33C93/DMAC path and
+needs `KICK31.ROM` plus `AmigaSYS3PlusAGA-rdb.hdf`. Put those files in
+`test-assets/` or `COPPERLINE_A2091_TEST_ASSETS`; asset-backed cases skip
+cleanly when their inputs are absent. The 3.1 test asserts a non-blank desktop
+and a diagnostic trace containing DMAC starts, 24-bit addresses, and delivered
+INT2 status. Run all available cases with:
+
+```sh
+cargo test --release --test a2091_boot -- --ignored --nocapture
+```
+
 ### Open CD32 FMV ROM
 
 `tests/cd32_fmv_aros.rs` contains two Cannon Fodder paths. The AROS case uses

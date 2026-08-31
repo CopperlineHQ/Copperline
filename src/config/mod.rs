@@ -53,6 +53,11 @@ pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
 /// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
 
+/// Sentinel `[scsi] rom` for an A2091/A590 fitted without a named ROM:
+/// resolve to Copperline's open replacement ROM, or fail. Explicit merged
+/// and split-EPROM paths continue to take precedence.
+pub const BUNDLED_A2091_ROM: &str = "<bundled-a2091>";
+
 /// Sentinel `[lide] rom` for a board fitted (an explicit `board`, or a drive
 /// image) without a named ROM: resolve to the bundled ROM for that board's
 /// personality (`lide.rom` for RIPPLE/RIDE, `lide-atbus.rom` for AT-Bus
@@ -1198,8 +1203,8 @@ pub struct ScsiConfig {
 
 impl ScsiConfig {
     /// Whether a `[scsi]` section asked for a board at all. A bare
-    /// `controller` with no ROM or drives fits nothing -- except an A4091,
-    /// which validation gives the bundled ROM, so `rom` is then set.
+    /// `controller` with no ROM or drives fits nothing -- except an A2091 or
+    /// A4091, which validation gives a bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
     }

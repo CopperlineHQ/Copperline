@@ -119,6 +119,34 @@ pub fn find_bundled_a4091() -> Option<PathBuf> {
         .find(|rom| rom.is_file())
 }
 
+/// Copperline's open A2091/A590 autoboot ROM.
+pub const A2091_ROM_FILE: &str = "copperline-a2091.rom";
+
+/// Locate the bundled A2091 ROM under the conventional package and source
+/// locations, with an environment override for downstream testing.
+pub fn find_bundled_a2091() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = crate::envcfg::var("COPPERLINE_A2091_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("a2091"));
+            if let Some(parent) = bin_dir.parent() {
+                dirs.push(parent.join("Resources").join("a2091"));
+                dirs.push(parent.join("share").join("copperline").join("a2091"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("assets").join("a2091"));
+
+    dirs.into_iter()
+        .map(|dir| dir.join(A2091_ROM_FILE))
+        .find(|rom| rom.is_file())
+}
+
 /// Bundled open-source lide.device autoboot ROMs and CD-filesystem second
 /// bank, used when a `[lide]` board is fitted without naming ROMs of its
 /// own. From https://github.com/LIV2/lide.device . RIPPLE and RIDE share

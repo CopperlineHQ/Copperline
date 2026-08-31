@@ -1,0 +1,163 @@
+Copperline A2091/A590 open ROM - source inventory and notices
+================================================================
+
+The ROM and disk-loadable scsi.device are built from:
+
+1. New Copperline A2091 loader, WD33C93/DMAC glue, interrupt bridge, and image
+   builder under the BSD 2-Clause license in LICENSE.
+2. Selected source files from A4091 software v42.39, commit
+   ce6d62cf2db5c6bf990e4d675d633f2dedcc84a6:
+   https://github.com/A4091/a4091-software
+3. The A4091 mounter submodule at commit
+   48c8c1cfdcda37fb9d4d6fd7b1bfd8f789402c1a:
+   https://github.com/A4091/mounter
+4. The 68000 ZX0 decompressor from Salvador at commit
+   bf562ffec873a72ee324beb4358fa680121e5852:
+   https://github.com/emmanuel-marty/salvador
+
+No Commodore ROM bytes, Linux driver code, or AROS driver code are included.
+The source files retain their per-file notices. The notices relevant to the
+binary are reproduced below.
+
+
+A4091 project code and mounter (BSD 2-Clause)
+------------------------------------------------
+
+Copyright 2022-2025 Stefan Reinauer & Chris Hooper
+Copyright 2022-2025 Chris Hooper & Stefan Reinauer
+Copyright 2022-2025 Stefan Reinauer
+Copyright 2022-2025 Chris Hooper
+Copyright 2021-2022 Toni Wilen
+Copyright 2022-2026 Stefan Reinauer
+Copyright 2023-2026 Matt Harlum
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+
+NetBSD Foundation code
+----------------------
+
+Copyright (c) 1998, 1999, 2000, 2002, 2003, 2004 The NetBSD Foundation, Inc.
+Copyright (c) 1998, 1999, 2000, 2004 The NetBSD Foundation, Inc.
+Copyright (c) 1998, 1999, 2004 The NetBSD Foundation, Inc.
+Copyright (c) 1999 The NetBSD Foundation, Inc.
+Copyright (c) 2005 The NetBSD Foundation, Inc.
+All rights reserved.
+
+This code is derived from software contributed to The NetBSD Foundation by
+Charles M. Hannum; by Jason R. Thorpe of the Numerical Aerospace Simulation
+Facility, NASA Ames Research Center. The SCSI Primary Commands definitions
+were contributed by Jason R. Thorpe.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE FOUNDATION OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+
+University of California code
+-----------------------------
+
+Copyright (c) 1990 The Regents of the University of California.
+Copyright (c) 1991, 1993 The Regents of the University of California.
+Copyright (c) 1993 The Regents of the University of California.
+All rights reserved.
+
+The 1990 code is derived from software contributed to Berkeley by Van Jacobson
+of Lawrence Berkeley Laboratory.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of the University nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Open Software Foundation and TRW Financial Systems code
+-------------------------------------------------------
+
+Some definitions derive from a file named "scsi.h" distributed by OSF as
+part of Mach 2.5.
+
+Copyright 1990 by Open Software Foundation, Grenoble, FRANCE
+All Rights Reserved
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee is hereby granted, provided
+that the above copyright notice appears in all copies and that both the
+copyright notice and this permission notice appear in supporting
+documentation, and that the name of OSF or Open Software Foundation not be
+used in advertising or publicity pertaining to distribution of the software
+without specific, written prior permission.
+
+OSF DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT SHALL OSF BE
+LIABLE FOR ANY SPECIAL, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN ACTION OF
+CONTRACT, NEGLIGENCE, OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Largely written by Julian Elischer for TRW Financial Systems. TRW Financial
+Systems grants permission to use or modify this software while this message
+is kept with it and supplies it without responsibility for correct function.
+
+
+ZX0 decompressor (zlib license)
+-------------------------------
+
+Copyright (C) 2021 Emmanuel Marty
+ZX0 compression (c) 2021 Einar Saukas, https://github.com/einar-saukas/ZX0
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from the
+use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+   that you wrote the original software. If you use this software in a
+   product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.

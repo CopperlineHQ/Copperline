@@ -103,9 +103,9 @@ modeled) with a WD33C93A SBIC, plus the board's autoboot ROM whose
 `scsi.device` drives them. The autoconfig
 identity comes from the DMAC -- Commodore West Chester (514), product 3,
 `ERTF_DIAGVALID` with `er_InitDiagVec` pointing at `$2000` -- while the
-ROM supplies the DiagArea and the driver; the ROM image therefore is a
-required configuration input (`rom`/`rom_odd`, split even/odd EPROM
-dumps interleaved U13-first).
+ROM supplies the DiagArea and the driver. Copperline defaults to its bundled
+clean-room open ROM; `rom`/`rom_odd` override it with merged or split EPROM
+dumps (interleaved U13-first).
 
 Board window layout: ISTR `$40`, CNTR `$42`, WTC `$80/$82`, ACR
 `$84/$86` (low bit forced even), DAWR `$8E`, the WD33C93 SASR/auxiliary
@@ -138,6 +138,14 @@ complete within the access; completion interrupts are delivered after a
 short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
+
+The bundled driver keeps inquiry, sense, and mode commands in asynchronous
+PIO. Sector transfers use the DMAC when the range is even, even-sized, and
+entirely below 16 MiB; other buffers are copied through Chip RAM. It loads
+ACR, starts the DMAC, and completes through a shared `INTB_PORTS` server.
+The server queues the close command-complete/disconnect status pair rather
+than collapsing it into one byte, and leaves the interrupt gated while the
+polling tail drains disconnect.
 
 ### A4091 (`a4091.rs`)
 

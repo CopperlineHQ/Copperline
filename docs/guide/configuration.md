@@ -1647,7 +1647,7 @@ filesystems the same way a `[scsi]` CD-ROM unit does.
 ```toml
 [scsi]
 # controller = "a2091"       # a2091 (default), a4091, or a3000
-rom = "a2091-v6.6.rom"       # boot ROM (a2091 needs one; a4091 defaults to bundled; a3000 none)
+# rom = "a2091-v7.0.rom"     # optional replacement; A2091/A4091 default to bundled open ROMs
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
@@ -1662,7 +1662,10 @@ drives**. `controller` picks which one:
   A2091 (Commodore DMAC + WD33C93A) as a Zorro II autoconfig board. It
   works on **any machine model** (the board needs no Gayle) and has no
   dependence on the Kickstart IDE driver -- the board's own boot ROM
-  carries `scsi.device` and autoboots on Kickstart 1.3 and newer, which
+  carries `scsi.device` and autoboots on Kickstart 1.3 and newer. Omit
+  `rom` to use Copperline's bundled clean-room open ROM, which uses PIO for
+  control commands and 24-bit DMAC transfers with safe bounce buffers for
+  inaccessible or unaligned memory. This
   also sidesteps the stock A600/A1200 `scsi.device` only probing the IDE
   master. `[ide]` remains available, and both can be used at once.
 - `"a4091"`: a Commodore A4091 (NCR 53C710 SCSI-2) as a Zorro III
@@ -1677,13 +1680,14 @@ drives**. `controller` picks which one:
   and autoboots from an RDB drive. It is only valid on a machine with the
   Super DMAC (the A3000).
 
-For the A2091, `rom` must point at an A590/A2091 boot ROM image (version
-6.6 or later; 16K/32K, available from the same vendors and dump sets as
-Kickstart ROMs). Dumps split into even/odd EPROM halves can be given as
+For the A2091, omit `rom` to use `assets/a2091/copperline-a2091.rom`, or
+point it at another 16K/32K/64K A590/A2091 boot ROM image. Dumps split into
+even/odd EPROM halves can be given as
 `rom` (even, U13) plus `rom_odd` (odd, U12). The ROM is required on the
 Zorro boards because the autoboot DiagArea and the scsi.device driver
 itself live in it; the autoconfig identity comes from the board (the
-A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
+A2091 is Commodore product 3, with its DiagArea vector at `$2000`). The
+replacement ROM sources and EPROM-pair build outputs live in `a2091-rom/`.
 
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`

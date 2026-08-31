@@ -75,6 +75,14 @@ install -Dm644 assets/a4091/README.md \
 install -Dm644 assets/a4091/THIRD_PARTY_NOTICES.txt \
   "$appdir/usr/share/copperline/a4091/THIRD_PARTY_NOTICES.txt"
 
+# Copperline's open A2091/A590 autoboot ROM.
+install -Dm644 assets/a2091/copperline-a2091.rom \
+  "$appdir/usr/share/copperline/a2091/copperline-a2091.rom"
+install -Dm644 assets/a2091/README.md \
+  "$appdir/usr/share/copperline/a2091/README.md"
+install -Dm644 assets/a2091/THIRD_PARTY_NOTICES.txt \
+  "$appdir/usr/share/copperline/a2091/THIRD_PARTY_NOTICES.txt"
+
 # Bundled open-source lide.device autoboot ROM and CD-filesystem bank
 # (default for a fitted [lide] board without a named rom/rom_bank2);
 # romsearch.rs looks under share/copperline/lide.

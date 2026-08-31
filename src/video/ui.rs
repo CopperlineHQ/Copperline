@@ -5955,7 +5955,7 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
             && (field != LauncherField::FmvRom || !setup.fmv_rom_disabled());
     }
     if field == LauncherField::ScsiRom {
-        return setup.scsi_controller_is_a4091() && setup.path(field).is_none();
+        return setup.scsi_bundled_rom_label().is_some() && setup.path(field).is_none();
     }
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }

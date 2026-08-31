@@ -566,6 +566,7 @@ impl TryFrom<RawConfig> for Config {
                  (or A1200, or A4000)"
             ));
         }
+        let scsi_controller_named = raw.scsi.controller.is_some();
         let scsi_controller = match raw.scsi.controller.as_deref() {
             // A machine with a Super DMAC already has a SCSI bus, so drives go
             // on it unless the config asks for a Zorro board instead.
@@ -632,17 +633,28 @@ impl TryFrom<RawConfig> for Config {
                 raw.scsi.unit6.map(drive_image).transpose()?,
             ],
         };
-        // An explicitly-fitted A4091 with no ROM named defaults to the bundled
-        // one (resolved to a real path later). This also fits the board with no
-        // drives, exactly as naming a ROM always has -- the setup for booting a
-        // CD inserted at runtime.
-        if scsi.controller == ScsiController::A4091 && scsi.rom.is_none() {
+        // Explicit A2091/A4091 boards, and a non-empty SCSI bus on machines
+        // which default to one, use their bundled open ROMs (resolved to real
+        // paths later). A completely absent [scsi] section must remain
+        // disabled; otherwise every ordinary A500 configuration would grow a
+        // controller merely because A2091 is the enum's default personality.
+        let scsi_requested = scsi_controller_named
+            || scsi.rom.is_some()
+            || scsi.rom_odd.is_some()
+            || scsi.units.iter().any(Option::is_some);
+        if scsi_requested
+            && scsi.controller == ScsiController::A2091
+            && scsi.rom.is_none()
+            && scsi.rom_odd.is_none()
+        {
+            scsi.rom = Some(PathBuf::from(BUNDLED_A2091_ROM));
+        }
+        if scsi_requested && scsi.controller == ScsiController::A4091 && scsi.rom.is_none() {
             scsi.rom = Some(PathBuf::from(BUNDLED_A4091_ROM));
         }
         if scsi.enabled() && scsi.rom.is_none() && scsi.controller.is_zorro_board() {
             errors.push(anyhow!(
-                "[scsi] drives need the boot ROM: set [scsi] rom = \"...\" \
-                 (an A590/A2091 6.x ROM image; its scsi.device drives the disks)"
+                "[scsi] drives need a boot ROM: set [scsi] rom = \"...\""
             ));
         }
         // The motherboard SCSI is silicon, not a card: it has no boot ROM (the
