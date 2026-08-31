@@ -49,7 +49,7 @@ fn portable_config_dir(
         .find_map(marked_program_dir)
 }
 
-/// The directory name host data lives under: "copperline" for the emulator
+/// The directory name host data lives under: "Copperline" for the emulator
 /// itself, a game's own id for a publisher-kit player build. See
 /// [`set_app_identity`].
 static APP_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -57,9 +57,9 @@ static APP_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The resolved host-data directory, cached for the life of the process.
 static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// Adopt a per-application identity, so host data lands under a directory of
-/// that name (`~/.config/<name>/`, `%APPDATA%\<name>\`) instead of
-/// `copperline`. Built for player builds, where each game keeps its own
+/// Adopt a per-application identity, so host data lands under a hidden
+/// per-user directory of that name (`~/.config/<name>/`,
+/// `%APPDATA%\<name>\`) instead of the emulator's own Documents folder. Built for player builds, where each game keeps its own
 /// settings, saves, and gamepad calibration.
 ///
 /// Must be called before anything resolves [`config_dir`]: the directory is
@@ -89,14 +89,20 @@ fn app_identity() -> &'static str {
     APP_IDENTITY
         .get()
         .map(String::as_str)
-        .unwrap_or("copperline")
+        // Capitalised: this folder sits in the user's Documents beside
+        // other applications' folders, and reads as a product name there,
+        // not as a unix binary.
+        .unwrap_or("Copperline")
 }
 
 /// Copperline's host-data directory. An empty `portable.txt` beside the
-/// executable or downloaded AppImage selects that directory; otherwise this is
-/// `$XDG_CONFIG_HOME/copperline`, `%APPDATA%\copperline`, or
-/// `$HOME/.config/copperline`, whichever the host offers first. A player
-/// build's [`set_app_identity`] substitutes the game's id for `copperline`.
+/// executable or downloaded AppImage selects that directory; otherwise this
+/// is the user's Documents folder -- `$HOME/Documents/Copperline`,
+/// `%USERPROFILE%\Documents\Copperline` -- somewhere a person browsing
+/// their own files can find, rather than a hidden config tree. A player
+/// build's [`set_app_identity`] keeps the game's data in the hidden tree
+/// instead (`~/.config/<id>/`, `%APPDATA%\<id>\`), one folder per game,
+/// off the top of the user's Documents.
 ///
 /// Not created here -- writers call [`ensure_parent`].
 pub fn config_dir() -> Option<PathBuf> {
@@ -112,13 +118,36 @@ fn discover_config_dir() -> Option<PathBuf> {
     if let Some(dir) = portable_config_dir(appimage.as_deref(), executable.as_deref()) {
         return Some(dir);
     }
-    for var in ["XDG_CONFIG_HOME", "APPDATA"] {
-        if let Some(dir) = crate::envcfg::var_os(var) {
-            return Some(PathBuf::from(dir).join(app_identity()));
+    // A player build ([`set_app_identity`]) keeps the hidden per-user
+    // tree: a published game is an appliance whose data nobody browses,
+    // and putting every bought game's id at the top of Documents would
+    // strew it with loose folders. Only the emulator's own host data --
+    // the saves, screenshots and configs a person actually goes looking
+    // for -- moves out to Documents.
+    if APP_IDENTITY.get().is_some() {
+        for var in ["XDG_CONFIG_HOME", "APPDATA"] {
+            if let Some(dir) = crate::envcfg::var_os(var) {
+                return Some(PathBuf::from(dir).join(app_identity()));
+            }
         }
+        return crate::envcfg::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".config").join(app_identity()));
     }
-    crate::envcfg::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".config").join(app_identity()))
+    // The user's own Documents folder: %USERPROFILE% is the Windows
+    // spelling of a home directory, HOME everyone else's. One chain serves
+    // both -- whichever the host defines names the home.
+    documents_config_dir(
+        ["USERPROFILE", "HOME"]
+            .iter()
+            .find_map(|var| crate::envcfg::var_os(var)),
+    )
+}
+
+/// The host-data directory under a home: `<home>/Documents/<identity>`.
+/// Split out, like [`portable_config_dir`], so the shape is testable
+/// without mutating the process environment `envcfg` snapshots.
+fn documents_config_dir(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    home.map(|home| PathBuf::from(home).join("Documents").join(app_identity()))
 }
 
 /// A named file directly inside [`config_dir`], e.g. `gamepads.toml`.
@@ -218,8 +247,8 @@ pub fn whdload_library_cache() -> Option<PathBuf> {
 
 /// The root the launcher takes its library paths from.
 ///
-/// A host with no per-user directory at all -- no `HOME`, no `XDG_CONFIG_HOME`,
-/// no `APPDATA`, which is a bare service account or some CI runners -- has
+/// A host with no per-user directory at all -- no `HOME`, no `USERPROFILE`,
+/// which is a bare service account or some CI runners -- has
 /// nowhere to put these, and every call site reached for
 /// `config_dir().unwrap_or_default()`. That yields an *empty* path, so the
 /// library quietly becomes `whdload/support/launcher.db` relative to
@@ -775,13 +804,28 @@ mod tests {
         );
     }
 
+    /// The home resolves to the user's Documents folder -- somewhere a
+    /// person browsing their own files can find, not a hidden config tree.
+    /// (A player build's overridden identity stays in the hidden tree; see
+    /// `discover_config_dir` -- that branch reads the process environment
+    /// through `envcfg`'s one snapshot, so it is exercised by the player
+    /// crate rather than driven from here.)
+    #[test]
+    fn host_data_lives_in_documents() {
+        assert_eq!(
+            documents_config_dir(Some("/home/lee".into())),
+            Some(PathBuf::from("/home/lee/Documents/Copperline"))
+        );
+        assert_eq!(documents_config_dir(None), None);
+    }
+
     /// The cascade is read through `envcfg`, which snapshots the environment
     /// once per process, so this asserts the shape of whatever the host
     /// offered rather than driving each branch with a mutated environment.
     #[test]
     fn host_data_paths_hang_off_one_directory() {
         let Some(dir) = config_dir() else {
-            return; // A host with no HOME/APPDATA/XDG_CONFIG_HOME.
+            return; // A host with no HOME/USERPROFILE.
         };
         assert_eq!(
             config_file("gamepads.toml").unwrap(),

@@ -957,9 +957,9 @@ directory is:
 
 | Host | Location |
 |---|---|
-| Linux/BSD | `$XDG_CONFIG_HOME/copperline/`, else `~/.config/copperline/` |
-| macOS | `~/.config/copperline/` |
-| Windows | `%APPDATA%\copperline\` |
+| Linux/BSD | `~/Documents/Copperline/` |
+| macOS | `~/Documents/Copperline/` |
+| Windows | `%USERPROFILE%\Documents\Copperline\` |
 
 with a folder inside it for each kind of file: `screenshots/`, `states/`
 (named saves and the quick-save slots), `recordings/` (video captures and
@@ -1171,9 +1171,9 @@ holding one hands the panel's Save and Cancel buttons to the pad, so a
 calibration can be finished without the mouse.
 
 Calibrations are saved per controller UUID in
-`~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
-`%APPDATA%\copperline\` on Windows, or beside the executable in
-[portable mode](#quick-save-slots)). A calibration recorded by a
+`~/Documents/Copperline/gamepads.toml`
+(`%USERPROFILE%\Documents\Copperline\` on Windows, or beside the
+executable in [portable mode](#quick-save-slots)). A calibration recorded by a
 Copperline version that predates the bundled controller database can
 resolve a stick direction reversed on a database-covered pad; the log
 suggests recalibrating when it loads such a file, and recalibrating
@@ -1207,5 +1207,5 @@ before -- including from the other mapping -- so the two controllers can
 never end up fighting over one key.
 
 Saved maps live next to the gamepad calibrations, in
-`~/.config/copperline/keymap.toml` (same per-platform locations as above).
+`~/Documents/Copperline/keymap.toml` (same per-platform locations as above).
 Deleting the file restores the defaults.
