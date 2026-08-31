@@ -8,6 +8,7 @@
 #define COPPERLINE_VIDEOCD_H
 
 #include <exec/libraries.h>
+#include <exec/semaphores.h>
 #include <exec/types.h>
 #include <utility/tagitem.h>
 
@@ -47,6 +48,7 @@
 struct VideoCDBase {
     struct Library library;
     struct ExecBase *sys_base;
+    struct SignalSemaphore session_lock;
 };
 
 struct VideoCDDisc;

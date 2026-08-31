@@ -363,14 +363,14 @@ Phase 4.
 - Keep the three baseline recipes from the 2026-08-25 investigation as
   fixed regression points (below).
 
-### Phase 5 -- AROS-side enablement -- MERGED AND VALIDATED
+### Phase 5 -- AROS-side enablement -- DRAFT PR VALIDATED
 
 1. Upstream AROS: bump `arch/m68k-amiga/devs/cd/cd.conf` version above 40
    (fixes the ORIGINAL ROM's collision too; independent of this project but
    shares the test rig). Local AROS tree: `~/Programming/Git/AmigaMe/aros-build/AROS`;
    prior upstreaming flow in memory files (AROS PRs #1018, #1034, #1051, #1063).
-2. PR 1089 supplies the required Mode-2/`CD_READXL` path. Copperline's fix for
-   the original numeric PBX drain was incorporated before merge as commit
+2. Draft PR 1089 supplies the required Mode-2/`CD_READXL` path. Copperline's
+   fix for the original numeric PBX drain is incorporated in the PR as commit
    `ebfc7d9`; it orders each snapshot by raw-sector MSF so normal DMA/task
    interleaving cannot swap adjacent sectors. Run the rest of the Phase 4
    matrix under AROS as more titles become available.
@@ -437,8 +437,9 @@ AROS serial debug (expansion/diag/romboot prints) arrives on the default
 - SCR/PTS sync fidelity. The emulator's CL450 model is command-level; if a
   title depends on fine SCR behavior the model lacks, extend the model with
   a regression (hardware-first: cite the CL450 manual).
-- The AROS CDXL-ordering fix merged with PR 1089 as commit `ebfc7d9`; retain
-  the real-media regression because adjacent-sector swaps are timing-sensitive.
+- The AROS CDXL-ordering fix is PR 1089 commit `ebfc7d9`; retain the real-media
+  regression because adjacent-sector swaps are timing-sensitive, and track
+  the draft PR until it lands upstream.
 - Titles detecting the module by probing ROM contents (e.g. checksumming or
   reading strings at fixed offsets) rather than by API -- would surface in
   Phase 0/4; handle case by case, never by title-keyed branches.

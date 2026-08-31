@@ -68,6 +68,9 @@ at LSN 151 begins with `ENTRYVCD` and carries a big-endian entry count followed
 by BCD track/MSF records. The implementation obtains track boundaries from
 `CD_TOCLSN`, restores the drive's prior sector-size/read-speed configuration
 on every exit path, and allocates no large static buffers in cartridge RAM.
+Because `CD_CONFIG` applies to the entire unit rather than one request, a
+library-base semaphore serializes each complete configure/read/restore
+session across concurrent callers.
 
 The real-media probe observed classifier 4, album `3106906332`, two video
 tracks, and 45 entry points. Its first video track spans LSN 3450 through

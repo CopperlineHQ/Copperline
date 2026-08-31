@@ -166,7 +166,7 @@ metadata. On CD32 Kickstart its version 41 `cdstrap` autoboots Video CDs to a
 track menu: use up/down to select, Red to play, and Blue to stop or leave the
 player. Non-Video-CD media chain to the stock CD32 strap and boot normally.
 The bundled AROS carries the matching PR 1089 MPEG device, including
-Copperline's chronological-CDXL fix as upstream commit `ebfc7d9`, but
+Copperline's chronological-CDXL fix as PR commit `ebfc7d9`, but
 deliberately skips cartridge diagnostics, so the cartridge library and player
 are currently a Kickstart path. Neither path ships Commodore code or CL450
 microcode; Copperline's command-level CL450 model does not execute the

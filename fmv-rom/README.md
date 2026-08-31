@@ -42,7 +42,7 @@ with `0xFF`. `make bundle` copies the exact output to
 The build takes no proprietary ROM or media as input. Current bundled image:
 
 - Size: 262,144 bytes.
-- SHA-256: `37a8300ba93d0aec295f4a5cec0942a1ff5d1bb6cff1f9626add3c275bba70dd`.
+- SHA-256: `615634dec8d6583e39edbae523762db0e06193742fa43ffda463a5d0818714e7`.
 - DiagArea: offset `0x80`, name `config_mpeg`; its diagnostic entry installs
   the cartridge's autoinit resident on systems which execute it.
 - Residents: `cd32mpeg.device` 41.0, located from the configured board with

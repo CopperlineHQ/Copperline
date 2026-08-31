@@ -496,6 +496,7 @@ static struct VideoCDBase *InitLibrary(
     base->library.lib_Version = VIDEOCD_VERSION;
     base->library.lib_Revision = VIDEOCD_REVISION;
     base->library.lib_IdString = (APTR)library_id;
+    InitSemaphore(&base->session_lock);
     return base;
 }
 
@@ -536,17 +537,19 @@ static ULONG ClassifyDiscVector(struct VideoCDBase *base __asm("a6"))
     UBYTE *sectors;
     ULONG result = VIDEOCD_DISC_UNKNOWN;
 
-    (void)base;
-    if (!open_cd(&session))
-        return result;
-    sectors = AllocMem(VCD_SECTOR_SIZE * 2, MEMF_PUBLIC);
-    if (sectors && read_sector(&session, VCD_INFO_LSN, sectors) &&
-        read_sector(&session, VCD_ENTRIES_LSN, sectors + VCD_SECTOR_SIZE) &&
-        has_vcd_signature(sectors, sectors + VCD_SECTOR_SIZE))
-        result = VIDEOCD_DISC_VCD;
-    if (sectors)
-        FreeMem(sectors, VCD_SECTOR_SIZE * 2);
-    close_cd(&session);
+    ObtainSemaphore(&base->session_lock);
+    if (open_cd(&session)) {
+        sectors = AllocMem(VCD_SECTOR_SIZE * 2, MEMF_PUBLIC);
+        if (sectors && read_sector(&session, VCD_INFO_LSN, sectors) &&
+            read_sector(&session, VCD_ENTRIES_LSN,
+                sectors + VCD_SECTOR_SIZE) &&
+            has_vcd_signature(sectors, sectors + VCD_SECTOR_SIZE))
+            result = VIDEOCD_DISC_VCD;
+        if (sectors)
+            FreeMem(sectors, VCD_SECTOR_SIZE * 2);
+        close_cd(&session);
+    }
+    ReleaseSemaphore(&base->session_lock);
     return result;
 }
 
@@ -561,27 +564,28 @@ static struct VideoCDDisc *OpenDiscVector(
 
     (void)source;
     (void)tags;
-    (void)base;
-    if (!open_cd(&session))
-        return NULL;
-    sectors = AllocMem(VCD_SECTOR_SIZE * 2, MEMF_PUBLIC);
-    disc = AllocMem(sizeof(*disc), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!sectors || !disc ||
-        !read_sector(&session, VCD_INFO_LSN, sectors) ||
-        !read_sector(&session, VCD_ENTRIES_LSN,
-            sectors + VCD_SECTOR_SIZE) ||
-        !has_vcd_signature(sectors, sectors + VCD_SECTOR_SIZE) ||
-        !read_toc(&session, disc) ||
-        !parse_entries(disc, sectors + VCD_SECTOR_SIZE)) {
-        free_disc(disc);
-        disc = NULL;
-    } else {
-        disc->magic = VCD_DESCRIPTION_MAGIC;
-        parse_info(disc, sectors);
+    ObtainSemaphore(&base->session_lock);
+    if (open_cd(&session)) {
+        sectors = AllocMem(VCD_SECTOR_SIZE * 2, MEMF_PUBLIC);
+        disc = AllocMem(sizeof(*disc), MEMF_PUBLIC | MEMF_CLEAR);
+        if (!sectors || !disc ||
+            !read_sector(&session, VCD_INFO_LSN, sectors) ||
+            !read_sector(&session, VCD_ENTRIES_LSN,
+                sectors + VCD_SECTOR_SIZE) ||
+            !has_vcd_signature(sectors, sectors + VCD_SECTOR_SIZE) ||
+            !read_toc(&session, disc) ||
+            !parse_entries(disc, sectors + VCD_SECTOR_SIZE)) {
+            free_disc(disc);
+            disc = NULL;
+        } else {
+            disc->magic = VCD_DESCRIPTION_MAGIC;
+            parse_info(disc, sectors);
+        }
+        if (sectors)
+            FreeMem(sectors, VCD_SECTOR_SIZE * 2);
+        close_cd(&session);
     }
-    if (sectors)
-        FreeMem(sectors, VCD_SECTOR_SIZE * 2);
-    close_cd(&session);
+    ReleaseSemaphore(&base->session_lock);
     return disc;
 }
 
