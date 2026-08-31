@@ -473,8 +473,10 @@ port 2.
 
 ### CD32 Full Motion Video module (`cd32_fmv.rs`)
 
-Setting top-level `fmv_rom` fits Commodore's 1 MiB Zorro II FMV cartridge as
-the first autoconfig board, normally at `$200000` (manufacturer 514, product
+The CD32 profile fits a 1 MiB Zorro II FMV cartridge by default using the
+bundled open ROM; top-level `fmv_rom` overrides it and an empty value removes
+it. The module is the first autoconfig board, normally at `$200000`
+(manufacturer 514, product
 `$6A`, serial `$0028001E`). Its window follows the physical decode: 256 KiB ROM at
 `+$000000`, board status/control at `+$040000`, LSI L64111 MPEG Layer II audio
 at `+$050000`, the C-Cube CL450 bitstream port at `+$060000`, CL450 registers
@@ -495,6 +497,24 @@ source instead of applying a second, one-sided crop. The decoder's partial
 bitstream, prediction frames, and presentation state are serialized directly,
 so a resumed headless run produces the same frames without retaining the
 already-decoded program stream.
+
+`fmv-rom/` builds the bundled open 256 KiB image. Its DiagArea installs an
+autoinit `cd32mpeg.device` under CD32 Kickstart 3.1; the worker configures the
+host `cd.device` for 2328-byte Mode-2 sectors, reads them in chronological LSN
+order with standard `CD_READ`, separates system/PES data, and feeds the two
+decoder ports. Under AROS PR 1089 the system-ROM device is used instead and
+the cartridge diagnostic is deliberately skipped to keep the legacy
+Commodore ROM from replacing AROS's `cd.device`. Both paths use the cartridge's
+empty CL450 container. Starting `CPU_CONTROL` is the boundary at which
+Copperline marks its command-level CL450 model ready, so no proprietary
+microcode is copied or executed.
+
+The matching AROS PR includes Copperline's ordering fix as commit `ebfc7d9`.
+Akiko allocates the highest armed PBX slot first; when a high slot is re-armed
+before an older low-slot sector is consumed, slot-number order is no longer
+arrival order. The driver sorts each CDXL snapshot by the raw sector MSF,
+preserving an exact chronological Mode-2 stream without changing Akiko's
+hardware arbitration.
 
 The optical sector clock and the firmware command transport are separate:
 sector payloads retain their physical 75/150 Hz cadence, while the drive's

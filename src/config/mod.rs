@@ -38,6 +38,11 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 /// `rom = "..."` or the CLI argument) always replaces it.
 pub const BUNDLED_AROS_ROM: &str = "<bundled-aros>";
 
+/// Sentinel `fmv_rom_path` for the CD32 profile's freely redistributable FMV
+/// cartridge ROM. `fmv_rom = "..."` replaces it; `fmv_rom = ""` explicitly
+/// leaves the cartridge slot empty.
+pub const BUNDLED_FMV_ROM: &str = "<bundled-fmv>";
+
 /// The player build's persisted end-user settings, an ordinary
 /// configuration fragment under the per-game config directory. Written by
 /// the menu's write-through in player sessions and layered over the game
@@ -188,8 +193,9 @@ pub struct Config {
     /// Extended ROM image (`extended_rom = "path"`): 512 KiB maps at
     /// $E00000 (CD32), 256 KiB at $F00000 (CDTV).
     pub extended_rom_path: Option<PathBuf>,
-    /// CD32 Full Motion Video cartridge ROM (`fmv_rom = "path"`).  Naming
-    /// one fits the physical 1 MiB autoconfig module; absent means no module.
+    /// CD32 Full Motion Video cartridge ROM (`fmv_rom = "path"`). The CD32
+    /// profile defaults to Copperline's bundled open ROM; an empty string
+    /// explicitly leaves the physical 1 MiB autoconfig module unfitted.
     pub fmv_rom_path: Option<PathBuf>,
     /// CD image (`[cd] image = "disc.cue"`), mounted on the machine's CD
     /// controller (CD32 Akiko or CDTV DMAC).

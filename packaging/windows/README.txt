@@ -21,6 +21,10 @@ is freely redistributable; see aros\LICENSE. To use a real Kickstart instead,
 point a config file at it, or load it at runtime from the menu
 (Load Kickstart ROM...).
 
+The CD32 profile also fits Copperline's bundled open Full Motion Video ROM
+from the fmv\ folder. Set fmv_rom = "" in a config to leave that cartridge
+unfitted.
+
 Configuration
 -------------
 copperline.example.toml is a starting point. Copy it, edit the paths to your

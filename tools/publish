@@ -39,6 +39,8 @@ AROS_FILES = [
     "ACKNOWLEDGEMENTS",
 ]
 
+FMV_FILES = ["copperline-fmv.rom", "README.md"]
+
 
 def fail(msg: str) -> "NoReturn":
     print(f"publish: {msg}", file=sys.stderr)
@@ -126,6 +128,12 @@ def stage_aros(dest: Path) -> None:
         shutil.copy2(REPO / "assets/aros" / name, dest / name)
 
 
+def stage_fmv(dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in FMV_FILES:
+        shutil.copy2(REPO / "assets/fmv" / name, dest / name)
+
+
 def bundle_macos(
     out: Path, binary: Path, payload: Path, manifest: dict, manifest_dir: Path, portable: bool
 ) -> Path:
@@ -142,6 +150,7 @@ def bundle_macos(
     shutil.copy2(binary, macos / game_id)
     copy_payload(payload, resources / payload.name)
     stage_aros(resources / "aros")
+    stage_fmv(resources / "fmv")
     write_licenses(resources / "LICENSES", title)
 
     info = {
@@ -209,6 +218,7 @@ def bundle_directory(
     shutil.copy2(binary, stage / exe)
     copy_payload(payload, stage / payload.name)
     stage_aros(stage / "aros")
+    stage_fmv(stage / "fmv")
     write_licenses(stage / "LICENSES", title)
     if portable:
         # An empty portable.txt keeps saves and settings in this directory.

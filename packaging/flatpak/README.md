@@ -65,9 +65,8 @@ appstreamcli validate packaging/flatpak/dev.copperline.Copperline.metainfo.xml
 
 1. Make sure the manifest builds and lints clean, then switch the `type: dir`
    source to a `type: git` source pointing at the tagged release (`tag:` and
-   `commit:`) you want published. The tag must already contain `assets/aros/`
-   (the AROS ROM was added after `v0.1.0`), or the build's asset-install steps
-   fail.
+   `commit:`) you want published. The tag must contain both `assets/aros/` and
+   `assets/fmv/`, or the build's asset-install steps fail.
 2. Fork <https://github.com/flathub/flathub>, branch off `new-pr`.
 3. Add the manifest, metainfo, desktop file and `cargo-sources.json`.
 4. Open a PR titled `Add dev.copperline.Copperline`.

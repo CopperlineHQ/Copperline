@@ -20,6 +20,9 @@ crates.io library, so the root package remains marked `publish = false`.
    - `assets/aros/aros-amiga-m68k-rom.bin` and
      `assets/aros/aros-amiga-m68k-ext.bin`, the bundled AROS boot ROMs
      (APL-licensed; see `assets/aros/README.md`)
+   - `assets/fmv/copperline-fmv.rom`, the GPLv3+ open CD32 Full Motion Video
+     cartridge ROM built reproducibly from `fmv-rom/` (see
+     `assets/fmv/README.md`)
    - `assets/services/services_rom.bin`, the guest-side host-filesystem
      handler built from `guest/services/`
    - `assets/a4091/a4091_cdfs.rom`, the upstream A4091 v42.39 autoboot ROM

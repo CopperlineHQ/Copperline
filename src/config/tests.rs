@@ -1505,12 +1505,24 @@ fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
             piped.floppy_connected, direct.floppy_connected,
             "{model:?} floppy drives"
         );
+        assert_eq!(piped.fmv_rom_path, direct.fmv_rom_path, "{model:?} FMV ROM");
     }
     Ok(())
 }
 
 #[test]
 fn fmv_rom_is_cd32_only() -> Result<()> {
+    let bundled = parse_config(
+        r#"
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(
+        bundled.fmv_rom_path.as_deref(),
+        Some(Path::new(BUNDLED_FMV_ROM))
+    );
+
     let cfg = parse_config(
         r#"
             fmv_rom = "cd32fmv.rom"
@@ -1519,6 +1531,15 @@ fn fmv_rom_is_cd32_only() -> Result<()> {
             "#,
     )?;
     assert_eq!(cfg.fmv_rom_path.as_deref(), Some(Path::new("cd32fmv.rom")));
+
+    let unfitted = parse_config(
+        r#"
+            fmv_rom = ""
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(unfitted.fmv_rom_path, None);
 
     let err = parse_config(
         r#"
@@ -2682,6 +2703,26 @@ fn the_a3000_scsi_bus_takes_drives_without_a_boot_rom() -> Result<()> {
     )
     .unwrap_err();
     assert!(err.to_string().contains("no boot ROM"), "{err:#}");
+    Ok(())
+}
+
+/// A CD32 without an FMV-ROM override resolves the bundled open cartridge.
+#[test]
+fn cd32_without_fmv_override_resolves_the_bundled_rom() -> Result<()> {
+    let mut cfg = parse_config(
+        r#"
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(
+        cfg.fmv_rom_path.as_deref(),
+        Some(Path::new(BUNDLED_FMV_ROM))
+    );
+    resolve_bundled_rom(&mut cfg)?;
+    let rom = cfg.fmv_rom_path.as_deref().expect("resolved FMV ROM");
+    assert!(rom.ends_with(crate::romsearch::FMV_ROM_FILE), "{rom:?}");
+    assert_ne!(rom, Path::new(BUNDLED_FMV_ROM));
     Ok(())
 }
 

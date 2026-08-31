@@ -220,10 +220,12 @@ model = "68000"
 # main rom.
 # extended_rom = "cdtv-extended.rom"
 
-# CD32 Full Motion Video module ROM. A 256 KiB v40.30 image fits the physical
-# Commodore MPEG cartridge as the first Zorro II board in a CD32. Omit it for
-# a stock CD32 without the FMV module.
-# fmv_rom = "cd32fmv.rom"
+# CD32 Full Motion Video module ROM. The CD32 profile fits Copperline's bundled
+# open 256 KiB replacement by default. Name another image (including the
+# Commodore v40.30 ROM) to override it, or use an empty string for a stock CD32
+# without the cartridge.
+# fmv_rom = "another-fmv.rom"
+# fmv_rom = ""
 
 
 # CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,

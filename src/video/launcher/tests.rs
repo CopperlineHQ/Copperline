@@ -1233,6 +1233,8 @@ fn the_rom_tab_carries_an_identification_line_under_each_path_row() {
 fn fmv_rom_path_round_trips_through_the_launcher() {
     let mut setup = MachineSetup::default();
     setup.select_model(Some(MachineModel::Cd32));
+    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert_eq!(setup.to_raw().fmv_rom, None);
     let path = PathBuf::from("/roms/cd32fmv.rom");
     setup.set_path(F::FmvRom, path.clone());
     assert_eq!(setup.path(F::FmvRom), Some(path.as_path()));
@@ -1245,6 +1247,25 @@ fn fmv_rom_path_round_trips_through_the_launcher() {
     setup.set_path(F::FmvRom, path);
     setup.select_model(Some(MachineModel::A1200));
     assert_eq!(setup.path(F::FmvRom), None, "non-CD32 profile drops module");
+}
+
+#[test]
+fn fmv_rom_explicit_opt_out_survives_a_launcher_round_trip() {
+    let raw = RawConfig::parse(
+        r#"
+        fmv_rom = ""
+        [machine]
+        profile = "CD32"
+        "#,
+    )
+    .unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.path(F::FmvRom), None);
+    assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
+    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+
+    setup.set_path(F::FmvRom, PathBuf::from("replacement.rom"));
+    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some("replacement.rom"));
 }
 
 #[test]

@@ -583,8 +583,8 @@ The layout is:
   **Revision** lines naming what the chosen image is, identified by
   checksum rather than by file name -- blank for an image Copperline does
   not know, and read from the image itself for the bundled AROS. The FMV row
-  fits the physical Commodore MPEG cartridge when a 256 KiB module ROM is
-  selected and is greyed on non-CD32 profiles; see [Configuration](configuration.md)),
+  shows the bundled open ROM by default on CD32, accepts another 256 KiB module
+  ROM, and is greyed on non-CD32 profiles; see [Configuration](configuration.md),
   *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
   speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;

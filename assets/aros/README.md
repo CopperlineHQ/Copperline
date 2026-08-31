@@ -17,10 +17,22 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-08-26 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 4df19140, plus
-one cd.device fix submitted upstream as pull request 1070
-(https://github.com/aros-development-team/AROS/pull/1070):
+Built from source on 2026-08-30 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `6b5933dc`, plus
+draft pull request 1089 through commit `ebfc7d9`.
+
+PR 1089 adds the open `cd32mpeg.device`, Mode-2 continuous `CD_READXL`, and a
+diagnostic-ROM gate which prevents Commodore's cartridge from replacing the
+AROS `cd.device`. Commit `ebfc7d9`, contributed from Copperline's validation,
+keeps each PBX snapshot chronological by sorting ready raw sectors by their
+absolute MSF before copying them into the CDXL stream. Akiko services the
+highest armed PBX slot first, so slot-number order can otherwise swap adjacent
+MPEG sectors after a high slot is re-armed. Cannon Fodder's 352x288 FMV
+introduction has been validated for 60 emulated seconds with more than 1,000
+decoded frames, non-silent stereo audio, and no malformed-stream recovery.
+
+The base commit includes the cd.device interrupt-source fix merged as pull
+request 1070 (https://github.com/aros-development-team/AROS/pull/1070):
 
 - cd32.c CD32_Interrupt masks CDINTREQ with the driver's own enable state
   (`status = readl(AKIKO_CDINTREQ) & cu->cu_IntEnable`). The Akiko

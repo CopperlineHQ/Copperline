@@ -44,7 +44,8 @@ pub struct RawConfig {
     /// Extended ROM image (CD32 512K at $E00000, CDTV 256K at $F00000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extended_rom: Option<String>,
-    /// CD32 Full Motion Video cartridge ROM (256 KiB v40.30 image).
+    /// CD32 Full Motion Video cartridge ROM (bundled open 256 KiB default;
+    /// an empty string leaves the module unfitted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fmv_rom: Option<String>,
     /// `identify = false` drops the Copperline identification board from the

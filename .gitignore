@@ -65,6 +65,7 @@
 !/assets/lide/lide.rom
 !/assets/lide/lide-atbus.rom
 !/assets/lide/cdfs.rom
+!/assets/fmv/copperline-fmv.rom
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,
 # RTC battery-RAM backing files).

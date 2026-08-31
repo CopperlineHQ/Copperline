@@ -60,6 +60,12 @@ install -Dm644 assets/aros/aros-amiga-m68k-ext.bin \
 install -Dm644 assets/aros/LICENSE \
   "$appdir/usr/share/copperline/aros/LICENSE"
 
+# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+install -Dm644 assets/fmv/copperline-fmv.rom \
+  "$appdir/usr/share/copperline/fmv/copperline-fmv.rom"
+install -Dm644 assets/fmv/README.md \
+  "$appdir/usr/share/copperline/fmv/README.md"
+
 # Bundled open-source A4091 autoboot ROM (default when a config fits an A4091
 # without naming a ROM); romsearch.rs looks under share/copperline/a4091.
 install -Dm644 assets/a4091/a4091_cdfs.rom \
