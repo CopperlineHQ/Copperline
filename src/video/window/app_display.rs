@@ -514,9 +514,10 @@ impl App {
     /// The rect the autocrop presentation shows of the display region,
     /// in canvas pixels -- or `None` whenever the classic whole-canvas
     /// layout must present instead: autocrop off, or a frame the mode
-    /// does not apply to (the bezel and the CRT presets frame the whole
-    /// glass, so the tube look wins while one is on; RTG board frames
-    /// and programmable scans present their own geometry).
+    /// does not apply to (the bezel frames the whole glass with a fixed
+    /// opening, so it wins while it is on; RTG board frames and
+    /// programmable scans present their own geometry). The CRT presets
+    /// compose: the pass re-draws whatever rect the layout shows.
     ///
     /// While the mode is on, the layout never falls back to the classic
     /// letterbox: an open menu or panel, or a session with no content
@@ -532,7 +533,6 @@ impl App {
             || self.present_programmable
             || self.present_width != FB_WIDTH
             || self.bezel.is_on()
-            || self.crt_shader_kind != crate::config::ShaderKind::None
         {
             return None;
         }
@@ -564,13 +564,12 @@ impl App {
             return;
         }
         crate::video::set_autocrop(autocrop);
-        // Turning it on under a bezel or CRT preset changes nothing on
-        // screen (the tube look owns the glass and the crop suspends
+        // Turning it on under a bezel changes nothing on screen (the
+        // front's fixed opening owns the glass and the crop suspends
         // itself); say so, or the toggle looks broken.
-        let suspended =
-            self.bezel.is_on() || self.crt_shader_kind != crate::config::ShaderKind::None;
+        let suspended = self.bezel.is_on();
         self.show_osd(match (autocrop, suspended) {
-            (true, true) => "Autocrop: on (suspended while a bezel or CRT shader is on)",
+            (true, true) => "Autocrop: on (suspended while a bezel is on)",
             (true, false) => "Autocrop: on",
             (false, _) => "Autocrop: off",
         });

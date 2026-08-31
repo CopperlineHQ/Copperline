@@ -360,10 +360,10 @@ belongs to the Amiga.
   against the crop. The status bar and panels keep their size in a band
   pinned along the window bottom; an open menu or panel widens the
   picture to the full display area while it is up, and the band stays
-  put. Presentation-only (captures keep their aperture), and suspended
-  under a bezel or CRT preset and for RTG or programmable scans. The
-  start-up value is `[display] autocrop`
-  (see [Configuration](configuration.md)).
+  put. Presentation-only (captures keep their aperture); the CRT
+  shader presets compose with it, while a bezel, RTG scanout and
+  programmable scans suspend it. The start-up value is
+  `[display] autocrop` (see [Configuration](configuration.md)).
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
   **Picture Left/Right** step one lo-res pixel (up to 16 each way),

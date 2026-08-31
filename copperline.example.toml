@@ -589,8 +589,8 @@ video = "PAL"
 # hardware programs (default false), so a game using fewer lines than the
 # full scan fills more of a 16:9/21:9 screen; with integer scaling the
 # whole-number fit is retaken against the crop. Window-only (captures
-# keep their aperture); suspended under a bezel/CRT preset, for RTG
-# scanout and programmable scans, and while a menu is open.
+# keep their aperture); composes with the CRT shader presets, and is
+# suspended under a bezel, for RTG scanout and for programmable scans.
 # deinterlace: motion-adaptive weaving of interlaced displays (default
 # true); false line-doubles every field, showing interlace bob/flicker like
 # a bare TV.

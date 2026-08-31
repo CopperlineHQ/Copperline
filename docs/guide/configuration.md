@@ -732,11 +732,13 @@ pinned along the window bottom; opening a menu or panel widens the
 picture to the full display area while it is up (so nothing of the
 overlay is cropped away) and the band stays put. A
 window-presentation setting only: screenshots, frame dumps and
-recordings always keep their configured aperture. Automatically
-suspended where it cannot apply -- under a monitor bezel or CRT preset
-(the tube look frames the whole glass), for RTG board scanout, and for
-programmable multisync scans. The menu's *Video Settings > Autocrop*
-toggle flips it live without touching the config.
+recordings always keep their configured aperture. The CRT shader
+presets compose with it (the scanlines, mask or tube face are drawn
+over the cropped picture). Automatically suspended where it cannot
+apply -- under a monitor bezel (whose fixed opening frames the whole
+glass), for RTG board scanout, and for programmable multisync scans.
+The menu's *Video Settings > Autocrop* toggle flips it live without
+touching the config.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

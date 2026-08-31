@@ -574,20 +574,7 @@ pub(super) fn uniforms_for(
         }
     };
     let viewport = (cx as f32, cy as f32, cw as f32, display_fraction(ch as f32));
-    // mask kind, curvature, vignette
-    let (mask, curvature, vignette) = match kind {
-        ShaderKind::Scanlines => (0.0, 0.0, 0.0),
-        // 2: staggered dot/shadow mask.
-        ShaderKind::Mask => (2.0, 0.0, 0.0),
-        // 1: aperture grille, with a bowed face and corner falloff. The
-        // curvature reproduces the screen-edge arcs of the 1084's tube
-        // datasheet (Philips M34EAQ10X) under crt.wgsl's aspect-weighted
-        // warp; the derivation is with the warp function.
-        ShaderKind::Crt => (1.0, face_curvature(kind), 0.15),
-        // A user shader gets the frame geometry and the two knobs it can
-        // sensibly honour; the preset look table means nothing to it.
-        ShaderKind::None | ShaderKind::Custom => (0.0, 0.0, 0.0),
-    };
+    let (mask, curvature, vignette) = preset_look(kind);
     let uniforms = CrtUniforms {
         src_rect: [0.0, 0.0, 1.0, display_fraction(1.0)],
         size: [
@@ -602,9 +589,117 @@ pub(super) fn uniforms_for(
     (uniforms, viewport)
 }
 
+/// The preset look table: mask kind, curvature, vignette.
+fn preset_look(kind: ShaderKind) -> (f32, f32, f32) {
+    match kind {
+        ShaderKind::Scanlines => (0.0, 0.0, 0.0),
+        // 2: staggered dot/shadow mask.
+        ShaderKind::Mask => (2.0, 0.0, 0.0),
+        // 1: aperture grille, with a bowed face and corner falloff. The
+        // curvature reproduces the screen-edge arcs of the 1084's tube
+        // datasheet (Philips M34EAQ10X) under crt.wgsl's aspect-weighted
+        // warp; the derivation is with the warp function.
+        ShaderKind::Crt => (1.0, face_curvature(kind), 0.15),
+        // A user shader gets the frame geometry and the two knobs it can
+        // sensibly honour; the preset look table means nothing to it.
+        ShaderKind::None | ShaderKind::Custom => (0.0, 0.0, 0.0),
+    }
+}
+
+/// [`uniforms_for`] for an arbitrary picture rect: the pass re-draws the
+/// `src_canvas` sub-rect of the canvas (`(x, y, w, h)` in logical canvas
+/// pixels of a `canvas`-sized buffer) into `viewport` (physical surface
+/// pixels). The autocrop layout's form, where the picture is a crop of
+/// the display region rather than the whole region under the status
+/// bar; the scaler pass draws the same sub-rect into the same viewport,
+/// so the two land identically. `scanlines` is the beam-line count
+/// across *this* rect, not the whole display.
+///
+/// Pure arithmetic, like [`uniforms_for`].
+pub(super) fn uniforms_for_rect(
+    kind: ShaderKind,
+    strength: f32,
+    viewport: (u32, u32, u32, u32),
+    src_canvas: (usize, usize, usize, usize),
+    canvas: (usize, usize),
+    texture_extent: (u32, u32),
+    scanlines: f32,
+) -> (CrtUniforms, (f32, f32, f32, f32)) {
+    let (vx, vy, vw, vh) = viewport;
+    let viewport = (vx as f32, vy as f32, vw as f32, vh as f32);
+    let (sx, sy, sw, sh) = src_canvas;
+    let (cw, ch) = (canvas.0.max(1) as f32, canvas.1.max(1) as f32);
+    let (mask, curvature, vignette) = preset_look(kind);
+    let uniforms = CrtUniforms {
+        src_rect: [
+            sx as f32 / cw,
+            sy as f32 / ch,
+            sw as f32 / cw,
+            sh as f32 / ch,
+        ],
+        size: [
+            viewport.2,
+            viewport.3,
+            sw as f32 * texture_extent.0 as f32 / cw,
+            sh as f32 * texture_extent.1 as f32 / ch,
+        ],
+        params: [strength, scanlines, mask, curvature],
+        params2: [vignette, 0.0, 0.0, 0.0],
+    };
+    (uniforms, viewport)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rect form maps an autocrop sub-rect of the display region:
+    /// the source rect is the crop's uv position in the whole buffer,
+    /// the source size its texel extent, and the viewport is taken as
+    /// given -- the same numbers the scaler pass draws the crop with.
+    #[test]
+    fn rect_uniforms_map_the_crop_not_the_whole_display() {
+        // A 640x400 crop at (38, 71) of a 716x581 canvas, on a 2x
+        // texture, drawn into a 1280x800 viewport at (76, 170).
+        let (u, viewport) = uniforms_for_rect(
+            ShaderKind::Scanlines,
+            1.0,
+            (76, 170, 1280, 800),
+            (38, 71, 640, 400),
+            (716, 581),
+            (1432, 1162),
+            200.0,
+        );
+        assert_eq!(viewport, (76.0, 170.0, 1280.0, 800.0));
+        assert_eq!(
+            u.src_rect,
+            [38.0 / 716.0, 71.0 / 581.0, 640.0 / 716.0, 400.0 / 581.0]
+        );
+        // Source texels: the crop at the texture's supersample factor.
+        assert_eq!(u.size, [1280.0, 800.0, 1280.0, 800.0]);
+        assert_eq!(u.params[1], 200.0);
+        // The look table is the same one the classic form uses.
+        let (classic, _) = uniforms_for(
+            ShaderKind::Crt,
+            0.5,
+            (0, 0, 1432, 1162),
+            537,
+            581,
+            (1432, 1162),
+            270.0,
+        );
+        let (rect, _) = uniforms_for_rect(
+            ShaderKind::Crt,
+            0.5,
+            (0, 0, 1432, 1074),
+            (0, 0, 716, 537),
+            (716, 581),
+            (1432, 1162),
+            270.0,
+        );
+        assert_eq!(rect.params[2..], classic.params[2..]);
+        assert_eq!(rect.params2, classic.params2);
+    }
 
     const PRESET_SOURCES: [(&str, &str); 3] = [
         ("scanlines", SCANLINES_WGSL),

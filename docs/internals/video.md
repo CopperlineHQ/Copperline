@@ -607,9 +607,12 @@ letterbox: an open menu or panel (which draws into the display region
 against the full canvas mapping) widens the display quad to the whole
 region instead of suspending, so the overlay stays fully visible and the
 chrome band stays pinned rather than hopping to the letterbox's centred
-bar. Only another pass owning the display rect falls back to the classic
-layout -- the bezel and CRT presets, RTG scanout -- along with
-programmable scans; captures never see the crop.
+bar. The CRT presets compose with the crop: `uniforms_for_rect` aims the
+pass at the layout's display rect and crop sub-rect (the same numbers
+the scaler pass drew), with the beam-line count scaled to the rows the
+crop shows. Only a pass that owns the whole display rect falls back to
+the classic layout -- the bezel's fixed opening, RTG scanout -- along
+with programmable scans; captures never see the crop.
 
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have

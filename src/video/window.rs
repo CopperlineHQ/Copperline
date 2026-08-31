@@ -4406,8 +4406,6 @@ impl ApplicationHandler for App {
                             "suspended(canvas-width)"
                         } else if self.bezel.is_on() {
                             "suspended(bezel)"
-                        } else if self.crt_shader_kind != crate::config::ShaderKind::None {
-                            "suspended(crt-shader)"
                         } else {
                             "active"
                         };
@@ -4493,6 +4491,20 @@ impl ApplicationHandler for App {
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
                         let bezel_style = self.bezel;
+                        // Under the autocrop layout the preset re-draws the
+                        // crop into the crop's own viewport -- the same
+                        // sub-rect the scaler pass just drew -- with the
+                        // beam-line count scaled to the rows the crop shows.
+                        // The bezel suspends autocrop, so this is never the
+                        // bezel case.
+                        let crt_crop = autocrop_src.map(|_| {
+                            (
+                                layout.display_dst,
+                                layout.src_canvas,
+                                scanlines * layout.src_canvas.3 as f32
+                                    / present_height().max(1) as f32,
+                            )
+                        });
                         // The closure is FnOnce and captures `r`, so the
                         // shaders have to be split out of it as separate
                         // borrows rather than reached through `r` inside.
@@ -4508,15 +4520,28 @@ impl ApplicationHandler for App {
                                 target,
                                 &present_draws,
                             );
-                            let (uniforms, viewport) = crt_shader::uniforms_for(
-                                kind,
-                                strength,
-                                present_clip,
-                                present_height(),
-                                window_present_height(),
-                                (ctx.texture_extent.width, ctx.texture_extent.height),
-                                scanlines,
-                            );
+                            let texture_extent =
+                                (ctx.texture_extent.width, ctx.texture_extent.height);
+                            let (uniforms, viewport) = match crt_crop {
+                                Some((dst, src, crop_scanlines)) => crt_shader::uniforms_for_rect(
+                                    kind,
+                                    strength,
+                                    dst,
+                                    src,
+                                    (FB_WIDTH, window_present_height()),
+                                    texture_extent,
+                                    crop_scanlines,
+                                ),
+                                None => crt_shader::uniforms_for(
+                                    kind,
+                                    strength,
+                                    present_clip,
+                                    present_height(),
+                                    window_present_height(),
+                                    texture_extent,
+                                    scanlines,
+                                ),
+                            };
                             if bezel_active {
                                 let opening = bezel::opening_rect(bezel_style, viewport);
                                 if crt_active {
