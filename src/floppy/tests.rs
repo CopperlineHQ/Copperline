@@ -1634,25 +1634,35 @@ fn dskbytr_wordequal_tracks_current_word() -> Result<()> {
     ctrl.park_head_at_word(0, 0);
     let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
 
-    // Writing DSKSYNC while the head is inside a matching word latches the
-    // match for the next read; after that read WORDEQUAL follows the
-    // comparator, which has not seen the word's last cell yet.
+    // WORDEQUAL is the comparator's live level. Writing DSKSYNC while the
+    // head is inside a matching word raises the interrupt, but the shift
+    // register has not seen the word's last cell yet, so the level is low.
     assert!(ctrl.write_dsksync(raw_words[0]));
-    let latched = ctrl.read_dskbytr(0);
-    assert_ne!(latched & WORDEQUAL, 0);
+    assert!(ctrl.take_sync_irq());
     assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
 
-    // The word's last cell completes the match, and it holds until the
-    // next word shifts it out.
+    // The word's last cell completes the match: the level is high for that
+    // one cell, and reading the register does not clear it.
     ctrl.tick(word_cck, 0, &mut []);
     let matched = ctrl.read_dskbytr(0);
     assert_ne!(matched & WORDEQUAL, 0);
     let repeat = ctrl.read_dskbytr(0);
     assert_ne!(repeat & WORDEQUAL, 0);
 
-    ctrl.tick(word_cck, 0, &mut []);
-    let next = ctrl.read_dskbytr(0);
-    assert_eq!(next & WORDEQUAL, 0);
+    // The next cell shifts the match out, whether or not anyone read it in
+    // time: a poll that arrives late sees nothing, as on the hardware.
+    ctrl.tick_cells(0, 1, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    // The second word completes fifteen cells on; sixteen carry the match
+    // through and out again before anyone reads it.
+    ctrl.write_dsksync(raw_words[1]);
+    ctrl.tick_cells(0, 16, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    // A revolution later the poll lands on the matching cell itself.
+    ctrl.tick_cells(0, 31, 0);
+    assert_ne!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    ctrl.tick_cells(0, 1, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -2946,11 +2956,17 @@ fn active_read_dma_dsksync_change_updates_dskbytr_wordequal() -> Result<()> {
     assert_eq!(read_chip_word(&chip_ram, 0), raw_words[0]);
     assert!(!ctrl.take_sync_irq());
 
+    // The comparator is live: the new sync word has not shifted in yet...
     assert!(ctrl.write_dsksync(raw_words[1]));
     let status = ctrl.read_dskbytr(dmacon);
     assert_ne!(status & DMAON, 0);
-    assert_ne!(status & WORDEQUAL, 0);
+    assert_eq!(status & WORDEQUAL, 0);
     assert!(ctrl.take_sync_irq());
+
+    // ...and WORDEQUAL reports it once the cell that completes it is in.
+    assert!(!ctrl.tick(word_cck, dmacon, &mut chip_ram));
+    assert_eq!(read_chip_word(&chip_ram, 2), raw_words[1]);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & WORDEQUAL, 0);
 
     let _ = fs::remove_file(path);
     Ok(())

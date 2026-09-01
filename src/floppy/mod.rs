@@ -238,7 +238,6 @@ pub struct FloppyController {
     last_dskdatr: u16,
     last_dskbytr_byte: u8,
     dskbyte_valid: bool,
-    word_equal_latch: bool,
     sync_irq_latch: bool,
     index_pulse_cck: u32,
     index_flag_sync_cck: u32,
@@ -316,7 +315,6 @@ impl Default for FloppyController {
             last_dskdatr: 0,
             last_dskbytr_byte: 0,
             dskbyte_valid: false,
-            word_equal_latch: false,
             sync_irq_latch: false,
             index_pulse_cck: 0,
             index_flag_sync_cck: 0,
@@ -1197,7 +1195,6 @@ impl FloppyController {
     pub fn write_dsksync(&mut self, val: u16) -> bool {
         self.dsksync = val;
         self.read_shifter.set_sync(val);
-        self.word_equal_latch = false;
         if self.current_disk_word_matches_sync() {
             self.record_sync_match();
             true
@@ -1294,8 +1291,10 @@ impl FloppyController {
     /// for WORDEQUAL, then reads the sector byte by byte through DSKBYTR
     /// while counting poll iterations, and rejects the read unless the first
     /// two bytes are the MFM of the sector's first data byte.) WORDEQUAL is
-    /// the comparator's level on the last sampled cell, held by a latch
-    /// until read so a polling loop cannot miss it.
+    /// the comparator's live level: true for the one cell in which the shift
+    /// register equals DSKSYNC and gone once the next cell shifts in, so a
+    /// polling loop can miss a match and wait a revolution for the next --
+    /// as it does on the hardware. Only DSKBYT is reset by the read.
     pub fn read_dskbytr(&mut self, dmacon: u16) -> u16 {
         let mut status = 0u16;
         if self.dma_enabled(dmacon) {
@@ -1316,14 +1315,13 @@ impl FloppyController {
                 self.dskbyte_valid = true;
             }
         }
-        if self.word_equal_latch || self.read_shifter.sync_matched() {
+        if self.read_shifter.sync_matched() {
             status |= WORDEQUAL;
         }
         if self.dskbyte_valid {
             status |= DSKBYT;
             self.dskbyte_valid = false;
         }
-        self.word_equal_latch = false;
         status | self.last_dskbytr_byte as u16
     }
 
@@ -2258,7 +2256,6 @@ impl FloppyController {
     }
 
     fn record_sync_match(&mut self) {
-        self.word_equal_latch = true;
         self.sync_irq_latch = true;
     }
 

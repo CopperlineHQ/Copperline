@@ -341,9 +341,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      the single IPL-pipe countdown with one delivery deadline per interrupt
 //      source, in absolute colour clocks.
 //  72: the floppy controller lost the DSKBYTR track-grid position tracking
-//      (`last_dskbytr_pos`, `last_stream_sync_pos`): DSKBYTR's byte and
-//      WORDEQUAL now come from Paula's read shifter on the framing a
-//      WORDSYNC match resets, as on hardware. Raw track images
+//      and the WORDEQUAL latch (`last_dskbytr_pos`, `last_stream_sync_pos`,
+//      `word_equal_latch`): DSKBYTR's byte and WORDEQUAL now come from
+//      Paula's read shifter on the framing a WORDSYNC match resets, as on
+//      hardware. Raw track images
 //      (`FloppyTrackImage::RawMfm`) and cached revolutions (`TrackRev`)
 //      gained the mastered cell-rate profile of IPF density models.
 pub const STATE_VERSION: u32 = 72;

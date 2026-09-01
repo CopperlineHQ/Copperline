@@ -397,8 +397,12 @@ trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
 word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
 DSKBYTR is served by that same read shifter: its byte and DSKBYT come from
 the shifter's bit counter, the one a WORDSYNC match resets whether or not a
-transfer is running, and WORDEQUAL is the comparator's level held until the
-register is read. A reader that waits for WORDEQUAL and then collects bytes
+transfer is running, and WORDEQUAL is the comparator's live level -- true for
+the one cell in which the shift register equals DSKSYNC, so a poll that
+arrives a cell late sees nothing and waits for the next revolution, as on
+the hardware; reading the register resets DSKBYT alone, while the DSKSYNC
+interrupt is the latched edge of the same comparator. A reader that waits
+for WORDEQUAL and then collects bytes
 through DSKBYTR therefore gets them framed from the end of the sync word at
 whatever bit phase the sync sits on the track -- IPF and flux tracks carry
 their syncs at arbitrary phases, and Rob Northen's Copylock reads its key
