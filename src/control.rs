@@ -21,6 +21,7 @@
 //!
 //! [`Emulator`]: crate::emulator::Emulator
 
+pub mod catalogue;
 pub mod exec;
 pub mod headless;
 pub mod observe;
