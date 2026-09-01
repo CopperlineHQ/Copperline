@@ -1097,8 +1097,8 @@ impl App {
             return;
         };
         let Some(path) = crate::paths::default_config_file() else {
-            // No host-data directory at all (no HOME, XDG_CONFIG_HOME or
-            // APPDATA), so there is nowhere the next launch would look.
+            // No host-data directory at all (no HOME or USERPROFILE), so
+            // there is nowhere the next launch would look.
             warn!("no host data directory to save a default configuration in");
             self.set_launcher_status(StatusMessage::err(
                 "Failed to set the default config (see log)",

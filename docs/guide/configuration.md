@@ -212,9 +212,9 @@ once something is moved. The launcher edits the same keys on its **A/V &
 Emu -> Paths** page.
 
 Each default is a folder of that name under the host-data directory --
-`~/.config/copperline` on macOS and Linux, `%APPDATA%\copperline` on
-Windows, or the executable's own folder in a [portable
-installation](ui.md#where-files-go). A relative path is taken from
+`~/Documents/Copperline` on macOS and Linux,
+`%USERPROFILE%\Documents\Copperline` on Windows, or the executable's own
+folder in a [portable installation](ui.md#where-files-go). A relative path is taken from
 `base` (itself taken from the host-data directory when relative or unset),
 an absolute path is used as given. Output folders are created on first
 write; the dialog folders are never created, and a dialog only starts in

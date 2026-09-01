@@ -32,7 +32,7 @@ fn snapshot() -> &'static HashMap<OsString, OsString> {
 
 /// Seal the snapshot with every `COPPERLINE_*` variable absent, so all
 /// diagnostic and debugging knobs read as unset for the life of the process.
-/// The rest of the environment (`HOME`, `APPDATA`, ...) is kept: `paths`
+/// The rest of the environment (`HOME`, `USERPROFILE`, ...) is kept: `paths`
 /// resolves the host-data directory through this module.
 ///
 /// Built for player builds, which call it first thing in `main` so a shipped

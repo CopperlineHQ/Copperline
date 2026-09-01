@@ -92,7 +92,9 @@ button opens a simplified in-game menu:
 - Save state slots (if enabled in manifest)
 
 User configuration, game saves, NVRAM, and save states are stored in the
-per-game directory (`~/.config/<id>/` on Linux/macOS, `%APPDATA%\<id>` on Windows),
+per-game directory (`~/.config/<id>/` on Linux/macOS, `%APPDATA%\<id>` on
+Windows -- the hidden per-user tree, deliberately: a published game is an
+appliance, and its folder does not belong at the top of Documents),
 or locally inside the application directory in portable mode.
 
 ## Automated bundle verification
