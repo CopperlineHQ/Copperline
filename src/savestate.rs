@@ -361,7 +361,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      the custom/CIA register shadows kept for it and the pending level-7
 //      freeze interrupt travel with the state, so a monitor session and
 //      the snapshot it took of the interrupted program survive a resume.
-pub const STATE_VERSION: u32 = 75;
+//  76: the uaelib trap gained the fn-88 overlay display list (the rects
+//      and text the guest asked to be drawn over the picture) and its
+//      drop counter, guest state like the registry.
+pub const STATE_VERSION: u32 = 76;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

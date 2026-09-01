@@ -9325,6 +9325,74 @@ fn full_anchor() -> (usize, usize, usize, usize) {
 }
 
 #[test]
+fn guest_overlay_maps_rects_and_text_onto_the_anchor() {
+    use crate::uaelib::OverlayCmd;
+    let scale = 1;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    // A full-space filled rect covers the whole anchor in the guest's red
+    // (0x00RRGGBB -> R in the low texture byte).
+    let cmds = vec![OverlayCmd::FilledRect {
+        l: 0,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x00FF_0000,
+    }];
+    super::statusbar::draw_guest_overlay(&mut frame, &cmds, scale, full_anchor());
+    assert_eq!(pixel(&frame, 0, 0, scale), [255, 0, 0, 255]);
+    assert_eq!(
+        pixel(
+            &frame,
+            crate::video::FB_WIDTH - 1,
+            super::present_height() - 1,
+            scale
+        ),
+        [255, 0, 0, 255]
+    );
+
+    // A sub-rect anchor maps the same command onto only that rect.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(&mut frame, &cmds, scale, (100, 50, 200, 100));
+    assert_eq!(pixel(&frame, 99, 50, scale), [0, 0, 0, 0]);
+    assert_eq!(pixel(&frame, 100, 50, scale), [255, 0, 0, 255]);
+    assert_eq!(pixel(&frame, 299, 149, scale), [255, 0, 0, 255]);
+    assert_eq!(pixel(&frame, 300, 149, scale), [0, 0, 0, 0]);
+
+    // A half-space rect lands proportionally: the guest's 384 maps to the
+    // anchor's midpoint.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::FilledRect {
+        l: 384,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x0000_00FF,
+    }];
+    super::statusbar::draw_guest_overlay(&mut frame, &cmds, scale, (0, 0, 200, 100));
+    assert_eq!(pixel(&frame, 99, 10, scale), [0, 0, 0, 0]);
+    assert_eq!(pixel(&frame, 100, 10, scale), [0, 0, 255, 255]);
+
+    // Text paints glyph pixels in the guest colour.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::Text {
+        l: 0,
+        t: 0,
+        text: "X".to_string(),
+        colour: 0x0000_FF00,
+    }];
+    super::statusbar::draw_guest_overlay(&mut frame, &cmds, scale, full_anchor());
+    let lit = (0..8 * 8)
+        .filter(|i| pixel(&frame, i % 8, i / 8, scale) == [0, 255, 0, 255])
+        .count();
+    assert!(lit > 4, "an X paints several glyph pixels, got {lit}");
+
+    // An empty list is a strict no-op.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(&mut frame, &[], scale, full_anchor());
+    assert!(frame.iter().all(|&b| b == 0));
+}
+
+#[test]
 fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let scale = 1;
     let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];

@@ -2003,6 +2003,94 @@ pub(super) fn draw_record_badge(
 /// Painted into the presentation texture only, like the record badge, so
 /// captures never include it; while a recording badge is up the block
 /// starts below it instead of fighting for the corner.
+/// The guest's fn-88 debug overlay (crate::uaelib): rects and text in a
+/// 768x576 PAL hires space, mapped proportionally onto the display
+/// sub-rect the viewer sees (`anchor`, canvas pixels) -- the way
+/// Bartman's WinUAE fork stretches its overlay buffer over the picture.
+/// Painted into the presentation texture only, after the frame capture
+/// copy, so it can never appear in screenshots, dumps or recordings.
+pub(super) fn draw_guest_overlay(
+    frame: &mut [u8],
+    cmds: &[crate::uaelib::OverlayCmd],
+    texture_scale: usize,
+    anchor: (usize, usize, usize, usize),
+) {
+    use crate::uaelib::{OverlayCmd, OVERLAY_HEIGHT, OVERLAY_WIDTH};
+    let s = texture_scale;
+    let (ax, ay, aw, ah) = anchor;
+    let (x0, y0, w, h) = (ax * s, ay * s, aw * s, ah * s);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let map_x = |v: u16| x0 + usize::from(v) * w / OVERLAY_WIDTH as usize;
+    let map_y = |v: u16| y0 + usize::from(v) * h / OVERLAY_HEIGHT as usize;
+    // 0x00RRGGBB -> the texture's memory order (R low byte, alpha high).
+    let guest_colour =
+        |c: u32| 0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+    // Device-pixel rects: the anchor mapping is already scaled, so these
+    // go straight to fill_rect with texture_scale 1.
+    let fill = |frame: &mut [u8], x: usize, y: usize, w: usize, h: usize, colour: u32| {
+        fill_rect(frame, Rect { x, y, w, h }, colour, 1);
+    };
+    let thickness = s.max(1);
+    // Text keeps whole glyph blocks: nearest integer scale down from the
+    // overlay space, floored at 1 so it stays legible at 1x.
+    let px = (w / OVERLAY_WIDTH as usize)
+        .min(h / OVERLAY_HEIGHT as usize)
+        .max(1);
+    let (tex_w, tex_h) = (texture_width(s), texture_height(s));
+    for cmd in cmds {
+        match cmd {
+            OverlayCmd::FilledRect { l, t, r, b, colour } => {
+                let (x, y) = (map_x(*l), map_y(*t));
+                fill(
+                    frame,
+                    x,
+                    y,
+                    map_x(*r).saturating_sub(x),
+                    map_y(*b).saturating_sub(y),
+                    guest_colour(*colour),
+                );
+            }
+            OverlayCmd::Rect { l, t, r, b, colour } => {
+                let (x, y) = (map_x(*l), map_y(*t));
+                let (rw, rh) = (map_x(*r).saturating_sub(x), map_y(*b).saturating_sub(y));
+                let colour = guest_colour(*colour);
+                fill(frame, x, y, rw, thickness.min(rh), colour);
+                fill(
+                    frame,
+                    x,
+                    (y + rh).saturating_sub(thickness).max(y),
+                    rw,
+                    thickness.min(rh),
+                    colour,
+                );
+                fill(frame, x, y, thickness.min(rw), rh, colour);
+                fill(
+                    frame,
+                    (x + rw).saturating_sub(thickness).max(x),
+                    y,
+                    thickness.min(rw),
+                    rh,
+                    colour,
+                );
+            }
+            OverlayCmd::Text { l, t, text, colour } => {
+                font::draw_text(
+                    frame,
+                    tex_w,
+                    tex_h,
+                    map_x(*l),
+                    map_y(*t),
+                    text,
+                    guest_colour(*colour),
+                    px,
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn draw_perf_overlay(
     frame: &mut [u8],
     lines: &[String],

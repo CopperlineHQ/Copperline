@@ -234,6 +234,19 @@ run, and `--perf-overlay` shows it from the command line; the launcher's
 counters are exported through the control protocol's `status` reply for
 headless runs (see [](../debugger/control)).
 
+## Guest debug overlay
+
+A program built against the vscode-amiga-debug template can draw over the
+picture through the uaelib trap's `debug_rect` / `debug_filled_rect` /
+`debug_text` helpers (see the uaelib trap section of [](run)). The commands
+describe a 768x576 canvas that is stretched over the visible display --
+tracking autocrop and per-axis scaling -- and stay up until the program
+sends `debug_clear`. The overlay sits directly on the picture, under every
+piece of host chrome (status bar, OSD, performance overlay), and is painted
+into the presentation only: screenshots, frame dumps, recordings and
+control-protocol captures never include it. Setting `[emulation] uaelib =
+false` removes the whole trap, overlay included.
+
 ## Drag and drop
 
 Disk images can be dropped anywhere on the emulator window:

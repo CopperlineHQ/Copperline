@@ -4294,6 +4294,10 @@ impl ApplicationHandler for App {
                     control_connected,
                 };
                 let osd = self.active_osd_text();
+                // Hoisted before the render borrow: the guest's fn-88
+                // overlay list is machine state on the bus.
+                let guest_overlay: Vec<crate::uaelib::OverlayCmd> =
+                    self.emu.uaelib_overlay().to_vec();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
                 // Decided out here: inside the render borrow the frame is
                 // the renderer's, and the focus is the window's business.
@@ -4450,6 +4454,13 @@ impl ApplicationHandler for App {
                         FB_WIDTH,
                         present_height(),
                     ));
+                    if !guest_overlay.is_empty() {
+                        // The guest's debug overlay sits directly on the
+                        // picture, under every piece of host chrome, and --
+                        // like everything from here down -- never in a
+                        // capture.
+                        draw_guest_overlay(frame, &guest_overlay, r.texture_scale, overlay_anchor);
+                    }
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.

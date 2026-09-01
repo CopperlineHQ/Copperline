@@ -829,6 +829,11 @@ impl Emulator {
         }
     }
 
+    /// The overlay display list the guest drew through the uaelib trap.
+    pub fn uaelib_overlay(&self) -> &[crate::uaelib::OverlayCmd] {
+        self.bus().uaelib.as_ref().map_or(&[], |u| u.overlay())
+    }
+
     /// The resources the guest registered through the uaelib trap.
     pub fn uaelib_resources(&self) -> &[crate::uaelib::DebugResource] {
         self.bus().uaelib.as_ref().map_or(&[], |u| u.resources())
