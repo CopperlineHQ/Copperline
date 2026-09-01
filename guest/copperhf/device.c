@@ -67,6 +67,12 @@ extern char device_name[];
  * server itself cannot be C. */
 extern void chf_int_handler(void);
 
+/* mounter.c (M3) -- narrow interface, see that file's own header comment.
+ * Ordinary extern C function, unlike the four exec vectors above: nothing
+ * about this call needs to satisfy exec's register-based dispatch
+ * contract, so it is reached with a plain compiler-generated call. */
+extern void chf_mount_all(struct ExecBase *sysbase, APTR board, struct ConfigDev *cd);
+
 /* AbsExecBase -- same reasoning as guest/hostsocket/stub.c's sysbase():
  * GCC's array-bounds warning treats any near-NULL dereference as a bug,
  * and move.l 4.w is the canonical instruction for this anyway. */
@@ -77,12 +83,13 @@ static struct ExecBase *sysbase(void)
     return base;
 }
 
-/* Re-derives the board base via expansion.library's GetCurrentBinding(),
- * exactly the recipe guest/services/handler.c's resident_init() and
- * guest/hostsocket/stub.c's hs_get_board_base() both use (confirmed safe
- * there on real Kickstart 1.3/2.0/3.1) -- none of da_DiagPoint's own
- * registers (in particular, the board base) are handed to rt_Init. */
-static APTR chf_get_board_base(void)
+/* Re-derives the board base (and, for the mounter, the ConfigDev itself)
+ * via expansion.library's GetCurrentBinding(), exactly the recipe
+ * guest/services/handler.c's resident_init() and guest/hostsocket/stub.c's
+ * hs_get_board_base() both use (confirmed safe there on real Kickstart
+ * 1.3/2.0/3.1) -- none of da_DiagPoint's own registers (in particular, the
+ * board base) are handed to rt_Init. `cd_out` may be NULL. */
+static APTR chf_get_board_base(struct ConfigDev **cd_out)
 {
     struct ExecBase *_sysbase = sysbase();
     struct Library *_expbase = OpenLibrary((STRPTR) "expansion.library", 0);
@@ -94,6 +101,8 @@ static APTR chf_get_board_base(void)
     APTR board = NULL;
     if (cb.cb_ConfigDev != NULL)
         board = cb.cb_ConfigDev->cd_BoardAddr;
+    if (cd_out != NULL)
+        *cd_out = cb.cb_ConfigDev;
 
     CloseLibrary(_expbase);
     return board;
@@ -131,7 +140,8 @@ struct CopperhfDevice *dev_init(struct ExecBase *sysbase __asm("a6"),
  * da_DiagPoint itself). */
 void resident_init(struct ExecBase *_sysbase __asm("a6"))
 {
-    APTR board = chf_get_board_base();
+    struct ConfigDev *cd = NULL;
+    APTR board = chf_get_board_base(&cd);
     if (board == NULL)
         return;
 
@@ -142,6 +152,13 @@ void resident_init(struct ExecBase *_sysbase __asm("a6"))
         return;
 
     AddDevice((struct Device *)dev);
+
+    /* Mount every present unit's partitions (M3) strictly before the INT2
+     * server goes live: the mounter's own I/O is polled (mounter.c's
+     * chf_do_io spins CHF_COMPLETE_GET/ACK itself) and its IORequests have
+     * no MsgPort at all, so int_handler.s's ReplyMsg must never see one of
+     * them -- see mounter.c's header comment for the full reasoning. */
+    chf_mount_all(_sysbase, board, cd);
 
     dev->dev_Interrupt.is_Node.ln_Type = NT_INTERRUPT;
     dev->dev_Interrupt.is_Node.ln_Pri = 0;

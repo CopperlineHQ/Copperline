@@ -15,7 +15,14 @@ ROM_BUDGET = 0x4000
 
 include ../toolchain.mk
 
+# -fno-strict-aliasing: the ROM addresses shared guest/host structures
+# (IORequest blocks, RDB blocks) through recast byte pointers by design;
+# with strict aliasing GCC dead-store-eliminated mounter.c's request field
+# writes outright (see chf_read_block's own comment for the confirmed
+# failure).
 CFLAGS  = -Os -m68000 -mpcrel -fomit-frame-pointer -fno-jump-tables \
+          -fno-builtin-memset -fno-builtin-memcpy \
+          -fno-tree-loop-distribute-patterns -fno-strict-aliasing \
           -Wall -Wextra -nostdlib -nostartfiles
 
 $(ROM): device.bin
@@ -39,9 +46,9 @@ device.bin: device.exe
 # int_handler.s needs -x assembler-with-cpp (a plain ".s" name isn't
 # preprocessed by default) so it can #include copperhf_board.h instead of
 # duplicating register offsets; entry.s itself has no #includes, so it
-# stays plain asm; -x c switches back for device.c.
-device.exe: entry.s device.c int_handler.s copperhf_board.h
-	$(CC) $(CFLAGS) entry.s -x c device.c \
+# stays plain asm; -x c switches back for device.c and mounter.c (M3).
+device.exe: entry.s device.c mounter.c int_handler.s copperhf_board.h
+	$(CC) $(CFLAGS) entry.s -x c device.c mounter.c \
 	  -x assembler-with-cpp int_handler.s -x none -o $@
 
 clean:

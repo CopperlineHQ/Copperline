@@ -16,8 +16,11 @@
 |     (device.c) but only ever *referenced* from here via `label-label`
 |     word displacements in `_func_table`, never `.long`'d directly.
 |   - `da_Config` needs DAC_CONFIGTIME, which requires a non-zero
-|     `da_BootPoint` -- `_boot_point` exists purely to satisfy that, and
-|     (like HostSocket's) always declines: this device has nothing to boot.
+|     `da_BootPoint` -- `_boot_point` boots dos.library on V34 the same way
+|     guest/services/entry.s's own da_BootPoint does (M3: mounter.c's V34
+|     fallback path Enqueue's a hand-built BootNode on eb_MountList for
+|     strap to find; V36+ never calls da_BootPoint at all, AddBootNode
+|     handles it).
 |
 | This board is a device, not a library or DOS handler: `rt_Type` is
 | NT_DEVICE, and `rt_Init` (patched by `_diag_entry` below, deferred to
@@ -90,11 +93,31 @@ _diag_point:
 	jsr	(_diag_entry-_entry_table+8)(a0) | +8 = ROM_OFFSET
 	rts
 _boot_point:
-	| copperhf.device has nothing to boot (no DOS mounter until M3) --
-	| this exists only because DAC_CONFIGTIME requires a non-zero
-	| da_BootPoint at all. Decline immediately, same as HostSocket's.
-	moveq	#0,d0
+	| Called by strap (A6 = ExecBase) when one of our BootNodes -- V34
+	| only; V36+ boots through AddBootNode's own strap integration, which
+	| never calls da_BootPoint at all -- has the highest boot priority.
+	| Mirrors guest/services/entry.s's own da_BootPoint move-for-move:
+	| fire up dos.library, whose init mounts the highest-priority
+	| BootNode (mounter.c's chf_add_boot_node_v34 built and Enqueue'd it
+	| on eb_MountList) as SYS:. Returns (boot failed, strap tries the
+	| next candidate) only if dos.library is missing. Not exercised by
+	| the AROS CI gate (it boots V36+ only); correctness here rests on
+	| this being byte-for-byte the same recipe as the already
+	| hardware-proven guest/services ROM.
+	lea	_dos_name(pc),a1
+	jsr	-96(a6)		| FindResident("dos.library")
+	tst.l	d0
+	beq.s	1f
+	move.l	d0,a0
+	move.l	22(a0),d0	| rt_Init
+	beq.s	1f
+	move.l	d0,a0
+	jsr	(a0)		| boots DOS; does not return on success
+1:	moveq	#0,d0
 	rts
+_dos_name:
+	.asciz	"dos.library"
+	.balign	2
 
 	| struct Resident ("Romtag"; exec/resident.h). rt_Init is called
 	| with D0=0, A0=NULL segList, A6=ExecBase once expansion has
