@@ -811,8 +811,9 @@ fn hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host(
 /// (Startup-Sequence only), the bundled AROS ROM boots it at priority 6,
 /// and the Startup-Sequence CDs to the program volume and runs the guest
 /// probe -- which writes FROM-GUEST next to the binary on the host. The
-/// staging is redirected via XDG_CONFIG_HOME so the invoking user's real
-/// config directory is never touched.
+/// staging is redirected via a scratch HOME (and USERPROFILE, for a
+/// Windows host) so the invoking user's real Documents/Copperline is
+/// never touched.
 #[test]
 #[ignore = "runs the emulator"]
 fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Error>> {
@@ -832,7 +833,8 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
         .env("RUST_LOG", "copperline=warn")
         .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &config_home)
+        .env("USERPROFILE", &config_home)
         .arg("--noaudio")
         .arg("--run")
         .arg(prog_dir.join("mkfile"))

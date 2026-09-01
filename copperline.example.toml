@@ -16,8 +16,8 @@ rom = "kickstart.rom"
 # [paths] -- where Copperline writes what it produces, and where its file
 # dialogs open when the field they were launched from is empty. Every key is
 # optional; the defaults are folders of these names under the host-data
-# directory (~/.config/copperline, %APPDATA%\copperline, or the executable's
-# folder in a portable install). Relative paths hang off `base`, absolute
+# directory (~/Documents/Copperline, %USERPROFILE%\Documents\Copperline, or
+# the executable's folder in a portable install). Relative paths hang off `base`, absolute
 # paths are used as given. Entries naming folders this machine cannot reach
 # are ignored with a log warning and the default is used instead.
 # [paths]

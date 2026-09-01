@@ -102,7 +102,8 @@ fn assert_cannon_fmv(
     let mut command = Command::new(env!("CARGO_BIN_EXE_copperline"));
     command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("XDG_CONFIG_HOME", scratch.join("config"))
+        .env("HOME", scratch.join("config"))
+        .env("USERPROFILE", scratch.join("config"))
         .env("RUST_LOG", "copperline::cd32_fmv=trace,copperline=warn");
     if let Some(aros_dir) = aros_dir {
         command.env("COPPERLINE_AROS_DIR", aros_dir);

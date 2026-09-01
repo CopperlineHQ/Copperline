@@ -125,29 +125,44 @@ fn discover_config_dir() -> Option<PathBuf> {
     // the saves, screenshots and configs a person actually goes looking
     // for -- moves out to Documents.
     if APP_IDENTITY.get().is_some() {
-        for var in ["XDG_CONFIG_HOME", "APPDATA"] {
-            if let Some(dir) = crate::envcfg::var_os(var) {
-                return Some(PathBuf::from(dir).join(app_identity()));
-            }
-        }
-        return crate::envcfg::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(".config").join(app_identity()));
+        return hidden_config_dir(
+            ["XDG_CONFIG_HOME", "APPDATA"]
+                .iter()
+                .find_map(|var| crate::envcfg::var_os(var)),
+            crate::envcfg::var_os("HOME"),
+        );
     }
     // The user's own Documents folder: %USERPROFILE% is the Windows
-    // spelling of a home directory, HOME everyone else's. One chain serves
-    // both -- whichever the host defines names the home.
-    documents_config_dir(
-        ["USERPROFILE", "HOME"]
-            .iter()
-            .find_map(|var| crate::envcfg::var_os(var)),
-    )
+    // spelling of a home directory, HOME everyone else's. Chosen per
+    // platform, not by precedence -- a unix box that happens to export
+    // USERPROFILE too must not have it outrank the documented $HOME.
+    documents_config_dir(crate::envcfg::var_os(HOME_VAR))
 }
+
+/// The environment variable naming this platform's home directory.
+#[cfg(windows)]
+const HOME_VAR: &str = "USERPROFILE";
+#[cfg(not(windows))]
+const HOME_VAR: &str = "HOME";
 
 /// The host-data directory under a home: `<home>/Documents/<identity>`.
 /// Split out, like [`portable_config_dir`], so the shape is testable
 /// without mutating the process environment `envcfg` snapshots.
 fn documents_config_dir(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
     home.map(|home| PathBuf::from(home).join("Documents").join(app_identity()))
+}
+
+/// A player build's hidden per-user directory: the explicit config base
+/// (`XDG_CONFIG_HOME`/`APPDATA`) with the identity under it, else
+/// `<home>/.config/<identity>`. The same seam-shape as
+/// [`documents_config_dir`], for the same testability reason.
+fn hidden_config_dir(
+    config_base: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    config_base
+        .map(|base| PathBuf::from(base).join(app_identity()))
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config").join(app_identity())))
 }
 
 /// A named file directly inside [`config_dir`], e.g. `gamepads.toml`.
@@ -804,12 +819,26 @@ mod tests {
         );
     }
 
+    /// A player build's overridden identity keeps the hidden per-user
+    /// tree. The resolver is pure, so both fallbacks are pinned here --
+    /// with the default identity, since an override is process-global.
+    #[test]
+    fn an_overridden_identity_would_stay_in_the_hidden_tree() {
+        assert_eq!(
+            hidden_config_dir(Some("/home/lee/.config".into()), Some("/home/lee".into())),
+            Some(PathBuf::from("/home/lee/.config/Copperline")),
+            "an explicit config base wins"
+        );
+        assert_eq!(
+            hidden_config_dir(None, Some("/home/lee".into())),
+            Some(PathBuf::from("/home/lee/.config/Copperline")),
+            "no base falls back to ~/.config"
+        );
+        assert_eq!(hidden_config_dir(None, None), None);
+    }
+
     /// The home resolves to the user's Documents folder -- somewhere a
     /// person browsing their own files can find, not a hidden config tree.
-    /// (A player build's overridden identity stays in the hidden tree; see
-    /// `discover_config_dir` -- that branch reads the process environment
-    /// through `envcfg`'s one snapshot, so it is exercised by the player
-    /// crate rather than driven from here.)
     #[test]
     fn host_data_lives_in_documents() {
         assert_eq!(
