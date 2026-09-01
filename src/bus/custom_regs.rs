@@ -150,6 +150,12 @@ impl Bus {
         // $020, and the second word must sample the first, not the residue
         // from before the transfer.
         self.data_bus = value;
+        // A freezer cartridge keeps the value every driven read returned,
+        // so its monitor can show the readable registers as the
+        // interrupted program last saw them.
+        if let Some(cartridge) = self.cartridge.as_mut() {
+            cartridge.note_custom_read(off, value);
+        }
         value
     }
 
@@ -301,6 +307,12 @@ impl Bus {
         source: BeamWriteSource,
     ) -> bool {
         let off = off & 0xFFE;
+        // A freezer cartridge shadows every custom-register write, CPU and
+        // Copper alike: the monitor cannot read the write-only registers
+        // back, so this is how it learns what the program had set.
+        if let Some(cartridge) = self.cartridge.as_mut() {
+            cartridge.note_custom_write(off, val);
+        }
         // Debugger-window register watch: record the first watched write
         // until the debugger polls it. The CpuCopperIrq attribution is a
         // render-pipeline nuance; the writer is the CPU.
