@@ -105,8 +105,8 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 | Function | WinUAE meaning | Copperline |
 |---|---|---|
 | 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) engages or releases warp. The template's `cpu_speed` and `*_cycle_exact` keys are accepted and ignored: the core is always cycle-exact. Returns 0, as WinUAE does. |
-| 86 | Debug log string | Printed on the host console as `DBG: <text>` (the same channel as serial output) and streamed to control-protocol `debug` subscribers as `event.debug`. Returns 1. |
-| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` are recorded and served by `debug.resources`; `debug_start_idle` / `debug_stop_idle` feed `debug.idle` and the `guest_idle_cck` field of `event.frame`. Overlay drawing and `debug_load` / `debug_save` are accepted no-ops (`debug_load` returns 0, not found). |
+| 86 | Debug log string | Printed on the host console as `DBG: <text>` (the same channel as serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and echoed into the debugger console pane while it is open. Returns 1. |
+| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` are recorded and served by `debug.resources`, previewed in the Frame Analyzer's Resources tab, named in its Memory tab, seedable into `palette.dump` / `copper.list`, and listed by the console's `DBGRES`; `debug_start_idle` / `debug_stop_idle` feed `debug.idle` and the `guest_idle_cck` field of `event.frame`. Overlay drawing and `debug_load` / `debug_save` are accepted no-ops (`debug_load` returns 0, not found). |
 | others | version, disks, RTG, ... | Return 0 with no side effect; Copperline does not report a WinUAE version. |
 
 - The trap is fitted by default; `[emulation] uaelib = false` leaves `$F0FF60`

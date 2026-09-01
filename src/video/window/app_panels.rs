@@ -1081,6 +1081,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerHeatPick { x, y }) => {
                 self.frame_analyzer_heat_pick(x, y)
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerResourceRow(index)) => {
+                self.frame_analyzer_select_resource(index)
+            }
             _ => {}
         }
         self.request_redraw();
