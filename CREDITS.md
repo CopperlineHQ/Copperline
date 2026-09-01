@@ -41,6 +41,13 @@ Thank you to:
   NetBSD, Berkeley, OSF, ODFileSystem, and ZX0 contributors. The exact source
   revisions, component inventory, and redistribution notices are kept beside
   the ROM in `assets/a4091/THIRD_PARTY_NOTICES.txt`.
+- **[HRTMon](https://github.com/wepl/hrtmon)** by Alain Malek, maintained by
+  Bert Jahn (wepl) and contributors, is the freezer-cartridge monitor bundled
+  as `assets/hrtmon/hrtmon.rom` and fitted by `[cartridge] model = "hrtmon"`.
+  It is assembled from the upstream source in its UAE cartridge
+  configuration (`hrtmon-rom/`) under the GNU GPL, version 2 or later; the
+  notice and license text are kept beside the image in
+  `assets/hrtmon/LICENSE`.
 - **[lide.device](https://github.com/LIV2/lide.device)** by Matt Harlum
   (LIV2) provides the autoboot ROM and CD-filesystem bank bundled as
   Copperline's default for a fitted `[lide]` board. `cdfs.rom` is Stefan

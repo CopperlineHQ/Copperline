@@ -67,6 +67,10 @@ class Copperline < Formula
     # rom/rom_bank2): <prefix>/share/copperline/lide.
     (pkgshare/"lide").install Dir["assets/lide/*"]
 
+    # The bundled HRTMon freezer-cartridge image (default for [cartridge]
+    # model = "hrtmon" without a named rom): <prefix>/share/copperline/hrtmon.
+    (pkgshare/"hrtmon").install Dir["assets/hrtmon/*"]
+
     # WHDLoad support archives: <prefix>/share/copperline/whdboot, where
     # whdload::find_whdboot_assets looks, with the provenance README beside
     # them. The stable formula can briefly point at a release made before a

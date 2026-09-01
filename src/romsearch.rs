@@ -90,6 +90,36 @@ pub fn find_bundled_fmv() -> Option<PathBuf> {
         .find(|rom| rom.is_file())
 }
 
+/// Bundled HRTMon freezer-cartridge image (HRTMon 2.39 assembled from
+/// https://github.com/wepl/hrtmon by `hrtmon-rom/build.sh`), used when a
+/// config fits the cartridge without naming an image.
+pub const HRTMON_ROM_FILE: &str = "hrtmon.rom";
+
+/// Locate the bundled HRTMon image, searching the same places as
+/// [`find_bundled_aros`] under an `hrtmon/` subdirectory.
+pub fn find_bundled_hrtmon() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = crate::envcfg::var("COPPERLINE_HRTMON_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("hrtmon"));
+            if let Some(parent) = bin_dir.parent() {
+                dirs.push(parent.join("Resources").join("hrtmon"));
+                dirs.push(parent.join("share").join("copperline").join("hrtmon"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("assets").join("hrtmon"));
+
+    dirs.into_iter()
+        .map(|dir| dir.join(HRTMON_ROM_FILE))
+        .find(|rom| rom.is_file())
+}
+
 /// Bundled open-source A4091 autoboot ROM, used when a config fits an A4091
 /// without naming a ROM. From https://github.com/A4091/a4091-software .
 pub const A4091_ROM_FILE: &str = "a4091_cdfs.rom";

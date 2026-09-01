@@ -36,6 +36,10 @@
 # the crates.io release; this tree is for working on the crate itself).
 /crates/m68k/
 
+# HRTMon cartridge image build output (the committed artifact is
+# assets/hrtmon/hrtmon.rom; hrtmon-rom/build.sh regenerates it).
+/hrtmon-rom/build/
+
 # Standalone cputest runner build output.
 /crates/cputest-runner/target
 # Standalone HostSocket plugin build output (the committed artifact is
@@ -66,6 +70,7 @@
 !/assets/lide/lide-atbus.rom
 !/assets/lide/cdfs.rom
 !/assets/fmv/copperline-fmv.rom
+!/assets/hrtmon/hrtmon.rom
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,
 # RTC battery-RAM backing files).

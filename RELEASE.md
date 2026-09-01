@@ -25,6 +25,9 @@ crates.io library, so the root package remains marked `publish = false`.
      `assets/fmv/README.md`)
    - `assets/services/services_rom.bin`, the guest-side host-filesystem
      handler built from `guest/services/`
+   - `assets/hrtmon/hrtmon.rom`, HRTMon 2.39 assembled reproducibly from
+     the upstream source by `hrtmon-rom/build.sh` (GPL-2.0-or-later; see
+     `assets/hrtmon/README.md` and `LICENSE`)
    - `assets/a4091/a4091_cdfs.rom`, the upstream A4091 v42.39 autoboot ROM
      (mixed redistribution notices and an exact component inventory are in
      `assets/a4091/THIRD_PARTY_NOTICES.txt`)
