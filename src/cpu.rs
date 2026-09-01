@@ -1971,6 +1971,36 @@ impl M68kMachine {
         self.dbg.is_some()
     }
 
+    /// Arm (or, with `None`, disarm) the environment-style headless debugger
+    /// programmatically. The debugger is a pure observer: its per-instruction
+    /// hooks read machine state through side-effect-free peeks and never
+    /// bill bus time, so arming it must not move the emulated timeline
+    /// (tests/debugger_transparency.rs holds that guarantee). The one
+    /// documented exception is a `[cpu] jit` machine, which drops back to
+    /// the precise per-instruction loop while any hook is armed.
+    pub fn arm_headless_debugger(&mut self, dbg: Option<crate::debugger::Debugger>) {
+        self.dbg = dbg;
+        self.note_jit_debug_fallback();
+    }
+
+    /// Log once when a JIT-enabled machine has been pushed onto the precise
+    /// loop by a debug or diagnostic hook: the batch model bills time
+    /// differently, so the run's timeline is no longer the undebugged JIT
+    /// run's. Silent otherwise.
+    fn note_jit_debug_fallback(&self) {
+        if self.jit_enabled
+            && !matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010)
+            && !self.jit_fast_path_ok()
+        {
+            log::warn!(
+                "cpu jit: a debug or diagnostic hook is armed, so this run uses the \
+                 precise per-instruction loop instead of the batch path; its \
+                 timeline differs from an undebugged [cpu] jit run (drop jit to \
+                 keep runs comparable)"
+            );
+        }
+    }
+
     /// Why interactive or environment-driven debugger state cannot observe
     /// speculative frames. Unlike CPU and chipset state, these counters,
     /// files, and rolling views intentionally survive a machine restore.
@@ -2181,6 +2211,7 @@ impl M68kMachine {
         }
         self.jit_enabled = on;
         self.bus.jit_enabled = on;
+        self.note_jit_debug_fallback();
     }
 
     pub fn jit_enabled(&self) -> bool {

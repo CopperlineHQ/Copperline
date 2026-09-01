@@ -18,6 +18,34 @@ COPPERLINE_DBG_SHOT=/tmp/hit \
 
 Addresses are specified in hexadecimal (with or without `0x` or `$` prefixes).
 
+## Timeline transparency
+
+The headless debugger is a pure observer. Its hooks read machine state
+through side-effect-free peeks, never bill chip-bus or CPU time, and write
+only to the host log, so arming any combination of the variables below
+leaves the emulated timeline byte-identical to an undebugged run: the same
+instructions retire at the same colour clocks, chip RAM holds the same
+bytes, and every frame renders the same. An investigation can therefore
+start from a plain `--screenshot-after` run and add breakpoints, watches,
+catches, traces, and dumps one at a time, knowing that each new
+instrument sees the same run the previous one did. The guarantee is held
+by `tests/debugger_transparency.rs`, which boots the bundled ROM twice,
+once with every hook armed, and compares the two machines after every
+frame.
+
+Two things do move a timeline, and both are documented behaviour rather
+than instrumentation cost:
+
+- A `[cpu] jit` machine (`--jit`) runs the batch/trace core, which bills
+  time in coarse batches instead of per instruction. Any armed debug or
+  diagnostic hook needs the per-instruction loop, so the machine drops back
+  to it for the whole run and logs a warning at start-up: the debugged run
+  is then the precise-timing run, not the JIT run. Compare debugged and
+  undebugged runs with JIT off.
+- Model knobs are not observation: `COPPERLINE_IRQ_LATENCY_CCK`,
+  `COPPERLINE_DBG_EXTCCK`, the CPU model, and any input script change the
+  machine and so change the timeline by design.
+
 ## Breakpoint and watchpoint variables
 
 `COPPERLINE_DBG_BREAK=PC[,PC...]`
