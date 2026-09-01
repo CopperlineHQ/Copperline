@@ -823,6 +823,32 @@ impl TryFrom<RawConfig> for Config {
         };
 
         let toccata = raw.toccata.enabled.unwrap_or(defaults.toccata);
+
+        // `[cartridge]`: a model with no image of its own gets the bundled
+        // one (resolved to a path by config::resolve); an image with no
+        // model is a mistake worth flagging rather than a silent no-op.
+        let cartridge = {
+            let model = match raw.cartridge.model.as_deref() {
+                Some(model) => CartridgeConfig::parse_model(model)
+                    .map_err(|error| anyhow!("[cartridge] {error}"))?,
+                None => defaults.cartridge.model,
+            };
+            let rom = raw
+                .cartridge
+                .rom
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from);
+            if rom.is_some() && model.is_none() {
+                return Err(anyhow!(
+                    "[cartridge] rom applies only to a fitted cartridge (model = \"hrtmon\")"
+                ));
+            }
+            CartridgeConfig {
+                model,
+                rom: model.and(rom.or_else(|| Some(PathBuf::from(BUNDLED_HRTMON_ROM)))),
+            }
+        };
         let mhi = raw.mhi.enabled.unwrap_or(defaults.mhi);
 
         // `[hostsocket]` expands to the bundled WASM plugin board (see
@@ -1280,6 +1306,7 @@ impl TryFrom<RawConfig> for Config {
             lide,
             a2065_net,
             toccata,
+            cartridge,
             mhi,
             hostsocket_net,
             hostsocket_transport,

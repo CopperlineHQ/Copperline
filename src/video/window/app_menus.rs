@@ -105,6 +105,7 @@ impl App {
             player: crate::video::player_profile(),
             player_save_states: crate::video::player_save_states(),
             paused: self.paused,
+            cartridge: self.emu.cartridge().map(|c| c.model().display_name()),
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
             bezel: self.bezel,
@@ -240,6 +241,7 @@ impl App {
             A::OpenFrameAnalyzer => self.open_frame_analyzer(),
             A::OpenDebugger => self.open_debugger(),
             A::OpenConsole => self.open_console(),
+            A::FreezeCartridge => self.freeze_cartridge(),
             A::OpenInputMapping => self.open_input_mapping(),
             A::OpenCalibration => {
                 self.ui.panel = Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));

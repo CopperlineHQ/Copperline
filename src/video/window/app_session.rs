@@ -377,6 +377,32 @@ impl App {
         self.set_warp(on, WarpSource::Manual);
     }
 
+    /// Press the freezer cartridge's button (the Freeze menu row, its
+    /// shortcut, `--freeze-after`, and the control protocol all land
+    /// here): the level-7 interrupt is raised for the next instruction
+    /// boundary, and the press is recorded like any other input so a
+    /// recorded session replays it at the same emulated instant.
+    pub(super) fn freeze_cartridge(&mut self) {
+        let Some(cartridge) = self.emu.cartridge() else {
+            self.show_osd("No freezer cartridge fitted");
+            return;
+        };
+        let label = cartridge.model().display_name();
+        match self.emu.cartridge_freeze() {
+            Ok(_) => {
+                let secs = self.emu.bus().emulated_seconds();
+                if let Some(rec) = self.input_recorder.as_mut() {
+                    rec.record_freeze(secs);
+                }
+                self.show_osd(format!("Freeze ({label})"));
+            }
+            Err(e) => {
+                log::warn!("cartridge freeze failed: {e}");
+                self.show_osd(format!("Freeze failed: {e}"));
+            }
+        }
+    }
+
     /// The guest's `warpmode()` through the uaelib trap, once per retired
     /// frame. Returns true when pacing changed, so the burst can break and
     /// the new pacing takes effect at this frame.

@@ -2324,19 +2324,23 @@ const SHORTCUT_NOTES: [&str; 3] = [
     "In the debugger: S step, O over, U out, F frame, R run/pause",
 ];
 const SHORTCUT_NOTE_H: usize = 12;
+/// Space between the last table row and the first note line.
+const SHORTCUT_NOTES_GAP: usize = 6;
 
 /// Panel height that exactly holds the table plus the notes, so adding a row
-/// does not silently push the last one off the bottom.
+/// does not silently push the last one off the bottom. The gap above the
+/// notes and the bottom margin are what a 25-row table leaves within the
+/// display.
 fn shortcuts_panel_height() -> usize {
     TITLE_H
         + 14
         + SHORTCUT_ROWS.len() * SHORTCUT_ROW_H
-        + 8
+        + SHORTCUT_NOTES_GAP
         + SHORTCUT_NOTES.len() * SHORTCUT_NOTE_H
-        + 10
+        + 8
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 24] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 25] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
@@ -2349,6 +2353,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 24] = [
     ("D", "Swap queued disk", true),
     ("G", "Capture mouse", true),
     ("B", "Debugger", true),
+    ("Shift+B", "Freeze (HRTMon)", true),
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
     ("M", "Monitor bezel off/on", true),
@@ -2383,7 +2388,7 @@ fn draw_shortcuts(frame: &mut [u8], rect: Rect, scale: usize) {
         draw_panel_text(frame, rect.x + 248, y, action, PANEL_TEXT, 2, scale);
         y += SHORTCUT_ROW_H;
     }
-    y += 8;
+    y += SHORTCUT_NOTES_GAP;
     for line in SHORTCUT_NOTES {
         draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT_DIM, 1, scale);
         y += SHORTCUT_NOTE_H;

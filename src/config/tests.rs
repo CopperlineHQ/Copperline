@@ -3585,6 +3585,68 @@ fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
 }
 
 #[test]
+fn cartridge_is_absent_by_default_and_hrtmon_takes_the_bundled_image() -> Result<()> {
+    use crate::cartridge::CartridgeModel;
+    use std::path::Path;
+    let cfg = parse_config("")?;
+    assert!(!cfg.cartridge.fitted());
+    assert_eq!(cfg.cartridge.rom, None);
+
+    let cfg = parse_config("[cartridge]\nmodel = \"hrtmon\"\n")?;
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Hrtmon));
+    assert_eq!(
+        cfg.cartridge.rom.as_deref(),
+        Some(Path::new(BUNDLED_HRTMON_ROM))
+    );
+
+    // The model is case-forgiving; an image of the user's own replaces
+    // the bundled one.
+    let cfg = parse_config("[cartridge]\nmodel = \"HRTMon\"\nrom = \"/roms/hrtmon.rom\"\n")?;
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Hrtmon));
+    assert_eq!(
+        cfg.cartridge.rom.as_deref(),
+        Some(Path::new("/roms/hrtmon.rom"))
+    );
+
+    let cfg = parse_config("[cartridge]\nmodel = \"none\"\n")?;
+    assert!(!cfg.cartridge.fitted());
+    assert_eq!(cfg.cartridge.rom, None);
+    Ok(())
+}
+
+#[test]
+fn cartridge_rejects_unknown_models_and_an_image_without_a_cartridge() {
+    let err = parse_config("[cartridge]\nmodel = \"actionreplay\"\n").unwrap_err();
+    assert!(err.to_string().contains("unknown cartridge model"), "{err}");
+    let err = parse_config("[cartridge]\nrom = \"/roms/hrtmon.rom\"\n").unwrap_err();
+    assert!(
+        err.to_string().contains("[cartridge] rom applies only"),
+        "{err}"
+    );
+}
+
+#[test]
+fn cartridge_cli_override_matches_the_config_field() -> Result<()> {
+    use crate::cartridge::CartridgeModel;
+    use std::path::Path;
+    let cfg = load_overrides(&ConfigOverrides {
+        cartridge: Some("hrtmon".to_string()),
+        ..ConfigOverrides::default()
+    })?;
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Hrtmon));
+    assert_eq!(
+        cfg.cartridge.rom.as_deref(),
+        Some(Path::new(BUNDLED_HRTMON_ROM))
+    );
+    let cfg = load_overrides(&ConfigOverrides {
+        cartridge: Some("none".to_string()),
+        ..ConfigOverrides::default()
+    })?;
+    assert!(!cfg.cartridge.fitted());
+    Ok(())
+}
+
+#[test]
 fn mhi_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
     assert!(!parse_config("")?.mhi);
     let cfg = parse_config("[mhi]\nenabled = true\n")?;

@@ -683,6 +683,10 @@ pub enum LauncherField {
     /// The MacroSystem Toccata sound board: fitted or not (`[toccata]
     /// enabled`). No other options exist (see docs/internals/toccata.md).
     Toccata,
+    /// The freezer cartridge (`[cartridge] model`): none, or the bundled
+    /// HRTMon monitor. An image of the user's own (`rom`) is carried
+    /// across the round trip but has no row.
+    Cartridge,
     /// The MHI virtual MPEG audio decoder board: fitted or not (`[mhi]
     /// enabled`). No other options exist (see docs/internals/mhi.md). Present
     /// only in an `mhi` build, the only build that can fit the board.
@@ -962,7 +966,20 @@ use RowKind::{Bootpri, Cycle, Drive, Toggle};
 // `std::path::Path` import.
 use RowKind::Path as PathRow;
 
-const SYSTEM_ROWS: [Row; 7] = [
+/// The `[cartridge] model` spelling of a launcher choice.
+fn cartridge_model_name(model: Option<crate::cartridge::CartridgeModel>) -> &'static str {
+    match model {
+        None => "none",
+        Some(m) => m.label(),
+    }
+}
+
+/// The row label for a cartridge choice.
+fn cartridge_label(model: Option<crate::cartridge::CartridgeModel>) -> &'static str {
+    model.map_or("None", |m| m.display_name())
+}
+
+const SYSTEM_ROWS: [Row; 8] = [
     row(F::Chipset, "Chipset", Cycle),
     row(F::Agnus, "Agnus", Cycle),
     row(F::Denise, "Denise", Cycle),
@@ -970,6 +987,7 @@ const SYSTEM_ROWS: [Row; 7] = [
     row(F::Rtc, "Real-time clock", Cycle),
     row(F::Identify, "Identify board", Cycle),
     row(F::Rtg, "RTG card", Cycle),
+    row(F::Cartridge, "Freezer cartridge", Cycle),
 ];
 const CPU_ROWS: [Row; 6] = [
     row(F::Cpu, "CPU", Cycle),
@@ -2274,6 +2292,11 @@ pub struct MachineSetup {
     /// The MacroSystem Toccata sound board, edited in the I/O Ports tab's
     /// Audio page (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
+    /// The freezer cartridge (`[cartridge] model`), edited in the System
+    /// tab, and an image of the user's own (`[cartridge] rom`), carried
+    /// across the round trip without a row.
+    cartridge: Option<crate::cartridge::CartridgeModel>,
+    cartridge_rom: Option<PathBuf>,
     /// The MHI virtual MPEG audio decoder board, edited on the same Audio
     /// page (`[mhi] enabled`) in an `mhi` build, the only build that can
     /// fit the board. Kept as an unconditional passthrough field even in a
@@ -2619,6 +2642,13 @@ impl MachineSetup {
             hostsocket_gateway: raw.hostsocket.gateway.clone(),
             hostsocket_resolver: raw.hostsocket.resolver.clone(),
             toccata: cfg.toccata,
+            cartridge: cfg.cartridge.model,
+            cartridge_rom: raw
+                .cartridge
+                .rom
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
             mhi: cfg.mhi,
             bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
@@ -3376,6 +3406,14 @@ impl MachineSetup {
         if self.toccata != base.toccata {
             raw.toccata.enabled = Some(self.toccata);
         }
+        if self.cartridge != base.cartridge.model {
+            raw.cartridge.model = Some(cartridge_model_name(self.cartridge).to_string());
+        }
+        if self.cartridge.is_some() {
+            if let Some(rom) = &self.cartridge_rom {
+                raw.cartridge.rom = Some(rom.display().to_string());
+            }
+        }
         if self.mhi != base.mhi {
             raw.mhi.enabled = Some(self.mhi);
         }
@@ -3562,6 +3600,8 @@ impl MachineSetup {
         self.warp = base.emulation.warp_speed;
         self.run_ahead_frames = base.emulation.run_ahead_frames;
         self.uaelib = base.emulation.uaelib;
+        self.cartridge = base.cartridge.model;
+        self.cartridge_rom = None;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
@@ -4447,6 +4487,7 @@ impl MachineSetup {
             F::SerialTelnet => enabled_label(self.serial_telnet),
             F::Rtc => enabled_label(self.rtc),
             F::Identify => enabled_label(self.identify),
+            F::Cartridge => cartridge_label(self.cartridge).to_string(),
             F::Fpu => enabled_label(self.fpu),
             F::Icache => enabled_label(self.icache),
             F::Dcache => enabled_label(self.dcache),
@@ -4934,6 +4975,12 @@ impl MachineSetup {
             F::SerialTelnet => self.serial_telnet = !self.serial_telnet,
             F::Rtc => self.rtc = !self.rtc,
             F::Identify => self.identify = !self.identify,
+            F::Cartridge => {
+                self.cartridge = match self.cartridge {
+                    None => Some(crate::cartridge::CartridgeModel::Hrtmon),
+                    Some(_) => None,
+                }
+            }
             F::Fpu => self.fpu = !self.fpu,
             F::Icache => self.icache = !self.icache,
             F::Dcache => self.dcache = !self.dcache,

@@ -53,6 +53,11 @@ pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
 /// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
 
+/// Sentinel `[cartridge] rom` for a freezer cartridge fitted without a
+/// named image: resolve to the bundled HRTMon image, or fail. A real
+/// `rom = "..."` replaces it.
+pub const BUNDLED_HRTMON_ROM: &str = "<bundled-hrtmon>";
+
 /// Sentinel `[scsi] rom` for an A2091/A590 fitted without a named ROM:
 /// resolve to Copperline's open replacement ROM, or fail. Explicit merged
 /// and split-EPROM paths continue to take precedence.
@@ -261,6 +266,10 @@ pub struct Config {
     /// joins the mixer as the `toccata` audio source. No other options
     /// exist yet (see docs/internals/toccata.md).
     pub toccata: bool,
+    /// Freezer cartridge (`[cartridge]`, `crate::cartridge`): a system
+    /// monitor in its own bank at $A10000, entered by a level-7 interrupt
+    /// on a freeze.
+    pub cartridge: CartridgeConfig,
     /// The MHI virtual MPEG audio decoder board (`[mhi] enabled = true`):
     /// when true, an MHI board autoconfigs on the Zorro chain and its
     /// decoded-MP3 output joins the mixer as the `mhi` audio source. No
@@ -1248,6 +1257,39 @@ pub struct LideConfig {
     /// Drive images, in (channel, master/slave) order: 0-1 are channel 0's,
     /// 2-3 are channel 1's (RIPPLE only).
     pub drives: [Option<DriveImage>; 4],
+}
+
+/// `[cartridge]`: which freezer cartridge is fitted, and the image it
+/// carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CartridgeConfig {
+    /// None for no cartridge (the default).
+    pub model: Option<crate::cartridge::CartridgeModel>,
+    /// The cartridge image. [`BUNDLED_HRTMON_ROM`] until resolved, when
+    /// a model is fitted without an image of the user's own.
+    pub rom: Option<PathBuf>,
+}
+
+impl CartridgeConfig {
+    pub fn fitted(&self) -> bool {
+        self.model.is_some()
+    }
+
+    /// Parse a `[cartridge] model` / `--cartridge` value.
+    pub fn parse_model(value: &str) -> Result<Option<crate::cartridge::CartridgeModel>> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "" => Ok(None),
+            "hrtmon" => Ok(Some(crate::cartridge::CartridgeModel::Hrtmon)),
+            other => Err(anyhow!(
+                "unknown cartridge model {other:?} (expected \"none\" or \"hrtmon\")"
+            )),
+        }
+    }
+
+    /// The model as the config spells it.
+    pub fn model_label(&self) -> &'static str {
+        self.model.map_or("none", |m| m.label())
+    }
 }
 
 impl LideConfig {
@@ -2385,6 +2427,7 @@ impl Default for Config {
             lide: LideConfig::default(),
             a2065_net: None,
             toccata: false,
+            cartridge: CartridgeConfig::default(),
             mhi: false,
             hostsocket_net: None,
             hostsocket_transport: None,
@@ -2670,6 +2713,9 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
+    /// Freezer cartridge (`--cartridge MODEL`): "none" or "hrtmon". Same
+    /// parser as `[cartridge] model`.
+    pub cartridge: Option<String>,
     /// Real host disks given to the machine (`--host-disk DEVICE [ATTACH]`, or
     /// `--host-disk-read-only` for the protected form), in command-line order.
     pub host_disks: Vec<HostDiskArg>,
@@ -2757,6 +2803,7 @@ impl ConfigOverrides {
             && self.mt32_control_rom.is_none()
             && self.mt32_pcm_rom.is_none()
             && self.mt32_panel.is_none()
+            && self.cartridge.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -3011,6 +3058,9 @@ impl ConfigOverrides {
         }
         if let Some(panel) = self.mt32_panel {
             raw.serial.mt32_panel = Some(panel);
+        }
+        if let Some(model) = &self.cartridge {
+            raw.cartridge.model = Some(model.clone());
         }
     }
 }

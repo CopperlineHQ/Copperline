@@ -190,6 +190,12 @@ impl InputRecorder {
         ));
     }
 
+    /// Record a freezer-cartridge button press.
+    pub fn record_freeze(&mut self, secs: f64) {
+        self.lines
+            .push((secs, format!("freeze-after {}", fmt_secs(secs))));
+    }
+
     fn emit_click(&mut self, port: usize, name: &str, press: f64, release: f64) {
         self.lines.push((
             press,
@@ -432,6 +438,14 @@ mod tests {
         assert!(script.contains("click-after 1.500 left 500\n"), "{script}");
         assert!(script.contains("joy-after 1.500 up 500\n"), "{script}");
         assert!(!script.contains("# ports:"), "{script}");
+    }
+
+    #[test]
+    fn a_cartridge_freeze_is_recorded_as_a_freeze_after_line() {
+        let mut rec = InputRecorder::new(0.0);
+        rec.record_freeze(12.3456);
+        let script = rec.finish();
+        assert!(script.contains("freeze-after 12.345\n"), "{script}");
     }
 
     #[test]

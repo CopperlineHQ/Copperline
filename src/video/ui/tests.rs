@@ -3060,6 +3060,7 @@ fn panels_render_into_their_rects() {
         player: false,
         player_save_states: false,
         paused: false,
+        cartridge: None,
         fullscreen: false,
         status_bar_hidden: false,
         bezel: crate::config::BezelStyle::None,

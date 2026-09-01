@@ -168,6 +168,7 @@ pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     resolve_bundled_a4091_rom(cfg)?;
     resolve_bundled_lide_rom(cfg)?;
     resolve_bundled_fmv_rom(cfg)?;
+    resolve_bundled_hrtmon_rom(cfg)?;
     if cfg.rom_path != Path::new(BUNDLED_AROS_ROM) {
         return Ok(());
     }
@@ -230,6 +231,29 @@ fn resolve_bundled_fmv_rom(cfg: &mut Config) -> Result<()> {
     })?;
     log::info!("using bundled open CD32 FMV ROM ({})", rom.display());
     cfg.fmv_rom_path = Some(rom);
+    Ok(())
+}
+
+/// Resolve a [`BUNDLED_HRTMON_ROM`] sentinel in `[cartridge] rom` to the
+/// located bundled image, or fail telling the user where to install one.
+fn resolve_bundled_hrtmon_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.cartridge.rom.as_deref() != Some(Path::new(BUNDLED_HRTMON_ROM)) {
+        return Ok(());
+    }
+    let rom = crate::romsearch::find_bundled_hrtmon().ok_or_else(|| {
+        anyhow!(
+            "[cartridge] model = \"hrtmon\" but no image was named and the bundled \
+             HRTMon image was not found. Set [cartridge] rom = \"...\" (an HRTMon \
+             cartridge image), or install {} next to the binary or under \
+             share/copperline/hrtmon/.",
+            crate::romsearch::HRTMON_ROM_FILE
+        )
+    })?;
+    log::info!(
+        "no cartridge image specified; using bundled HRTMon ({})",
+        rom.display()
+    );
+    cfg.cartridge.rom = Some(rom);
     Ok(())
 }
 
