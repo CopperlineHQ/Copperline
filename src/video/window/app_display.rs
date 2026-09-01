@@ -298,7 +298,11 @@ impl App {
     /// Draw a given monitor front for the rest of the run (the config file
     /// default is unchanged; set `[display] bezel` to make it stick).
     pub(super) fn set_bezel(&mut self, style: BezelStyle) {
-        self.apply_bezel_style(style);
+        if !self.apply_bezel_style(style) {
+            self.show_osd("Monitor bezel unchanged: the display texture could not be resized");
+            self.request_redraw();
+            return;
+        }
         info!("monitor bezel: {}", style.label());
         self.show_osd(format!("Monitor bezel: {}", style.menu_label()));
         self.request_redraw();
@@ -310,17 +314,26 @@ impl App {
     /// under integer scaling of the tv aspect (`video::square_canvas`) --
     /// the texture and window that follow the canvas. Says nothing on
     /// screen: the toggle announces itself, a machine start does not.
-    pub(super) fn apply_bezel_style(&mut self, style: BezelStyle) {
+    /// False, with the previous style back in force, when the texture
+    /// could not follow the canvas change.
+    pub(super) fn apply_bezel_style(&mut self, style: BezelStyle) -> bool {
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
+        let previous = (self.bezel, self.bezel_last);
         self.bezel = style;
         if style.is_on() {
             self.bezel_last = style;
         }
         crate::video::set_bezel_shown(style.is_on());
-        if window_present_height() != canvas_before {
-            self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+        if window_present_height() != canvas_before
+            && !self.resync_canvas_geometry(was_canvas_sized, canvas_before)
+        {
+            (self.bezel, self.bezel_last) = previous;
+            crate::video::set_bezel_shown(self.bezel.is_on());
+            self.replan_main_texture();
+            return false;
         }
+        true
     }
 
     /// Cmd/Alt+P: toggle the performance overlay for the rest of the run
@@ -460,11 +473,17 @@ impl App {
         // note the height that verdict is measured against.
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
+        let previous = crate::video::pixel_aspect();
         crate::video::set_pixel_aspect(aspect);
         // The square aspect and integer scaling of the tv aspect share the
         // square canvas, so the height need not change; the geometry
         // resync is a no-op then, and the texture is re-planned regardless.
-        self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+        if !self.resync_canvas_geometry(was_canvas_sized, canvas_before) {
+            crate::video::set_pixel_aspect(previous);
+            self.replan_main_texture();
+            self.show_osd("Pixel aspect unchanged: the display texture could not be resized");
+            return;
+        }
         self.request_redraw();
     }
 
@@ -477,11 +496,24 @@ impl App {
     /// layout is the canvas's, panel centring reading the live height --
     /// on the new size too, and move the window with it
     /// (`follow_canvas_change`).
-    pub(super) fn resync_canvas_geometry(&mut self, was_canvas_sized: bool, canvas_before: usize) {
+    ///
+    /// False when the main texture could not be resized for the new
+    /// canvas, and then nothing else is touched. The draw helpers slice
+    /// the texture by the live canvas height, so a taller canvas over the
+    /// old, shorter texture would index past it on the next redraw: the
+    /// caller must put its setting back and re-plan for the canvas it
+    /// went back to ([`Self::replan_main_texture`]), as the status-bar
+    /// toggle does.
+    pub(super) fn resync_canvas_geometry(
+        &mut self,
+        was_canvas_sized: bool,
+        canvas_before: usize,
+    ) -> bool {
         if let Some(r) = self.render.as_mut() {
             let surface = r.window.inner_size();
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
                 warn!("resize texture buffer for the canvas change failed: {e}");
+                return false;
             }
         }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
@@ -502,6 +534,19 @@ impl App {
             }
         }
         self.follow_canvas_change(was_canvas_sized, canvas_before);
+        true
+    }
+
+    /// Re-plan the main texture for the canvas a reverted setting went
+    /// back to. The plan taken for the canvas that never materialised is
+    /// stale; the texture kept its old extent (`resize_buffer` leaves it
+    /// on failure), so this re-take is what makes texture and canvas
+    /// agree again before the next redraw.
+    pub(super) fn replan_main_texture(&mut self) {
+        if let Some(r) = self.render.as_mut() {
+            let surface = r.window.inner_size();
+            let _ = sync_main_present_scaling(r, (surface.width, surface.height));
+        }
     }
 
     /// Switch how the presentation canvas is scaled into the window live.
@@ -521,9 +566,15 @@ impl App {
         }
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
+        let previous = crate::video::display_scaling();
         crate::video::set_display_scaling(scaling);
         if window_present_height() != canvas_before {
-            self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+            if !self.resync_canvas_geometry(was_canvas_sized, canvas_before) {
+                crate::video::set_display_scaling(previous);
+                self.replan_main_texture();
+                self.show_osd("Scaling unchanged: the display texture could not be resized");
+                return;
+            }
         } else if let Some(r) = self.render.as_mut() {
             // A minimized window has no surface to re-plan against; the
             // Resized event that restores it re-plans itself.

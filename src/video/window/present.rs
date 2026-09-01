@@ -811,7 +811,19 @@ pub(super) fn per_axis_fit(
     type Candidate = ((usize, usize), (u64, u64), bool);
     let mut best: Option<Candidate> = None;
     for lines in 1..=max_lines {
-        for columns in 1..=max_columns {
+        // At a given height the shape grows with the column count, so
+        // only the two counts astride the ideal one (lines * par / 2)
+        // can be the closest -- and the tolerance band, an interval
+        // around the ideal, holds one of them if it holds any. Two
+        // candidates per height instead of every column: a one-line
+        // autocrop rect on a large surface has thousands of both, and
+        // the fit runs on every redraw and cursor move.
+        let ideal = (lines as u64 * par_w / (2 * par_h)) as usize;
+        let astride = [
+            ideal.clamp(1, max_columns),
+            (ideal + 1).clamp(1, max_columns),
+        ];
+        for columns in astride {
             let dev = deviation(columns, lines);
             let ok = within(dev);
             let better = match best {

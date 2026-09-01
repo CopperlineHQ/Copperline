@@ -8937,6 +8937,77 @@ fn per_axis_fit_reaches_the_ntsc_shapes_of_ordinary_displays() {
     );
 }
 
+/// The fit evaluates only the two column counts astride the ideal at
+/// each height, and that loses nothing against trying every column: the
+/// shape is monotone in the count at a fixed height, so the closest count
+/// is one of the two, and the tolerance band holds one of them if it
+/// holds any. Checked against the exhaustive rule over a grid of small
+/// surfaces, rects and shapes; and a one-line autocrop rect on a large
+/// surface, which the exhaustive scan would spend millions of steps on
+/// per redraw, still answers.
+#[test]
+fn per_axis_fit_prunes_to_the_columns_astride_the_ideal() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let exhaustive = |avail: (u32, u32), (w, h): (usize, usize), par: (u32, u32)| {
+        let (max_columns, max_lines) = (avail.0 as usize / w, 2 * avail.1 as usize / h);
+        let (pw, ph) = (u64::from(par.0), u64::from(par.1));
+        let dev = |c: usize, l: usize| {
+            let (a, b) = (2 * c as u64 * ph, l as u64 * pw);
+            (a.max(b), a.min(b))
+        };
+        let within = |(hi, lo): (u64, u64)| hi * 10 <= lo * 11;
+        let cmp = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+        type Candidate = ((usize, usize), (u64, u64), bool);
+        let mut best: Option<Candidate> = None;
+        for l in 1..=max_lines {
+            for c in 1..=max_columns {
+                let d = dev(c, l);
+                let ok = within(d);
+                let better = match best {
+                    None => true,
+                    Some((_, _, bok)) if ok != bok => ok,
+                    Some((b, bd, true)) => l.cmp(&b.1).then(cmp(bd, d)).then(c.cmp(&b.0)).is_gt(),
+                    Some((b, bd, false)) => cmp(bd, d).then(l.cmp(&b.1)).then(c.cmp(&b.0)).is_gt(),
+                };
+                if better {
+                    best = Some(((c, l), d, ok));
+                }
+            }
+        }
+        best.map(|(f, _, _)| f)
+    };
+    let shapes = [
+        super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Full, None, OUT_HEIGHT),
+        (1, 3),
+        (3, 1),
+    ];
+    for par in shapes {
+        for (w, h) in [(2, 2), (3, 2), (5, 4), (7, 6), (16, 10), (40, 30)] {
+            for avail in [
+                (1, 1),
+                (7, 5),
+                (40, 30),
+                (97, 61),
+                (160, 90),
+                (200, 200),
+                (300, 120),
+            ] {
+                assert_eq!(
+                    super::per_axis_fit(avail, (w, h), par),
+                    exhaustive(avail, (w, h), par),
+                    "par {par:?} rect {w}x{h} on {avail:?}"
+                );
+            }
+        }
+    }
+    // A one-line, two-column rect on a 4K surface: thousands of counts
+    // on each axis, answered without the cross product.
+    let ntsc = shapes[1];
+    assert!(super::per_axis_fit((3840, 2160), (2, 2), ntsc).is_some());
+}
+
 /// Per-axis integer scaling draws the rect at exactly its factors -- the
 /// columns times the horizontal one, the field lines times the vertical
 /// one -- centred and point-sampled, and the cursor mapping inverts that
