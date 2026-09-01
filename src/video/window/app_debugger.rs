@@ -707,7 +707,8 @@ impl App {
             visible_start_vpos,
             h_shift,
             self.overscan,
-        );
+        )
+        .rows;
         let base = self.emu.bus().frame_render_base();
         let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,

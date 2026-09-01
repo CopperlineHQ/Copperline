@@ -1613,9 +1613,10 @@ struct RenderWorkerResult {
     /// frames keep the previous geometry.
     tv_aperture: TvApertureFrame,
     programmable: bool,
-    /// Playfield content envelope in woven presentation-buffer space (x
-    /// in framebuffer pixels, y in woven rows), for the autocrop
-    /// presentation; `None` for border-only or programmable frames.
+    /// Playfield content envelope in presentation-buffer space (x in
+    /// buffer columns, y in buffer rows: the woven field of a standard
+    /// scan, the sync-anchored glass of a programmable one), for the
+    /// autocrop presentation; `None` for a border-only frame.
     content_rect: Option<bitplane::ContentRect>,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
@@ -4420,8 +4421,11 @@ impl ApplicationHandler for App {
                     // line prints whether or not a mode is on and the
                     // difference is invisible from it alone. The factors
                     // are the whole-number draw's pixels per canvas
-                    // column and per field line, and the shape is the
-                    // glass ratio a per-axis draw aims at.
+                    // column and per field line, the shape is the glass
+                    // ratio a per-axis draw aims at, and the scan says
+                    // which window model the envelope came through (a
+                    // programmable scan crops too, at the uniform
+                    // multiple).
                     if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
                         && self.last_diag_layout != Some(layout)
                     {
@@ -4431,10 +4435,6 @@ impl ApplicationHandler for App {
                             "off"
                         } else if self.rtg_present_dims.is_some() {
                             "suspended(rtg)"
-                        } else if self.present_programmable {
-                            "suspended(programmable)"
-                        } else if self.present_width != FB_WIDTH {
-                            "suspended(canvas-width)"
                         } else if self.bezel.is_on() {
                             "suspended(bezel)"
                         } else if autocrop && per_axis {
@@ -4445,10 +4445,15 @@ impl ApplicationHandler for App {
                             "active(autocrop)"
                         };
                         info!(
-                            "[DIAG_AUTOCROP] layout mode={} surface={:?} src_canvas={:?} \
-                             display_dst={:?} chrome_dst={:?} filter={:?} factors={:?} \
-                             shape={:?}",
+                            "[DIAG_AUTOCROP] layout mode={} scan={} surface={:?} \
+                             src_canvas={:?} display_dst={:?} chrome_dst={:?} filter={:?} \
+                             factors={:?} shape={:?}",
                             mode,
+                            if self.present_programmable {
+                                "programmable"
+                            } else {
+                                "standard"
+                            },
                             r.surface_size,
                             layout.src_canvas,
                             layout.display_dst,

@@ -258,6 +258,56 @@ fn programmable_blanking_blanks_vbstrt_vbstop_rows_under_varvben() {
     assert_eq!(row(&fb, 0x24), FILL);
 }
 
+/// The content envelope the autocrop presentation feeds on stops at the
+/// blanking: rows inside the programmable vertical blank (or past the
+/// frame end) and columns inside the horizontal blank are trimmed off
+/// its edges, exactly the rows and columns `apply_programmable_blanking`
+/// and `blank_rows_past_frame_end` paint black. A blank through the
+/// middle leaves the envelope alone, and an envelope blanked entirely
+/// is no envelope.
+#[test]
+fn content_rect_trims_to_the_blanking_the_frame_shows() {
+    let rect = ContentRect {
+        x0: 0x40,
+        x1: 0x200,
+        y0: 0x26,
+        y1: 0x100,
+    };
+    // Vertical blank over beam lines 0x50..0x58 = rows 0x24..0x2C: the
+    // envelope's first rows fall inside it.
+    let vblank = Some((0x50u32, 0x58u32));
+    let trimmed = trim_content_rect_to_blanking(rect, vblank, None, 312, PAL_VISIBLE_LINE0)
+        .expect("envelope survives");
+    assert_eq!((trimmed.y0, trimmed.y1), (0x2C, 0x100));
+    assert_eq!((trimmed.x0, trimmed.x1), (0x40, 0x200));
+    // Horizontal blank over colour clocks 0x40..0x48 = framebuffer
+    // columns 0x3E..0x5E: the envelope's left edge is inside it.
+    let hblank = Some((0x40u32, 0x48u32));
+    let trimmed = trim_content_rect_to_blanking(rect, None, hblank, 312, PAL_VISIBLE_LINE0)
+        .expect("envelope survives");
+    assert_eq!(trimmed.x0, ((0x90 - DIW_HSTART_FB0) * 2) as usize);
+    assert_eq!(trimmed.x1, 0x200);
+    // The frame end: a 263-line scan shows rows up to beam line 262.
+    let trimmed = trim_content_rect_to_blanking(rect, None, None, 263, PAL_VISIBLE_LINE0)
+        .expect("envelope survives");
+    assert_eq!(trimmed.y1, (263 - PAL_VISIBLE_LINE0) as usize);
+    // A blank through the middle (rows 0x40..0x48) trims nothing.
+    let middle = Some((
+        PAL_VISIBLE_LINE0 as u32 + 0x80,
+        PAL_VISIBLE_LINE0 as u32 + 0x88,
+    ));
+    assert_eq!(
+        trim_content_rect_to_blanking(rect, middle, None, 312, PAL_VISIBLE_LINE0),
+        Some(rect)
+    );
+    // A blank covering every row of the envelope leaves none.
+    let all = Some((PAL_VISIBLE_LINE0 as u32, PAL_VISIBLE_LINE0 as u32 + 0x200));
+    assert_eq!(
+        trim_content_rect_to_blanking(rect, all, None, 312, PAL_VISIBLE_LINE0),
+        None
+    );
+}
+
 #[test]
 fn programmable_blanking_blanks_hbstrt_hbstop_columns_under_blanken() {
     use crate::chipset::agnus::{

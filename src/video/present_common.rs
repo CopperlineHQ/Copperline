@@ -179,6 +179,11 @@ pub fn tv_glass_sample(row: &[u32], out_x: usize, source_x_offset: i32) -> u32 {
     crate::video::blend_rgba(row[i], row[(i + 1).min(FB_WIDTH - 1)], frac)
 }
 
+/// Turn a rendered field into a presentable frame in place, and report
+/// how it was placed ([`FieldPlacement`]). Returns the placement rather
+/// than only its row count so a coordinate stated in field space -- the
+/// autocrop content envelope -- can follow the pixels through the same
+/// maps, and the two cannot disagree.
 pub fn post_process_rendered_field(
     fb: &mut [u32],
     geometry: FrameGeometry,
@@ -188,7 +193,7 @@ pub fn post_process_rendered_field(
     visible_start_vpos: u32,
     h_shift: usize,
     overscan: Overscan,
-) -> usize {
+) -> FieldPlacement {
     let canvas_width = FB_WIDTH * canvas_scale;
     let field_rows = geometry.visible_lines.min(fb.len() / canvas_width);
     // Vertical centring, optional full-overscan horizontal recentring, and the
@@ -204,29 +209,222 @@ pub fn post_process_rendered_field(
         if overscan == Overscan::Tv {
             mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
         }
-        return field_rows;
+        return FieldPlacement {
+            rows: field_rows,
+            canvas_scale,
+            map: PlacementMap::Standard {
+                y_offset: presentation_source_y_offset(visible_start_vpos),
+                h_shift,
+            },
+        };
     }
-    if let Some((src_x0, src_w)) = presentation_h_window {
+    let columns = if let Some((src_x0, src_w)) = presentation_h_window {
         // A multisync monitor locks its horizontal deflection to the
         // programmed sync pulse: the glass shows the line from the sync
         // trailing edge to the next pulse, centring the picture the way
         // the mode's own porches place it. The window is computed in
         // classic-canvas pixels; scale it to this frame's pitch.
-        screenshot::stretch_rows_x_window(
-            fb,
-            canvas_width,
-            field_rows,
-            src_x0 * canvas_scale as i32,
-            src_w * canvas_scale as u32,
-        );
+        let (src_x0, src_w) = (src_x0 * canvas_scale as i32, src_w * canvas_scale as u32);
+        screenshot::stretch_rows_x_window(fb, canvas_width, field_rows, src_x0, src_w);
+        ColumnMap::Window { src_x0, src_w }
     } else if geometry.line_cck != 227 {
         // No programmed sync to anchor on: fall back to the time-linear
         // whole-line map (each colour clock of this scan's shorter/longer
         // line covers 227/line_cck of the glass a standard line's clock
         // would).
         screenshot::stretch_rows_x(fb, canvas_width, field_rows, geometry.line_cck, 227);
+        ColumnMap::Linear {
+            src_num: geometry.line_cck,
+            src_den: 227,
+        }
+    } else {
+        ColumnMap::Identity
+    };
+    let rows =
+        presentation_v_window_placement(field_rows, fb.len() / canvas_width, presentation_v_window);
+    place_presentation_v_window(fb, canvas_width, field_rows, rows);
+    FieldPlacement {
+        rows: rows.rows,
+        canvas_scale,
+        map: PlacementMap::Programmable { columns, rows },
     }
-    apply_presentation_v_window(fb, canvas_width, field_rows, presentation_v_window)
+}
+
+/// How [`post_process_rendered_field`] placed a rendered field on the
+/// presentation buffer: the rows it left, and the maps it moved the
+/// pixels through. Built by the function from what it did, so a
+/// field-space coordinate mapped through it ([`Self::content_rect`])
+/// lands exactly where the pixels went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldPlacement {
+    /// Rows of the placed field.
+    pub rows: usize,
+    /// The canvas pitch the field was rendered at
+    /// (`bitplane::canvas_scale_for`): 1, or 2 for a 35 ns canvas.
+    canvas_scale: usize,
+    map: PlacementMap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlacementMap {
+    /// A standard scan: rows moved down by the vertical centring, columns
+    /// left by the full-overscan recentring shift.
+    Standard { y_offset: usize, h_shift: usize },
+    /// A programmable scan: columns resampled onto the glass width, rows
+    /// placed inside the sync-anchored vertical window.
+    Programmable {
+        columns: ColumnMap,
+        rows: VerticalPlacement,
+    },
+}
+
+/// The horizontal resample a programmable scan's line takes onto the
+/// glass width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnMap {
+    /// A standard-length line with no programmed sync: columns stay put.
+    Identity,
+    /// [`screenshot::stretch_rows_x_window`], the sync-anchored window.
+    Window { src_x0: i32, src_w: u32 },
+    /// [`screenshot::stretch_rows_x`], the time-linear whole-line map.
+    Linear { src_num: u32, src_den: u32 },
+}
+
+impl ColumnMap {
+    /// The source taps output column `x` of a `width`-column row reads.
+    fn source(self, x: usize, width: usize) -> (usize, u32) {
+        match self {
+            Self::Identity => (x, 0),
+            Self::Window { src_x0, src_w } => {
+                screenshot::stretch_rows_x_window_source(x, width, src_x0, src_w)
+            }
+            Self::Linear { src_num, src_den } => {
+                screenshot::stretch_rows_x_source(x, width, src_num, src_den)
+            }
+        }
+    }
+}
+
+impl FieldPlacement {
+    /// A standard placement, for callers that present a field the
+    /// classic way without the post-process pass.
+    pub fn standard(rows: usize, visible_start_vpos: u32, h_shift: usize) -> Self {
+        Self {
+            rows,
+            canvas_scale: 1,
+            map: PlacementMap::Standard {
+                y_offset: presentation_source_y_offset(visible_start_vpos),
+                h_shift,
+            },
+        }
+    }
+
+    /// Follow a content envelope the renderer stated in field canvas
+    /// space (`x` in hi-res-pitch pixels, `y` in rendered field rows)
+    /// through this placement and onto the `present_rows`-row buffer the
+    /// deinterlacer built from the placed field: the buffer rows and
+    /// columns that show any of the envelope. A standard field takes the
+    /// centring and recentring shifts, then two woven rows per field row;
+    /// a programmable field's columns are scanned against the resample's
+    /// own taps (so a partially blended edge column counts, and the
+    /// sync tail left of the capture, which clamps to the edge column,
+    /// counts when that column is picture), its rows are the captured
+    /// rows the vertical window kept, and the deinterlacer's row count
+    /// says whether the placed rows were woven (LACE) or passed through
+    /// at native height. `None` when nothing of the envelope reaches the
+    /// buffer -- a picture entirely off the glass.
+    pub fn content_rect(
+        &self,
+        rect: bitplane::ContentRect,
+        present_rows: usize,
+    ) -> Option<bitplane::ContentRect> {
+        let width = FB_WIDTH * self.canvas_scale;
+        // The renderer's x is the hi-res pitch; a 35 ns canvas fans each
+        // logical pixel out to `canvas_scale` columns.
+        let (x0, x1) = (rect.x0 * self.canvas_scale, rect.x1 * self.canvas_scale);
+        let (x0, x1, y0, y1) = match self.map {
+            PlacementMap::Standard { y_offset, h_shift } => {
+                let x0 = x0.saturating_sub(h_shift).min(width);
+                let x1 = x1.saturating_sub(h_shift).clamp(x0, width);
+                let y0 = (rect.y0 + y_offset).min(self.rows);
+                let y1 = (rect.y1 + y_offset).clamp(y0, self.rows);
+                (x0, x1, y0, y1)
+            }
+            PlacementMap::Programmable { columns, rows } => {
+                let mut shown = (0..width).filter(|&x| {
+                    screenshot::resampled_column_reads(columns.source(x, width), width, x0, x1)
+                });
+                let first = shown.next()?;
+                let last = shown.next_back().unwrap_or(first);
+                let kept = rows.skip_top..rows.skip_top + rows.content_rows;
+                let y0 = rect.y0.max(kept.start);
+                let y1 = rect.y1.min(kept.end);
+                if y1 <= y0 {
+                    return None;
+                }
+                let placed = |y: usize| y - rows.skip_top + rows.pad_top;
+                (first, last + 1, placed(y0), placed(y1))
+            }
+        };
+        // The deinterlacer wove or line-doubled the placed rows onto the
+        // buffer (two per row), or passed a programmable progressive field
+        // through at native height.
+        let row_scale = if present_rows >= 2 * self.rows { 2 } else { 1 };
+        let y0 = (row_scale * y0).min(present_rows);
+        let y1 = (row_scale * y1).clamp(y0, present_rows);
+        (x1 > x0 && y1 > y0).then_some(bitplane::ContentRect { x0, x1, y0, y1 })
+    }
+}
+
+/// Where [`apply_presentation_v_window`] puts the captured rows of a
+/// `field_rows`-row field: the rows it skips off the glass top, the
+/// blanked rows it pads above them, how many captured rows it keeps, and
+/// the rows of the result. Without a programmed vertical sync, or with a
+/// glass no taller than the field, the field is left as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerticalPlacement {
+    pub skip_top: usize,
+    pub pad_top: usize,
+    pub content_rows: usize,
+    pub rows: usize,
+}
+
+pub fn presentation_v_window_placement(
+    field_rows: usize,
+    buf_rows: usize,
+    presentation_v_window: Option<(i32, u32)>,
+) -> VerticalPlacement {
+    let unplaced = VerticalPlacement {
+        skip_top: 0,
+        pad_top: 0,
+        content_rows: field_rows,
+        rows: field_rows,
+    };
+    let Some((v_offset, glass_rows)) = presentation_v_window else {
+        return unplaced;
+    };
+    let glass_rows = (glass_rows as usize).min(buf_rows).max(1);
+    if glass_rows <= field_rows {
+        return unplaced;
+    }
+    // Rows the sync-anchored glass top cuts off the capture (offset < 0)
+    // vs. blanked glass rows above the captured window (offset > 0).
+    let skip_top = (-v_offset).max(0) as usize;
+    let pad_top = (v_offset).max(0) as usize;
+    if skip_top >= field_rows || pad_top >= glass_rows {
+        return VerticalPlacement {
+            skip_top,
+            pad_top,
+            content_rows: 0,
+            rows: glass_rows,
+        };
+    }
+    VerticalPlacement {
+        skip_top,
+        pad_top,
+        content_rows: (field_rows - skip_top).min(glass_rows - pad_top),
+        rows: glass_rows,
+    }
 }
 
 /// Vertical counterpart of the sync-anchored horizontal window: place the
@@ -240,24 +438,34 @@ pub fn apply_presentation_v_window(
     field_rows: usize,
     presentation_v_window: Option<(i32, u32)>,
 ) -> usize {
-    let Some((v_offset, glass_rows)) = presentation_v_window else {
-        return field_rows;
-    };
-    let buf_rows = fb.len() / canvas_width;
-    let glass_rows = (glass_rows as usize).min(buf_rows).max(1);
+    let placement =
+        presentation_v_window_placement(field_rows, fb.len() / canvas_width, presentation_v_window);
+    place_presentation_v_window(fb, canvas_width, field_rows, placement);
+    placement.rows
+}
+
+/// Move a `field_rows`-row field's pixels where
+/// [`presentation_v_window_placement`] decided.
+fn place_presentation_v_window(
+    fb: &mut [u32],
+    canvas_width: usize,
+    field_rows: usize,
+    placement: VerticalPlacement,
+) {
+    let VerticalPlacement {
+        skip_top,
+        pad_top,
+        content_rows,
+        rows: glass_rows,
+    } = placement;
     if glass_rows <= field_rows {
-        return field_rows;
+        return;
     }
-    // Rows the sync-anchored glass top cuts off the capture (offset < 0)
-    // vs. blanked glass rows above the captured window (offset > 0).
-    let skip_top = (-v_offset).max(0) as usize;
-    let pad_top = (v_offset).max(0) as usize;
     let black = rgba(0, 0, 0);
-    if skip_top >= field_rows || pad_top >= glass_rows {
+    if content_rows == 0 {
         fb[..glass_rows * canvas_width].fill(black);
-        return glass_rows;
+        return;
     }
-    let content_rows = (field_rows - skip_top).min(glass_rows - pad_top);
     if pad_top > skip_top {
         for row in (0..content_rows).rev() {
             let src = (skip_top + row) * canvas_width;
@@ -273,7 +481,6 @@ pub fn apply_presentation_v_window(
     }
     fb[..pad_top * canvas_width].fill(black);
     fb[(pad_top + content_rows) * canvas_width..glass_rows * canvas_width].fill(black);
-    glass_rows
 }
 
 /// `[display] overscan = "tv"`: black out the deep-overscan margins like the
@@ -799,6 +1006,173 @@ mod tests {
         for row in 2..10 {
             assert_eq!(fb[row * FB_WIDTH], black, "row {row}");
         }
+    }
+
+    /// The placement a programmable field reports carries its content
+    /// envelope exactly where the pixels went: columns through the
+    /// sync-anchored resample's own taps (a window starting left of the
+    /// capture pushes the picture right and widens it onto the glass),
+    /// rows through the vertical window's skip and pad, and the
+    /// deinterlacer's row count decides between native rows and woven
+    /// pairs.
+    #[test]
+    fn programmable_placement_maps_the_content_envelope_through_its_windows() {
+        use crate::video::bitplane::ContentRect;
+        let geometry = FrameGeometry {
+            programmable: true,
+            visible_start_vpos: 20,
+            visible_lines: 100,
+            line_cck: 130,
+            frame_lines: 140,
+            lace: false,
+        };
+        let mut fb = vec![0u32; FB_WIDTH * 120];
+        let lit = 0xFFFF_FFFF;
+        let content = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 10,
+            y1: 60,
+        };
+        for y in content.y0..content.y1 {
+            fb[y * FB_WIDTH + content.x0..y * FB_WIDTH + content.x1].fill(lit);
+        }
+        // A sync-anchored window from 40 columns left of the capture, 400
+        // wide, and a glass of 120 rows whose top sits 5 captured rows
+        // down.
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            1,
+            Some((-40, 400)),
+            Some((-5, 120)),
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        assert_eq!(placement.rows, 120);
+        let mapped = placement
+            .content_rect(content, placement.rows)
+            .expect("content reaches the glass");
+        // Every lit output pixel (any colour in it: a blended edge counts,
+        // the opaque black padding does not) lies inside the mapped rect,
+        // and the rect's edge columns and rows carry lit pixels (no
+        // slack).
+        let is_lit = |px: u32| px & 0x00FF_FFFF != 0;
+        for y in 0..placement.rows {
+            for x in 0..FB_WIDTH {
+                if is_lit(fb[y * FB_WIDTH + x]) {
+                    assert!(
+                        (mapped.x0..mapped.x1).contains(&x) && (mapped.y0..mapped.y1).contains(&y),
+                        "lit pixel ({x}, {y}) outside {mapped:?}"
+                    );
+                }
+            }
+        }
+        let lit_in_column = |x: usize| (0..placement.rows).any(|y| is_lit(fb[y * FB_WIDTH + x]));
+        let lit_in_row = |y: usize| (0..FB_WIDTH).any(|x| is_lit(fb[y * FB_WIDTH + x]));
+        assert!(lit_in_column(mapped.x0) && lit_in_column(mapped.x1 - 1));
+        assert!(lit_in_row(mapped.y0) && lit_in_row(mapped.y1 - 1));
+        // Rows: captured rows 10..60 minus the 5 skipped, at the glass top.
+        assert_eq!((mapped.y0, mapped.y1), (5, 55));
+        // Columns: source 100..300 of a 400-wide window at -40 spans
+        // (140..340) * 716 / 400 of the glass, give or take the blend.
+        assert!((248..=252).contains(&mapped.x0), "{mapped:?}");
+        assert!((606..=612).contains(&mapped.x1), "{mapped:?}");
+
+        // Woven (LACE) presentation doubles the rows.
+        let woven = placement.content_rect(content, 2 * placement.rows).unwrap();
+        assert_eq!((woven.y0, woven.y1), (10, 110));
+
+        // Content entirely above the glass top maps to nothing.
+        let above = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 0,
+            y1: 5,
+        };
+        assert_eq!(placement.content_rect(above, placement.rows), None);
+        // Content entirely left of the sync-anchored window (the sync
+        // tail clamps to the edge column, which is border here) maps
+        // to nothing either.
+        let mut fb = vec![0u32; FB_WIDTH * 120];
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            1,
+            Some((300, 400)),
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        let left = ContentRect {
+            x0: 100,
+            x1: 200,
+            y0: 10,
+            y1: 60,
+        };
+        assert_eq!(placement.content_rect(left, placement.rows), None);
+        // Without a programmed vertical sync the rows stay as captured,
+        // and a standard-length line without programmed horizontal sync
+        // keeps its columns.
+        let native = FrameGeometry {
+            line_cck: 227,
+            ..geometry
+        };
+        let placement = post_process_rendered_field(
+            &mut fb,
+            native,
+            1,
+            None,
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        assert_eq!(placement.rows, 100);
+        assert_eq!(placement.content_rect(left, 100), Some(left));
+    }
+
+    /// A 35 ns canvas fans each hi-res-pitch column of the envelope out
+    /// to two buffer columns before the window resample.
+    #[test]
+    fn programmable_placement_scales_the_envelope_to_the_canvas_pitch() {
+        use crate::video::bitplane::ContentRect;
+        let geometry = FrameGeometry {
+            programmable: true,
+            visible_start_vpos: 20,
+            visible_lines: 50,
+            line_cck: 227,
+            frame_lines: 80,
+            lace: false,
+        };
+        let mut fb = vec![0u32; 2 * FB_WIDTH * 50];
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            2,
+            None,
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        let content = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 10,
+            y1: 40,
+        };
+        assert_eq!(
+            placement.content_rect(content, 50),
+            Some(ContentRect {
+                x0: 200,
+                x1: 600,
+                y0: 10,
+                y1: 40
+            })
+        );
     }
 
     #[test]

@@ -8556,14 +8556,14 @@ fn integer_scaling_fits_in_whole_canvas_pixels() {
     assert_eq!(plan(false, 1.0, (3024, 1964)), (1, None));
 }
 
-/// The renderer's field-space content envelope reaches presentation
-/// space through the exact shifts the pixels took: vertical centring by
+/// The content envelope follows a standard field through the exact
+/// shifts the pixels took: vertical centring by
 /// `presentation_source_y_offset`, horizontal recentring by `h_shift`,
-/// then each field row onto its two woven rows. Programmable scans never
-/// map (they present their own window in full).
+/// then each field row onto its two woven rows.
 #[test]
-fn woven_content_rect_applies_the_post_process_shifts_and_weaves() {
+fn standard_placement_applies_the_post_process_shifts_and_weaves() {
     use crate::video::bitplane::ContentRect;
+    use crate::video::present_common::FieldPlacement;
     let rect = ContentRect {
         x0: 100,
         x1: 500,
@@ -8572,20 +8572,11 @@ fn woven_content_rect_applies_the_post_process_shifts_and_weaves() {
     };
     let y_off = super::presentation_source_y_offset(0x2C);
 
-    let woven = super::woven_content_rect(Some(rect), false, 0x2C, 10, FB_WIDTH, 570)
+    let woven = FieldPlacement::standard(crate::video::FB_HEIGHT, 0x2C, 10)
+        .content_rect(rect, 570)
         .expect("standard frame maps");
     assert_eq!((woven.x0, woven.x1), (90, 490));
     assert_eq!((woven.y0, woven.y1), (2 * (30 + y_off), 2 * (230 + y_off)));
-
-    // Programmable scans and border-only frames give nothing to crop to.
-    assert_eq!(
-        super::woven_content_rect(Some(rect), true, 0x2C, 0, FB_WIDTH, 570),
-        None
-    );
-    assert_eq!(
-        super::woven_content_rect(None, false, 0x2C, 0, FB_WIDTH, 570),
-        None
-    );
 
     // The woven rows clamp to the frame actually presented, and a rect
     // shifted entirely off the canvas collapses to None rather than an
@@ -8597,7 +8588,7 @@ fn woven_content_rect_applies_the_post_process_shifts_and_weaves() {
         y1: 285,
     };
     assert_eq!(
-        super::woven_content_rect(Some(low), false, 0x2C, 8, FB_WIDTH, 570),
+        FieldPlacement::standard(crate::video::FB_HEIGHT, 0x2C, 8).content_rect(low, 570),
         None
     );
 }
@@ -8620,6 +8611,7 @@ fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
     let (x, y, w, h) = super::canvas_content_rect(
         content,
         570,
+        FB_WIDTH,
         Overscan::Tv,
         crate::config::TvCentre::default(),
         Some(aperture_rows),
@@ -8655,6 +8647,7 @@ fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
     let (px, py, pw, ph) = super::canvas_content_rect(
         content,
         570,
+        FB_WIDTH,
         Overscan::Full,
         crate::config::TvCentre::default(),
         None,
@@ -8675,6 +8668,7 @@ fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
         super::canvas_content_rect(
             off_glass,
             570,
+            FB_WIDTH,
             Overscan::Tv,
             crate::config::TvCentre::default(),
             Some(aperture_rows),
@@ -8682,6 +8676,129 @@ fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
         ),
         None
     );
+}
+
+/// A programmable scan's glass presents through the plain copy: its rows
+/// rescale onto the canvas height, and a 35 ns canvas folds two buffer
+/// columns onto each canvas column, so the envelope's columns come back
+/// halved and its rows follow the row map -- content at the glass edges
+/// reaches the canvas edges.
+#[test]
+fn canvas_content_rect_folds_a_programmable_glass_onto_the_canvas() {
+    use crate::video::bitplane::ContentRect;
+    let glass_rows = 552;
+    let canvas_rows = crate::video::PRESENT_HEIGHT_SQUARE;
+    let content = ContentRect {
+        x0: 200,
+        x1: 1000,
+        y0: 40,
+        y1: 500,
+    };
+    let (x, y, w, h) = super::canvas_content_rect(
+        content,
+        glass_rows,
+        2 * FB_WIDTH,
+        Overscan::Tv,
+        crate::config::TvCentre::default(),
+        None,
+        canvas_rows,
+    )
+    .expect("glass content maps");
+    assert_eq!((x, w), (100, 400));
+    // Forward-map the returned row range like the plain copy does.
+    for canvas_y in y..y + h {
+        let src = crate::screenshot::scaled_source_row(canvas_y, glass_rows, canvas_rows);
+        assert!((content.y0..content.y1).contains(&src), "row {canvas_y}");
+    }
+    assert!(
+        !(content.y0..content.y1).contains(&crate::screenshot::scaled_source_row(
+            y - 1,
+            glass_rows,
+            canvas_rows
+        ))
+    );
+    assert!(
+        !(content.y0..content.y1).contains(&crate::screenshot::scaled_source_row(
+            y + h,
+            glass_rows,
+            canvas_rows
+        ))
+    );
+
+    // The whole glass is the whole canvas.
+    let whole = ContentRect {
+        x0: 0,
+        x1: 2 * FB_WIDTH,
+        y0: 0,
+        y1: glass_rows,
+    };
+    assert_eq!(
+        super::canvas_content_rect(
+            whole,
+            glass_rows,
+            2 * FB_WIDTH,
+            Overscan::Tv,
+            crate::config::TvCentre::default(),
+            None,
+            canvas_rows,
+        ),
+        Some((0, 0, FB_WIDTH, canvas_rows))
+    );
+}
+
+/// Autocrop presents a programmable (multisync) scan's content the way
+/// it presents a standard one's: the display source is the content
+/// rect on the canvas, at the uniform pixel shape (a programmable
+/// scan's rows are not woven pairs for the per-axis fit to step by
+/// half a row), and the same suspensions -- a bezel, RTG scanout --
+/// still apply.
+#[test]
+fn display_canvas_src_crops_a_programmable_scan() {
+    use crate::video::bitplane::ContentRect;
+    let mut app = test_app();
+    app.present_programmable = true;
+    app.present_rows = 552;
+    app.present_width = FB_WIDTH;
+    app.present_tv_aperture_rows = None;
+    app.present_content_rect = Some(ContentRect {
+        x0: 40,
+        x1: 680,
+        y0: 20,
+        y1: 532,
+    });
+    let expected = super::canvas_content_rect(
+        app.present_content_rect.unwrap(),
+        552,
+        FB_WIDTH,
+        app.overscan,
+        app.tv_centre,
+        None,
+        present_height(),
+    )
+    .unwrap();
+
+    let src = app
+        .display_canvas_src_for(false, true)
+        .expect("autocrop crops the programmable scan");
+    assert_eq!(src.rect, expected);
+    assert_eq!(src.par, (1, 1));
+
+    // Per-axis integer scaling keeps the uniform multiple on a
+    // programmable scan, cropped or not.
+    let per_axis = app.display_canvas_src_for(true, true).unwrap();
+    assert_eq!(per_axis, src);
+    let uncropped = app.display_canvas_src_for(true, false).unwrap();
+    assert_eq!(uncropped.rect, (0, 0, FB_WIDTH, present_height()));
+    assert_eq!(uncropped.par, (1, 1));
+
+    // Both modes off: the classic layout.
+    assert_eq!(app.display_canvas_src_for(false, false), None);
+    // A standard scan under per-axis scaling asks for the glass shape.
+    app.present_programmable = false;
+    app.present_rows = crate::video::deinterlace::OUT_HEIGHT;
+    app.present_tv_aperture_rows = Some(TV_PAL_PRESENT_HEIGHT);
+    let standard = app.display_canvas_src_for(true, false).unwrap();
+    assert_ne!(standard.par, (1, 1));
 }
 
 /// The autocrop latch grows immediately (content must never be cut),
@@ -8862,6 +8979,7 @@ fn display_rects_start_on_field_lines() {
     let rect = super::canvas_content_rect(
         content,
         crate::video::deinterlace::OUT_HEIGHT,
+        FB_WIDTH,
         Overscan::Tv,
         TvCentre::default(),
         Some(TV_NTSC_PRESENT_HEIGHT),

@@ -609,11 +609,24 @@ the display quad samples the content sub-rect of the canvas -- derived
 each frame from the display-window rows that carry fetched bitplane data
 (`RenderResult::content_rect`: the renderer's own per-line window model
 intersected with the captured rows, so a window left open around a
-shorter picture crops to the picture; carried through the same shifts
-`post_process_rendered_field` applies and inverted through the same
-row/column maps the present copy uses) -- and the chrome band (panels and
-status bar) is drawn separately, bottom-anchored at exactly the size the
-classic letterbox gives it, so the band never eats what the crop gains. `AutocropLatch` smooths the per-frame envelope: growth is adopted
+shorter picture crops to the picture, and trimmed to the rows and columns
+the programmable blanking windows or the frame end blacked; carried
+through the same shifts `post_process_rendered_field` applies and
+inverted through the same row/column maps the present copy uses) -- and
+the chrome band (panels and status bar) is drawn separately,
+bottom-anchored at exactly the size the classic letterbox gives it, so
+the band never eats what the crop gains. `post_process_rendered_field`
+returns the `FieldPlacement` it applied, and the envelope follows the
+pixels through it: a standard field's centring and recentring shifts and
+then two woven rows per line; a programmable scan's sync-anchored column
+resample (`stretch_rows_x_window`, scanned against the resampler's own
+taps so a partly blended edge column counts), the vertical window's
+skipped and padded rows, and native rows or woven pairs as the
+deinterlacer left them. So a multisync scan -- DblPAL Workbench, a 31 kHz
+console -- crops like a 15 kHz one; it keeps the uniform multiple under
+integer scaling (its rows are not woven pairs for the per-axis fit), and
+a scan-geometry change resets the latch, the way the deinterlacer drops
+its weave history there. `AutocropLatch` smooths the per-frame envelope: growth is adopted
 immediately, border-only frames hold the previous crop (like the aperture
 latch), and a strictly smaller envelope is adopted only after holding
 steady for its stability window, so screen transitions do not pump the
@@ -626,8 +639,8 @@ bar. The CRT presets compose with the crop: `uniforms_for_rect` aims the
 pass at the layout's display rect and crop sub-rect (the same numbers
 the scaler pass drew), with the beam-line count scaled to the rows the
 crop shows. Only a pass that owns the whole display rect falls back to
-the classic layout -- the bezel's fixed opening, RTG scanout -- along
-with programmable scans; captures never see the crop.
+the classic layout -- the bezel's fixed opening, RTG scanout; captures
+never see the crop.
 
 Integer scaling presents from the square canvas under either aspect
 (`video::square_canvas`): `present_height()` -- the window canvas the
@@ -660,8 +673,9 @@ they do for autocrop, and the two modes compose (autocrop supplies the
 rect, the per-axis fit the factors). A bezel keeps the tv canvas -- its
 opening resamples the whole glass -- and the canvas change it, the
 scaling toggle and the pixel aspect each provoke goes through one path
-(`App::resync_canvas_geometry`); RTG board frames and programmable scans
-take the classic uniform multiple of the square canvas.
+(`App::resync_canvas_geometry`); RTG board frames take the classic
+uniform multiple of the square canvas, and programmable scans the
+uniform multiple of their (cropped or whole) glass.
 
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have

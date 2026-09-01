@@ -166,7 +166,8 @@ fn main() -> Result<()> {
                         visible_start_vpos,
                         0,
                         Overscan::Tv,
-                    );
+                    )
+                    .rows;
                     let base = emu.bus().frame_render_base();
                     let (next_rows, next_width) = deinterlacer.present_field_into(
                         &fb,
