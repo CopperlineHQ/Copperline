@@ -340,7 +340,13 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      cursor has to travel with the state. `irq_latency_visible_at` replaces
 //      the single IPL-pipe countdown with one delivery deadline per interrupt
 //      source, in absolute colour clocks.
-pub const STATE_VERSION: u32 = 71;
+//  72: the floppy controller lost the DSKBYTR track-grid position tracking
+//      (`last_dskbytr_pos`, `last_stream_sync_pos`): DSKBYTR's byte and
+//      WORDEQUAL now come from Paula's read shifter on the framing a
+//      WORDSYNC match resets, as on hardware. Raw track images
+//      (`FloppyTrackImage::RawMfm`) and cached revolutions (`TrackRev`)
+//      gained the mastered cell-rate profile of IPF density models.
+pub const STATE_VERSION: u32 = 72;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

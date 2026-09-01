@@ -73,9 +73,7 @@ impl Bus {
             }
             0x018 => self.paula.read_serdatr(), // SERDATR
             0x01A => {
-                let r = self
-                    .floppy
-                    .read_dskbytr(self.agnus.dmacon, self.paula.adkcon);
+                let r = self.floppy.read_dskbytr(self.agnus.dmacon);
                 if self.floppy.take_sync_irq() {
                     self.paula.intreq |= INT_DSKSYNC;
                 }

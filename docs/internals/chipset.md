@@ -395,6 +395,15 @@ later DSKSYNC match during it, so the sectors after an index wrap on a track
 whose cell count is not a multiple of 16 still land word-aligned (AROS's
 trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
 word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
+DSKBYTR is served by that same read shifter: its byte and DSKBYT come from
+the shifter's bit counter, the one a WORDSYNC match resets whether or not a
+transfer is running, and WORDEQUAL is the comparator's level held until the
+register is read. A reader that waits for WORDEQUAL and then collects bytes
+through DSKBYTR therefore gets them framed from the end of the sync word at
+whatever bit phase the sync sits on the track -- IPF and flux tracks carry
+their syncs at arbitrary phases, and Rob Northen's Copylock reads its key
+sector exactly this way (Lemmings, issue #610), rejecting the read unless the
+first two bytes are the MFM of the sector's first data byte.
 Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
@@ -422,12 +431,21 @@ repeated byte or from forward and backward gap streams whose loop samples
 stretch to meet at the write splice in the middle. Each track is checked
 against the bit counts its descriptors declare and then rotated so the
 revolution starts at the index, matching the shape a flux capture already
-has. Two modelling gaps remain: the variable cell-*rate* density profiles
-(Copylock, Speedlock, Brierley) decode with uniform 2 us cells and log a
-warning, and weak bits replay as the one deterministic revolution the file
-stores rather than varying per revolution -- `FloppyTrackImage::RawMfm` can
-already carry both (`bitcell_ns` and multiple revolutions) when the
-per-protection profiles are modelled.
+has. A track's cell-*rate* density model (the IMGE density field) becomes a
+per-track profile of cell-time weights, in per-mille of nominal, following the
+CAPS library's own definitions: Copylock Amiga masters three consecutive key
+sectors at -5.5%, -0.5% and +4.5% (blocks 4-6, or 0-2 on the newer scheme),
+each run starting at the gap before its block; Copylock ST, Speedlock and the
+Brierley models weight single blocks by +-5..15%, and the Brierley density-key
+model takes a bit per block from block 0's gap value. The floppy model scales
+each cell's clock by its run's weight (`TrackRev::prefix_cck`), so a loader
+that reads two key sectors byte by byte through DSKBYTR and compares how often
+it polled between bytes sees the few-per-cent difference the master put
+there -- Copylock's check on Lemmings wants `$8911`'s sector at least 2%
+slower than `$8912`'s (issue #610). One modelling gap remains: weak bits
+replay as the one deterministic revolution the file stores rather than
+varying per revolution -- `FloppyTrackImage::RawMfm` can already carry
+multiple revolutions, so closing it is a decoder change alone.
 
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
