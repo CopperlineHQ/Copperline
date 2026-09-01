@@ -303,6 +303,30 @@ static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG u
         segs[i] = NULL;
     }
 
+    /* HARD-WON (M6): every hunk is allocated here, from the header's own
+     * size table, before any hunk body or relocation is read -- exactly
+     * what real LoadSeg does, and required for correctness: a
+     * HUNK_RELOC32/RELOC32SHORT record may legally target a hunk that
+     * appears *later* in the file (a hunk 0 field pointing at hunk 2, for
+     * instance), and the hunk format places no ordering constraint on
+     * that at all. The previous version of this loop allocated segs[cur]
+     * lazily, only when it reached that hunk's own CODE/DATA/BSS record --
+     * so a forward-referencing reloc always found segs[idx] still NULL
+     * and (correctly, per that stale check) failed the whole load. Every
+     * hunk covered by this project's own tests before M6 happened to
+     * only reference *earlier* hunks, so this never showed up until a
+     * fixture actually needed a forward reference. */
+    for (i = 0; i < nhunks; i++) {
+        segs[i] = AllocMem(sizes[i] + 8, MEMF_PUBLIC | MEMF_CLEAR);
+        if (segs[i] == NULL) {
+            ULONG j;
+            for (j = 0; j < nhunks; j++)
+                if (segs[j] != NULL)
+                    FreeMem(segs[j], sizes[j] + 8);
+            return 0;
+        }
+    }
+
     cur = 0;
     while (ok && cur < nhunks) {
         ULONG htype, szlong, bytes;
@@ -324,12 +348,8 @@ static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG u
                              * allocate (see the layout comment above) */
                 break;
             }
-            /* MEMF_CLEAR covers both BSS and a truncated CODE/DATA tail. */
-            segs[cur] = AllocMem(sizes[cur] + 8, MEMF_PUBLIC | MEMF_CLEAR);
-            if (segs[cur] == NULL) {
-                ok = FALSE;
-                break;
-            }
+            /* Already allocated above (MEMF_CLEAR there covers both BSS
+             * and a truncated CODE/DATA tail here). */
             if (htype != HUNK_BSS && !lseg_read_bytes(&s, segs[cur] + 8, bytes)) {
                 ok = FALSE;
                 break;
@@ -667,6 +687,7 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
                                  const ULONG *env, ULONG flags, ULONG fshdlist, UBYTE *buf)
 {
     UBYTE namelen;
+    UBYTE namepad;
     ULONG tablesize, envwords, dostype;
     LONG bootpri;
     BOOL bootable = (flags & PBFF_BOOTABLE) != 0;
@@ -686,6 +707,20 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
     namelen = namebstr[0];
     if (namelen > 31)
         namelen = 31;
+    /* HARD-WON (M6): `bname` starts longword-aligned (mem is AllocMem'd,
+     * sizeof(struct DeviceNode) is a whole number of longs), but the
+     * volume BSTR occupies 1+namelen bytes -- an ODD total whenever
+     * namelen is itself even -- and fssm/envcopy, laid out right after
+     * it below, are addressed with ordinary MOVE.L (FileSysStartupMsg's
+     * BPTR/ULONG fields, and envcopy is ULONG[]). 68000 raises an
+     * Address Error on any odd-address long access, and every partition
+     * name this project's own tests used before M6 ("DH0", length 3)
+     * happened to need no padding -- M6's "TST0" (length 4) does, and
+     * without this pad every M6-shaped RDB address-faults mid-mount, in
+     * the *general* partition-mounting code, nothing FSHD/LSEG-specific.
+     * Pad up to the next longword so this can never recur regardless of
+     * name length. */
+    namepad = (UBYTE)((4 - ((1 + (ULONG)namelen) & 3)) & 3);
 
     tablesize = env[0];
     if (tablesize > 19) /* pb_Environment[20]: indices 0..19 only */
@@ -698,7 +733,7 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
     while (device_name[devnamelen] != '\0' && devnamelen < 200)
         devnamelen++;
 
-    allocsize = sizeof(struct DeviceNode) + 1 + namelen /* volume BSTR */
+    allocsize = sizeof(struct DeviceNode) + 1 + namelen + namepad /* volume BSTR, longword-padded */
                 + sizeof(struct FileSysStartupMsg) + envwords * sizeof(ULONG) + 1 +
                 devnamelen; /* device-name BSTR */
 
@@ -708,7 +743,7 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
 
     dn = (struct DeviceNode *)mem;
     bname = mem + sizeof(struct DeviceNode);
-    fssm = (struct FileSysStartupMsg *)(bname + 1 + namelen);
+    fssm = (struct FileSysStartupMsg *)(bname + 1 + namelen + namepad);
     envcopy = (ULONG *)(fssm + 1);
     devbstr = (UBYTE *)(envcopy + envwords);
 
@@ -754,12 +789,34 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
     if (fse != NULL)
         chf_apply_patch(dn, fse);
 
-    if (_expbase->lib_Version >= 36) {
-        AddBootNode(bootpri, ADNF_STARTPROC, dn, cd);
-    } else if (bootpri == -128) {
-        AddDosNode(bootpri, ADNF_STARTPROC, dn);
-    } else {
-        chf_add_boot_node_v34(_sysbase, _expbase, bootpri, dn, cd);
+    /* HARD-WON (M6): ADNF_STARTPROC ("start a handler process
+     * immediately") is documented (expansion.doc/AddBootNode) as normally
+     * unset -- "the process is started only when the device node is
+     * first referenced" otherwise. This file used to pass it
+     * unconditionally for every partition, bootable or not: harmless for
+     * M3's single bootable DH0 (autoboot legitimately needs its handler
+     * running right away), but for a non-bootable partition it forces
+     * AmigaDOS to start the loaded SegList as a real process during the
+     * boot-time device scan, before anything ever opens the volume.
+     * Likewise "Pass a NULL ConfigDev pointer to create a non-bootable
+     * node" (same autodoc) -- this file always passed the real `cd`.
+     * Neither flag change alone turned out to be the actual fix for
+     * M6's own probe (see guest/copperhf-test/gen_lsegfix.py's own
+     * header comment for what was: a handler that properly answers
+     * every DOS packet it receives) -- both are still worth doing, since
+     * both are exactly what the autodocs say a non-bootable mount should
+     * do, independent of anything M6-specific. */
+    {
+        ULONG start_flags = bootable ? ADNF_STARTPROC : 0;
+        struct ConfigDev *boot_cd = bootable ? cd : NULL;
+
+        if (_expbase->lib_Version >= 36) {
+            AddBootNode(bootpri, start_flags, dn, boot_cd);
+        } else if (bootpri == -128) {
+            AddDosNode(bootpri, start_flags, dn);
+        } else {
+            chf_add_boot_node_v34(_sysbase, _expbase, bootpri, dn, cd);
+        }
     }
 }
 
