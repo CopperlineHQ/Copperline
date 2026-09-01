@@ -297,9 +297,42 @@ The stub is V34-clean: no V36+ exec/expansion calls anywhere on this path,
   bounded doorbell-to-worker channel, and quiesce-on-save/quiesce-on-hot-
   mutate. The guest-visible protocol is unchanged from M4 (see the
   `BeginIO`/INT2 note above).
-- **M6** (planned): integration matrix (RDB/RDB-less x OFS/FFS/PFS3-DS)
-  and CI wiring for 1.3/3.1/3.2 Kickstart runs, per
-  `COPPERHF-DEVICE-PLAN.md`'s "M6 -- Tests, CI, docs".
+- **M6** (this page): the integration matrix, split across two test files
+  (`tests/README.md` has the full asset/gate rundown):
+  - `tests/copperhf_m6.rs` -- default-CI, bundled AROS, no local assets: a
+    hand-built RDB whose FSHD/LSEG chain carries a self-checking synthetic
+    fixture binary (`guest/copperhf-test/lsegfix`) proves
+    `guest/copperhf/mounter.c`'s FSHD/LSEG loader end to end (FileSystem.
+    resource entry, seglist walk, a called-and-verified relocation
+    self-test, and the mounted DeviceNode's patched fields) without
+    needing any licensed filesystem binary. This is the milestone's
+    stand-in for the FFS-from-LSEG axis in default CI. Building it did
+    exactly the job it exists to do: its first runs caught three real,
+    previously-unexercised `mounter.c` bugs (forward-referencing
+    relocations always failed because hunks were allocated lazily; an
+    even-length partition name left the FileSysStartupMsg odd-aligned and
+    address-faulted the 68000; `ADNF_STARTPROC`/`ConfigDev` were passed
+    for non-bootable partitions against the autodoc's documented
+    behaviour), all fixed at the site in `mounter.c`.
+  - `tests/copperhf_kickstarts.rs` -- `#[ignore]`d, real Kickstart 1.3/
+    3.1/3.2 ROMs: {RDB, RDB-less} x plain-OFS autoboot for each ROM (3.1/
+    3.2 verified structurally via the same bootmark trick as `tests/
+    copperhf_mounter.rs`; 1.3 has no ROM-resident `Echo`, so it is
+    verified by golden screenshot of the resulting CLI prompt instead --
+    genuinely exercising the V34 `AddDosNode`/`eb_MountList` fallback
+    path for the first time, which had never run before this milestone
+    since no earlier copperhf test booted Kickstart 1.3 from a copperhf
+    unit at all); an FFS-from-LSEG axis against Kickstart 3.1 using a real
+    `FastFileSystem` binary tagged DOS\3 (FFS+INTL is not ROM-resident on
+    3.1, unlike DOS\0/DOS\1, so this is the one dostype that actually
+    forces the LSEG path to run against real filesystem code); and a
+    deliberately narrow-scoped PFS3-DS axis that only proves a >4 GiB
+    LSEG-attached unit doesn't crash or hang the boot, not a full
+    format-and-mount (see that test's own header comment and `tests/
+    README.md` for the reasoning and the manual smoke-test alternative).
+    This machine has only `KICK31.ROM` locally, so the 3.1 OFS axes are
+    verified passing here; every other axis in this file is reviewed but
+    **locally unverified** -- only its skip-cleanly path has been run.
 
 ## See also
 
