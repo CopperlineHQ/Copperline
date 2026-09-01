@@ -53,6 +53,18 @@ fn warp_boot_settings_survive_the_config_screen_round_trip() {
 }
 
 #[test]
+fn uaelib_setting_survives_the_config_screen_round_trip() {
+    // No config-screen control: a saved `uaelib = false` must not revert
+    // to the default on Run/Save.
+    let raw: RawConfig = toml::from_str("[emulation]\nuaelib = false\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.uaelib, Some(false));
+    let raw: RawConfig = toml::from_str("").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.uaelib, None);
+}
+
+#[test]
 fn ram_initialisation_controls_cycle_and_round_trip() {
     let raw: RawConfig = toml::from_str("[memory]\ninit = \"random:0xBEEF\"\n").unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();

@@ -17,6 +17,9 @@ impl Bus {
         if self.collision_tracking_active {
             self.accumulate_live_collisions_to_frame_end();
         }
+        if let Some(uaelib) = self.uaelib.as_mut() {
+            uaelib.note_frame_start(self.emulated_cck);
+        }
         self.log_bus_accounting_frame();
         self.finish_frame_bus_trace();
         let promote_render_frame = !self.current_frame_render_blocked;

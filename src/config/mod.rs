@@ -1299,6 +1299,10 @@ pub struct Emulation {
     /// Warp boot until an absolute emulated timestamp instead: the
     /// deterministic variant for a setup whose boot time is known.
     pub warp_until: Option<f64>,
+    /// The WinUAE-compatible uaelib trap at $F0FF60 (`crate::uaelib`):
+    /// guest programs toggle warp, log debug text and register resources
+    /// through it. On by default; `uaelib = false` leaves $F0FF60 floating.
+    pub uaelib: bool,
     /// Record rewind history from power-on, so the rewind hotkey and menu item
     /// work without opening the debugger. Off by default: capturing costs a
     /// whole-machine serialize every `rewind_interval_frames` and the retained
@@ -2325,6 +2329,7 @@ impl Default for Config {
                 warp_boot: false,
                 warp_boot_idle: 10.0,
                 warp_until: None,
+                uaelib: true,
                 rewind: false,
                 rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
                 rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,

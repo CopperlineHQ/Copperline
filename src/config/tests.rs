@@ -3563,6 +3563,20 @@ fn identify_false_drops_the_board() -> Result<()> {
 }
 
 #[test]
+fn uaelib_trap_is_fitted_by_default() -> Result<()> {
+    let cfg = parse_config("")?;
+    assert!(cfg.emulation.uaelib);
+    Ok(())
+}
+
+#[test]
+fn emulation_uaelib_false_drops_the_trap() -> Result<()> {
+    let cfg = parse_config("[emulation]\nuaelib = false")?;
+    assert!(!cfg.emulation.uaelib);
+    Ok(())
+}
+
+#[test]
 fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
     assert!(!parse_config("")?.toccata);
     let cfg = parse_config("[toccata]\nenabled = true\n")?;

@@ -2370,6 +2370,8 @@ pub struct MachineSetup {
     warp_boot: bool,
     warp_boot_idle: f64,
     warp_until: Option<f64>,
+    /// Same again for the uaelib trap (crate::uaelib).
+    uaelib: bool,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2672,6 +2674,7 @@ impl MachineSetup {
             warp_boot: cfg.emulation.warp_boot,
             warp_boot_idle: cfg.emulation.warp_boot_idle,
             warp_until: cfg.emulation.warp_until,
+            uaelib: cfg.emulation.uaelib,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -3268,6 +3271,9 @@ impl MachineSetup {
         if self.warp_until != base.emulation.warp_until {
             raw.emulation.warp_until = self.warp_until;
         }
+        if self.uaelib != base.emulation.uaelib {
+            raw.emulation.uaelib = Some(self.uaelib);
+        }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
@@ -3555,6 +3561,7 @@ impl MachineSetup {
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
         self.run_ahead_frames = base.emulation.run_ahead_frames;
+        self.uaelib = base.emulation.uaelib;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;

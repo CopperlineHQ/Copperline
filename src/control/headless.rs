@@ -279,6 +279,28 @@ impl Session {
         for line in lines {
             self.write(&line)?;
         }
+        self.service_guest_warp_request()
+    }
+
+    /// The guest's `warpmode()` through the uaelib trap: the headless
+    /// server is unpaced end to end, so the request changes nothing here,
+    /// but the client sees the guest's intent as an `event.warp`.
+    fn service_guest_warp_request(&mut self) -> Result<()> {
+        if let Some(on) = self.emu.take_uaelib_warp_request() {
+            log::info!(
+                "control: guest requested warp {} (headless server stays unpaced)",
+                if on { "on" } else { "off" }
+            );
+            self.write(&proto::event_line(
+                "event.warp",
+                json!({
+                    "on": on,
+                    "paced": false,
+                    "source": "guest",
+                    "position": super::observe::position(&self.emu),
+                }),
+            ))?;
+        }
         Ok(())
     }
 
@@ -478,6 +500,13 @@ impl Session {
                     Err(e) => proto::err_line(&id, &CtlError::io(format!("{e:#}"))),
                 };
                 self.write(&reply)?;
+                Ok(None)
+            }
+            HostOp::WarpGet | HostOp::WarpSet { .. } => {
+                // The headless server runs unpaced end to end (`run`);
+                // warp.set is accepted as a no-op so scripts port across
+                // the two drivers.
+                self.write(&proto::ok_line(&id, headless_warp_value()))?;
                 Ok(None)
             }
             HostOp::Reset { warm } => {
@@ -865,7 +894,9 @@ impl Session {
                     | HostOp::CdInsert { .. }
                     | HostOp::CdEject
                     | HostOp::SetPortDevice { .. }
-                    | HostOp::Reset { .. }),
+                    | HostOp::Reset { .. }
+                    | HostOp::WarpGet
+                    | HostOp::WarpSet { .. }),
                 ) => {
                     // Media changes, controller hot-plug, and reset are
                     // ordinary live events; apply them at this boundary.
@@ -891,6 +922,18 @@ impl Session {
             }
         }
     }
+}
+
+/// The `warp.get` / `warp.set` reply of the headless server, which is
+/// unpaced end to end and never re-paces.
+fn headless_warp_value() -> Value {
+    json!({
+        "on": true,
+        "paced": false,
+        "source": "headless",
+        "headless": true,
+        "note": "headless server runs unpaced end to end; warp.set does not re-pace it",
+    })
 }
 
 #[cfg(test)]
@@ -1698,6 +1741,70 @@ mod tests {
             assert_eq!(collect.len(), 2);
             assert_eq!(collect[0]["ok"]["pc"], stop["pc"]);
             assert!(collect[1]["ok"]["data"].is_string());
+        });
+    }
+
+    #[test]
+    fn warp_get_reports_headless_unpaced() {
+        run_session(None, |c| {
+            c.result("auth", json!({"token": TOKEN}));
+            let warp = c.result("warp.get", json!({}));
+            assert_eq!(warp["headless"], true);
+            assert_eq!(warp["paced"], false);
+            assert_eq!(warp["on"], true);
+            assert_eq!(warp["source"], "headless");
+            assert!(warp["note"].is_string());
+        });
+    }
+
+    #[test]
+    fn warp_set_is_accepted_and_never_repaces_headless() {
+        let mut emu = control_test_emulator();
+        emu.set_paced(false); // as run() does before serving
+        let (emu, _, _, _) = run_machine_session(emu, MachineInputState::new(None), |c| {
+            c.result("auth", json!({"token": TOKEN}));
+            let off = c.result("warp.set", json!({"on": false}));
+            assert_eq!(off["paced"], false);
+            assert_eq!(off["headless"], true);
+            assert!(off["note"].is_string());
+            let on = c.result("warp.set", json!({"on": true}));
+            assert_eq!(on["paced"], false);
+            let status = c.result("status", json!({}));
+            assert_eq!(status["paced"], false);
+            assert_eq!(status["warp"], true);
+            let err = c.call("warp.set", json!({}));
+            assert_eq!(err["error"]["code"], proto::INVALID_PARAMS);
+        });
+        assert!(
+            !emu.paced(),
+            "warp.set false must not re-pace the headless server"
+        );
+    }
+
+    #[test]
+    fn guest_warp_request_emits_event_warp_headless() {
+        let mut emu = control_test_emulator();
+        emu.set_paced(false);
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        lib.request_warp(true);
+        emu.bus_mut().attach_uaelib(lib);
+        run_machine_session(emu, MachineInputState::new(None), |c| {
+            c.result("auth", json!({"token": TOKEN}));
+            // Events are emitted after every command; the request latched
+            // before the session surfaces at the first one.
+            let _ = c.result("status", json!({}));
+            let event = c
+                .stash
+                .iter()
+                .find(|m| m["method"] == "event.warp")
+                .cloned()
+                .unwrap_or_else(|| c.recv());
+            assert_eq!(event["method"], "event.warp");
+            assert_eq!(event["params"]["source"], "guest");
+            assert_eq!(event["params"]["on"], true);
+            assert_eq!(event["params"]["paced"], false);
+            assert!(event["params"]["position"]["frame"].is_number());
         });
     }
 }

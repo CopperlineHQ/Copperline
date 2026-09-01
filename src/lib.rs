@@ -119,6 +119,7 @@ pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;
 pub mod toccata;
+pub mod uaelib;
 pub mod video;
 pub mod warpboot;
 pub mod wasm_manifest;

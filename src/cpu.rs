@@ -3017,7 +3017,19 @@ impl CpuBus {
             Some(PlainMemRegion::AccelRam(off)) => self.bus.mem.accel_ram[off],
             Some(PlainMemRegion::Wcs(off)) => self.bus.mem.wcs[off],
             Some(PlainMemRegion::ExtendedRom(off)) => self.bus.mem.extended_rom[off],
-            None => 0xFF,
+            None => {
+                if crate::uaelib::UaeLib::decodes(addr) {
+                    if let Some(b) = self
+                        .bus
+                        .uaelib
+                        .as_ref()
+                        .and_then(|u| u.peek_byte(addr - crate::uaelib::UAELIB_BASE))
+                    {
+                        return b;
+                    }
+                }
+                0xFF
+            }
         }
     }
 
@@ -3362,6 +3374,15 @@ impl CpuBus {
                 return value;
             }
         }
+        if self.bus.uaelib.is_some() && crate::uaelib::UaeLib::decodes(addr) {
+            // The uaelib trap stub (crate::uaelib): ROM-like memory (WinUAE's
+            // rtarea is a plain ROM bank) the CPU also fetches instructions
+            // from, so it costs what the Kickstart ROM costs.
+            self.bill_external_access(size);
+            if let Some(uaelib) = self.bus.uaelib.as_ref() {
+                return uaelib.read(addr - crate::uaelib::UAELIB_BASE, size);
+            }
+        }
         if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
             if let Some(ramsey) = self.bus.ramsey.as_ref() {
@@ -3690,6 +3711,36 @@ impl CpuBus {
                 gayle.write(addr, size, value);
                 if gayle.take_activity() {
                     self.bus.note_hdd_activity();
+                }
+            }
+            return;
+        }
+        if self.bus.uaelib.is_some() && crate::uaelib::UaeLib::decodes(addr) {
+            // The uaelib trap doorbell (crate::uaelib): the call is serviced
+            // inside this write, like a services-board DosPacket.
+            self.bill_external_access(size);
+            let address_mask = self.address_mask;
+            let cck = self.bus.emulated_cck();
+            let frame = self.bus.emulated_frames();
+            let touched_memory = {
+                let mem = &mut self.bus.mem;
+                self.bus.uaelib.as_mut().is_some_and(|uaelib| {
+                    uaelib.write(
+                        addr - crate::uaelib::UAELIB_BASE,
+                        size,
+                        value,
+                        mem,
+                        address_mask,
+                        cck,
+                        frame,
+                    )
+                })
+            };
+            // Function 82 cleared the caller's out buffer behind the data
+            // cache (the filesys packet case below does the same): drop it.
+            if touched_memory {
+                if let Some(dcache) = self.dcache.as_mut() {
+                    dcache.clear_all();
                 }
             }
             return;
@@ -7041,5 +7092,211 @@ mod tests {
         let count = ((watch.addr & 1) + watch.len).div_ceil(2);
         let words: Vec<u32> = (0..count).map(|k| base + k * 2).collect();
         assert_eq!(words, vec![0x1000, 0x1002]);
+    }
+
+    /// The uaelib trap stub (crate::uaelib) at $F0FF60: served from its
+    /// fixed 32-byte region on every CPU, floating outside it, hidden by a
+    /// CDTV extended ROM, and kept out of both caches.
+    #[test]
+    fn uaelib_stub_is_served_from_the_fixed_region_and_floats_outside_it() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x00F8_0100);
+        bus.attach_uaelib(crate::uaelib::UaeLib::new());
+        let mut machine = build(bus, CpuModel::M68000, false, 2, Default::default(), false)?;
+        assert_eq!(machine.bus.read_word(0x00F0_FF60), 0x4EB9);
+        assert_eq!(machine.bus.read_long(0x00F0_FF60), 0x4EB9_00F0);
+        assert_eq!(machine.bus.read_word(0x00F0_FF74), 0x4E75);
+        // Outside the region the bus floats to the last driven value.
+        let floating = machine.bus.read_word(0x00F0_FF80);
+        assert_eq!(floating, machine.bus.bus.data_bus);
+        let floating = machine.bus.read_word(0x00F0_0000);
+        assert_eq!(floating, machine.bus.bus.data_bus);
+        // The debugger's side-effect-free peeks see the stub too.
+        assert_eq!(machine.bus.bus.peek_word_any(0x00F0_FF60), 0x4EB9);
+        assert_eq!(machine.bus.peek_byte(0x00F0_FF61), 0xB9);
+        assert_eq!(machine.bus.peek_byte(0x00F0_FF80), 0xFF);
+        assert!(!machine.bus.icache_cacheable(0x00F0_FF60));
+        assert!(!machine.bus.dcache_cacheable(0x00F0_FF60));
+
+        // A CDTV extended ROM at $F00000 decodes first and hides the trap.
+        machine
+            .bus
+            .bus
+            .mem
+            .attach_extended_rom(vec![0x11; 0x4_0000])?;
+        assert_eq!(machine.bus.read_word(0x00F0_FF60), 0x1111);
+        // A CD32's lives at $E00000 and does not.
+        machine
+            .bus
+            .bus
+            .mem
+            .attach_extended_rom(vec![0x11; 0x8_0000])?;
+        assert_eq!(machine.bus.read_word(0x00F0_FF60), 0x4EB9);
+
+        // Without the trap fitted the region floats like any other.
+        let bus = test_bus_with_pc(0x00F8_0100);
+        let mut machine = build(bus, CpuModel::M68000, false, 2, Default::default(), false)?;
+        let floating = machine.bus.read_word(0x00F0_FF60);
+        assert_eq!(floating, machine.bus.bus.data_bus);
+        Ok(())
+    }
+
+    /// Bartman's `KPrintF` shape: `UaeDbgLog(86, string)` as a C call.
+    fn uaelib_log_program() -> Vec<u16> {
+        vec![
+            0x4879, 0x0000, 0x2000, // pea ($2000).l      ; string
+            0x4878, 0x0056, // pea (86).w         ; function
+            0x4EB9, 0x00F0, 0xFF60, // jsr ($F0FF60).l
+            0x508F, // addq.l #8,a7
+            0x23C0, 0x0000, 0x1000, // move.l d0,($1000).l
+            0x60FE, // bra.s *
+        ]
+    }
+
+    /// Bartman's `warpmode()` shape: `UaeConf(82, -1, "warp true", 0, &out, 1)`.
+    fn uaelib_warp_program(out: u32) -> Vec<u16> {
+        vec![
+            0x4878,
+            0x0001, // pea (1).w          ; outsize
+            0x4879,
+            (out >> 16) as u16,
+            out as u16, // pea (out).l
+            0x4878,
+            0x0000, // pea (0).w          ; size: measure
+            0x4879,
+            0x0000,
+            0x2000, // pea ($2000).l      ; "warp true"
+            0x4878,
+            0xFFFF, // pea (-1).w         ; index -1
+            0x4878,
+            0x0052, // pea (82).w
+            0x4EB9,
+            0x00F0,
+            0xFF60, // jsr ($F0FF60).l
+            0x4FEF,
+            0x0018, // lea 24(a7),a7
+            0x23C0,
+            0x0000,
+            0x1000, // move.l d0,($1000).l
+            0x60FE, // bra.s *
+        ]
+    }
+
+    fn write_chip_bytes(bus: &mut Bus, address: u32, bytes: &[u8]) {
+        let off = region_offset(bus.mem.chip_ram.len(), CHIP_RAM_BASE, address, bytes.len())
+            .expect("test chip address must fit chip RAM");
+        bus.mem.chip_ram[off..off + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// A 68000 rings the doorbell as two word writes, a 68030 as one long
+    /// write; both reach the arguments on the guest stack through the
+    /// stub and get D0 back.
+    #[test]
+    fn uaelib_call_through_the_stub_reads_its_arguments_from_the_guest_stack() -> Result<()> {
+        for model in [CpuModel::M68000, CpuModel::M68030] {
+            let mut bus = test_bus_with_pc(0x00F8_0100);
+            bus.attach_uaelib(crate::uaelib::UaeLib::new());
+            write_chip_bytes(&mut bus, 0x2000, b"hello\0");
+            write_program(&mut bus, 0x00F8_0100, &uaelib_log_program());
+            let mut machine = build(bus, model, false, 2, Default::default(), false)?;
+            machine.step_slice(11)?;
+            let mem = &machine.bus.bus.mem;
+            assert_eq!(
+                &mem.chip_ram[0x1000..0x1004],
+                &1u32.to_be_bytes(),
+                "{model:?}: function 86 returns 1 in D0"
+            );
+            let uaelib = machine.bus.bus.uaelib.as_mut().unwrap();
+            assert_eq!(
+                uaelib.take_debug_events(),
+                (vec![crate::uaelib::DebugEvent::Log("hello".into())], 0),
+                "{model:?}"
+            );
+
+            let mut bus = test_bus_with_pc(0x00F8_0100);
+            bus.attach_uaelib(crate::uaelib::UaeLib::new());
+            write_chip_bytes(&mut bus, 0x2000, b"warp true\0");
+            write_chip_bytes(&mut bus, 0x3000, &[0xAA]);
+            write_chip_bytes(&mut bus, 0x1000, &[0xEE; 4]);
+            write_program(&mut bus, 0x00F8_0100, &uaelib_warp_program(0x3000));
+            let mut machine = build(bus, model, false, 2, Default::default(), false)?;
+            machine.step_slice(15)?;
+            let mem = &machine.bus.bus.mem;
+            assert_eq!(
+                &mem.chip_ram[0x1000..0x1004],
+                &[0; 4],
+                "{model:?}: returns 0"
+            );
+            assert_eq!(mem.chip_ram[0x3000], 0, "{model:?}: out string cleared");
+            let uaelib = machine.bus.bus.uaelib.as_mut().unwrap();
+            assert_eq!(uaelib.take_warp_request(), Some(true), "{model:?}");
+        }
+        Ok(())
+    }
+
+    /// A lone high-word doorbell write (the first half of a 68000 move.l)
+    /// is visible through the peeks and has not fired.
+    #[test]
+    fn uaelib_half_written_doorbell_is_latched_but_silent() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x00F8_0100);
+        bus.attach_uaelib(crate::uaelib::UaeLib::new());
+        let mut machine = build(bus, CpuModel::M68000, false, 2, Default::default(), false)?;
+        machine.bus.write_word(0x00F0_FF7C, 0x0001);
+        assert_eq!(machine.bus.bus.peek_word_any(0x00F0_FF7C), 0x0001);
+        assert_eq!(machine.bus.read_long(0x00F0_FF78), 0, "no result latched");
+        let uaelib = machine.bus.bus.uaelib.as_mut().unwrap();
+        assert!(uaelib.take_debug_events().0.is_empty());
+        Ok(())
+    }
+
+    /// Function 82 clears the caller's out string behind a 68030's data
+    /// cache: the completed doorbell drops the cache so the guest reads the
+    /// NUL back, not the stale line.
+    #[test]
+    fn uaelib_doorbell_completion_drops_a_stale_data_cache_line() -> Result<()> {
+        let out = FAST_RAM_BASE as u32 + 0x40;
+        let program = [
+            vec![
+                0x203C,
+                0x0000,
+                0x0101, // move.l #$101,d0    ; CACR: EI + ED
+                0x4E7B,
+                0x0002, // movec d0,cacr
+                0x2239,
+                (out >> 16) as u16,
+                out as u16, // move.l (out).l,d1 ; fill the line
+            ],
+            uaelib_warp_program(out),
+        ]
+        .concat();
+        // The warp program ends in bra.s *; patch a read-back before it.
+        let mut program = program;
+        let bra = program.len() - 1;
+        program.splice(
+            bra..bra,
+            [
+                0x2439,
+                (out >> 16) as u16,
+                out as u16, // move.l (out).l,d2
+                0x23C2,
+                0x0000,
+                0x1004, // move.l d2,($1004).l
+            ],
+        );
+        let mut bus = test_bus_with_pc(0x00F8_0100);
+        bus.attach_uaelib(crate::uaelib::UaeLib::new());
+        write_chip_bytes(&mut bus, 0x2000, b"warp true\0");
+        write_program(&mut bus, 0x00F8_0100, &program);
+        let off = bus.mem.zorro.region_at(out, 4).unwrap();
+        bus.mem.zorro.board_ram_mut(off.0)[off.1..off.1 + 4].copy_from_slice(&[0xAA; 4]);
+        let mut machine = build(bus, CpuModel::M68030, false, 2, Default::default(), false)?;
+        machine.set_cache_emulation(true, true);
+        machine.step_slice(20)?;
+        let mem = &machine.bus.bus.mem;
+        assert_eq!(
+            &mem.chip_ram[0x1004..0x1008],
+            &0x00AA_AAAAu32.to_be_bytes(),
+            "the NUL the host wrote is what the guest reads back"
+        );
+        Ok(())
     }
 }

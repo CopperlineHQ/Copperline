@@ -1084,6 +1084,11 @@ pub(crate) struct RawEmulation {
     /// exclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warp_until: Option<f64>,
+    /// The WinUAE-compatible uaelib trap at $F0FF60 (default true): guest
+    /// programs toggle warp, log debug text and register resources through
+    /// it. Set false for a machine with nothing at $F0FF60.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uaelib: Option<bool>,
     /// Record rewind history from power-on (default false), so the rewind
     /// hotkey works outside the debugger.
     #[serde(skip_serializing_if = "Option::is_none")]

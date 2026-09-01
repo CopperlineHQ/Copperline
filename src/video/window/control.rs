@@ -8,6 +8,7 @@
 //! routes input/media through the exact helpers live input uses so
 //! journaling (input recorder, reverse-replay log) is identical.
 
+use super::app_session::WarpSource;
 use super::*;
 use crate::control::exec::{
     self, CoreOp, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
@@ -177,6 +178,10 @@ impl App {
         }
         self.emu.bus_mut().ui_disarm_beam_trap_once();
         ctx.remove_all_breaks(&mut self.emu);
+        // A warp the client engaged has no client left to release it.
+        if self.warp_hold == Some(WarpSource::Control) {
+            self.set_warp(false, WarpSource::Control);
+        }
         self.show_osd("Control client detached");
         self.request_redraw();
     }
@@ -394,6 +399,18 @@ impl App {
                     proto::err_line(&id, &CtlError::io("state load failed (see log)"))
                 };
                 self.control_send(line);
+            }
+            HostOp::WarpGet => {
+                let value = self.warp_report_value(None);
+                self.control_send(proto::ok_line(&id, value));
+            }
+            HostOp::WarpSet { on } => {
+                // No pending-resume refusal: like pause and input, this does
+                // not reposition the machine, and flipping warp mid-continue
+                // is the point.
+                let outcome = self.set_warp(on, WarpSource::Control);
+                let value = self.warp_report_value(outcome.note);
+                self.control_send(proto::ok_line(&id, value));
             }
             HostOp::Reset { warm } => {
                 if warm {
@@ -635,6 +652,67 @@ impl App {
         let stop = exec::stop_snapshot(&self.emu, reason, detail);
         if let Ok(value) = serde_json::to_value(&stop) {
             ctl.handle.send(proto::event_line("event.stopped", value));
+        }
+    }
+
+    /// The `warp.get` / `warp.set` reply: the pacing state and who holds
+    /// warp (a programmatic hold, an engaged boot gate, or the manual
+    /// toggle), plus a note when a request could not be honoured.
+    fn warp_report_value(&self, note: Option<&str>) -> Value {
+        let paced = self.emu.paced();
+        let source = if paced {
+            "none"
+        } else if self.headless_capture_active() {
+            // --control-gui combined with --screenshot-after/--dump-frames:
+            // unpaced end to end with no hold or gate, not a manual toggle.
+            "capture"
+        } else if let Some(hold) = self.warp_hold {
+            hold.label()
+        } else if self.warp_launch.as_ref().is_some_and(|l| l.engaged) {
+            "launch"
+        } else if self.warp_boot.as_ref().is_some_and(|g| g.engaged) {
+            "boot"
+        } else {
+            "manual"
+        };
+        let mut value = json!({
+            "on": !paced,
+            "paced": paced,
+            "source": source,
+            "headless": false,
+        });
+        if let Some(note) = note {
+            value["note"] = json!(note);
+        }
+        value
+    }
+
+    /// Tell an attached client that warp changed for a reason other than
+    /// its own `warp.set` (the hotkey, the guest, a boot gate, power off)
+    /// as an `event.warp` notification. Not gated on a pending resume: a
+    /// change during a `continue` is exactly what a client wants to see.
+    /// Delivery is best effort so a full outbound queue never disconnects
+    /// the client over an informational event.
+    pub(super) fn control_notify_warp(&mut self, source: &'static str) {
+        let paced = self.emu.paced();
+        let position = crate::control::observe::position(&self.emu);
+        let Some(ctl) = self.control.as_mut() else {
+            return;
+        };
+        if !ctl.handle.connected() {
+            return;
+        }
+        let line = proto::event_line(
+            "event.warp",
+            json!({
+                "on": !paced,
+                "paced": paced,
+                "source": source,
+                "position": position,
+            }),
+        );
+        if !ctl.handle.try_send_event(line) {
+            ctl.ctx.note_event_notification_dropped();
         }
     }
 
