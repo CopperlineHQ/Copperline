@@ -62,7 +62,7 @@ description). In summary:
 | `CHF_CHANGED_MASK` | 0x4014 | 16 | RO | M4: bit *n* set = unit *n*'s media changed (eject, hot attach/detach) and the guest has not yet acked it |
 | `CHF_CHANGED_ACK` | 0x4016 | 16 | WO | M4: write a mask; clears those `CHF_CHANGED_MASK` bits |
 | `CHF_UNIT_MEDIA` | 0x4018 | 16 | RO | M4: bit *n* set = unit *n* currently has media (distinct from `CHF_UNIT_PRESENT`, "slot configured") |
-| `CHF_DOORBELL` | 0x4020 | 32 | WO | guest pointer to an IOStdReq; enqueues and executes it synchronously (M1-M4; M5 makes this actually asynchronous without changing the guest-visible protocol) |
+| `CHF_DOORBELL` | 0x4020 | 32 | WO | guest pointer to an IOStdReq; enqueues it (executed synchronously through M4, asynchronously on a worker thread as of M5 -- see "Asynchronous I/O (M5)" below; the guest-visible protocol is unchanged) |
 | `CHF_COMPLETE_GET` | 0x4028 | 32 | RO | oldest completed request pointer, 0 if empty (idempotent -- does not pop) |
 | `CHF_COMPLETE_ACK` | 0x402C | 16 | WO | any write pops the oldest completion |
 | `CHF_IRQ_STATUS` | 0x4030 | 16 | RO | bit 0 = completion queue non-empty; bit 1 (M4) = `CHF_CHANGED_MASK` non-zero |
@@ -155,12 +155,111 @@ stub, built from:
 
 `BeginIO` never calls `ReplyMsg` itself: it clears `IOF_QUICK`, writes 0 to
 `io_Error`, and rings `CHF_DOORBELL` with the request pointer as a single
-32-bit write. The M1/M2 host-side protocol still executes the request
-synchronously (before `CHF_DOORBELL`'s write instruction even retires), but
-the guest is never told that -- it always waits for the INT2 completion
-drain, exactly as it would against genuinely asynchronous hardware. This is
-deliberate: it keeps the guest-visible contract stable across the M5
-milestone that makes the host side actually asynchronous.
+32-bit write. Through M4 the host-side protocol executed the request
+synchronously (before `CHF_DOORBELL`'s write instruction even retired), but
+the guest was never told that -- it always waited for the INT2 completion
+drain, exactly as it would against genuinely asynchronous hardware. M5 (see
+below) makes that host side actually asynchronous, on a worker thread; the
+guest-visible protocol -- this section included -- is unchanged.
+
+## Asynchronous I/O (M5)
+
+As of M5, `CHF_DOORBELL` no longer executes a request inline. The board
+splits each request into a doorbell-time half and a drain-time half:
+
+- **Doorbell time** (`CopperhfBoard::dispatch_request`, on the emulation
+  thread): read the `IOStdReq` header back out of guest memory, validate
+  the unit/range against board-cached state (`present`/`media`/
+  `total_sectors`, kept in sync with the worker's own unit table by the
+  quiesce rule below), copy `CMD_WRITE`/`TD_WRITE64`-style write payloads
+  *out* of guest memory into an owned buffer, and hand the job to the
+  worker over a bounded channel (`WORKER_QUEUE_CAPACITY`, 64 requests). A
+  request with no file I/O and no unit-table dependency (`TD_MOTOR`,
+  `TD_GETGEOMETRY`, `TD_CHANGENUM`/`CHANGESTATE`/`PROTSTATUS`, `TD_SEEK64`,
+  `CMD_CLEAR`, anything unrecognized) still takes a slot in the same
+  in-order queue, answered later from board-cached state rather than the
+  worker. Nothing at doorbell time ever writes a guest-visible result or
+  pushes a completion.
+- **Worker thread**: owns the real backing files (`units:
+  Arc<Mutex<[Option<ScsiDisk>; NUM_UNITS]>>`) and does the actual sector
+  read/write/SCSI-CDB work off the emulation thread, one single-threaded
+  FIFO worker per board, replying on its own result channel in the same
+  order jobs were sent.
+- **Drain time** (`tick`, on the emulation thread, called every scheduler
+  tick): pop the oldest in-flight request and block on the worker's result
+  channel until *that* request's result has arrived, then apply every
+  guest-visible effect -- `io_Error`/`io_Actual`, read data copied back
+  into guest memory, the pointer pushed onto `CHF_COMPLETE_GET`'s queue,
+  `TD_EJECT`'s media-mask/change-counter bookkeeping, and INT2 -- and
+  repeat until nothing already queued as of this tick remains in flight.
+
+### The determinism model
+
+The core invariant (spelled out in full in `src/copperhf.rs`'s own module
+doc, which this section summarizes): every guest-visible effect of a
+request lands at an emulated time that is a pure function of emulated
+time, never of how fast the worker thread's file I/O happened to run on
+this particular invocation. This holds because a request's due time is, by
+construction, "the first `tick()` call after its own doorbell write" --
+`tick` always blocks on the worker until every request already in flight
+*when tick runs* has actually delivered its result, so a slow disk costs
+host wall-clock time inside that block, not a shift in which emulated tick
+the completion becomes visible at. `CopperhfBoard::next_event_cck` reports
+an in-flight request as due immediately (offset 0) rather than letting the
+sparse-wake scheduler skip ahead, which is what makes that blocking-tick
+guarantee actually reachable every time. All requests -- I/O and
+board-answered alike -- ride one FIFO pipeline end to end (one
+doorbell-ordered queue on the board, matched positionally against the
+worker's own strictly-ordered output), so completions surface in doorbell
+order exactly as M1-M4. `TD_EJECT` is the one command whose *decision*
+(`io_Length != 0`) is made at doorbell time, since that only reads a
+guest-supplied field that cannot change out from under it, but whose
+*execution* (dropping the worker's file handle) is deferred to the
+worker's own queue position, so it can never race file I/O already queued
+against the same unit.
+
+The doorbell-to-worker channel is bounded (backpressure, not an unbounded
+queue): if the guest floods doorbells faster than the worker drains them,
+the doorbell write itself blocks the emulation thread briefly. This stays
+deterministic-safe because the worker thread never calls back into the
+emulation thread and never waits on anything but its own job queue and its
+own file I/O -- it cannot need the emulation thread to make progress, so
+the emulation thread blocking on it cannot deadlock.
+
+The browser build has no threads (`std::thread::spawn` fails at runtime on
+`wasm32-unknown-unknown`), so there the "worker" runs each job inline at
+dispatch time and buffers its result for the drain -- same FIFO pipeline,
+same call sites, zero concurrency, determinism trivially intact.
+
+### Quiesce-on-save
+
+The worker thread owns the real file handles, so a save state (or a
+runtime unit mutation) must never race the worker's own view of the unit
+table. `CopperhfBoard::quiesce` blocks until every in-flight request has
+surfaced -- the same drain loop `tick` runs, just repeated until the
+pipeline is empty -- and is a no-op when nothing is in flight.
+`Bus::copperhf_quiesce` calls it on whichever `[copperhf]` board is
+configured; `Emulator::save_state`/`save_state_bytes` call that
+unconditionally before serializing (both methods take `&mut self` as of
+M5, to allow it), and the CCP `copperhf.attach`/`copperhf.eject` handlers
+(`src/control/exec.rs`) call it before touching a unit, matching
+`attach_unit`/`hot_attach_unit`/`eject_unit`'s own precondition that the
+pipeline is already empty. A save state is therefore always captured with
+an empty copperhf pipeline, so resuming it reproduces an uninterrupted
+run's history byte-for-byte -- the same save-state contract every other
+board on this project holds to (`AGENTS.md`'s "Save states"), just with an
+explicit drain step to get there instead of nothing-in-flight-by
+construction. The state format's version 71 (`src/savestate.rs`) reflects
+this: `CopperhfBoard` gained a cached per-unit `total_sectors` field
+alongside its existing per-unit state, always serialized quiesced.
+
+`tests/copperhf_m5.rs` pins both properties end to end against a real AROS
+boot that drives dense doorbell traffic (the M3 RDSK/PART mounter walk
+plus the OFS Startup-Sequence's bootmark write): repeated boots of the
+identical scenario must produce byte-identical mid-boot save states and
+final screenshots, and a state saved mid-boot (deliberately inside the
+busy mounter/Startup-Sequence I/O window) must resume byte-identical to an
+uninterrupted run.
 
 `Open` fails with `IOERR_OPENFAIL` unless the requested unit is below
 `CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set; on success it sets
@@ -193,8 +292,14 @@ The stub is V34-clean: no V36+ exec/expansion calls anywhere on this path,
   control protocol -- `copperhf.attach`/`copperhf.eject`
   ([](../debugger/control)) -- for scripts and agents to swap a unit's media
   at runtime the same way `TD_EJECT` does from the guest side.
-- **M5** (planned): asynchronous I/O on a worker thread; the guest-visible
-  protocol above does not change under it (see the `BeginIO`/INT2 note).
+- **M5** (this page): asynchronous I/O on a worker thread, as described in
+  "Asynchronous I/O (M5)" above -- deterministic completion timing, a
+  bounded doorbell-to-worker channel, and quiesce-on-save/quiesce-on-hot-
+  mutate. The guest-visible protocol is unchanged from M4 (see the
+  `BeginIO`/INT2 note above).
+- **M6** (planned): integration matrix (RDB/RDB-less x OFS/FFS/PFS3-DS)
+  and CI wiring for 1.3/3.1/3.2 Kickstart runs, per
+  `COPPERHF-DEVICE-PLAN.md`'s "M6 -- Tests, CI, docs".
 
 ## See also
 
