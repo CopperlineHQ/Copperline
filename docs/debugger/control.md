@@ -73,7 +73,7 @@ copperline-ctl --info /tmp/ccp.json --repl
 An authenticated client can subscribe to asynchronous event notifications:
 
 ```text
-events.subscribe {"events":["frame","serial","interrupt","media"],"frame_interval":50,"frame_digest":true}
+events.subscribe {"events":["frame","serial","interrupt","media","debug"],"frame_interval":50,"frame_digest":true}
 events.list
 events.unsubscribe {"events":["serial"]}
 ```
@@ -81,17 +81,30 @@ events.unsubscribe {"events":["serial"]}
 ### Event types
 
 - **`event.frame`:** Emitted per video frame (or per `frame_interval`). Includes timeline
-  position and optional FNV-1a framebuffer hash digest.
+  position and optional FNV-1a framebuffer hash digest, plus `guest_idle_cck`: the
+  colour clocks the guest declared idle during the last frame through the uaelib
+  trap's idle markers (null until it uses them).
 - **`event.serial`:** Emitted when Paula serial transmission occurs.
 - **`event.interrupt`:** Emitted when interrupt request and enable state transitions occur.
 - **`event.media`:** Emitted when floppy disks or CD images are inserted or ejected.
+- **`event.debug`:** Guest debug output through the
+  [uaelib trap](../guide/run.md#uaelib-trap): one notification per item, with
+  `kind` `log` (`text`, a `KPrintF` line, also echoed on the host console) or
+  `resource` (`action` and the registered `resource`, as `debug.resources`
+  reports it). `dropped_events` counts items the bounded queue lost before
+  this batch.
+- **`event.warp`:** Sent without a subscription, in both modes, whenever warp
+  changes for a reason other than the client's own `warp.set`:
+  `{"on", "paced", "source", "position"}` with `source` one of `manual`,
+  `guest`, `launch`, `boot`, `power_off`. The headless server reports the
+  guest's `warpmode()` request with `paced` always false.
 
 ## Command reference summary
 
 ### Session management
 - `hello {"token": "..."}`: Handshake and protocol version query.
 - `auth {"token": "..."}`: Authenticate active connection.
-- `status`: Returns emulation state, frame counters, and host execution timing.
+- `status`: Returns emulation state, frame counters, host execution timing, and pacing (`paced`, `warp`).
 - `shutdown`: Terminates the emulator process.
 
 ### Execution control
@@ -104,6 +117,10 @@ events.unsubscribe {"events":["serial"]}
 - `run_until {"pc" | "vpos" | "frame" | "cck" | "seconds" | "stable_frames"}`: Run until condition.
 - `pause`: Pause active execution.
 - `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
+
+### Speed
+- `warp.get`: Report whether warp (unpaced emulation) is on, whether the machine is paced, and who holds it (`source`: `none`, `manual`, `control`, `guest`, `launch`, `boot`, or `headless`).
+- `warp.set {"on": true|false}`: Engage or release warp. On mutes live audio like `--warp-boot`; off also cancels a pending `--run` / `--warp-boot` phase. `Cmd+W` / `Alt+W`, the guest's `warpmode(0)`, a client disconnect, or a cold `machine.reset` release a client's warp. Accepted while a resume is pending. A bridged physical floppy drive keeps the machine paced (the reply carries a `note`), and the headless server, unpaced end to end, accepts it as a no-op (`"headless": true` plus a `note`).
 
 ### Reverse execution
 - `reverse_step {"n": 1}`: Step backward by instruction.
@@ -132,6 +149,8 @@ events.unsubscribe {"events":["serial"]}
 - `fault.list` / `fault.clear`: List or clear active memory bus faults.
 - `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable or configure address-space access tracking.
 - `memory.heatmap.report {"path": "..."}`: Export memory access heatmap.
+- `debug.resources`: List the bitmaps, palettes and copper lists the guest registered through the [uaelib trap](../guide/run.md#uaelib-trap) (`address`, `size`, `name`, `type`, `flags`, geometry, `registered_frame`).
+- `debug.idle`: The guest's uaelib idle markers: current state, whether ever used, and the last completed frame's `idle_cck` / `frame_cck`.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
 

@@ -307,6 +307,10 @@ The tracked `.bin` files are generated test programs, not ROM or disk images:
   probe built from `guest/zz9kprobe/` (the vendored ZZ9000 SDK transport
   plus the probe source); `tests/zz9k.rs` boots it on the bundled AROS ROM
   with no external assets.
+- `guest/uaelib-test/uaelibtest` is the uaelib-trap probe (the
+  vscode-amiga-debug template's `warpmode`/`KPrintF`/`debug_*` helpers as
+  written) built from `guest/uaelib-test/`; `tests/image_regression.rs`
+  boots it with `--run` on the bundled AROS ROM, with no external assets.
 Run the tracked-file audit in `RELEASE.md` before publishing a rewritten
 public repository.
 

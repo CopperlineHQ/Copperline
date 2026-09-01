@@ -383,6 +383,7 @@ warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 warp_boot = false          # warp the boot until storage goes idle
 warp_boot_idle = 10        # ...for this many emulated seconds
 # warp_until = 12.0        # or warp until an absolute emulated time
+uaelib = true              # WinUAE-compatible uaelib trap at $F0FF60
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
@@ -454,12 +455,20 @@ carried no information.)
   `warp_until = SECS` is the deterministic alternative: warp until an
   absolute emulated timestamp, for a setup whose boot time is known. The two
   are mutually exclusive, `--warp-boot`/`--warp-until` set them from the
-  command line, the manual warp toggle cancels the phase, headless captures
-  (already unpaced end to end) ignore both, and `--run` (whose own warp
-  launch ends at a sharper condition) cannot combine with them. The
-  launcher's *Warp boot* and *Warp boot idle* rows (*A/V & Emu*,
-  *Emulation*) edit the storage-idle mode; a `warp_until` loaded from a
-  config shows there as its own *Until Ns* state, which one press clears.
+  command line, the manual warp toggle (or `warp.set {"on": false}` over the
+  control protocol) cancels the phase, headless captures (already unpaced
+  end to end) ignore both, and `--run` (whose own warp launch ends at a
+  sharper condition) cannot combine with them. The launcher's *Warp boot*
+  and *Warp boot idle* rows (*A/V & Emu*, *Emulation*) edit the
+  storage-idle mode; a `warp_until` loaded from a config shows there as its
+  own *Until Ns* state, which one press clears.
+- `uaelib = true` (the default) fits the WinUAE-compatible "uaelib" trap at
+  `$F0FF60`, through which a guest program can toggle warp (`warpmode()` in
+  the vscode-amiga-debug template), log debug text, and register its
+  bitmaps, palettes and copper lists for the debugger; see the uaelib trap
+  section of [](run). `false` leaves `$F0FF60` floating. A CDTV's extended
+  ROM hides the trap regardless. There is no launcher row; the setting
+  survives the configuration screen's round trip.
 - `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
   and the **Rewind** menu item can step the whole machine backward through
   it. It rides the same deterministic snapshot ring as the debugger's reverse
