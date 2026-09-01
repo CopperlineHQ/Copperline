@@ -807,11 +807,17 @@ overlay is cropped away) and the band stays put. A
 window-presentation setting only: screenshots, frame dumps and
 recordings always keep their configured aperture. The CRT shader
 presets compose with it (the scanlines, mask or tube face are drawn
-over the cropped picture). Automatically suspended where it cannot
-apply -- under a monitor bezel (whose fixed opening frames the whole
-glass), for RTG board scanout, and for programmable multisync scans.
-The menu's *Video Settings > Autocrop* toggle flips it live without
-touching the config.
+over the cropped picture). Programmable (ECS/AGA VARBEAMEN) multisync
+scans -- a DblPAL or Multiscan Workbench, a 31 kHz Linux console --
+crop too: their envelope is the same fetched-rows model carried
+through the scan's own sync-anchored window and blanking, so a
+doubled Workbench screen fills the window like a 15 kHz one, at the
+uniform multiple under integer scaling (a progressive scan's rows are
+not woven pairs for the per-axis fit to step by). Automatically
+suspended where it cannot apply -- under a monitor bezel (whose fixed
+opening frames the whole glass) and for RTG board scanout. The menu's
+*Video Settings > Autocrop* toggle flips it live without touching the
+config.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

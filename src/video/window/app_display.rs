@@ -607,9 +607,12 @@ impl App {
     /// unless autocrop tightens it to the content. Neither applies to a
     /// frame it cannot draw: the bezel frames the whole glass with a fixed
     /// opening (and keeps the tv canvas, so there is no per-axis draw to
-    /// make), RTG board frames and programmable scans present their own
-    /// geometry. The CRT presets compose: the pass re-draws whatever rect
-    /// the layout shows.
+    /// make), and RTG board frames present their own geometry. A
+    /// programmable (multisync) scan crops like a standard one -- its
+    /// envelope arrives mapped through the scan's own sync-anchored
+    /// window -- but takes the uniform multiple rather than the per-axis
+    /// glass shape. The CRT presets compose: the pass re-draws whatever
+    /// rect the layout shows.
     ///
     /// While a mode is on, the layout never falls back to the classic
     /// letterbox: an open menu or panel widens the rect to the full
@@ -620,19 +623,27 @@ impl App {
     /// bottom, rather than hopping between the bottom-anchored band and
     /// the letterbox's centred bar every time a menu opens.
     pub(super) fn display_canvas_src(&self) -> Option<DisplaySrc> {
-        if self.rtg_present_dims.is_some()
-            || self.present_programmable
-            || self.present_width != FB_WIDTH
-            || self.bezel.is_on()
-        {
+        self.display_canvas_src_for(per_axis_scaling_requested(), crate::video::autocrop())
+    }
+
+    /// [`Self::display_canvas_src`] for the given mode requests, pure of
+    /// the live globals.
+    pub(super) fn display_canvas_src_for(
+        &self,
+        per_axis: bool,
+        autocrop: bool,
+    ) -> Option<DisplaySrc> {
+        if self.rtg_present_dims.is_some() || self.bezel.is_on() {
             return None;
         }
-        let per_axis = per_axis_scaling_requested();
-        let autocrop = crate::video::autocrop();
         if !per_axis && !autocrop {
             return None;
         }
-        let par = if per_axis {
+        // A programmable scan's glass is the whole canvas, with no woven
+        // pairs for a per-line factor to step by half a row: it keeps
+        // the uniform multiple of the square canvas, so only the tv
+        // canvas of a standard scan asks for the glass shape.
+        let par = if per_axis && !self.present_programmable {
             glass_par(
                 self.overscan,
                 self.present_tv_aperture_rows,
@@ -658,6 +669,7 @@ impl App {
                     canvas_content_rect(
                         content,
                         self.present_rows,
+                        self.present_width,
                         self.overscan,
                         self.tv_centre,
                         self.present_tv_aperture_rows,
@@ -797,6 +809,30 @@ impl App {
         self.present_width = width;
     }
 
+    /// A different scan geometry is a different coordinate space for the
+    /// content envelope -- a programmable scan's own glass rows against
+    /// the standard woven field, a 35 ns canvas against the classic one,
+    /// a mode's LACE toggling its rows -- so the latch's union and shrink
+    /// clock start over across one, the way the deinterlacer drops its
+    /// weave history there. The screen changes wholesale at such a switch
+    /// anyway; there is no zoom to hold steady through it.
+    fn reset_autocrop_latch_across_scan_change(
+        &mut self,
+        programmable: bool,
+        present_rows: usize,
+        present_width: usize,
+    ) {
+        if (programmable, present_rows, present_width)
+            != (
+                self.present_programmable,
+                self.present_rows,
+                self.present_width,
+            )
+        {
+            self.autocrop_latch.reset();
+        }
+    }
+
     pub(super) fn reset_render_pipeline(&mut self) {
         self.render_generation = self.render_generation.wrapping_add(1);
         self.last_rendered_emulated_frame = None;
@@ -827,6 +863,11 @@ impl App {
         // envelope prove itself stable. A change to the *presented* crop
         // must repaint even when the pixels themselves are unchanged
         // (the shrink adoption fires on the Nth identical frame).
+        self.reset_autocrop_latch_across_scan_change(
+            result.programmable,
+            result.present_rows,
+            result.present_width,
+        );
         let smoothed = self.autocrop_latch.resolve(result.content_rect);
         if smoothed != self.present_content_rect {
             self.present_content_rect = smoothed;
@@ -1051,7 +1092,7 @@ impl App {
         let field_content = bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
-        let field_rows = post_process_rendered_field(
+        let placement = post_process_rendered_field(
             &mut self.fb,
             geometry,
             canvas_scale,
@@ -1067,21 +1108,17 @@ impl App {
         let mut next_present_fb = std::mem::take(&mut self.render_recycle_fb);
         let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,
-            field_rows,
+            placement.rows,
             FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
             &mut next_present_fb,
         );
-        let smoothed = self.autocrop_latch.resolve(woven_content_rect(
-            field_content,
-            geometry.programmable,
-            visible_start_vpos,
-            h_shift,
-            FB_WIDTH * canvas_scale,
-            rows,
-        ));
+        self.reset_autocrop_latch_across_scan_change(geometry.programmable, rows, width);
+        let smoothed = self
+            .autocrop_latch
+            .resolve(field_content.and_then(|rect| placement.content_rect(rect, rows)));
         if smoothed != self.present_content_rect {
             self.present_content_rect = smoothed;
             self.main_presentation_dirty = true;

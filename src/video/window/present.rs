@@ -139,7 +139,7 @@ pub(super) fn render_job_to_presentation(
     let canvas_scale = input.canvas_scale();
     let canvas_width = FB_WIDTH * canvas_scale;
     let visible_start_vpos = input.visible_start_vpos();
-    let field_rows = post_process_rendered_field(
+    let placement = post_process_rendered_field(
         fb,
         geometry,
         canvas_scale,
@@ -152,21 +152,16 @@ pub(super) fn render_job_to_presentation(
     let base = input.render_base();
     let (present_rows, present_width) = deinterlacer.present_field_into(
         fb,
-        field_rows,
+        placement.rows,
         canvas_width,
         base.bplcon0 & 0x0004 != 0,
         base.long_field,
         !geometry.programmable,
         &mut presentation_fb,
     );
-    let content_rect = woven_content_rect(
-        render_result.content_rect,
-        geometry.programmable,
-        visible_start_vpos,
-        h_shift,
-        canvas_width,
-        present_rows,
-    );
+    let content_rect = render_result
+        .content_rect
+        .and_then(|rect| placement.content_rect(rect, present_rows));
     let metadata = RepeatedPresentationMetadata {
         present_rows,
         present_width,
@@ -190,38 +185,13 @@ pub(super) fn render_job_to_presentation(
     }
 }
 
-/// Map the renderer's field-space content envelope into woven
-/// presentation-buffer space: the same shifts
-/// `post_process_rendered_field` applied to the pixels (vertical
-/// centring, horizontal recentring), then each field row onto its two
-/// woven rows. Programmable scans present their own window in full and
-/// never autocrop, so they map to `None`.
-pub(super) fn woven_content_rect(
-    rect: Option<bitplane::ContentRect>,
-    programmable: bool,
-    visible_start_vpos: u32,
-    h_shift: usize,
-    canvas_width: usize,
-    present_rows: usize,
-) -> Option<bitplane::ContentRect> {
-    rect.filter(|_| !programmable)
-        .map(|rect| {
-            let y_off = presentation_source_y_offset(visible_start_vpos);
-            let x0 = rect.x0.saturating_sub(h_shift).min(canvas_width);
-            let x1 = rect.x1.saturating_sub(h_shift).clamp(x0, canvas_width);
-            let y0 = (2 * (rect.y0 + y_off)).min(present_rows);
-            let y1 = (2 * (rect.y1 + y_off)).clamp(y0, present_rows);
-            bitplane::ContentRect { x0, x1, y0, y1 }
-        })
-        .filter(|rect| rect.x1 > rect.x0 && rect.y1 > rect.y0)
-}
-
-/// Map a woven-space content envelope into canvas coordinates -- the
-/// space of the texture's display region -- by inverting the same row
-/// and column mapping `copy_window_present_frame` used for this frame's
-/// branch. Returns `(x, y, w, h)` in canvas pixels, or `None` when no
-/// canvas pixel shows content (crop everything away and there is nothing
-/// to present).
+/// Map a presentation-buffer content envelope (`src_rows` x `src_width`
+/// pixels: the woven field of a standard scan, a programmable scan's
+/// glass) into canvas coordinates -- the space of the texture's display
+/// region -- by inverting the same row and column mapping
+/// `copy_window_present_frame` used for this frame's branch. Returns
+/// `(x, y, w, h)` in canvas pixels, or `None` when no canvas pixel shows
+/// content (crop everything away and there is nothing to present).
 ///
 /// The inversion scans the canvas axes against the copy's forward maps
 /// rather than deriving closed forms: a few hundred iterations, run only
@@ -230,6 +200,7 @@ pub(super) fn woven_content_rect(
 pub(super) fn canvas_content_rect(
     content: bitplane::ContentRect,
     src_rows: usize,
+    src_width: usize,
     overscan: Overscan,
     tv_centre: TvCentre,
     tv_aperture_rows: Option<usize>,
@@ -278,8 +249,17 @@ pub(super) fn canvas_content_rect(
                     y_max = Some(y);
                 }
             }
-            x_min = Some(content.x0.min(FB_WIDTH - 1));
-            x_max = Some(content.x1.saturating_sub(1).min(FB_WIDTH - 1));
+            // The plain copy keeps the classic canvas's columns as they
+            // are and folds a wider (35 ns) canvas onto them by nearest
+            // sample: canvas column x reads source column
+            // x * src_width / FB_WIDTH, so a content column lands on the
+            // canvas column that far back. Inclusive at both ends -- the
+            // crop must never cut a content column, whichever of a
+            // group's sources the texture scale in force samples.
+            let src_width = src_width.max(1);
+            let canvas_x = |x: usize| (x * FB_WIDTH / src_width).min(FB_WIDTH - 1);
+            x_min = Some(canvas_x(content.x0));
+            x_max = Some(canvas_x(content.x1.saturating_sub(1)));
         }
     }
     let (x0, x1, y0, y1) = (x_min?, x_max?, y_min?, y_max?);

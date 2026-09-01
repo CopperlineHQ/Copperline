@@ -547,6 +547,8 @@ impl WebEmu {
         let h_shift = self
             .presentation_latch
             .presentation_h_shift(&base, self.overscan);
+        // The browser presents the whole placed field (no autocrop here
+        // yet), so only the placement's row count is used.
         let field_rows = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
@@ -556,7 +558,8 @@ impl WebEmu {
             visible_start_vpos,
             h_shift,
             self.overscan,
-        );
+        )
+        .rows;
         let canvas_width = FB_WIDTH * canvas_scale;
         let lace = base.bplcon0 & 0x0004 != 0;
         let double_rows = !geometry.programmable;
