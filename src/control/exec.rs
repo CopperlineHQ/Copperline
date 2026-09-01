@@ -328,9 +328,9 @@ pub fn copperhf_attach(
     volume_name: Option<String>,
     boot_pri: i8,
 ) -> Result<Value, CtlError> {
-    let Some(board) = emu.bus_mut().copperhf_board_mut() else {
+    if emu.bus_mut().copperhf_board_mut().is_none() {
         return Err(CtlError::unsupported("no [copperhf] controller configured"));
-    };
+    }
     let disk = crate::harddrive::HardDriveImage::open(
         path,
         &format!("DH{unit}"),
@@ -341,16 +341,26 @@ pub fn copperhf_attach(
     )
     .map_err(|e| CtlError::io(format!("{e:#}")))?;
     let blocks = disk.total_sectors();
-    board.hot_attach_unit(unit, disk);
+    // Quiesce first: attach/eject are only safe to call once no request is
+    // in flight (src/copperhf.rs's module doc, "Ownership and quiescing").
+    emu.bus_mut().copperhf_quiesce();
+    emu.bus_mut()
+        .copperhf_board_mut()
+        .expect("checked above")
+        .hot_attach_unit(unit, disk);
     Ok(json!({"unit": unit, "blocks": blocks}))
 }
 
 /// Hot-eject/detach a copperhf.device unit's media: see [`HostOp::CopperhfEject`].
 pub fn copperhf_eject(emu: &mut Emulator, unit: usize) -> Result<Value, CtlError> {
-    let Some(board) = emu.bus_mut().copperhf_board_mut() else {
+    if emu.bus_mut().copperhf_board_mut().is_none() {
         return Err(CtlError::unsupported("no [copperhf] controller configured"));
-    };
-    board.eject_unit(unit);
+    }
+    emu.bus_mut().copperhf_quiesce();
+    emu.bus_mut()
+        .copperhf_board_mut()
+        .expect("checked above")
+        .eject_unit(unit);
     Ok(json!({"unit": unit}))
 }
 

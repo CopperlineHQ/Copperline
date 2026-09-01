@@ -332,7 +332,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (`toc_spin_up_cck`) and the dump-exclusive command hold
 //      (`command_deferred_for_toc`), both calibrated against a real-CD32
 //      boot video and the cd32-probe rows.
-pub const STATE_VERSION: u32 = 70;
+//  71: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
+//      gained a per-unit cached `total_sectors` (`unit_sectors`) alongside
+//      the existing per-unit state; always serialized quiesced (no
+//      in-flight requests), so the shape otherwise stays close to M4's.
+pub const STATE_VERSION: u32 = 71;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

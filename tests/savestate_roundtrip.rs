@@ -229,7 +229,7 @@ fn resumed_run(
     expected: &[Fingerprint],
 ) -> anyhow::Result<()> {
     let started = Instant::now();
-    let (emu, split_frame) = boot_to_split()?;
+    let (mut emu, split_frame) = boot_to_split()?;
     println!(
         "  resumed: second build reached T={SPLIT_SECS}s in {:.1}s wall",
         started.elapsed().as_secs_f64()
