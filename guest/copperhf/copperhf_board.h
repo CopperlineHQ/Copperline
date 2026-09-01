@@ -106,6 +106,19 @@
                                 //         selected unit
 #define CHF_UNIT_BLOCKS  0x4010 // u32 ro: total 512-byte blocks of the
                                 //         selected unit
+#define CHF_CHANGED_MASK 0x4014 // u16 ro (M4): bit n set = unit n's media
+                                //         changed (eject, hot attach/detach)
+                                //         and the guest has not acked it yet
+#define CHF_CHANGED_ACK  0x4016 // u16 wo (M4): write a mask; clears those
+                                //         CHF_CHANGED_MASK bits
+#define CHF_UNIT_MEDIA   0x4018 // u16 ro (M4): bit n set = unit n currently
+                                //         has media. CHF_UNIT_PRESENT keeps
+                                //         meaning "slot configured" -- an
+                                //         ejected/hot-detached unit stays
+                                //         present (opens still succeed, like
+                                //         a diskless trackdisk drive) with
+                                //         its media bit clear. Before M4 the
+                                //         two masks were always identical.
 #define CHF_DOORBELL     0x4020 // u32 wo: guest pointer to an IOStdReq;
                                 //         enqueues and (M1) executes it.
                                 //         Written as two words, the high
@@ -121,12 +134,18 @@
 #define CHF_COMPLETE_ACK 0x402C // u16 wo: any write pops the oldest
                                 //         completed request
 #define CHF_IRQ_STATUS   0x4030 // u16 ro: bit 0 = completion queue non-empty
+                                //         bit 1 = CHF_CHANGED_MASK non-zero
+                                //         (M4)
 #define CHF_IRQ_ENABLE   0x4032 // u16 rw: bit 0 = enable INT2 while
-                                //         CHF_IRQ_STATUS bit 0 is set
-                                //         (power-on/reset value: 0)
+                                //         CHF_IRQ_STATUS is non-zero (any
+                                //         bit; power-on/reset value: 0)
 
 #define CHF_MAGIC_VALUE 0x43504846u // "CPHF"
-#define CHF_PROTOCOL_VERSION 1
+// Version 2 = M4: CHF_CHANGED_MASK/ACK, CHF_UNIT_MEDIA, IRQ_STATUS bit 1,
+// TD64/NSD/HD_SCSICMD command coverage. The guest ROM ships in lockstep
+// with the host board, so nothing branches on this at runtime -- it exists
+// so a register dump identifies the protocol vintage.
+#define CHF_PROTOCOL_VERSION 2
 #define CHF_NUM_UNITS 7
 
 // IOStdReq field offsets copperhf reads/writes (see the protocol comment
@@ -148,6 +167,44 @@
 #define CHF_CMD_TD_MOTOR     9
 #define CHF_CMD_TD_FORMAT    11
 #define CHF_CMD_TD_GETGEOMETRY 22
+
+// M4 command coverage. Host-side (doorbell) unless noted guest-side; the
+// guest-side ones never reach the doorbell at all -- device.c's BeginIO
+// answers them from the stub/ROM directly, because they need guest
+// pointers (the NSD supported-command table) or guest state (the pending
+// change-interrupt list) the host cannot provide.
+#define CHF_CMD_TD_CHANGENUM    13 // io_Actual = unit's change counter
+#define CHF_CMD_TD_CHANGESTATE  14 // io_Actual = 0 media present, 1 absent
+#define CHF_CMD_TD_PROTSTATUS   15 // io_Actual = 0 writable, 1 read-only
+#define CHF_CMD_TD_ADDCHANGEINT 20 // guest-side: queue io_Data Interrupt
+#define CHF_CMD_TD_REMCHANGEINT 21 // guest-side: unqueue + reply the add
+#define CHF_CMD_TD_EJECT        23 // io_Length != 0 ejects the media
+                                   // (bumps the change counter, sets the
+                                   // CHF_CHANGED_MASK bit); io_Length == 0
+                                   // ("insert") is a successful no-op --
+                                   // the host has nothing to load
+// TD64: io_Actual carries the UPPER 32 bits of the 64-bit byte offset on
+// entry, io_Offset the lower 32 (trackdisk64.doc); same 512-byte-multiple
+// rules as CMD_READ/CMD_WRITE. The NSCMD_* variants are identical in
+// layout, only the command numbers differ (NSD's newstyle.h).
+#define CHF_CMD_TD_READ64       24
+#define CHF_CMD_TD_WRITE64      25
+#define CHF_CMD_TD_SEEK64       26 // no-op success (nothing to seek)
+#define CHF_CMD_TD_FORMAT64     27 // treated as TD_WRITE64
+#define CHF_CMD_HD_SCSICMD      28 // io_Data -> struct SCSICmd; see
+                                   // src/copperhf.rs for the CDB coverage
+#define CHF_NSCMD_DEVICEQUERY   0x4000 // guest-side: fills the
+                                       // NSDeviceQueryResult at io_Data
+                                       // from a ROM-resident command table
+#define CHF_NSCMD_TD_READ64     0xC000
+#define CHF_NSCMD_TD_WRITE64    0xC001
+#define CHF_NSCMD_TD_SEEK64     0xC002
+#define CHF_NSCMD_TD_FORMAT64   0xC003
+
+// Plain 32-bit CMD_READ/CMD_WRITE/TD_FORMAT never wrap past 4 GiB:
+// io_Offset + io_Length overflowing 32 bits fails with IOERR_BADADDRESS
+// (COPPERHF-DEVICE-PLAN.md M4). The 64-bit commands are the only way to
+// address beyond 4 GiB.
 
 // io_Error values.
 #define CHF_IOERR_OPENFAIL   (-1)

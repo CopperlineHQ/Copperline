@@ -444,6 +444,33 @@ impl Session {
                 self.write(&reply)?;
                 Ok(None)
             }
+            HostOp::CopperhfAttach {
+                unit,
+                path,
+                volume_name,
+                boot_pri,
+            } => {
+                let reply = match exec::copperhf_attach(
+                    &mut self.emu,
+                    unit,
+                    &path,
+                    volume_name,
+                    boot_pri,
+                ) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.write(&reply)?;
+                Ok(None)
+            }
+            HostOp::CopperhfEject { unit } => {
+                let reply = match exec::copperhf_eject(&mut self.emu, unit) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.write(&reply)?;
+                Ok(None)
+            }
             HostOp::SetPortDevice { port, device } => {
                 self.emu
                     .bus_mut()
@@ -864,6 +891,8 @@ impl Session {
                     | HostOp::FloppyEject { .. }
                     | HostOp::CdInsert { .. }
                     | HostOp::CdEject
+                    | HostOp::CopperhfAttach { .. }
+                    | HostOp::CopperhfEject { .. }
                     | HostOp::SetPortDevice { .. }
                     | HostOp::Reset { .. }),
                 ) => {

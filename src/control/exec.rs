@@ -317,6 +317,43 @@ pub fn mouse_to(
     }
 }
 
+/// Hot-attach a copperhf.device unit's media: opens `path` exactly like a
+/// boot-time `[copperhf]` unit and replaces whatever media the unit had.
+/// Shared by both control-server drivers so `copperhf.attach` behaves
+/// identically headless and windowed.
+pub fn copperhf_attach(
+    emu: &mut Emulator,
+    unit: usize,
+    path: &std::path::Path,
+    volume_name: Option<String>,
+    boot_pri: i8,
+) -> Result<Value, CtlError> {
+    let Some(board) = emu.bus_mut().copperhf_board_mut() else {
+        return Err(CtlError::unsupported("no [copperhf] controller configured"));
+    };
+    let disk = crate::harddrive::HardDriveImage::open(
+        path,
+        &format!("DH{unit}"),
+        "copperhf",
+        volume_name.as_deref(),
+        boot_pri,
+        crate::diskimage::FileSystem::FFS,
+    )
+    .map_err(|e| CtlError::io(format!("{e:#}")))?;
+    let blocks = disk.total_sectors();
+    board.hot_attach_unit(unit, disk);
+    Ok(json!({"unit": unit, "blocks": blocks}))
+}
+
+/// Hot-eject/detach a copperhf.device unit's media: see [`HostOp::CopperhfEject`].
+pub fn copperhf_eject(emu: &mut Emulator, unit: usize) -> Result<Value, CtlError> {
+    let Some(board) = emu.bus_mut().copperhf_board_mut() else {
+        return Err(CtlError::unsupported("no [copperhf] controller configured"));
+    };
+    board.eject_unit(unit);
+    Ok(json!({"unit": unit}))
+}
+
 /// A "wait until the picture stops changing" run target: keep running
 /// until `frames` consecutive rendered frames hash identically. This is
 /// how a script waits for a GUI to finish drawing without guessing at an
@@ -440,6 +477,26 @@ pub enum HostOp {
         path: PathBuf,
     },
     CdEject,
+    /// Hot-attach a copperhf.device unit's media at runtime (`[copperhf]`'s
+    /// own boot-time attach path, driven from a live session): opens
+    /// `path` exactly like a configured `[copperhf]` unit and replaces
+    /// whatever media the unit had, bumping its change counter and setting
+    /// its `CHF_CHANGED_MASK` bit so the guest's disk-change machinery
+    /// fires.
+    CopperhfAttach {
+        unit: usize,
+        path: PathBuf,
+        volume_name: Option<String>,
+        boot_pri: i8,
+    },
+    /// Hot-eject/detach a copperhf.device unit's media: drops the backing
+    /// image but leaves the unit present (`CHF_UNIT_PRESENT` stays set,
+    /// only `CHF_UNIT_MEDIA` clears), bumping its change counter and
+    /// setting `CHF_CHANGED_MASK` the same way `TD_EJECT` does from the
+    /// guest side.
+    CopperhfEject {
+        unit: usize,
+    },
     /// Hot-plug a controller device into a port (0 = port 1, 1 = port 2).
     /// Releases every line the previous device drove; not journaled for
     /// reverse replay (like a media change, it is host state).
@@ -1002,6 +1059,38 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: PathBuf::from(p.str_req("path")?),
         }),
         "media.cd.eject" => host(HostOp::CdEject),
+        "copperhf.attach" => {
+            let unit = p.usize_req("unit")?;
+            if unit >= crate::copperhf::NUM_UNITS {
+                return Err(CtlError::invalid_params(format!(
+                    "unit must be 0..{}",
+                    crate::copperhf::NUM_UNITS
+                )));
+            }
+            let boot_pri = p.i32_or(
+                "boot_pri",
+                i32::from(crate::config::HARDFILE_DEFAULT_BOOT_PRI),
+            )?;
+            if !(i32::from(i8::MIN)..=i32::from(i8::MAX)).contains(&boot_pri) {
+                return Err(CtlError::invalid_params("boot_pri must be -128..=127"));
+            }
+            host(HostOp::CopperhfAttach {
+                unit,
+                path: PathBuf::from(p.str_req("path")?),
+                volume_name: p.str_opt("volume_name")?,
+                boot_pri: boot_pri as i8,
+            })
+        }
+        "copperhf.eject" => {
+            let unit = p.usize_req("unit")?;
+            if unit >= crate::copperhf::NUM_UNITS {
+                return Err(CtlError::invalid_params(format!(
+                    "unit must be 0..{}",
+                    crate::copperhf::NUM_UNITS
+                )));
+            }
+            host(HostOp::CopperhfEject { unit })
+        }
         "events.subscribe" => {
             let events = parse_event_list(&p, true)?.expect("required event list");
             let frame_interval = p.u64_opt("frame_interval")?;
@@ -3391,5 +3480,83 @@ mod tests {
         assert!(detail.contains("100"));
         let (reason, _) = stop_reason_of(&DebugStop::Breakpoint { pc: 0x1000 });
         assert_eq!(reason, "breakpoint");
+    }
+
+    #[test]
+    fn copperhf_attach_parses_unit_path_and_optional_params() {
+        match parse_method(
+            "copperhf.attach",
+            &json!({"unit": 2, "path": "/tmp/x.hdf", "volume_name": "DH2", "boot_pri": 5}),
+        )
+        .unwrap()
+        {
+            Request::Host(HostOp::CopperhfAttach {
+                unit,
+                path,
+                volume_name,
+                boot_pri,
+            }) => {
+                assert_eq!(unit, 2);
+                assert_eq!(path, PathBuf::from("/tmp/x.hdf"));
+                assert_eq!(volume_name.as_deref(), Some("DH2"));
+                assert_eq!(boot_pri, 5);
+            }
+            other => panic!("expected CopperhfAttach, got {other:?}"),
+        }
+
+        // Defaults: no volume_name, boot_pri = HARDFILE_DEFAULT_BOOT_PRI.
+        match parse_method("copperhf.attach", &json!({"unit": 0, "path": "/tmp/y.hdf"})).unwrap() {
+            Request::Host(HostOp::CopperhfAttach {
+                volume_name,
+                boot_pri,
+                ..
+            }) => {
+                assert_eq!(volume_name, None);
+                assert_eq!(boot_pri, crate::config::HARDFILE_DEFAULT_BOOT_PRI);
+            }
+            other => panic!("expected CopperhfAttach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copperhf_attach_and_eject_reject_an_out_of_range_unit() {
+        let err = parse_method(
+            "copperhf.attach",
+            &json!({"unit": 99, "path": "/tmp/x.hdf"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method("copperhf.eject", &json!({"unit": 99})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn copperhf_attach_rejects_boot_pri_outside_i8_range() {
+        let err = parse_method(
+            "copperhf.attach",
+            &json!({"unit": 0, "path": "/tmp/x.hdf", "boot_pri": 200}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn copperhf_eject_parses_unit() {
+        match parse_method("copperhf.eject", &json!({"unit": 3})).unwrap() {
+            Request::Host(HostOp::CopperhfEject { unit }) => assert_eq!(unit, 3),
+            other => panic!("expected CopperhfEject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copperhf_attach_and_eject_report_unsupported_with_no_controller_configured() {
+        // test_emulator() builds a bare bus with no [copperhf] board; both
+        // operations must fail cleanly rather than panic.
+        let mut emu = test_emulator();
+        let err = copperhf_attach(&mut emu, 0, std::path::Path::new("/tmp/nope.hdf"), None, 0)
+            .unwrap_err();
+        assert_eq!(err.code, proto::UNSUPPORTED);
+        let err = copperhf_eject(&mut emu, 0).unwrap_err();
+        assert_eq!(err.code, proto::UNSUPPORTED);
     }
 }

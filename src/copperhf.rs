@@ -1,24 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! copperhf.device: a register-level virtual block-storage board, M1 slice
-//! (board + register protocol, synchronous I/O; see
+//! copperhf.device: a register-level virtual block-storage board (board +
+//! register protocol, TD64/NSD/`HD_SCSICMD` command coverage, disk-change
+//! handling; still synchronous I/O -- async is M5. See
 //! `COPPERHF-DEVICE-PLAN.md`).
 //!
-//! Up to [`NUM_UNITS`] units, each an optional [`HardDriveImage`], are
-//! addressed by a raw unit number (not a guest `Unit` pointer -- see
+//! Up to [`NUM_UNITS`] units, each an optional backing image, are addressed
+//! by a raw unit number (not a guest `Unit` pointer -- see
 //! `guest/copperhf/copperhf_board.h`) through a doorbell/completion-queue
 //! protocol modelled on real trackdisk-style hardware but simplified: a
 //! request handed to [`CopperhfBoard::write`] via `CHF_DOORBELL` is executed
 //! synchronously (no worker thread yet -- that is M5's job) and its pointer
 //! is pushed onto a completion queue the guest drains through
-//! `CHF_COMPLETE_GET`/`CHF_COMPLETE_ACK`. INT2 is asserted whenever the
-//! queue is non-empty and `CHF_IRQ_ENABLE` is set.
+//! `CHF_COMPLETE_GET`/`CHF_COMPLETE_ACK`. INT2 is asserted whenever
+//! `CHF_IRQ_ENABLE` is set and either the completion queue is non-empty or
+//! a unit's media has changed and not yet been acked (`CHF_CHANGED_MASK`).
+//! "Present" (a slot is configured) and "media" (the slot currently has
+//! something in it) are tracked separately, so `TD_EJECT` and a runtime
+//! CCP `copperhf.eject` behave like pulling a disk out of a still-attached
+//! drive rather than unplugging the drive itself.
 //!
 //! The register offsets, IOStdReq field offsets, command numbers, and error
 //! codes below all mirror `guest/copperhf/copperhf_board.h`; keep the two in
 //! sync.
 
 use crate::harddrive::{HardDriveImage, RDB_HEADS, RDB_SPT};
+use crate::scsi::{ScsiDisk, ScsiExec, CHECK_CONDITION};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use std::collections::VecDeque;
 
@@ -60,6 +67,9 @@ const CHF_UNIT_RDONLY: u32 = 0x400A;
 const CHF_UNIT_SELECT: u32 = 0x400C;
 const CHF_CHANGE_COUNT: u32 = 0x400E;
 const CHF_UNIT_BLOCKS: u32 = 0x4010;
+const CHF_CHANGED_MASK: u32 = 0x4014;
+const CHF_CHANGED_ACK: u32 = 0x4016;
+const CHF_UNIT_MEDIA: u32 = 0x4018;
 const CHF_DOORBELL: u32 = 0x4020;
 const CHF_COMPLETE_GET: u32 = 0x4028;
 const CHF_COMPLETE_ACK: u32 = 0x402C;
@@ -67,7 +77,9 @@ const CHF_IRQ_STATUS: u32 = 0x4030;
 const CHF_IRQ_ENABLE: u32 = 0x4032;
 
 const CHF_MAGIC_VALUE: u32 = 0x4350_4846; // "CPHF"
-const CHF_PROTOCOL_VERSION: u16 = 1;
+                                          // Version 2 = M4: CHF_CHANGED_MASK/ACK, CHF_UNIT_MEDIA, IRQ_STATUS bit 1,
+                                          // TD64/NSD/HD_SCSICMD command coverage. See guest/copperhf/copperhf_board.h.
+const CHF_PROTOCOL_VERSION: u16 = 2;
 
 // IOStdReq field offsets, relative to the request pointer.
 const IO_UNIT: u32 = 24;
@@ -85,15 +97,51 @@ const CMD_UPDATE: u16 = 4;
 const CMD_CLEAR: u16 = 5;
 const TD_MOTOR: u16 = 9;
 const TD_FORMAT: u16 = 11;
+const TD_CHANGENUM: u16 = 13;
+const TD_CHANGESTATE: u16 = 14;
+const TD_PROTSTATUS: u16 = 15;
 const TD_GETGEOMETRY: u16 = 22;
+const TD_EJECT: u16 = 23;
+const TD_READ64: u16 = 24;
+const TD_WRITE64: u16 = 25;
+const TD_SEEK64: u16 = 26;
+const TD_FORMAT64: u16 = 27;
+const HD_SCSICMD: u16 = 28;
+const NSCMD_TD_READ64: u16 = 0xC000;
+const NSCMD_TD_WRITE64: u16 = 0xC001;
+const NSCMD_TD_SEEK64: u16 = 0xC002;
+const NSCMD_TD_FORMAT64: u16 = 0xC003;
 
 // io_Error values.
 const IOERR_OPENFAIL: i8 = -1;
 const IOERR_NOCMD: i8 = -3;
 const IOERR_BADLENGTH: i8 = -4;
 const IOERR_BADADDRESS: i8 = -5;
+// exec.library/io.h negative range ends at -13 (IOERR_ABORTED); trackdisk.doc
+// keeps its own error numbering in the positive range starting at 20, so
+// TDERR_DiskChanged is a plain positive io_Error value, not part of the
+// IOERR_* family above.
+const TDERR_DISK_CHANGED: i8 = 29;
+// devices/scsidisk.h: HD_SCSICMD's io_Error when the target returned a
+// non-GOOD scsi_Status (the request itself was delivered and answered).
+const HFERR_BAD_STATUS: i8 = 45;
 
 const SECTOR_SIZE: usize = 512;
+
+// struct SCSICmd field offsets (devices/scsidisk.h; 32 bytes on m68k with
+// natural 4-byte alignment for the pointer/ULONG fields -- 2 bytes of
+// padding fall between scsi_Status and scsi_SenseData).
+const SCSI_DATA: u32 = 0; // UWORD *scsi_Data
+const SCSI_LENGTH: u32 = 4; // ULONG scsi_Length
+const SCSI_ACTUAL: u32 = 8; // ULONG scsi_Actual
+const SCSI_COMMAND: u32 = 12; // UBYTE *scsi_Command
+const SCSI_CMDLENGTH: u32 = 16; // UWORD scsi_CmdLength
+const SCSI_CMDACTUAL: u32 = 18; // UWORD scsi_CmdActual
+/// scsi_Flags (high byte) / scsi_Status (low byte): one big-endian word.
+const SCSI_FLAGS: u32 = 20;
+const SCSI_SENSEDATA: u32 = 24; // UBYTE *scsi_SenseData
+const SCSI_SENSELENGTH: u32 = 28; // UWORD scsi_SenseLength
+const SCSI_SENSEACTUAL: u32 = 30; // UWORD scsi_SenseActual
 
 /// Bound on the completion queue purely as a sanity backstop: in the
 /// synchronous M1 protocol exactly one completion is produced per doorbell
@@ -107,9 +155,24 @@ const COMPLETION_WARN_LEN: usize = 64;
 /// `guest/copperhf/copperhf_board.h`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CopperhfBoard {
-    units: [Option<HardDriveImage>; NUM_UNITS],
-    /// Disk-change counter per unit, bumped on attach/detach (`CHF_CHANGE_COUNT`).
+    /// Each unit's backing store, wrapped in a [`ScsiDisk`] purely to reuse
+    /// its CDB machinery for `HD_SCSICMD` (M4) -- there is no SCSI bus
+    /// underneath; every other command talks to `.disk` directly exactly as
+    /// M1-M3 did.
+    units: [Option<ScsiDisk>; NUM_UNITS],
+    /// `CHF_UNIT_PRESENT`: "slot configured", sticky once a unit is ever
+    /// attached (boot-time `[copperhf]` config or a runtime CCP attach).
+    /// Ejecting or hot-detaching a unit's media clears `units[n]` but never
+    /// this -- an ejected unit stays present, like a diskless trackdisk
+    /// drive (`guest/copperhf/copperhf_board.h`'s own comment on
+    /// `CHF_UNIT_MEDIA`).
+    present: [bool; NUM_UNITS],
+    /// Disk-change counter per unit, bumped on attach/eject/detach
+    /// (`CHF_CHANGE_COUNT`, `CHF_CMD_TD_CHANGENUM`).
     change_count: [u16; NUM_UNITS],
+    /// `CHF_CHANGED_MASK`: bit *n* set = unit *n*'s media changed and the
+    /// guest has not yet acked it via `CHF_CHANGED_ACK`.
+    changed_mask: u16,
     /// TD_MOTOR state per unit; tracked but has no effect on I/O in M1.
     motor: [bool; NUM_UNITS],
     /// `CHF_UNIT_SELECT`: which unit `CHF_CHANGE_COUNT`/`CHF_UNIT_BLOCKS`
@@ -136,7 +199,9 @@ impl CopperhfBoard {
     pub fn new() -> Self {
         Self {
             units: Default::default(),
+            present: [false; NUM_UNITS],
             change_count: [0; NUM_UNITS],
+            changed_mask: 0,
             motor: [false; NUM_UNITS],
             select: 0,
             doorbell_hi: None,
@@ -148,24 +213,70 @@ impl CopperhfBoard {
         }
     }
 
-    /// Attach a unit's image, bumping its disk-change counter. Replaces
-    /// whatever was there.
+    /// Attach a unit's image at boot time (`[copperhf]` config, before the
+    /// guest has run at all): bumps the disk-change counter but does *not*
+    /// set `CHF_CHANGED_MASK`.
+    ///
+    /// Deliberately not the same path as a runtime hot-attach
+    /// ([`Self::hot_attach_unit`]): every M1-M3 guest build predates
+    /// `CHF_CHANGED_MASK`/`CHF_CHANGED_ACK` entirely and never acks it, so a
+    /// change flagged here would latch forever the moment the guest sets
+    /// `CHF_IRQ_ENABLE` -- `CHF_IRQ_STATUS` bit 1 would stay permanently
+    /// set, INT2 would never drop, and the CPU would spend the rest of the
+    /// boot re-entering the interrupt handler instead of getting anywhere
+    /// (verified against `tests/copperhf_device.rs`'s M2 boot, which hangs
+    /// before `--run`'s staged program ever executes if this bumps
+    /// `changed_mask`). A boot-time attach is not a "change" from the
+    /// guest's point of view in the first place -- it is what the unit
+    /// looked like when the guest first saw it.
     pub fn attach_unit(&mut self, unit: usize, image: HardDriveImage) {
-        self.units[unit] = Some(image);
-        self.change_count[unit] = self.change_count[unit].wrapping_add(1);
+        self.units[unit] = Some(ScsiDisk::from_disk(image));
+        self.present[unit] = true;
         self.motor[unit] = false;
+        // Deliberately does not bump change_count either: a unit that was
+        // never ejected must read back CHF_CHANGE_COUNT/TD_CHANGENUM == 0
+        // (guest/copperhf-test/chftest_m4.c's own test_changenum -- the
+        // guest's documented contract for "this unit has never changed").
+        // A boot-time attach is what the unit looked like when the guest
+        // first saw it, not a change from some prior state it never had.
     }
 
-    /// Detach a unit's image, if any, bumping its disk-change counter.
-    pub fn detach_unit(&mut self, unit: usize) -> Option<HardDriveImage> {
+    /// Hot-attach a unit's image at runtime (CCP `copperhf.attach`): like
+    /// [`Self::attach_unit`], but also bumps the change counter and marks
+    /// the change pending in `CHF_CHANGED_MASK` so a guest that is actually
+    /// running (and can ack it) notices, matching the guest's own
+    /// `TD_EJECT`.
+    pub fn hot_attach_unit(&mut self, unit: usize, image: HardDriveImage) {
+        self.attach_unit(unit, image);
+        self.change_count[unit] = self.change_count[unit].wrapping_add(1);
+        self.changed_mask |= 1 << unit;
+    }
+
+    /// Eject a unit's media (guest `TD_EJECT`, or a runtime CCP
+    /// `copperhf.eject`/`copperhf.detach`): drops the backing image but
+    /// leaves the unit present, bumps its change counter, and marks the
+    /// change pending. A no-op (still bumps/flags) if the unit already had
+    /// no media -- an idempotent eject is not an error. Always a runtime
+    /// operation (there is no "eject" at boot-config time), so unlike
+    /// [`Self::attach_unit`] this always sets `CHF_CHANGED_MASK`.
+    pub fn eject_unit(&mut self, unit: usize) -> Option<HardDriveImage> {
         let image = self.units[unit].take();
-        if image.is_some() {
-            self.change_count[unit] = self.change_count[unit].wrapping_add(1);
-        }
-        image
+        self.change_count[unit] = self.change_count[unit].wrapping_add(1);
+        self.changed_mask |= 1 << unit;
+        image.map(|d| d.disk)
     }
 
     fn present_bitmask(&self) -> u16 {
+        let mut mask = 0u16;
+        for (i, &p) in self.present.iter().enumerate() {
+            if p {
+                mask |= 1 << i;
+            }
+        }
+        mask
+    }
+
+    fn media_bitmask(&self) -> u16 {
         let mut mask = 0u16;
         for (i, u) in self.units.iter().enumerate() {
             if u.is_some() {
@@ -175,15 +286,15 @@ impl CopperhfBoard {
         mask
     }
 
-    /// Always reports every attached unit as writable in M1.
+    /// Always reports every attached unit as writable, through M4.
     ///
     /// Deviation from the milestone note: there is no per-image read-only
     /// flag anywhere in the shared `HardDriveImage` layer today (see
     /// COPPERHF-DEVICE-PLAN.md's "Deferred" section) -- not even for a host
     /// disk, which exposes `is_host_disk()` but no writability query. Wiring
-    /// `CHF_UNIT_RDONLY` up to something real is therefore a shared-layer
-    /// follow-up like the note says PROTSTATUS is, not something this board
-    /// can honestly report on its own.
+    /// `CHF_UNIT_RDONLY`/`TD_PROTSTATUS` up to something real is therefore a
+    /// shared-layer follow-up, not something this board can honestly report
+    /// on its own.
     fn rdonly_bitmask(&self) -> u16 {
         0
     }
@@ -200,7 +311,7 @@ impl CopperhfBoard {
     fn blocks_for_selected(&self) -> u32 {
         self.selected_unit()
             .and_then(|u| self.units[u].as_ref())
-            .map_or(0, |img| img.total_sectors() as u32)
+            .map_or(0, |img| img.disk.total_sectors() as u32)
     }
 
     fn read_word(&mut self, off: u32) -> u16 {
@@ -235,10 +346,16 @@ impl CopperhfBoard {
                     .unwrap_or_else(|| self.completions.front().copied().unwrap_or(0));
                 v as u16
             }
-            CHF_IRQ_STATUS => u16::from(!self.completions.is_empty()),
+            CHF_CHANGED_MASK => self.changed_mask,
+            CHF_UNIT_MEDIA => self.media_bitmask(),
+            CHF_IRQ_STATUS => self.irq_status(),
             CHF_IRQ_ENABLE => u16::from(self.irq_enable),
             _ => 0xFFFF,
         }
+    }
+
+    fn irq_status(&self) -> u16 {
+        (u16::from(!self.completions.is_empty())) | (u16::from(self.changed_mask != 0) << 1)
     }
 
     fn read_long(&mut self, off: u32) -> u32 {
@@ -253,6 +370,7 @@ impl CopperhfBoard {
     fn write_word(&mut self, off: u32, value: u16, host: &mut DeviceHost) {
         match off {
             CHF_UNIT_SELECT => self.select = value,
+            CHF_CHANGED_ACK => self.changed_mask &= !value,
             CHF_DOORBELL => self.doorbell_hi = Some(value),
             _ if off == CHF_DOORBELL + 2 => {
                 let hi = self.doorbell_hi.take().unwrap_or(0);
@@ -318,18 +436,17 @@ impl CopperhfBoard {
     /// Run one already-decoded command, returning `(io_Error, io_Actual)`.
     fn run_command(&mut self, header: &RequestHeader, host: &mut DeviceHost) -> (i8, u32) {
         match header.command {
-            CMD_READ => self.do_read(header, host),
-            CMD_WRITE | TD_FORMAT => self.do_write(header, host),
-            CMD_UPDATE => {
-                if let Some(unit) = self.valid_unit(header.unit) {
-                    if let Err(e) = self.units[unit].as_mut().unwrap().flush() {
+            CMD_READ => self.do_rw(header, host, true, false),
+            CMD_WRITE | TD_FORMAT => self.do_rw(header, host, false, false),
+            CMD_UPDATE => match self.require_media(header.unit) {
+                Ok(unit) => {
+                    if let Err(e) = self.units[unit].as_mut().unwrap().disk.flush() {
                         log::warn!("copperhf: unit {unit}: CMD_UPDATE flush failed: {e}");
                     }
                     (0, 0)
-                } else {
-                    (IOERR_OPENFAIL, 0)
                 }
-            }
+                Err(e) => (e, 0),
+            },
             CMD_CLEAR => (0, 0),
             TD_MOTOR => {
                 let Some(unit) = self.valid_unit(header.unit) else {
@@ -340,96 +457,175 @@ impl CopperhfBoard {
                 (0, previous)
             }
             TD_GETGEOMETRY => self.do_get_geometry(header, host),
+            TD_CHANGENUM => match self.valid_unit(header.unit) {
+                Some(unit) => (0, u32::from(self.change_count[unit])),
+                None => (IOERR_OPENFAIL, 0),
+            },
+            TD_CHANGESTATE => match self.valid_unit(header.unit) {
+                Some(unit) => (0, u32::from(self.units[unit].is_none())),
+                None => (IOERR_OPENFAIL, 0),
+            },
+            TD_PROTSTATUS => match self.valid_unit(header.unit) {
+                // rdonly_bitmask() is always 0 today (see its own doc
+                // comment); mirrored here rather than hard-coded so the two
+                // stay in lockstep if that ever changes.
+                Some(unit) => (0, u32::from(self.rdonly_bitmask() & (1 << unit) != 0)),
+                None => (IOERR_OPENFAIL, 0),
+            },
+            TD_EJECT => match self.valid_unit(header.unit) {
+                Some(unit) => {
+                    if header.length != 0 {
+                        self.eject_unit(unit);
+                    }
+                    (0, 0)
+                }
+                None => (IOERR_OPENFAIL, 0),
+            },
+            TD_READ64 | NSCMD_TD_READ64 => self.do_rw(header, host, true, true),
+            TD_WRITE64 | TD_FORMAT64 | NSCMD_TD_WRITE64 | NSCMD_TD_FORMAT64 => {
+                self.do_rw(header, host, false, true)
+            }
+            TD_SEEK64 | NSCMD_TD_SEEK64 => match self.valid_unit(header.unit) {
+                Some(_) => (0, 0),
+                None => (IOERR_OPENFAIL, 0),
+            },
+            HD_SCSICMD => self.do_scsicmd(header, host),
             _ => (IOERR_NOCMD, 0),
         }
     }
 
-    /// The unit index if `raw` names a present unit, `None` otherwise
-    /// (out of range or an empty slot).
+    /// The unit index if `raw` names a present (configured) unit, `None`
+    /// otherwise (out of range or an unconfigured slot). Present does not
+    /// imply media -- an ejected/hot-detached unit stays present with its
+    /// `CHF_UNIT_MEDIA` bit clear, like a diskless trackdisk drive.
     fn valid_unit(&self, raw: u32) -> Option<usize> {
         let unit = raw as usize;
-        (unit < NUM_UNITS && self.units[unit].is_some()).then_some(unit)
+        (unit < NUM_UNITS && self.present[unit]).then_some(unit)
     }
 
-    fn do_read(&mut self, header: &RequestHeader, host: &mut DeviceHost) -> (i8, u32) {
-        let Some(unit) = self.valid_unit(header.unit) else {
-            return (IOERR_OPENFAIL, 0);
+    /// The unit index if `raw` names a present unit that also currently has
+    /// media, `Err(IOERR_OPENFAIL)` if the unit is not configured at all,
+    /// `Err(TDERR_DISK_CHANGED)` if it is configured but ejected/hot-
+    /// detached. I/O and geometry commands require this; the change-status
+    /// trio (`TD_CHANGENUM`/`TD_CHANGESTATE`/`TD_PROTSTATUS`) and `TD_EJECT`
+    /// answer from a media-absent unit too, so they use [`Self::valid_unit`]
+    /// directly instead.
+    fn require_media(&self, raw: u32) -> Result<usize, i8> {
+        let unit = self.valid_unit(raw).ok_or(IOERR_OPENFAIL)?;
+        if self.units[unit].is_none() {
+            return Err(TDERR_DISK_CHANGED);
+        }
+        Ok(unit)
+    }
+
+    /// `CMD_READ`/`CMD_WRITE`/`TD_FORMAT` and their TD64/NSD 64-bit twins,
+    /// which differ only in whether `io_Actual` carries the high 32 bits of
+    /// the byte offset on entry and whether the 4 GiB address ceiling
+    /// applies (`sixty_four`).
+    fn do_rw(
+        &mut self,
+        header: &RequestHeader,
+        host: &mut DeviceHost,
+        read: bool,
+        sixty_four: bool,
+    ) -> (i8, u32) {
+        let unit = match self.require_media(header.unit) {
+            Ok(unit) => unit,
+            Err(e) => return (e, 0),
         };
-        let Some((start_lba, sectors)) = self.check_range(unit, header) else {
-            return (IOERR_BADLENGTH, 0);
+        let offset = if sixty_four {
+            (u64::from(header.actual) << 32) | u64::from(header.offset)
+        } else {
+            u64::from(header.offset)
+        };
+        let (start_lba, sectors) = match self.check_range(unit, offset, header.length, !sixty_four)
+        {
+            Ok(range) => range,
+            Err(e) => return (e, 0),
         };
         // One sector at a time -- never a whole-transfer host allocation, so
-        // a full-image CMD_READ costs 512 bytes of host buffer, not the
+        // a full-image transfer costs 512 bytes of host buffer, not the
         // image's size, and a bad io_Data pointer fails on the first sector.
         self.activity = true;
-        let image = self.units[unit].as_mut().unwrap();
-        let mut sector = [0u8; SECTOR_SIZE];
-        for i in 0..sectors {
-            if let Err(e) = image.read_sector(start_lba + i, &mut sector) {
-                log::warn!("copperhf: unit {unit}: read_sector failed: {e}");
-                return (IOERR_BADADDRESS, 0);
+        let image = &mut self.units[unit].as_mut().unwrap().disk;
+        if read {
+            let mut sector = [0u8; SECTOR_SIZE];
+            for i in 0..sectors {
+                if let Err(e) = image.read_sector(start_lba + i, &mut sector) {
+                    log::warn!("copperhf: unit {unit}: read_sector failed: {e}");
+                    return (IOERR_BADADDRESS, 0);
+                }
+                if !dma_write_bytes(host, header.data + (i as u32) * SECTOR_SIZE as u32, &sector) {
+                    return (IOERR_BADADDRESS, 0);
+                }
             }
-            if !dma_write_bytes(host, header.data + (i as u32) * SECTOR_SIZE as u32, &sector) {
-                return (IOERR_BADADDRESS, 0);
-            }
-        }
-        (0, header.length)
-    }
-
-    fn do_write(&mut self, header: &RequestHeader, host: &mut DeviceHost) -> (i8, u32) {
-        let Some(unit) = self.valid_unit(header.unit) else {
-            return (IOERR_OPENFAIL, 0);
-        };
-        let Some((start_lba, sectors)) = self.check_range(unit, header) else {
-            return (IOERR_BADLENGTH, 0);
-        };
-        // Sector-at-a-time for the same reasons as `do_read`; a bad io_Data
-        // pointer fails before the image is touched at all.
-        self.activity = true;
-        let image = self.units[unit].as_mut().unwrap();
-        for i in 0..sectors {
-            let Some(sector) = dma_read_bytes(
-                host,
-                header.data + (i as u32) * SECTOR_SIZE as u32,
-                SECTOR_SIZE,
-            ) else {
-                return (IOERR_BADADDRESS, 0);
-            };
-            if let Err(e) = image.write_sector(start_lba + i, &sector) {
-                log::warn!("copperhf: unit {unit}: write_sector failed: {e}");
-                return (IOERR_BADADDRESS, 0);
+        } else {
+            for i in 0..sectors {
+                let Some(sector) = dma_read_bytes(
+                    host,
+                    header.data + (i as u32) * SECTOR_SIZE as u32,
+                    SECTOR_SIZE,
+                ) else {
+                    return (IOERR_BADADDRESS, 0);
+                };
+                if let Err(e) = image.write_sector(start_lba + i, &sector) {
+                    log::warn!("copperhf: unit {unit}: write_sector failed: {e}");
+                    return (IOERR_BADADDRESS, 0);
+                }
             }
         }
         (0, header.length)
     }
 
-    /// Validate a read/write's alignment and range against a unit's size,
-    /// returning `(start_lba, sector_count)` on success.
-    fn check_range(&self, unit: usize, header: &RequestHeader) -> Option<(u64, u64)> {
-        if header.length == 0
-            || !(header.length as usize).is_multiple_of(SECTOR_SIZE)
-            || !(header.offset as usize).is_multiple_of(SECTOR_SIZE)
+    /// Validate a transfer's alignment and range against a unit's size,
+    /// returning `(start_lba, sector_count)` on success. `cap_4gib` applies
+    /// the plain 32-bit commands' no-wrap rule
+    /// (`guest/copperhf/copperhf_board.h`): `offset + length` reaching past
+    /// the 4 GiB boundary is `IOERR_BADADDRESS`, distinct from an ordinary
+    /// past-end-of-unit `IOERR_BADLENGTH`. The 64-bit commands never set it,
+    /// since a 64-bit offset addresses well past 4 GiB legitimately.
+    fn check_range(
+        &self,
+        unit: usize,
+        offset: u64,
+        length: u32,
+        cap_4gib: bool,
+    ) -> Result<(u64, u64), i8> {
+        if length == 0
+            || !(length as usize).is_multiple_of(SECTOR_SIZE)
+            || !(offset as usize).is_multiple_of(SECTOR_SIZE)
         {
-            return None;
+            return Err(IOERR_BADLENGTH);
         }
-        let end = u64::from(header.offset).checked_add(u64::from(header.length))?;
-        let total_bytes = self.units[unit].as_ref()?.total_sectors() * SECTOR_SIZE as u64;
+        let end = offset
+            .checked_add(u64::from(length))
+            .ok_or(IOERR_BADADDRESS)?;
+        if cap_4gib && end > u64::from(u32::MAX) + 1 {
+            return Err(IOERR_BADADDRESS);
+        }
+        let total_bytes = self.units[unit]
+            .as_ref()
+            .ok_or(IOERR_OPENFAIL)?
+            .disk
+            .total_sectors()
+            * SECTOR_SIZE as u64;
         if end > total_bytes {
-            return None;
+            return Err(IOERR_BADLENGTH);
         }
-        let start_lba = u64::from(header.offset) / SECTOR_SIZE as u64;
-        let sectors = u64::from(header.length) / SECTOR_SIZE as u64;
-        Some((start_lba, sectors))
+        let start_lba = offset / SECTOR_SIZE as u64;
+        let sectors = u64::from(length) / SECTOR_SIZE as u64;
+        Ok((start_lba, sectors))
     }
 
     fn do_get_geometry(&mut self, header: &RequestHeader, host: &mut DeviceHost) -> (i8, u32) {
-        let Some(unit) = self.valid_unit(header.unit) else {
-            return (IOERR_OPENFAIL, 0);
+        let unit = match self.require_media(header.unit) {
+            Ok(unit) => unit,
+            Err(e) => return (e, 0),
         };
         if header.length < 32 {
             return (IOERR_BADLENGTH, 0);
         }
-        let total_sectors = self.units[unit].as_ref().unwrap().total_sectors() as u32;
+        let total_sectors = self.units[unit].as_ref().unwrap().disk.total_sectors() as u32;
         let cylinders = total_sectors / (RDB_HEADS * RDB_SPT);
         let mut geom = [0u8; 32];
         geom[0..4].copy_from_slice(&(SECTOR_SIZE as u32).to_be_bytes());
@@ -444,6 +640,110 @@ impl CopperhfBoard {
             return (IOERR_BADADDRESS, 0);
         }
         (0, 0)
+    }
+
+    /// `HD_SCSICMD`: `io_Data` points at a `struct SCSICmd` (32 bytes on
+    /// m68k -- `devices/scsidisk.h`; field offsets below confirmed against
+    /// the NDK autodocs). This board answers it against the unit's own
+    /// image without a real SCSI bus underneath, reusing
+    /// `src/scsi.rs::ScsiDisk`'s CDB machinery (the same target model the
+    /// A2091/A4091 boards drive over the WD33C93A).
+    fn do_scsicmd(&mut self, header: &RequestHeader, host: &mut DeviceHost) -> (i8, u32) {
+        let unit = match self.require_media(header.unit) {
+            Ok(unit) => unit,
+            Err(e) => return (e, 0),
+        };
+        let Some(cmd) = ScsiCmdHeader::read(header.data, host) else {
+            return (IOERR_BADADDRESS, 0);
+        };
+        let cdb_len = (cmd.cmd_length as usize).min(16);
+        let Some(cdb) = dma_read_bytes(host, cmd.command, cdb_len) else {
+            return (IOERR_BADADDRESS, 0);
+        };
+
+        self.activity = true;
+        let disk = self.units[unit].as_mut().unwrap();
+        let (exec, mut status) = disk.execute(&cdb, 0);
+        let data_len = match exec {
+            ScsiExec::DataIn(data) => {
+                let n = data.len().min(cmd.length as usize);
+                if !dma_write_bytes(host, cmd.data, &data[..n]) {
+                    return (IOERR_BADADDRESS, 0);
+                }
+                n
+            }
+            ScsiExec::DataOut(expected) => {
+                let n = expected.min(cmd.length as usize);
+                let Some(mut payload) = dma_read_bytes(host, cmd.data, n) else {
+                    return (IOERR_BADADDRESS, 0);
+                };
+                payload.resize(expected, 0);
+                status = self.units[unit]
+                    .as_mut()
+                    .unwrap()
+                    .complete_out(&cdb, &payload);
+                n
+            }
+            ScsiExec::NoData => 0,
+        };
+
+        let sense = (status == CHECK_CONDITION)
+            .then(|| self.units[unit].as_ref().unwrap().sense_bytes().to_vec());
+
+        // scsi_Actual (u32 @8), scsi_CmdActual (u16 @18), scsi_Flags/Status
+        // (one big-endian word @20: high byte is scsi_Flags, which is
+        // preserved rather than overwritten with zero).
+        let flags_word = host.dma_read_word(header.data + SCSI_FLAGS).unwrap_or(0);
+        let ok = write_u32(host, header.data + SCSI_ACTUAL, data_len as u32)
+            && write_u16(host, header.data + SCSI_CMDACTUAL, cdb_len as u16)
+            && host.dma_write_word(
+                header.data + SCSI_FLAGS,
+                (flags_word & 0xFF00) | u16::from(status),
+            );
+        if !ok {
+            return (IOERR_BADADDRESS, 0);
+        }
+        if let Some(sense) = sense {
+            self.write_scsi_sense(header.data, &cmd, &sense, host);
+        }
+        // scsi.device's documented HD_SCSICMD contract: io_Error reports
+        // HFERR_BadStatus whenever scsi_Status came back non-GOOD (the CDB
+        // itself was delivered fine -- the target just rejected it), so a
+        // caller that only checks io_Error still notices the failure.
+        if status != crate::scsi::GOOD {
+            return (HFERR_BAD_STATUS, 0);
+        }
+        (0, 0)
+    }
+
+    /// Fill `scsi_SenseData`/`scsi_SenseActual` after a CHECK CONDITION,
+    /// honouring `scsi_SenseLength` and `SCSIF_AUTOSENSE`/`SCSIF_OLDAUTOSENSE`
+    /// (`scsi_Flags` bits 1/2 -- `SCSIB_AUTOSENSE`/`SCSIB_OLDAUTOSENSE`).
+    /// Silent (leaves `scsi_SenseActual` at whatever the guest initialized
+    /// it to) if autosense was not requested or the sense pointer cannot be
+    /// reached -- a `SCSICmd` without autosense has no sense buffer to write
+    /// into at all.
+    fn write_scsi_sense(
+        &self,
+        req_data: u32,
+        cmd: &ScsiCmdHeader,
+        sense: &[u8],
+        host: &mut DeviceHost,
+    ) {
+        if cmd.flags & 0b0110 == 0 {
+            return;
+        }
+        let Some(sense_ptr) = read_u32(host, req_data + SCSI_SENSEDATA) else {
+            return;
+        };
+        if sense_ptr == 0 {
+            return;
+        }
+        let n = (cmd.sense_length as usize).min(sense.len());
+        if n > 0 && !dma_write_bytes(host, sense_ptr, &sense[..n]) {
+            return;
+        }
+        let _ = write_u16(host, req_data + SCSI_SENSEACTUAL, n as u16);
     }
 }
 
@@ -461,6 +761,13 @@ struct RequestHeader {
     length: u32,
     data: u32,
     offset: u32,
+    /// `io_Actual` as read on entry: unused input for every M1-M3 command,
+    /// but the TD64/NSD 64-bit commands alias it as `io_HighOffset` (the
+    /// upper 32 bits of a 64-bit byte offset, `devices/newstyle.h`) --
+    /// `io_Actual` is still an *output* on completion for every command
+    /// including these, so `execute_request` always overwrites it with the
+    /// transfer count afterwards.
+    actual: u32,
 }
 
 impl RequestHeader {
@@ -468,6 +775,7 @@ impl RequestHeader {
         let unit = read_u32(host, ptr + IO_UNIT)?;
         let command = host.dma_read_word(ptr + IO_COMMAND)?;
         let flags = (host.dma_read_word(ptr + IO_FLAGS_ERROR)? >> 8) as u8;
+        let actual = read_u32(host, ptr + IO_ACTUAL)?;
         let length = read_u32(host, ptr + IO_LENGTH)?;
         let data = read_u32(host, ptr + IO_DATA)?;
         let offset = read_u32(host, ptr + IO_OFFSET)?;
@@ -478,6 +786,38 @@ impl RequestHeader {
             length,
             data,
             offset,
+            actual,
+        })
+    }
+}
+
+/// The IOStdReq fields `HD_SCSICMD` reads out of the guest's `struct
+/// SCSICmd` (see the `SCSI_*` offset constants above). `scsi_Actual` is not
+/// read here: it is an output-only field this device always overwrites.
+struct ScsiCmdHeader {
+    data: u32,
+    length: u32,
+    command: u32,
+    cmd_length: u16,
+    flags: u8,
+    sense_length: u16,
+}
+
+impl ScsiCmdHeader {
+    fn read(ptr: u32, host: &DeviceHost) -> Option<Self> {
+        let data = read_u32(host, ptr + SCSI_DATA)?;
+        let length = read_u32(host, ptr + SCSI_LENGTH)?;
+        let command = read_u32(host, ptr + SCSI_COMMAND)?;
+        let cmd_length = host.dma_read_word(ptr + SCSI_CMDLENGTH)?;
+        let flags_status = host.dma_read_word(ptr + SCSI_FLAGS)?;
+        let sense_length = host.dma_read_word(ptr + SCSI_SENSELENGTH)?;
+        Some(Self {
+            data,
+            length,
+            command,
+            cmd_length,
+            flags: (flags_status >> 8) as u8,
+            sense_length,
         })
     }
 }
@@ -502,6 +842,10 @@ fn read_u32(host: &DeviceHost, addr: u32) -> Option<u32> {
 
 fn write_u32(host: &mut DeviceHost, addr: u32, value: u32) -> bool {
     host.dma_write_word(addr, (value >> 16) as u16) && host.dma_write_word(addr + 2, value as u16)
+}
+
+fn write_u16(host: &mut DeviceHost, addr: u32, value: u16) -> bool {
+    host.dma_write_word(addr, value)
 }
 
 /// Word-granular checked bulk read (see [`read_u32`]'s doc comment for why
@@ -604,11 +948,13 @@ impl ZorroDevice for CopperhfBoard {
             CHF_CHANGE_COUNT => Some(self.change_count_for_selected()),
             CHF_UNIT_BLOCKS => Some((self.blocks_for_selected() >> 16) as u16),
             _ if off == CHF_UNIT_BLOCKS + 2 => Some(self.blocks_for_selected() as u16),
+            CHF_CHANGED_MASK => Some(self.changed_mask),
+            CHF_UNIT_MEDIA => Some(self.media_bitmask()),
             CHF_COMPLETE_GET => Some((self.completions.front().copied().unwrap_or(0) >> 16) as u16),
             _ if off == CHF_COMPLETE_GET + 2 => {
                 Some(self.completions.front().copied().unwrap_or(0) as u16)
             }
-            CHF_IRQ_STATUS => Some(u16::from(!self.completions.is_empty())),
+            CHF_IRQ_STATUS => Some(self.irq_status()),
             CHF_IRQ_ENABLE => Some(u16::from(self.irq_enable)),
             _ => None,
         }
@@ -620,7 +966,7 @@ impl ZorroDevice for CopperhfBoard {
     }
 
     fn int2_line(&self) -> bool {
-        self.irq_enable && !self.completions.is_empty()
+        self.irq_enable && self.irq_status() != 0
     }
 
     fn is_idle(&self) -> bool {
@@ -749,6 +1095,87 @@ mod tests {
         )
     }
 
+    /// Pokes `io_Actual` *before* ringing the doorbell -- the TD64/NSD 64-bit
+    /// commands alias it as `io_HighOffset` (the upper 32 bits of the byte
+    /// offset) on entry, unlike every other command's `io_Actual`, which is
+    /// output-only.
+    fn set_io_high_offset(mem: &mut Memory, ptr: u32, high: u32) {
+        mem.chip_ram[ptr as usize + IO_ACTUAL as usize..][..4].copy_from_slice(&high.to_be_bytes());
+    }
+
+    /// A sparse flat image (no bare-partition/RDB sniffing applies -- the
+    /// file starts all zero) sized `total_bytes`, allocated with `set_len`
+    /// so a multi-GiB fixture costs no real disk space on a filesystem that
+    /// supports sparse files (APFS/ext4/...).
+    fn sparse_image(name: &str, total_bytes: u64) -> HardDriveImage {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "copperline-copperhf-sparse-{}-{unique}-{name}",
+            std::process::id()
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(total_bytes)
+            .unwrap();
+        HardDriveImage::open(
+            &path,
+            "CHF0",
+            "copperhf",
+            None,
+            0,
+            crate::diskimage::FileSystem::OFS,
+        )
+        .unwrap()
+    }
+
+    /// Write a `struct SCSICmd` (see the `SCSI_*` offset constants) into
+    /// guest chip RAM at `ptr`. `scsi_Actual`/`scsi_CmdActual`/`scsi_Status`/
+    /// `scsi_SenseActual` are left at zero -- they are output fields the
+    /// board fills in.
+    #[allow(clippy::too_many_arguments)]
+    fn write_scsicmd(
+        mem: &mut Memory,
+        ptr: u32,
+        data: u32,
+        length: u32,
+        command: u32,
+        cmd_length: u16,
+        flags: u8,
+        sense_data: u32,
+        sense_length: u16,
+    ) {
+        let p = ptr as usize;
+        mem.chip_ram[p + SCSI_DATA as usize..][..4].copy_from_slice(&data.to_be_bytes());
+        mem.chip_ram[p + SCSI_LENGTH as usize..][..4].copy_from_slice(&length.to_be_bytes());
+        mem.chip_ram[p + SCSI_COMMAND as usize..][..4].copy_from_slice(&command.to_be_bytes());
+        mem.chip_ram[p + SCSI_CMDLENGTH as usize..][..2].copy_from_slice(&cmd_length.to_be_bytes());
+        mem.chip_ram[p + SCSI_FLAGS as usize] = flags; // high byte of the word; status (low) stays 0
+        mem.chip_ram[p + SCSI_SENSEDATA as usize..][..4].copy_from_slice(&sense_data.to_be_bytes());
+        mem.chip_ram[p + SCSI_SENSELENGTH as usize..][..2]
+            .copy_from_slice(&sense_length.to_be_bytes());
+    }
+
+    fn scsi_status(mem: &Memory, scsicmd_ptr: u32) -> u8 {
+        mem.chip_ram[scsicmd_ptr as usize + SCSI_FLAGS as usize + 1]
+    }
+
+    fn scsi_actual(mem: &Memory, scsicmd_ptr: u32) -> u32 {
+        u32::from_be_bytes(
+            mem.chip_ram[scsicmd_ptr as usize + SCSI_ACTUAL as usize..][..4]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn scsi_sense_actual(mem: &Memory, scsicmd_ptr: u32) -> u16 {
+        u16::from_be_bytes(
+            mem.chip_ram[scsicmd_ptr as usize + SCSI_SENSEACTUAL as usize..][..2]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
     fn ring_doorbell_long(board: &mut CopperhfBoard, host: &mut DeviceHost, ptr: u32) {
         board.write(CHF_DOORBELL, 4, ptr, host);
     }
@@ -772,15 +1199,18 @@ mod tests {
     }
 
     #[test]
-    fn unit_present_bitmask_reflects_attach_and_detach() {
+    fn unit_present_bitmask_reflects_attach_and_stays_set_after_eject() {
+        // M4: CHF_UNIT_PRESENT is "slot configured", sticky once attached --
+        // ejecting only clears CHF_UNIT_MEDIA (see the eject/media test
+        // below), like a diskless trackdisk drive.
         let mut board = CopperhfBoard::new();
         let mut mem = memory();
         let mut host = DeviceHost::new(&mut mem);
         assert_eq!(board.read(CHF_UNIT_PRESENT, 2, &mut host), 0);
         board.attach_unit(2, open_image("present", 16));
         assert_eq!(board.read(CHF_UNIT_PRESENT, 2, &mut host), 0b100);
-        board.detach_unit(2);
-        assert_eq!(board.read(CHF_UNIT_PRESENT, 2, &mut host), 0);
+        board.eject_unit(2);
+        assert_eq!(board.read(CHF_UNIT_PRESENT, 2, &mut host), 0b100);
     }
 
     #[test]
@@ -802,15 +1232,29 @@ mod tests {
     }
 
     #[test]
-    fn change_count_bumps_on_attach_and_detach() {
+    fn boot_time_attach_leaves_change_count_at_zero() {
+        // guest/copperhf-test/chftest_m4.c's test_changenum: "unit 0 has
+        // never been ejected, so the change counter must read back 0" --
+        // a boot-time [copperhf] config attach is not itself a change.
         let mut board = CopperhfBoard::new();
         let mut mem = memory();
         let mut host = DeviceHost::new(&mut mem);
         board.write(CHF_UNIT_SELECT, 2, 0, &mut host);
         assert_eq!(board.read(CHF_CHANGE_COUNT, 2, &mut host), 0);
-        board.attach_unit(0, open_image("changecount", 16));
+        board.attach_unit(0, open_image("changecount-boot", 16));
+        assert_eq!(board.read(CHF_CHANGE_COUNT, 2, &mut host), 0);
+    }
+
+    #[test]
+    fn change_count_bumps_on_hot_attach_and_eject() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        board.write(CHF_UNIT_SELECT, 2, 0, &mut host);
+        assert_eq!(board.read(CHF_CHANGE_COUNT, 2, &mut host), 0);
+        board.hot_attach_unit(0, open_image("changecount", 16));
         assert_eq!(board.read(CHF_CHANGE_COUNT, 2, &mut host), 1);
-        board.detach_unit(0);
+        board.eject_unit(0);
         assert_eq!(board.read(CHF_CHANGE_COUNT, 2, &mut host), 2);
     }
 
@@ -1243,5 +1687,506 @@ mod tests {
         ring_doorbell_long(&mut board, &mut host, ptr);
         assert_eq!(io_error(&mem, ptr), 0);
         assert_eq!(io_actual(&mem, ptr), 512);
+    }
+
+    // -- M4: command coverage --------------------------------------------
+
+    #[test]
+    fn version_register_reports_2() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_VERSION, 2, &mut host), 2);
+    }
+
+    #[test]
+    fn boot_time_attach_does_not_flag_a_change() {
+        // A boot-time [copperhf] config attach happens before any guest
+        // has run: no M1-M3 guest ever acks CHF_CHANGED_MASK, so flagging
+        // one here would latch INT2 forever the moment CHF_IRQ_ENABLE gets
+        // set (this exact bug hung tests/copperhf_device.rs's AROS boot
+        // before its --run payload ever executed).
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        board.attach_unit(1, open_image("boot-attach", 16));
+        assert_eq!(board.read(CHF_UNIT_MEDIA, 2, &mut host), 0b10);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0);
+        assert_eq!(board.read(CHF_IRQ_STATUS, 2, &mut host), 0);
+    }
+
+    #[test]
+    fn hot_attach_sets_media_and_changed_bit_and_ack_clears_it() {
+        let mut board = CopperhfBoard::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_UNIT_MEDIA, 2, &mut host), 0);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0);
+
+        board.hot_attach_unit(1, open_image("changed-attach", 16));
+        assert_eq!(board.read(CHF_UNIT_MEDIA, 2, &mut host), 0b10);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0b10);
+        assert_eq!(board.read(CHF_IRQ_STATUS, 2, &mut host), 0b10);
+
+        board.write(CHF_CHANGED_ACK, 2, 0b10, &mut host);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0);
+        assert_eq!(board.read(CHF_IRQ_STATUS, 2, &mut host), 0);
+    }
+
+    #[test]
+    fn changed_ack_only_clears_the_acked_bits() {
+        let mut board = CopperhfBoard::new();
+        board.hot_attach_unit(0, open_image("ack-0", 16));
+        board.hot_attach_unit(1, open_image("ack-1", 16));
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0b11);
+        board.write(CHF_CHANGED_ACK, 2, 0b01, &mut host);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0b10);
+    }
+
+    #[test]
+    fn td_eject_clears_media_keeps_present_and_flags_change() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("eject", 16)); // boot-time: no changed bit yet
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0);
+
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, TD_EJECT, 0, 1, 0, 0); // io_Length != 0
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(board.read(CHF_UNIT_PRESENT, 2, &mut host), 0b1);
+        assert_eq!(board.read(CHF_UNIT_MEDIA, 2, &mut host), 0);
+        assert_eq!(board.read(CHF_CHANGED_MASK, 2, &mut host), 0b1);
+        assert_eq!(io_error(&mem, ptr), 0);
+    }
+
+    #[test]
+    fn td_eject_with_zero_length_is_a_no_op_insert() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("eject-noop", 16));
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        board.write(CHF_CHANGED_ACK, 2, 0xFFFF, &mut host);
+
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, TD_EJECT, 0, 0, 0, 0); // io_Length == 0
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(
+            board.read(CHF_UNIT_MEDIA, 2, &mut host),
+            0b1,
+            "still has media"
+        );
+        assert_eq!(
+            board.read(CHF_CHANGED_MASK, 2, &mut host),
+            0,
+            "no change flagged"
+        );
+        assert_eq!(io_error(&mem, ptr), 0);
+    }
+
+    #[test]
+    fn td_changenum_changestate_protstatus_round_trip() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("tdstatus", 16));
+        let mut mem = memory();
+
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, TD_CHANGENUM, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 0, "boot-time attach is not a change");
+
+        let ptr2 = 0x1100u32;
+        write_request(&mut mem, ptr2, 0, TD_CHANGESTATE, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr2);
+        assert_eq!(io_error(&mem, ptr2), 0);
+        assert_eq!(io_actual(&mem, ptr2), 0, "media present");
+
+        let ptr3 = 0x1200u32;
+        write_request(&mut mem, ptr3, 0, TD_PROTSTATUS, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr3);
+        assert_eq!(io_error(&mem, ptr3), 0);
+        assert_eq!(io_actual(&mem, ptr3), 0, "writable");
+    }
+
+    #[test]
+    fn media_absent_unit_fails_io_but_answers_change_status() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("absent", 16));
+        board.eject_unit(0);
+        let mut mem = memory();
+
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), TDERR_DISK_CHANGED);
+
+        let ptr2 = 0x1100u32;
+        write_request(&mut mem, ptr2, 0, TD_GETGEOMETRY, 0, 32, 0x2000, 0);
+        let mut host2 = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host2, ptr2);
+        assert_eq!(io_error(&mem, ptr2), TDERR_DISK_CHANGED);
+
+        // CHANGENUM/CHANGESTATE/PROTSTATUS still answer from a present-but-
+        // media-absent unit.
+        let ptr3 = 0x1200u32;
+        write_request(&mut mem, ptr3, 0, TD_CHANGESTATE, 0, 0, 0, 0);
+        let mut host3 = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host3, ptr3);
+        assert_eq!(io_error(&mem, ptr3), 0);
+        assert_eq!(io_actual(&mem, ptr3), 1, "media absent");
+    }
+
+    #[test]
+    fn plain_cmd_read_offset_length_overflowing_u32_is_bad_address() {
+        // A disk bigger than 4 GiB, so the ordinary past-end-of-unit bound
+        // (IOERR_BADLENGTH) does not mask the no-wrap rule.
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, sparse_image("overflow", 5 * (1u64 << 30)));
+        let mut mem = memory();
+        let ptr = 0x1000u32;
+        // offset + length overflows u32 (offset alone is already the max
+        // 32-bit-aligned sector-multiple value below 4 GiB).
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 1024, 0x2000, 0xFFFF_FE00);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
+    }
+
+    #[test]
+    fn td64_write_then_read_round_trips_past_4gib_on_a_sparse_image() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, sparse_image("td64", 5 * (1u64 << 30)));
+        let mut mem = memory();
+
+        let offset: u64 = (1u64 << 32) + 512; // just past the 4 GiB boundary
+        let pattern: Vec<u8> = (0..512u32).map(|i| (i * 7 + 3) as u8).collect();
+        let data_addr = 0x2000u32;
+        mem.chip_ram[data_addr as usize..data_addr as usize + 512].copy_from_slice(&pattern);
+
+        let ptr = 0x1000u32;
+        write_request(
+            &mut mem,
+            ptr,
+            0,
+            TD_WRITE64,
+            0,
+            512,
+            data_addr,
+            offset as u32,
+        );
+        set_io_high_offset(&mut mem, ptr, (offset >> 32) as u32);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 512);
+
+        let ptr2 = 0x1100u32;
+        let readback_addr = 0x3000u32;
+        write_request(
+            &mut mem,
+            ptr2,
+            0,
+            TD_READ64,
+            0,
+            512,
+            readback_addr,
+            offset as u32,
+        );
+        set_io_high_offset(&mut mem, ptr2, (offset >> 32) as u32);
+        let mut host2 = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host2, ptr2);
+        assert_eq!(io_error(&mem, ptr2), 0);
+        assert_eq!(
+            &mem.chip_ram[readback_addr as usize..readback_addr as usize + 512],
+            &pattern[..]
+        );
+    }
+
+    #[test]
+    fn nscmd_td_read64_behaves_like_td_read64() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, sparse_image("nscmd64", 5 * (1u64 << 30)));
+        let mut mem = memory();
+        let offset: u64 = 3 * (1u64 << 30); // 3 GiB: below 4 GiB, still exercises the path
+
+        let ptr = 0x1000u32;
+        let data_addr = 0x2000u32;
+        write_request(
+            &mut mem,
+            ptr,
+            0,
+            NSCMD_TD_READ64,
+            0,
+            512,
+            data_addr,
+            offset as u32,
+        );
+        set_io_high_offset(&mut mem, ptr, (offset >> 32) as u32);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 512);
+    }
+
+    #[test]
+    fn td_seek64_is_a_success_no_op() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("seek64", 16));
+        let mut mem = memory();
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, TD_SEEK64, 0, 0, 0, 0);
+        set_io_high_offset(&mut mem, ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+    }
+
+    #[test]
+    fn hd_scsicmd_inquiry_round_trips_identity() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-inquiry", 16));
+        let mut mem = memory();
+
+        let cdb_addr = 0x1800u32;
+        let cdb = [0x12u8, 0, 0, 0, 36, 0];
+        mem.chip_ram[cdb_addr as usize..cdb_addr as usize + cdb.len()].copy_from_slice(&cdb);
+        let data_addr = 0x2000u32;
+        let scsicmd_ptr = 0x1400u32;
+        write_scsicmd(
+            &mut mem,
+            scsicmd_ptr,
+            data_addr,
+            64,
+            cdb_addr,
+            cdb.len() as u16,
+            0,
+            0,
+            0,
+        );
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(scsi_status(&mem, scsicmd_ptr), 0, "GOOD");
+        assert_eq!(scsi_actual(&mem, scsicmd_ptr), 36);
+        assert_eq!(
+            &mem.chip_ram[data_addr as usize + 8..data_addr as usize + 16],
+            b"COPPERLN"
+        );
+    }
+
+    #[test]
+    fn hd_scsicmd_read_capacity10_reports_last_lba_and_block_size() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-capacity", 16));
+        let mut mem = memory();
+
+        let cdb_addr = 0x1800u32;
+        let cdb = [0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        mem.chip_ram[cdb_addr as usize..cdb_addr as usize + cdb.len()].copy_from_slice(&cdb);
+        let data_addr = 0x2000u32;
+        let scsicmd_ptr = 0x1400u32;
+        write_scsicmd(
+            &mut mem,
+            scsicmd_ptr,
+            data_addr,
+            8,
+            cdb_addr,
+            cdb.len() as u16,
+            0,
+            0,
+            0,
+        );
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(scsi_actual(&mem, scsicmd_ptr), 8);
+        let last = u32::from_be_bytes(
+            mem.chip_ram[data_addr as usize..data_addr as usize + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let block_size = u32::from_be_bytes(
+            mem.chip_ram[data_addr as usize + 4..data_addr as usize + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(last, 15, "16 sectors -> last LBA 15");
+        assert_eq!(block_size, 512);
+    }
+
+    #[test]
+    fn hd_scsicmd_read10_returns_the_units_sector_data() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-read10", 16));
+        let mut mem = memory();
+
+        let cdb_addr = 0x1800u32;
+        // READ(10): lba 0, transfer length 1.
+        let cdb = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+        mem.chip_ram[cdb_addr as usize..cdb_addr as usize + cdb.len()].copy_from_slice(&cdb);
+        let data_addr = 0x2000u32;
+        let scsicmd_ptr = 0x1400u32;
+        write_scsicmd(
+            &mut mem,
+            scsicmd_ptr,
+            data_addr,
+            512,
+            cdb_addr,
+            cdb.len() as u16,
+            0,
+            0,
+            0,
+        );
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(scsi_actual(&mem, scsicmd_ptr), 512);
+        let expected: Vec<u8> = (0..512u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            &mem.chip_ram[data_addr as usize..data_addr as usize + 512],
+            &expected[..]
+        );
+    }
+
+    #[test]
+    fn hd_scsicmd_check_condition_autosense_fills_sense_data() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-sense", 16));
+        let mut mem = memory();
+
+        let cdb_addr = 0x1800u32;
+        let cdb = [0xFFu8, 0, 0, 0, 0, 0]; // unsupported opcode
+        mem.chip_ram[cdb_addr as usize..cdb_addr as usize + cdb.len()].copy_from_slice(&cdb);
+        let sense_addr = 0x2400u32;
+        let scsicmd_ptr = 0x1400u32;
+        write_scsicmd(
+            &mut mem,
+            scsicmd_ptr,
+            0,
+            0,
+            cdb_addr,
+            cdb.len() as u16,
+            0b0010, // SCSIF_AUTOSENSE
+            sense_addr,
+            18,
+        );
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+
+        assert_eq!(
+            io_error(&mem, ptr),
+            HFERR_BAD_STATUS,
+            "non-GOOD scsi_Status reports HFERR_BadStatus in io_Error \
+             (scsi.device's documented HD_SCSICMD contract)"
+        );
+        assert_eq!(scsi_status(&mem, scsicmd_ptr), 0x02, "CHECK CONDITION");
+        assert_eq!(scsi_sense_actual(&mem, scsicmd_ptr), 18);
+        assert_eq!(mem.chip_ram[sense_addr as usize], 0x70, "current error");
+        assert_eq!(
+            mem.chip_ram[sense_addr as usize + 2],
+            0x05,
+            "ILLEGAL_REQUEST"
+        );
+        assert_eq!(
+            mem.chip_ram[sense_addr as usize + 12],
+            0x20,
+            "INVALID_OPCODE"
+        );
+    }
+
+    #[test]
+    fn hd_scsicmd_without_autosense_leaves_sense_actual_untouched() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-nosense", 16));
+        let mut mem = memory();
+
+        let cdb_addr = 0x1800u32;
+        let cdb = [0xFFu8, 0, 0, 0, 0, 0];
+        mem.chip_ram[cdb_addr as usize..cdb_addr as usize + cdb.len()].copy_from_slice(&cdb);
+        let sense_addr = 0x2400u32;
+        let scsicmd_ptr = 0x1400u32;
+        write_scsicmd(
+            &mut mem,
+            scsicmd_ptr,
+            0,
+            0,
+            cdb_addr,
+            cdb.len() as u16,
+            0, // SCSIF_NOSENSE
+            sense_addr,
+            18,
+        );
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+
+        assert_eq!(io_error(&mem, ptr), HFERR_BAD_STATUS);
+        assert_eq!(scsi_status(&mem, scsicmd_ptr), 0x02, "CHECK CONDITION");
+        assert_eq!(
+            scsi_sense_actual(&mem, scsicmd_ptr),
+            0,
+            "no autosense requested"
+        );
+    }
+
+    #[test]
+    fn savestate_round_trip_keeps_media_present_and_changed_state() {
+        // Unit 0: attached (boot-time, no changed bit), then ejected
+        // (present, media-absent, changed flagged). Unit 1: attached
+        // boot-time only (present, media, no changed bit -- boot-time
+        // attach never flags a change). Unit 2: never configured at all.
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("state-0", 16));
+        board.eject_unit(0);
+        board.attach_unit(1, open_image("state-1", 16));
+
+        let encoded = bincode::serialize(&board).unwrap();
+        let mut restored: CopperhfBoard = bincode::deserialize(&encoded).unwrap();
+
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(restored.read(CHF_UNIT_PRESENT, 2, &mut host), 0b011);
+        assert_eq!(restored.read(CHF_UNIT_MEDIA, 2, &mut host), 0b010);
+        assert_eq!(restored.read(CHF_CHANGED_MASK, 2, &mut host), 0b001);
+
+        // The hot-attached unit 1's backing image survived intact.
+        restored.write(CHF_UNIT_SELECT, 2, 1, &mut host);
+        assert_eq!(restored.read(CHF_UNIT_BLOCKS, 4, &mut host), 16);
+    }
+
+    #[test]
+    fn hd_scsicmd_against_media_absent_unit_fails_with_disk_changed() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("scsi-absent", 16));
+        board.eject_unit(0);
+        let mut mem = memory();
+
+        let scsicmd_ptr = 0x1400u32;
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, HD_SCSICMD, 0, 0, scsicmd_ptr, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), TDERR_DISK_CHANGED);
     }
 }

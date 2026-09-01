@@ -137,6 +137,10 @@ pub(crate) fn be32(b: &[u8], off: usize) -> u32 {
     (be24(b, off) << 8) | u32::from(b[off + 3])
 }
 
+pub(crate) fn be64(b: &[u8], off: usize) -> u64 {
+    (u64::from(be32(b, off)) << 32) | u64::from(be32(b, off + 4))
+}
+
 /// CDB length from the opcode's command group.
 pub(crate) fn cdb_len(opcode: u8) -> usize {
     match opcode >> 5 {
@@ -169,6 +173,26 @@ pub struct ScsiDisk {
 }
 
 impl ScsiDisk {
+    /// Wrap an already-open [`HardDriveImage`] as a SCSI target with fresh
+    /// (empty) sense state. Used by `copperhf.rs`, which opens its units
+    /// through the shared hardfile layer exactly like `[ide]`/`[scsi]` and
+    /// only wants `ScsiDisk`'s CDB machinery on top, not another `open`.
+    pub(crate) fn from_disk(disk: HardDriveImage) -> Self {
+        Self {
+            disk,
+            sense: [0u8; SENSE_LEN],
+        }
+    }
+
+    /// The current sense buffer, without the REQUEST SENSE side effect of
+    /// clearing it. `HD_SCSICMD`'s `SCSIF_AUTOSENSE` behaviour fills
+    /// `scsi_SenseData` from whatever a failed command just set, without the
+    /// guest having to issue a separate REQUEST SENSE -- which is also still
+    /// available as an ordinary CDB through [`Self::execute`].
+    pub(crate) fn sense_bytes(&self) -> &[u8; SENSE_LEN] {
+        &self.sense
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
         self.disk.materialize_host_disk()
@@ -413,6 +437,31 @@ impl ScsiDisk {
             }
             // START STOP UNIT / SEND DIAGNOSTIC / PREVENT ALLOW REMOVAL
             0x1B | 0x1D | 0x1E => (ScsiExec::NoData, GOOD),
+            // MODE SENSE(10): same pages as MODE SENSE(6), 8-byte header.
+            0x5A => {
+                let dbd = cdb[1] & 0x08 != 0;
+                let page = cdb[2] & 0x3F;
+                let Some(pages) = self.mode_pages(page) else {
+                    return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+                };
+                let mut data = vec![0u8; 8];
+                if !dbd {
+                    data[7] = 8; // block descriptor length
+                    let blocks = total.min(u64::from(u32::MAX)) as u32;
+                    data.push(0);
+                    data.extend_from_slice(&blocks.to_be_bytes()[1..]);
+                    data.push(0);
+                    data.extend_from_slice(&(SECTOR_SIZE as u32).to_be_bytes()[1..]);
+                }
+                data.extend_from_slice(&pages);
+                let mode_len = (data.len() - 2) as u16;
+                data[0..2].copy_from_slice(&mode_len.to_be_bytes());
+                let alloc = be16(cdb, 7) as usize;
+                data.truncate(alloc);
+                (ScsiExec::DataIn(data), GOOD)
+            }
+            // MODE SELECT(10): accept and ignore the parameter list.
+            0x55 => (ScsiExec::DataOut(be16(cdb, 7) as usize), GOOD),
             // READ CAPACITY(10)
             0x25 => {
                 let last = total.saturating_sub(1).min(u64::from(u32::MAX)) as u32;
@@ -439,6 +488,36 @@ impl ScsiDisk {
                 }
                 (ScsiExec::NoData, GOOD)
             }
+            // READ(12) / WRITE(12)
+            0xA8 | 0xAA => {
+                let lba = u64::from(be32(cdb, 2));
+                let count = u64::from(be32(cdb, 6));
+                if count == 0 {
+                    return (ScsiExec::NoData, GOOD);
+                }
+                self.rw_command(op == 0xA8, lba, count, total)
+            }
+            // READ(16) / WRITE(16)
+            0x88 | 0x8A => {
+                let lba = be64(cdb, 2);
+                let count = u64::from(be32(cdb, 10));
+                if count == 0 {
+                    return (ScsiExec::NoData, GOOD);
+                }
+                self.rw_command(op == 0x88, lba, count, total)
+            }
+            // SERVICE ACTION IN(16): only READ CAPACITY(16) (service action
+            // 0x10) is implemented.
+            0x9E if cdb[1] & 0x1F == 0x10 => {
+                let last = total.saturating_sub(1);
+                let mut data = vec![0u8; 32];
+                data[0..8].copy_from_slice(&last.to_be_bytes());
+                data[8..12].copy_from_slice(&(SECTOR_SIZE as u32).to_be_bytes());
+                let alloc = be32(cdb, 10) as usize;
+                data.truncate(alloc);
+                (ScsiExec::DataIn(data), GOOD)
+            }
+            0x9E => self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB),
             // SYNCHRONIZE CACHE(10)
             0x35 => match self.disk.flush() {
                 Ok(()) => (ScsiExec::NoData, GOOD),
@@ -498,11 +577,11 @@ impl ScsiDisk {
             return GOOD;
         }
         match op {
-            0x0A | 0x2A => {
-                let lba = if cdb[0] == 0x0A {
-                    u64::from(be24(cdb, 1) & 0x1F_FFFF)
-                } else {
-                    u64::from(be32(cdb, 2))
+            0x0A | 0x2A | 0xAA | 0x8A => {
+                let lba = match cdb[0] {
+                    0x0A => u64::from(be24(cdb, 1) & 0x1F_FFFF),
+                    0x2A | 0xAA => u64::from(be32(cdb, 2)),
+                    _ => be64(cdb, 2), // 0x8A: WRITE(16)
                 };
                 for (i, sector) in data.chunks(SECTOR_SIZE).enumerate() {
                     if sector.len() < SECTOR_SIZE {

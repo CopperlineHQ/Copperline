@@ -4261,6 +4261,15 @@ impl Bus {
         })
     }
 
+    /// The copperhf.device board, when one is configured (`[copperhf]`), for
+    /// the CCP `copperhf.*` hot attach/detach methods.
+    pub fn copperhf_board_mut(&mut self) -> Option<&mut crate::copperhf::CopperhfBoard> {
+        self.devices.iter_mut().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::Copperhf(board) => Some(board),
+            _ => None,
+        })
+    }
+
     /// The MHI MPEG decoder board, when one is configured, for the
     /// debugger's audio tab.
     #[cfg(feature = "mhi")]
