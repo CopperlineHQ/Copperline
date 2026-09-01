@@ -298,13 +298,29 @@ impl App {
     /// Draw a given monitor front for the rest of the run (the config file
     /// default is unchanged; set `[display] bezel` to make it stick).
     pub(super) fn set_bezel(&mut self, style: BezelStyle) {
+        self.apply_bezel_style(style);
+        info!("monitor bezel: {}", style.label());
+        self.show_osd(format!("Monitor bezel: {}", style.menu_label()));
+        self.request_redraw();
+    }
+
+    /// Adopt a bezel style: the window's own field, the canvas rule's
+    /// mirror of it (`video::set_bezel_shown`), and -- when that moves
+    /// the canvas between the tv and the square geometry, which it does
+    /// under integer scaling of the tv aspect (`video::square_canvas`) --
+    /// the texture and window that follow the canvas. Says nothing on
+    /// screen: the toggle announces itself, a machine start does not.
+    pub(super) fn apply_bezel_style(&mut self, style: BezelStyle) {
+        let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         self.bezel = style;
         if style.is_on() {
             self.bezel_last = style;
         }
-        info!("monitor bezel: {}", style.label());
-        self.show_osd(format!("Monitor bezel: {}", style.menu_label()));
-        self.request_redraw();
+        crate::video::set_bezel_shown(style.is_on());
+        if window_present_height() != canvas_before {
+            self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+        }
     }
 
     /// Cmd/Alt+P: toggle the performance overlay for the rest of the run
@@ -445,18 +461,29 @@ impl App {
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
         crate::video::set_pixel_aspect(aspect);
+        // The square aspect and integer scaling of the tv aspect share the
+        // square canvas, so the height need not change; the geometry
+        // resync is a no-op then, and the texture is re-planned regardless.
+        self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+        self.request_redraw();
+    }
+
+    /// Follow a change of the canvas height that came from a presentation
+    /// setting -- the pixel aspect, integer scaling under the tv aspect,
+    /// the bezel (`video::present_height`): re-plan the main texture for
+    /// the new canvas (the integer fit and its supersample factor are
+    /// re-decided for it, and the texture resized like a DPI change, see
+    /// `resync_render_scale`), put the tool windows -- whose texture
+    /// layout is the canvas's, panel centring reading the live height --
+    /// on the new size too, and move the window with it
+    /// (`follow_canvas_change`).
+    pub(super) fn resync_canvas_geometry(&mut self, was_canvas_sized: bool, canvas_before: usize) {
         if let Some(r) = self.render.as_mut() {
-            // The canvas height changes with the aspect, so re-plan: the
-            // integer fit (and its supersample factor) is re-decided for the
-            // new canvas, and the texture resized to it.
             let surface = r.window.inner_size();
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
-                warn!("resize texture buffer for pixel aspect failed: {e}");
+                warn!("resize texture buffer for the canvas change failed: {e}");
             }
         }
-        // Tool windows share the canvas-sized texture layout (panel
-        // centring reads the live canvas height), so their buffers and
-        // windows must follow the new size too.
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
         for kind in ToolPanelKind::ALL {
             let mut applied = None;
@@ -465,7 +492,7 @@ impl App {
                     texture_width(tool.texture_scale) as u32,
                     texture_height(tool.texture_scale) as u32,
                 ) {
-                    warn!("resize tool texture buffer for pixel aspect failed: {e}");
+                    warn!("resize tool texture buffer for the canvas change failed: {e}");
                 }
                 applied = tool.window.request_inner_size(size);
             }
@@ -475,22 +502,29 @@ impl App {
             }
         }
         self.follow_canvas_change(was_canvas_sized, canvas_before);
-        self.request_redraw();
     }
 
     /// Switch how the presentation canvas is scaled into the window live.
     ///
-    /// The canvas itself never changes -- integer mode may re-render it at a
-    /// different supersample factor, but its pixel content, the window size
-    /// and a video recording (whose frames are the 1x canvas, averaged down
-    /// like any supersample) all carry on -- so unlike a pixel-aspect switch
-    /// there is no recording to refuse and no window to re-size.
+    /// Under the square aspect the canvas itself never changes -- integer
+    /// mode may re-render it at a different supersample factor, but its
+    /// pixel content and the window size carry on -- so only the plan is
+    /// re-taken. Under the tv aspect, integer scaling moves the canvas to
+    /// the square geometry and back (`video::square_canvas`: the
+    /// whole-number draw is only exact from an unresampled canvas), which
+    /// is a pixel-aspect-sized change the texture, the tool windows and
+    /// the window all follow. A video recording carries on either way:
+    /// its frames are the aspect's capture canvas, never the window's.
     pub(super) fn apply_display_scaling(&mut self, scaling: DisplayScaling) {
         if scaling == crate::video::display_scaling() {
             return;
         }
+        let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
         crate::video::set_display_scaling(scaling);
-        if let Some(r) = self.render.as_mut() {
+        if window_present_height() != canvas_before {
+            self.resync_canvas_geometry(was_canvas_sized, canvas_before);
+        } else if let Some(r) = self.render.as_mut() {
             // A minimized window has no surface to re-plan against; the
             // Resized event that restores it re-plans itself.
             if !r.minimized {
@@ -511,49 +545,79 @@ impl App {
         self.request_redraw();
     }
 
-    /// The rect the autocrop presentation shows of the display region,
-    /// in canvas pixels -- or `None` whenever the classic whole-canvas
-    /// layout must present instead: autocrop off, or a frame the mode
-    /// does not apply to (the bezel frames the whole glass with a fixed
-    /// opening, so it wins while it is on; RTG board frames and
-    /// programmable scans present their own geometry). The CRT presets
-    /// compose: the pass re-draws whatever rect the layout shows.
+    /// The sub-rect of the display region the presentation shows, in
+    /// canvas pixels, with the pixel shape it is drawn at -- or `None`
+    /// whenever the classic whole-canvas layout must present instead.
+    /// Two modes show a sub-rect: autocrop (the content rect the hardware
+    /// fetches), and per-axis integer scaling -- integer scaling of the
+    /// tv aspect, which draws the square canvas with its own whole-number
+    /// factor per axis at the glass's pixel shape (`glass_par`), and
+    /// shows the TV aperture's rect of that canvas (`aperture_canvas_rect`)
+    /// unless autocrop tightens it to the content. Neither applies to a
+    /// frame it cannot draw: the bezel frames the whole glass with a fixed
+    /// opening (and keeps the tv canvas, so there is no per-axis draw to
+    /// make), RTG board frames and programmable scans present their own
+    /// geometry. The CRT presets compose: the pass re-draws whatever rect
+    /// the layout shows.
     ///
-    /// While the mode is on, the layout never falls back to the classic
-    /// letterbox: an open menu or panel, or a session with no content
-    /// yet, widens the rect to the full display region instead. The
-    /// overlays draw into the display region against the full canvas
-    /// mapping, so this keeps them entirely visible -- and it keeps the
-    /// status-bar band pinned to the window bottom, rather than hopping
-    /// between the bottom-anchored band and the letterbox's centred bar
-    /// every time a menu opens.
-    pub(super) fn autocrop_canvas_src(&self) -> Option<(usize, usize, usize, usize)> {
-        if !crate::video::autocrop()
-            || self.rtg_present_dims.is_some()
+    /// While a mode is on, the layout never falls back to the classic
+    /// letterbox: an open menu or panel widens the rect to the full
+    /// display region instead, as does a session with no content yet
+    /// under autocrop alone. The overlays draw into the display region
+    /// against the full canvas mapping, so this keeps them entirely
+    /// visible -- and it keeps the status-bar band pinned to the window
+    /// bottom, rather than hopping between the bottom-anchored band and
+    /// the letterbox's centred bar every time a menu opens.
+    pub(super) fn display_canvas_src(&self) -> Option<DisplaySrc> {
+        if self.rtg_present_dims.is_some()
             || self.present_programmable
             || self.present_width != FB_WIDTH
             || self.bezel.is_on()
         {
             return None;
         }
+        let per_axis = per_axis_scaling_requested();
+        let autocrop = crate::video::autocrop();
+        if !per_axis && !autocrop {
+            return None;
+        }
+        let par = if per_axis {
+            glass_par(
+                self.overscan,
+                self.present_tv_aperture_rows,
+                self.present_rows,
+            )
+        } else {
+            (1, 1)
+        };
         let full = (0, 0, FB_WIDTH, present_height());
         if self.ui.active() {
-            return Some(full);
+            return Some(DisplaySrc { rect: full, par });
         }
-        let Some(content) = self.present_content_rect else {
-            return Some(full);
+        // What the per-axis draw shows with nothing tighter to show: the
+        // aperture the tv canvas fills its glass with, not the pads
+        // around it. (The full-overscan canvas is its own aperture.)
+        let base = match self.present_tv_aperture_rows {
+            Some(rows) if per_axis && self.overscan == Overscan::Tv => aperture_canvas_rect(rows),
+            _ => full,
         };
-        Some(
-            canvas_content_rect(
-                content,
-                self.present_rows,
-                self.overscan,
-                self.tv_centre,
-                self.present_tv_aperture_rows,
-                present_height(),
-            )
-            .unwrap_or(full),
-        )
+        let rect = if autocrop {
+            self.present_content_rect
+                .and_then(|content| {
+                    canvas_content_rect(
+                        content,
+                        self.present_rows,
+                        self.overscan,
+                        self.tv_centre,
+                        self.present_tv_aperture_rows,
+                        present_height(),
+                    )
+                })
+                .unwrap_or(base)
+        } else {
+            base
+        };
+        Some(DisplaySrc { rect, par })
     }
 
     /// Switch the autocrop presentation live. Purely a scaler-pass

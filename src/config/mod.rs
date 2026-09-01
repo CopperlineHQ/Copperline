@@ -315,8 +315,9 @@ pub struct Config {
     pub pixel_aspect: PixelAspect,
     /// How the presentation canvas is scaled into the window: aspect-fit
     /// with filtering, or whole-number multiples only. See
-    /// [`DisplayScaling`]. Orthogonal to `pixel_aspect`, which decides what
-    /// the canvas itself is.
+    /// [`DisplayScaling`]. A separate question from `pixel_aspect`, which
+    /// decides the shape of the picture; integer scaling draws that shape
+    /// from the unresampled canvas under either aspect.
     pub scaling: DisplayScaling,
     /// Crop the window presentation to the display window the hardware
     /// programs (`[display] autocrop`, default off), so a display using
@@ -485,11 +486,15 @@ pub enum DisplayScaling {
     /// whatever the ratio works out to. The default.
     #[default]
     Smooth,
-    /// Draw the canvas at the largest whole-number multiple of itself that
-    /// fits the window, centred in black borders and point-sampled, so
-    /// every canvas pixel is the same square block of host pixels. Falls
-    /// back to the smooth fit when the window is too small for even 1x,
-    /// which shrinks rather than crops.
+    /// Draw the canvas at whole-number multiples, centred in black borders
+    /// and point-sampled, so every canvas pixel is the same block of host
+    /// pixels. Always from the unresampled (square) canvas: the largest
+    /// uniform multiple under the square aspect, and under the tv aspect a
+    /// separate whole number per axis -- pixels per column and per scan
+    /// line -- chosen to approximate the 4:3 pixel shape
+    /// (`video::window::present::per_axis_fit`). Falls back to the smooth
+    /// fit when the window is too small for even 1x, which shrinks rather
+    /// than crops.
     Integer,
 }
 

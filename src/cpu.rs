@@ -1397,7 +1397,7 @@ impl M68kMachine {
             &fb,
             canvas_width as u32,
             present_rows as u32,
-            (crate::video::present_height() * canvas_scale) as u32,
+            (crate::video::capture_height() * canvas_scale) as u32,
         ) {
             Ok(()) => log::info!("  screenshot: {path}"),
             Err(e) => log::warn!("  screenshot failed ({path}): {e:#}"),

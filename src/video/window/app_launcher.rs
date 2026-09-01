@@ -1401,6 +1401,9 @@ impl App {
         self.overscan = crate::config::resolve_overscan(cfg.overscan);
         self.tv_centre = cfg.tv_centre;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
+        // The bezel before the scaling: the canvas rule reads both, and
+        // adopting them in this order moves the canvas at most once.
+        self.apply_bezel_style(crate::config::resolve_bezel(cfg.bezel));
         self.apply_display_scaling(cfg.scaling);
         self.apply_autocrop(cfg.autocrop);
         // Apply the configured start-up window state; the runtime toggles
@@ -1470,7 +1473,7 @@ impl App {
             r.crt_shader.clear_custom();
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
-        self.bezel = crate::config::resolve_bezel(cfg.bezel);
+        // The style itself was adopted with the display settings above.
         self.bezel_last = last_bezel_style(self.bezel);
         self.bezel_stickers_path =
             crate::config::resolve_bezel_stickers(cfg.bezel_stickers.clone());

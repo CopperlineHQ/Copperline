@@ -671,33 +671,219 @@ pub(super) fn main_clip_rect(r: &Render) -> (u32, u32, u32, u32) {
 pub(super) struct PresentLayout {
     /// The canvas sub-rect the display draw samples, in logical canvas
     /// pixels `(x, y, w, h)`. The whole window canvas -- chrome included
-    /// -- in the classic layout; the autocrop rect (display region only)
-    /// when cropping.
+    /// -- in the classic layout; the display region's sub-rect (an
+    /// autocrop content rect, the TV aperture under per-axis integer
+    /// scaling) in a sub-rect layout.
     pub(super) src_canvas: (usize, usize, usize, usize),
     /// Where that lands on the surface, physical pixels.
     pub(super) display_dst: (u32, u32, u32, u32),
     pub(super) filter: scaler::ScaleFilter,
     /// The chrome band's destination when the layout splits it from the
-    /// display (autocrop only): the texture rows below `present_height`
-    /// drawn across the surface bottom.
+    /// display (a sub-rect layout: autocrop, per-axis integer scaling):
+    /// the texture rows below `present_height` drawn across the surface
+    /// bottom.
     pub(super) chrome_dst: Option<(u32, u32, u32, u32)>,
+    /// The whole-number factors of the display draw, as surface pixels
+    /// `(per canvas column, per field line)` -- a uniform multiple `m`
+    /// is `(m, 2 * m)` -- or `None` for a smooth fit.
+    pub(super) factors: Option<(usize, usize)>,
 }
 
-/// The layout for the current frame. `autocrop_src` is the content rect
-/// to crop to, in canvas pixels of the display region, or `None` for the
-/// classic whole-canvas letterbox (autocrop off, suspended, or nothing
-/// to crop to).
-pub(super) fn main_present_layout(
-    r: &Render,
-    autocrop_src: Option<(usize, usize, usize, usize)>,
-) -> PresentLayout {
+/// The sub-rect of the display region the display draw shows, and the
+/// shape its canvas pixels are drawn at. `App::display_canvas_src`
+/// derives it per frame; `None` there means the classic whole-canvas
+/// letterbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DisplaySrc {
+    /// The canvas sub-rect `(x, y, w, h)`, in logical canvas pixels of
+    /// the display region.
+    pub(super) rect: (usize, usize, usize, usize),
+    /// The pixel aspect the rect's canvas pixels are drawn at, as the
+    /// `(width, height)` of one canvas pixel in surface units: `(1, 1)`
+    /// when the canvas already has the picture's shape (the tv canvas,
+    /// or the square canvas under the square aspect), the glass ratio
+    /// ([`glass_par`]) for the square canvas under the tv aspect.
+    pub(super) par: (u32, u32),
+}
+
+/// The shape of one square-canvas pixel on the 4:3 glass, as a ratio
+/// `(width, height)`: the tv aspect's own model, read back. The tv
+/// canvas fits the TV aperture -- `TV_CAPTURED_WIDTH` columns by
+/// `tv_aperture_rows` woven rows -- onto the `FB_WIDTH` x
+/// `PRESENT_HEIGHT_TV` glass (`tv_glass_sample`, `tv_aperture_source_row`),
+/// so each captured column widens by FB_WIDTH / TV_CAPTURED_WIDTH and
+/// each woven row by PRESENT_HEIGHT_TV / rows; the full-overscan canvas
+/// puts the whole `present_rows`-row field on the same glass. PAL lands
+/// at 1.078 (a shade over the textbook 16:15), NTSC at 0.854 (6:7, a
+/// shade over the textbook 5:6): the aperture keeps a little less of the
+/// line than of the field, so both come out a few per cent wider than
+/// the window-fills-the-glass figures.
+pub(super) fn glass_par(
+    overscan: Overscan,
+    tv_aperture_rows: Option<usize>,
+    present_rows: usize,
+) -> (u32, u32) {
+    match tv_aperture_rows {
+        Some(rows) if overscan == Overscan::Tv => (
+            (FB_WIDTH * rows) as u32,
+            (crate::video::PRESENT_HEIGHT_TV * TV_CAPTURED_WIDTH) as u32,
+        ),
+        _ => (
+            present_rows.max(1) as u32,
+            crate::video::PRESENT_HEIGHT_TV as u32,
+        ),
+    }
+}
+
+/// The TV aperture's rect on the square canvas: the captured aperture's
+/// columns between the black side pads, its rows between the bezel
+/// bands `tv_aperture_source_row` centres a shorter aperture with. This
+/// is the picture the tv canvas fills its whole glass with, so it is
+/// what the per-axis draw shows when nothing tighter (an autocrop
+/// content rect) is asked for.
+pub(super) fn aperture_canvas_rect(tv_aperture_rows: usize) -> (usize, usize, usize, usize) {
+    let rows = tv_aperture_rows.min(crate::video::PRESENT_HEIGHT_SQUARE);
+    (
+        TV_LIVE_PAD_X,
+        (crate::video::PRESENT_HEIGHT_SQUARE - rows) / 2,
+        TV_CAPTURED_WIDTH,
+        rows,
+    )
+}
+
+/// How far a whole-number pixel shape may stray from the glass ratio
+/// before a taller fit stops being worth it: max(shape/par, par/shape)
+/// at most 11/10. Wide enough that NTSC's 0.854 admits 4:5 (6.8% off)
+/// through 6:7, 7:8 and 12:13 -- the family amiga.vision's NTSC guide
+/// reaches for, 4:5 being its 1080p and 4K answer -- while excluding
+/// 3:4 (14%) and the squat 1:1 (17%); and that PAL's 1.078 admits the
+/// square 1:1 (7.2%) and 8:7 (6%) but not 6:5 (11%).
+const PAR_TOLERANCE: (u64, u64) = (11, 10);
+
+/// The per-axis whole-number fit of a `w` x `h` canvas rect (hi-res
+/// columns by woven rows) into `avail` surface pixels, drawn at the
+/// pixel shape `par`: `(columns, lines)` -- surface pixels per canvas
+/// column, and per *field line*, the scan's own vertical unit. The
+/// woven canvas carries two rows per line so interlaced fields can be
+/// woven; a non-interlaced display's two are identical, so a whole
+/// number of pixels per line is exact for it whether or not the number
+/// is even (an odd count lands as alternate rows of the pair, which is
+/// only visible on an interlaced display). Stepping the vertical factor
+/// by half a woven row is what makes the NTSC shapes reachable on
+/// ordinary displays: 4:5 is two pixels per column and five per line,
+/// 1000 rows for a 200-line display -- the 1080p answer.
+///
+/// The choice is the tallest fit whose shape stays within
+/// [`PAR_TOLERANCE`] of `par` (a bigger picture beats a marginally truer
+/// one), the closest shape among fits of that height, and the widest
+/// among equals; with no fit inside the tolerance, the closest shape at
+/// the largest size. `None` when not even one pixel per column and per
+/// line fits, where the caller falls back to the smooth fit. Exact
+/// integer arithmetic throughout, so every host agrees on the answer.
+pub(super) fn per_axis_fit(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> Option<(usize, usize)> {
+    if w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
+        return None;
+    }
+    let max_columns = avail.0 as usize / w;
+    // `h` woven rows are `h / 2` field lines: `lines` pixels per line
+    // puts `h * lines / 2` rows on the surface.
+    let max_lines = 2 * avail.1 as usize / h;
+    if max_columns == 0 || max_lines == 0 {
+        return None;
+    }
+    let (par_w, par_h) = (u64::from(par.0), u64::from(par.1));
+    // A shape's deviation from `par`, as the two cross products ordered
+    // (max, min): their quotient is the symmetric ratio error, and two
+    // deviations compare exactly by cross-multiplying.
+    let deviation = |columns: usize, lines: usize| -> (u64, u64) {
+        let shape = 2 * columns as u64 * par_h;
+        let glass = lines as u64 * par_w;
+        (shape.max(glass), shape.min(glass))
+    };
+    let within = |(hi, lo): (u64, u64)| hi * PAR_TOLERANCE.1 <= lo * PAR_TOLERANCE.0;
+    let compare = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+    // A candidate: its factors, its deviation, and whether that is
+    // within the tolerance.
+    type Candidate = ((usize, usize), (u64, u64), bool);
+    let mut best: Option<Candidate> = None;
+    for lines in 1..=max_lines {
+        for columns in 1..=max_columns {
+            let dev = deviation(columns, lines);
+            let ok = within(dev);
+            let better = match best {
+                None => true,
+                Some((_, _, cand_ok)) if ok != cand_ok => ok,
+                Some((cand, cand_dev, true)) => lines
+                    .cmp(&cand.1)
+                    .then(compare(cand_dev, dev))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+                Some((cand, cand_dev, false)) => compare(cand_dev, dev)
+                    .then(lines.cmp(&cand.1))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+            };
+            if better {
+                best = Some(((columns, lines), dev, ok));
+            }
+        }
+    }
+    best.map(|(factors, _, _)| factors)
+}
+
+/// Where a `w` x `h` canvas rect lands in `avail` at whole-number
+/// factors `(columns, lines)`: exactly `w * columns` by `h * lines / 2`,
+/// centred. The rect's rows are whole field lines (an even count) so the
+/// height is exact -- every display rect's are, starting on a woven pair
+/// (`display_rects_start_on_field_lines`).
+fn per_axis_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    (columns, lines): (usize, usize),
+) -> (u32, u32, u32, u32) {
+    let dw = ((w * columns) as u32).min(avail.0);
+    let dh = ((h * lines / 2) as u32).min(avail.1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// The smooth fit of a `w` x `h` canvas rect drawn at pixel shape
+/// `par`: the aspect-preserving letterbox of `w * par` by `h` in
+/// `avail`, `clip_rect_for`'s smooth arithmetic with the shape folded
+/// into the width (at `(1, 1)` it is that fit exactly).
+fn smooth_fit_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> (u32, u32, u32, u32) {
+    if avail.0 == 0 || avail.1 == 0 || w == 0 || h == 0 {
+        return (0, 0, 0, 0);
+    }
+    let shaped_w = w as f32 * par.0 as f32 / par.1.max(1) as f32;
+    let scale = (avail.0 as f32 / shaped_w).min(avail.1 as f32 / h as f32);
+    let dw = ((shaped_w * scale) as u32).min(avail.0).max(1);
+    let dh = ((h as f32 * scale) as u32).min(avail.1).max(1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// The layout for the current frame. `src` is the sub-rect of the
+/// display region to show (an autocrop content rect, the TV aperture
+/// under per-axis integer scaling) with the pixel shape to draw it at,
+/// or `None` for the classic whole-canvas letterbox (both modes off or
+/// suspended).
+pub(super) fn main_present_layout(r: &Render, src: Option<DisplaySrc>) -> PresentLayout {
     let surface = (r.surface_size.0.max(1), r.surface_size.1.max(1));
-    let Some(crop) = autocrop_src.filter(|(_, _, w, h)| *w > 0 && *h > 0) else {
+    let Some(src) = src.filter(|src| src.rect.2 > 0 && src.rect.3 > 0) else {
+        let plan = main_present_plan(r);
         return PresentLayout {
             src_canvas: (0, 0, FB_WIDTH, window_present_height()),
             display_dst: main_clip_rect(r),
-            filter: main_present_plan(r).filter(),
+            filter: plan.filter(),
             chrome_dst: None,
+            factors: plan.multiple.map(|m| (m, 2 * m)),
         };
     };
     // The chrome band keeps exactly the size and position the classic
@@ -717,46 +903,63 @@ pub(super) fn main_present_layout(
     // The *requested* setting, not the classic plan's resolved multiple:
     // a surface too small for the whole canvas can still hold a whole
     // multiple of the crop (a 700-wide window around a 640-wide game),
-    // and autocrop_layout takes its own fit against the crop.
-    autocrop_layout(surface, integer_scaling_requested(), crop, chrome_dst)
+    // and display_src_layout takes its own fit against the rect.
+    display_src_layout(surface, integer_scaling_requested(), src, chrome_dst)
 }
 
-/// The autocrop layout, pure of the live globals: `crop` (canvas pixels
-/// of the display region) placed on `surface`, above the already-sized
-/// `chrome_dst` band (panels and status bar; `None` when there is no
-/// chrome to show).
+/// The sub-rect layout, pure of the live globals: `src` (canvas pixels
+/// of the display region, and the shape to draw them at) placed on
+/// `surface`, above the already-sized `chrome_dst` band (panels and
+/// status bar; `None` when there is no chrome to show).
 ///
-/// Integer scaling re-fits against the crop -- a display using fewer
-/// lines earns a larger whole multiple, which is the point of the
-/// feature -- and falls back to the smooth fit of the crop when not
-/// even 1x fits, exactly as the classic layout falls back.
-pub(super) fn autocrop_layout(
+/// Integer scaling re-fits against the rect -- a display using fewer
+/// lines earns a larger whole multiple, which is the point of autocrop
+/// -- as a uniform multiple when the canvas already has the picture's
+/// shape, and as the per-axis fit ([`per_axis_fit`]) when the shape is
+/// the glass's: the square canvas under the tv aspect. Either falls
+/// back to the smooth fit of the rect at its shape when not even 1x
+/// fits, exactly as the classic layout falls back.
+pub(super) fn display_src_layout(
     surface: (u32, u32),
     integer: bool,
-    crop: (usize, usize, usize, usize),
+    src: DisplaySrc,
     chrome_dst: Option<(u32, u32, u32, u32)>,
 ) -> PresentLayout {
     let avail_h = surface.1 - chrome_dst.map_or(0, |(_, _, _, h)| h.min(surface.1));
     let avail = (surface.0, avail_h.max(1));
-    let multiple = integer
-        .then(|| (avail.0 as usize / crop.2).min(avail.1 as usize / crop.3))
-        .filter(|fit| *fit >= 1);
-    let display_dst = scaler::clip_rect_for(avail, (crop.2 as u32, crop.3 as u32), multiple);
+    let (w, h) = (src.rect.2.max(1), src.rect.3.max(1));
+    let factors = if !integer {
+        None
+    } else if src.par.0 == src.par.1 {
+        // The uniform multiple is the per-axis fit's answer for a square
+        // shape, but stated directly: the tolerance that lets a glass
+        // shape prefer a taller near-miss must not apply to a canvas
+        // asked for as square.
+        let fit = (avail.0 as usize / w).min(avail.1 as usize / h);
+        (fit >= 1).then_some((fit, 2 * fit))
+    } else {
+        per_axis_fit(avail, (w, h), src.par)
+    };
+    let display_dst = match factors {
+        Some(factors) => per_axis_rect(avail, (w, h), factors),
+        None => smooth_fit_rect(avail, (w, h), src.par),
+    };
     PresentLayout {
-        src_canvas: crop,
+        src_canvas: src.rect,
         display_dst,
-        filter: if multiple.is_some() {
+        filter: if factors.is_some() {
             scaler::ScaleFilter::Nearest
         } else {
             scaler::ScaleFilter::SharpBilinear
         },
         chrome_dst,
+        factors,
     }
 }
 
 impl PresentLayout {
     /// The scaler-pass draws this layout amounts to. The classic layout
-    /// is one whole-texture draw; the autocrop layout samples the crop's
+    /// is one whole-texture draw; a sub-rect layout samples the rect's
     /// uv sub-rect and adds the chrome band below it.
     pub(super) fn draws(&self) -> Vec<scaler::ScalerDraw> {
         let canvas_h = window_present_height() as f32;
@@ -817,6 +1020,15 @@ impl PresentLayout {
 /// machine's own display follows it; the tool windows are always fitted.
 pub(super) fn integer_scaling_requested() -> bool {
     crate::video::display_scaling() == crate::config::DisplayScaling::Integer
+}
+
+/// Whether the emulator window draws with a whole-number factor per axis:
+/// integer scaling of the tv aspect, which presents the square canvas at
+/// the glass's pixel shape (`glass_par`, `per_axis_fit`). A drawn bezel
+/// keeps the tv canvas and suspends the draw, like the other sub-rect
+/// conditions `App::display_canvas_src` checks per frame.
+pub(super) fn per_axis_scaling_requested() -> bool {
+    integer_scaling_requested() && crate::video::pixel_aspect() == crate::config::PixelAspect::Tv
 }
 
 /// Re-plan the emulator window's presentation for the given surface size
@@ -979,14 +1191,14 @@ pub(super) fn cursor_texture_position(
 /// window is drawn by the scaler pass, not the built-in renderer, so the
 /// rects inverted here are the same [`PresentLayout`] rects the pass
 /// draws into, and the mapping lands directly in logical canvas pixels.
-/// `autocrop_src` must be the same crop the redraw presents
-/// (`App::autocrop_canvas_src`), so clicks land where the picture is.
+/// `src` must be the same sub-rect the redraw presents
+/// (`App::display_canvas_src`), so clicks land where the picture is.
 pub(super) fn main_cursor_position(
     r: &Render,
-    autocrop_src: Option<(usize, usize, usize, usize)>,
+    src: Option<DisplaySrc>,
     position: winit::dpi::PhysicalPosition<f64>,
 ) -> Option<(i32, i32)> {
-    main_present_layout(r, autocrop_src).cursor_position(position)
+    main_present_layout(r, src).cursor_position(position)
 }
 
 /// The pure half of [`cursor_texture_position`]: position and clip rect in
@@ -1643,8 +1855,10 @@ pub(super) fn save_present_frame(
     }
 
     // A double-width (35 ns) canvas saves at double height too, keeping the
-    // 4:3 glass shape at the higher resolution.
-    let out_rows = present_height() * src_width / FB_WIDTH;
+    // 4:3 glass shape at the higher resolution. The capture canvas, not
+    // the window's: a saved picture keeps the aspect's shape whatever
+    // the window is drawing.
+    let out_rows = crate::video::capture_height() * src_width / FB_WIDTH;
     screenshot::save_scaled_y(
         path,
         present_fb,
