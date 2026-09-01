@@ -4428,16 +4428,29 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) -> Option<ContentRect> {
     })
 }
 
-/// Synchronous render wrapper with exact previous-frame reuse. Returns true
-/// when `fb` already contains the identical progressive frame and no render
-/// was needed. This is primarily the frontend-free benchmark companion to the
-/// threaded window cache; [`render`] preserves its always-render contract.
+/// What [`render_reusing_previous`] did with the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReuseRender {
+    /// `fb` already held the identical progressive frame; nothing was
+    /// rendered.
+    Reused,
+    /// The frame was rendered, with its playfield content envelope (see
+    /// [`ContentRect`]), as [`render`] reports it.
+    Rendered(Option<ContentRect>),
+}
+
+/// Synchronous render wrapper with exact previous-frame reuse. Reports
+/// [`ReuseRender::Reused`] when `fb` already contains the identical
+/// progressive frame and no render was needed, and the fresh render's
+/// content envelope otherwise. This is primarily the frontend-free
+/// benchmark companion to the threaded window cache; [`render`] preserves
+/// its always-render contract.
 #[doc(hidden)]
 pub fn render_reusing_previous(
     bus: &mut Bus,
     fb: &mut [u32],
     detector: &mut RepeatedFrameDetector,
-) -> bool {
+) -> ReuseRender {
     thread_local! {
         static REUSED_RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
             const { std::cell::RefCell::new(None) };
@@ -4455,7 +4468,7 @@ pub fn render_reusing_previous(
                 .as_mut()
                 .expect("scratch render input present")
                 .release_shared_frame_data();
-            return true;
+            return ReuseRender::Reused;
         }
         let mut result = if detector.should_track_read_dependencies(input) {
             render_from_input_tracking_reuse(input, fb)
@@ -4469,7 +4482,7 @@ pub fn render_reusing_previous(
             .as_mut()
             .expect("scratch render input present")
             .release_shared_frame_data();
-        false
+        ReuseRender::Rendered(result.content_rect)
     })
 }
 

@@ -8936,6 +8936,24 @@ fn glass_par_is_the_tv_canvas_model_read_back() {
     ] {
         assert_eq!(super::glass_par(Overscan::Full, rows, OUT_HEIGHT), field);
     }
+    // The browser reads the same shapes off its presentation buffer
+    // (`buffer_glass_par`): the captured aperture at its woven rows, or the
+    // whole field, shown in a 4:3 element.
+    let same_shape = |a: (u32, u32), b: (u32, u32)| {
+        u64::from(a.0) * u64::from(b.1) == u64::from(b.0) * u64::from(a.1)
+    };
+    assert!(same_shape(
+        pal,
+        super::buffer_glass_par(TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT)
+    ));
+    assert!(same_shape(
+        ntsc,
+        super::buffer_glass_par(TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT)
+    ));
+    assert!(same_shape(
+        field,
+        super::buffer_glass_par(FB_WIDTH, OUT_HEIGHT)
+    ));
     assert_eq!(super::glass_par(Overscan::Tv, None, OUT_HEIGHT), field);
 }
 

@@ -26,6 +26,20 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   - **Monitor presentation:** Select CRT shader and bezel frames (**1084**, **Classic**,
     **CRT filter**, or **Plain**).
   - **View (Overscan):** Crop to standard TV aperture or view full overscan border areas.
+  - **Scaling:** **Smooth** (the default) fits the picture to the monitor. **Integer** is
+    the desktop's `[display] scaling = "integer"`: the picture is drawn at whole device
+    pixels per hi-res column and per scan line, a separate whole number per axis chosen to
+    approximate the 4:3 glass shape (4:5 pixels for a 200-line NTSC game on a 1080p screen,
+    square multiples for PAL), centred in black. It takes the fit against every device pixel
+    the element has, so fullscreen on a 16:9 laptop or TV is where it gains the most.
+  - **Autocrop:** The desktop's `[display] autocrop`: crop the picture to the display window
+    the program actually draws (the rows and columns carrying fetched bitplane data, smoothed
+    across frames so screen transitions do not pump the zoom) instead of the fixed TV aperture.
+    With **Integer** scaling the whole-number fit is retaken against the crop, so a 200-line
+    game usually earns a full multiple more. In fullscreen the picture may use the whole
+    screen rather than a 4:3 box. Both settings stand down while a monitor bezel is drawn
+    (the frame's fixed opening owns the glass), as on the desktop, and never affect
+    screenshots, which capture the presentation buffer.
   - **Screen tint:** Monochrome simulation presets (Black & White, Green, Amber, Sepia).
   - **Deinterlacing:** Motion-adaptive field merging for interlaced display modes.
   - **Phosphor persistence:** Simulates CRT phosphor decay trails.
@@ -152,6 +166,21 @@ requestAnimationFrame(renderLoop);
 - `set_port_device(port, device)`: Configure controller port device (`port` 1 or 2, e.g., `"mouse"`, `"joystick"`, `"cd32"`, `"analogue"`, `"none"`).
 - `save_state()`: Export full machine state as `Uint8Array`.
 - `load_state(stateBytes)`: Restore machine state from `Uint8Array`.
+- `set_overscan(mode)`: `"tv"` (default) or `"full"` presentation overscan.
+- `set_scaling(mode)`: `"smooth"` (default) or `"integer"`. Under `"integer"` a 60 Hz
+  standard scan presents its captured aperture at its own woven rows (`present_rows()`
+  follows) instead of resampled onto the 50 Hz aperture's row count, so whole-number factors
+  carry every scan line to the screen as one block.
+- `set_autocrop(on)`: Crop `present_layout()` to the content envelope.
+- `present_content_rect()`: The latched content envelope as `[x, y, width, height]` in
+  presentation-buffer pixels, or an empty array before any content has been seen.
+- `present_layout(availWidth, availHeight)`: Where the presentation buffer lands on a
+  viewport of that many device pixels under the scaling and autocrop settings:
+  `[sx, sy, sw, sh, dx, dy, dw, dh, columns, lines]` -- the buffer sub-rect to draw, its
+  destination rect (paint the rest black), and the whole-number factors of an integer draw
+  (`0, 0` for a smooth fit). Empty until a frame has been presented. A page that draws the
+  buffer itself asks for this instead of stretching the buffer over its element; the bundled
+  `try.js` does so whenever either setting is on and no bezel is drawn.
 
 ### HTML element hooks in `try.js`
 
@@ -162,6 +191,8 @@ When using the bundled `try.js` harness, standard UI elements can be connected b
 - `#floppy-speed`: `<select>` for floppy drive speed multiplier (`100`, `200`, `400`, `800`, `0` for turbo).
 - `#monitor`: `<select>` for CRT shader and bezel style.
 - `#overscan`: `<select>` for TV aperture vs. full overscan view.
+- `#scaling`: `<select>` for smooth vs. integer scaling (`smooth` / `integer`).
+- `#autocrop`: `<input type="checkbox">` for the autocrop presentation.
 - `#df0list` / `#kicklist`: `<select>` elements populated from remote disk/ROM manifests.
 - `#pause`, `#screenshot`, `#keyboard`: Action button triggers.
 
@@ -178,9 +209,15 @@ You can provide default settings via a `config.json` file in the web root:
   "autoboot": true,
   "floppy_speed": 400,
   "monitor": "1084",
+  "scaling": "integer",
+  "autocrop": true,
   "background_run": true
 }
 ```
+
+Display choices (`overscan`, `tint`, `monitor`, `scaling`, `autocrop`, `deinterlace`,
+`phosphor`) are starting points for first-time visitors: a visitor's own remembered choice
+wins.
 
 ## Serial port over WebSockets
 

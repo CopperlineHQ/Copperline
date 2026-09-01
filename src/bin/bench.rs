@@ -150,7 +150,7 @@ fn main() -> Result<()> {
                     emu.bus_mut(),
                     &mut fb,
                     &mut repeated_frame_detector,
-                );
+                ) == bitplane::ReuseRender::Reused;
                 if reused {
                     reused_frames += 1;
                     render_skipped_frames += 1;

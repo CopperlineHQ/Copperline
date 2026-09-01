@@ -144,6 +144,12 @@ let lastStatUpdate = 0;
 // path the canvas backing store is display-resolution, so pointer scaling
 // reads the emulated size from here rather than from the canvas.
 let presentSize = { width: 0, rows: 0 };
+// The layout the last draw placed the picture with under the scaling and
+// autocrop modes (the display: scaling section): the presentation
+// sub-rect shown and where it landed, in backing-store (device) pixels.
+// Null while the plain stretch draws the whole buffer into the whole
+// element, which is what pointer scaling assumes without one.
+let lastLayout = null;
 
 // Transient caption over the screen, the page's version of the desktop's
 // on-screen display. It exists because the shell's status line lives inside
@@ -832,6 +838,8 @@ async function boot() {
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     if (overscanMode !== null) machine.set_overscan?.(overscanMode);
     machine.set_monitor_bezel?.(monitorBezelOn());
+    machine.set_scaling?.(scalingMode);
+    machine.set_autocrop?.(autocropOn);
     machine.set_deinterlace?.(deinterlaceEnabled);
     machine.set_phosphor?.(phosphorPersistence);
     emu = machine;
@@ -995,10 +1003,6 @@ function presentFrame(force = false) {
     presentFrameMonitor(width, rows, changed || !hasPresentationRevision);
   } else {
     const uploadStart = performance.now();
-    if (canvas.width !== width || canvas.height !== rows) {
-      canvas.width = width;
-      canvas.height = rows;
-    }
     // The view must be rebuilt after every changed presentation: wasm memory
     // may grow and the present buffer may reallocate. A forced 2D redraw
     // (resize while paused) needs the same copy even when the revision held.
@@ -1007,11 +1011,71 @@ function presentFrame(force = false) {
       emu.present_ptr(),
       width * rows * 4,
     );
-    ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
+    const [w, h] = canvasDeviceSize();
+    const lay = subRectModeActive() ? presentLayoutFor(w, h) : null;
+    lastLayout = lay;
+    if (lay) {
+      presentFrame2dLayout(view, width, rows, w, h, lay);
+    } else {
+      if (canvas.width !== width || canvas.height !== rows) {
+        canvas.width = width;
+        canvas.height = rows;
+      }
+      ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
+    }
     uploadMsThisSecond += performance.now() - uploadStart;
   }
   if (hasPresentationRevision) lastPresentationRevision = revision;
   return changed;
+}
+
+// The element's backing-store size at device resolution, which both the
+// monitor path and a 2D layout draw give the canvas: the whole-number
+// factors of integer scaling are real device pixels only then.
+function canvasDeviceSize() {
+  const dpr = window.devicePixelRatio || 1;
+  return [
+    Math.max(1, Math.round(canvas.clientWidth * dpr)),
+    Math.max(1, Math.round(canvas.clientHeight * dpr)),
+  ];
+}
+
+// The 2D fallback's draw of a layout. putImageData cannot scale, so the
+// presentation goes through a staging canvas at its own size and is drawn
+// from there into the layout's rect of a device-resolution backing store,
+// point-sampled at whole-number factors and filtered for a smooth fit;
+// the store outside the rect is black. The plain stretch keeps the old
+// present-sized store and the page's CSS scaling.
+let stage2d = null;
+function presentFrame2dLayout(view, width, rows, w, h, lay) {
+  if (!stage2d) {
+    const canvas = document.createElement('canvas');
+    stage2d = { canvas, ctx: canvas.getContext('2d') };
+  }
+  if (stage2d.canvas.width !== width || stage2d.canvas.height !== rows) {
+    stage2d.canvas.width = width;
+    stage2d.canvas.height = rows;
+  }
+  stage2d.ctx.putImageData(new ImageData(view, width, rows), 0, 0);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  ctx2d.fillStyle = '#000';
+  ctx2d.fillRect(0, 0, w, h);
+  ctx2d.imageSmoothingEnabled = !lay.factors;
+  ctx2d.imageSmoothingQuality = 'high';
+  ctx2d.drawImage(
+    stage2d.canvas,
+    lay.sx,
+    lay.sy,
+    lay.sw,
+    lay.sh,
+    lay.dx,
+    lay.dy,
+    lay.dw,
+    lay.dh,
+  );
 }
 
 // Advance the machine to nowMs and ship what it produced (audio, serial):
@@ -1866,6 +1930,16 @@ let lastPos = null;
 // with the bezel on the picture fills only the frame's opening, so a CSS
 // pixel of the element covers proportionally more of the picture.
 const cssToEmu = () => {
+  if (lastLayout) {
+    // A layout draw: the picture's sub-rect occupies its destination
+    // rect of the backing store, in device pixels, and a CSS pixel is a
+    // device-pixel-ratio's worth of those.
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: lastLayout.sw / (lastLayout.dw / dpr),
+      y: lastLayout.sh / (lastLayout.dh / dpr),
+    };
+  }
   const scale = monitorPictureScale();
   return {
     x: (presentSize.width || canvas.width) / (canvas.clientWidth * scale),
@@ -2440,6 +2514,30 @@ const CSS_FS_CANVAS = {
   objectFit: 'fill',
 };
 
+// The same letterbox with the element spanning the whole viewport: what
+// fullscreen gives the canvas while a layout draw is placing the picture
+// (integer scaling or autocrop without a bezel). The draw letterboxes
+// inside the element itself, at the picture's shape rather than the
+// monitor's, so a cropped picture can take the screen's full width or
+// height -- the point of autocrop on a 16:9 laptop or TV -- and the
+// whole-number fit is taken against every device pixel there is.
+const CSS_FS_CANVAS_FILL = {
+  ...CSS_FS_CANVAS,
+  width: '100dvw',
+  height: 'calc(100dvh - var(--cl-kbd-h, 0px))',
+};
+
+function fsCanvasStyles() {
+  return subRectModeActive() ? CSS_FS_CANVAS_FILL : CSS_FS_CANVAS;
+}
+
+// Re-apply the fullscreen letterbox after a display-mode change while
+// fullscreen is up: the two style sets share their keys, so setting the
+// other one over the old is the whole switch.
+function syncFsCanvasStyles() {
+  if (isFullscreen()) setStyles(canvas, fsCanvasStyles(), true);
+}
+
 function setStyles(el, styles, on) {
   for (const k of Object.keys(styles)) el.style[k] = on ? styles[k] : '';
 }
@@ -2447,7 +2545,7 @@ function setStyles(el, styles, on) {
 function enterCssFullscreen() {
   cssFullscreen = true;
   setStyles(shell, CSS_FS_SHELL, true);
-  setStyles(canvas, CSS_FS_CANVAS, true);
+  setStyles(canvas, fsCanvasStyles(), true);
   document.documentElement.style.overflow = 'hidden';
   updateFsUi();
 }
@@ -2501,7 +2599,7 @@ function syncEscapeLock() {
 // chrome (the monitor path's border hiding); entering it is a no-op
 // there, since fullscreen owns the shell's styles.
 document.addEventListener('fullscreenchange', () => {
-  setStyles(canvas, CSS_FS_CANVAS, document.fullscreenElement !== null);
+  setStyles(canvas, fsCanvasStyles(), document.fullscreenElement !== null);
   syncEscapeLock();
   updateFsUi();
   syncShellChrome();
@@ -4014,6 +4112,8 @@ function restoreState(bytes, source) {
   if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
   if (overscanMode !== null) emu.set_overscan?.(overscanMode);
   emu.set_monitor_bezel?.(monitorBezelOn());
+  emu.set_scaling?.(scalingMode);
+  emu.set_autocrop?.(autocropOn);
   emu.set_deinterlace?.(deinterlaceEnabled);
   emu.set_phosphor?.(phosphorPersistence);
   // Port fittings live on the machine, so the pads plugged into the host go
@@ -4876,6 +4976,106 @@ function setOverscanMode(mode, remember) {
 }
 overscanSel.addEventListener('change', () => setOverscanMode(overscanSel.value, true));
 
+// --- display: scaling and autocrop -----------------------------------------
+// The desktop's `[display] scaling` and `autocrop` knobs for the page.
+// "integer" draws the picture at whole-number device pixels per buffer
+// column and per scan line, centred in black; autocrop crops it to the
+// display window the hardware actually programs instead of the fixed TV
+// aperture. Either way the page stops stretching the buffer over the
+// whole element and asks the wasm where the picture lands
+// (present_layout, the desktop's own fit and crop smoothing), then draws
+// that rect -- through the monitor shaders' picture sub-rect on the GL
+// path, or through a staging canvas on the 2D fallback. Both are
+// presentation-only choices remembered per browser like overscan, never
+// observable by the guest, and both stand down while a bezel mode's
+// fixed opening owns the glass, as the desktop's do. Hidden on a bundle
+// with no layout to ask for (the class methods exist as soon as the
+// module is imported).
+const SCALING_STORAGE_KEY = 'copperline-scaling';
+const SCALING_MODES = ['smooth', 'integer'];
+const SCALING_LABELS = { smooth: 'Smooth', integer: 'Integer' };
+const AUTOCROP_STORAGE_KEY = 'copperline-autocrop';
+const layoutSupported = typeof WebEmu.prototype?.present_layout === 'function';
+
+const scalingShellSel = $('scaling');
+const scalingSel = scalingShellSel ?? buildSettingControl('scaling', 'Scaling');
+if (!scalingSel.options.length) {
+  for (const mode of SCALING_MODES) {
+    const option = document.createElement('option');
+    option.value = mode;
+    option.textContent = SCALING_LABELS[mode];
+    scalingSel.appendChild(option);
+  }
+}
+scalingSel.title =
+  'Integer draws whole device pixels per column and scan line, centred in black; ' +
+  'Smooth fits the picture to the monitor.';
+const autocropShellToggle = $('autocrop');
+const autocropToggle = autocropShellToggle ?? buildToggleControl('autocrop', 'Autocrop');
+autocropToggle.checked = false;
+autocropToggle.title =
+  'Crop to the display the program actually draws instead of the full TV aperture.';
+if (!layoutSupported) {
+  (scalingShellSel ?? scalingSel.parentElement).hidden = true;
+  (autocropShellToggle ?? autocropToggle.parentElement).hidden = true;
+}
+let scalingMode = 'smooth';
+let autocropOn = false;
+
+function setScalingMode(mode, remember) {
+  if (!SCALING_MODES.includes(mode)) return;
+  scalingMode = mode;
+  scalingSel.value = mode;
+  if (remember) storePref(SCALING_STORAGE_KEY, mode);
+  syncFsCanvasStyles();
+  // The wasm re-presents the held frame under the new setting (a 60 Hz
+  // aperture changes its row count); the redraw picks it up even while
+  // paused, with the layout the setting asks for.
+  emu?.set_scaling?.(mode);
+  if (emu && running) presentFrame(true);
+}
+scalingSel.addEventListener('change', () => setScalingMode(scalingSel.value, true));
+
+function setAutocrop(on, remember) {
+  autocropOn = !!on;
+  autocropToggle.checked = autocropOn;
+  if (remember) storePref(AUTOCROP_STORAGE_KEY, autocropOn ? 'on' : 'off');
+  syncFsCanvasStyles();
+  // A layout setting alone: the held picture is redrawn where the crop
+  // puts it, nothing is re-presented.
+  emu?.set_autocrop?.(autocropOn);
+  if (emu && running) presentFrame(true);
+}
+autocropToggle.addEventListener('change', () => setAutocrop(autocropToggle.checked, true));
+
+// Whether the draw places the picture through the wasm's layout rather
+// than stretching the buffer over the element: a mode is on, the bundle
+// can answer, and no bezel is framing the glass.
+function subRectModeActive() {
+  return layoutSupported && (scalingMode === 'integer' || autocropOn) && !monitorBezelOn();
+}
+
+// Where the picture lands on a `w` x `h` device-pixel viewport under the
+// modes: the presentation sub-rect to show, its destination rect, and the
+// whole-number factors (device pixels per buffer column and per scan
+// line) of an integer draw, or null for a smooth fit. Null with no frame
+// to place.
+function presentLayoutFor(w, h) {
+  const l = emu?.present_layout?.(w, h);
+  if (!l || l.length < 10) return null;
+  return {
+    sx: l[0],
+    sy: l[1],
+    sw: l[2],
+    sh: l[3],
+    dx: l[4],
+    dy: l[5],
+    dw: l[6],
+    dh: l[7],
+    factors: l[8] > 0 ? [l[8], l[9]] : null,
+  };
+}
+
 // Motion-adaptive deinterlacing and phosphor decay both retain and process
 // frame history. They are useful CRT presentation effects, but opt-in in the
 // browser so the default path keeps maximum emulation headroom. Ordinary
@@ -5122,6 +5322,7 @@ void main() {
 precision highp int;
 uniform sampler2D u_tex;
 uniform vec4 u_size;   // xy: viewport size in px, zw: source size in texels
+uniform vec4 u_src;    // picture sub-rect of the texture in UV: xy origin, zw size
 uniform int u_tint;    // 0 none, 1 bw, 2 green, 3 amber, 4 sepia
 in vec2 v_uv;
 out vec4 fragColor;
@@ -5168,13 +5369,19 @@ vec3 apply_tint(vec3 c) {
   return clamp(c * TINT_HUE_M8, 0.0, 1.0);
 }
 
-// Sample the picture. Unlike the desktop's backing texture the source
-// carries no status bar, so the desktop's src_rect collapses to the whole
-// texture and the edge clamp is the sampler's. The tint applies in sRGB
-// before the pass's own arithmetic, like the desktop's tint LUT on the
-// present buffer.
+// Sample the picture: the u_src sub-rect of the texture, the desktop's
+// src_rect (crt.wgsl sample_display) -- the whole texture for the plain
+// stretch, the picture's crop under a layout draw (integer scaling,
+// autocrop) -- with the edge clamp half a texel inside the rect, so a
+// linear sample on a crop boundary never blends in the far side (u_size.zw
+// is the rect's own size in texels). The tint applies in sRGB before the
+// pass's own arithmetic, like the desktop's tint LUT on the present buffer.
 vec3 sample_display(vec2 uv) {
-  vec3 c = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  vec2 half_texel = 0.5 * u_src.zw / max(u_size.zw, vec2(1.0));
+  vec2 lo = u_src.xy + half_texel;
+  vec2 hi = u_src.xy + u_src.zw - half_texel;
+  vec2 tc = clamp(u_src.xy + clamp(uv, 0.0, 1.0) * u_src.zw, lo, hi);
+  vec3 c = texture(u_tex, tc).rgb;
   if (u_tint != 0) c = srgb_decode(apply_tint(srgb_encode(c)));
   return c;
 }
@@ -6174,21 +6381,31 @@ function monitorDraw(width, rows, crtLines) {
   // Draw a pass over a viewport rect given in canvas coordinates (origin
   // top-left, like everything else on the page); GL viewports measure
   // from the bottom-left.
-  const draw = (p, vx, vy, vw, vh, setUniforms) => {
+  // The picture sub-rect a pass shows (`src`, texels) is the whole texture
+  // unless a layout draw crops it; the source size the shaders see follows
+  // the rect, like the desktop's uniforms_for_rect.
+  const draw = (p, vx, vy, vw, vh, setUniforms, src) => {
+    const [sx, sy, sw, sh] = src ?? [0, 0, width, rows];
     gl.useProgram(p.prog);
     gl.viewport(vx, canvas.height - vy - vh, vw, vh);
     gl.uniform1i(p.u.u_tex, 0);
     gl.uniform1i(p.u.u_tint, tint);
-    gl.uniform4f(p.u.u_size, vw, vh, width, rows);
+    gl.uniform4f(p.u.u_size, vw, vh, sw, sh);
+    gl.uniform4f(p.u.u_src, sx / width, sy / rows, sw / width, sh / rows);
     setUniforms?.(p);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };
-  const crtUniforms = (p) => {
-    gl.uniform4f(p.u.u_params, 1.0, crtLines, 1.0, MONITOR_CRT_CURVATURE);
+  // The scanline count is the beam lines across the rect drawn, not the
+  // whole display: a crop carries its share of them.
+  const crtUniformsFor = (lines) => (p) => {
+    gl.uniform4f(p.u.u_params, 1.0, lines, 1.0, MONITOR_CRT_CURVATURE);
     gl.uniform4f(p.u.u_params2, MONITOR_CRT_VIGNETTE, 0, 0, 0);
   };
+  const crtUniforms = crtUniformsFor(crtLines);
 
   if (bezelStyle) {
+    // A drawn front's fixed opening owns the glass: no layout draw here.
+    lastLayout = null;
     // The desktop composition (window.rs): with the preset on it paints
     // the picture into the opening's bounding box first, and the bezel
     // follows in frame-only mode, clipping the preset's square viewport
@@ -6283,10 +6500,29 @@ function monitorDraw(width, rows, crtLines) {
       // Leave the picture texture bound, as every other path here does.
       gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
     }
-  } else if (crtOn) {
-    draw(monitorGl.crt, 0, 0, w, h, crtUniforms);
   } else {
-    draw(monitorGl.plain, 0, 0, w, h);
+    // No bezel: the picture is the element, stretched over it as the
+    // page always did -- or, under integer scaling or autocrop, placed
+    // where the wasm's layout puts its rect, the element black around it
+    // (the clear covers the whole store; a viewport does not bound it).
+    const lay = emu && running && subRectModeActive() ? presentLayoutFor(w, h) : null;
+    lastLayout = lay;
+    if (lay) {
+      gl.viewport(0, 0, w, h);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const src = [lay.sx, lay.sy, lay.sw, lay.sh];
+      if (crtOn) {
+        const lines = crtLines * (lay.sh / Math.max(rows, 1));
+        draw(monitorGl.crt, lay.dx, lay.dy, lay.dw, lay.dh, crtUniformsFor(lines), src);
+      } else {
+        draw(monitorGl.plain, lay.dx, lay.dy, lay.dw, lay.dh, undefined, src);
+      }
+    } else if (crtOn) {
+      draw(monitorGl.crt, 0, 0, w, h, crtUniforms);
+    } else {
+      draw(monitorGl.plain, 0, 0, w, h);
+    }
   }
 }
 
@@ -6406,6 +6642,9 @@ function setMonitorMode(mode, remember) {
   monitorSel.value = mode;
   if (remember) storePref(MONITOR_STORAGE_KEY, mode);
   syncShellChrome();
+  // A bezel suspends the layout modes, which changes what fullscreen
+  // gives the element.
+  syncFsCanvasStyles();
   // A drawn frame widens the emulated presentation to the tube aperture;
   // the wasm re-presents the held frame under the new crop on the spot,
   // so the redraw below picks it up even while paused.
@@ -6441,7 +6680,9 @@ window.addEventListener('load', () => {
   if (!emu) presentMonitorOff();
 });
 window.addEventListener('resize', () => {
-  if (!monitorGl) return;
+  // The 2D fallback's plain blit is the page's CSS scaling and needs no
+  // redraw; its layout draw follows the element like the monitor path.
+  if (!monitorGl && !subRectModeActive()) return;
   if (!emu) presentMonitorOff();
   else if (running) presentFrame(true);
 });
@@ -6829,6 +7070,18 @@ function bugReportHref() {
       `present = "${presentSize.width}x${presentSize.rows}"`,
       `canvas = "${canvas.width}x${canvas.height}"`,
       `monitor = ${toml(monitorGl ? monitorMode : '2d fallback')}`,
+      `scaling = ${toml(scalingMode)}`,
+      `autocrop = ${autocropOn}`,
+      // The layout draw's rects when one is placing the picture: the
+      // presentation sub-rect shown, where it landed (device pixels), and
+      // the whole-number factors per column and scan line.
+      `layout = ${toml(
+        lastLayout
+          ? `${lastLayout.sw}x${lastLayout.sh}@${lastLayout.sx},${lastLayout.sy}` +
+              ` -> ${lastLayout.dw}x${lastLayout.dh}@${lastLayout.dx},${lastLayout.dy}` +
+              (lastLayout.factors ? ` x${lastLayout.factors[0]},${lastLayout.factors[1]}` : '')
+          : 'stretch',
+      )}`,
       `deinterlace = ${deinterlaceEnabled}`,
       `phosphor = ${phosphorPersistence}`,
       `running = ${running}`,
@@ -6965,6 +7218,10 @@ const pageParams = new URLSearchParams(location.search);
 //     "monitor": "plain",            starting monitor presentation
 //                                    (1084|classic|crt|cabinet|bezel|plain,
 //                                    default 1084); same visitor rule
+//     "scaling": "integer",          starting presentation scaling
+//                                    (smooth|integer); same visitor rule
+//     "autocrop": true,              crop to the display the program draws;
+//                                    off by default, same visitor rule
 //     "deinterlace": true,           motion-adaptive LACE field merging;
 //                                    off by default for throughput
 //     "phosphor": 0.4,               CRT persistence (0.0..0.95); off by
@@ -7069,6 +7326,14 @@ async function startup() {
     storedPref(MONITOR_STORAGE_KEY) ??
     (typeof cfg.monitor === 'string' ? cfg.monitor.trim() : null);
   if (monitorPref) setMonitorMode(monitorPref, false);
+  // Scaling and autocrop, the desktop's display knobs, the same rule.
+  const scalingPref =
+    storedPref(SCALING_STORAGE_KEY) ??
+    (typeof cfg.scaling === 'string' ? cfg.scaling.trim() : null);
+  if (scalingPref) setScalingMode(scalingPref, false);
+  const autocropPref = storedPref(AUTOCROP_STORAGE_KEY);
+  if (autocropPref !== null) setAutocrop(autocropPref === 'on', false);
+  else if (typeof cfg.autocrop === 'boolean') setAutocrop(cfg.autocrop, false);
   // History-dependent display effects are opt-in for browser throughput.
   // A visitor's saved choice wins over the site's suggested starting point.
   const deinterlacePref = storedPref(DEINTERLACE_STORAGE_KEY);
