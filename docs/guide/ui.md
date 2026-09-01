@@ -343,17 +343,22 @@ belongs to the Amiga.
   (see [Configuration](configuration.md)).
 - **Scaling**: how that canvas is drawn into the window -- **Smooth** (the
   default: fit to the window preserving aspect ratio, interpolated) or
-  **Integer** (the largest whole-number multiple of the canvas that fits,
-  centred in black borders and point-sampled, so every canvas pixel is the
-  same square block of host pixels). The fit is taken in whole canvas
-  pixels, so every step exists on high-DPI and fractional-scale displays
-  alike. Integer scaling applies to RTG board modes too, at multiples of
-  their own native resolution, and gives way to the smooth fit when the
-  window cannot hold even a 1:1 copy rather than cropping the picture. The
-  window never resizes when it changes, and a video recording carries on
-  underneath. The start-up mode is
-  `[display] scaling`, which also notes which pixel-aspect pairing is
-  fully pixel-exact (see [Configuration](configuration.md)).
+  **Integer** (whole-number multiples of the unresampled canvas, centred
+  in black borders and point-sampled, so every canvas pixel is the same
+  block of host pixels). Under the TV aspect the two axes take separate
+  whole numbers -- pixels per column and per scan line -- chosen to
+  approximate the 4:3 pixel shape, so an NTSC game on a 1080p screen is
+  drawn at 4:5 pixels rather than squat square ones; under square pixels
+  the multiple is uniform. The fit is taken in whole canvas pixels, so
+  every step exists on high-DPI and fractional-scale displays alike.
+  Integer scaling applies to RTG board modes too, at multiples of their
+  own native resolution, and gives way to the smooth fit when the window
+  cannot hold even a 1:1 copy rather than cropping the picture. Under the
+  TV aspect the window resizes to the unresampled canvas when the mode
+  changes, as it does for a pixel-aspect change; a video recording carries
+  on underneath either way, at the aspect's own shape. The start-up mode
+  is `[display] scaling`, which describes the per-axis fit and its
+  pairing with autocrop (see [Configuration](configuration.md)).
 - **Autocrop**: crop the presentation to the picture the hardware
   fetches, so a game driving fewer lines than the full scan fills more
   of a wide screen; with integer scaling the whole-number fit is retaken

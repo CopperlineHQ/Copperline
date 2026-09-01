@@ -1990,6 +1990,11 @@ impl App {
             .run_ahead_frames
             .unwrap_or(0)
             .min(crate::config::RUN_AHEAD_MAX_FRAMES);
+        // The canvas rule reads the bezel through its own mirror
+        // (`present_height`), and the window is sized from the canvas
+        // before the first frame: seed it with the style the window opens
+        // with, as `main` seeds the aspect and the scaling.
+        crate::video::set_bezel_shown(bezel.is_on());
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -3781,11 +3786,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let previous_cursor_pos = self.cursor_pos;
                 self.last_cursor_phys = Some(position);
-                let autocrop_src = self.autocrop_canvas_src();
+                let display_src = self.display_canvas_src();
                 let pos = self
                     .render
                     .as_ref()
-                    .and_then(|r| main_cursor_position(r, autocrop_src, position));
+                    .and_then(|r| main_cursor_position(r, display_src, position));
                 // A button held on the dial turns it by following the hand
                 // round the face.
                 #[cfg(feature = "mt32")]
@@ -4172,9 +4177,9 @@ impl ApplicationHandler for App {
                 // a redraw, so re-mapping the cached host position here
                 // keeps hover and click hit-testing aligned with the
                 // pixels this frame actually shows.
-                let autocrop_src = self.autocrop_canvas_src();
+                let display_src = self.display_canvas_src();
                 if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
-                    self.cursor_pos = main_cursor_position(r, autocrop_src, phys);
+                    self.cursor_pos = main_cursor_position(r, display_src, phys);
                 }
                 let status = status_with_latched_fdd_track(
                     self.emu.bus().front_panel_status(),
@@ -4353,8 +4358,14 @@ impl ApplicationHandler for App {
                     );
                     // The corner overlays anchor to the display region the
                     // viewer actually sees: the whole display classically,
-                    // the crop rect while autocrop presents.
-                    let overlay_anchor = autocrop_src.unwrap_or((0, 0, FB_WIDTH, present_height()));
+                    // the sub-rect while autocrop or per-axis scaling
+                    // presents one.
+                    let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
+                        0,
+                        0,
+                        FB_WIDTH,
+                        present_height(),
+                    ));
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.
@@ -4396,21 +4407,27 @@ impl ApplicationHandler for App {
                     // the same display rect, and the cursor mapping inverts
                     // the same layout, so all of them agree by construction.
                     // The branches that draw over the display (RTG, CRT,
-                    // bezel) only run when autocrop is suspended, so their
-                    // layout is the classic whole-texture letterbox.
-                    let layout = main_present_layout(r, autocrop_src);
+                    // bezel) only run when the sub-rect modes are
+                    // suspended, so their layout is the classic
+                    // whole-texture letterbox.
+                    let layout = main_present_layout(r, display_src);
                     // COPPERLINE_DIAG_AUTOCROP: the window half of the
                     // renderer-side envelope trace -- the exact rects the
                     // scaler pass draws this frame, logged when they
                     // change, with the mode spelled out: a classic layout
-                    // must say WHY it is classic (toggle off, or which
-                    // condition suspended the crop), because the envelope
-                    // line prints whether or not the mode is on and the
-                    // difference is invisible from it alone.
+                    // must say WHY it is classic (both modes off, or which
+                    // condition suspended them), because the envelope
+                    // line prints whether or not a mode is on and the
+                    // difference is invisible from it alone. The factors
+                    // are the whole-number draw's pixels per canvas
+                    // column and per field line, and the shape is the
+                    // glass ratio a per-axis draw aims at.
                     if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
                         && self.last_diag_layout != Some(layout)
                     {
-                        let mode = if !crate::video::autocrop() {
+                        let autocrop = crate::video::autocrop();
+                        let per_axis = per_axis_scaling_requested();
+                        let mode = if !autocrop && !per_axis {
                             "off"
                         } else if self.rtg_present_dims.is_some() {
                             "suspended(rtg)"
@@ -4420,18 +4437,25 @@ impl ApplicationHandler for App {
                             "suspended(canvas-width)"
                         } else if self.bezel.is_on() {
                             "suspended(bezel)"
+                        } else if autocrop && per_axis {
+                            "active(autocrop+per-axis)"
+                        } else if per_axis {
+                            "active(per-axis)"
                         } else {
-                            "active"
+                            "active(autocrop)"
                         };
                         info!(
                             "[DIAG_AUTOCROP] layout mode={} surface={:?} src_canvas={:?} \
-                             display_dst={:?} chrome_dst={:?} filter={:?}",
+                             display_dst={:?} chrome_dst={:?} filter={:?} factors={:?} \
+                             shape={:?}",
                             mode,
                             r.surface_size,
                             layout.src_canvas,
                             layout.display_dst,
                             layout.chrome_dst,
                             layout.filter,
+                            layout.factors,
+                            display_src.map(|src| src.par),
                         );
                         self.last_diag_layout = Some(layout);
                     }
@@ -4505,13 +4529,13 @@ impl ApplicationHandler for App {
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
                         let bezel_style = self.bezel;
-                        // Under the autocrop layout the preset re-draws the
-                        // crop into the crop's own viewport -- the same
+                        // Under a sub-rect layout the preset re-draws the
+                        // rect into the rect's own viewport -- the same
                         // sub-rect the scaler pass just drew -- with the
-                        // beam-line count scaled to the rows the crop shows.
-                        // The bezel suspends autocrop, so this is never the
-                        // bezel case.
-                        let crt_crop = autocrop_src.map(|_| {
+                        // beam-line count scaled to the rows the rect shows.
+                        // The bezel suspends the sub-rect modes, so this is
+                        // never the bezel case.
+                        let crt_crop = display_src.map(|_| {
                             (
                                 layout.display_dst,
                                 layout.src_canvas,

@@ -629,6 +629,40 @@ crop shows. Only a pass that owns the whole display rect falls back to
 the classic layout -- the bezel's fixed opening, RTG scanout -- along
 with programmable scans; captures never see the crop.
 
+Integer scaling presents from the square canvas under either aspect
+(`video::square_canvas`): `present_height()` -- the window canvas the
+texture, the tool windows and every overlay size themselves from -- is
+`PRESENT_HEIGHT_SQUARE` for the square aspect and for integer scaling,
+`PRESENT_HEIGHT_TV` otherwise and under a bezel; captures size themselves
+from `capture_height()`, the aspect's own, so a scaling or bezel toggle
+never changes a saved picture. A whole-number draw is only pixel-exact
+from an unresampled canvas, and under the tv aspect the layout then puts
+the 4:3 shape back with a separate whole-number factor per axis.
+`DisplaySrc` (`window/present.rs`) carries the sub-rect to show -- the TV
+aperture's rect on the square canvas (`aperture_canvas_rect`), or the
+autocrop content rect -- and the pixel shape to draw it at: `glass_par`,
+the tv canvas's own resample read back (`FB_WIDTH / TV_CAPTURED_WIDTH`
+wide by `PRESENT_HEIGHT_TV / aperture rows` tall: PAL 1.078, NTSC 0.854;
+the whole field over the glass for full overscan). `per_axis_fit` then
+picks surface pixels per canvas column and per *field line*: the tallest
+fit whose shape is within 11/10 of the glass's, the closest shape among
+those of that height, and the closest shape at the largest size when
+none is inside the tolerance -- exact integer arithmetic, so every host
+agrees. Counting per field line rather than per woven row is what
+reaches 4:5 on a 1080p display: a non-interlaced line's two woven rows
+are identical, so an odd count per line is still one exact block per
+line, and the scaler's sample centres can never coincide with a line
+boundary -- every display rect starts on a woven pair, and the sample
+positions a half-row factor leaves ambiguous fall between the two rows
+of a pair (`display_rects_start_on_field_lines`). The chrome band, the
+cursor mapping and the CRT-preset viewport follow the rect exactly as
+they do for autocrop, and the two modes compose (autocrop supplies the
+rect, the per-axis fit the factors). A bezel keeps the tv canvas -- its
+opening resamples the whole glass -- and the canvas change it, the
+scaling toggle and the pixel aspect each provoke goes through one path
+(`App::resync_canvas_geometry`); RTG board frames and programmable scans
+take the classic uniform multiple of the square canvas.
+
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have
 arrived first. `pixels` rebuilds its swapchain from the size the last

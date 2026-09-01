@@ -605,12 +605,15 @@ video = "PAL"
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
 # pixel-exact comparison against square-pixel emulators). scaling: how that
 # canvas reaches the window. "smooth" (default; fit to the window preserving
-# aspect ratio, interpolated) or "integer" (the largest whole-number multiple
-# of the canvas that fits, centred in black borders and point-sampled, in the
-# spirit of WinUAE/Amiberry integer scaling). Integer covers RTG modes too,
-# at multiples of their own native resolution, and falls back to the smooth
-# fit when the window is too small for even 1x rather than cropping.
-# Pair it with pixel_aspect = "square" for a fully pixel-exact picture.
+# aspect ratio, interpolated) or "integer" (whole-number multiples of the
+# unresampled canvas, centred in black borders and point-sampled, in the
+# spirit of WinUAE/Amiberry integer scaling). Under the tv aspect the two
+# axes take separate whole numbers -- pixels per column and per scan line,
+# chosen for the 4:3 pixel shape, so an NTSC game on a 1080p screen draws
+# at 4:5 pixels (1280x1000 with autocrop) rather than squat square ones;
+# under square pixels the multiple is uniform. Integer covers RTG modes
+# too, at multiples of their own native resolution, and falls back to the
+# smooth fit when the window is too small for even 1x rather than cropping.
 # autocrop: crop the window presentation to the display window the
 # hardware programs (default false), so a game using fewer lines than the
 # full scan fills more of a 16:9/21:9 screen; with integer scaling the

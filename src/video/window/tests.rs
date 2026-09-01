@@ -8725,17 +8725,21 @@ fn autocrop_latch_grows_fast_and_shrinks_only_when_stable() {
     assert_eq!(latch.resolve(None), None);
 }
 
-/// The autocrop layout splits the chrome band off at the width-fit
+/// The sub-rect layout splits the chrome band off at the width-fit
 /// scale, and integer scaling re-fits its whole multiple against the
-/// crop rather than the full canvas -- the display using fewer lines is
-/// what earns the larger multiple.
+/// rect rather than the full canvas -- the display using fewer lines is
+/// what earns the larger multiple. A square shape (a canvas that already
+/// has the picture's shape) takes the uniform multiple.
 #[test]
-fn autocrop_layout_refits_the_multiple_against_the_crop() {
+fn display_src_layout_refits_the_multiple_against_the_rect() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    let crop = |rect| super::DisplaySrc { rect, par: (1, 1) };
+    let game = (38, 69, 640, 400);
     // A 200-line lo-res game (400 woven rows, 640 canvas px wide) on a
     // 2000x1200 surface, above a pre-sized 100-row chrome band (the
     // caller sizes the band at the classic letterbox scale).
     let chrome = (30u32, 1100u32, 1940u32, 100u32);
-    let layout = super::autocrop_layout((2000, 1200), true, (38, 69, 640, 400), Some(chrome));
+    let layout = super::display_src_layout((2000, 1200), true, crop(game), Some(chrome));
     // The band passes through untouched, and the crop fits 2x whole
     // (min(2000/640, 1100/400) = 2), centred in the region above it.
     assert_eq!(layout.chrome_dst, Some(chrome));
@@ -8743,8 +8747,10 @@ fn autocrop_layout_refits_the_multiple_against_the_crop() {
         layout.display_dst,
         ((2000 - 1280) / 2, (1100 - 800) / 2, 1280, 800)
     );
-    assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
-    assert_eq!(layout.src_canvas, (38, 69, 640, 400));
+    assert_eq!(layout.filter, Nearest);
+    assert_eq!(layout.src_canvas, game);
+    // Two pixels per column, four per two-row field line.
+    assert_eq!(layout.factors, Some((2, 4)));
 
     // The classic full canvas only fits 1x on the same surface: the crop
     // doubled the picture.
@@ -8754,23 +8760,312 @@ fn autocrop_layout_refits_the_multiple_against_the_crop() {
     );
 
     // Without a whole multiple the crop falls back to its smooth fit.
-    let layout = super::autocrop_layout((600, 500), true, (38, 69, 640, 400), None);
-    assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
+    let layout = super::display_src_layout((600, 500), true, crop(game), None);
+    assert_eq!(layout.filter, SharpBilinear);
+    assert_eq!(layout.factors, None);
     assert!(layout.display_dst.2 <= 600);
 
     // A surface too small for the whole 716-wide canvas still holds a
     // whole multiple of a 640-wide crop: the fit is the crop's own, not
     // an inherited fallback from the classic full-canvas plan.
-    let layout = super::autocrop_layout((700, 500), true, (38, 69, 640, 400), None);
-    assert_eq!(layout.filter, super::scaler::ScaleFilter::Nearest);
+    let layout = super::display_src_layout((700, 500), true, crop(game), None);
+    assert_eq!(layout.filter, Nearest);
     assert_eq!((layout.display_dst.2, layout.display_dst.3), (640, 400));
 
     // Smooth scaling keeps the sharp-bilinear fit of the crop.
-    let layout = super::autocrop_layout((2000, 1200), false, (38, 69, 640, 400), None);
+    let layout = super::display_src_layout((2000, 1200), false, crop(game), None);
     assert_eq!(layout.chrome_dst, None);
-    assert_eq!(layout.filter, super::scaler::ScaleFilter::SharpBilinear);
+    assert_eq!(layout.filter, SharpBilinear);
+    assert_eq!(layout.factors, None);
     // Aspect preserved: 640x400 into 2000x1200 is height-limited.
     assert_eq!(layout.display_dst.3, 1200);
+}
+
+/// The glass ratio is the tv aspect's own model read back: the tv canvas
+/// widens the captured aperture's columns onto the glass width and its
+/// rows onto the glass height, and the ratio of the two is the shape of
+/// a square-canvas pixel on that glass -- PAL a shade wider than tall,
+/// NTSC the 5:6 of a 200-line display on a 4:3 screen. Full overscan
+/// puts the whole woven field on the glass, both standards alike.
+#[test]
+fn glass_par_is_the_tv_canvas_model_read_back() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    use crate::video::PRESENT_HEIGHT_TV;
+    let ratio = |(w, h): (u32, u32)| f64::from(w) / f64::from(h);
+    let pal = super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    assert_eq!(
+        pal,
+        (
+            (FB_WIDTH * TV_PAL_PRESENT_HEIGHT) as u32,
+            (PRESENT_HEIGHT_TV * TV_CAPTURED_WIDTH) as u32
+        )
+    );
+    assert!(
+        (ratio(pal) - 1.0778).abs() < 5e-4,
+        "PAL glass shape {}",
+        ratio(pal)
+    );
+    assert!(
+        (ratio(ntsc) - 0.8543).abs() < 5e-4,
+        "NTSC glass shape {}",
+        ratio(ntsc)
+    );
+    let field = (OUT_HEIGHT as u32, PRESENT_HEIGHT_TV as u32);
+    for rows in [
+        Some(TV_PAL_PRESENT_HEIGHT),
+        Some(TV_NTSC_PRESENT_HEIGHT),
+        None,
+    ] {
+        assert_eq!(super::glass_par(Overscan::Full, rows, OUT_HEIGHT), field);
+    }
+    assert_eq!(super::glass_par(Overscan::Tv, None, OUT_HEIGHT), field);
+}
+
+/// The TV aperture's rect on the square canvas is the aperture between
+/// its side pads and bezel bands, and its first row is the aperture's
+/// first -- an even woven row, the start of a field-line pair -- with a
+/// whole number of lines below it. Every display rect starts on a pair
+/// like this: it is what lets the per-axis draw give a field line an odd
+/// number of surface rows and still land each non-interlaced line, whose
+/// two woven rows are identical, as one exact block (`per_axis_fit`).
+#[test]
+fn display_rects_start_on_field_lines() {
+    use crate::video::PRESENT_HEIGHT_SQUARE;
+    assert_eq!(TV_PRESENT_SOURCE_Y % 2, 0);
+    for rows in [TV_PAL_PRESENT_HEIGHT, TV_NTSC_PRESENT_HEIGHT] {
+        let rect = super::aperture_canvas_rect(rows);
+        assert_eq!(
+            rect,
+            (
+                TV_LIVE_PAD_X,
+                (PRESENT_HEIGHT_SQUARE - rows) / 2,
+                TV_CAPTURED_WIDTH,
+                rows
+            )
+        );
+        assert_eq!(
+            tv_aperture_source_row(rect.1, PRESENT_HEIGHT_SQUARE, 1, rows),
+            Some(0)
+        );
+        assert_eq!(rect.3 % 2, 0);
+    }
+    // A content rect on the square canvas keeps its woven bounds, which
+    // the renderer states in whole field lines.
+    use crate::config::TvCentre;
+    let content = crate::video::bitplane::ContentRect {
+        x0: 52,
+        x1: 692,
+        y0: 2 * 20,
+        y1: 2 * 220,
+    };
+    let rect = super::canvas_content_rect(
+        content,
+        crate::video::deinterlace::OUT_HEIGHT,
+        Overscan::Tv,
+        TvCentre::default(),
+        Some(TV_NTSC_PRESENT_HEIGHT),
+        PRESENT_HEIGHT_SQUARE,
+    )
+    .unwrap();
+    let pad = (PRESENT_HEIGHT_SQUARE - TV_NTSC_PRESENT_HEIGHT) / 2;
+    assert_eq!(rect.1, pad + content.y0 - TV_PRESENT_SOURCE_Y);
+    assert_eq!(rect.3, content.y1 - content.y0);
+}
+
+/// The per-axis fit reaches the NTSC shapes amiga.vision's guide gives
+/// ordinary displays -- 4:5 at 1080p and 4K, 6:7 at 1440p, 5:6 at 5K --
+/// by counting pixels per field line rather than per woven row, prefers
+/// a taller fit within the tolerance to a marginally truer one, settles
+/// for the closest shape when nothing fits inside it, and gives up (to
+/// the smooth fit) only below one pixel per column and per line. PAL's
+/// glass shape is within the tolerance of square, so its fits are the
+/// uniform multiples until the zoom admits a taller near-miss (8:7 with
+/// seven rows per line) or a truer shape (16:15 with fifteen).
+#[test]
+fn per_axis_fit_reaches_the_ntsc_shapes_of_ordinary_displays() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    let pal = super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
+    let fit = super::per_axis_fit;
+    // A 200-line lo-res display's content rect: 640 columns, 400 woven
+    // rows (200 field lines).
+    let game = (640, 400);
+    // 1080p under a 44-row status bar: two pixels per column, five per
+    // line -- 4:5, 1280x1000.
+    assert_eq!(fit((1920, 1036), game, ntsc), Some((2, 5)));
+    // 1440p with the bar hidden: 6:7 at 1920x1400; under the bar the
+    // 1400 rows do not fit and 4:5 stands.
+    assert_eq!(fit((2560, 1440), game, ntsc), Some((3, 7)));
+    assert_eq!(fit((2560, 1396), game, ntsc), Some((2, 5)));
+    // 4K: 4:5 at 2560x2000.
+    assert_eq!(fit((3840, 2072), game, ntsc), Some((4, 10)));
+    // 5K: thirteen rows per line offers 12:13 inside the tolerance, and
+    // being taller it takes 3840x2600 over the truer 5:6 at 2400 rows;
+    // with the bar hidden the fourteenth row admits 6:7, the truest of
+    // all, at 3840x2800.
+    assert_eq!(fit((5120, 2792), game, ntsc), Some((6, 13)));
+    assert_eq!(fit((5120, 2880), game, ntsc), Some((6, 14)));
+    // Taller beats truer inside the tolerance: room for 16 rows per line
+    // takes 7:8 at 4480x3200 over 5:6 at 2400 rows.
+    assert_eq!(fit((4480, 3200), game, ntsc), Some((7, 16)));
+    // Nothing inside the tolerance: the closest shape, 1:1 at 640x400,
+    // over the 2:3 that would stand taller.
+    assert_eq!(fit((800, 600), game, ntsc), Some((1, 2)));
+    // Below one pixel per column, or per line: no whole-number fit.
+    assert_eq!(fit((600, 300), game, ntsc), None);
+    assert_eq!(fit((700, 199), game, ntsc), None);
+
+    let aperture = (TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+    assert_eq!(fit((1920, 1036), aperture, pal), Some((1, 2)));
+    assert_eq!(fit((2560, 1396), aperture, pal), Some((2, 4)));
+    // 4K under the bar: 8:7 at 2672x1890 stands taller than 1:1 at 3x;
+    // with the bar hidden, 1:1 at 4x fills the height.
+    assert_eq!(fit((3840, 2072), aperture, pal), Some((4, 7)));
+    assert_eq!(fit((3840, 2160), aperture, pal), Some((4, 8)));
+    // Fifteen rows per line: 16:15 is truer than 15:15 and takes it.
+    assert_eq!(
+        fit(
+            (
+                16 * TV_CAPTURED_WIDTH as u32,
+                15 * TV_PAL_PRESENT_HEIGHT as u32
+            ),
+            aperture,
+            pal
+        ),
+        Some((16, 30))
+    );
+}
+
+/// The fit evaluates only the two column counts astride the ideal at
+/// each height, and that loses nothing against trying every column: the
+/// shape is monotone in the count at a fixed height, so the closest count
+/// is one of the two, and the tolerance band holds one of them if it
+/// holds any. Checked against the exhaustive rule over a grid of small
+/// surfaces, rects and shapes; and a one-line autocrop rect on a large
+/// surface, which the exhaustive scan would spend millions of steps on
+/// per redraw, still answers.
+#[test]
+fn per_axis_fit_prunes_to_the_columns_astride_the_ideal() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let exhaustive = |avail: (u32, u32), (w, h): (usize, usize), par: (u32, u32)| {
+        let (max_columns, max_lines) = (avail.0 as usize / w, 2 * avail.1 as usize / h);
+        let (pw, ph) = (u64::from(par.0), u64::from(par.1));
+        let dev = |c: usize, l: usize| {
+            let (a, b) = (2 * c as u64 * ph, l as u64 * pw);
+            (a.max(b), a.min(b))
+        };
+        let within = |(hi, lo): (u64, u64)| hi * 10 <= lo * 11;
+        let cmp = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+        type Candidate = ((usize, usize), (u64, u64), bool);
+        let mut best: Option<Candidate> = None;
+        for l in 1..=max_lines {
+            for c in 1..=max_columns {
+                let d = dev(c, l);
+                let ok = within(d);
+                let better = match best {
+                    None => true,
+                    Some((_, _, bok)) if ok != bok => ok,
+                    Some((b, bd, true)) => l.cmp(&b.1).then(cmp(bd, d)).then(c.cmp(&b.0)).is_gt(),
+                    Some((b, bd, false)) => cmp(bd, d).then(l.cmp(&b.1)).then(c.cmp(&b.0)).is_gt(),
+                };
+                if better {
+                    best = Some(((c, l), d, ok));
+                }
+            }
+        }
+        best.map(|(f, _, _)| f)
+    };
+    let shapes = [
+        super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Full, None, OUT_HEIGHT),
+        (1, 3),
+        (3, 1),
+    ];
+    for par in shapes {
+        for (w, h) in [(2, 2), (3, 2), (5, 4), (7, 6), (16, 10), (40, 30)] {
+            for avail in [
+                (1, 1),
+                (7, 5),
+                (40, 30),
+                (97, 61),
+                (160, 90),
+                (200, 200),
+                (300, 120),
+            ] {
+                assert_eq!(
+                    super::per_axis_fit(avail, (w, h), par),
+                    exhaustive(avail, (w, h), par),
+                    "par {par:?} rect {w}x{h} on {avail:?}"
+                );
+            }
+        }
+    }
+    // A one-line, two-column rect on a 4K surface: thousands of counts
+    // on each axis, answered without the cross product.
+    let ntsc = shapes[1];
+    assert!(super::per_axis_fit((3840, 2160), (2, 2), ntsc).is_some());
+}
+
+/// Per-axis integer scaling draws the rect at exactly its factors -- the
+/// columns times the horizontal one, the field lines times the vertical
+/// one -- centred and point-sampled, and the cursor mapping inverts that
+/// rect; the chrome band takes its rows off the fit; without a fit the
+/// rect falls back to the smooth fit at the glass shape.
+#[test]
+fn per_axis_layout_draws_the_rect_at_its_factors() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    let src = super::DisplaySrc {
+        rect: (38, 71, 640, 400),
+        par: ntsc,
+    };
+    let layout = super::display_src_layout((1920, 1036), true, src, None);
+    assert_eq!(layout.factors, Some((2, 5)));
+    assert_eq!(
+        layout.display_dst,
+        ((1920 - 1280) / 2, (1036 - 1000) / 2, 1280, 1000)
+    );
+    assert_eq!(layout.filter, Nearest);
+    assert_eq!(layout.src_canvas, src.rect);
+    let (dx, dy, dw, dh) = layout.display_dst;
+    let at = |x: u32, y: u32| {
+        layout.cursor_position(winit::dpi::PhysicalPosition::new(
+            f64::from(x),
+            f64::from(y),
+        ))
+    };
+    assert_eq!(at(dx, dy), Some((38, 71)));
+    assert_eq!(at(dx + dw - 1, dy + dh - 1), Some((38 + 639, 71 + 399)));
+    assert_eq!(at(dx + dw, dy), None);
+
+    // A 100-row chrome band leaves 936 rows: four per line (1:1, the
+    // closest shape with no 4:5 room) at 1280x800, centred above it.
+    let chrome = (0u32, 936u32, 1920u32, 100u32);
+    let layout = super::display_src_layout((1920, 1036), true, src, Some(chrome));
+    assert_eq!(layout.factors, Some((2, 4)));
+    assert_eq!(
+        layout.display_dst,
+        ((1920 - 1280) / 2, (936 - 800) / 2, 1280, 800)
+    );
+    assert_eq!(layout.chrome_dst, Some(chrome));
+
+    // Too small for one pixel per column: the smooth fit, at the glass
+    // shape rather than the rect's own.
+    let shaped = 640.0 * f64::from(ntsc.0) / f64::from(ntsc.1) / 400.0;
+    let layout = super::display_src_layout((600, 500), true, src, None);
+    assert_eq!(layout.factors, None);
+    assert_eq!(layout.filter, SharpBilinear);
+    let (_, _, w, h) = layout.display_dst;
+    assert!(w <= 600 && h <= 500);
+    assert!((f64::from(w) / f64::from(h) - shaped).abs() < 0.01);
+    // Smooth scaling draws the same shape: height-limited here.
+    let layout = super::display_src_layout((2000, 1200), false, src, None);
+    assert_eq!(layout.factors, None);
+    assert_eq!(layout.display_dst.3, 1200);
+    assert!((f64::from(layout.display_dst.2) / 1200.0 - shaped).abs() < 0.01);
 }
 
 /// A redraw that finds the host window at a size the surface was not

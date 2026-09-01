@@ -727,11 +727,12 @@ flips the mode live without touching the config, and
 a separate question from what the canvas is. The default `"smooth"` fits the
 canvas to the window preserving its aspect ratio and interpolates, so the
 picture always uses the full window height (or width) whatever fraction the
-scale works out to. `"integer"` instead draws the canvas at the largest
-whole-number multiple of itself that fits the window, measured in physical
-device pixels, centred in black borders and point-sampled: every canvas
-pixel becomes the same square block of host pixels, with no row or column
-sampled twice, which is the look WinUAE and Amiberry call integer scaling.
+scale works out to. `"integer"` instead draws the canvas at whole-number
+multiples -- the largest that fits the window, measured in physical device
+pixels, and under the TV aspect a separate whole number per axis (below)
+-- centred in black borders and point-sampled: every canvas pixel becomes
+the same block of host pixels, with no row or column sampled twice, which
+is the look WinUAE and Amiberry call integer scaling.
 The fit is taken in whole canvas pixels against the physical surface --
 the canvas is re-rendered at whatever factor fits, rather than drawn at
 whole multiples of a fixed high-DPI texture -- so every step exists on
@@ -749,16 +750,40 @@ what fits. RTG board modes follow the setting too: their frame is scaled
 from its own native resolution, so a 640x480 board screen is drawn at 1x,
 2x, 3x of *those* pixels inside the display area.
 
-`pixel_aspect = "square"` with `scaling = "integer"` is the fully
-pixel-exact combination: the square-pixel canvas is one host row per woven
-scanline, so a whole-number window scale carries the emulated bitmap to the
-screen untouched. Integer scaling of the default TV aspect is still crisp,
-but crisp pixels of an already-resampled image -- that canvas fits the scan
-onto 537 rows for the 4:3 shape before presentation. The monitor-bezel mode
-(`bezel`) composes with either, but its picture opening is a fraction of
-the window by design and is not itself integer-exact. The menu's *Video
-Settings > Scaling* item switches modes live without touching the config;
-there is no environment-variable override.
+Integer scaling always draws from the unresampled canvas -- one host row
+per woven scanline, the canvas `pixel_aspect = "square"` presents -- so a
+whole-number scale carries the emulated bitmap to the screen untouched
+under either aspect. Under the default TV aspect the two axes take
+separate whole numbers: the picture is the TV aperture, drawn at a whole
+number of device pixels per hi-res column and a whole number per scan
+line, chosen to approximate the pixel shape of the 4:3 glass (the shape
+the smooth TV presentation resamples to: a PAL pixel about 1.08 times
+wider than tall, an NTSC one about 0.85). The choice is the tallest fit
+whose shape stays within a tenth of the glass's, so an NTSC 200-line game
+on a 1080p screen gets two pixels per column and five per line -- the
+4:5 pixel of [amiga.vision's NTSC guide](https://amiga.vision/ntsc), a
+1280x1000 picture -- 6:7 at 1440p and 4:5 again at 4K, while PAL, whose
+glass shape is within a tenth of square, takes the square multiples until
+a display is tall enough for 8:7. The count per scan line may be odd: a
+non-interlaced display's two woven rows per line are identical, so the
+line still lands as one exact block, and only an interlaced display shows
+its two fields' rows at alternating heights then. A window too short for
+even one pixel per line falls back to the smooth fit of the same shape.
+`pixel_aspect = "square"` with `"integer"` keeps the uniform square
+multiples instead, exact in the same way, for side-by-side pixel
+comparison. Pair either with `autocrop` (below): the fit is retaken
+against the picture the hardware draws, which is what earns the extra
+lines a taller shape needs (the uncropped NTSC aperture on a 1080p screen
+only has room for square pixels). The window resizes to the unresampled
+canvas when the TV aspect switches to or from integer scaling, as it does
+for a pixel-aspect change; captures keep the aspect's own shape whatever
+the window draws. The monitor-bezel mode (`bezel`) keeps the resampled TV
+canvas under either scaling: its picture opening is a fraction of the
+window by design and is not itself integer-exact. Programmable (ECS/AGA
+VARBEAMEN) scans and RTG board screens, which present their own geometry,
+take a uniform multiple of the canvas. The menu's *Video Settings >
+Scaling* item switches modes live without touching the config; there is
+no environment-variable override.
 
 `autocrop` (default off) crops the window presentation to the display
 window the hardware actually programs, instead of the fixed TV aperture:

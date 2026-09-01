@@ -663,7 +663,11 @@ impl App {
     }
 
     pub(super) fn start_recording_to(&mut self, path: PathBuf) {
-        match crate::recorder::VideoRecorder::create(&path, FB_WIDTH, present_height()) {
+        // The capture canvas: a recording is the aspect's own picture,
+        // whatever the window is drawing (integer scaling of the tv aspect
+        // draws from a square canvas the recording never sees).
+        let rows = crate::video::capture_height();
+        match crate::recorder::VideoRecorder::create(&path, FB_WIDTH, rows) {
             Ok(rec) => {
                 // The Paula tap collects the mixed stereo output from this
                 // point on; capture_recorder_output drains it every frame.
@@ -734,7 +738,7 @@ impl App {
                         &self.record_scratch_fb,
                         FB_WIDTH,
                         self.present_rows,
-                        present_height(),
+                        crate::video::capture_height(),
                         &mut self.record_fb,
                     );
                 } else {
@@ -742,7 +746,7 @@ impl App {
                         &self.present_fb,
                         FB_WIDTH,
                         self.present_rows,
-                        present_height(),
+                        crate::video::capture_height(),
                         &mut self.record_fb,
                     );
                 }

@@ -106,7 +106,7 @@ impl App {
         if !crate::envcfg::flag("COPPERLINE_DIAG_CURSOR") {
             return;
         }
-        let autocrop_src = self.autocrop_canvas_src();
+        let display_src = self.display_canvas_src();
         let Some(r) = self.render.as_ref() else {
             return;
         };
@@ -114,10 +114,11 @@ impl App {
         let inner = r.window.inner_size();
         let phys = self.last_cursor_phys;
         let context = r.pixels.context();
-        // The rect the display quad is actually drawn into -- the crop's
-        // under autocrop, the classic letterbox otherwise -- so the trace
-        // shows the same mapping the position below went through.
-        let layout = main_present_layout(r, autocrop_src);
+        // The rect the display quad is actually drawn into -- the
+        // sub-rect's under autocrop or per-axis scaling, the classic
+        // letterbox otherwise -- so the trace shows the same mapping the
+        // position below went through.
+        let layout = main_present_layout(r, display_src);
         let clip = layout.display_dst;
         let texture = (context.texture_extent.width, context.texture_extent.height);
         let pos = phys.and_then(|p| layout.cursor_position(p));
