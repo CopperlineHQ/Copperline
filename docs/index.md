@@ -44,7 +44,7 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
 - [](zorro.md) -- Expansion bus specification and custom Zorro II/III plugin definitions.
 - [](debugger/window), [](debugger/headless), and [](debugger/gdb) -- Interactive,
   command-line, headless, and GDB debugging tools.
-- [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation.
+- [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation, with an MCP server mode for coding agents.
 - [](internals/architecture) -- Emulator internals and subsystem architecture.
 
 ## Core design principles
