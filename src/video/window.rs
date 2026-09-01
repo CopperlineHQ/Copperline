@@ -1077,6 +1077,11 @@ pub struct App {
     /// real-time pacing (src/warpboot.rs). One-shot; None once finished
     /// or cancelled. Host-side only, never serialized.
     warp_boot: Option<crate::warpboot::WarpBootGate>,
+    /// A warp a control client or the guest engaged (`App::set_warp`):
+    /// mutes live audio like the boot gates, outlives a gate that ends
+    /// under it, and is released by any warp-off, the manual toggle, or
+    /// power off. Never `Manual`. Host-side only, never serialized.
+    warp_hold: Option<app_session::WarpSource>,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -2069,6 +2074,7 @@ impl App {
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
+            warp_hold: None,
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -4686,6 +4692,9 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        // Frames retired outside the burst (a control step, a debugger
+        // step) may have carried a guest warp request.
+        self.service_uaelib();
         if self.render.is_none() {
             return;
         }
@@ -4854,7 +4863,7 @@ impl ApplicationHandler for App {
         // frame per loop (request_redraw is skipped below), and every captured
         // frame must be rendered, so warp's output frame-skip burst must not
         // apply there.
-        let headless_capture = !self.auto_shot.is_empty() || self.frame_dump.is_some();
+        let headless_capture = self.headless_capture_active();
         // A completed run-ahead burst renders its future frame before the
         // anchor is restored. Suppress the generic post-step render in that
         // case or it would immediately replace the future image with the
@@ -4924,6 +4933,14 @@ impl ApplicationHandler for App {
                 // The warp-boot gate ends its warp the frame its
                 // timestamp or storage-idle condition holds.
                 if self.poll_warp_boot() {
+                    burst_complete = false;
+                    break;
+                }
+                // The guest's warpmode() through the uaelib trap starts or
+                // ends its warp at the frame it was made. Committed frames
+                // only: a flip on a speculative frame would abandon the
+                // run-ahead anchor mid-burst.
+                if !speculative && self.service_uaelib() {
                     burst_complete = false;
                     break;
                 }

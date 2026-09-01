@@ -48,6 +48,10 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoreOp {
     Status,
+    /// The guest's uaelib function-88 resource registry (`debug.resources`).
+    DebugResources,
+    /// The guest's uaelib idle-marker accounting (`debug.idle`).
+    DebugIdle,
     RegsGet,
     RegsSet {
         reg: usize,
@@ -208,6 +212,8 @@ impl CoreOp {
                 | CoreOp::DisplayGet
                 | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
+                | CoreOp::DebugResources
+                | CoreOp::DebugIdle
                 | CoreOp::CopperList { .. }
                 | CoreOp::PcHistory
                 | CoreOp::BreakList
@@ -452,6 +458,13 @@ pub enum HostOp {
     },
     Reset {
         warm: bool,
+    },
+    /// Report the warp (pacing) state; each driver knows its own holder.
+    WarpGet,
+    /// Engage or release warp; each driver applies it through its own
+    /// pacing owner (the App in a windowed session, a no-op headless).
+    WarpSet {
+        on: bool,
     },
     /// Servo the guest pointer to an absolute presented-pixel position;
     /// see [`mouse_to`]. A host op because it both injects input and runs
@@ -1091,6 +1104,12 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 }
             },
         }),
+        "warp.get" => host(HostOp::WarpGet),
+        "warp.set" => host(HostOp::WarpSet {
+            on: p.bool_req("on")?,
+        }),
+        "debug.resources" => core(CoreOp::DebugResources),
+        "debug.idle" => core(CoreOp::DebugIdle),
         other => Err(CtlError::method_not_found(other)),
     }
 }
@@ -1563,6 +1582,11 @@ impl<'a> ParamReader<'a> {
         Ok(self.bool_opt(key)?.unwrap_or(default))
     }
 
+    fn bool_req(&self, key: &str) -> Result<bool, CtlError> {
+        self.bool_opt(key)?
+            .ok_or_else(|| CtlError::invalid_params(format!("missing {key}")))
+    }
+
     fn str_req(&self, key: &str) -> Result<String, CtlError> {
         self.str_opt(key)?
             .ok_or_else(|| CtlError::invalid_params(format!("missing {key}")))
@@ -1703,6 +1727,19 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "port1": input.ports[0].device.label(),
                 "port2": input.ports[1].device.label(),
             }))
+        }
+        CoreOp::DebugResources => {
+            if !emu.uaelib_fitted() {
+                return Err(CtlError::not_found(UAELIB_DISABLED));
+            }
+            let resources: Vec<Value> = emu.uaelib_resources().iter().map(resource_value).collect();
+            Ok(json!({ "resources": resources }))
+        }
+        CoreOp::DebugIdle => {
+            let Some(idle) = emu.uaelib_idle() else {
+                return Err(CtlError::not_found(UAELIB_DISABLED));
+            };
+            Ok(idle_value(idle))
         }
         CoreOp::RtcGet => {
             let bus = emu.bus();
@@ -2200,6 +2237,55 @@ fn reverse_result(emu: &Emulator, outcome: ReverseOutcome<String>) -> Result<Val
     }
 }
 
+const UAELIB_DISABLED: &str = "uaelib trap not fitted ([emulation] uaelib = false)";
+
+/// A guest-registered resource as `debug.resources` and `event.debug`
+/// report it: the template's `struct debug_resource`, flags spelled out.
+pub(crate) fn resource_value(r: &crate::uaelib::DebugResource) -> Value {
+    use crate::uaelib::{
+        ResourceKind, RESOURCE_FLAG_HAM, RESOURCE_FLAG_INTERLEAVED, RESOURCE_FLAG_MASKED,
+    };
+    let mut value = json!({
+        "address": r.address,
+        "size": r.size,
+        "name": r.name,
+        "type": r.kind_name(),
+        "flags": {
+            "interleaved": r.flags & RESOURCE_FLAG_INTERLEAVED != 0,
+            "masked": r.flags & RESOURCE_FLAG_MASKED != 0,
+            "ham": r.flags & RESOURCE_FLAG_HAM != 0,
+            "raw": r.flags,
+        },
+        "registered_frame": r.registered_frame,
+    });
+    match r.kind {
+        ResourceKind::Bitmap {
+            width,
+            height,
+            planes,
+        } => {
+            value["width"] = json!(width);
+            value["height"] = json!(height);
+            value["planes"] = json!(planes);
+        }
+        ResourceKind::Palette { entries } => value["entries"] = json!(entries),
+        ResourceKind::Copperlist => {}
+        ResourceKind::Unknown(code) => value["type_code"] = json!(code),
+    }
+    value
+}
+
+/// The guest's idle markers as `debug.idle` reports them.
+pub(crate) fn idle_value(idle: &crate::uaelib::IdleAccounting) -> Value {
+    json!({
+        "idle": idle.is_idle(),
+        "used": idle.used(),
+        "last_frame": idle
+            .last_frame()
+            .map(|(idle_cck, frame_cck)| json!({ "idle_cck": idle_cck, "frame_cck": frame_cck })),
+    })
+}
+
 fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
     let bus = emu.bus();
     // Cumulative counters: a client derives rates (emulated fps, host
@@ -2208,6 +2294,8 @@ fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
     let audio = bus.live_audio_status();
     json!({
         "state": if ctx.running { "running" } else { "paused" },
+        "paced": emu.paced(),
+        "warp": !emu.paced(),
         "pending_resume": ctx.pending,
         "powered_on": ctx.powered_on,
         "double_faulted": emu.machine.cpu_double_faulted(),
@@ -3391,5 +3479,152 @@ mod tests {
         assert!(detail.contains("100"));
         let (reason, _) = stop_reason_of(&DebugStop::Breakpoint { pc: 0x1000 });
         assert_eq!(reason, "breakpoint");
+    }
+
+    fn uaelib_emulator() -> Emulator {
+        let mut emu = test_emulator();
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        emu.bus_mut().attach_uaelib(lib);
+        emu
+    }
+
+    /// The template's `struct debug_resource` for a bitmap, big-endian.
+    fn bitmap_resource_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0002_0000u32.to_be_bytes());
+        bytes.extend_from_slice(&51200u32.to_be_bytes());
+        let mut name = [0u8; 32];
+        name[..6].copy_from_slice(b"screen");
+        bytes.extend_from_slice(&name);
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // bitmap
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // interleaved
+        for v in [320u16, 256, 5] {
+            bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_warp_methods_map_to_host_ops() {
+        assert!(matches!(
+            parse_method("warp.get", &Value::Null).unwrap(),
+            Request::Host(HostOp::WarpGet)
+        ));
+        assert!(matches!(
+            parse_method("warp.set", &json!({"on": true})).unwrap(),
+            Request::Host(HostOp::WarpSet { on: true })
+        ));
+        assert!(matches!(
+            parse_method("warp.set", &json!({"on": false})).unwrap(),
+            Request::Host(HostOp::WarpSet { on: false })
+        ));
+        assert_eq!(core("debug.resources", Value::Null), CoreOp::DebugResources);
+        assert_eq!(core("debug.idle", Value::Null), CoreOp::DebugIdle);
+        assert!(CoreOp::DebugResources.collectable());
+        assert!(CoreOp::DebugIdle.collectable());
+    }
+
+    #[test]
+    fn parse_warp_set_requires_boolean_on() {
+        for params in [
+            json!({}),
+            json!({"on": 1}),
+            json!({"on": "yes"}),
+            Value::Null,
+        ] {
+            let err = parse_method("warp.set", &params).unwrap_err();
+            assert_eq!(err.code, proto::INVALID_PARAMS, "{params}");
+        }
+    }
+
+    #[test]
+    fn status_reports_pacing() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.set_paced(true);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::Status).unwrap();
+        assert_eq!(status["paced"], true);
+        assert_eq!(status["warp"], false);
+        emu.set_paced(false);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::Status).unwrap();
+        assert_eq!(status["paced"], false);
+        assert_eq!(status["warp"], true);
+    }
+
+    #[test]
+    fn debug_methods_report_not_found_without_the_trap() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        for op in [CoreOp::DebugResources, CoreOp::DebugIdle] {
+            let err = exec_core(&mut emu, &mut ctx, &op).unwrap_err();
+            assert_eq!(err.code, proto::NOT_FOUND, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn debug_resources_lists_what_the_guest_registered() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let empty = exec_core(&mut emu, &mut ctx, &CoreOp::DebugResources).unwrap();
+        assert_eq!(empty["resources"], json!([]));
+
+        let bytes = bitmap_resource_bytes();
+        let mask = emu.machine.ui_addr_mask();
+        {
+            let bus = emu.bus_mut();
+            bus.mem.chip_ram[0x5000..0x5000 + bytes.len()].copy_from_slice(&bytes);
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_CMD,
+                [crate::uaelib::CMD_REGISTER_RESOURCE, 0x5000, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                7,
+            );
+        }
+        let value = exec_core(&mut emu, &mut ctx, &CoreOp::DebugResources).unwrap();
+        assert_eq!(value["resources"].as_array().unwrap().len(), 1);
+        let r = &value["resources"][0];
+        assert_eq!(r["address"], 0x0002_0000);
+        assert_eq!(r["size"], 51200);
+        assert_eq!(r["name"], "screen");
+        assert_eq!(r["type"], "bitmap");
+        assert_eq!(r["width"], 320);
+        assert_eq!(r["height"], 256);
+        assert_eq!(r["planes"], 5);
+        assert_eq!(r["flags"]["interleaved"], true);
+        assert_eq!(r["flags"]["masked"], false);
+        assert_eq!(r["flags"]["ham"], false);
+        assert_eq!(r["flags"]["raw"], 1);
+        assert_eq!(r["registered_frame"], 7);
+        assert!(r.get("entries").is_none());
+    }
+
+    #[test]
+    fn debug_idle_reports_the_last_frame() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let value = exec_core(&mut emu, &mut ctx, &CoreOp::DebugIdle).unwrap();
+        assert_eq!(value["used"], false);
+        assert_eq!(value["idle"], false);
+        assert!(value["last_frame"].is_null());
+        {
+            let bus = emu.bus_mut();
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            let cmd = crate::uaelib::FN_DEBUG_CMD;
+            let set_idle = crate::uaelib::CMD_SET_IDLE;
+            lib.call(cmd, [set_idle, 1, 0, 0, 0], mem, 0x00FF_FFFF, 100, 0);
+            lib.call(cmd, [set_idle, 0, 0, 0, 0], mem, 0x00FF_FFFF, 400, 0);
+            lib.note_frame_start(1000);
+        }
+        let value = exec_core(&mut emu, &mut ctx, &CoreOp::DebugIdle).unwrap();
+        assert_eq!(value["used"], true);
+        assert_eq!(value["idle"], false);
+        assert_eq!(value["last_frame"]["idle_cck"], 300);
+        assert_eq!(value["last_frame"]["frame_cck"], 1000);
     }
 }

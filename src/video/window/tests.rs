@@ -9524,3 +9524,333 @@ fn manual_warp_toggle_cancels_the_warp_boot_gate() {
     assert!(app.warp_boot.is_none(), "the toggle cancels the gate");
     assert!(app.emu.paced(), "one press lands on paced, audible");
 }
+
+/// Programmatic warp (a control client or the guest) versus the manual
+/// toggle: only the former mutes live audio and records a hold.
+#[test]
+fn programmatic_warp_mutes_audio_but_manual_warp_does_not() {
+    use super::app_session::WarpSource;
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app_with_audio(Box::new(SuspensionSink {
+        states: Rc::clone(&states),
+    }));
+    app.powered_on = true;
+    app.emu.set_paced(true);
+    app.sync_live_audio_suspension();
+    assert_eq!(states.borrow().last(), Some(&false));
+
+    let outcome = app.set_warp(true, WarpSource::Guest);
+    assert!(outcome.changed);
+    assert!(outcome.note.is_none());
+    assert!(!app.emu.paced());
+    assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+    assert_eq!(states.borrow().last(), Some(&true), "guest warp is silent");
+
+    // One press of the hotkey ends it: paced and audible again.
+    app.toggle_warp();
+    assert!(app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+    assert_eq!(states.borrow().last(), Some(&false));
+
+    // The manual toggle warps without a hold and without muting.
+    app.toggle_warp();
+    assert!(!app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+    assert_eq!(states.borrow().last(), Some(&false));
+    app.toggle_warp();
+    assert!(app.emu.paced());
+
+    // Warp off is a complete action whoever asks: a control client's
+    // request releases a guest hold too.
+    app.set_warp(true, WarpSource::Guest);
+    let outcome = app.set_warp(false, WarpSource::Control);
+    assert!(outcome.changed);
+    assert!(app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+}
+
+#[test]
+fn power_off_releases_a_programmatic_hold() {
+    use super::app_session::WarpSource;
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app_with_audio(Box::new(SuspensionSink {
+        states: Rc::clone(&states),
+    }));
+    app.powered_on = true;
+    app.emu.set_paced(true);
+    app.set_warp(true, WarpSource::Control);
+    assert!(!app.emu.paced());
+    app.power_off();
+    assert!(app.emu.paced(), "the hold goes with the machine");
+    assert_eq!(app.warp_hold, None);
+}
+
+/// Control-protocol warp control through the windowed drain.
+#[cfg(feature = "control")]
+mod warp_control {
+    use super::super::app_session::WarpSource;
+    use super::{test_app, test_app_with_audio, SuspensionSink};
+    use crate::control::exec::parse_method;
+    use crate::control::windowed::{ControlHandle, CtlMsg};
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    type App = super::super::App;
+
+    fn attach(app: &mut App) -> (Sender<CtlMsg>, Receiver<String>) {
+        let (handle, cmd_tx, reply_rx) = ControlHandle::test_pair();
+        app.attach_control(handle, &crate::control::Config::new(":0".into()));
+        (cmd_tx, reply_rx)
+    }
+
+    fn call(
+        app: &mut App,
+        cmd_tx: &Sender<CtlMsg>,
+        reply_rx: &Receiver<String>,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        let req = parse_method(method, &params).expect("request should parse");
+        cmd_tx.send(CtlMsg::Request { id: json!(id), req }).unwrap();
+        app.drain_control();
+        loop {
+            let line = reply_rx.try_recv().expect("a reply should be queued");
+            let msg: Value = serde_json::from_str(&line).expect("replies are JSON");
+            if msg["id"] == id {
+                return msg["result"].clone();
+            }
+        }
+    }
+
+    /// Every queued line whose method is `method`.
+    fn events(reply_rx: &Receiver<String>, method: &str) -> Vec<Value> {
+        let mut found = Vec::new();
+        while let Ok(line) = reply_rx.try_recv() {
+            let msg: Value = serde_json::from_str(&line).expect("lines are JSON");
+            if msg["method"] == method {
+                found.push(msg["params"].clone());
+            }
+        }
+        found
+    }
+
+    fn audio_app() -> (App, Rc<RefCell<Vec<bool>>>) {
+        let states = Rc::new(RefCell::new(Vec::new()));
+        let mut app = test_app_with_audio(Box::new(SuspensionSink {
+            states: Rc::clone(&states),
+        }));
+        app.powered_on = true;
+        // A windowed session is paced; the fixture's emulator starts
+        // unpaced like a headless run.
+        app.emu.set_paced(true);
+        app.sync_live_audio_suspension();
+        (app, states)
+    }
+
+    fn fit_uaelib(app: &mut App) {
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        app.emu.bus_mut().attach_uaelib(lib);
+    }
+
+    #[test]
+    fn warp_set_unpaces_mutes_audio_and_names_the_hold() {
+        let (mut app, states) = audio_app();
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["paced"], false);
+        assert_eq!(reply["source"], "control");
+        assert_eq!(reply["headless"], false);
+        assert!(reply["note"].is_null());
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert_eq!(
+            states.borrow().last(),
+            Some(&true),
+            "control warp is silent"
+        );
+        let osd = app.active_osd_text().expect("an OSD names the requester").0;
+        assert!(osd.contains("control client"), "{osd}");
+        assert!(
+            events(&rx, "event.warp").is_empty(),
+            "the client's own warp.set gets a reply, not an event"
+        );
+
+        let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": false}));
+        assert_eq!(reply["on"], false);
+        assert_eq!(reply["source"], "none");
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+
+        let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
+        assert_eq!(reply["on"], false);
+        assert_eq!(reply["source"], "none");
+    }
+
+    #[test]
+    fn warp_get_reports_an_engaged_gate_and_warp_set_false_cancels_it() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.emu.set_paced(true);
+        app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+            crate::warpboot::WarpBootCondition::StorageIdle(10.0),
+        ));
+        app.engage_warp_boot();
+        assert!(!app.emu.paced());
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.get", json!({}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["source"], "boot");
+        call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": false}));
+        assert!(app.warp_boot.is_none(), "warp off cancels the gate");
+        assert!(app.emu.paced());
+    }
+
+    #[test]
+    fn control_warp_hold_outlives_a_finishing_boot_gate() {
+        let (mut app, states) = audio_app();
+        app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+            crate::warpboot::WarpBootCondition::Until(0.05),
+        ));
+        app.engage_warp_boot();
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(reply["source"], "control");
+
+        // Run past the gate's timestamp: the gate ends, the hold keeps
+        // the machine warping and silent.
+        let mut ended = false;
+        for _ in 0..12 {
+            app.emu.step_frame().unwrap();
+            if app.poll_warp_boot() {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the gate should end within a dozen frames");
+        assert!(app.warp_boot.is_none());
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert_eq!(states.borrow().last(), Some(&true));
+        assert!(
+            events(&rx, "event.warp").is_empty(),
+            "pacing did not change"
+        );
+
+        // The hotkey ends it, and the client hears about it.
+        app.toggle_warp();
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], false);
+        assert_eq!(warp[0]["source"], "manual");
+        assert!(warp[0]["position"]["frame"].is_number());
+    }
+
+    #[test]
+    fn guest_warp_request_flips_pacing_and_notifies_the_client() {
+        let (mut app, states) = audio_app();
+        fit_uaelib(&mut app);
+        let (tx, rx) = attach(&mut app);
+        assert!(!app.service_uaelib(), "nothing pending");
+
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .request_warp(true);
+        assert!(app.service_uaelib(), "pacing changed: the burst breaks");
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+        assert_eq!(states.borrow().last(), Some(&true));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], true);
+        assert_eq!(warp[0]["source"], "guest");
+        let reply = call(&mut app, &tx, &rx, 1, "warp.get", json!({}));
+        assert_eq!(reply["source"], "guest");
+
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .request_warp(false);
+        assert!(app.service_uaelib());
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], false);
+        assert_eq!(warp[0]["source"], "guest");
+    }
+
+    #[test]
+    fn control_disconnect_releases_a_control_hold() {
+        let (mut app, states) = audio_app();
+        let (tx, rx) = attach(&mut app);
+        call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(
+            app.emu.paced(),
+            "a warp the client engaged has no client left to release it"
+        );
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+    }
+
+    #[test]
+    fn warp_set_is_refused_during_a_capture_run() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.auto_shot
+            .push((50.0, std::path::PathBuf::from("shot.png")));
+        app.emu.set_paced(false);
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": false}));
+        assert!(reply["note"].is_string(), "{reply}");
+        assert!(!app.emu.paced(), "a capture run is never re-paced");
+        let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": true}));
+        assert!(reply["note"].is_string());
+        assert_eq!(app.warp_hold, None);
+    }
+
+    #[test]
+    fn debug_subscription_streams_guest_lines_through_the_drain() {
+        let mut app = test_app();
+        app.powered_on = true;
+        fit_uaelib(&mut app);
+        let (tx, rx) = attach(&mut app);
+        let state = call(
+            &mut app,
+            &tx,
+            &rx,
+            1,
+            "events.subscribe",
+            json!({"events": ["debug"]}),
+        );
+        assert_eq!(state["active"], json!(["debug"]));
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .queue_debug_line("hello from the guest");
+        app.control_emit_events();
+        let debug = events(&rx, "event.debug");
+        assert_eq!(debug.len(), 1);
+        assert_eq!(debug[0]["kind"], "log");
+        assert_eq!(debug[0]["text"], "hello from the guest");
+    }
+}
