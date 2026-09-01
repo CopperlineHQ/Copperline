@@ -77,11 +77,18 @@ You can schedule keyboard, mouse, and joystick inputs at specific emulated times
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
 | `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.chd`) in CD drive |
+| `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`): the HRTMon monitor takes over at SECS |
 | `--script FILE` | Execute script file containing input directives |
 | `--record-input PATH` | Record all inputs to script file on exit |
 
 Key identifiers can be raw key codes (`0x45`) or standard names (`ctrl`, `lalt`,
 `lami`, `f1`, `esc`, alphanumeric characters).
+
+`--freeze-after` needs a fitted cartridge (`--cartridge hrtmon` or
+`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge));
+the monitor's screen is then what a later `--screenshot-after` captures,
+and a `--save-state-after` taken inside the monitor resumes inside it. An
+input recording writes a press as a `freeze-after SECS` script line.
 
 (input-recording-and-script-files)=
 ### Input scripts and recording
@@ -94,6 +101,7 @@ joy-after 60.0 red 300
 key-after 75.0 f1 200
 insert-disk-after 90.0 df1 "disk2.adf"
 joy-after 95.0 red 300 1
+freeze-after 120.0
 ```
 
 Run with `--script`:

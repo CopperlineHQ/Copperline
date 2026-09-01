@@ -22,6 +22,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
+| `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter the HRTMon monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings > Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
@@ -320,6 +321,12 @@ belongs to the Amiga.
   tabbed debugger in a tool window; see [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
   command line in its own tool window; see [](../debugger/console).
+- **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
+  freezer cartridge's button, so the machine runs on into the HRTMon
+  monitor on its own screen; the monitor's `x` command returns to the
+  program. Greyed out unless a cartridge is fitted (`[cartridge] model`,
+  or the configuration screen's *Freezer cartridge* row); see
+  [Configuration](configuration.md#freezer-cartridge).
 
 ### Audio Settings
 
@@ -592,7 +599,8 @@ The layout is:
   CD image
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
-  overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
+  overrides, video standard, RTC, identify board, RTG card, freezer
+  cartridge), *CPU* (model,
   FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
   see `[cpu] jit` in [Configuration](configuration.md)),
   *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed

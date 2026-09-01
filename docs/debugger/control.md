@@ -139,6 +139,8 @@ events.unsubscribe {"events":["serial"]}
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
+- `cartridge.get`: Describe the fitted freezer cartridge (`[cartridge] model`): `model`, `base` and `size` of its bank, the monitor's `version`, whether the monitor is `entered`, whether a press is still waiting for the CPU (`nmi_pending`), and the count of `freezes`. Not found without a cartridge.
+- `cartridge.freeze`: Press the freezer cartridge's button: the level-7 vector under the current VBR is pointed at the monitor and the non-maskable interrupt raised for the next instruction boundary; the machine keeps running (resume it if stopped) and enters the monitor. Replies with the `cartridge.get` fields plus the `vector` slot written and the `entry` address it holds. Not found without a cartridge.
 - `copper.list {"addr": ..., "max": ...}`: Disassemble Copper instructions.
 - `pc_history`: Return recently executed instruction addresses.
 
