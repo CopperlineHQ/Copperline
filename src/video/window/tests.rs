@@ -9861,3 +9861,198 @@ mod warp_control {
         assert_eq!(debug[0]["text"], "hello from the guest");
     }
 }
+
+#[cfg(feature = "gdb")]
+mod gdb_drain {
+    use super::test_app;
+    use crate::gdbstub::core::{checksum, hex_encode};
+    use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
+    use std::sync::mpsc::{Receiver, Sender};
+
+    fn attached_app() -> (super::super::App, Sender<GdbMsg>, Receiver<String>) {
+        let mut app = test_app();
+        let (handle, cmd_tx, frame_rx) = GdbHandle::test_pair();
+        app.attach_gdb(handle, &crate::gdbstub::Config::new(":0".into()));
+        cmd_tx.send(GdbMsg::Connected).unwrap();
+        (app, cmd_tx, frame_rx)
+    }
+
+    fn packet(cmd_tx: &Sender<GdbMsg>, payload: &str) {
+        cmd_tx.send(GdbMsg::Packet(payload.to_string())).unwrap();
+    }
+
+    fn monitor(cmd_tx: &Sender<GdbMsg>, command: &str) {
+        packet(cmd_tx, &format!("qRcmd,{}", hex_encode(command.as_bytes())));
+    }
+
+    /// The wire framing `GdbHandle::send_packet` produces for `payload`.
+    fn frame(payload: &str) -> String {
+        format!("${payload}#{:02x}", checksum(payload.as_bytes()))
+    }
+
+    fn frames(frame_rx: &Receiver<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(f) = frame_rx.try_recv() {
+            out.push(f);
+        }
+        out
+    }
+
+    #[test]
+    fn attach_pauses_and_a_breakpoint_completes_a_deferred_continue() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.paused, "attaching stops the target");
+
+        // A Z0 breakpoint installs into the machine's break store (the
+        // burst loop steps whole frames; the core's polled list alone
+        // would never fire here).
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert_eq!(frames(&frame_rx), vec![frame("OK")]);
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+
+        // Continue defers its reply and lets the frame loop run.
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused, "continue resumes the machine");
+        assert!(frames(&frame_rx).is_empty(), "the stop reply is deferred");
+
+        // The hit surfaces mid-frame, answers the client, and leaves the
+        // local debugger window closed.
+        app.emu.step_frame().expect("frame");
+        assert!(app.surface_debug_stop());
+        assert!(app.paused);
+        assert_eq!(app.emu.machine.pc() & 0x00FF_FFFF, target);
+        assert_eq!(frames(&frame_rx), vec![frame("T05hwbreak:;thread:1;")]);
+        assert!(
+            app.debugger_panel.is_none(),
+            "a remote stop must not commandeer the local debugger"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_pauses_and_always_gets_a_stop_reply() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused);
+        cmd_tx.send(GdbMsg::Interrupt).unwrap();
+        app.drain_gdb();
+        assert!(app.paused, "0x03 pauses the machine");
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn a_step_replies_synchronously_and_stays_paused() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let before = app.emu.retired_instructions();
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert!(app.paused);
+        assert!(app.emu.retired_instructions() > before);
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn detach_removes_only_gdb_installed_break_state() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The GUI owns a breakpoint of its own.
+        let gui_break = app.emu.machine.pc().wrapping_add(0x20) & 0x00FF_FFFF;
+        app.emu.machine.ui_set_breakpoint(gui_break, None, 0);
+        // The client sets one at the same spot (never touched: the GUI
+        // owns it) and one of its own, plus a register watch through the
+        // intercepted monitor command.
+        let own_break = app.emu.machine.pc().wrapping_add(0x40) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{gui_break:x},2"));
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        monitor(&cmd_tx, "watch-reg DMACON");
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+        let sent = frames(&frame_rx);
+        assert_eq!(sent.last(), Some(&frame("OK")));
+        assert!(
+            sent.iter()
+                .any(|f| f.contains(&hex_encode(b"watching DMACON"))),
+            "monitor output arrives as O packets: {sent:?}"
+        );
+
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(gui_break),
+            "detach must leave GUI-owned points alone"
+        );
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(!app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+    }
+
+    #[test]
+    fn monitor_warp_holds_until_disconnect_releases_it() {
+        let (mut app, cmd_tx, _frame_rx) = attached_app();
+        // The fixture starts unpaced; warp semantics are defined against
+        // a paced interactive session.
+        app.emu.set_paced(true);
+        app.drain_gdb();
+        monitor(&cmd_tx, "warp on");
+        app.drain_gdb();
+        assert!(!app.emu.paced(), "monitor warp on unpaces the machine");
+        assert_eq!(
+            app.warp_hold,
+            Some(super::super::app_session::WarpSource::Gdb)
+        );
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.paced(),
+            "a disconnect releases the client's warp hold"
+        );
+        assert!(app.warp_hold.is_none());
+    }
+
+    #[test]
+    fn kill_detaches_and_the_window_survives() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let own_break = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        packet(&cmd_tx, "k");
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(
+            app.gdb.is_some(),
+            "the server keeps serving for the next client"
+        );
+        assert!(
+            !app.gdb.as_ref().unwrap().handle.connected(),
+            "kill closes the connection instead of exiting the window"
+        );
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn qxfer_libraries_read_arms_the_machine_loadseg_catch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+        packet(&cmd_tx, "qXfer:libraries:read::0,1000");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("l<library-list version=\"1.0\"/>")]
+        );
+        assert!(
+            app.emu.machine.ui_breaks().loadseg_catch.is_some(),
+            "library events arm the machine-level loadseg catch"
+        );
+        // Detach disarms it again (it was ours).
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+    }
+}

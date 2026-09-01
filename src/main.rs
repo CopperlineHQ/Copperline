@@ -139,10 +139,18 @@ fn validate_run_args(cli: &CliArgs) -> Result<()> {
 
 fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     #[cfg(not(feature = "gdb"))]
-    if cli.gdb.is_some() {
+    if cli.gdb.is_some() || cli.gdb_gui.is_some() {
         return Err(anyhow!(
             "this build was compiled without the gdb feature; \
-             rebuild with --features gdb for --gdb"
+             rebuild with --features gdb for --gdb/--gdb-gui"
+        ));
+    }
+    if cli.gdb.is_some() && cli.gdb_gui.is_some() {
+        return Err(anyhow!("--gdb and --gdb-gui cannot be combined"));
+    }
+    if cli.gdb_gui.is_some() && cli.benchmark_until.is_some() {
+        return Err(anyhow!(
+            "--gdb-gui cannot be combined with --benchmark-until"
         ));
     }
     if cli.gdb.is_none() {
@@ -197,9 +205,9 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         ));
     }
     if cli.control.is_some() || cli.control_gui.is_some() {
-        if cli.gdb.is_some() {
+        if cli.gdb.is_some() || cli.gdb_gui.is_some() {
             return Err(anyhow!(
-                "--control/--control-gui cannot be combined with --gdb"
+                "--control/--control-gui cannot be combined with --gdb/--gdb-gui"
             ));
         }
         if cli.benchmark_until.is_some() {
@@ -1040,8 +1048,9 @@ fn main() -> Result<()> {
     // window-server access), and a capture run must work anywhere.
     // --control-gui keeps the windowed path: it explicitly asks for an
     // interactive session.
-    let windowless_capture =
-        (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
+    let windowless_capture = (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some())
+        && cli.control_gui.is_none()
+        && cli.gdb_gui.is_none();
     // The warp-launch gate belongs to interactive sessions only: a capture
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
@@ -1113,6 +1122,17 @@ fn main() -> Result<()> {
         config.info_file = cli.control_info;
         let handle = copperline::control::windowed::ControlHandle::bind(&config)?;
         app.attach_control(handle, &config);
+    }
+    #[cfg(feature = "gdb")]
+    if let Some(listen) = cli.gdb_gui {
+        // Same shape for the windowed GDB stub: bind before the window
+        // opens, socket threads start inside App::run.
+        let mut config = gdbstub::Config::new(listen);
+        // --run + --gdb-gui: stop at the program's first instruction,
+        // the moment the guest OS loads it.
+        config.stop_on_load = run_prog_name.clone();
+        let handle = copperline::gdbstub::windowed::GdbHandle::bind(&config)?;
+        app.attach_gdb(handle, &config);
     }
 
     // Elevate the thread that is about to run the event loop and the pacer.
@@ -1269,6 +1289,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.frame_dump.is_none()
         && cli.benchmark_until.is_none()
         && cli.gdb.is_none()
+        && cli.gdb_gui.is_none()
         && cli.control.is_none()
         && cli.control_gui.is_none()
         && cli.load_state.is_none()
@@ -1939,6 +1960,30 @@ mod tests {
         assert_eq!(args.gdb.as_deref(), Some(":2345"));
         assert!(!args.audio_live);
         validate_gdb_args(&args)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gdb_gui_parses_and_excludes_the_contending_modes() -> Result<()> {
+        // The windowed stub keeps live audio: the machine stays paced
+        // and audible like any interactive session.
+        let args = parse(&["--gdb-gui", ":2345"])?;
+        assert_eq!(args.gdb_gui.as_deref(), Some(":2345"));
+        assert!(args.audio_live);
+        validate_gdb_args(&args)?;
+        validate_control_args(&args)?;
+
+        let args = parse(&["--gdb-gui", ":2345", "--gdb", ":2346"])?;
+        let err = validate_gdb_args(&args).unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"), "{err:#}");
+
+        let args = parse(&["--gdb-gui", ":2345", "--benchmark-until", "5"])?;
+        let err = validate_gdb_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--benchmark-until"), "{err:#}");
+
+        let args = parse(&["--gdb-gui", ":2345", "--control-gui", ":7710"])?;
+        let err = validate_control_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--gdb-gui"), "{err:#}");
         Ok(())
     }
 

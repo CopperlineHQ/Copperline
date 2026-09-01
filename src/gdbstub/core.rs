@@ -42,8 +42,8 @@ pub(crate) const TARGET_XML: &str = r#"<?xml version="1.0"?>
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Watchpoint {
-    addr: u32,
-    len: usize,
+    pub(crate) addr: u32,
+    pub(crate) len: usize,
     last: Vec<u8>,
 }
 

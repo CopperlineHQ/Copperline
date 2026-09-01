@@ -153,4 +153,19 @@ impl GdbClient {
     pub(crate) fn request(&mut self, payload: &str) -> String {
         self.request_collect(payload).1
     }
+
+    /// Write raw bytes to the stream (interrupts, deliberately bad
+    /// frames).
+    pub(crate) fn raw(&mut self, bytes: &[u8]) {
+        self.stream.write_all(bytes).unwrap();
+        self.stream.flush().unwrap();
+    }
+
+    /// Read exactly `n` bytes, for asserting the precise wire encoding
+    /// (framing, ack bytes) rather than just the payload.
+    pub(crate) fn read_bytes(&mut self, n: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; n];
+        self.stream.read_exact(&mut buf).unwrap();
+        buf
+    }
 }
