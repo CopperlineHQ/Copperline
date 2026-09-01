@@ -705,6 +705,388 @@ pub fn standard_tv_aperture_frame(
     }
 }
 
+/// Presentation smoothing for the autocrop rect. Per-frame content
+/// envelopes jitter -- loaders blank the screen, screen transitions
+/// rebuild the copper list over a frame or two, games flip between
+/// differently-sized displays -- and the presented crop must not pump
+/// with them. The latch grows immediately (content must never be cut)
+/// to the union of the old and new envelopes, holds through border-only
+/// frames like the aperture latch does, and shrinks only after the
+/// smaller envelope has held steady for [`Self::SHRINK_STABLE_FRAMES`]
+/// consecutive rendered frames. Shared by the desktop window (in woven
+/// presentation space) and the browser wrapper (in its presentation
+/// buffer's space); the envelope's coordinate space is the caller's.
+#[derive(Default, Debug)]
+pub struct AutocropLatch {
+    active: Option<bitplane::ContentRect>,
+    candidate: Option<bitplane::ContentRect>,
+    stable_frames: u32,
+}
+
+impl AutocropLatch {
+    /// Rendered frames a strictly-smaller envelope must persist for
+    /// before the presentation tightens onto it: about half a second of
+    /// PAL frames, long enough to sit out a screen transition.
+    pub const SHRINK_STABLE_FRAMES: u32 = 25;
+
+    pub fn resolve(
+        &mut self,
+        frame: Option<bitplane::ContentRect>,
+    ) -> Option<bitplane::ContentRect> {
+        let Some(frame) = frame else {
+            // Border-only frame: keep presenting the previous crop, and
+            // keep any shrink candidate's clock running from zero again
+            // once content returns.
+            self.candidate = None;
+            self.stable_frames = 0;
+            return self.active;
+        };
+        let Some(active) = self.active else {
+            self.active = Some(frame);
+            return self.active;
+        };
+        let contained = frame.x0 >= active.x0
+            && frame.x1 <= active.x1
+            && frame.y0 >= active.y0
+            && frame.y1 <= active.y1;
+        if !contained {
+            self.active = Some(bitplane::ContentRect {
+                x0: active.x0.min(frame.x0),
+                x1: active.x1.max(frame.x1),
+                y0: active.y0.min(frame.y0),
+                y1: active.y1.max(frame.y1),
+            });
+            self.candidate = None;
+            self.stable_frames = 0;
+        } else if frame != active {
+            if self.candidate == Some(frame) {
+                self.stable_frames += 1;
+                if self.stable_frames >= Self::SHRINK_STABLE_FRAMES {
+                    self.active = Some(frame);
+                    self.candidate = None;
+                    self.stable_frames = 0;
+                }
+            } else {
+                self.candidate = Some(frame);
+                self.stable_frames = 1;
+            }
+        } else {
+            self.candidate = None;
+            self.stable_frames = 0;
+        }
+        self.active
+    }
+
+    /// Forget the crop across a presentation discontinuity (power cycle,
+    /// RTG entry), like `PresentationLatch::reset`.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// How far a whole-number pixel shape may stray from the glass ratio
+/// before a taller fit stops being worth it: max(shape/par, par/shape)
+/// at most 11/10. Wide enough that NTSC's 0.854 admits 4:5 (6.8% off)
+/// through 6:7, 7:8 and 12:13 -- the family amiga.vision's NTSC guide
+/// reaches for, 4:5 being its 1080p and 4K answer -- while excluding
+/// 3:4 (14%) and the squat 1:1 (17%); and that PAL's 1.078 admits the
+/// square 1:1 (7.2%) and 8:7 (6%) but not 6:5 (11%).
+const PAR_TOLERANCE: (u64, u64) = (11, 10);
+
+/// The per-axis whole-number fit of a `w` x `h` canvas rect (hi-res
+/// columns by woven rows) into `avail` surface pixels, drawn at the
+/// pixel shape `par`: `(columns, lines)` -- surface pixels per canvas
+/// column, and per *field line*, the scan's own vertical unit. The
+/// woven canvas carries two rows per line so interlaced fields can be
+/// woven; a non-interlaced display's two are identical, so a whole
+/// number of pixels per line is exact for it whether or not the number
+/// is even (an odd count lands as alternate rows of the pair, which is
+/// only visible on an interlaced display). Stepping the vertical factor
+/// by half a woven row is what makes the NTSC shapes reachable on
+/// ordinary displays: 4:5 is two pixels per column and five per line,
+/// 1000 rows for a 200-line display -- the 1080p answer.
+///
+/// The choice is the tallest fit whose shape stays within
+/// [`PAR_TOLERANCE`] of `par` (a bigger picture beats a marginally truer
+/// one), the closest shape among fits of that height, and the widest
+/// among equals; with no fit inside the tolerance, the closest shape at
+/// the largest size. `None` when not even one pixel per column and per
+/// line fits, where the caller falls back to the smooth fit. Exact
+/// integer arithmetic throughout, so every host agrees on the answer.
+pub fn per_axis_fit(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> Option<(usize, usize)> {
+    if w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
+        return None;
+    }
+    let max_columns = avail.0 as usize / w;
+    // `h` woven rows are `h / 2` field lines: `lines` pixels per line
+    // puts `h * lines / 2` rows on the surface.
+    let max_lines = 2 * avail.1 as usize / h;
+    if max_columns == 0 || max_lines == 0 {
+        return None;
+    }
+    let (par_w, par_h) = (u64::from(par.0), u64::from(par.1));
+    // A shape's deviation from `par`, as the two cross products ordered
+    // (max, min): their quotient is the symmetric ratio error, and two
+    // deviations compare exactly by cross-multiplying.
+    let deviation = |columns: usize, lines: usize| -> (u64, u64) {
+        let shape = 2 * columns as u64 * par_h;
+        let glass = lines as u64 * par_w;
+        (shape.max(glass), shape.min(glass))
+    };
+    let within = |(hi, lo): (u64, u64)| hi * PAR_TOLERANCE.1 <= lo * PAR_TOLERANCE.0;
+    let compare = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+    // A candidate: its factors, its deviation, and whether that is
+    // within the tolerance.
+    type Candidate = ((usize, usize), (u64, u64), bool);
+    let mut best: Option<Candidate> = None;
+    for lines in 1..=max_lines {
+        // At a given height the shape grows with the column count, so
+        // only the two counts astride the ideal one (lines * par / 2)
+        // can be the closest -- and the tolerance band, an interval
+        // around the ideal, holds one of them if it holds any. Two
+        // candidates per height instead of every column: a one-line
+        // autocrop rect on a large surface has thousands of both, and
+        // the fit runs on every redraw and cursor move.
+        let ideal = (lines as u64 * par_w / (2 * par_h)) as usize;
+        let astride = [
+            ideal.clamp(1, max_columns),
+            (ideal + 1).clamp(1, max_columns),
+        ];
+        for columns in astride {
+            let dev = deviation(columns, lines);
+            let ok = within(dev);
+            let better = match best {
+                None => true,
+                Some((_, _, cand_ok)) if ok != cand_ok => ok,
+                Some((cand, cand_dev, true)) => lines
+                    .cmp(&cand.1)
+                    .then(compare(cand_dev, dev))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+                Some((cand, cand_dev, false)) => compare(cand_dev, dev)
+                    .then(lines.cmp(&cand.1))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+            };
+            if better {
+                best = Some(((columns, lines), dev, ok));
+            }
+        }
+    }
+    best.map(|(factors, _, _)| factors)
+}
+
+/// Where a `w` x `h` canvas rect lands in `avail` at whole-number
+/// factors `(columns, lines)`: exactly `w * columns` by `h * lines / 2`,
+/// centred. The rect's rows are whole field lines (an even count) so the
+/// height is exact -- every display rect's are, starting on a woven pair
+/// (`display_rects_start_on_field_lines`).
+pub fn per_axis_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    (columns, lines): (usize, usize),
+) -> (u32, u32, u32, u32) {
+    let dw = ((w * columns) as u32).min(avail.0);
+    let dh = ((h * lines / 2) as u32).min(avail.1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// The smooth fit of a `w` x `h` canvas rect drawn at pixel shape
+/// `par`: the aspect-preserving letterbox of `w * par` by `h` in
+/// `avail`, the classic letterbox (`clip_rect_for`'s smooth fit) with
+/// the shape folded into the width (at `(1, 1)` it is that fit). Exact
+/// integer arithmetic, so a rect whose shape is the viewport's fills it
+/// to the pixel: the browser draws its whole presentation buffer into a
+/// 4:3 element this way, where a truncated last column would show as a
+/// black seam.
+pub fn smooth_fit_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> (u32, u32, u32, u32) {
+    if avail.0 == 0 || avail.1 == 0 || w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
+        return (0, 0, 0, 0);
+    }
+    // The rect's shape on the surface is `w * par.0 : h * par.1`; the
+    // fit is width-limited when the viewport is narrower than that
+    // shape at the viewport's own height.
+    let (avail_w, avail_h) = (u64::from(avail.0), u64::from(avail.1));
+    let shaped_w = w as u64 * u64::from(par.0);
+    let shaped_h = h as u64 * u64::from(par.1);
+    let (dw, dh) = if avail_w * shaped_h <= avail_h * shaped_w {
+        (avail_w, avail_w * shaped_h / shaped_w)
+    } else {
+        (avail_h * shaped_w / shaped_h, avail_h)
+    };
+    let dw = (dw as u32).clamp(1, avail.0);
+    let dh = (dh as u32).clamp(1, avail.1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// A sub-rect draw's fit ([`sub_rect_fit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubRectFit {
+    /// The whole-number factors of an integer draw, as surface pixels
+    /// `(per column, per field line)` -- a uniform multiple `m` is
+    /// `(m, 2 * m)` -- or `None` for a smooth fit.
+    pub factors: Option<(usize, usize)>,
+    /// Where the rect lands, `(x, y, w, h)` in surface pixels.
+    pub dst: (u32, u32, u32, u32),
+}
+
+/// The whole-number factors and the destination of a sub-rect draw: the
+/// `rect` (`(x, y, w, h)` in canvas or buffer pixels) drawn at the pixel
+/// shape `par` into `avail` surface pixels. Under `integer` the fit is
+/// retaken against the rect -- a display using fewer lines earns a
+/// larger whole multiple, which is the point of autocrop -- as a
+/// uniform multiple when the pixels are asked for as square, and as the
+/// per-axis fit ([`per_axis_fit`]) at a glass shape; either falls back
+/// to the smooth fit of the rect at its shape ([`smooth_fit_rect`])
+/// when not even 1x fits. The desktop's `display_src_layout` and the
+/// browser's [`buffer_layout`] both draw with this.
+pub fn sub_rect_fit(
+    avail: (u32, u32),
+    integer: bool,
+    rect: (usize, usize, usize, usize),
+    par: (u32, u32),
+) -> SubRectFit {
+    let (w, h) = (rect.2.max(1), rect.3.max(1));
+    let factors = if !integer {
+        None
+    } else if par.0 == par.1 {
+        // The uniform multiple is the per-axis fit's answer for a square
+        // shape, but stated directly: the tolerance that lets a glass
+        // shape prefer a taller near-miss must not apply to a canvas
+        // asked for as square.
+        let fit = (avail.0 as usize / w).min(avail.1 as usize / h);
+        (fit >= 1).then_some((fit, 2 * fit))
+    } else {
+        per_axis_fit(avail, (w, h), par)
+    };
+    let dst = match factors {
+        Some(factors) => per_axis_rect(avail, (w, h), factors),
+        None => smooth_fit_rect(avail, (w, h), par),
+    };
+    SubRectFit { factors, dst }
+}
+
+/// The shape of one pixel of a `width` x `rows` presentation buffer
+/// drawn to fill a 4:3 glass, as a ratio `(width, height)` in lowest
+/// terms. The browser's glass model: the page shows whatever buffer the
+/// wrapper presents in a 4:3 element, so the buffer's own dimensions
+/// state its pixel shape. It is the desktop's tv canvas read back
+/// (`window::present::glass_par`) -- the captured TV aperture,
+/// `TV_CAPTURED_WIDTH` columns by its woven rows, lands at PAL 1.078
+/// and NTSC 0.854, and the full-overscan field at `rows` /
+/// `PRESENT_HEIGHT_TV` (the glass is `FB_WIDTH` by `PRESENT_HEIGHT_TV`,
+/// itself 4:3).
+pub fn buffer_glass_par(width: usize, rows: usize) -> (u32, u32) {
+    let (w, h) = (4 * rows.max(1) as u64, 3 * width.max(1) as u64);
+    let g = gcd(w, h);
+    ((w / g) as u32, (h / g) as u32)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Follow a content envelope stated in woven presentation-field space
+/// through the deinterlacer's region copy
+/// (`Deinterlacer::present_field_region_into`): the rows and columns of
+/// the `destination_width` x `destination_rows` buffer that show any of
+/// it. The copy reads woven column `source_x + x` for buffer column `x`,
+/// and woven row `source_y + scaled_source_row(y)` for buffer row `y`
+/// (`screenshot::scaled_source_row`, the centre-aligned resample of
+/// `source_rows` onto `destination_rows`). The rows are scanned against
+/// that map rather than derived in closed form, like the desktop's
+/// `canvas_content_rect`: a few hundred iterations per rendered frame,
+/// and immune to drifting out of agreement with the copy it mirrors.
+/// `None` when nothing of the envelope reaches the buffer.
+pub fn region_present_content_rect(
+    rect: bitplane::ContentRect,
+    source_x: i32,
+    source_y: i32,
+    source_rows: usize,
+    destination_width: usize,
+    destination_rows: usize,
+) -> Option<bitplane::ContentRect> {
+    let x0 = (rect.x0 as i64 - i64::from(source_x)).clamp(0, destination_width as i64);
+    let x1 = (rect.x1 as i64 - i64::from(source_x)).clamp(x0, destination_width as i64);
+    if x1 <= x0 {
+        return None;
+    }
+    let (mut y_min, mut y_max) = (None, None);
+    for y in 0..destination_rows {
+        let woven = i64::from(source_y)
+            + screenshot::scaled_source_row(y, source_rows, destination_rows) as i64;
+        if (rect.y0 as i64..rect.y1 as i64).contains(&woven) {
+            y_min.get_or_insert(y);
+            y_max = Some(y);
+        }
+    }
+    Some(bitplane::ContentRect {
+        x0: x0 as usize,
+        x1: x1 as usize,
+        y0: y_min?,
+        y1: y_max? + 1,
+    })
+}
+
+/// Where a presentation buffer lands on a viewport: the browser
+/// wrapper's answer to the desktop's `display_src_layout`, for a page
+/// that draws the wrapper's `width` x `rows` buffer itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferLayout {
+    /// The buffer sub-rect shown, `(x, y, w, h)` in buffer pixels.
+    pub src: (usize, usize, usize, usize),
+    /// Where it lands, `(x, y, w, h)` in viewport pixels; the viewport
+    /// outside it is black.
+    pub dst: (u32, u32, u32, u32),
+    /// The whole-number factors of an integer draw, as viewport pixels
+    /// `(per buffer column, per field line)` -- a uniform multiple `m`
+    /// is `(m, 2 * m)` -- or `None` for a smooth fit.
+    pub factors: Option<(usize, usize)>,
+}
+
+/// The layout of a `width` x `rows` presentation buffer on an `avail`
+/// viewport under the browser's display settings: `content` is the
+/// autocrop rect to show (the latched envelope in buffer pixels), or
+/// `None` to show the whole buffer; `integer` asks for whole-number
+/// factors. The buffer's pixel shape is the 4:3 glass's
+/// ([`buffer_glass_par`]): drawn smooth, the whole buffer fills a 4:3
+/// viewport exactly as the page's plain stretch did, and a crop keeps
+/// that shape in a letterbox; drawn integer, a standard scan takes the
+/// per-axis fit at that shape, while a `programmable` scan takes the
+/// uniform multiple (its rows are not woven pairs for the per-line
+/// factor to step by), as on the desktop.
+pub fn buffer_layout(
+    avail: (u32, u32),
+    (width, rows): (usize, usize),
+    programmable: bool,
+    integer: bool,
+    content: Option<bitplane::ContentRect>,
+) -> BufferLayout {
+    let full = (0, 0, width, rows);
+    let src = content
+        .map(|rect| (rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0))
+        .filter(|rect| rect.2 > 0 && rect.3 > 0)
+        .unwrap_or(full);
+    let par = if programmable && integer {
+        (1, 1)
+    } else {
+        buffer_glass_par(width, rows)
+    };
+    let SubRectFit { factors, dst } = sub_rect_fit(avail, integer, src, par);
+    BufferLayout { src, dst, factors }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,5 +1568,209 @@ mod tests {
             4
         );
         assert_eq!(fb[0], 1);
+    }
+
+    #[test]
+    fn smooth_fit_rect_fills_a_viewport_of_the_rects_own_shape_exactly() {
+        // The browser's whole-buffer draw: every buffer the wrapper presents
+        // -- the 50 Hz aperture, the 60 Hz aperture at its own rows, a full
+        // overscan field, the square canvas -- fills a 4:3 viewport to the
+        // pixel at the glass shape read off the buffer, at any size. The
+        // f32 fit this replaces could truncate the last column away.
+        for (w, h) in [(668, 540), (668, 428), (716, 626), (716, 570)] {
+            let par = buffer_glass_par(w, h);
+            for avail in [
+                (1440, 1080),
+                (2880, 2160),
+                (1024, 768),
+                (716, 537),
+                (3840, 2880),
+            ] {
+                assert_eq!(
+                    smooth_fit_rect(avail, (w, h), par),
+                    (0, 0, avail.0, avail.1),
+                    "{w}x{h} in {avail:?}"
+                );
+            }
+        }
+        // A rect narrower than the viewport at its shape is height-limited
+        // and centred: 640 x 400 of the native NTSC aperture (0.854 pixels)
+        // on a 16:9 screen.
+        let ntsc = buffer_glass_par(668, 428);
+        assert_eq!(
+            smooth_fit_rect((1920, 1080), (640, 400), ntsc),
+            (222, 0, 1476, 1080)
+        );
+        assert_eq!(smooth_fit_rect((0, 10), (640, 400), ntsc), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn buffer_glass_par_is_the_4_3_glass_read_off_the_buffer() {
+        // The PAL and NTSC apertures land at the desktop's glass shapes
+        // (`glass_par`: 1.078 and 0.854), in lowest terms.
+        let ratio = |(w, h): (u32, u32)| f64::from(w) / f64::from(h);
+        let pal = buffer_glass_par(TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+        let ntsc = buffer_glass_par(TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT);
+        assert_eq!(pal, (180, 167));
+        assert!((ratio(pal) - 1.0778).abs() < 5e-4, "PAL {}", ratio(pal));
+        assert!((ratio(ntsc) - 0.8543).abs() < 5e-4, "NTSC {}", ratio(ntsc));
+        // The full-overscan field: rows over PRESENT_HEIGHT_TV, the glass
+        // being FB_WIDTH x PRESENT_HEIGHT_TV (itself 4:3).
+        assert_eq!(
+            buffer_glass_par(FB_WIDTH, OUT_HEIGHT),
+            (
+                OUT_HEIGHT as u32 / 3,
+                crate::video::PRESENT_HEIGHT_TV as u32 / 3
+            )
+        );
+        assert_eq!(buffer_glass_par(0, 0), (4, 3));
+    }
+
+    #[test]
+    fn region_present_content_rect_inverts_the_aperture_copy() {
+        use crate::video::bitplane::ContentRect;
+        // A 640-wide standard window, 200 lines woven to rows 64..464 of
+        // the field, presented through the 50 Hz aperture copy: the
+        // capture starts TV_CAPTURED_MARGIN_X left of the window and its
+        // rows are the identity from woven row TV_PRESENT_SOURCE_Y.
+        let x0 = bitplane::STANDARD_VISIBLE_X0;
+        let rect = ContentRect {
+            x0,
+            x1: x0 + 640,
+            y0: 64,
+            y1: 464,
+        };
+        let (source_x, source_y) = (TV_CAPTURED_SOURCE_X as i32, TV_PRESENT_SOURCE_Y as i32);
+        assert_eq!(
+            region_present_content_rect(rect, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            Some(ContentRect {
+                x0: TV_CAPTURED_MARGIN_X,
+                x1: TV_CAPTURED_MARGIN_X + 640,
+                y0: 46,
+                y1: 446,
+            })
+        );
+        // A tv-centre nudge moves the capture, so the buffer rect moves the
+        // other way.
+        let nudged = region_present_content_rect(
+            rect,
+            source_x - 8,
+            source_y + 4,
+            540,
+            TV_CAPTURED_WIDTH,
+            540,
+        )
+        .unwrap();
+        assert_eq!(
+            (nudged.x0, nudged.x1),
+            (TV_CAPTURED_MARGIN_X + 8, TV_CAPTURED_MARGIN_X + 648)
+        );
+        assert_eq!((nudged.y0, nudged.y1), (42, 442));
+        // The 60 Hz aperture resampled onto the 50 Hz row count (428 -> 540,
+        // the smooth presentation): rows 64..364 land on the buffer rows
+        // whose centre-aligned source falls inside them, 58..437; at its
+        // own rows (the integer presentation) the map is the identity.
+        let ntsc = ContentRect { y1: 364, ..rect };
+        let resampled =
+            region_present_content_rect(ntsc, source_x, source_y, 428, TV_CAPTURED_WIDTH, 540)
+                .unwrap();
+        assert_eq!((resampled.y0, resampled.y1), (58, 437));
+        let native =
+            region_present_content_rect(ntsc, source_x, source_y, 428, TV_CAPTURED_WIDTH, 428)
+                .unwrap();
+        assert_eq!((native.y0, native.y1), (46, 346));
+        // Off the buffer entirely: above the aperture, or left of the capture.
+        let above = ContentRect {
+            y0: 0,
+            y1: 10,
+            ..rect
+        };
+        assert_eq!(
+            region_present_content_rect(above, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            None
+        );
+        let left = ContentRect {
+            x0: 0,
+            x1: 4,
+            ..rect
+        };
+        assert_eq!(
+            region_present_content_rect(left, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            None
+        );
+        // Partly off: the shown part, clipped.
+        let wide = ContentRect {
+            x0: 0,
+            x1: FB_WIDTH,
+            ..rect
+        };
+        let shown =
+            region_present_content_rect(wide, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540)
+                .unwrap();
+        assert_eq!((shown.x0, shown.x1), (0, TV_CAPTURED_WIDTH));
+    }
+
+    #[test]
+    fn buffer_layout_places_the_browser_buffer() {
+        use crate::video::bitplane::ContentRect;
+        // Smooth, whole buffer: the 4:3 element, exactly -- the page's
+        // plain stretch, so the modes' draw path shows the same picture.
+        let pal = (TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+        assert_eq!(
+            buffer_layout((1440, 1080), pal, false, false, None),
+            BufferLayout {
+                src: (0, 0, 668, 540),
+                dst: (0, 0, 1440, 1080),
+                factors: None,
+            }
+        );
+        // Integer, the PAL aperture on a 1080p screen: two pixels per
+        // column and four per line (square, within a tenth of PAL's
+        // 1.078), 1336 x 1080 centred.
+        let layout = buffer_layout((1440, 1080), pal, false, true, None);
+        assert_eq!(layout.factors, Some((2, 4)));
+        assert_eq!(layout.dst, (52, 0, 1336, 1080));
+        // Integer with autocrop, a 640 x 400 NTSC display of the native-row
+        // aperture on a 1080p screen: amiga.vision's 4:5 pixel, 1280 x 1000.
+        let ntsc = (TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT);
+        let content = ContentRect {
+            x0: 14,
+            x1: 654,
+            y0: 14,
+            y1: 414,
+        };
+        let layout = buffer_layout((1920, 1080), ntsc, false, true, Some(content));
+        assert_eq!(layout.src, (14, 14, 640, 400));
+        assert_eq!(layout.factors, Some((2, 5)));
+        assert_eq!(layout.dst, (320, 40, 1280, 1000));
+        // Smooth with autocrop: the crop at the glass shape, letterboxed.
+        let layout = buffer_layout((1920, 1080), ntsc, false, false, Some(content));
+        assert_eq!(layout.factors, None);
+        assert_eq!(layout.dst, (222, 0, 1476, 1080));
+        // A programmable scan (a 716 x 552 DblPAL field) under integer
+        // scaling takes the uniform multiple, its rows not being woven
+        // pairs; drawn smooth it fills the glass like any buffer.
+        let layout = buffer_layout((1440, 1080), (716, 552), true, true, None);
+        assert_eq!(layout.factors, Some((1, 2)));
+        assert_eq!(layout.dst, (362, 264, 716, 552));
+        assert_eq!(
+            buffer_layout((1440, 1080), (716, 552), true, false, None).dst,
+            (0, 0, 1440, 1080)
+        );
+        // Too small for one pixel per column: the smooth fit of the same shape.
+        let layout = buffer_layout((600, 500), pal, false, true, None);
+        assert_eq!(layout.factors, None);
+        assert_eq!(layout.dst, (0, 25, 600, 450));
+        // An empty envelope shows the whole buffer.
+        let empty = ContentRect {
+            x0: 10,
+            x1: 10,
+            y0: 0,
+            y1: 5,
+        };
+        assert_eq!(
+            buffer_layout((1440, 1080), pal, false, false, Some(empty)).src,
+            (0, 0, 668, 540)
+        );
     }
 }

@@ -266,83 +266,6 @@ pub(super) fn canvas_content_rect(
     Some((x0, y0, x1 + 1 - x0, y1 + 1 - y0))
 }
 
-/// Presentation smoothing for the autocrop rect. Per-frame content
-/// envelopes jitter -- loaders blank the screen, screen transitions
-/// rebuild the copper list over a frame or two, games flip between
-/// differently-sized displays -- and the presented crop must not pump
-/// with them. The latch grows immediately (content must never be cut)
-/// to the union of the old and new envelopes, holds through border-only
-/// frames like the aperture latch does, and shrinks only after the
-/// smaller envelope has held steady for [`Self::SHRINK_STABLE_FRAMES`]
-/// consecutive rendered frames.
-#[derive(Default)]
-pub(super) struct AutocropLatch {
-    active: Option<bitplane::ContentRect>,
-    candidate: Option<bitplane::ContentRect>,
-    stable_frames: u32,
-}
-
-impl AutocropLatch {
-    /// Rendered frames a strictly-smaller envelope must persist for
-    /// before the presentation tightens onto it: about half a second of
-    /// PAL frames, long enough to sit out a screen transition.
-    pub(super) const SHRINK_STABLE_FRAMES: u32 = 25;
-
-    pub(super) fn resolve(
-        &mut self,
-        frame: Option<bitplane::ContentRect>,
-    ) -> Option<bitplane::ContentRect> {
-        let Some(frame) = frame else {
-            // Border-only frame: keep presenting the previous crop, and
-            // keep any shrink candidate's clock running from zero again
-            // once content returns.
-            self.candidate = None;
-            self.stable_frames = 0;
-            return self.active;
-        };
-        let Some(active) = self.active else {
-            self.active = Some(frame);
-            return self.active;
-        };
-        let contained = frame.x0 >= active.x0
-            && frame.x1 <= active.x1
-            && frame.y0 >= active.y0
-            && frame.y1 <= active.y1;
-        if !contained {
-            self.active = Some(bitplane::ContentRect {
-                x0: active.x0.min(frame.x0),
-                x1: active.x1.max(frame.x1),
-                y0: active.y0.min(frame.y0),
-                y1: active.y1.max(frame.y1),
-            });
-            self.candidate = None;
-            self.stable_frames = 0;
-        } else if frame != active {
-            if self.candidate == Some(frame) {
-                self.stable_frames += 1;
-                if self.stable_frames >= Self::SHRINK_STABLE_FRAMES {
-                    self.active = Some(frame);
-                    self.candidate = None;
-                    self.stable_frames = 0;
-                }
-            } else {
-                self.candidate = Some(frame);
-                self.stable_frames = 1;
-            }
-        } else {
-            self.candidate = None;
-            self.stable_frames = 0;
-        }
-        self.active
-    }
-
-    /// Forget the crop across a presentation discontinuity (power cycle,
-    /// RTG entry), like `PresentationLatch::reset`.
-    pub(super) fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
 pub(super) fn presentation_pixels_equal(
     current: &[u32],
     current_rows: usize,
@@ -731,136 +654,6 @@ pub(super) fn aperture_canvas_rect(tv_aperture_rows: usize) -> (usize, usize, us
     )
 }
 
-/// How far a whole-number pixel shape may stray from the glass ratio
-/// before a taller fit stops being worth it: max(shape/par, par/shape)
-/// at most 11/10. Wide enough that NTSC's 0.854 admits 4:5 (6.8% off)
-/// through 6:7, 7:8 and 12:13 -- the family amiga.vision's NTSC guide
-/// reaches for, 4:5 being its 1080p and 4K answer -- while excluding
-/// 3:4 (14%) and the squat 1:1 (17%); and that PAL's 1.078 admits the
-/// square 1:1 (7.2%) and 8:7 (6%) but not 6:5 (11%).
-const PAR_TOLERANCE: (u64, u64) = (11, 10);
-
-/// The per-axis whole-number fit of a `w` x `h` canvas rect (hi-res
-/// columns by woven rows) into `avail` surface pixels, drawn at the
-/// pixel shape `par`: `(columns, lines)` -- surface pixels per canvas
-/// column, and per *field line*, the scan's own vertical unit. The
-/// woven canvas carries two rows per line so interlaced fields can be
-/// woven; a non-interlaced display's two are identical, so a whole
-/// number of pixels per line is exact for it whether or not the number
-/// is even (an odd count lands as alternate rows of the pair, which is
-/// only visible on an interlaced display). Stepping the vertical factor
-/// by half a woven row is what makes the NTSC shapes reachable on
-/// ordinary displays: 4:5 is two pixels per column and five per line,
-/// 1000 rows for a 200-line display -- the 1080p answer.
-///
-/// The choice is the tallest fit whose shape stays within
-/// [`PAR_TOLERANCE`] of `par` (a bigger picture beats a marginally truer
-/// one), the closest shape among fits of that height, and the widest
-/// among equals; with no fit inside the tolerance, the closest shape at
-/// the largest size. `None` when not even one pixel per column and per
-/// line fits, where the caller falls back to the smooth fit. Exact
-/// integer arithmetic throughout, so every host agrees on the answer.
-pub(super) fn per_axis_fit(
-    avail: (u32, u32),
-    (w, h): (usize, usize),
-    par: (u32, u32),
-) -> Option<(usize, usize)> {
-    if w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
-        return None;
-    }
-    let max_columns = avail.0 as usize / w;
-    // `h` woven rows are `h / 2` field lines: `lines` pixels per line
-    // puts `h * lines / 2` rows on the surface.
-    let max_lines = 2 * avail.1 as usize / h;
-    if max_columns == 0 || max_lines == 0 {
-        return None;
-    }
-    let (par_w, par_h) = (u64::from(par.0), u64::from(par.1));
-    // A shape's deviation from `par`, as the two cross products ordered
-    // (max, min): their quotient is the symmetric ratio error, and two
-    // deviations compare exactly by cross-multiplying.
-    let deviation = |columns: usize, lines: usize| -> (u64, u64) {
-        let shape = 2 * columns as u64 * par_h;
-        let glass = lines as u64 * par_w;
-        (shape.max(glass), shape.min(glass))
-    };
-    let within = |(hi, lo): (u64, u64)| hi * PAR_TOLERANCE.1 <= lo * PAR_TOLERANCE.0;
-    let compare = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
-    // A candidate: its factors, its deviation, and whether that is
-    // within the tolerance.
-    type Candidate = ((usize, usize), (u64, u64), bool);
-    let mut best: Option<Candidate> = None;
-    for lines in 1..=max_lines {
-        // At a given height the shape grows with the column count, so
-        // only the two counts astride the ideal one (lines * par / 2)
-        // can be the closest -- and the tolerance band, an interval
-        // around the ideal, holds one of them if it holds any. Two
-        // candidates per height instead of every column: a one-line
-        // autocrop rect on a large surface has thousands of both, and
-        // the fit runs on every redraw and cursor move.
-        let ideal = (lines as u64 * par_w / (2 * par_h)) as usize;
-        let astride = [
-            ideal.clamp(1, max_columns),
-            (ideal + 1).clamp(1, max_columns),
-        ];
-        for columns in astride {
-            let dev = deviation(columns, lines);
-            let ok = within(dev);
-            let better = match best {
-                None => true,
-                Some((_, _, cand_ok)) if ok != cand_ok => ok,
-                Some((cand, cand_dev, true)) => lines
-                    .cmp(&cand.1)
-                    .then(compare(cand_dev, dev))
-                    .then(columns.cmp(&cand.0))
-                    .is_gt(),
-                Some((cand, cand_dev, false)) => compare(cand_dev, dev)
-                    .then(lines.cmp(&cand.1))
-                    .then(columns.cmp(&cand.0))
-                    .is_gt(),
-            };
-            if better {
-                best = Some(((columns, lines), dev, ok));
-            }
-        }
-    }
-    best.map(|(factors, _, _)| factors)
-}
-
-/// Where a `w` x `h` canvas rect lands in `avail` at whole-number
-/// factors `(columns, lines)`: exactly `w * columns` by `h * lines / 2`,
-/// centred. The rect's rows are whole field lines (an even count) so the
-/// height is exact -- every display rect's are, starting on a woven pair
-/// (`display_rects_start_on_field_lines`).
-fn per_axis_rect(
-    avail: (u32, u32),
-    (w, h): (usize, usize),
-    (columns, lines): (usize, usize),
-) -> (u32, u32, u32, u32) {
-    let dw = ((w * columns) as u32).min(avail.0);
-    let dh = ((h * lines / 2) as u32).min(avail.1);
-    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
-}
-
-/// The smooth fit of a `w` x `h` canvas rect drawn at pixel shape
-/// `par`: the aspect-preserving letterbox of `w * par` by `h` in
-/// `avail`, `clip_rect_for`'s smooth arithmetic with the shape folded
-/// into the width (at `(1, 1)` it is that fit exactly).
-fn smooth_fit_rect(
-    avail: (u32, u32),
-    (w, h): (usize, usize),
-    par: (u32, u32),
-) -> (u32, u32, u32, u32) {
-    if avail.0 == 0 || avail.1 == 0 || w == 0 || h == 0 {
-        return (0, 0, 0, 0);
-    }
-    let shaped_w = w as f32 * par.0 as f32 / par.1.max(1) as f32;
-    let scale = (avail.0 as f32 / shaped_w).min(avail.1 as f32 / h as f32);
-    let dw = ((shaped_w * scale) as u32).min(avail.0).max(1);
-    let dh = ((h as f32 * scale) as u32).min(avail.1).max(1);
-    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
-}
-
 /// The layout for the current frame. `src` is the sub-rect of the
 /// display region to show (an autocrop content rect, the TV aperture
 /// under per-axis integer scaling) with the pixel shape to draw it at,
@@ -919,23 +712,10 @@ pub(super) fn display_src_layout(
 ) -> PresentLayout {
     let avail_h = surface.1 - chrome_dst.map_or(0, |(_, _, _, h)| h.min(surface.1));
     let avail = (surface.0, avail_h.max(1));
-    let (w, h) = (src.rect.2.max(1), src.rect.3.max(1));
-    let factors = if !integer {
-        None
-    } else if src.par.0 == src.par.1 {
-        // The uniform multiple is the per-axis fit's answer for a square
-        // shape, but stated directly: the tolerance that lets a glass
-        // shape prefer a taller near-miss must not apply to a canvas
-        // asked for as square.
-        let fit = (avail.0 as usize / w).min(avail.1 as usize / h);
-        (fit >= 1).then_some((fit, 2 * fit))
-    } else {
-        per_axis_fit(avail, (w, h), src.par)
-    };
-    let display_dst = match factors {
-        Some(factors) => per_axis_rect(avail, (w, h), factors),
-        None => smooth_fit_rect(avail, (w, h), src.par),
-    };
+    let SubRectFit {
+        factors,
+        dst: display_dst,
+    } = sub_rect_fit(avail, integer, src.rect, src.par);
     PresentLayout {
         src_canvas: src.rect,
         display_dst,

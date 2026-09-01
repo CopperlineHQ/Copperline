@@ -487,6 +487,27 @@ changes such as a resize, tint, monitor mode or WebGL context restoration can
 force a draw of the held texture without pretending the emulated picture
 changed.
 
+The browser's integer scaling and autocrop reuse the desktop's machinery
+rather than re-deriving it in JavaScript. `present_common` carries the
+pure pieces both frontends need: the autocrop smoothing (`AutocropLatch`),
+the per-axis whole-number fit and its smooth fallback (`per_axis_fit`,
+`sub_rect_fit`), and the two maps that follow the renderer's content
+envelope into presentation-buffer pixels -- `FieldPlacement::content_rect`
+onto the woven field, then `region_present_content_rect`, the inverse of
+the deinterlacer's aperture copy, onto the buffer the page draws. The
+wrapper latches that rect per frame (a reused frame re-feeds the previous
+envelope, so a static screen can still prove a smaller crop stable) and
+answers `present_layout` from `buffer_layout`, which reads the glass pixel
+shape off the buffer itself (`buffer_glass_par`: the page shows the buffer
+in a 4:3 element, so a 668 x 540 PAL aperture states the same 1.078 shape
+the desktop's `glass_par` derives from its tv canvas). Under integer
+scaling the wrapper presents a 60 Hz aperture at its own woven rows rather
+than resampled onto the 50 Hz row count -- the browser's equivalent of the
+desktop drawing its unresampled canvas -- so the factors are exact per
+scan line. The page draws the answer: the GL monitor passes take the
+sub-rect through a `u_src` uniform mirroring `crt.wgsl`'s `src_rect`, and
+the 2D fallback scales a staging canvas into a device-resolution store.
+
 For a progressive frame without phosphor persistence, presentation writes
 directly into the frontend-owned buffer instead of first filling the
 deinterlacer's full woven buffer. The browser's standard-TV path goes one step
