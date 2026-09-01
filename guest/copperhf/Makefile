@@ -47,7 +47,7 @@ device.bin: device.exe
 # preprocessed by default) so it can #include copperhf_board.h instead of
 # duplicating register offsets; entry.s itself has no #includes, so it
 # stays plain asm; -x c switches back for device.c and mounter.c (M3).
-device.exe: entry.s device.c mounter.c int_handler.s copperhf_board.h
+device.exe: entry.s device.c mounter.c int_handler.s copperhf_board.h device_layout.h
 	$(CC) $(CFLAGS) entry.s -x c device.c mounter.c \
 	  -x assembler-with-cpp int_handler.s -x none -o $@
 

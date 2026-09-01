@@ -37,6 +37,8 @@
 #include <libraries/configvars.h>
 #include <libraries/expansion.h>
 #include <libraries/expansionbase.h>
+#include <devices/newstyle.h>
+#include <stddef.h>
 
 #define EXEC_BASE_NAME _sysbase
 #define EXPANSION_BASE_NAME _expbase
@@ -44,19 +46,34 @@
 #include <inline/expansion.h>
 
 #include "copperhf_board.h"
+#include "device_layout.h"
 
 #define INTB_PORTS 3 /* hardware/intbits.h -- I/O ports and timers */
 
 /* copperhf.device's extension of struct Library/struct Device: the board
- * base (every register access is board-base-relative) and the INT2
- * interrupt-server node int_handler.s drains completions through. Both
+ * base (every register access is board-base-relative), the INT2
+ * interrupt-server node int_handler.s drains completions through, and (M4)
+ * the list of pending TD_ADDCHANGEINT requests int_handler.s's
+ * chf_drain_changes() walks on a CHF_CHANGED_MASK interrupt. All three
  * live in the device base MakeLibrary allocates -- real writable Amiga
- * RAM, not ROM -- so there is nothing here that needs relocation fixups. */
+ * RAM, not ROM -- so there is nothing here that needs relocation fixups.
+ *
+ * dev_BoardBase's offset must stay device_layout.h's
+ * CHF_DEV_BOARDBASE_OFFSET -- see that file's header comment for why
+ * int_handler.s needs the number at all (is_Data is now this whole struct,
+ * not just the board pointer) and the _Static_assert below for how it's
+ * kept honest. */
 struct CopperhfDevice {
     struct Library dev_Lib;
     APTR dev_BoardBase;
     struct Interrupt dev_Interrupt;
+    struct List dev_ChangeInts; /* M4: pending TD_ADDCHANGEINT requests */
 };
+
+_Static_assert(offsetof(struct CopperhfDevice, dev_BoardBase) == CHF_DEV_BOARDBASE_OFFSET,
+               "device_layout.h's CHF_DEV_BOARDBASE_OFFSET is out of sync with "
+               "struct CopperhfDevice -- update it (and re-derive the byte count in "
+               "that file's header comment) if this struct's layout ever changes");
 
 /* Defined in entry.s: the vector table MakeLibrary consumes, and the
  * shared "copperhf.device" name/id string (also this device's ln_Name). */
@@ -129,6 +146,15 @@ struct CopperhfDevice *dev_init(struct ExecBase *sysbase __asm("a6"),
     dev->dev_Lib.lib_Revision = 0;
     dev->dev_Lib.lib_IdString = (char *)device_name;
     dev->dev_BoardBase = boardbase;
+    /* Manual empty-list init (the idiom exec/lists.h's own NewList macro
+     * expands to -- mounter.c's chf_get_or_create_fsr uses the same
+     * pattern for fsr_FileSysEntries), not a NewList() library call: this
+     * runs inside MakeLibrary's own init before the device (and thus
+     * exec.library's normal calling context for this task) is fully
+     * established. */
+    dev->dev_ChangeInts.lh_Head = (struct Node *)&dev->dev_ChangeInts.lh_Tail;
+    dev->dev_ChangeInts.lh_Tail = NULL;
+    dev->dev_ChangeInts.lh_TailPred = (struct Node *)&dev->dev_ChangeInts.lh_Head;
     return dev;
 }
 
@@ -163,7 +189,11 @@ void resident_init(struct ExecBase *_sysbase __asm("a6"))
     dev->dev_Interrupt.is_Node.ln_Type = NT_INTERRUPT;
     dev->dev_Interrupt.is_Node.ln_Pri = 0;
     dev->dev_Interrupt.is_Node.ln_Name = (char *)device_name;
-    dev->dev_Interrupt.is_Data = board;
+    /* M4: is_Data is the whole device (not just the board pointer, M1-M3)
+     * so int_handler.s's CHF_CHANGED_MASK path can reach dev_ChangeInts;
+     * the asm recovers the board pointer itself via
+     * device_layout.h's CHF_DEV_BOARDBASE_OFFSET. */
+    dev->dev_Interrupt.is_Data = dev;
     dev->dev_Interrupt.is_Code = (void (*)(void))chf_int_handler;
     AddIntServer(INTB_PORTS, &dev->dev_Interrupt);
 
@@ -225,19 +255,255 @@ ULONG dev_extfunc(void)
     return 0;
 }
 
-/* BeginIO(dev, ioreq) -- A6=devbase, A1=ioreq. Clears IOF_QUICK (the M1
- * board always executes synchronously host-side, but the guest is never
- * told so -- it must wait for the INT2 completion drain like real
- * asynchronous hardware, never inspect the request again until then) and
- * rings CHF_DOORBELL with the request pointer as a single 32-bit write
- * (copperhf_board.h: "a single 32-bit write commits immediately"). Never
- * calls ReplyMsg here -- that is int_handler.s's job once the completion
- * actually shows up on CHF_COMPLETE_GET. */
+/* ROM-resident, 0-terminated NSD supported-command table
+ * (NSCMD_DEVICEQUERY's nsdqr_SupportedCommands, devices/newstyle.h):
+ * every command copperhf.device answers, guest-side stub commands and
+ * doorbell-forwarded commands alike. `static const`, so this is compiler-
+ * generated PC-relative rodata referenced only from this same file --
+ * exactly the "ordinary compiler-generated PC-relative code" case entry.s's
+ * header comment carves out as safe, never a hand `.long`. */
+static const UWORD chf_nsd_commands[] = {
+    CHF_CMD_READ,
+    CHF_CMD_WRITE,
+    CHF_CMD_UPDATE,
+    CHF_CMD_CLEAR,
+    CHF_CMD_TD_MOTOR,
+    CHF_CMD_TD_FORMAT,
+    CHF_CMD_TD_GETGEOMETRY,
+    CHF_CMD_TD_CHANGENUM,
+    CHF_CMD_TD_CHANGESTATE,
+    CHF_CMD_TD_PROTSTATUS,
+    CHF_CMD_TD_ADDCHANGEINT,
+    CHF_CMD_TD_REMCHANGEINT,
+    CHF_CMD_TD_EJECT,
+    CHF_CMD_TD_READ64,
+    CHF_CMD_TD_WRITE64,
+    CHF_CMD_TD_SEEK64,
+    CHF_CMD_TD_FORMAT64,
+    CHF_CMD_HD_SCSICMD,
+    CHF_NSCMD_DEVICEQUERY,
+    CHF_NSCMD_TD_READ64,
+    CHF_NSCMD_TD_WRITE64,
+    CHF_NSCMD_TD_SEEK64,
+    CHF_NSCMD_TD_FORMAT64,
+    0
+};
+
+/* Completes a guest-answered request per BeginIO's IOF_QUICK contract
+ * (exec.doc/BeginIO): if the caller allowed quick I/O, leave IOF_QUICK set
+ * and return -- the caller polls io_Error/io_Actual itself and there is no
+ * ReplyMsg. Otherwise clear it (already clear on this path, but that is
+ * exactly what "answering a quick-eligible request the slow way" means)
+ * and ReplyMsg from here -- BeginIO always runs in the caller's own task
+ * context, so this is safe unlike int_handler.s's own interrupt-context
+ * ReplyMsg. */
+static void chf_complete(struct IOStdReq *ioreq, struct ExecBase *_sysbase)
+{
+    if (ioreq->io_Flags & IOF_QUICK)
+        return;
+    ReplyMsg(&ioreq->io_Message);
+}
+
+/* NSCMD_DEVICEQUERY (guest-side, copperhf_board.h): fills the
+ * NSDeviceQueryResult at io_Data from chf_nsd_commands above.
+ * nsdqr_SizeAvailable is always this device's full result-struct size (the
+ * NSD contract: report it regardless of how much the caller's buffer can
+ * hold), but the struct itself is only written -- and io_Actual only set
+ * -- if io_Length says the caller's buffer is big enough to hold it. */
+static void chf_do_devicequery(struct IOStdReq *ioreq, struct ExecBase *_sysbase)
+{
+    struct NSDeviceQueryResult *r;
+
+    if (ioreq->io_Length < (ULONG)sizeof(struct NSDeviceQueryResult)) {
+        ioreq->io_Error = CHF_IOERR_BADLENGTH;
+        chf_complete(ioreq, _sysbase);
+        return;
+    }
+
+    r = (struct NSDeviceQueryResult *)ioreq->io_Data;
+    r->nsdqr_DevQueryFormat = 0;
+    r->nsdqr_SizeAvailable = sizeof(struct NSDeviceQueryResult);
+    r->nsdqr_DeviceType = NSDEVTYPE_TRACKDISK;
+    r->nsdqr_DeviceSubType = 0;
+    r->nsdqr_SupportedCommands = (UWORD *)chf_nsd_commands;
+
+    ioreq->io_Actual = sizeof(struct NSDeviceQueryResult);
+    ioreq->io_Error = 0;
+    chf_complete(ioreq, _sysbase);
+}
+
+/* TD_ADDCHANGEINT (guest-side, copperhf_board.h): queues io_Data (a
+ * struct Interrupt*, trackdisk.doc's TD_ADDCHANGEINT contract) on the
+ * per-device pending list under Disable()/Enable() -- int_handler.s's
+ * chf_drain_changes() walks this same list at interrupt time on a
+ * CHF_CHANGED_MASK IRQ. Never rings the doorbell and never replies: per
+ * trackdisk.doc, "this command only returns when the handler is removed"
+ * (TD_REMCHANGEINT), so it is always effectively asynchronous regardless
+ * of what IOF_QUICK the caller passed in -- callers are required to use
+ * SendIO(), never DoIO(), with this command. */
+static void chf_do_addchangeint(struct IOStdReq *ioreq, struct CopperhfDevice *dev,
+                                 struct ExecBase *_sysbase)
+{
+    ioreq->io_Error = 0;
+    ioreq->io_Flags &= ~IOF_QUICK;
+    Disable();
+    AddTail(&dev->dev_ChangeInts, (struct Node *)ioreq);
+    Enable();
+}
+
+/* TD_REMCHANGEINT (guest-side, copperhf_board.h): finds the pending
+ * TD_ADDCHANGEINT request this call is removing. trackdisk.doc's own
+ * IO REQUEST INPUT for TD_REMCHANGEINT says "the same IO request used for
+ * TD_ADDCHANGEINT", but since that original request is still held by the
+ * device (never replied until this call), a caller cannot literally reuse
+ * the same struct for both DoIO(REMCHANGEINT) and the still-pending
+ * SendIO(ADDCHANGEINT) at once -- so match by io_Data (the Interrupt*
+ * pointer, unique per registration and the field the documented "same IO
+ * request" phrasing is really about identifying) first, and fall back to
+ * matching the request pointer itself in case a caller does literally
+ * reuse the block after its ADDCHANGEINT was already removed some other
+ * way. Removes the match under Disable()/Enable() and ReplyMsg's it --
+ * that is the only place the held ADDCHANGEINT ever completes. The
+ * REMCHANGEINT request itself then completes normally, honoring its own
+ * IOF_QUICK. */
+static void chf_do_remchangeint(struct IOStdReq *ioreq, struct CopperhfDevice *dev,
+                                 struct ExecBase *_sysbase)
+{
+    struct Node *node;
+    struct IOStdReq *pending = NULL;
+
+    Disable();
+    for (node = dev->dev_ChangeInts.lh_Head; node->ln_Succ != NULL; node = node->ln_Succ) {
+        struct IOStdReq *cand = (struct IOStdReq *)node;
+        if (cand->io_Data == ioreq->io_Data || cand == ioreq) {
+            pending = cand;
+            break;
+        }
+    }
+    if (pending != NULL)
+        Remove((struct Node *)pending);
+    Enable();
+
+    /* pending == ioreq means the caller reused the still-held ADDCHANGEINT
+     * block itself as the REMCHANGEINT request -- then the one completion
+     * below already covers it, and a separate ReplyMsg here would reply
+     * the same message twice (double-linking it on the reply port). */
+    if (pending != NULL && pending != ioreq)
+        ReplyMsg(&pending->io_Message);
+
+    ioreq->io_Error = 0;
+    chf_complete(ioreq, _sysbase);
+}
+
+/* BeginIO(dev, ioreq) -- A6=devbase, A1=ioreq. Three commands are answered
+ * entirely from the guest stub (copperhf_board.h: "the guest-side ones
+ * never reach the doorbell at all") because they need guest pointers (the
+ * NSD command table) or guest state (the pending change-interrupt list)
+ * the host cannot provide: NSCMD_DEVICEQUERY, TD_ADDCHANGEINT,
+ * TD_REMCHANGEINT. Every other command keeps the M1-M3 behaviour
+ * unchanged -- clears IOF_QUICK (the board always executes synchronously
+ * host-side, but the guest is never told so -- it must wait for the INT2
+ * completion drain like real asynchronous hardware, never inspect the
+ * request again until then) and rings CHF_DOORBELL with the request
+ * pointer as a single 32-bit write (copperhf_board.h: "a single 32-bit
+ * write commits immediately"). Never calls ReplyMsg on that path -- that
+ * is int_handler.s's job once the completion actually shows up on
+ * CHF_COMPLETE_GET. */
 void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev __asm("a6"))
 {
+    switch (ioreq->io_Command) {
+    case CHF_NSCMD_DEVICEQUERY:
+        chf_do_devicequery(ioreq, sysbase());
+        return;
+    case CHF_CMD_TD_ADDCHANGEINT:
+        chf_do_addchangeint(ioreq, dev, sysbase());
+        return;
+    case CHF_CMD_TD_REMCHANGEINT:
+        chf_do_remchangeint(ioreq, dev, sysbase());
+        return;
+    default:
+        break;
+    }
+
     ioreq->io_Flags &= ~IOF_QUICK;
     ioreq->io_Error = 0;
     *(volatile ULONG *)((UBYTE *)dev->dev_BoardBase + CHF_DOORBELL) = (ULONG)ioreq;
+}
+
+/* int_handler.s (M4): CHF_IRQ_STATUS bit 1 handler, reached by an ordinary
+ * cross-object `bsr.w` (not a hand `.long` -- see entry.s's header
+ * comment), with `dev` passed as an ORDINARY STACK ARGUMENT -- unlike the
+ * four exec vectors above (dev_open/dev_close/dev_beginio/dev_abortio),
+ * this is NOT a `__asm("a5")`-bound register parameter, and int_handler.s
+ * pushes it accordingly (`move.l a5,-(sp)` before the `bsr.w`, cleaned up
+ * by the caller after return, matching this exact toolchain's own
+ * plain-C-call convention -- confirmed against chf_mount_all's call site
+ * in resident_init, which pushes its three arguments the same way).
+ *
+ * HARD-WON: an earlier version declared this function as
+ * `chf_drain_changes(struct CopperhfDevice *dev __asm("a5"))`, matching
+ * the four exec vectors' own register-bound-parameter idiom, and had
+ * int_handler.s simply `bsr.w` with dev already sitting in a5 (no stack
+ * push) on the theory that it was "the same explicit-register-parameter
+ * convention". That theory only holds for the four exec vectors because
+ * they are EXEC's own ABI entry points (MakeLibrary's function table /
+ * BeginIO's documented A6=devbase,A1=ioreq contract) with no
+ * GCC-generated *caller* at all -- GCC only ever generates the callee side
+ * for those, and honors the register binding at the function's own entry.
+ * chf_drain_changes has no such special status: it is an ordinary internal
+ * function reached by hand-written asm, and this exact GCC target does NOT
+ * reliably honor `__asm("a5")` as an input-parameter binding for a
+ * CALLEE-SAVED register (A5, unlike the four vectors' A0/A1/D0/D1/A6,
+ * which are all caller-scratch registers) -- confirmed via objdump: the
+ * compiled prologue (`movem.l d2/a2/a5-a6,-(sp)`) preserves the CALLER's
+ * incoming A5 as any callee-saved register would, then reads the
+ * "register-bound" parameter back from `50(sp)` -- i.e. GCC silently fell
+ * back to ordinary stack-passing for this parameter, ignoring the `a5`
+ * annotation, because using a callee-saved register as a fixed parameter
+ * slot conflicts with the function's own need to preserve the caller's A5.
+ * Since int_handler.s's `bsr.w` (no push) never put anything useful at
+ * that stack slot, `dev` inside chf_drain_changes read whatever garbage
+ * happened to be there -- explaining the M4 guest test's exact failure
+ * signature (`board` computed from that garbage `dev` pointed nowhere
+ * real, so CHF_CHANGED_ACK's write never reached the actual board,
+ * CHF_CHANGED_MASK never cleared, and INT2 re-fired continuously --
+ * confirmed by a temporary diagnostic build that counted 6193+
+ * chf_drain_changes entries in 13 emulated seconds, all completing
+ * normally, all reading the same bogus non-board address). Standard
+ * C-callee register discipline applies otherwise (this function, like any
+ * ordinary library call, may trash D0/D1/A0/A1; D2-D7/A2/A5/A6 are
+ * GCC-callee-preserved on this target, so int_handler.s's own board-base
+ * register in A0 -- recomputed after this call anyway -- and A5 itself
+ * both survive).
+ *
+ * Reads CHF_CHANGED_MASK once and immediately acks exactly what it saw
+ * (copperhf_board.h: CHF_CHANGED_ACK "write a mask; clears those
+ * CHF_CHANGED_MASK bits") so a change that lands between the read and the
+ * ack still shows up as pending on the next interrupt rather than being
+ * silently swallowed, then Cause()s (exec LVO -180) every queued
+ * TD_ADDCHANGEINT Interrupt whose io_Unit (the raw unit number, this
+ * device's io_Unit convention -- copperhf_board.h) names a unit the mask
+ * has set. One pass over the pending list rather than a mask-bit outer
+ * loop: every pending node is checked against the whole mask once, which
+ * is the same amount of work and simpler. */
+void chf_drain_changes(struct CopperhfDevice *dev)
+{
+    UBYTE *board = (UBYTE *)dev->dev_BoardBase;
+    UWORD mask = *(volatile UWORD *)(board + CHF_CHANGED_MASK);
+    struct ExecBase *_sysbase;
+    struct Node *node;
+
+    if (mask == 0)
+        return;
+    *(volatile UWORD *)(board + CHF_CHANGED_ACK) = mask;
+
+    _sysbase = sysbase();
+    for (node = dev->dev_ChangeInts.lh_Head; node->ln_Succ != NULL; node = node->ln_Succ) {
+        struct IOStdReq *req = (struct IOStdReq *)node;
+        UWORD unit = (UWORD)(ULONG)req->io_Unit;
+        if (unit < CHF_NUM_UNITS && (mask & (1U << unit)))
+            Cause((struct Interrupt *)req->io_Data);
+    }
 }
 
 /* AbortIO(dev, ioreq) -- A6=devbase, A1=ioreq. The M1/M2 protocol executes

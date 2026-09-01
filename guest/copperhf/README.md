@@ -15,7 +15,16 @@ protocol in `copperhf_board.h`, served read-only from the board window's
   rt_Init) and the Open/Close/Expunge/BeginIO/AbortIO vectors. `resident_init`
   calls `mounter.c`'s `chf_mount_all` right after `AddDevice()` and strictly
   before `AddIntServer()`/`CHF_IRQ_ENABLE` (see `mounter.c`'s header comment
-  for why the ordering matters).
+  for why the ordering matters). M4 adds three guest-side BeginIO
+  interceptions that never reach the doorbell: `NSCMD_DEVICEQUERY` (fills a
+  `NSDeviceQueryResult` from a ROM-resident supported-command table),
+  `TD_ADDCHANGEINT` (queues the request on a per-device pending list under
+  Disable()/Enable()), and `TD_REMCHANGEINT` (removes and replies the held
+  ADDCHANGEINT, matching by `io_Data`). Every other M4 command (TD64/NSD
+  64-bit reads and writes, `HD_SCSICMD`, `TD_CHANGENUM`/`CHANGESTATE`/
+  `PROTSTATUS`/`EJECT`) is unchanged from the guest's point of view -- it
+  goes to the doorbell exactly like a CMD_READ, and the host (`src/
+  copperhf.rs`) answers it.
 - `mounter.c` (M3) -- the boot-time partition mounter: walks each present
   unit's RDSK/PART chain (polled I/O, its own doorbell/completion spin, no
   MsgPort involved), hand-builds a `DeviceNode` + `FileSysStartupMsg` +
@@ -32,7 +41,30 @@ protocol in `copperhf_board.h`, served read-only from the board window's
   file unchanged. Behavioural reference: LIV2/lide.device (GPL-2.0-only,
   read for behaviour only -- see the file's own header comment).
 - `int_handler.s` -- the INT2 completion-drain server (must be assembly:
-  see its own header comment on the Z-flag contract).
+  see its own header comment on the Z-flag contract). M4 adds a second
+  interrupt source on the same shared handler: `CHF_IRQ_STATUS` bit 1
+  (`CHF_CHANGED_MASK` non-zero) is drained by calling `device.c`'s
+  `chf_drain_changes(dev)`, which acks the mask at the real board and
+  `Cause()`s every pending `TD_ADDCHANGEINT` interrupt whose unit the mask
+  names. `chf_drain_changes` takes `dev` as an ordinary stack argument
+  (`int_handler.s` pushes it before `bsr.w` and pops it after) -- an
+  earlier version tried a `__asm("a5")` register-bound parameter, matching
+  the four exec vectors' own idiom, but that idiom only holds for functions
+  GCC never generates a caller for (MakeLibrary's vector table, BeginIO's
+  hardware-documented entry contract); for an ordinary internal function
+  reached by hand-written `bsr`, this GCC target silently ignores an
+  `__asm` binding to a callee-saved register (A5) and falls back to
+  stack-passing, so the unpushed `bsr` was reading garbage off the stack --
+  see `device.c`'s own header comment on `chf_drain_changes` for the full
+  post-mortem (confirmed via objdump and a temporary instrumented build
+  that counted 6000+ endlessly-retriggering interrupt entries in 13
+  emulated seconds, none of them reaching the real board).
+- `device_layout.h` -- the one M4 guest-only (not shared with the host)
+  layout constant, `CHF_DEV_BOARDBASE_OFFSET`: the byte offset of
+  `dev_BoardBase` within `struct CopperhfDevice` (`device.c`), needed by
+  `int_handler.s` because M4's `AddIntServer` `is_Data` is the whole device
+  pointer, not just the board pointer (M1-M3). Cross-checked against
+  `offsetof()` by a `_Static_assert` in `device.c` at every build.
 - `copperhf_board.h` -- the register map, shared with `src/copperhf.rs`.
 
 Because `src/harddrive.rs` guarantees every attached image (RDB or bare)
