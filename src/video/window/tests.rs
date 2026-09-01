@@ -9821,9 +9821,16 @@ mod warp_control {
         let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": false}));
         assert!(reply["note"].is_string(), "{reply}");
         assert!(!app.emu.paced(), "a capture run is never re-paced");
+        assert_eq!(
+            reply["source"], "capture",
+            "not misreported as a manual toggle"
+        );
         let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": true}));
         assert!(reply["note"].is_string());
         assert_eq!(app.warp_hold, None);
+        let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["source"], "capture");
     }
 
     #[test]

@@ -322,12 +322,24 @@ impl UaeLib {
     /// A machine reset: the latches return to the image and a pending warp
     /// request, the registry and the idle accounting go with the guest
     /// that made them. Queued debug events belong to the host observer and
-    /// survive.
+    /// survive, and the registry teardown is queued as `Cleared` events so
+    /// a subscriber that saw the registrations can reconcile.
     pub fn reset(&mut self) {
         self.image = IMAGE;
         self.pending_warp = None;
-        self.resources.clear();
+        self.clear_registry();
         self.idle = IdleAccounting::default();
+    }
+
+    /// Drop every registered resource, queueing a `Cleared` event per
+    /// entry (the guest's `debug_unregister(0)`, and a machine reset).
+    fn clear_registry(&mut self) {
+        for resource in std::mem::take(&mut self.resources) {
+            self.push_event(DebugEvent::Resource {
+                action: ResourceAction::Cleared,
+                resource,
+            });
+        }
     }
 
     /// Big-endian read of `size` bytes at `off`, any alignment; 0 when the
@@ -620,12 +632,7 @@ impl UaeLib {
 
     fn unregister_resource(&mut self, address: u32) {
         if address == 0 {
-            for resource in std::mem::take(&mut self.resources) {
-                self.push_event(DebugEvent::Resource {
-                    action: ResourceAction::Cleared,
-                    resource,
-                });
-            }
+            self.clear_registry();
             return;
         }
         if let Some(pos) = self.resources.iter().position(|r| r.address == address) {
@@ -1203,10 +1210,21 @@ mod tests {
         assert_eq!(lib.take_warp_request(), None);
         assert!(lib.resources().is_empty());
         assert!(!lib.idle().used());
+        let (events, _) = lib.take_debug_events();
         assert_eq!(
-            lib.take_debug_events().0.len(),
-            2,
-            "log + registration survive"
+            events.len(),
+            3,
+            "log + registration survive, teardown queued"
+        );
+        assert!(
+            matches!(
+                &events[2],
+                DebugEvent::Resource {
+                    action: ResourceAction::Cleared,
+                    ..
+                }
+            ),
+            "a subscriber that saw the registration hears the reset clear it"
         );
     }
 

@@ -119,7 +119,7 @@ events.unsubscribe {"events":["serial"]}
 - `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
 
 ### Speed
-- `warp.get`: Report whether warp (unpaced emulation) is on, whether the machine is paced, and who holds it (`source`: `none`, `manual`, `control`, `guest`, `launch`, `boot`, or `headless`).
+- `warp.get`: Report whether warp (unpaced emulation) is on, whether the machine is paced, and who holds it (`source`: `none`, `manual`, `control`, `guest`, `launch`, `boot`, `capture` for a windowed capture run, which is unpaced end to end, or `headless`).
 - `warp.set {"on": true|false}`: Engage or release warp. On mutes live audio like `--warp-boot`; off also cancels a pending `--run` / `--warp-boot` phase. `Cmd+W` / `Alt+W`, the guest's `warpmode(0)`, a client disconnect, or a cold `machine.reset` release a client's warp. Accepted while a resume is pending. A bridged physical floppy drive keeps the machine paced (the reply carries a `note`), and the headless server, unpaced end to end, accepts it as a no-op (`"headless": true` plus a `note`).
 
 ### Reverse execution

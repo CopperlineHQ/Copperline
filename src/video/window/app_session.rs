@@ -128,13 +128,13 @@ impl App {
         match launch.note(now, loaded.as_deref()) {
             crate::runprog::WarpLaunchOutcome::Waiting => false,
             crate::runprog::WarpLaunchOutcome::Loaded => {
-                info!("warp launch: {target} loaded; real-time pacing resumes");
+                info!("warp launch: {target} loaded; automatic warp phase ends");
                 self.finish_warp_launch();
                 self.show_osd(format!("Warp launch: {target} running"));
                 true
             }
             crate::runprog::WarpLaunchOutcome::Finished => {
-                info!("warp launch: {target} already ran to completion; real-time pacing resumes");
+                info!("warp launch: {target} already ran to completion; automatic warp phase ends");
                 self.finish_warp_launch();
                 self.show_osd(format!("Warp launch: {target} finished"));
                 true
@@ -142,7 +142,7 @@ impl App {
             crate::runprog::WarpLaunchOutcome::TimedOut => {
                 warn!(
                     "warp launch: {target} was not loaded within {:.0} emulated seconds; \
-                     resuming real-time pacing anyway",
+                     ending the automatic warp phase anyway",
                     crate::runprog::WARP_LAUNCH_TIMEOUT_SECS
                 );
                 self.finish_warp_launch();
@@ -232,14 +232,15 @@ impl App {
         match gate.note(now, storage_active) {
             crate::warpboot::WarpBootOutcome::Waiting => false,
             crate::warpboot::WarpBootOutcome::Done => {
-                info!("warp boot: done at {now:.1}s emulated; real-time pacing resumes");
+                info!("warp boot: done at {now:.1}s emulated; automatic warp phase ends");
                 self.finish_warp_boot();
                 self.show_osd("Warp boot: done");
                 true
             }
             crate::warpboot::WarpBootOutcome::TimedOut => {
                 warn!(
-                    "warp boot: storage never settled within {:.0} emulated seconds; resuming real-time pacing anyway",
+                    "warp boot: storage never settled within {:.0} emulated seconds; \
+                     ending the automatic warp phase anyway",
                     crate::warpboot::WARP_BOOT_TIMEOUT_SECS
                 );
                 self.finish_warp_boot();

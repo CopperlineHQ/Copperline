@@ -662,6 +662,10 @@ impl App {
         let paced = self.emu.paced();
         let source = if paced {
             "none"
+        } else if self.headless_capture_active() {
+            // --control-gui combined with --screenshot-after/--dump-frames:
+            // unpaced end to end with no hold or gate, not a manual toggle.
+            "capture"
         } else if let Some(hold) = self.warp_hold {
             hold.label()
         } else if self.warp_launch.as_ref().is_some_and(|l| l.engaged) {
