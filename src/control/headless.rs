@@ -936,13 +936,57 @@ fn headless_warp_value() -> Value {
     })
 }
 
+/// The token the in-process test sessions are served with.
+#[cfg(test)]
+pub(crate) const TEST_TOKEN: &str = "sesame";
+
+/// The control test machine with time travel and PC history armed the
+/// way `run()` arms them.
+#[cfg(test)]
+pub(crate) fn control_test_emulator() -> Emulator {
+    let mut emu = crate::control::test_emulator();
+    emu.enable_time_travel(64, 1);
+    emu.debug_ensure_time_travel_anchor().unwrap();
+    emu.machine.ui_set_pc_history_enabled(true);
+    emu
+}
+
+/// Serve one control connection on a background thread against a fresh
+/// test machine, for clients that live on the test thread (the MCP
+/// bridge tests): the bound address, the token, and the thread, which
+/// ends when the client disconnects or shuts the session down.
+#[cfg(test)]
+pub(crate) fn spawn_test_session() -> (
+    std::net::SocketAddr,
+    &'static str,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding a loopback listener");
+    let addr = listener
+        .local_addr()
+        .expect("resolving the listener address");
+    let handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accepting the test client");
+        let config = Config::new(":0".into());
+        let mut session = Session::new(
+            control_test_emulator(),
+            stream,
+            TEST_TOKEN,
+            &config,
+            MachineInputState::default(),
+        );
+        session.serve().expect("session should not error");
+        session.teardown();
+    });
+    (addr, TEST_TOKEN, handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::test_emulator;
     use std::io::BufRead;
 
-    const TOKEN: &str = "sesame";
+    const TOKEN: &str = TEST_TOKEN;
 
     /// A minimal JSON-RPC line client for driving a [`Session`] over
     /// loopback, with out-of-order response matching by id.
@@ -1015,14 +1059,6 @@ mod tests {
             let hello = self.result("hello", json!({"token": TOKEN}));
             assert_eq!(hello["authed"], true);
         }
-    }
-
-    fn control_test_emulator() -> Emulator {
-        let mut emu = test_emulator();
-        emu.enable_time_travel(64, 1);
-        emu.debug_ensure_time_travel_anchor().unwrap();
-        emu.machine.ui_set_pc_history_enabled(true);
-        emu
     }
 
     fn stopped_control_test_emulator() -> Emulator {

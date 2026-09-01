@@ -21,9 +21,11 @@
 //!
 //! [`Emulator`]: crate::emulator::Emulator
 
+pub mod bridge;
 pub mod catalogue;
 pub mod exec;
 pub mod headless;
+pub mod mcp;
 pub mod observe;
 pub mod proto;
 pub mod session;
