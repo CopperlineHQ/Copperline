@@ -757,6 +757,12 @@ pub struct Bus {
     /// $DD2020.
     #[serde(default)]
     pub ide_a4000: Option<crate::ide_a4000::IdeA4000>,
+    /// WinUAE-compatible uaelib trap at $F0FF60 (`[emulation] uaelib`): a
+    /// guest-callable warp toggle, debug log and resource registry
+    /// (`crate::uaelib`). None when disabled; a CDTV extended ROM at
+    /// $F00000 decodes ahead of it and hides it.
+    #[serde(default)]
+    pub uaelib: Option<crate::uaelib::UaeLib>,
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
@@ -2655,6 +2661,7 @@ impl Bus {
             gary: None,
             sdmac: None,
             ide_a4000: None,
+            uaelib: None,
             log_unmapped: None,
             akiko: None,
             cdtv: None,
@@ -3599,6 +3606,10 @@ impl Bus {
         self.gayle = Some(gayle);
     }
 
+    pub fn attach_uaelib(&mut self, uaelib: crate::uaelib::UaeLib) {
+        self.uaelib = Some(uaelib);
+    }
+
     pub fn attach_ramsey(&mut self, ramsey: crate::ramsey::Ramsey) {
         self.ramsey = Some(ramsey);
     }
@@ -3863,6 +3874,9 @@ impl Bus {
         }
         for dev in &mut self.devices {
             crate::zorro_device::ZorroDevice::reset(dev);
+        }
+        if let Some(uaelib) = self.uaelib.as_mut() {
+            uaelib.reset();
         }
         self.mem.zorro.warm_reset();
         self.hdd_led_until_cck = 0;
@@ -7325,6 +7339,17 @@ impl Bus {
             if a >= base && a.wrapping_sub(base) + 1 < mem.len() {
                 let off = a - base;
                 return ((mem[off] as u16) << 8) | mem[off + 1] as u16;
+            }
+        }
+        // The uaelib trap stub (after the ROM windows: a CDTV extended ROM
+        // at $F00000 hides it on the real bus too).
+        if crate::uaelib::UaeLib::decodes(addr) {
+            if let Some(word) = self
+                .uaelib
+                .as_ref()
+                .and_then(|u| u.peek_word(addr.wrapping_sub(crate::uaelib::UAELIB_BASE)))
+            {
+                return word;
             }
         }
         0

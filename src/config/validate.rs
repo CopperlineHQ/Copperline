@@ -145,6 +145,7 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
             warp_until,
+            uaelib: raw.emulation.uaelib.unwrap_or(defaults.emulation.uaelib),
             rewind: raw.emulation.rewind.unwrap_or(defaults.emulation.rewind),
             rewind_budget_mb: match raw.emulation.rewind_budget_mb {
                 None => defaults.emulation.rewind_budget_mb,

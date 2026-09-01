@@ -529,6 +529,47 @@ impl Emulator {
         self.machine.bus_mut()
     }
 
+    /// Whether the WinUAE-compatible uaelib trap is fitted
+    /// (`[emulation] uaelib`, `crate::uaelib`).
+    pub fn uaelib_fitted(&self) -> bool {
+        self.bus().uaelib.is_some()
+    }
+
+    /// The guest's latest `warpmode()` request through the uaelib trap,
+    /// if any since the last take.
+    pub fn take_uaelib_warp_request(&mut self) -> Option<bool> {
+        self.bus_mut()
+            .uaelib
+            .as_mut()
+            .and_then(|u| u.take_warp_request())
+    }
+
+    /// Queued guest debug events (uaelib functions 86 and 88) and the
+    /// number dropped since the last take.
+    pub fn take_uaelib_debug_events(&mut self) -> (Vec<crate::uaelib::DebugEvent>, u64) {
+        self.bus_mut()
+            .uaelib
+            .as_mut()
+            .map(|u| u.take_debug_events())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_uaelib_debug_events(&mut self) {
+        if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
+            uaelib.clear_debug_events();
+        }
+    }
+
+    /// The resources the guest registered through the uaelib trap.
+    pub fn uaelib_resources(&self) -> &[crate::uaelib::DebugResource] {
+        self.bus().uaelib.as_ref().map_or(&[], |u| u.resources())
+    }
+
+    /// The guest's idle-marker accounting, when the trap is fitted.
+    pub fn uaelib_idle(&self) -> Option<&crate::uaelib::IdleAccounting> {
+        self.bus().uaelib.as_ref().map(|u| u.idle())
+    }
+
     /// Suspend only host live audio output. Emulated Paula time still
     /// advances whenever the machine is stepped.
     pub fn set_live_audio_suspended(&mut self, suspended: bool) {
@@ -839,6 +880,9 @@ impl Emulator {
         let bus = self.bus_mut();
         bus.set_live_audio_discard(on);
         bus.paula.set_speculative_host_quiet(on);
+        if let Some(uaelib) = bus.uaelib.as_mut() {
+            uaelib.set_speculative_host_quiet(on);
+        }
     }
 
     /// Serialize the machine at a run-ahead anchor boundary. Same-process
@@ -3071,6 +3115,20 @@ pub fn build_machine(
     // identify a Fat Gary. Fitting one without the other identifies as neither.
     if cfg.gate_array.is_fat_gary() {
         bus.attach_gary(crate::gary::Gary::new());
+    }
+    // The WinUAE-compatible uaelib trap at $F0FF60 (crate::uaelib). Fitted
+    // even when a $F00000 extended ROM hides it: the decode order handles
+    // both, and a later ROM reload may take the extended ROM away.
+    if cfg.emulation.uaelib {
+        let shadowed = !bus.mem.extended_rom.is_empty() && bus.mem.extended_rom_base == 0x00F0_0000;
+        bus.attach_uaelib(crate::uaelib::UaeLib::new());
+        if shadowed {
+            info!("uaelib: trap at $F0FF60 fitted but hidden behind the $F00000 extended ROM");
+        } else {
+            info!(
+                "uaelib: WinUAE-compatible trap at $F0FF60 (guest warp toggle, debug log, resources)"
+            );
+        }
     }
     if !devices.is_empty() {
         bus.attach_devices(devices);

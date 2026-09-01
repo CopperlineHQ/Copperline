@@ -101,6 +101,14 @@ pacing_budget = "cycles"
 # for a setup whose boot time is known (mutually exclusive with warp_boot).
 # warp_until = 12.0
 
+# The WinUAE-compatible "uaelib" trap at $F0FF60 (on by default): a guest
+# program can toggle warp speed (warpmode() in the vscode-amiga-debug
+# template), log debug text to the host console and the control protocol
+# (KPrintF), and register its bitmaps, palettes and copper lists for the
+# debugger (see docs/guide/run.md). Set false for a machine with nothing at
+# $F0FF60. A CDTV's extended ROM occupies $F00000 and hides the trap anyway.
+# uaelib = true
+
 # Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
 # item) can step the machine back through it. Off by default because it is
 # not free: every rewind_interval_frames the whole machine is serialized, and

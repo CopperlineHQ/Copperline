@@ -347,7 +347,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      hardware. Raw track images
 //      (`FloppyTrackImage::RawMfm`) and cached revolutions (`TrackRev`)
 //      gained the mastered cell-rate profile of IPF density models.
-pub const STATE_VERSION: u32 = 72;
+//  73: the bus gained the WinUAE-compatible uaelib trap (`uaelib`): its
+//      result/doorbell latch image, the pending warp request, the debug
+//      event queue, the resource registry and the idle accounting travel
+//      with the state, so run-ahead and rewind restore them together with
+//      the guest state that produced them.
+pub const STATE_VERSION: u32 = 73;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
