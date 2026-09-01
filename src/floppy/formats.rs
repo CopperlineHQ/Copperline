@@ -44,7 +44,18 @@ pub(super) enum FloppyTrackImage {
         revolutions: u8,
         legacy_sync: Option<u16>,
         bitcell_ns: Option<Vec<u32>>,
+        /// The cell-rate profile of a mastered protection track (IPF density
+        /// models), as the runs where the rate changes; `None` is uniform.
+        density: Option<Vec<DensitySpan>>,
     },
+}
+
+/// From `start_bit` until the next span (or the index), cells are written at
+/// `permille` / 1000 of the nominal cell time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DensitySpan {
+    pub(crate) start_bit: u32,
+    pub(crate) permille: u16,
 }
 
 impl FloppyImage {
@@ -119,12 +130,14 @@ impl FloppyImage {
                         bit_len,
                         revolutions,
                         legacy_sync,
+                        density,
                         ..
                     } => Some(raw_mfm_track_stream(
                         words,
                         *bit_len,
                         *revolutions,
                         legacy_sync.is_some(),
+                        density.as_deref().unwrap_or(&[]),
                     )),
                 }
             }
@@ -151,6 +164,7 @@ pub(super) fn raw_mfm_track_stream(
     bit_len: u32,
     revolutions: u8,
     legacy_sync: bool,
+    density: &[DensitySpan],
 ) -> TrackStream {
     let rev_bits = (bit_len as usize).max(1);
     let words_per_rev = rev_bits.div_ceil(16).max(1);
@@ -172,11 +186,20 @@ pub(super) fn raw_mfm_track_stream(
         let rev_words = words[start..end].to_vec();
         let this_bits = rev_bits.min(rev_words.len() * 16);
         let word_cck = FloppyController::word_cck_for_track_words(rev_words.len());
-        revs.push(TrackRev::new(rev_words, this_bits, word_cck));
+        // The mastered cell-rate profile is a property of the track, so every
+        // captured revolution of it carries the same one.
+        revs.push(TrackRev::with_density(
+            rev_words, this_bits, word_cck, density,
+        ));
     }
     if revs.is_empty() {
         let word_cck = FloppyController::word_cck_for_track_words(words.len());
-        revs.push(TrackRev::new(words.to_vec(), words.len() * 16, word_cck));
+        revs.push(TrackRev::with_density(
+            words.to_vec(),
+            words.len() * 16,
+            word_cck,
+            density,
+        ));
     }
     TrackStream { revs }
 }
@@ -347,6 +370,7 @@ pub(super) fn decode_uae_extended_adf(data: &[u8]) -> Result<FloppyImageData> {
                 revolutions,
                 legacy_sync: None,
                 bitcell_ns: None,
+                density: None,
             }),
             other => {
                 ensure!(
@@ -439,6 +463,7 @@ pub(super) fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageD
                 revolutions: 1,
                 legacy_sync: Some(sync),
                 bitcell_ns: None,
+                density: None,
             }));
         }
     }
@@ -458,10 +483,21 @@ pub(super) fn decode_ipf_image(data: &[u8]) -> Result<FloppyImageData> {
                 bit_len: track.bit_len,
                 // The format describes one canonical revolution, and its cell
                 // rate is the nominal 2 us that `word_cck_for_track_words`
-                // already paces a raw track at.
+                // already paces a raw track at -- except where the track's
+                // density model marks sectors mastered at another rate.
                 revolutions: 1,
                 legacy_sync: None,
                 bitcell_ns: None,
+                density: (!track.density.is_empty()).then(|| {
+                    track
+                        .density
+                        .iter()
+                        .map(|&(start_bit, permille)| DensitySpan {
+                            start_bit,
+                            permille,
+                        })
+                        .collect()
+                }),
             })
         })
         .collect();
@@ -650,6 +686,7 @@ pub(super) fn decode_scp_track(
         revolutions: decoded_revolutions,
         legacy_sync: None,
         bitcell_ns: Some(all_bitcell_ns),
+        density: None,
     })
 }
 

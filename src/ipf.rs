@@ -98,6 +98,19 @@ const SIGNAL_2US_CELLS: u32 = 1;
 // the track to defeat copiers, and needs a per-protection timing model.
 const DENSITY_NOISE: u32 = 1;
 const DENSITY_AUTO: u32 = 2;
+// The mastered cell-rate profiles: which blocks of the track were written
+// with cells longer or shorter than nominal, and by how much, so a loader
+// timing them can tell an original from a copy. Modelled after the CAPS
+// library's `GenerateCLA`/`GenerateSLA`/`GenerateABA` family, which scales
+// each byte's cell time in per-mille of nominal.
+const DENSITY_COPYLOCK_AMIGA: u32 = 3;
+const DENSITY_COPYLOCK_AMIGA_NEW: u32 = 4;
+const DENSITY_COPYLOCK_ST: u32 = 5;
+const DENSITY_SPEEDLOCK_AMIGA: u32 = 6;
+const DENSITY_SPEEDLOCK_AMIGA_OLD: u32 = 7;
+const DENSITY_BRIERLEY_AMIGA: u32 = 8;
+const DENSITY_BRIERLEY_AMIGA_KEY: u32 = 9;
+const DENSITY_NOMINAL_PERMILLE: i32 = 1000;
 
 // Data-stream sample types.
 const DATA_SYNC: u8 = 1;
@@ -116,11 +129,15 @@ const BLOCK_FLAG_BWGAP: u32 = 1 << 1;
 const BLOCK_FLAG_BIT_LENGTHS: u32 = 1 << 2;
 
 /// One decoded revolution: packed MFM words, MSB first, and the exact bit
-/// length it wraps at.
+/// length it wraps at. `density` is the track's mastered cell-rate profile as
+/// `(start_bit, permille)` spans in ascending bit order, each holding until
+/// the next one: cells from `start_bit` are written at `permille` / 1000 of
+/// the nominal cell time. Empty for a track written at one rate throughout.
 #[derive(Debug)]
 pub struct IpfTrack {
     pub words: Vec<u16>,
     pub bit_len: u32,
+    pub density: Vec<(u32, u16)>,
 }
 
 /// True when `data` opens with the IPF/CAPS file signature.
@@ -166,7 +183,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<Option<IpfTrack>>> {
     ensure!(!images.is_empty(), "IPF image describes no tracks");
 
     let mut tracks: Vec<Option<IpfTrack>> = (0..MAX_TRACKS).map(|_| None).collect();
-    let mut unsupported_density = None;
+    let mut unknown_density = None;
     for imge in &images {
         let index = imge.track_index()?;
         ensure!(
@@ -175,8 +192,8 @@ pub fn decode(data: &[u8]) -> Result<Vec<Option<IpfTrack>>> {
             imge.cylinder,
             imge.head
         );
-        if let Some(density) = imge.unsupported_density() {
-            unsupported_density.get_or_insert(density);
+        if let Some(density) = imge.unknown_density() {
+            unknown_density.get_or_insert(density);
         }
         let area = areas
             .iter()
@@ -187,17 +204,14 @@ pub fn decode(data: &[u8]) -> Result<Vec<Option<IpfTrack>>> {
         })?;
     }
 
-    if let Some(density) = unsupported_density {
+    if let Some(density) = unknown_density {
         // The cells are still decoded, and every byte of them is right; it is
         // only the varying cell *rate* that is missing, so the disk loads and
         // just the timing check of the protection sees the wrong answer.
-        // TODO: model the per-protection density profiles (Copylock,
-        // Speedlock, Brierley) as a per-cell bitcell_ns track profile, which
-        // FloppyTrackImage::RawMfm can already carry.
         warn!(
-            "IPF image uses cell-density model {density}, whose variable cell timing is not \
-             modelled; the track data is decoded with uniform 2 us cells, so a protection \
-             that measures cell timing may not pass"
+            "IPF image uses cell-density model {density}, which Copperline does not know; the \
+             track data is decoded with uniform 2 us cells, so a protection that measures \
+             cell timing may not pass"
         );
     }
 
@@ -389,10 +403,11 @@ impl Imge {
         Ok(index)
     }
 
-    /// The density models past `AUTO` vary the cell rate across the track.
-    fn unsupported_density(&self) -> Option<u32> {
+    /// A density model this decoder has no cell-rate profile for.
+    fn unknown_density(&self) -> Option<u32> {
         match self.density {
             DENSITY_NOISE | DENSITY_AUTO => None,
+            DENSITY_COPYLOCK_AMIGA..=DENSITY_BRIERLEY_AMIGA_KEY => None,
             other => Some(other),
         }
     }
@@ -432,6 +447,9 @@ struct Block {
     gap_offset: usize,
     flags: u32,
     gap_value: u8,
+    /// The whole gap-value word: block 0's doubles as the density key of the
+    /// Brierley density-key model.
+    gap_value_word: u32,
     data_offset: usize,
 }
 
@@ -455,6 +473,7 @@ impl Block {
             },
             // The gap fill value is a byte held in a big-endian word.
             gap_value: d[27],
+            gap_value_word: read_be_u32(&d[24..28]),
             data_offset: read_be_u32(&d[28..32]) as usize,
         })
     }
@@ -506,10 +525,113 @@ fn decode_track(imge: &Imge, area: Option<&[u8]>, info: &Info) -> Result<Option<
         }
     }
 
+    let flags_meaningful = info.block_flags_meaningful();
+    let blocks = (0..imge.block_count as usize)
+        .map(|index| Block::parse(area, index, flags_meaningful))
+        .collect::<Result<Vec<_>>>()?;
+    let density = density_profile(imge, &blocks, start, track_bits);
+
     Ok(Some(IpfTrack {
         words,
         bit_len: imge.track_bits,
+        density,
     }))
+}
+
+/// The track's mastered cell-rate profile as `(start_bit, permille)` spans on
+/// the revolution as rotated to the index, or empty when every cell is
+/// nominal. The profiles are the CAPS library's own (`GenerateCLA`,
+/// `GenerateSLA`, `GenerateABA` and their variants), which weight each block's
+/// cell time in per-mille of nominal:
+///
+/// - Copylock Amiga slows and speeds three consecutive sectors (blocks 4-6 on
+///   the original scheme, 0-2 on the newer one) by -5.5%, -0.5% and +4.5%,
+///   each run starting at the gap that precedes its block. A loader reads
+///   two of them byte by byte, counting how often it polled between bytes,
+///   and passes only if their counts differ by the few per cent the mastered
+///   rates put between them;
+/// - Copylock ST writes block 5 5% slow; Speedlock writes block 1 10% slow
+///   and block 2 10% fast (the older variant block 1 5% slow); Brierley steps
+///   blocks 1, 2, 4, 5 and 6 through +10%, +5%, -5%, -10%, -15%; and the
+///   Brierley density-key model takes a bit per block from block 0's gap
+///   value word, 5% fast where set and 5% slow where clear.
+fn density_profile(
+    imge: &Imge,
+    blocks: &[Block],
+    start: usize,
+    track_bits: usize,
+) -> Vec<(u32, u16)> {
+    // Per affected block: the per-mille delta, and whether the run begins at
+    // the gap that precedes the block rather than at the block itself.
+    let deltas: Vec<(usize, i32, bool)> = match imge.density {
+        DENSITY_COPYLOCK_AMIGA => vec![(4, -55, true), (5, -5, true), (6, 45, true)],
+        DENSITY_COPYLOCK_AMIGA_NEW => vec![(0, -55, true), (1, -5, true), (2, 45, true)],
+        DENSITY_COPYLOCK_ST => vec![(5, 50, false)],
+        DENSITY_SPEEDLOCK_AMIGA => vec![(1, 100, false), (2, -100, false)],
+        DENSITY_SPEEDLOCK_AMIGA_OLD => vec![(1, 50, false)],
+        DENSITY_BRIERLEY_AMIGA => vec![
+            (1, 100, false),
+            (2, 50, false),
+            (4, -50, false),
+            (5, -100, false),
+            (6, -150, false),
+        ],
+        DENSITY_BRIERLEY_AMIGA_KEY => {
+            let key = blocks.first().map_or(0, |block| block.gap_value_word);
+            (1..blocks.len())
+                .map(|blk| {
+                    let mask = 1u32.checked_shl(blk as u32 - 1).unwrap_or(0);
+                    (blk, if key & mask != 0 { -50 } else { 50 }, false)
+                })
+                .collect()
+        }
+        _ => return Vec::new(),
+    };
+    if track_bits == 0 || blocks.is_empty() {
+        return Vec::new();
+    }
+
+    // Where each block begins in the stream as laid out from block 0; its
+    // gap follows it.
+    let mut block_starts = Vec::with_capacity(blocks.len());
+    let mut pos = 0usize;
+    for block in blocks {
+        block_starts.push(pos);
+        pos += block.block_bits + block.gap_bits;
+    }
+    let mut weights = vec![DENSITY_NOMINAL_PERMILLE; track_bits];
+    for (blk, delta, from_preceding_gap) in deltas {
+        let Some(&block_start) = block_starts.get(blk) else {
+            continue;
+        };
+        let lead = if from_preceding_gap {
+            blocks[(blk + blocks.len() - 1) % blocks.len()].gap_bits
+        } else {
+            0
+        };
+        let from = block_start as isize - lead as isize;
+        let to = (block_start + blocks[blk].block_bits) as isize;
+        for i in from..to {
+            weights[i.rem_euclid(track_bits as isize) as usize] += delta;
+        }
+    }
+
+    // Rotate to the index as the cells were, then keep only the changes.
+    let mut spans: Vec<(u32, u16)> = Vec::new();
+    for bit in 0..track_bits {
+        let weight = weights[(bit + track_bits - start) % track_bits];
+        let permille = weight.clamp(1, i32::from(u16::MAX)) as u16;
+        if spans.last().is_none_or(|&(_, last)| last != permille) {
+            spans.push((bit as u32, permille));
+        }
+    }
+    if spans
+        .iter()
+        .all(|&(_, permille)| i32::from(permille) == DENSITY_NOMINAL_PERMILLE)
+    {
+        return Vec::new();
+    }
+    spans
 }
 
 /// Encode every block of a track back to back, returning the cells and the
@@ -1409,6 +1531,120 @@ pub(crate) mod tests {
 
         let err = decode(&image_bytes).expect_err("an HD cell rate is not an Amiga DD disk");
         assert!(format!("{err:#}").contains("signal type"));
+    }
+
+    /// Eleven blocks with a gap after each, in the shape of a mastered
+    /// protection track, under the given density model.
+    fn density_ipf_image(density: u32, gap_bits: usize, start_bit: u32) -> Vec<u8> {
+        let payload: Vec<u8> = (0..SECTOR_BYTES).map(|i| (i % 251) as u8).collect();
+        let mut stream = sample(DATA_GAP, 2, &[0, 0]);
+        stream.extend_from_slice(&sample(DATA_SYNC, 4, &[0x44, 0x89, 0x44, 0x89]));
+        stream.extend_from_slice(&sample(DATA_DATA, SECTOR_BYTES, &payload));
+        stream.push(0);
+
+        let descriptors = SECTORS * BLOCK_DESCRIPTOR_LEN;
+        let mut area = Vec::new();
+        for sector in 0..SECTORS {
+            area.extend_from_slice(&block_descriptor(
+                BLOCK_BITS,
+                gap_bits,
+                0,
+                0,
+                0,
+                descriptors + sector * stream.len(),
+            ));
+        }
+        // Block 0's gap-value word doubles as the Brierley density key: make
+        // it a recognisable bit pattern.
+        area[24..28].copy_from_slice(&0x0000_0155u32.to_be_bytes());
+        for _ in 0..SECTORS {
+            area.extend_from_slice(&stream);
+        }
+
+        let track = Track {
+            density,
+            start_bit,
+            data_bits: (SECTORS * BLOCK_BITS) as u32,
+            gap_bits: (SECTORS * gap_bits) as u32,
+            track_bits: (SECTORS * (BLOCK_BITS + gap_bits)) as u32,
+            blocks: SECTORS as u32,
+            ..Track::default()
+        };
+        image(track, &area, ENCODER_CAPS, 1)
+    }
+
+    /// Copylock's key sectors are mastered at other cell rates: the CAPS
+    /// profile speeds block 4 by 5.5%, block 5 by 0.5% and slows block 6 by
+    /// 4.5%, each run beginning at the gap before its block and ending with
+    /// the block's own cells.
+    #[test]
+    fn copylock_density_profile_covers_the_key_sectors_and_their_leading_gaps() {
+        const GAP: usize = 720;
+        let block = (BLOCK_BITS + GAP) as u32;
+        let track = only_track(&density_ipf_image(DENSITY_COPYLOCK_AMIGA, GAP, 0));
+        assert_eq!(
+            track.density,
+            vec![
+                (0, 1000),
+                (4 * block - GAP as u32, 945),
+                (5 * block - GAP as u32, 995),
+                (6 * block - GAP as u32, 1045),
+                (6 * block + BLOCK_BITS as u32, 1000),
+            ]
+        );
+        // The profile sits on the revolution as rotated to the index, like
+        // the cells do.
+        let rotated = only_track(&density_ipf_image(DENSITY_COPYLOCK_AMIGA, GAP, 1176));
+        assert_eq!(
+            rotated.density,
+            vec![
+                (0, 1000),
+                (4 * block - GAP as u32 + 1176, 945),
+                (5 * block - GAP as u32 + 1176, 995),
+                (6 * block - GAP as u32 + 1176, 1045),
+                (6 * block + BLOCK_BITS as u32 + 1176, 1000),
+            ]
+        );
+    }
+
+    /// The other models weight the block's cells alone; the density-key one
+    /// takes a bit per block from block 0's gap value word.
+    #[test]
+    fn speedlock_and_brierley_density_profiles_weight_the_blocks_alone() {
+        const GAP: usize = 720;
+        let block = (BLOCK_BITS + GAP) as u32;
+        let speedlock = only_track(&density_ipf_image(DENSITY_SPEEDLOCK_AMIGA, GAP, 0));
+        assert_eq!(
+            speedlock.density,
+            vec![
+                (0, 1000),
+                (block, 1100),
+                (block + BLOCK_BITS as u32, 1000),
+                (2 * block, 900),
+                (2 * block + BLOCK_BITS as u32, 1000),
+            ]
+        );
+
+        // Key 0x155 = bits 0, 2, 4, 6, 8 set: blocks 1, 3, 5, 7, 9 fast, the
+        // rest slow.
+        let keyed = only_track(&density_ipf_image(DENSITY_BRIERLEY_AMIGA_KEY, GAP, 0));
+        let mut expected = vec![(0u32, 1000u16)];
+        for blk in 1..SECTORS as u32 {
+            let permille = if blk % 2 == 1 { 950 } else { 1050 };
+            expected.push((blk * block, permille));
+            expected.push((blk * block + BLOCK_BITS as u32, 1000));
+        }
+        assert_eq!(keyed.density, expected);
+    }
+
+    /// A uniform track has no profile, and a density model this decoder does
+    /// not know still decodes -- at the nominal rate throughout.
+    #[test]
+    fn uniform_and_unknown_density_models_decode_without_a_profile() {
+        assert!(only_track(&amigados_ipf_image()).density.is_empty());
+        let unknown = only_track(&density_ipf_image(42, 720, 0));
+        assert!(unknown.density.is_empty());
+        assert_eq!(unknown.bit_len as usize, SECTORS * (BLOCK_BITS + 720));
     }
 
     /// Files the CAPS encoder wrote spend the flags word on other fields, so
