@@ -2548,6 +2548,9 @@ function enterCssFullscreen() {
   setStyles(canvas, fsCanvasStyles(), true);
   document.documentElement.style.overflow = 'hidden';
   updateFsUi();
+  // No window resize accompanies the pinned fallback: redraw for the
+  // element's new size now (the observer would follow, a frame later).
+  redrawForElementSize();
 }
 
 function exitCssFullscreen() {
@@ -2559,6 +2562,7 @@ function exitCssFullscreen() {
   // Clearing the border shorthand above also cleared the monitor path's
   // border hiding; put the windowed chrome back the way the mode wants.
   syncShellChrome();
+  redrawForElementSize();
 }
 
 function exitFullscreen() {
@@ -2603,6 +2607,7 @@ document.addEventListener('fullscreenchange', () => {
   syncEscapeLock();
   updateFsUi();
   syncShellChrome();
+  redrawForElementSize();
 });
 
 // --- on-screen keyboard ----------------------------------------------------
@@ -2898,6 +2903,8 @@ function ensureKeyboard() {
 function publishKbdHeight(px) {
   document.documentElement.style.setProperty('--cl-kbd-h', `${px}px`);
   placeOsd();
+  // In fullscreen the strip takes its share of the element's box.
+  redrawForElementSize();
 }
 
 function buildKeyCap(grid, spec, x, y) {
@@ -3851,13 +3858,20 @@ function togglePause() {
 // buffer read and puts it back -- each flip re-presents the held frame
 // in place without stepping the machine, and blobOf's executor reads
 // the buffer synchronously (only the canvas encode is async), so the
-// flip is invisible to the page.
+// flip is invisible to the page. Integer scaling is dropped the same
+// way: it presents a 60 Hz aperture at its own woven rows for the draw's
+// sake, and a capture keeps the smooth presentation's shape whatever
+// the page draws, as the desktop's captures keep the aspect's own shape
+// whatever its window draws.
 function withTvAperture(f) {
   const bezel = monitorBezelOn();
+  const integer = layoutSupported && scalingMode === 'integer';
   if (bezel) emu.set_monitor_bezel?.(false);
+  if (integer) emu.set_scaling?.('smooth');
   try {
     return f();
   } finally {
+    if (integer) emu.set_scaling?.('integer');
     if (bezel) emu.set_monitor_bezel?.(true);
   }
 }
@@ -4989,8 +5003,10 @@ overscanSel.addEventListener('change', () => setOverscanMode(overscanSel.value, 
 // presentation-only choices remembered per browser like overscan, never
 // observable by the guest, and both stand down while a bezel mode's
 // fixed opening owns the glass, as the desktop's do. Hidden on a bundle
-// with no layout to ask for (the class methods exist as soon as the
-// module is imported).
+// with no layout to ask for, and shown explicitly on one that has (the
+// class methods exist as soon as the module is imported): a shell ships
+// the hooks hidden, like #devkeyboard, so a page deployed ahead of the
+// glue never shows a dead control.
 const SCALING_STORAGE_KEY = 'copperline-scaling';
 const SCALING_MODES = ['smooth', 'integer'];
 const SCALING_LABELS = { smooth: 'Smooth', integer: 'Integer' };
@@ -5015,10 +5031,8 @@ const autocropToggle = autocropShellToggle ?? buildToggleControl('autocrop', 'Au
 autocropToggle.checked = false;
 autocropToggle.title =
   'Crop to the display the program actually draws instead of the full TV aperture.';
-if (!layoutSupported) {
-  (scalingShellSel ?? scalingSel.parentElement).hidden = true;
-  (autocropShellToggle ?? autocropToggle.parentElement).hidden = true;
-}
+(scalingShellSel ?? scalingSel.parentElement).hidden = !layoutSupported;
+(autocropShellToggle ?? autocropToggle.parentElement).hidden = !layoutSupported;
 let scalingMode = 'smooth';
 let autocropOn = false;
 
@@ -6679,13 +6693,25 @@ presentMonitorOff();
 window.addEventListener('load', () => {
   if (!emu) presentMonitorOff();
 });
-window.addEventListener('resize', () => {
-  // The 2D fallback's plain blit is the page's CSS scaling and needs no
-  // redraw; its layout draw follows the element like the monitor path.
+// Redraw the held picture whenever the element changes size: the monitor
+// path's backing store and a layout draw follow the element, so a stale
+// store would be CSS-stretched over the new size -- and an integer draw
+// would no longer be pixel-exact -- until the next changed frame, which a
+// paused or static screen never sends. The window's own resize is one
+// such change; the element also changes size without one (the CSS
+// fullscreen fallback pinning it to the viewport, the on-screen keyboard
+// strip taking its share, the shell's sidebar opening beside it), which
+// the observer catches -- the page's own fullscreen and keyboard paths
+// also call this directly, so they redraw at once rather than a frame
+// later. The 2D fallback's plain blit is the page's CSS scaling and
+// needs no redraw; its layout draw follows the element too.
+function redrawForElementSize() {
   if (!monitorGl && !subRectModeActive()) return;
   if (!emu) presentMonitorOff();
   else if (running) presentFrame(true);
-});
+}
+window.addEventListener('resize', redrawForElementSize);
+new ResizeObserver(redrawForElementSize).observe(canvas);
 
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:

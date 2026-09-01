@@ -38,8 +38,10 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
     With **Integer** scaling the whole-number fit is retaken against the crop, so a 200-line
     game usually earns a full multiple more. In fullscreen the picture may use the whole
     screen rather than a 4:3 box. Both settings stand down while a monitor bezel is drawn
-    (the frame's fixed opening owns the glass), as on the desktop, and never affect
-    screenshots, which capture the presentation buffer.
+    (the frame's fixed opening owns the glass), as on the desktop. Screenshots capture the
+    presentation buffer at its smooth shape: the capture drops integer scaling (and a drawn
+    bezel) around the buffer read, as the desktop's captures keep the aspect's own shape
+    whatever its window draws.
   - **Screen tint:** Monochrome simulation presets (Black & White, Green, Amber, Sepia).
   - **Deinterlacing:** Motion-adaptive field merging for interlaced display modes.
   - **Phosphor persistence:** Simulates CRT phosphor decay trails.
@@ -192,14 +194,16 @@ When using the bundled `try.js` harness, standard UI elements can be connected b
 - `#monitor`: `<select>` for CRT shader and bezel style.
 - `#overscan`: `<select>` for TV aperture vs. full overscan view.
 - `#scaling`: `<select>` for smooth vs. integer scaling (`smooth` / `integer`).
-- `#autocrop`: `<input type="checkbox">` for the autocrop presentation.
+- `#autocrop`: `<input type="checkbox">` for the autocrop presentation. A shell can ship
+  both with the `hidden` attribute; the glue un-hides them on a bundle that supports them.
 - `#df0list` / `#kicklist`: `<select>` elements populated from remote disk/ROM manifests.
 - `#pause`, `#screenshot`, `#keyboard`: Action button triggers.
 
 (browser-page-config)=
-### Page configuration file (`config.json`)
+### Page configuration file (`copperline.json`)
 
-You can provide default settings via a `config.json` file in the web root:
+You can provide default settings via a `copperline.json` file next to the page (the glue
+fetches `./copperline.json`):
 
 ```json
 {
