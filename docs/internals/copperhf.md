@@ -124,14 +124,15 @@ The stub is V34-clean: no V36+ exec/expansion calls anywhere on this path,
 
 - **M1** (committed): board, register protocol, `[copperhf]` config,
   synchronous I/O. No boot ROM.
-- **M2** (this page): boot ROM with a working device stub, as described
+- **M2** (committed): boot ROM with a working device stub, as described
   above. A program that already knows the device's name can
-  `OpenDevice("copperhf.device", unit, ...)` and drive it. **No partition
-  mounter**: nothing here makes an attached unit appear as a mounted
-  volume or an Early Startup boot candidate.
-- **M3** (planned): the boot ROM grows an RDSK/PART walk and a `DosEnvec`-
-  driven mounter, so attached units autoboot and mount like `[ide]`/
-  `[scsi]`/`[lide]` units do today.
+  `OpenDevice("copperhf.device", unit, ...)` and drive it.
+- **M3** (this page): the boot ROM's mounter (`guest/copperhf/mounter.c`):
+  a polled-I/O RDSK/PART walk building a `DeviceNode` +
+  `FileSysStartupMsg` + `DosEnvec` per partition, added via `AddBootNode`
+  (V36+) or the hand-built `eb_MountList` fallback (V34), plus FSHD/LSEG
+  loading into `FileSystem.resource` -- so attached units autoboot and
+  mount like `[ide]`/`[scsi]`/`[lide]` units do.
 - **M4** (planned): TD64/NSD/`HD_SCSICMD` command coverage, disk-change
   handling.
 - **M5** (planned): asynchronous I/O on a worker thread; the guest-visible

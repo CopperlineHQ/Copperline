@@ -1757,13 +1757,15 @@ instead.
 
 The guest sees `copperhf.device` with unit numbers 0-6, matching the
 `unitN` key numbering. The board carries a boot ROM (a DiagArea plus a
-working `copperhf.device` exec-device stub), so a program that already
-knows the device's name can `OpenDevice("copperhf.device", unit, ...)` and
-drive it -- but nothing yet mounts an attached unit as a DOS volume or
-offers it in the Early Startup boot menu; that arrives with the partition
-mounter in a later milestone (see `COPPERHF-DEVICE-PLAN.md` in the
-repository root). See [](../internals/copperhf) for the board, the register
-protocol, and the device stub's current behaviour in full.
+working `copperhf.device` exec-device stub and partition mounter), so a
+program that already knows the device's name can
+`OpenDevice("copperhf.device", unit, ...)` and drive it directly, and an
+attached unit's partitions also RDB-mount and autoboot at boot time like
+any other controller's -- the mounter walks each unit's RDSK/PART chain
+(synthesizing one from a bare partition hardfile exactly as `[ide]`/
+`[scsi]`/`[lide]` do, see above) and offers its bootable partitions the same
+way. See [](../internals/copperhf) for the board, the register protocol,
+and the boot ROM's current behaviour in full.
 
 ## `[lide]` -- a lide.device-compatible Zorro II IDE board
 
