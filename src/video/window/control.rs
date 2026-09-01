@@ -219,6 +219,12 @@ impl App {
                         if matches!(op, CoreOp::HeatMapSet { .. }) {
                             self.heatmap_armed_by_panel = false;
                         }
+                        // profile.stop disarms the analyzer it armed; an
+                        // open pane still wants its trace, so re-arm for it.
+                        if matches!(op, CoreOp::ProfileStop) && self.frame_analyzer_panel.is_some()
+                        {
+                            self.emu.bus_mut().set_frame_analyzer_enabled(true);
+                        }
                         proto::ok_line(&id, value)
                     }
                     Err(err) => proto::err_line(&id, &err),

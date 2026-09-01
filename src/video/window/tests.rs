@@ -9656,6 +9656,64 @@ mod warp_control {
         app.emu.bus_mut().attach_uaelib(lib);
     }
 
+    fn profile_options(dir: &std::path::Path) -> crate::profile::ProfileOptions {
+        crate::profile::ProfileOptions {
+            path: dir.to_path_buf(),
+            frames: 100,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        }
+    }
+
+    #[test]
+    fn closing_the_analyzer_panel_keeps_a_profiling_session_armed() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.open_frame_analyzer();
+        assert!(app.emu.bus().frame_analyzer_enabled());
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "the capture adopts the arming instead of losing its trace"
+        );
+        let status = app
+            .emu
+            .profile_stop(serde_json::Value::Null, serde_json::json!([]))
+            .unwrap();
+        assert_eq!(status["active"], false);
+        assert!(
+            !app.emu.bus().frame_analyzer_enabled(),
+            "stop disarms the adopted arming"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_stop_rearms_an_open_analyzer_panel() {
+        let (mut app, _states) = audio_app();
+        app.open_frame_analyzer();
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-rearm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, rx) = attach(&mut app);
+        // profile.start via the drain would need a JSON path; drive the
+        // emulator directly and stop through the protocol, which is the
+        // ownership-sensitive step.
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        let reply = call(&mut app, &tx, &rx, 1, "profile.stop", json!({}));
+        assert_eq!(reply["active"], false);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "an open pane keeps its trace after profile.stop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn warp_set_unpaces_mutes_audio_and_names_the_hold() {
         let (mut app, states) = audio_app();
