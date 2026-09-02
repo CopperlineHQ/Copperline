@@ -389,7 +389,7 @@ works unchanged (user-facing description in the uaelib trap section of
 - **State.** The latch image, the pending warp request, the bounded event
   queue, the registry, the idle accounting and the overlay display list
   are machine state inside
-  `Bus` (save-state version 74): run-ahead and rewind restore them with the
+  `Bus` (save-state version 75): run-ahead and rewind restore them with the
   guest that made them. The pending request is drained by the frontends
   once per committed frame (`App::service_uaelib`, the headless control
   server's `emit_events`); the queue by a control-protocol `debug`
