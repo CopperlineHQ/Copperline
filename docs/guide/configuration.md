@@ -1761,6 +1761,55 @@ control protocol's `media.cd.insert` all eject the current disc, run the
 tray for a second of emulated time, and mount the new one with a
 medium-change unit attention for the guest's filesystem to notice.
 
+## `[copperhf]` -- Copperline's virtual hardfile controller
+
+```toml
+[copperhf]
+unit0 = "workbench.hdf"     # units 0-6
+unit1 = "data.hdf"
+# unit2..unit6 = ...
+```
+
+Copperline's own virtual hardfile controller, `copperhf.device` -- an
+emulator-only board with no real-hardware counterpart, the Copperline
+equivalent of WinUAE's `uaehf.device`. It exists to move data at zero
+emulated cost: rather than modelling a real chip's register timing and
+DMA behaviour like `[ide]`, `[scsi]`, and `[lide]` do, it is a purpose-built
+Copperline device with a purpose-built register protocol and no
+host-adapter choice to make.
+
+Up to **seven units** (0-6), each taking the same bare-path/table drive form
+as `[ide]`/`[scsi]`/`[lide]`: RDB images, bare partition hardfiles
+(a synthesized RDB advertises a bootable partition, named `DH0`..`DH6` after
+the unit number, from the same virtual-RDB synthesis `[ide]`/`[scsi]`/`[lide]`
+use), gzip-compressed hardfiles (`.hdz`), and host directories built into
+in-memory FFS/OFS volumes -- including the
+`{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table form
+that overrides a directory mount's volume name, filesystem, and the
+synthesized partition's boot priority, exactly as described under `[ide]`
+above. RDB and RDB-less images are handled identically to the other three
+controllers through the same shared hardfile layer, so a unit here behaves
+like the equivalent `[scsi]` unit for anything that isn't specific to the
+register protocol.
+
+**Hard disks only**: unlike `[ide]`/`[scsi]`/`[lide]`, a `unitN` path ending
+in `.cue`, `.iso`, `.nrg`, or `.chd` is rejected at config-parse time rather
+than attaching a CD-ROM drive -- `copperhf.device` has no ATAPI/SCSI-CDROM
+command set behind it. Attach CD images to `[scsi]` or `[ide]`/`[lide]`
+instead.
+
+The guest sees `copperhf.device` with unit numbers 0-6, matching the
+`unitN` key numbering. The board carries a boot ROM (a DiagArea plus a
+working `copperhf.device` exec-device stub and partition mounter), so a
+program that already knows the device's name can
+`OpenDevice("copperhf.device", unit, ...)` and drive it directly, and an
+attached unit's partitions also RDB-mount and autoboot at boot time like
+any other controller's -- the mounter walks each unit's RDSK/PART chain
+(synthesizing one from a bare partition hardfile exactly as `[ide]`/
+`[scsi]`/`[lide]` do, see above) and offers its bootable partitions the same
+way. See [](../internals/copperhf) for the board, the register protocol,
+and the boot ROM's current behaviour in full.
+
 ## `[lide]` -- a lide.device-compatible Zorro II IDE board
 
 ```toml

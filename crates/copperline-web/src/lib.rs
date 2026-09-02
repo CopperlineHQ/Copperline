@@ -1163,7 +1163,10 @@ impl WebEmu {
     /// page decides where it goes: a download, IndexedDB, anywhere it can
     /// keep bytes. Call between frames -- outside `run`, which every
     /// JS-facing method is by construction.
-    pub fn save_state(&self) -> Result<Vec<u8>, JsValue> {
+    // (&mut: save_state_bytes quiesces copperhf.device's I/O pipeline
+    // before serializing -- src/copperhf.rs's module doc -- so the core
+    // emulator method takes &mut self as of M5.)
+    pub fn save_state(&mut self) -> Result<Vec<u8>, JsValue> {
         self.emu.save_state_bytes().map_err(js_err)
     }
 

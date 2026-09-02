@@ -640,7 +640,7 @@ The layout is:
   unit likewise a CD image attaching a SCSI CD-ROM drive, appear once a
   controller is chosen and are hidden with none, the same way disabled
   floppy drives are; a block of buttons at
-  the top links to six sub-pages: **CD** (image, insert delay,
+  the top links to seven sub-pages: **CD** (image, insert delay,
   CD32 NVRAM); **Host Folder**, for host directories
   served live as AmigaDOS volumes (up to four mounts, each with a boot
   priority and a read-write/read-only **Access** field -- the config file
@@ -649,6 +649,17 @@ The layout is:
   [](host-disks.md)); **Lide**, the built-in `[lide]` Zorro II IDE board --
   personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
   (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image);
+  **Copperline HD**, the emulator's own virtual hardfile controller
+  (`copperhf.device`, configured as `[copperhf]` -- see
+  [](configuration.md)) -- up to seven units, always
+  shown with no controller or personality to pick first (there is no real
+  hardware behind it), and hard disks only: unlike IDE, SCSI, and Lide a
+  Copperline HD unit cannot be a CD image. A unit configured here attaches at
+  boot, the same as any other drive; swapping one's media while the machine
+  runs is not a screen or menu action here but a
+  [control-protocol](../debugger/control.md) call
+  (`copperhf.attach`/`copperhf.eject`), which the window surfaces with an
+  on-screen notice the way any other host-initiated media change is;
   **Boot Priority**, which sets each drive's
   synthesized-RDB boot priority (see below); and **Create Image...**, which
   makes new ADF and HDF images (see below). Each sub-page has a **< Back**
@@ -705,13 +716,13 @@ The layout is:
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
   a file path through a native file dialog. On the *Storage* tab (IDE master/
-  slave, a SCSI unit, or a lide drive), **Browse** lets you pick a directory as
-  well as a file -- on macOS -- since any of those slots can be a host
-  directory mounted as an in-memory FFS volume instead of a raw image; on
-  other platforms the dialog is file-only there too, matching the rest of the
-  launcher, and a directory target still has to be set some other way (e.g.
-  editing the config file directly). Once an IDE, SCSI, or lide drive has an
-  image a small editable box appears next to **Browse**:
+  slave, a SCSI unit, a lide drive, or a Copperline HD unit), **Browse** lets you
+  pick a directory as well as a file -- on macOS -- since any of those slots
+  can be a host directory mounted as an in-memory FFS volume instead of a raw
+  image; on other platforms the dialog is file-only there too, matching the
+  rest of the launcher, and a directory target still has to be set some other
+  way (e.g. editing the config file directly). Once an IDE, SCSI, lide, or
+  Copperline HD drive has an image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
   raw HDF). Once that image is a host **directory** specifically, an **FFS/OFS**
@@ -732,13 +743,14 @@ The layout is:
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
   Drives without media or configured as CD-ROMs are disabled ("No drive" /
-  "CD-ROM"). SCSI and Lide units appear only when media is attached,
-  ensuring the list reflects valid boot sources. Drives are listed in order:
-  IDE bays, SCSI units, and Lide drives. If the list exceeds one page, use
-  **Next Page >** and **< Back** to navigate between pages. Newly added
-  drives are assigned cascading default priorities (0 for the first hard
-  drive, followed by -35, -40, -45) to avoid boot conflicts. A drive
-  already carrying a priority in the config
+  "CD-ROM"). SCSI, Lide, and Copperline HD units appear only when media is
+  attached, ensuring the list reflects valid boot sources. Drives are
+  listed in order: IDE bays, SCSI units, Lide drives, and Copperline HD
+  units. If the list exceeds one page, use **Next Page >** to walk forward
+  through as many pages as the drives need; every page's **< Back**
+  returns to the first. Newly added drives are assigned cascading default
+  priorities (0 for the first hard drive, followed by -35, -40, -45) to
+  avoid boot conflicts. A drive already carrying a priority in the config
   keeps it, and one that just names a device with no `bootpri` stays at 0. See
   [](configuration.md) for how the priority ranks against Kickstart's DF0: boot
   node at 5.

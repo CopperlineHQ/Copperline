@@ -350,7 +350,7 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::HostFs,
         LauncherTab::Whdload,
         LauncherTab::BootPriority,
-        LauncherTab::BootPriorityMore,
+        LauncherTab::BootPriorityMore(2),
         LauncherTab::Lide,
         LauncherTab::AvVideo,
         LauncherTab::AvDisplay,
@@ -377,7 +377,7 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
                 // that is what has to fit -- see `BOOTPRI_PAGE_ROWS`.
                 let drawn = if matches!(
                     tab,
-                    LauncherTab::BootPriority | LauncherTab::BootPriorityMore
+                    LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_)
                 ) {
                     rows.len().min(launcher::BOOTPRI_PAGE_ROWS + 1)
                 } else {
@@ -3111,7 +3111,7 @@ fn panels_render_into_their_rects() {
     for (tab, name) in [
         (LauncherTab::BootPriority, "launcher-boot-priority-full"),
         (
-            LauncherTab::BootPriorityMore,
+            LauncherTab::BootPriorityMore(2),
             "launcher-boot-priority-page2",
         ),
     ] {

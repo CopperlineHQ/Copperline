@@ -41,17 +41,27 @@ annotates the generated TOML file:
 | `filesystem2=` directory mounts | `[[filesys]]` directory mounts |
 | Built-in IDE (`ide0`, `ide1`) | `[ide] master`, `slave` |
 | Board IDE / SCSI hardfiles (`ide1_alfapower`, `scsiN`) | `[lide]` and `[scsi]` units |
-| Virtual `uae0` hardfiles | First available `[ide]` slot |
+| Virtual `uaeN` hardfiles / FS-UAE's default hard-drive controller | `[copperhf] unitN` |
 | Audio channel modes and filters | `[audio]` settings |
 | Input port assignments | `[input]` port configurations |
 
 ## Important differences
 
-- **Virtual UAE hardfiles vs. hardware IDE:** WinUAE's `uae` hardfile controller
-  bypasses the guest's storage device drivers. Copperline's `[ide]` models the
-  hardware Gayle / A4000 IDE controller directly. Large hardfiles (over 4 GB) require
-  Kickstart versions and filesystems that support direct SCSI / 64-bit addressing,
-  or should be attached via the `[lide]` controller.
+- **Virtual controller hardfiles map onto `[copperhf]`:** WinUAE/Amiberry's `uaeN`
+  controller and FS-UAE's unnamed default controller both mean the same thing --
+  the emulator's own `uaehf.device`, a zero-cost virtual hardfile board with no
+  real-hardware counterpart. Copperline's `[copperhf]` (`copperhf.device`) is the
+  exact analogue, so these drives translate exactly: the trailing digit in `uaeN`
+  becomes `[copperhf] unitN`, and FS-UAE's default-controller drives take
+  successive `[copperhf]` units in the order they appear. `[copperhf]` has seven
+  units (0-6); a `uaeN` whose number is out of range or already taken is
+  renumbered to the first free unit instead of being dropped, and this is noted
+  in the generated file. Only once all seven units are already used does a
+  virtual-controller hardfile fall back onto a real port -- WinUAE/Amiberry
+  hardfiles fall back to `[ide]` (inheriting the Kickstart IDE port's size
+  limits, called out with the image's measured size where the file can be
+  found), and FS-UAE hardfiles are flagged for manual placement on `[scsi]` or
+  `[lide]`.
 - **Read-only hardfiles:** Copperline IDE hardfiles are read-write by default. To
   enforce read-only access, adjust filesystem permissions on the host file.
 - **Relative paths:** Relative paths in UAE configurations are preserved as written.

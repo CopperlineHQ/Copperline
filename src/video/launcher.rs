@@ -177,11 +177,13 @@ pub enum LauncherTab {
     /// FluxBridge settings for one bay, reached from its Configure button.
     FluxBridge,
     BootPriority,
-    /// The rest of the boot order when one page cannot hold it. A fully
-    /// fitted machine reaches thirteen drives, more than the panel has
-    /// rows for, so the list runs onto a second page reached by the
-    /// "Next Page >" button and returning via its own Back.
-    BootPriorityMore,
+    /// The rest of the boot order when one page cannot hold it: page `N`
+    /// (`N` >= 2) of the list, reached by the "Next Page >" button and
+    /// returning to the first page via its own Back. A fully fitted machine
+    /// reaches twenty drives across four board families, more than one page
+    /// holds, so however many pages the row count needs are offered --
+    /// [`MachineSetup::boot_priority_page_count`] says how many there are.
+    BootPriorityMore(u8),
     HostFs,
     /// Direct WHDLoad boot (src/whdload.rs): the game to launch and what
     /// staging draws on, reached from the Storage tab.
@@ -199,6 +201,10 @@ pub enum LauncherTab {
     /// The `[lide]` built-in Zorro II IDE board: personality, boot ROM(s),
     /// and its drives, reached from the Storage tab.
     Lide,
+    /// Copperline's own virtual hardfile controller (`[copperhf]`,
+    /// copperhf.device): seven units, no board/ROM to choose -- the board
+    /// is always there. Reached from the Storage tab, like Lide.
+    Copperhf,
     /// The "I/O Ports" strip tab, whose default category is the serial
     /// port. Parallel, networking and audio are its sibling categories,
     /// switched between via the top nav row, with no Back button --
@@ -292,7 +298,7 @@ impl LauncherTab {
             LauncherTab::Floppy => "Floppy",
             LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
-            LauncherTab::BootPriority | LauncherTab::BootPriorityMore => "Boot Priority",
+            LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_) => "Boot Priority",
             LauncherTab::HostFs => "Host Folder",
             LauncherTab::Whdload => "WHDLoad",
             // The strip's own name for it. Inside the WHDLoad pages the
@@ -303,6 +309,7 @@ impl LauncherTab {
             LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
             LauncherTab::Lide => "Lide",
+            LauncherTab::Copperhf => "Copperline HD",
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::IoParallel => "Parallel Port",
             LauncherTab::IoNetworking => "Networking",
@@ -335,8 +342,9 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
-            | LauncherTab::BootPriorityMore
+            | LauncherTab::BootPriorityMore(_)
             | LauncherTab::Lide
+            | LauncherTab::Copperhf
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard
             | LauncherTab::CreateGeometry => LauncherTab::Storage,
@@ -368,11 +376,15 @@ impl LauncherTab {
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
             | LauncherTab::Lide
+            | LauncherTab::Copperhf
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard => Some(LauncherTab::Storage),
             // Back goes to the page that sent you here, not to Storage.
             LauncherTab::CreateGeometry => Some(LauncherTab::CreateHard),
-            LauncherTab::BootPriorityMore => Some(LauncherTab::BootPriority),
+            // Every later page's Back goes straight to the first rather than
+            // stepping back one page at a time -- the same "one fixed
+            // parent" shape every other sub-page's Back button has.
+            LauncherTab::BootPriorityMore(_) => Some(LauncherTab::BootPriority),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
@@ -414,9 +426,10 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Lide", LauncherTab::Lide),
-    // Four to a row, so the second holds what is done with it: the boot
-    // order across everything above, and the one entry that makes
-    // something rather than attaching something.
+    ("Copperline HD", LauncherTab::Copperhf),
+    // Four to a row, so copperhf wraps onto the second alongside what is
+    // done with the hardware above: the boot order across everything, and
+    // the one entry that makes something rather than attaching something.
     ("Boot Priority", LauncherTab::BootPriority),
     ("Create Image...", LauncherTab::CreateFloppy),
 ];
@@ -591,6 +604,17 @@ pub enum LauncherField {
     LideDrive1,
     LideDrive2,
     LideDrive3,
+    // `[copperhf]`: Copperline's own virtual hardfile controller
+    // (copperhf.device), on its own Storage sub-page like Lide. No board/ROM
+    // row -- the board is always there, built into Copperline itself -- just
+    // its seven units.
+    CopperhfUnit0,
+    CopperhfUnit1,
+    CopperhfUnit2,
+    CopperhfUnit3,
+    CopperhfUnit4,
+    CopperhfUnit5,
+    CopperhfUnit6,
     // Boot priority sub-page: the synthesized-RDB de_BootPri for each hard-disk
     // drive above, edited on its own page so it does not crowd the Storage tab.
     IdeMasterBoot,
@@ -606,6 +630,13 @@ pub enum LauncherField {
     LideDrive1Boot,
     LideDrive2Boot,
     LideDrive3Boot,
+    CopperhfUnit0Boot,
+    CopperhfUnit1Boot,
+    CopperhfUnit2Boot,
+    CopperhfUnit3Boot,
+    CopperhfUnit4Boot,
+    CopperhfUnit5Boot,
+    CopperhfUnit6Boot,
     // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
     Filesys0Dir,
     Filesys0Boot,
@@ -1094,7 +1125,7 @@ const HOSTFS_ROWS: [Row; 12] = [
 // ground greyed when empty; a SCSI unit or Lide slot is listed only once it
 // carries a disk (`row_hidden`). More rows than one page holds run onto a
 // second page -- see `MachineSetup::boot_page_of`.
-const BOOTPRI_ROWS: [Row; 13] = [
+const BOOTPRI_ROWS: [Row; 20] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
     row(F::ScsiUnit0Boot, "SCSI unit 0", Bootpri),
@@ -1112,6 +1143,15 @@ const BOOTPRI_ROWS: [Row; 13] = [
     row(F::LideDrive1Boot, "Lide drive 1", Bootpri),
     row(F::LideDrive2Boot, "Lide drive 2", Bootpri),
     row(F::LideDrive3Boot, "Lide drive 3", Bootpri),
+    // copperhf.device's units sit last: a Copperline-only board with no
+    // real-hardware counterpart, ranked after every board with one.
+    row(F::CopperhfUnit0Boot, "copperhf unit 0", Bootpri),
+    row(F::CopperhfUnit1Boot, "copperhf unit 1", Bootpri),
+    row(F::CopperhfUnit2Boot, "copperhf unit 2", Bootpri),
+    row(F::CopperhfUnit3Boot, "copperhf unit 3", Bootpri),
+    row(F::CopperhfUnit4Boot, "copperhf unit 4", Bootpri),
+    row(F::CopperhfUnit5Boot, "copperhf unit 5", Bootpri),
+    row(F::CopperhfUnit6Boot, "copperhf unit 6", Bootpri),
 ];
 const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
@@ -1131,6 +1171,20 @@ const LIDE_ROWS: [Row; 7] = [
     row(F::LideDrive1, "Drive 1", Drive),
     row(F::LideDrive2, "Drive 2", Drive),
     row(F::LideDrive3, "Drive 3", Drive),
+];
+// The `[copperhf]` Storage sub-page: copperhf.device's seven units, no
+// board/ROM row -- the board is always there, built into Copperline itself
+// (see `RawCopperhf`'s own doc comment) -- so unlike Lide there is nothing
+// to fit before the drives appear. Boot priorities live on the shared Boot
+// Priority page with every other drive's, in `BOOTPRI_ROWS`.
+const COPPERHF_ROWS: [Row; 7] = [
+    row(F::CopperhfUnit0, "Unit 0", Drive),
+    row(F::CopperhfUnit1, "Unit 1", Drive),
+    row(F::CopperhfUnit2, "Unit 2", Drive),
+    row(F::CopperhfUnit3, "Unit 3", Drive),
+    row(F::CopperhfUnit4, "Unit 4", Drive),
+    row(F::CopperhfUnit5, "Unit 5", Drive),
+    row(F::CopperhfUnit6, "Unit 6", Drive),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
 // draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
@@ -1424,11 +1478,11 @@ pub fn rows(
         // in the same place as each sub-page's Back button, so they are not part
         // of the row grid.
         LauncherTab::Storage => Cow::Borrowed(&STORAGE_ROWS),
-        // Both boot pages carry the same table and the same column titles;
-        // which drives each one draws is decided per drive by
+        // Every boot page carries the same table and the same column
+        // titles; which drives each one draws is decided per drive by
         // `MachineSetup::boot_page_of`, since only the machine knows which
         // slots are filled.
-        LauncherTab::BootPriority | LauncherTab::BootPriorityMore => {
+        LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_) => {
             // The greyed column titles, then one row per hard-disk drive.
             let mut rows = vec![bootpri_header()];
             rows.extend_from_slice(&BOOTPRI_ROWS);
@@ -1443,6 +1497,7 @@ pub fn rows(
         LauncherTab::HostDisk => Cow::Borrowed(&[]),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::Lide => Cow::Borrowed(&LIDE_ROWS),
+        LauncherTab::Copperhf => Cow::Borrowed(&COPPERHF_ROWS),
         LauncherTab::IoPorts => Cow::Owned(io_serial_rows(
             serial_mode,
             midi_out_is_mt32,
@@ -2174,6 +2229,16 @@ pub struct MachineSetup {
     scsi_unit_is_dir: [bool; 7],
     scsi_unit_bootpri: [Option<i8>; 7],
     scsi_unit_boot_off: [bool; 7],
+    /// `[copperhf]` unit images, by unit number (0-6). Unlike `[scsi]` there
+    /// is no controller/ROM to fit first -- the board is always there --
+    /// so these seven are the whole of it.
+    copperhf_units: [Option<PathBuf>; 7],
+    copperhf_unit_names: [Option<String>; 7],
+    copperhf_unit_fs: [crate::diskimage::FileSystem; 7],
+    /// Paralleling `ide_master_is_dir`, per unit.
+    copperhf_unit_is_dir: [bool; 7],
+    copperhf_unit_bootpri: [Option<i8>; 7],
+    copperhf_unit_boot_off: [bool; 7],
     /// Which lide personality is fitted, or `None` for no board. Unlike
     /// `[scsi]`, presence is inferred from the config's own `rom`/`drives`
     /// (see `LideConfig::enabled`); this `Option` is purely the launcher's
@@ -2544,6 +2609,31 @@ impl MachineSetup {
             }),
             scsi_unit_boot_off: std::array::from_fn(|i| {
                 boot_is_off(raw_scsi_unit(&raw.scsi, i).and_then(|d| d.bootpri))
+            }),
+            copperhf_units: std::array::from_fn(|i| {
+                cfg.copperhf.units[i].as_ref().map(|d| d.path.clone())
+            }),
+            copperhf_unit_names: std::array::from_fn(|i| {
+                cfg.copperhf.units[i]
+                    .as_ref()
+                    .and_then(|d| d.volume_name.clone())
+            }),
+            copperhf_unit_fs: std::array::from_fn(|i| {
+                cfg.copperhf.units[i]
+                    .as_ref()
+                    .map(|d| d.filesystem)
+                    .unwrap_or(crate::diskimage::FileSystem::FFS)
+            }),
+            copperhf_unit_is_dir: std::array::from_fn(|i| {
+                cfg.copperhf.units[i]
+                    .as_ref()
+                    .is_some_and(|d| d.path.is_dir())
+            }),
+            copperhf_unit_bootpri: std::array::from_fn(|i| {
+                boot_priority_of(raw_copperhf_unit(&raw.copperhf, i).and_then(|d| d.bootpri))
+            }),
+            copperhf_unit_boot_off: std::array::from_fn(|i| {
+                boot_is_off(raw_copperhf_unit(&raw.copperhf, i).and_then(|d| d.bootpri))
             }),
             lide_board: cfg.lide.enabled().then_some(cfg.lide.board),
             // Read from the raw text, not the validated `Config`: an
@@ -3086,6 +3176,51 @@ impl MachineSetup {
                 self.scsi_unit_fs[6],
             );
         }
+        // `[copperhf]` has no controller/ROM to gate on -- the board is
+        // always there -- so its units are always emitted, unlike `[scsi]`
+        // above and `[lide]` below.
+        raw.copperhf.unit0 = drive_raw(
+            self.copperhf_units[0].as_deref(),
+            self.copperhf_unit_names[0].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit0Boot),
+            self.copperhf_unit_fs[0],
+        );
+        raw.copperhf.unit1 = drive_raw(
+            self.copperhf_units[1].as_deref(),
+            self.copperhf_unit_names[1].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit1Boot),
+            self.copperhf_unit_fs[1],
+        );
+        raw.copperhf.unit2 = drive_raw(
+            self.copperhf_units[2].as_deref(),
+            self.copperhf_unit_names[2].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit2Boot),
+            self.copperhf_unit_fs[2],
+        );
+        raw.copperhf.unit3 = drive_raw(
+            self.copperhf_units[3].as_deref(),
+            self.copperhf_unit_names[3].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit3Boot),
+            self.copperhf_unit_fs[3],
+        );
+        raw.copperhf.unit4 = drive_raw(
+            self.copperhf_units[4].as_deref(),
+            self.copperhf_unit_names[4].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit4Boot),
+            self.copperhf_unit_fs[4],
+        );
+        raw.copperhf.unit5 = drive_raw(
+            self.copperhf_units[5].as_deref(),
+            self.copperhf_unit_names[5].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit5Boot),
+            self.copperhf_unit_fs[5],
+        );
+        raw.copperhf.unit6 = drive_raw(
+            self.copperhf_units[6].as_deref(),
+            self.copperhf_unit_names[6].as_deref(),
+            self.effective_bootpri(F::CopperhfUnit6Boot),
+            self.copperhf_unit_fs[6],
+        );
         // Only emit `[lide]` when a board is fitted, matching `[scsi]` above.
         if let Some(board) = self.lide_board {
             raw.lide.board = Some(board.name().to_string());
@@ -3728,6 +3863,18 @@ impl MachineSetup {
                             .is_none()
                 })
             }
+            // copperhf units are always fitted (there is no board to lack),
+            // so the only reason a unit's boot row goes is an empty slot --
+            // the same terms as the SCSI units above.
+            F::CopperhfUnit0Boot
+            | F::CopperhfUnit1Boot
+            | F::CopperhfUnit2Boot
+            | F::CopperhfUnit3Boot
+            | F::CopperhfUnit4Boot
+            | F::CopperhfUnit5Boot
+            | F::CopperhfUnit6Boot => Self::boot_field_drive(field)
+                .and_then(|drive| self.drive_holds(drive))
+                .is_none(),
             // Nothing to configure without a board fitted.
             F::LideRom => self.lide_board.is_none(),
             // AT-Bus 2008 has no flash banking.
@@ -3842,7 +3989,14 @@ impl MachineSetup {
             | F::LideDrive0Boot
             | F::LideDrive1Boot
             | F::LideDrive2Boot
-            | F::LideDrive3Boot => {
+            | F::LideDrive3Boot
+            | F::CopperhfUnit0Boot
+            | F::CopperhfUnit1Boot
+            | F::CopperhfUnit2Boot
+            | F::CopperhfUnit3Boot
+            | F::CopperhfUnit4Boot
+            | F::CopperhfUnit5Boot
+            | F::CopperhfUnit6Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.drive_holds(drive) {
                     None => Some("No drive"),
@@ -4009,6 +4163,13 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4].as_deref(),
             F::ScsiUnit5 => self.scsi_units[5].as_deref(),
             F::ScsiUnit6 => self.scsi_units[6].as_deref(),
+            F::CopperhfUnit0 => self.copperhf_units[0].as_deref(),
+            F::CopperhfUnit1 => self.copperhf_units[1].as_deref(),
+            F::CopperhfUnit2 => self.copperhf_units[2].as_deref(),
+            F::CopperhfUnit3 => self.copperhf_units[3].as_deref(),
+            F::CopperhfUnit4 => self.copperhf_units[4].as_deref(),
+            F::CopperhfUnit5 => self.copperhf_units[5].as_deref(),
+            F::CopperhfUnit6 => self.copperhf_units[6].as_deref(),
             F::LideRom => self.lide_rom.as_deref(),
             F::LideRomBank2 => self.lide_rom_bank2.as_deref(),
             F::LideDrive0 => self.lide_drives[0].as_deref(),
@@ -4190,6 +4351,13 @@ impl MachineSetup {
                 | F::ScsiUnit4
                 | F::ScsiUnit5
                 | F::ScsiUnit6
+                | F::CopperhfUnit0
+                | F::CopperhfUnit1
+                | F::CopperhfUnit2
+                | F::CopperhfUnit3
+                | F::CopperhfUnit4
+                | F::CopperhfUnit5
+                | F::CopperhfUnit6
                 | F::LideDrive0
                 | F::LideDrive1
                 | F::LideDrive2
@@ -4213,6 +4381,13 @@ impl MachineSetup {
             F::ScsiUnit4 => &self.scsi_unit_names[4],
             F::ScsiUnit5 => &self.scsi_unit_names[5],
             F::ScsiUnit6 => &self.scsi_unit_names[6],
+            F::CopperhfUnit0 => &self.copperhf_unit_names[0],
+            F::CopperhfUnit1 => &self.copperhf_unit_names[1],
+            F::CopperhfUnit2 => &self.copperhf_unit_names[2],
+            F::CopperhfUnit3 => &self.copperhf_unit_names[3],
+            F::CopperhfUnit4 => &self.copperhf_unit_names[4],
+            F::CopperhfUnit5 => &self.copperhf_unit_names[5],
+            F::CopperhfUnit6 => &self.copperhf_unit_names[6],
             F::LideDrive0 => &self.lide_drive_names[0],
             F::LideDrive1 => &self.lide_drive_names[1],
             F::LideDrive2 => &self.lide_drive_names[2],
@@ -4241,6 +4416,13 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_unit_fs[4],
             F::ScsiUnit5 => self.scsi_unit_fs[5],
             F::ScsiUnit6 => self.scsi_unit_fs[6],
+            F::CopperhfUnit0 => self.copperhf_unit_fs[0],
+            F::CopperhfUnit1 => self.copperhf_unit_fs[1],
+            F::CopperhfUnit2 => self.copperhf_unit_fs[2],
+            F::CopperhfUnit3 => self.copperhf_unit_fs[3],
+            F::CopperhfUnit4 => self.copperhf_unit_fs[4],
+            F::CopperhfUnit5 => self.copperhf_unit_fs[5],
+            F::CopperhfUnit6 => self.copperhf_unit_fs[6],
             F::LideDrive0 => self.lide_drive_fs[0],
             F::LideDrive1 => self.lide_drive_fs[1],
             F::LideDrive2 => self.lide_drive_fs[2],
@@ -4265,6 +4447,13 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_unit_is_dir[4],
             F::ScsiUnit5 => self.scsi_unit_is_dir[5],
             F::ScsiUnit6 => self.scsi_unit_is_dir[6],
+            F::CopperhfUnit0 => self.copperhf_unit_is_dir[0],
+            F::CopperhfUnit1 => self.copperhf_unit_is_dir[1],
+            F::CopperhfUnit2 => self.copperhf_unit_is_dir[2],
+            F::CopperhfUnit3 => self.copperhf_unit_is_dir[3],
+            F::CopperhfUnit4 => self.copperhf_unit_is_dir[4],
+            F::CopperhfUnit5 => self.copperhf_unit_is_dir[5],
+            F::CopperhfUnit6 => self.copperhf_unit_is_dir[6],
             F::LideDrive0 => self.lide_drive_is_dir[0],
             F::LideDrive1 => self.lide_drive_is_dir[1],
             F::LideDrive2 => self.lide_drive_is_dir[2],
@@ -4289,6 +4478,13 @@ impl MachineSetup {
             F::ScsiUnit4 => &mut self.scsi_unit_is_dir[4],
             F::ScsiUnit5 => &mut self.scsi_unit_is_dir[5],
             F::ScsiUnit6 => &mut self.scsi_unit_is_dir[6],
+            F::CopperhfUnit0 => &mut self.copperhf_unit_is_dir[0],
+            F::CopperhfUnit1 => &mut self.copperhf_unit_is_dir[1],
+            F::CopperhfUnit2 => &mut self.copperhf_unit_is_dir[2],
+            F::CopperhfUnit3 => &mut self.copperhf_unit_is_dir[3],
+            F::CopperhfUnit4 => &mut self.copperhf_unit_is_dir[4],
+            F::CopperhfUnit5 => &mut self.copperhf_unit_is_dir[5],
+            F::CopperhfUnit6 => &mut self.copperhf_unit_is_dir[6],
             F::LideDrive0 => &mut self.lide_drive_is_dir[0],
             F::LideDrive1 => &mut self.lide_drive_is_dir[1],
             F::LideDrive2 => &mut self.lide_drive_is_dir[2],
@@ -4310,6 +4506,13 @@ impl MachineSetup {
             F::ScsiUnit4 => &mut self.scsi_unit_fs[4],
             F::ScsiUnit5 => &mut self.scsi_unit_fs[5],
             F::ScsiUnit6 => &mut self.scsi_unit_fs[6],
+            F::CopperhfUnit0 => &mut self.copperhf_unit_fs[0],
+            F::CopperhfUnit1 => &mut self.copperhf_unit_fs[1],
+            F::CopperhfUnit2 => &mut self.copperhf_unit_fs[2],
+            F::CopperhfUnit3 => &mut self.copperhf_unit_fs[3],
+            F::CopperhfUnit4 => &mut self.copperhf_unit_fs[4],
+            F::CopperhfUnit5 => &mut self.copperhf_unit_fs[5],
+            F::CopperhfUnit6 => &mut self.copperhf_unit_fs[6],
             F::LideDrive0 => &mut self.lide_drive_fs[0],
             F::LideDrive1 => &mut self.lide_drive_fs[1],
             F::LideDrive2 => &mut self.lide_drive_fs[2],
@@ -4348,6 +4551,13 @@ impl MachineSetup {
             F::ScsiUnit4 => &mut self.scsi_unit_names[4],
             F::ScsiUnit5 => &mut self.scsi_unit_names[5],
             F::ScsiUnit6 => &mut self.scsi_unit_names[6],
+            F::CopperhfUnit0 => &mut self.copperhf_unit_names[0],
+            F::CopperhfUnit1 => &mut self.copperhf_unit_names[1],
+            F::CopperhfUnit2 => &mut self.copperhf_unit_names[2],
+            F::CopperhfUnit3 => &mut self.copperhf_unit_names[3],
+            F::CopperhfUnit4 => &mut self.copperhf_unit_names[4],
+            F::CopperhfUnit5 => &mut self.copperhf_unit_names[5],
+            F::CopperhfUnit6 => &mut self.copperhf_unit_names[6],
             F::LideDrive0 => &mut self.lide_drive_names[0],
             F::LideDrive1 => &mut self.lide_drive_names[1],
             F::LideDrive2 => &mut self.lide_drive_names[2],
@@ -4719,7 +4929,14 @@ impl MachineSetup {
             | F::LideDrive0Boot
             | F::LideDrive1Boot
             | F::LideDrive2Boot
-            | F::LideDrive3Boot => drive_bootpri_label(self.effective_bootpri(field)),
+            | F::LideDrive3Boot
+            | F::CopperhfUnit0Boot
+            | F::CopperhfUnit1Boot
+            | F::CopperhfUnit2Boot
+            | F::CopperhfUnit3Boot
+            | F::CopperhfUnit4Boot
+            | F::CopperhfUnit5Boot
+            | F::CopperhfUnit6Boot => drive_bootpri_label(self.effective_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -5368,6 +5585,13 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = Some(path),
             F::ScsiUnit5 => self.scsi_units[5] = Some(path),
             F::ScsiUnit6 => self.scsi_units[6] = Some(path),
+            F::CopperhfUnit0 => self.copperhf_units[0] = Some(path),
+            F::CopperhfUnit1 => self.copperhf_units[1] = Some(path),
+            F::CopperhfUnit2 => self.copperhf_units[2] = Some(path),
+            F::CopperhfUnit3 => self.copperhf_units[3] = Some(path),
+            F::CopperhfUnit4 => self.copperhf_units[4] = Some(path),
+            F::CopperhfUnit5 => self.copperhf_units[5] = Some(path),
+            F::CopperhfUnit6 => self.copperhf_units[6] = Some(path),
             F::LideRom => {
                 self.lide_rom = Some(path);
                 self.lide_rom_disabled = false;
@@ -5447,6 +5671,13 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4] = None,
             F::ScsiUnit5 => self.scsi_units[5] = None,
             F::ScsiUnit6 => self.scsi_units[6] = None,
+            F::CopperhfUnit0 => self.copperhf_units[0] = None,
+            F::CopperhfUnit1 => self.copperhf_units[1] = None,
+            F::CopperhfUnit2 => self.copperhf_units[2] = None,
+            F::CopperhfUnit3 => self.copperhf_units[3] = None,
+            F::CopperhfUnit4 => self.copperhf_units[4] = None,
+            F::CopperhfUnit5 => self.copperhf_units[5] = None,
+            F::CopperhfUnit6 => self.copperhf_units[6] = None,
             F::LideRom => {
                 self.lide_rom = None;
                 self.lide_rom_disabled = false;
@@ -5510,6 +5741,9 @@ impl MachineSetup {
                 } else if let Some(i) = lide_drive_index(field) {
                     self.lide_drive_bootpri[i] = None;
                     self.lide_drive_boot_off[i] = false;
+                } else if let Some(i) = copperhf_unit_index(field) {
+                    self.copperhf_unit_bootpri[i] = None;
+                    self.copperhf_unit_boot_off[i] = false;
                 }
             }
         }
@@ -5543,6 +5777,13 @@ impl MachineSetup {
             F::LideDrive1Boot => F::LideDrive1,
             F::LideDrive2Boot => F::LideDrive2,
             F::LideDrive3Boot => F::LideDrive3,
+            F::CopperhfUnit0Boot => F::CopperhfUnit0,
+            F::CopperhfUnit1Boot => F::CopperhfUnit1,
+            F::CopperhfUnit2Boot => F::CopperhfUnit2,
+            F::CopperhfUnit3Boot => F::CopperhfUnit3,
+            F::CopperhfUnit4Boot => F::CopperhfUnit4,
+            F::CopperhfUnit5Boot => F::CopperhfUnit5,
+            F::CopperhfUnit6Boot => F::CopperhfUnit6,
             _ => return None,
         })
     }
@@ -5562,7 +5803,13 @@ impl MachineSetup {
             F::ScsiUnit4Boot => self.scsi_unit_bootpri[4],
             F::ScsiUnit5Boot => self.scsi_unit_bootpri[5],
             F::ScsiUnit6Boot => self.scsi_unit_bootpri[6],
-            _ => lide_drive_index(field).and_then(|i| self.lide_drive_bootpri[i]),
+            _ => {
+                if let Some(i) = lide_drive_index(field) {
+                    self.lide_drive_bootpri[i]
+                } else {
+                    copperhf_unit_index(field).and_then(|i| self.copperhf_unit_bootpri[i])
+                }
+            }
         }
     }
 
@@ -5582,6 +5829,8 @@ impl MachineSetup {
             _ => {
                 if let Some(i) = lide_drive_index(field) {
                     self.lide_drive_bootpri[i] = value;
+                } else if let Some(i) = copperhf_unit_index(field) {
+                    self.copperhf_unit_bootpri[i] = value;
                 }
             }
         }
@@ -5621,15 +5870,51 @@ impl MachineSetup {
         self.boot_priority_row_count() > BOOTPRI_PAGE_ROWS
     }
 
-    /// The page a session should stand on after this setup replaced the one
-    /// it was looking at (Load..., Defaults): the same page, unless that
-    /// page no longer exists -- the second boot page with nothing left on
-    /// it falls back to the first rather than standing empty.
-    pub fn settle_tab(&self, tab: LauncherTab) -> LauncherTab {
-        if tab == LauncherTab::BootPriorityMore && !self.boot_priority_has_second_page() {
+    /// How many Boot Priority pages the listed drives need, at least one.
+    /// However many board families are fitted, the table pages rather than
+    /// piling up on (or falling off the end of) a fixed two.
+    pub fn boot_priority_page_count(&self) -> usize {
+        self.boot_priority_row_count()
+            .div_ceil(BOOTPRI_PAGE_ROWS)
+            .max(1)
+    }
+
+    /// The 1-based page number a Boot Priority tab stands for, or `None` for
+    /// any other tab.
+    fn boot_priority_page_number(tab: LauncherTab) -> Option<usize> {
+        Some(match tab {
+            LauncherTab::BootPriority => 1,
+            LauncherTab::BootPriorityMore(n) => usize::from(n),
+            _ => return None,
+        })
+    }
+
+    /// The tab for a 1-based Boot Priority page number.
+    fn boot_priority_tab(page: usize) -> LauncherTab {
+        if page <= 1 {
             LauncherTab::BootPriority
         } else {
-            tab
+            LauncherTab::BootPriorityMore(page as u8)
+        }
+    }
+
+    /// The tab a Boot Priority page's "Next Page >" button goes to, or
+    /// `None` when `tab` is not a Boot Priority page or is already the last
+    /// one. Every page's own Back button already returns to the first, so
+    /// paging only ever needs to go forward.
+    pub fn boot_priority_next_page(&self, tab: LauncherTab) -> Option<LauncherTab> {
+        let page = Self::boot_priority_page_number(tab)?;
+        (page < self.boot_priority_page_count()).then(|| Self::boot_priority_tab(page + 1))
+    }
+
+    /// The page a session should stand on after this setup replaced the one
+    /// it was looking at (Load..., Defaults): the same page, unless that
+    /// page no longer exists -- a boot page with nothing left on it falls
+    /// back to the first rather than standing empty.
+    pub fn settle_tab(&self, tab: LauncherTab) -> LauncherTab {
+        match Self::boot_priority_page_number(tab) {
+            Some(page) if page > self.boot_priority_page_count() => LauncherTab::BootPriority,
+            _ => tab,
         }
     }
 
@@ -5651,15 +5936,11 @@ impl MachineSetup {
             .take_while(|r| r.field != field)
             .filter(|r| !self.row_hidden(r.field))
             .count();
-        Some(if rank < BOOTPRI_PAGE_ROWS {
-            LauncherTab::BootPriority
-        } else {
-            LauncherTab::BootPriorityMore
-        })
+        Some(Self::boot_priority_tab(rank / BOOTPRI_PAGE_ROWS + 1))
     }
 
     /// Whether a row is drawn on `tab`: present on this machine, and -- for
-    /// the paged boot order -- belonging to this page rather than the other.
+    /// the paged boot order -- belonging to this page rather than another.
     pub fn row_on_page(&self, tab: LauncherTab, field: LauncherField) -> bool {
         !self.row_hidden(field) && self.boot_page_of(field).is_none_or(|page| page == tab)
     }
@@ -5674,6 +5955,7 @@ impl MachineSetup {
             _ => {
                 scsi_boot_index(field).is_some_and(|i| self.scsi_unit_boot_off[i])
                     || lide_drive_index(field).is_some_and(|i| self.lide_drive_boot_off[i])
+                    || copperhf_unit_index(field).is_some_and(|i| self.copperhf_unit_boot_off[i])
             }
         }
     }
@@ -5707,6 +5989,8 @@ impl MachineSetup {
                     self.scsi_unit_boot_off[i] = off;
                 } else if let Some(i) = lide_drive_index(field) {
                     self.lide_drive_boot_off[i] = off;
+                } else if let Some(i) = copperhf_unit_index(field) {
+                    self.copperhf_unit_boot_off[i] = off;
                 }
             }
         }
@@ -8974,6 +9258,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &WHDLOAD_ROWS,
         &CD_ROWS,
         &LIDE_ROWS,
+        &COPPERHF_ROWS,
         &INPUT_ROWS,
         &VIDEO_ROWS,
         &AUDIO_ROWS,
@@ -9026,6 +9311,19 @@ fn raw_scsi_unit(scsi: &crate::config::RawScsi, unit: usize) -> Option<&RawDrive
         4 => scsi.unit4.as_ref(),
         5 => scsi.unit5.as_ref(),
         _ => scsi.unit6.as_ref(),
+    }
+}
+
+/// A `[copperhf]` unit entry by unit number, paralleling `raw_scsi_unit`.
+fn raw_copperhf_unit(copperhf: &crate::config::RawCopperhf, unit: usize) -> Option<&RawDrive> {
+    match unit {
+        0 => copperhf.unit0.as_ref(),
+        1 => copperhf.unit1.as_ref(),
+        2 => copperhf.unit2.as_ref(),
+        3 => copperhf.unit3.as_ref(),
+        4 => copperhf.unit4.as_ref(),
+        5 => copperhf.unit5.as_ref(),
+        _ => copperhf.unit6.as_ref(),
     }
 }
 
@@ -9103,6 +9401,21 @@ fn lide_drive_index(field: LauncherField) -> Option<usize> {
     })
 }
 
+/// copperhf unit index behind a `CopperhfUnitN`/`CopperhfUnitNBoot` field.
+fn copperhf_unit_index(field: LauncherField) -> Option<usize> {
+    use LauncherField as F;
+    Some(match field {
+        F::CopperhfUnit0 | F::CopperhfUnit0Boot => 0,
+        F::CopperhfUnit1 | F::CopperhfUnit1Boot => 1,
+        F::CopperhfUnit2 | F::CopperhfUnit2Boot => 2,
+        F::CopperhfUnit3 | F::CopperhfUnit3Boot => 3,
+        F::CopperhfUnit4 | F::CopperhfUnit4Boot => 4,
+        F::CopperhfUnit5 | F::CopperhfUnit5Boot => 5,
+        F::CopperhfUnit6 | F::CopperhfUnit6Boot => 6,
+        _ => return None,
+    })
+}
+
 /// The boot-priority field for a hard-disk drive field (inverse of
 /// [`MachineSetup::boot_field_drive`]).
 fn drive_boot_field(drive: LauncherField) -> Option<LauncherField> {
@@ -9121,6 +9434,13 @@ fn drive_boot_field(drive: LauncherField) -> Option<LauncherField> {
         F::LideDrive1 => F::LideDrive1Boot,
         F::LideDrive2 => F::LideDrive2Boot,
         F::LideDrive3 => F::LideDrive3Boot,
+        F::CopperhfUnit0 => F::CopperhfUnit0Boot,
+        F::CopperhfUnit1 => F::CopperhfUnit1Boot,
+        F::CopperhfUnit2 => F::CopperhfUnit2Boot,
+        F::CopperhfUnit3 => F::CopperhfUnit3Boot,
+        F::CopperhfUnit4 => F::CopperhfUnit4Boot,
+        F::CopperhfUnit5 => F::CopperhfUnit5Boot,
+        F::CopperhfUnit6 => F::CopperhfUnit6Boot,
         _ => return None,
     })
 }

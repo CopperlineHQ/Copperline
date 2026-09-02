@@ -107,6 +107,7 @@ __pycache__/
 
 # Guest-code build intermediates (the committed artifact is the .bin blob).
 /guest/services/handler.*
+/guest/copperhf/device.exe
 
 # guest/mhi/test's local build-mount copy of ../mhi_abi.h (the docker mount
 # only covers guest/mhi/test/, see guest/mhi/test/Makefile's own comment).

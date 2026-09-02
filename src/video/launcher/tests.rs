@@ -3533,6 +3533,7 @@ fn sub_pages_of_hdd_cd() {
         LauncherTab::HostDisk,
         LauncherTab::BootPriority,
         LauncherTab::Lide,
+        LauncherTab::Copperhf,
     ] {
         assert!(!TABS.contains(&t));
         // Each keeps the Storage strip tab highlighted and returns to it.
@@ -3557,6 +3558,7 @@ fn sub_pages_of_hdd_cd() {
             LauncherTab::HostFs,
             LauncherTab::HostDisk,
             LauncherTab::Lide,
+            LauncherTab::Copperhf,
             LauncherTab::BootPriority,
             LauncherTab::CreateFloppy,
         ]
@@ -4047,6 +4049,114 @@ fn lide_drives_round_trip_in_channel_order_with_boot_priority() {
     assert_eq!(back.path(F::LideDrive0), Some(Path::new("ch0-master.hdf")));
     assert_eq!(back.path(F::LideDrive1), Some(Path::new("ch0-slave.hdf")));
     assert_eq!(back.value_label(F::LideDrive0Boot), "5");
+}
+
+/// Unlike SCSI (gated behind a chosen controller) and Lide (gated behind a
+/// chosen board), `[copperhf]` has no board/personality to pick -- the
+/// board is always there -- so its seven unit rows are always shown and
+/// never greyed for that reason, on a fresh `MachineSetup` with no model
+/// selected at all.
+#[test]
+fn copperhf_units_are_always_visible_and_never_greyed() {
+    use LauncherField as F;
+    let s = MachineSetup::default();
+    let unit_rows = [
+        F::CopperhfUnit0,
+        F::CopperhfUnit1,
+        F::CopperhfUnit2,
+        F::CopperhfUnit3,
+        F::CopperhfUnit4,
+        F::CopperhfUnit5,
+        F::CopperhfUnit6,
+    ];
+    for f in unit_rows {
+        assert!(!s.row_hidden(f), "{f:?} hidden with no unit configured");
+        assert_eq!(
+            s.disabled_reason(f),
+            None,
+            "{f:?} greyed with no board to lack"
+        );
+    }
+    // The copperhf Storage sub-page itself carries just the seven drive
+    // rows -- no board/ROM row above them, unlike Lide's page.
+    let page_rows = rows(
+        LauncherTab::Copperhf,
+        Default::default(),
+        Default::default(),
+        false,
+        false,
+    );
+    assert_eq!(page_rows.len(), 7);
+    assert!(page_rows.iter().all(|r| r.kind == RowKind::Drive));
+}
+
+/// `[copperhf]` units round-trip through the config screen like SCSI/Lide
+/// units: path, volume name, and boot priority all survive a
+/// `to_raw`/`from_raw` cycle, and an empty unit takes no boot-priority row.
+#[test]
+fn copperhf_units_round_trip_with_boot_priority() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    s.set_path(F::CopperhfUnit0, PathBuf::from("workbench.hdf"));
+    s.set_path(F::CopperhfUnit1, PathBuf::from("data.hdf"));
+    s.set_drive_bootpri(F::CopperhfUnit0Boot, Some(5));
+
+    assert!(s.has_boot_priority_rows());
+    assert_eq!(s.value_label(F::CopperhfUnit0Boot), "5");
+    assert_eq!(s.disabled_reason(F::CopperhfUnit1Boot), None);
+    // An empty unit has nothing to order, so it takes no place in the list.
+    assert!(s.row_hidden(F::CopperhfUnit2Boot));
+
+    let raw = s.to_raw();
+    assert_eq!(raw.copperhf.unit0.as_ref().unwrap().path, "workbench.hdf");
+    assert_eq!(raw.copperhf.unit0.as_ref().unwrap().bootpri, Some(5));
+    assert_eq!(raw.copperhf.unit1.as_ref().unwrap().path, "data.hdf");
+    assert!(raw.copperhf.unit2.is_none());
+
+    let back = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(
+        back.path(F::CopperhfUnit0),
+        Some(Path::new("workbench.hdf"))
+    );
+    assert_eq!(back.path(F::CopperhfUnit1), Some(Path::new("data.hdf")));
+    assert_eq!(back.value_label(F::CopperhfUnit0Boot), "5");
+}
+
+/// The Boot Priority page ranks drives with no real-hardware counterpart
+/// last: IDE, then SCSI, then Lide, then Copperhf units -- matching
+/// `BOOTPRI_ROWS`'s own fixed order.
+#[test]
+fn copperhf_units_take_their_place_after_lide_in_the_boot_order() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    s.select_model(Some(MachineModel::A1200));
+    s.set_path(F::IdeMaster, PathBuf::from("ide0.hdf"));
+    s.cycle(F::LideBoard, true); // RIPPLE
+    s.set_path(F::LideDrive0, PathBuf::from("lide0.hdf"));
+    s.set_path(F::CopperhfUnit0, PathBuf::from("copperhf0.hdf"));
+
+    let listed: Vec<_> = rows(
+        LauncherTab::BootPriority,
+        Default::default(),
+        Default::default(),
+        false,
+        false,
+    )
+    .iter()
+    .filter(|r| s.row_on_page(LauncherTab::BootPriority, r.field))
+    .map(|r| r.field)
+    .collect();
+    assert_eq!(
+        listed,
+        vec![
+            F::SectionHeader,
+            F::IdeMasterBoot,
+            F::IdeSlaveBoot,
+            F::LideDrive0Boot,
+            F::CopperhfUnit0Boot,
+        ]
+    );
+    assert_eq!(s.boot_priority_row_count(), 4);
 }
 
 #[test]
@@ -5422,26 +5532,47 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
     ] {
         assert_eq!(
             s.boot_page_of(f),
-            Some(LauncherTab::BootPriorityMore),
+            Some(LauncherTab::BootPriorityMore(2)),
             "{f:?}"
         );
     }
     // Neither page draws more rows than one holds.
-    for tab in [LauncherTab::BootPriority, LauncherTab::BootPriorityMore] {
+    for tab in [LauncherTab::BootPriority, LauncherTab::BootPriorityMore(2)] {
         let drawn = rows(tab, Default::default(), Default::default(), false, false)
             .iter()
             .filter(|r| s.row_on_page(tab, r.field))
             .count();
         assert!(drawn <= BOOTPRI_PAGE_ROWS + 1, "{tab:?} draws {drawn}");
     }
+    assert_eq!(s.boot_priority_page_count(), 2);
 
-    // The table itself fits the two pages that exist -- the compile-time
-    // bound behind `boot_page_of`'s two-page answer. A drive class that
-    // pushes past this needs a third page, not a silent pile-up.
-    assert!(BOOTPRI_ROWS.len() <= 2 * BOOTPRI_PAGE_ROWS);
-    // And with every slot filled, each page really draws no more than its
-    // share -- the same filter the draw path uses, not a re-stated cap.
-    let per_page: Vec<usize> = [LauncherTab::BootPriority, LauncherTab::BootPriorityMore]
+    // Fill every copperhf unit too: 20 rows, and the pagination grows a
+    // third page rather than silently stranding the overflow -- the exact
+    // capacity bug the fixed two-page implementation had when copperhf's
+    // seven rows first landed.
+    for f in [
+        F::CopperhfUnit0,
+        F::CopperhfUnit1,
+        F::CopperhfUnit2,
+        F::CopperhfUnit3,
+        F::CopperhfUnit4,
+        F::CopperhfUnit5,
+        F::CopperhfUnit6,
+    ] {
+        s.set_path(f, PathBuf::from("copperhf.hdf"));
+    }
+    assert_eq!(s.boot_priority_row_count(), 20);
+    assert_eq!(s.boot_priority_page_count(), 3);
+
+    // With every slot filled, each page draws exactly its share -- the same
+    // filter the draw path uses, not a re-stated cap -- and every listed
+    // row is reachable on exactly one page.
+    let pages = [
+        LauncherTab::BootPriority,
+        LauncherTab::BootPriorityMore(2),
+        LauncherTab::BootPriorityMore(3),
+    ];
+    let per_page: Vec<usize> = pages
         .iter()
         .map(|&tab| {
             BOOTPRI_ROWS
@@ -5450,25 +5581,47 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
                 .count()
         })
         .collect();
-    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, 4]);
+    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, BOOTPRI_PAGE_ROWS, 2]);
+    for row in BOOTPRI_ROWS.iter() {
+        let on = pages
+            .iter()
+            .filter(|&&tab| s.row_on_page(tab, row.field))
+            .count();
+        assert_eq!(on, 1, "{:?} reachable on exactly one page", row.field);
+    }
 
-    // A setup swapped in under the panel (Load..., Defaults) may have no
-    // second page; the tab it was standing on settles back to the first.
+    // "Next Page >" walks forward through every page and stops at the last.
     assert_eq!(
-        s.settle_tab(LauncherTab::BootPriorityMore),
-        LauncherTab::BootPriorityMore,
-        "a full machine keeps its second page"
+        s.boot_priority_next_page(LauncherTab::BootPriority),
+        Some(LauncherTab::BootPriorityMore(2))
+    );
+    assert_eq!(
+        s.boot_priority_next_page(LauncherTab::BootPriorityMore(2)),
+        Some(LauncherTab::BootPriorityMore(3))
+    );
+    assert_eq!(
+        s.boot_priority_next_page(LauncherTab::BootPriorityMore(3)),
+        None
+    );
+
+    // A setup swapped in under the panel (Load..., Defaults) may not have
+    // the page the session was standing on; a vanished page settles back to
+    // the first.
+    assert_eq!(
+        s.settle_tab(LauncherTab::BootPriorityMore(3)),
+        LauncherTab::BootPriorityMore(3),
+        "a full machine keeps its third page"
     );
     let empty = MachineSetup::default();
     assert_eq!(
-        empty.settle_tab(LauncherTab::BootPriorityMore),
+        empty.settle_tab(LauncherTab::BootPriorityMore(2)),
         LauncherTab::BootPriority
     );
     assert_eq!(empty.settle_tab(LauncherTab::Lide), LauncherTab::Lide);
 
-    // Back on the second page returns to the first, not to Storage.
+    // Back on a later page returns to the first, not to Storage.
     assert_eq!(
-        LauncherTab::BootPriorityMore.parent_tab(),
+        LauncherTab::BootPriorityMore(2).parent_tab(),
         Some(LauncherTab::BootPriority)
     );
     assert_eq!(

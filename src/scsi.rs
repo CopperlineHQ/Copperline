@@ -118,6 +118,12 @@ pub(crate) const ASC_LUN_NOT_SUPPORTED: u8 = 0x25;
 pub(crate) const ASC_MEDIUM_MAY_HAVE_CHANGED: u8 = 0x28;
 pub(crate) const ASC_MEDIUM_NOT_PRESENT: u8 = 0x3A;
 pub(crate) const ASC_ILLEGAL_MODE_FOR_THIS_TRACK: u8 = 0x64;
+pub(crate) const ASC_PARAMETER_LIST_LENGTH_ERROR: u8 = 0x1A;
+
+/// Bound on a single READ/WRITE CDB's own transfer request, checked in
+/// `ScsiDisk::rw_command` before any host allocation. See that function's
+/// own comment for why `lba + count > total` alone is not enough.
+const MAX_SCSI_RW_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const SENSE_LEN: usize = 18;
 
 /// Emulated delay (chip-bus colour clocks) between issuing a command and
@@ -135,6 +141,10 @@ pub(crate) fn be24(b: &[u8], off: usize) -> u32 {
 
 pub(crate) fn be32(b: &[u8], off: usize) -> u32 {
     (be24(b, off) << 8) | u32::from(b[off + 3])
+}
+
+pub(crate) fn be64(b: &[u8], off: usize) -> u64 {
+    (u64::from(be32(b, off)) << 32) | u64::from(be32(b, off + 4))
 }
 
 /// CDB length from the opcode's command group.
@@ -169,6 +179,26 @@ pub struct ScsiDisk {
 }
 
 impl ScsiDisk {
+    /// Wrap an already-open [`HardDriveImage`] as a SCSI target with fresh
+    /// (empty) sense state. Used by `copperhf.rs`, which opens its units
+    /// through the shared hardfile layer exactly like `[ide]`/`[scsi]` and
+    /// only wants `ScsiDisk`'s CDB machinery on top, not another `open`.
+    pub(crate) fn from_disk(disk: HardDriveImage) -> Self {
+        Self {
+            disk,
+            sense: [0u8; SENSE_LEN],
+        }
+    }
+
+    /// The current sense buffer, without the REQUEST SENSE side effect of
+    /// clearing it. `HD_SCSICMD`'s `SCSIF_AUTOSENSE` behaviour fills
+    /// `scsi_SenseData` from whatever a failed command just set, without the
+    /// guest having to issue a separate REQUEST SENSE -- which is also still
+    /// available as an ordinary CDB through [`Self::execute`].
+    pub(crate) fn sense_bytes(&self) -> &[u8; SENSE_LEN] {
+        &self.sense
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
         self.disk.materialize_host_disk()
@@ -240,7 +270,7 @@ impl ScsiDisk {
         self.sense = [0u8; SENSE_LEN];
     }
 
-    fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
+    pub(crate) fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
         self.set_sense(key, asc);
         (ScsiExec::NoData, CHECK_CONDITION)
     }
@@ -413,6 +443,31 @@ impl ScsiDisk {
             }
             // START STOP UNIT / SEND DIAGNOSTIC / PREVENT ALLOW REMOVAL
             0x1B | 0x1D | 0x1E => (ScsiExec::NoData, GOOD),
+            // MODE SENSE(10): same pages as MODE SENSE(6), 8-byte header.
+            0x5A => {
+                let dbd = cdb[1] & 0x08 != 0;
+                let page = cdb[2] & 0x3F;
+                let Some(pages) = self.mode_pages(page) else {
+                    return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+                };
+                let mut data = vec![0u8; 8];
+                if !dbd {
+                    data[7] = 8; // block descriptor length
+                    let blocks = total.min(u64::from(u32::MAX)) as u32;
+                    data.push(0);
+                    data.extend_from_slice(&blocks.to_be_bytes()[1..]);
+                    data.push(0);
+                    data.extend_from_slice(&(SECTOR_SIZE as u32).to_be_bytes()[1..]);
+                }
+                data.extend_from_slice(&pages);
+                let mode_len = (data.len() - 2) as u16;
+                data[0..2].copy_from_slice(&mode_len.to_be_bytes());
+                let alloc = be16(cdb, 7) as usize;
+                data.truncate(alloc);
+                (ScsiExec::DataIn(data), GOOD)
+            }
+            // MODE SELECT(10): accept and ignore the parameter list.
+            0x55 => (ScsiExec::DataOut(be16(cdb, 7) as usize), GOOD),
             // READ CAPACITY(10)
             0x25 => {
                 let last = total.saturating_sub(1).min(u64::from(u32::MAX)) as u32;
@@ -439,6 +494,36 @@ impl ScsiDisk {
                 }
                 (ScsiExec::NoData, GOOD)
             }
+            // READ(12) / WRITE(12)
+            0xA8 | 0xAA => {
+                let lba = u64::from(be32(cdb, 2));
+                let count = u64::from(be32(cdb, 6));
+                if count == 0 {
+                    return (ScsiExec::NoData, GOOD);
+                }
+                self.rw_command(op == 0xA8, lba, count, total)
+            }
+            // READ(16) / WRITE(16)
+            0x88 | 0x8A => {
+                let lba = be64(cdb, 2);
+                let count = u64::from(be32(cdb, 10));
+                if count == 0 {
+                    return (ScsiExec::NoData, GOOD);
+                }
+                self.rw_command(op == 0x88, lba, count, total)
+            }
+            // SERVICE ACTION IN(16): only READ CAPACITY(16) (service action
+            // 0x10) is implemented.
+            0x9E if cdb[1] & 0x1F == 0x10 => {
+                let last = total.saturating_sub(1);
+                let mut data = vec![0u8; 32];
+                data[0..8].copy_from_slice(&last.to_be_bytes());
+                data[8..12].copy_from_slice(&(SECTOR_SIZE as u32).to_be_bytes());
+                let alloc = be32(cdb, 10) as usize;
+                data.truncate(alloc);
+                (ScsiExec::DataIn(data), GOOD)
+            }
+            0x9E => self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB),
             // SYNCHRONIZE CACHE(10)
             0x35 => match self.disk.flush() {
                 Ok(()) => (ScsiExec::NoData, GOOD),
@@ -460,10 +545,37 @@ impl ScsiDisk {
     }
 
     fn rw_command(&mut self, read: bool, lba: u64, count: u64, total: u64) -> (ScsiExec, u8) {
-        if lba + count > total {
+        // `lba`/`count` come straight from a guest-supplied CDB (READ/WRITE
+        // 12 and 16 carry a full 32-bit count, 16 a full 64-bit LBA), so
+        // both the range check and the byte-count conversion below use
+        // checked arithmetic: `lba + count` can wrap a 64-bit sum for an
+        // LBA near u64::MAX, and `count * SECTOR_SIZE` can wrap a 32-bit
+        // `usize` on this crate's wasm32 targets even though it cannot on a
+        // 64-bit host. Either wrap would let an out-of-range or
+        // multi-terabyte request slip past the bound below.
+        let Some(end) = lba.checked_add(count) else {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE);
+        };
+        if end > total {
             return self.check(SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE);
         }
-        let bytes = (count as usize) * SECTOR_SIZE;
+        let Some(bytes) = count
+            .checked_mul(SECTOR_SIZE as u64)
+            .and_then(|b| usize::try_from(b).ok())
+        else {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+        };
+        // A single CDB's own transfer request is capped well above any
+        // real multi-sector burst a driver issues in one go (scsi.device
+        // itself chunks at MaxTransfer, typically far smaller), but far
+        // below "attempt to allocate the whole disk in one shot" -- the
+        // `lba + count > total` bound above is necessary but not
+        // sufficient on its own: a large but legitimately-sized attached
+        // hardfile still lets a single crafted CDB request its entire
+        // multi-gigabyte extent as one host allocation.
+        if bytes > MAX_SCSI_RW_BYTES {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+        }
         if !read {
             return (ScsiExec::DataOut(bytes), GOOD);
         }
@@ -498,11 +610,11 @@ impl ScsiDisk {
             return GOOD;
         }
         match op {
-            0x0A | 0x2A => {
-                let lba = if cdb[0] == 0x0A {
-                    u64::from(be24(cdb, 1) & 0x1F_FFFF)
-                } else {
-                    u64::from(be32(cdb, 2))
+            0x0A | 0x2A | 0xAA | 0x8A => {
+                let lba = match cdb[0] {
+                    0x0A => u64::from(be24(cdb, 1) & 0x1F_FFFF),
+                    0x2A | 0xAA => u64::from(be32(cdb, 2)),
+                    _ => be64(cdb, 2), // 0x8A: WRITE(16)
                 };
                 for (i, sector) in data.chunks(SECTOR_SIZE).enumerate() {
                     if sector.len() < SECTOR_SIZE {

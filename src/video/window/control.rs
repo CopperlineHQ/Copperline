@@ -381,6 +381,45 @@ impl App {
                 };
                 self.control_send(line);
             }
+            HostOp::CopperhfAttach {
+                unit,
+                path,
+                volume_name,
+                boot_pri,
+            } => {
+                let line = match exec::copperhf_attach(
+                    &mut self.emu,
+                    unit,
+                    &path,
+                    volume_name,
+                    boot_pri,
+                ) {
+                    Ok(value) => {
+                        // A hot attach surfaces to a running guest as a disk
+                        // change (TD_ADDCHANGEINT/TD_CHANGESTATE) but does not
+                        // automount it -- the boot-ROM mounter only runs at
+                        // boot -- so the OSD says so rather than implying the
+                        // new image is already usable.
+                        self.show_osd(format!(
+                            "copperhf unit {unit}: attached {} (reboot to mount)",
+                            display_file_name(&path)
+                        ));
+                        proto::ok_line(&id, value)
+                    }
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.control_send(line);
+            }
+            HostOp::CopperhfEject { unit } => {
+                let line = match exec::copperhf_eject(&mut self.emu, unit) {
+                    Ok(value) => {
+                        self.show_osd(format!("copperhf unit {unit}: media ejected"));
+                        proto::ok_line(&id, value)
+                    }
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.control_send(line);
+            }
             HostOp::SetPortDevice { port, device } => {
                 self.hot_plug_port_device(port as usize, device);
                 self.show_osd(format!("Port {}: {}", port + 1, device.label()));

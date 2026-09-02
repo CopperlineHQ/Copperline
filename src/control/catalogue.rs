@@ -1055,6 +1055,45 @@ fn build() -> Vec<ToolDef> {
             no_params(),
             json!({}),
         ),
+        entry(
+            "copperhf.attach",
+            "Hot-attach a copperhf.device unit's media: opens `path` exactly like a \
+             boot-time [copperhf] unit and replaces whatever media the unit had, bumping \
+             its change counter and flagging the change to the guest (the same disk-change \
+             machinery the guest's own TD_EJECT drives). Fails if no [copperhf] controller \
+             is configured.",
+            object(
+                vec![
+                    ("unit", int("Unit slot, 0-6", Some(0), Some(6))),
+                    ("path", string("Host path of the hardfile image")),
+                    (
+                        "volume_name",
+                        string("Volume name written into a synthesized RDB (bare images only)"),
+                    ),
+                    (
+                        "boot_pri",
+                        int(
+                            "Boot priority written into a synthesized RDB (bare images only)",
+                            Some(-128),
+                            Some(127),
+                        ),
+                    ),
+                ],
+                &["unit", "path"],
+            ),
+            json!({"unit": 0, "path": "/path/to/disk.hdf"}),
+        ),
+        entry(
+            "copperhf.eject",
+            "Hot-eject a copperhf.device unit's media: the slot stays configured (opens \
+             still succeed, like a diskless drive), only its media drops -- the same as \
+             the guest's own TD_EJECT.",
+            object(
+                vec![("unit", int("Unit slot, 0-6", Some(0), Some(6)))],
+                &["unit"],
+            ),
+            json!({"unit": 0}),
+        ),
         // Events
         entry(
             "events.subscribe",

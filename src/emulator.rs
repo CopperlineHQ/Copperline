@@ -915,14 +915,21 @@ impl Emulator {
     /// Write a save state of the whole emulated machine to `path`. Call
     /// between frames (the event loop and the headless frame loop both run
     /// at frame granularity, so any caller outside step_frame qualifies).
-    pub fn save_state(&self, path: &std::path::Path) -> Result<()> {
+    ///
+    /// Quiesces the copperhf.device board first (a no-op unless one is
+    /// configured and something is in flight): the worker-thread I/O
+    /// pipeline must be fully drained before its board is serialized (see
+    /// `src/copperhf.rs`'s module doc).
+    pub fn save_state(&mut self, path: &std::path::Path) -> Result<()> {
+        self.bus_mut().copperhf_quiesce();
         crate::savestate::save(&self.machine, &self.descriptor, path)
     }
 
     /// `save_state` into memory instead of a file, for hosts with no
     /// filesystem to write to (the browser build hands the blob to a
     /// download or IndexedDB). Same bytes, same format version.
-    pub fn save_state_bytes(&self) -> Result<Vec<u8>> {
+    pub fn save_state_bytes(&mut self) -> Result<Vec<u8>> {
+        self.bus_mut().copperhf_quiesce();
         let mut blob = Vec::new();
         crate::savestate::save_to_writer(&self.machine, &self.descriptor, &mut blob)?;
         Ok(blob)
@@ -3006,6 +3013,32 @@ pub fn build_machine(
                 .unwrap_or_default()
         );
         devices.push(crate::zorro_device::BoardDevice::IdeZorro(board));
+    }
+    // copperhf.device virtual hardfile controller (`[copperhf]`): up to
+    // seven units, each opened exactly like an `[ide]`/`[scsi]` unit (same
+    // `DriveImage` shape, same `DH{unit}` naming convention) so a bare
+    // hardfile boots identically regardless of which controller it is
+    // attached to. Failing to open a configured unit's image is fatal, not
+    // a warning, matching the IDE/SCSI attach blocks above: a unit named in
+    // the config has no image to fall back on.
+    if cfg.copperhf.enabled() {
+        let slot = devices.len();
+        let mut board = crate::copperhf::CopperhfBoard::new();
+        for (unit, drive) in cfg.copperhf.units.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            let disk = crate::harddrive::HardDriveImage::open(
+                &drive.path,
+                &format!("DH{unit}"),
+                "copperhf",
+                drive.volume_name.as_deref(),
+                drive.boot_pri,
+                drive.filesystem,
+            )?;
+            board.attach_unit(unit, disk);
+        }
+        zorro.add_board(crate::zorro::BoardSpec::copperhf(slot))?;
+        info!("copperhf: virtual hardfile controller on the Zorro chain (slot {slot})");
+        devices.push(crate::zorro_device::BoardDevice::Copperhf(board));
     }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.

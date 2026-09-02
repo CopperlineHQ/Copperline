@@ -99,6 +99,13 @@ impl App {
                 | LauncherField::LideDrive1
                 | LauncherField::LideDrive2
                 | LauncherField::LideDrive3
+                | LauncherField::CopperhfUnit0
+                | LauncherField::CopperhfUnit1
+                | LauncherField::CopperhfUnit2
+                | LauncherField::CopperhfUnit3
+                | LauncherField::CopperhfUnit4
+                | LauncherField::CopperhfUnit5
+                | LauncherField::CopperhfUnit6
         );
         let title = if hard_drive_slot && cfg!(target_os = "macos") {
             "Select file or folder"
@@ -164,6 +171,19 @@ impl App {
             | LauncherField::LideDrive3 => dialog
                 .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
                 .add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
+            // copperhf.device serves hard disks only -- no ATAPI/SCSI-CDROM
+            // emulation behind it (`copperhf_drive_image` rejects a CD
+            // extension) -- so its units get no CD filter, unlike the slots
+            // above.
+            LauncherField::CopperhfUnit0
+            | LauncherField::CopperhfUnit1
+            | LauncherField::CopperhfUnit2
+            | LauncherField::CopperhfUnit3
+            | LauncherField::CopperhfUnit4
+            | LauncherField::CopperhfUnit5
+            | LauncherField::CopperhfUnit6 => {
+                dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
+            }
             _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
@@ -223,7 +243,14 @@ impl App {
             | LauncherField::ScsiUnit3
             | LauncherField::ScsiUnit4
             | LauncherField::ScsiUnit5
-            | LauncherField::ScsiUnit6 => crate::paths::harddrives_dir(),
+            | LauncherField::ScsiUnit6
+            | LauncherField::CopperhfUnit0
+            | LauncherField::CopperhfUnit1
+            | LauncherField::CopperhfUnit2
+            | LauncherField::CopperhfUnit3
+            | LauncherField::CopperhfUnit4
+            | LauncherField::CopperhfUnit5
+            | LauncherField::CopperhfUnit6 => crate::paths::harddrives_dir(),
             // The WHDLoad game folder and the NVRAM image have homes of their
             // own that the launcher already knows; nothing to add here.
             LauncherField::WhdloadGame | LauncherField::Cd32Nvram => None,

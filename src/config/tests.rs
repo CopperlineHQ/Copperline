@@ -2415,6 +2415,103 @@ fn scsi_section_parses_units_and_defaults_to_the_bundled_boot_rom() -> Result<()
 }
 
 #[test]
+fn copperhf_section_parses_bare_and_table_units() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+            [copperhf]
+            unit0 = "workbench.hdf"
+            unit3 = { path = "data.hdf", name = "Data", bootpri = 5 }
+            "#,
+    )?;
+    assert!(cfg.copperhf.enabled());
+    assert_eq!(
+        cfg.copperhf.units[0].as_ref().map(|d| d.path.as_path()),
+        Some(Path::new("workbench.hdf"))
+    );
+    assert!(cfg.copperhf.units[1].is_none());
+    let unit3 = cfg.copperhf.units[3].as_ref().expect("unit3 configured");
+    assert_eq!(unit3.path, Path::new("data.hdf"));
+    assert_eq!(unit3.volume_name.as_deref(), Some("Data"));
+    assert_eq!(unit3.boot_pri, 5);
+
+    // No section at all: nothing configured, nothing fitted.
+    let cfg = parse_config("")?;
+    assert!(!cfg.copperhf.enabled());
+    assert!(cfg.copperhf.units.iter().all(Option::is_none));
+    Ok(())
+}
+
+#[test]
+fn copperhf_unit_rejects_an_unknown_table_key() {
+    let err = parse_config(
+        r#"
+            [copperhf]
+            unit0 = { path = "work/", label = "Work" }
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("label"), "{err:#}");
+}
+
+#[test]
+fn copperhf_rejects_cd_image_paths() {
+    // copperhf.device serves hard disks only -- no ATAPI/SCSI-CDROM command
+    // set behind it, so a CD-image extension is a clear config-time error
+    // rather than a unit that silently never answers useful commands.
+    let err = parse_config(
+        r#"
+            [copperhf]
+            unit0 = "game.cue"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("hard disks only"), "{err:#}");
+
+    let err = parse_config(
+        r#"
+            [copperhf]
+            unit1 = { path = "cd32.iso" }
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("hard disks only"), "{err:#}");
+}
+
+#[test]
+fn copperhf_rejects_filesystem_key_on_a_file_path() {
+    // `filesystem` only means something for a host-directory mount, same
+    // rule as [ide]/[scsi]/[lide].
+    let err = parse_config(
+        r#"
+            [copperhf]
+            unit0 = { path = "data.hdf", filesystem = "ofs" }
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("filesystem"), "{err:#}");
+}
+
+#[test]
+fn copperhf_unit_round_trips_through_saved_toml() {
+    let raw = RawConfig {
+        copperhf: RawCopperhf {
+            unit0: Some(RawDrive {
+                path: "work/".to_string(),
+                name: Some("Work".to_string()),
+                bootpri: None,
+                filesystem: None,
+            }),
+            unit1: Some(RawDrive::from_path("data.hdf")),
+            ..RawCopperhf::default()
+        },
+        ..RawConfig::default()
+    };
+    let text = raw.to_toml_string().unwrap();
+    let back: RawConfig = toml::from_str(&text).unwrap();
+    assert_eq!(raw, back, "round-trip mismatch; TOML was:\n{text}");
+}
+
+#[test]
 fn lide_named_drive_keys_allow_holes_and_beat_the_legacy_array() -> Result<()> {
     // A slot filled with the one before it empty -- the whole point of the
     // named keys, and impossible to express with the positional `drives`

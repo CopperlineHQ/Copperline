@@ -71,6 +71,7 @@ project:
         - file: internals/peripherals.md
         - file: internals/toccata.md
         - file: internals/mhi.md
+        - file: internals/copperhf.md
         - file: internals/zz9k.md
         - file: internals/picasso2.md
         - file: internals/graffity.md
@@ -115,6 +116,7 @@ project:
         - internals/peripherals.md
         - internals/toccata.md
         - internals/mhi.md
+        - internals/copperhf.md
         - internals/zz9k.md
         - internals/picasso2.md
         - internals/graffity.md

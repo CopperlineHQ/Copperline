@@ -6143,13 +6143,15 @@ fn launcher_nav_block_h(tab: launcher::LauncherTab) -> usize {
     LAUNCH_NAV_BLOCK_H + (rows - 1) * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP)
 }
 
-/// The Boot Priority page's paging button, when it has one: the first page
-/// offers the rest of the order, and only while there is a rest to offer.
-/// The second page needs none -- its Back button already goes to the first.
+/// The Boot Priority page's paging button, when it has one: any page short
+/// of the last offers the next, and only while there is a next to offer.
+/// Every page's Back button already returns to the first, so paging only
+/// ever needs to go forward.
 fn boot_page_button(state: &LauncherState) -> Option<(&'static str, launcher::LauncherTab)> {
-    (state.tab == launcher::LauncherTab::BootPriority
-        && state.setup.boot_priority_has_second_page())
-    .then_some(("Next Page >", launcher::LauncherTab::BootPriorityMore))
+    state
+        .setup
+        .boot_priority_next_page(state.tab)
+        .map(|next| ("Next Page >", next))
 }
 
 /// The Status column's clickable area (the "Bootable" label plus its tick box),

@@ -72,6 +72,9 @@ const PRODUCT_HOSTSOCKET: u8 = 0x06;
 /// [`BoardDescriptor::mhi`], so a no-`mhi` build stays warning-free.
 #[cfg(feature = "mhi")]
 const PRODUCT_MHI: u8 = 0x07;
+/// The copperhf.device virtual block-storage board (`crate::copperhf`); see
+/// `COPPERHF-DEVICE-PLAN.md`.
+const PRODUCT_COPPERHF: u8 = 0x08;
 
 /// MNT Research's registered expansion manufacturer ID, carried by the
 /// bundled ZZ9000 SDK crypto board (`crate::zz9k`, `[zz9k]`): the SDK's
@@ -324,6 +327,34 @@ impl BoardSpec {
             no_shutup: false,
             window: 0,
             diag_vec: None,
+        }
+    }
+
+    /// The copperhf.device virtual block-storage board (`[copperhf]`):
+    /// manufacturer [`COPPERLINE_MANUFACTURER_ID`], product
+    /// [`PRODUCT_COPPERHF`], a 64K Zorro II I/O window. `diag_vec` points at
+    /// the boot ROM's DiagArea (`crate::copperhf::DIAG_OFFSET`), landed in
+    /// M2: a guest that already knows the device's name can
+    /// `OpenDevice("copperhf.device", ...)` and drive the register
+    /// protocol at `guest/copperhf/copperhf_board.h` once expansion has
+    /// DiagPoint-ed the board -- no partition mounter/autoboot volume yet,
+    /// that is M3. `slot` is the index of the matching
+    /// [`crate::copperhf::CopperhfBoard`] device in `Bus::devices`.
+    pub fn copperhf(slot: usize) -> Self {
+        Self {
+            name: "copperhf.device".into(),
+            version: ZorroVersion::II,
+            manufacturer: COPPERLINE_MANUFACTURER_ID,
+            product: PRODUCT_COPPERHF,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            no_shutup: false,
+            window: 0,
+            diag_vec: Some(crate::copperhf::DIAG_OFFSET),
         }
     }
 

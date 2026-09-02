@@ -994,9 +994,15 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     // field is a custom handler with no equivalent here.
     //
     // The controller decides the destination. `uaeN` is WinUAE's own
-    // virtual controller, which has no counterpart -- those become plain
-    // IDE drives, the closest real thing. `ideN`/`scsiN` go where they say:
-    // the trailing number is the unit on that controller (WinUAE's
+    // virtual controller (uaehf.device); Copperline's [copperhf]
+    // (copperhf.device) is the exact analogue -- same purpose-built,
+    // zero-cost hardfile board, no real-hardware counterpart -- so `uaeN`
+    // maps unit for unit onto `[copperhf] unitN`. An out-of-range (>6) or
+    // already-taken unit number falls back to the first free copperhf unit
+    // instead of being dropped, and only once all seven units are full does
+    // a drive fall back onto plain [ide], the same substitution this
+    // mapper used before [copperhf] existed. `ideN`/`scsiN` go where they
+    // say: the trailing number is the unit on that controller (WinUAE's
     // get_filesys_controller), so `ide1` is the first channel's slave and
     // not "the second hardfile in the file". An `ideN_alfapower` /
     // `ideN_ripple` names one of the lide.device boards Copperline models
@@ -1114,10 +1120,74 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                     ),
                 ),
             }
+        } else if let Some(n) = unit("uae") {
+            // `uaeN`: WinUAE's own virtual controller, unit for unit onto
+            // [copperhf]'s unitN -- an exact translation, not an
+            // approximation, when the number fits.
+            let taken = |doc: &DocumentMut, u: usize| {
+                doc.get("copperhf")
+                    .and_then(toml_edit::Item::as_table)
+                    .and_then(|t| t.get(&format!("unit{u}")))
+                    .is_some()
+            };
+            let target = if n <= 6 && !taken(&doc, n) {
+                Some(n)
+            } else {
+                (0..=6).find(|&u| !taken(&doc, u))
+            };
+            match target {
+                Some(u) => {
+                    let unit_key = format!("unit{u}");
+                    table(&mut doc, &["copperhf"])[&unit_key] = drive;
+                    if u != n {
+                        report.approximated(
+                            &e.key,
+                            &e.value,
+                            format!(
+                                "Copperline's [copperhf] only has units 0-6; controller \
+                                 \"{controller}\" doesn't fit there (out of range, or that unit \
+                                 was already taken), so this drive was renumbered to unit{u} \
+                                 instead"
+                            ),
+                        );
+                    } else {
+                        annotate(
+                            &mut doc,
+                            &["copperhf"],
+                            &unit_key,
+                            &format!(
+                                "from hardfile2 controller={controller} -- copperhf.device is \
+                                 Copperline's exact analogue of WinUAE's uaehf.device, so this \
+                                 is an exact translation"
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    // All seven [copperhf] units are already spoken for:
+                    // fall back to the same real-IDE substitution this
+                    // mapper used before [copperhf] existed, with the same
+                    // size-limit caveat.
+                    while ide_next < 2 && !place_ide(&mut doc, ide_next, drive.clone()) {
+                        ide_next += 1;
+                    }
+                    if ide_next >= 2 {
+                        report.approximated(
+                            &e.key,
+                            &e.value,
+                            "Copperline's [copperhf] (units 0-6) and [ide] (master/slave) are \
+                             both full; attach this drive to [scsi] or [lide] by hand",
+                        );
+                        continue;
+                    }
+                    ide_next += 1;
+                    report.approximated(&e.key, &e.value, uae_controller_note(&hf.path, source));
+                }
+            }
         } else {
-            // A controller with no real counterpart (`uaeN`, or a name this
-            // mapper doesn't know): fill the first [ide] slot an explicit
-            // `ideN` drive hasn't already claimed.
+            // A controller name this mapper doesn't recognize at all: fill
+            // the first [ide] slot an explicit `ideN` drive hasn't already
+            // claimed.
             while ide_next < 2 && !place_ide(&mut doc, ide_next, drive.clone()) {
                 ide_next += 1;
             }
@@ -1131,9 +1201,6 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                 continue;
             }
             ide_next += 1;
-            if controller.starts_with("uae") {
-                report.approximated(&e.key, &e.value, uae_controller_note(&hf.path, source));
-            }
         }
     }
 
@@ -1408,16 +1475,18 @@ mod tests {
     #[test]
     fn hardfiles_go_where_their_controller_says() {
         // AmigaVision's own shape: two `uae` virtual-controller hardfiles,
-        // the second parked out of the boot order.
+        // the second parked out of the boot order. `uaeN`'s exact
+        // Copperline analogue is `[copperhf] unitN`, not [ide].
         let out = convert(
             "hardfile2=rw,DH0:AmigaVision.hdf,0,0,0,512,0,,uae0\n\
              hardfile2=rw,DH1:AmigaVision-Saves.hdf,0,0,0,512,-128,,uae1\n",
         );
-        assert!(out.contains(r#"master = "AmigaVision.hdf""#), "{out}");
+        assert!(out.contains(r#"unit0 = "AmigaVision.hdf""#), "{out}");
         assert!(
-            out.contains(r#"slave = { path = "AmigaVision-Saves.hdf", bootpri = -128 }"#),
+            out.contains(r#"unit1 = { path = "AmigaVision-Saves.hdf", bootpri = -128 }"#),
             "a non-default boot priority needs the table form: {out}"
         );
+        assert!(!out.contains("master ="), "{out}");
 
         // A lide board's drive, per-slot -- only expressible since
         // [lide] gained drive0..drive3.
@@ -1565,26 +1634,65 @@ mod tests {
     }
 
     #[test]
-    fn a_uae_virtual_controller_is_flagged_as_the_substitution_it_is() {
-        // There is no `uae` controller in Copperline; calling the result an
-        // ordinary IDE drive is a real substitution, and one that needs a
-        // machine with an IDE port -- worth saying rather than silently
-        // producing a config that may not build.
+    fn a_uae_virtual_controller_maps_exactly_onto_copperhf() {
+        // copperhf.device is Copperline's own exact analogue of WinUAE's
+        // uaehf.device, so a `uaeN` hardfile is a like-for-like translation
+        // -- nothing should land in the flagged (approximated/unsupported)
+        // report bucket for it, just an inline comment on the unit itself.
         let entries = crate::parse::parse("hardfile2=rw,DH0:a.hdf,0,0,0,512,0,,uae0\n");
         let out = map(&entries, std::path::Path::new("test.uae"));
-        assert_eq!(out.report.flagged.len(), 1);
-        assert!(out.report.flagged[0]
-            .note
-            .contains("virtual hard-drive controller"));
+        assert!(out.report.flagged.is_empty(), "{:?}", out.report.flagged);
+        assert!(
+            out.doc.to_string().contains(r#"unit0 = "a.hdf""#),
+            "{}",
+            out.doc
+        );
+        assert!(
+            out.doc.to_string().contains("copperhf.device"),
+            "an inline note names the analogue: {}",
+            out.doc
+        );
     }
 
     #[test]
-    fn an_oversized_uae_hardfile_names_the_kickstart_limit_it_will_hit() {
+    fn a_uae_unit_number_out_of_range_or_taken_is_renumbered_and_reported() {
+        // uae9 has no unit9 on a 7-unit (0-6) [copperhf] controller, and a
+        // repeated uae0 collides with the first drive's unit -- both need a
+        // sane fallback (the first free unit) rather than silent loss, and
+        // both are worth flagging since the source's own numbering was not
+        // honoured.
+        let out = convert(
+            "hardfile2=rw,DH0:a.hdf,0,0,0,512,0,,uae0\n\
+             hardfile2=rw,DH1:b.hdf,0,0,0,512,0,,uae0\n\
+             hardfile2=rw,DH2:c.hdf,0,0,0,512,0,,uae9\n",
+        );
+        assert!(out.contains(r#"unit0 = "a.hdf""#), "{out}");
+        assert!(
+            out.contains(r#"unit1 = "b.hdf""#),
+            "the collision falls to unit1: {out}"
+        );
+        assert!(
+            out.contains(r#"unit2 = "c.hdf""#),
+            "uae9 is out of range, falls to unit2: {out}"
+        );
+
+        let entries = crate::parse::parse(
+            "hardfile2=rw,DH0:a.hdf,0,0,0,512,0,,uae0\n\
+             hardfile2=rw,DH1:b.hdf,0,0,0,512,0,,uae0\n",
+        );
+        let out = map(&entries, std::path::Path::new("test.uae"));
+        assert_eq!(out.report.flagged.len(), 1);
+        assert!(out.report.flagged[0].note.contains("renumbered"));
+    }
+
+    #[test]
+    fn a_uae_hardfile_only_falls_back_to_ide_once_copperhf_is_full() {
         // The real AmigaVision shape: a bare filename in `conf/`, with the
-        // image itself under the install root's Harddrives/ folder. A
-        // `uae` hardfile has no size ceiling; the built-in IDE port
-        // inherits Kickstart's, so a 10GB drive that worked in Amiberry
-        // silently will not here.
+        // image itself under the install root's Harddrives/ folder. Only
+        // once all seven [copperhf] units are taken does a `uae` hardfile
+        // fall back to the machine's real IDE port, inheriting Kickstart's
+        // size limits -- so a 10GB drive that worked in Amiberry silently
+        // will not here.
         let root = std::env::temp_dir().join(format!(
             "copperline-import-hf-{}-{}",
             std::process::id(),
@@ -1604,14 +1712,31 @@ mod tests {
         drop(f);
         let source = conf.join("default.uae");
 
-        let entries = crate::parse::parse("hardfile2=rw,DH0:Big.hdf,0,0,0,512,0,,uae0\n");
-        let note = &map(&entries, &source).report.flagged[0].note;
+        let mut fill = String::new();
+        for u in 0..7 {
+            fill.push_str(&format!(
+                "hardfile2=rw,DH0:filler{u}.hdf,0,0,0,512,0,,uae{u}\n"
+            ));
+        }
+
+        let entries = crate::parse::parse(&format!(
+            "{fill}hardfile2=rw,DH0:Big.hdf,0,0,0,512,0,,uae9\n"
+        ));
+        let out = map(&entries, &source);
+        assert!(
+            out.doc.to_string().contains(r#"master = "Big.hdf""#),
+            "{}",
+            out.doc
+        );
+        let note = &out.report.flagged[0].note;
         assert!(note.contains("5.0GB"), "the measured size: {note}");
         assert!(note.contains("[lide]"), "and the way out: {note}");
 
         // An image it cannot find falls back to the general caveat rather
         // than claiming a size it does not know.
-        let entries = crate::parse::parse("hardfile2=rw,DH0:Absent.hdf,0,0,0,512,0,,uae0\n");
+        let entries = crate::parse::parse(&format!(
+            "{fill}hardfile2=rw,DH0:Absent.hdf,0,0,0,512,0,,uae9\n"
+        ));
         let note = &map(&entries, &source).report.flagged[0].note;
         assert!(note.contains("Worth checking the image size"), "{note}");
 

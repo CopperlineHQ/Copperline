@@ -364,7 +364,13 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  76: the uaelib trap gained the fn-88 overlay display list (the rects
 //      and text the guest asked to be drawn over the picture) and its
 //      drop counter, guest state like the registry.
-pub const STATE_VERSION: u32 = 76;
+//  77: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
+//      gained a per-unit cached `total_sectors` (`unit_sectors`) alongside
+//      the existing per-unit state; always serialized quiesced (no
+//      in-flight requests), so the shape otherwise stays close to M4's.
+//      (Was 71, then 75 on the copperhf-device branch; renumbered past
+//      upstream's own 71-76 at each merge.)
+pub const STATE_VERSION: u32 = 77;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -4378,6 +4378,33 @@ impl Bus {
         })
     }
 
+    /// The copperhf.device board, when one is configured (`[copperhf]`), for
+    /// the CCP `copperhf.*` hot attach/detach methods.
+    pub fn copperhf_board_mut(&mut self) -> Option<&mut crate::copperhf::CopperhfBoard> {
+        self.devices.iter_mut().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::Copperhf(board) => Some(board),
+            _ => None,
+        })
+    }
+
+    /// Block until the copperhf.device board (if configured) has no
+    /// requests in flight -- every completion already surfaced, every
+    /// guest-visible effect already applied. A no-op if there is no
+    /// `[copperhf]` board or nothing is in flight. Required before any of
+    /// `CopperhfBoard`'s quiesced-only unit mutators (attach/eject) run, and
+    /// before serializing a save state, so neither races the worker
+    /// thread's own view of the unit table (`src/copperhf.rs`'s module doc,
+    /// "Ownership and quiescing").
+    pub fn copperhf_quiesce(&mut self) {
+        let Self { devices, mem, .. } = self;
+        for dev in devices.iter_mut() {
+            if let crate::zorro_device::BoardDevice::Copperhf(board) = dev {
+                let mut host = crate::zorro_device::DeviceHost::new(mem);
+                board.quiesce(&mut host);
+            }
+        }
+    }
+
     /// The MHI MPEG decoder board, when one is configured, for the
     /// debugger's audio tab.
     #[cfg(feature = "mhi")]

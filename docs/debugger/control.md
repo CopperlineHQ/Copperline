@@ -292,6 +292,8 @@ events.unsubscribe {"events":["serial"]}
 - `media.floppy.query`: Query connected floppy drives, mounted disk images, and write-protection status.
 - `media.cd.insert {"path": "..."}`: Insert CD image.
 - `media.cd.eject`: Eject CD image.
+- `copperhf.attach {"unit": 0, "path": "...", "volume_name": "...", "boot_pri": 0}`: Hot-attach a `copperhf.device` unit's media (opens `path` exactly like a boot-time `[copperhf]` unit, `volume_name`/`boot_pri` optional). Bumps the unit's change counter and sets its `CHF_CHANGED_MASK` bit. Fails if no `[copperhf]` controller is configured.
+- `copperhf.eject {"unit": 0}`: Hot-eject/detach a `copperhf.device` unit's media. The unit stays present (`CHF_UNIT_PRESENT`); only its media bit (`CHF_UNIT_MEDIA`) clears. Bumps the change counter and sets `CHF_CHANGED_MASK`, the same as the guest's own `TD_EJECT`.
 
 ### State snapshot files
 - `state.save {"path": "..."}`: Snapshot machine state to file.
