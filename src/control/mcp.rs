@@ -194,13 +194,50 @@ impl McpServer {
                 "request must be a JSON object (batches are not supported)",
             ));
         };
-        let id = obj.get("id").cloned().filter(|id| !id.is_null());
-        let Some(method) = obj.get("method").and_then(Value::as_str) else {
+        if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Some(error_line(
+                &Value::Null,
+                INVALID_REQUEST,
+                "jsonrpc must be \"2.0\"",
+            ));
+        }
+        // MCP narrows JSON-RPC's id to a string or an integer: no null,
+        // and nothing else. A reply to a malformed id carries null.
+        let id = match obj.get("id") {
+            None => None,
+            Some(Value::String(s)) => Some(Value::String(s.clone())),
+            Some(Value::Number(n)) if n.is_i64() || n.is_u64() => Some(Value::Number(n.clone())),
+            Some(_) => {
+                return Some(error_line(
+                    &Value::Null,
+                    INVALID_REQUEST,
+                    "id must be a string or an integer",
+                ))
+            }
+        };
+        let method = match obj.get("method") {
+            None => None,
+            Some(Value::String(method)) => Some(method.as_str()),
+            Some(_) => {
+                return Some(error_line(
+                    &id.unwrap_or(Value::Null),
+                    INVALID_REQUEST,
+                    "method must be a string",
+                ))
+            }
+        };
+        let Some(method) = method else {
             // A reply to a server-initiated request (this server sends
-            // none) is ignored; a request without a method is malformed.
-            return id
-                .filter(|_| obj.get("result").is_none() && obj.get("error").is_none())
-                .map(|id| error_line(&id, INVALID_REQUEST, "request has no method"));
+            // none) is ignored; anything else without a method is
+            // malformed, id or no id.
+            if obj.contains_key("result") || obj.contains_key("error") {
+                return None;
+            }
+            return Some(error_line(
+                &id.unwrap_or(Value::Null),
+                INVALID_REQUEST,
+                "request has no method",
+            ));
         };
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
         let Some(id) = id else {
@@ -589,42 +626,71 @@ fn resume_with_wait(
 }
 
 /// `capture.screenshot` with the PNG attached as an image content block.
+///
+/// The path the emulator gets is absolute: the emulator writes relative
+/// to its own working directory and this process reads relative to ours,
+/// which differ for an attached session or a `session_launch` with a
+/// `cwd`, so a relative `path` is resolved here first. A `path` that is
+/// not a string goes through as it is, so the method's own invalid-params
+/// error comes back like any other tool's.
 fn screenshot(session: &mut Session, args: &Value, seq: u64) -> ToolResult {
-    let explicit = args.get("path").and_then(Value::as_str).map(PathBuf::from);
-    let temporary = explicit.is_none();
-    let path = explicit.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("copperline-mcp-{}-{seq}.png", std::process::id()))
-    });
-    let reply = session.bridge.call(
-        "capture.screenshot",
-        json!({"path": path.display().to_string()}),
-    );
+    let (param, path) = match args.get("path") {
+        None | Some(Value::Null) => {
+            let path = std::env::temp_dir()
+                .join(format!("copperline-mcp-{}-{seq}.png", std::process::id()));
+            (json!(path.display().to_string()), Some((path, true)))
+        }
+        Some(Value::String(given)) => {
+            let path = std::path::absolute(given).unwrap_or_else(|_| PathBuf::from(given));
+            (json!(path.display().to_string()), Some((path, false)))
+        }
+        Some(other) => (other.clone(), None),
+    };
+    let reply = session
+        .bridge
+        .call("capture.screenshot", json!({"path": param}));
     let mut result = match reply {
         Ok(Reply::Ok(result)) => result,
         Ok(Reply::Err { code, message }) => return ToolResult::ccp_error(code, message),
         Ok(Reply::TimedOut) => unreachable!("waited without a timeout"),
         Err(e) => return ToolResult::error(e),
     };
+    let Some((path, temporary)) = path else {
+        return ToolResult::ok(result);
+    };
     let png = std::fs::read(&path);
     if temporary {
         let _ = std::fs::remove_file(&path);
-        result["path"] = Value::Null;
-        result["note"] = json!("temporary file deleted after reading; the image is attached");
     }
-    let mut content = vec![ToolResult::text_block(&result)];
     match png {
-        Ok(bytes) => content.push(json!({
-            "type": "image",
-            "data": proto::encode_base64(&bytes),
-            "mimeType": "image/png",
-        })),
-        Err(e) => content.push(ToolResult::text_block(&json!({
-            "note": format!("the PNG could not be read back from {}: {e}", path.display())
-        }))),
-    }
-    ToolResult {
-        content,
-        is_error: false,
+        Ok(bytes) => {
+            if temporary {
+                result["path"] = Value::Null;
+                result["note"] =
+                    json!("temporary file deleted after reading; the image is attached");
+            }
+            ToolResult {
+                content: vec![
+                    ToolResult::text_block(&result),
+                    json!({
+                        "type": "image",
+                        "data": proto::encode_base64(&bytes),
+                        "mimeType": "image/png",
+                    }),
+                ],
+                is_error: false,
+            }
+        }
+        Err(e) => ToolResult {
+            content: vec![ToolResult::text_block(&json!({
+                "error": format!(
+                    "the screenshot was written but could not be read back from {}: {e}",
+                    path.display()
+                ),
+                "result": result,
+            }))],
+            is_error: true,
+        },
     }
 }
 
@@ -946,6 +1012,80 @@ mod tests {
     }
 
     #[test]
+    fn envelopes_must_be_json_rpc_2_with_a_string_or_integer_id() {
+        let mut server = McpServer::new();
+        let invalid = |server: &mut McpServer, line: &str| -> Value {
+            let reply: Value = serde_json::from_str(
+                &server
+                    .handle_message(line)
+                    .unwrap_or_else(|| panic!("{line} must be answered")),
+            )
+            .unwrap();
+            assert_eq!(reply["error"]["code"], INVALID_REQUEST, "{line}: {reply}");
+            reply
+        };
+        // The version is required, and must be 2.0.
+        let reply = invalid(&mut server, "{\"id\": 1, \"method\": \"ping\"}");
+        assert_eq!(reply["id"], Value::Null);
+        invalid(
+            &mut server,
+            "{\"jsonrpc\": \"1.0\", \"id\": 1, \"method\": \"ping\"}",
+        );
+        invalid(
+            &mut server,
+            "{\"jsonrpc\": 2, \"id\": 1, \"method\": \"ping\"}",
+        );
+        // Ids: null, booleans, floats, objects and arrays are not ids,
+        // and the error reply for one carries null.
+        for id in ["null", "true", "1.5", "{}", "[1]"] {
+            let reply = invalid(
+                &mut server,
+                &format!("{{\"jsonrpc\": \"2.0\", \"id\": {id}, \"method\": \"ping\"}}"),
+            );
+            assert_eq!(reply["id"], Value::Null, "id {id}");
+        }
+        // No method and no id is malformed, not a notification.
+        let reply = invalid(&mut server, "{\"jsonrpc\": \"2.0\"}");
+        assert_eq!(reply["id"], Value::Null);
+        let reply = invalid(&mut server, "{\"jsonrpc\": \"2.0\", \"params\": {}}");
+        assert_eq!(reply["id"], Value::Null);
+        // A method that is not a string is malformed too, with the id.
+        let reply = invalid(
+            &mut server,
+            "{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": 3}",
+        );
+        assert_eq!(reply["id"], 7);
+
+        // String and integer ids are answered as themselves.
+        for (id, expect) in [
+            ("\"abc\"", json!("abc")),
+            ("0", json!(0)),
+            ("-3", json!(-3)),
+        ] {
+            let reply: Value = serde_json::from_str(
+                &server
+                    .handle_message(&format!(
+                        "{{\"jsonrpc\": \"2.0\", \"id\": {id}, \"method\": \"ping\"}}"
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(reply["id"], expect);
+            assert_eq!(reply["result"], json!({}));
+        }
+        // A valid notification with an unknown method is still ignored,
+        // and so is a stray response, whatever its id.
+        assert!(server
+            .handle_message(
+                "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/progress\", \"params\": {}}"
+            )
+            .is_none());
+        assert!(server
+            .handle_message("{\"jsonrpc\": \"2.0\", \"id\": \"x\", \"error\": {\"code\": 1, \"message\": \"m\"}}")
+            .is_none());
+    }
+
+    #[test]
     fn tools_list_carries_session_tools_and_the_catalogue() {
         let mut server = McpServer::new();
         let reply: Value = serde_json::from_str(
@@ -1217,6 +1357,34 @@ mod tests {
         assert_eq!(text_json(&result)["path"], path.display().to_string());
         assert!(path.is_file());
         std::fs::remove_dir_all(&dir).ok();
+
+        // A relative path is resolved against this process's working
+        // directory and forwarded absolute, so an emulator with another
+        // cwd writes the file where it is read back from.
+        let rel_dir = format!("ccp-mcp-rel-{}", std::process::id());
+        std::fs::create_dir_all(&rel_dir).unwrap();
+        let result = call(
+            &mut server,
+            4,
+            "capture_screenshot",
+            json!({"path": format!("{rel_dir}/shot.png")}),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join(&rel_dir)
+            .join("shot.png");
+        assert_eq!(text_json(&result)["path"], expected.display().to_string());
+        assert!(expected.is_file());
+        assert_eq!(result["content"][1]["type"], "image");
+        std::fs::remove_dir_all(&rel_dir).ok();
+
+        // A path that is not a string is the method's own invalid-params
+        // error, not a temporary screenshot.
+        let result = call(&mut server, 5, "capture_screenshot", json!({"path": 7}));
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(text_json(&result)["error"]["code"], INVALID_PARAMS);
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
         close(server, handle);
     }
 

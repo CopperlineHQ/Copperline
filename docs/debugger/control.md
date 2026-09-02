@@ -145,16 +145,23 @@ the drop count.
 `capture_screenshot` returns the PNG as an MCP image content block
 (`{"type": "image", "mimeType": "image/png"}`) alongside the text result, so
 the model can look at the screen. With no `path` the file is temporary and
-deleted after it is read; with a `path` it is kept there.
+deleted after it is read; with a `path` it is kept there. A relative `path`
+is resolved against `copperline-ctl`'s working directory (not the
+emulator's, which can differ) and forwarded absolute, and the text result
+carries that absolute path. A PNG the emulator wrote but the bridge cannot
+read back is reported as a tool error, not as a result without its image.
 
 ### Protocol subset
 
 MCP 2025-06-18 over stdio, newline-delimited JSON-RPC 2.0: `initialize`
 (an earlier revision the client names is echoed; the served subset is the
 same), `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
-Unknown methods get a JSON-RPC error; unknown notifications are ignored;
-stdout carries protocol messages only and diagnostics go to stderr. The
-server exits on stdin EOF.
+A message that is not a JSON-RPC 2.0 request (no `"jsonrpc": "2.0"`, an
+`id` that is not a string or an integer, a missing method) is answered with
+`-32600`, unparseable input with `-32700`, and unknown methods with
+`-32601`; unknown notifications (a method and no `id`) are ignored; stdout
+carries protocol messages only and diagnostics go to stderr. The server
+exits on stdin EOF.
 
 ## Protocol overview
 
