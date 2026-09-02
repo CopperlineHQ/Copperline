@@ -84,6 +84,12 @@ impl App {
         });
     }
 
+    /// Whether this client's own resume (continue / run_until) is
+    /// outstanding.
+    pub(super) fn control_resume_pending(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| c.pending.is_some())
+    }
+
     pub(super) fn control_exit_requested(&self) -> bool {
         self.control.as_ref().is_some_and(|c| c.exit_requested)
     }
@@ -178,8 +184,9 @@ impl App {
         }
         self.emu.bus_mut().ui_disarm_beam_trap_once();
         ctx.remove_all_breaks(&mut self.emu);
-        // A warp the client engaged has no client left to release it.
-        if self.warp_hold == Some(WarpSource::Control) {
+        // A warp the client engaged has no client left to release it;
+        // another holder's warp (a GDB client, the guest) stays.
+        if self.warp_holds.contains(WarpSource::Control) {
             self.set_warp(false, WarpSource::Control);
         }
         self.show_osd("Control client detached");
@@ -189,7 +196,11 @@ impl App {
     fn control_dispatch(&mut self, id: Value, req: Request) {
         match req {
             Request::Core(op) => {
-                let pending = self.control.as_ref().is_some_and(|c| c.pending.is_some());
+                let own_pending = self.control_resume_pending();
+                // Any client's outstanding resume (a GDB continue too, when
+                // both share the window) means the machine is running on
+                // its behalf and must not be repositioned under it.
+                let pending = self.remote_resume_pending();
                 if pending && !op.allowed_while_running() {
                     self.control_send(proto::err_line(
                         &id,
@@ -206,7 +217,7 @@ impl App {
                         .as_mut()
                         .expect("dispatch without control state");
                     ctl.ctx.running = powered_on && !halted && !paused;
-                    ctl.ctx.pending = pending;
+                    ctl.ctx.pending = own_pending;
                     ctl.ctx.powered_on = powered_on;
                     exec::exec_core(&mut self.emu, &mut ctl.ctx, &op)
                 };
@@ -247,7 +258,10 @@ impl App {
     fn control_dispatch_host(&mut self, id: Value, op: HostOp) {
         match op {
             HostOp::Pause => {
-                let had_pending = self.control_complete_pending("pause", "paused by client");
+                let had_pending = self.control_resume_pending();
+                // A GDB continue outstanding on the same window ends here
+                // too, with the same detail.
+                self.complete_remote_resumes("pause", "paused by client");
                 let was_paused = self.paused;
                 if !was_paused {
                     self.paused = true;
@@ -299,7 +313,7 @@ impl App {
                 // itself, so it would step frames out from under a
                 // pending run_until -- past a pc target, or through
                 // frames a stable_frames watcher never got to sample.
-                if self.control.as_ref().is_some_and(|c| c.pending.is_some()) {
+                if self.remote_resume_pending() {
                     self.control_send(proto::err_line(
                         &id,
                         &CtlError::invalid_state("pause before servoing the pointer"),
@@ -376,7 +390,7 @@ impl App {
                 ));
             }
             HostOp::StateLoad { path } => {
-                if self.control.as_ref().is_some_and(|c| c.pending.is_some()) {
+                if self.remote_resume_pending() {
                     self.control_send(proto::err_line(
                         &id,
                         &CtlError::invalid_state("pause before loading a state"),
@@ -416,7 +430,7 @@ impl App {
                 // not reposition the machine, and flipping warp mid-continue
                 // is the point.
                 let outcome = self.set_warp(on, WarpSource::Control);
-                let value = self.warp_report_value(outcome.note);
+                let value = self.warp_report_value(outcome.note.as_deref());
                 self.control_send(proto::ok_line(&id, value));
             }
             HostOp::Reset { warm } => {
@@ -673,7 +687,7 @@ impl App {
             // --control-gui combined with --screenshot-after/--dump-frames:
             // unpaced end to end with no hold or gate, not a manual toggle.
             "capture"
-        } else if let Some(hold) = self.warp_hold {
+        } else if let Some(hold) = self.warp_holds.first() {
             hold.label()
         } else if self.warp_launch.as_ref().is_some_and(|l| l.engaged) {
             "launch"
@@ -686,6 +700,8 @@ impl App {
             "on": !paced,
             "paced": paced,
             "source": source,
+            // Every programmatic hold in force; `source` is the first.
+            "holders": self.warp_holds.labels(),
             "headless": false,
         });
         if let Some(note) = note {
@@ -703,6 +719,7 @@ impl App {
     pub(super) fn control_notify_warp(&mut self, source: &'static str) {
         let paced = self.emu.paced();
         let position = crate::control::observe::position(&self.emu);
+        let holders = self.warp_holds.labels();
         let Some(ctl) = self.control.as_mut() else {
             return;
         };
@@ -715,6 +732,7 @@ impl App {
                 "on": !paced,
                 "paced": paced,
                 "source": source,
+                "holders": holders,
                 "position": position,
             }),
         );
@@ -759,7 +777,7 @@ impl App {
             };
             self.paused = true;
             self.sync_live_audio_suspension();
-            self.control_complete_pending(reason, &detail);
+            self.complete_remote_resumes(reason, &detail);
             self.request_redraw();
             return true;
         }
@@ -767,7 +785,7 @@ impl App {
             if self.emu.bus().emulated_frames() >= frame {
                 self.paused = true;
                 self.sync_live_audio_suspension();
-                self.control_complete_pending(reason, &format!("frame {frame}"));
+                self.complete_remote_resumes(reason, &format!("frame {frame}"));
                 self.request_redraw();
                 return true;
             }
@@ -791,7 +809,7 @@ impl App {
                 }
                 self.paused = true;
                 self.sync_live_audio_suspension();
-                self.control_complete_pending(reason, &format!("cck {cck}"));
+                self.complete_remote_resumes(reason, &format!("cck {cck}"));
                 self.request_redraw();
                 return true;
             }
