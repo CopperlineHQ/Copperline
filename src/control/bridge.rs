@@ -414,7 +414,13 @@ pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
     let info_path = std::env::temp_dir().join(format!("{stamp}.json"));
     let log_path = std::env::temp_dir().join(format!("{stamp}.log"));
     let _ = std::fs::remove_file(&info_path);
-    let log = std::fs::File::create(&log_path)
+    // The emulator announces its token on stderr, so the log is readable
+    // by the owner only from the moment it exists, like the info file,
+    // and is never an existing file: a symlink planted under the
+    // predictable name in a shared temp dir would carry the token away.
+    let log = super::owner_only_create()
+        .create_new(true)
+        .open(&log_path)
         .map_err(|e| format!("creating {}: {e}", log_path.display()))?;
     let log_err = log
         .try_clone()
@@ -680,6 +686,16 @@ mod tests {
         assert!(err.contains("exited"), "{err}");
         assert!(err.contains("boot failure"), "{err}");
         assert!(err.contains("--control :0"), "{err}");
+        // The log the emulator's stderr went to (where a real emulator
+        // announces its token) is readable by the owner only.
+        let log = err
+            .split("; log ")
+            .nth(1)
+            .and_then(|rest| rest.split("):").next())
+            .expect("the report names the log");
+        let mode = std::fs::metadata(log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{log}");
+        std::fs::remove_file(log).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
