@@ -165,7 +165,9 @@ activity by subsystem and fade over 32 frames.
 
 Debug resources the guest registered through the
 [uaelib trap](../guide/run.md#uaelib-trap) join the window presets (named by
-the guest, rebuilt when the tab is entered), and the readout under the map
+the guest, rebuilt when the tab is entered; the first four registered
+resources, so a large registry cannot push the machine windows off the
+row -- the Resources tab reaches them all), and the readout under the map
 names the resource a hovered or pinned cell falls in.
 
 ### Resources tab
@@ -179,7 +181,8 @@ Frame Analyzer Resources tab previewing a registered bitmap.
 
 The Resources tab lists what the running program registered through the
 uaelib trap's `debug_register_bitmap` / `_palette` / `_copperlist` helpers:
-name, type, address, size, and geometry. Selecting a row decodes it fresh
+name, type, address, size, and geometry. The cursor and page keys scroll
+the table when the registry outgrows it. Selecting a row decodes it fresh
 from guest memory each repaint, so the preview tracks what the program
 draws:
 

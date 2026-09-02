@@ -10384,7 +10384,7 @@ mod uaelib_insights {
             resources.rows[0].text
         );
         assert!(resources.rows[1].selected);
-        assert_eq!(resources.hidden, 0);
+        assert_eq!((resources.hidden_above, resources.hidden_below), (0, 0));
         let crate::video::ui::AnalyzerResourceDetail::Bitmap(preview) =
             resources.detail.expect("bitmap preview")
         else {
@@ -10403,6 +10403,123 @@ mod uaelib_insights {
         app.frame_analyzer_select_resource(9);
         let panel = app.frame_analyzer_panel.clone().unwrap();
         assert_eq!(panel.resource_selected, Some(0x2_0000));
+    }
+
+    #[test]
+    fn resources_tab_scrolls_to_reach_a_large_registry() {
+        use winit::keyboard::KeyCode;
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // 13 palettes: three more than the table shows at once.
+        for i in 0..13u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("pal{i:02}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!(
+            view.rows.len(),
+            super::super::ui::ANALYZER_RESOURCE_ROWS_MAX
+        );
+        assert_eq!((view.hidden_above, view.hidden_below), (0, 3));
+        assert!(view.rows[0].text.contains("pal00"));
+
+        // Scrolling down re-windows the table; the hint counts flip.
+        app.ui_handle_frame_analyzer_key(KeyCode::PageDown);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!((view.hidden_above, view.hidden_below), (3, 0));
+        assert!(
+            view.rows.last().unwrap().text.contains("pal12"),
+            "the tail of the registry is reachable"
+        );
+
+        // A row click resolves through the same scroll window the rows
+        // were drawn with: row 0 is now pal03.
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0300));
+
+        // The scroll clamps at both ends.
+        app.ui_handle_frame_analyzer_key(KeyCode::ArrowDown);
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            3
+        );
+        for _ in 0..20 {
+            app.ui_handle_frame_analyzer_key(KeyCode::ArrowUp);
+        }
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            0
+        );
+    }
+
+    #[test]
+    fn resource_presets_are_capped_so_the_machine_windows_survive() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        for i in 0..6u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("res{i}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(labels.contains(&"res3"), "{labels:?}");
+        assert!(
+            !labels.contains(&"res4"),
+            "only the first four resources become presets: {labels:?}"
+        );
+        assert_eq!(labels.last(), Some(&"24-bit"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_multibyte_resource_name_truncates_without_panicking() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // Seven ASCII characters then a two-byte character: a byte-wise
+        // truncate at 8 would split it and panic.
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 64, "abcdefg\u{00e9}xyz", 1, 0, [32, 0, 0]),
+        );
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        assert!(
+            presets.iter().any(|p| p.label == "abcdefg\u{00e9}"),
+            "eight characters survive, wherever the bytes fall"
+        );
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert!(view.rows[0].text.contains("abcdefg"));
     }
 
     #[test]

@@ -2498,7 +2498,8 @@ fn panels_render_into_their_rects() {
                 selected: false,
             },
         ],
-        hidden: 0,
+        hidden_above: 0,
+        hidden_below: 0,
         detail: Some(AnalyzerResourceDetail::Bitmap(preview)),
     };
     let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {

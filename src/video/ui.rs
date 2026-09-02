@@ -300,6 +300,9 @@ pub struct FrameAnalyzerPanel {
     /// Resources tab: the selected resource, keyed by its guest address so
     /// the selection survives registry churn between draw and click.
     pub resource_selected: Option<u32>,
+    /// Resources tab: the first listed registry entry (cursor keys
+    /// scroll), so a registry larger than the table stays reachable.
+    pub resource_scroll: usize,
 }
 
 impl FrameAnalyzerPanel {
@@ -313,6 +316,7 @@ impl FrameAnalyzerPanel {
             heat_presets: Vec::new(),
             heat_selected: None,
             resource_selected: None,
+            resource_scroll: 0,
         }
     }
 
@@ -1935,8 +1939,10 @@ pub struct AnalyzerHeatResource {
 /// The Resources tab's table and the selected resource's decoded preview.
 pub struct AnalyzerResourcesView {
     pub rows: Vec<AnalyzerResourceRowView>,
-    /// Resources past the table's capacity, reported as "+N more".
-    pub hidden: usize,
+    /// Registry entries scrolled off either end of the table, reported
+    /// under it with the scroll hint.
+    pub hidden_above: usize,
+    pub hidden_below: usize,
     pub detail: Option<AnalyzerResourceDetail>,
 }
 
@@ -4379,12 +4385,15 @@ fn draw_analyzer_resources_tab(
         );
     }
     let more_y = analyzer_content_top(rect) + 16 + resources.rows.len() * ANALYZER_RESOURCE_ROW_H;
-    if resources.hidden > 0 {
+    if resources.hidden_above > 0 || resources.hidden_below > 0 {
         draw_panel_text(
             frame,
             rect.x + 10,
             more_y,
-            &format!("+{} more", resources.hidden),
+            &format!(
+                "{} above / {} below (cursor keys scroll)",
+                resources.hidden_above, resources.hidden_below
+            ),
             PANEL_TEXT_DIM,
             1,
             scale,

@@ -886,9 +886,15 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
     // Rebuilt on tab entry, so a resource registered while the tab is up
     // appears the next time the Memory tab is entered.
     if let Some(uaelib) = bus.uaelib.as_ref() {
-        for resource in uaelib.resources() {
-            let mut label = resource.name.clone();
-            label.truncate(8);
+        // Bounded so a large registry cannot push the machine windows'
+        // trailing presets (notably 24-bit) off the single preset row;
+        // the Resources tab lists and scrolls the full registry.
+        const RESOURCE_PRESETS_MAX: usize = 4;
+        for resource in uaelib.resources().iter().take(RESOURCE_PRESETS_MAX) {
+            // By characters, not bytes: the name is guest data run
+            // through from_utf8_lossy, and a byte-indexed truncate can
+            // panic inside a multibyte character.
+            let label: String = resource.name.chars().take(8).collect();
             presets.push(ui::HeatPreset {
                 label,
                 base: resource.address,

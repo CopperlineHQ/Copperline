@@ -99,14 +99,19 @@ pub fn decode_bitmap(
         notes.push("mask plane skipped".to_string());
     }
 
-    let stride = width_px.div_ceil(16) * 2;
+    // Source addressing follows the DECLARED geometry, whatever the
+    // preview clamps above did: clamping only bounds what is allocated
+    // and iterated, while the guest's bytes stay laid out by the real
+    // width, height, and plane count. A clamped preview therefore shows
+    // the top-left of the true layout instead of a scrambled one.
+    let stride = usize::from(width).div_ceil(16) * 2;
     // Row step between one row's plane `p` and the next row's, and the
-    // per-plane starting offset, per layout (mask rows double the step).
+    // per-plane starting offset, per layout (mask rows widen the step).
     let (row_step, plane_step) = if interleaved {
-        let per_row_planes = plane_count + usize::from(masked);
+        let per_row_planes = usize::from(planes) + usize::from(masked);
         (stride * per_row_planes, stride)
     } else {
-        (stride, stride * height_px)
+        (stride, stride * usize::from(height))
     };
 
     const BACKGROUND: u32 = 0xFF20_2020;
@@ -331,6 +336,54 @@ mod tests {
         let preview = decode_bitmap(&build(false, false), 32, 4, 2, false, false, true, &PALETTE);
         check_picture(&preview);
         assert!(preview.note.as_deref().unwrap().contains("HAM"));
+    }
+
+    #[test]
+    fn clamped_planes_keep_the_declared_interleaved_row_step() {
+        // 10 declared planes (clamped to 8 for decoding): row 1's data
+        // still starts 10 plane-rows in, not 8, or every row after the
+        // first reads the wrong bytes.
+        let width = 16u16;
+        let stride = 2usize;
+        let declared_planes = 10usize;
+        let mut data = vec![0u8; 2 * declared_planes * stride];
+        // Row 1, plane 0, first pixel.
+        data[declared_planes * stride] = 0x80;
+        let preview = decode_bitmap(
+            &data,
+            width,
+            2,
+            declared_planes as u16,
+            true,
+            false,
+            false,
+            &[0xFF00_0000, 0xFF11_1111],
+        );
+        assert_eq!(preview.width, 16);
+        assert_eq!(preview.height, 2);
+        assert_eq!(
+            preview.pixels[16], 0xFF11_1111,
+            "row 1 pixel 0 must come from the declared row step"
+        );
+    }
+
+    #[test]
+    fn truncated_height_keeps_the_declared_planar_plane_offsets() {
+        // 512x1024x2 planar: the pixel cap truncates the preview to 512
+        // rows, but plane 1 still starts a full declared-height plane in.
+        let width = 512u16;
+        let height = 1024u16;
+        let stride = 64usize;
+        let mut data = vec![0u8; 2 * usize::from(height) * stride];
+        // Plane 1, row 0, first pixel.
+        data[usize::from(height) * stride] = 0x80;
+        let palette = [0xFF00_0000, 0xFF11_1111, 0xFF22_2222, 0xFF33_3333];
+        let preview = decode_bitmap(&data, width, height, 2, false, false, false, &palette);
+        assert!(preview.height < usize::from(height), "cap truncates");
+        assert_eq!(
+            preview.pixels[0], 0xFF22_2222,
+            "pixel (0,0) carries plane 1's bit from the declared offset"
+        );
     }
 
     #[test]

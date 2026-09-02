@@ -141,6 +141,25 @@ impl App {
             self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control);
             return true;
         }
+        // Resources tab: cursor/page keys scroll the table, so every
+        // registry entry stays reachable however many are registered.
+        if self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::AnalyzerTab::Resources)
+        {
+            let rows = match code {
+                KeyCode::ArrowUp => Some(-1isize),
+                KeyCode::ArrowDown => Some(1),
+                KeyCode::PageUp => Some(-(ui::ANALYZER_RESOURCE_ROWS_MAX as isize)),
+                KeyCode::PageDown => Some(ui::ANALYZER_RESOURCE_ROWS_MAX as isize),
+                _ => None,
+            };
+            if let Some(rows) = rows {
+                self.frame_analyzer_scroll_resources(rows);
+                return true;
+            }
+        }
         let delta = match code {
             KeyCode::ArrowLeft => Some((-1, 0)),
             KeyCode::ArrowRight => Some((1, 0)),
@@ -293,16 +312,43 @@ impl App {
     /// end does nothing, and the selection is kept by address so registry
     /// churn cannot re-point it at a different resource.
     pub(super) fn frame_analyzer_select_resource(&mut self, index: u8) {
-        let Some(address) = self
-            .emu
-            .uaelib_resources()
-            .get(usize::from(index))
+        let resources = self.emu.uaelib_resources();
+        let scroll = self
+            .frame_analyzer_panel
+            .as_ref()
+            .map(|panel| {
+                panel.resource_scroll.min(
+                    resources
+                        .len()
+                        .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX),
+                )
+            })
+            .unwrap_or(0);
+        let Some(address) = resources
+            .get(scroll + usize::from(index))
             .map(|resource| resource.address)
         else {
             return;
         };
         if let Some(panel) = self.frame_analyzer_panel.as_mut() {
             panel.resource_selected = Some(address);
+        }
+        self.request_redraw();
+    }
+
+    /// Scroll the Resources tab's table window by `rows`, clamped to the
+    /// registry.
+    pub(super) fn frame_analyzer_scroll_resources(&mut self, rows: isize) {
+        let max_scroll = self
+            .emu
+            .uaelib_resources()
+            .len()
+            .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX) as isize;
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            let scroll = (panel.resource_scroll as isize)
+                .saturating_add(rows)
+                .clamp(0, max_scroll);
+            panel.resource_scroll = scroll as usize;
         }
         self.request_redraw();
     }
@@ -320,12 +366,21 @@ impl App {
         use crate::video::resource_preview;
 
         let resources = self.emu.uaelib_resources();
+        // The scroll clamps to the registry as it is NOW, so a shrunk
+        // registry cannot leave the window past the end.
+        let scroll = panel.resource_scroll.min(
+            resources
+                .len()
+                .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX),
+        );
         let rows = resources
             .iter()
+            .skip(scroll)
             .take(ui::ANALYZER_RESOURCE_ROWS_MAX)
             .map(|r| {
-                let mut name = r.name.clone();
-                name.truncate(12);
+                // Character-wise: a byte truncate can panic inside a
+                // multibyte character of a lossily-decoded guest name.
+                let name: String = r.name.chars().take(12).collect();
                 let geometry = match r.kind {
                     ResourceKind::Bitmap {
                         width,
@@ -359,9 +414,10 @@ impl App {
                 }
             })
             .collect();
-        let hidden = resources
+        let hidden_above = scroll;
+        let hidden_below = resources
             .len()
-            .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX);
+            .saturating_sub(scroll + ui::ANALYZER_RESOURCE_ROWS_MAX);
 
         let detail = panel
             .resource_selected
@@ -411,7 +467,8 @@ impl App {
 
         ui::AnalyzerResourcesView {
             rows,
-            hidden,
+            hidden_above,
+            hidden_below,
             detail,
         }
     }

@@ -1718,15 +1718,14 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         }
         CoreOp::PaletteDump { resource } => {
             if let Some(name) = resource {
-                let r = find_debug_resource(emu, name)?;
-                let entries = match r.kind {
-                    crate::uaelib::ResourceKind::Palette { entries } => entries,
-                    _ => {
-                        return Err(CtlError::invalid_params(format!(
-                            "'{name}' is a {}, not a palette",
-                            r.kind_name()
-                        )))
-                    }
+                let r = find_debug_resource(
+                    emu,
+                    name,
+                    |kind| matches!(kind, crate::uaelib::ResourceKind::Palette { .. }),
+                    "palette",
+                )?;
+                let crate::uaelib::ResourceKind::Palette { entries } = r.kind else {
+                    unreachable!("finder returns only palettes here");
                 };
                 let resource_json = resource_value(r);
                 let data = emu
@@ -1894,13 +1893,12 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let start = match (addr, resource) {
                 (Some(addr), _) => Some(*addr),
                 (None, Some(name)) => {
-                    let r = find_debug_resource(emu, name)?;
-                    if !matches!(r.kind, crate::uaelib::ResourceKind::Copperlist) {
-                        return Err(CtlError::invalid_params(format!(
-                            "'{name}' is a {}, not a copperlist",
-                            r.kind_name()
-                        )));
-                    }
+                    let r = find_debug_resource(
+                        emu,
+                        name,
+                        |kind| matches!(kind, crate::uaelib::ResourceKind::Copperlist),
+                        "copperlist",
+                    )?;
                     Some(r.address)
                 }
                 (None, None) => None,
@@ -2359,30 +2357,46 @@ fn reverse_result(emu: &Emulator, outcome: ReverseOutcome<String>) -> Result<Val
 
 const UAELIB_DISABLED: &str = "uaelib trap not fitted ([emulation] uaelib = false)";
 
-/// The registered resource called `name`, or an error the client can act
-/// on: the trap being disabled, or a listing of the names that do exist.
+/// The registered resource called `name` whose kind satisfies `want`,
+/// or an error the client can act on: the trap being disabled, the name
+/// existing only with other kinds, or a listing of the names that do
+/// exist. Names are not unique (the registry replaces by address), so
+/// the kind filter keeps a palette lookup from being shadowed by, say,
+/// a bitmap registered under the same name.
 fn find_debug_resource<'a>(
     emu: &'a Emulator,
     name: &str,
+    want: fn(&crate::uaelib::ResourceKind) -> bool,
+    want_name: &str,
 ) -> Result<&'a crate::uaelib::DebugResource, CtlError> {
     if !emu.uaelib_fitted() {
         return Err(CtlError::not_found(UAELIB_DISABLED));
     }
-    emu.uaelib_resources()
+    let same_name: Vec<&crate::uaelib::DebugResource> = emu
+        .uaelib_resources()
         .iter()
-        .find(|resource| resource.name == name)
-        .ok_or_else(|| {
-            let known: Vec<String> = emu
-                .uaelib_resources()
-                .iter()
-                .map(|resource| format!("\"{}\"", resource.name))
-                .collect();
-            CtlError::not_found(if known.is_empty() {
-                format!("no resource {name:?}; none registered")
-            } else {
-                format!("no resource {name:?}; registered: {}", known.join(", "))
-            })
-        })
+        .filter(|resource| resource.name == name)
+        .collect();
+    if let Some(resource) = same_name.iter().find(|resource| want(&resource.kind)) {
+        return Ok(resource);
+    }
+    if !same_name.is_empty() {
+        let kinds: Vec<&str> = same_name.iter().map(|r| r.kind_name()).collect();
+        return Err(CtlError::invalid_params(format!(
+            "'{name}' is a {}, not a {want_name}",
+            kinds.join("/")
+        )));
+    }
+    let known: Vec<String> = emu
+        .uaelib_resources()
+        .iter()
+        .map(|resource| format!("\"{}\"", resource.name))
+        .collect();
+    Err(CtlError::not_found(if known.is_empty() {
+        format!("no resource {name:?}; none registered")
+    } else {
+        format!("no resource {name:?}; registered: {}", known.join(", "))
+    }))
 }
 
 /// A guest-registered resource as `debug.resources` and `event.debug`
@@ -3964,6 +3978,39 @@ mod tests {
         let err =
             parse_method("copper.list", &json!({"addr": 100, "resource": "cop"})).unwrap_err();
         assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn palette_dump_prefers_the_matching_kind_among_duplicate_names() {
+        // Names are not unique (the registry replaces by address): a
+        // bitmap registered first under the same name must not shadow
+        // the palette the client asked for.
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let mut bitmap = Vec::new();
+        bitmap.extend_from_slice(&0x0002_0000u32.to_be_bytes());
+        bitmap.extend_from_slice(&51200u32.to_be_bytes());
+        let mut name = [0u8; 32];
+        name[..3].copy_from_slice(b"pal");
+        bitmap.extend_from_slice(&name);
+        bitmap.extend_from_slice(&0u16.to_be_bytes()); // bitmap
+        bitmap.extend_from_slice(&0u16.to_be_bytes());
+        for v in [320u16, 256, 5] {
+            bitmap.extend_from_slice(&v.to_be_bytes());
+        }
+        register_resource(&mut emu, 0x5000, &bitmap);
+        emu.bus_mut().mem.chip_ram[0x3000..0x3004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+        register_resource(&mut emu, 0x5100, &palette_resource_bytes(0x3000, "pal", 2));
+        let value = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("pal".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(value["resource"]["type"], "palette");
+        assert_eq!(value["words"], json!([0x0F00, 0x008F]));
     }
 
     fn uaelib_emulator() -> Emulator {
