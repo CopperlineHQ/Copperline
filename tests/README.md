@@ -184,7 +184,11 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     previously-unexercised bug in the V34 `AddDosNode`/`eb_MountList`
     fallback path in `guest/copperhf/mounter.c` -- this machine has no
     `KICK13.ROM`, so that path is reviewed but **locally unverified**.
-  - **FFS-from-LSEG**, Kickstart 3.1 only (the gate `COPPERHF-DEVICE-
+  - **FFS-from-LSEG**, Kickstart 3.1 plus a bundled-AROS variant
+    (`aros_ffs_from_lseg_...`, still `#[ignore]`d for the FastFileSystem
+    asset but needing no ROM -- AROS's dos.library starting a real
+    Commodore FFS through the FSHD/LSEG chain is its own compatibility
+    data point). The 3.1 row is the gate (`COPPERHF-DEVICE-
     PLAN.md` actually asks for). Needs `test-assets/copperhf/
     FastFileSystem`, a real FastFileSystem binary. Design note: Kickstart
     3.1's ROM already has DOS\0 (OFS) and DOS\1 (FFS) resident in
@@ -201,7 +205,8 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     build_image` already supports building it directly via
     `FileSystem { ffs: true, variant: Variant::Intl }` -- no bespoke FFS
     emitter was needed. Verified the same bootmark way as the OFS axis.
-  - **PFS3-DS beyond 4 GiB**, Kickstart 3.1 only. Needs
+  - **PFS3-DS beyond 4 GiB**, Kickstart 3.1 plus a bundled-AROS variant
+    (`aros_pfs3_...`, `#[ignore]`d for the pfs3aio asset only). Needs
     `test-assets/copperhf/pfs3aio`, the real PFS3 "all-in-one" binary.
     **Deliberately narrow scope**: this project has no host-side tool to
     *format* a PFS3 volume (`src/dirfs.rs` only ever implemented plain

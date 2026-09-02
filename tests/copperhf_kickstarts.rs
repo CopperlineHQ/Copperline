@@ -819,18 +819,23 @@ fn kick32_ofs_rdbless_autoboots_and_writes_bootmark() {
 // this test's own filenames are plain ASCII so that never matters) --
 // `src/dirfs.rs::build_image` already supports building it directly via
 // `Variant::Intl`, so no bespoke FFS emitter was needed for this test.
-#[test]
-#[ignore = "runs the emulator and requires a local Kickstart 3.1 ROM plus \
-            test-assets/copperhf/FastFileSystem"]
-fn kick31_ffs_from_lseg_autoboots_and_writes_bootmark() {
-    let tag = "kick31_ffs_from_lseg_autoboots_and_writes_bootmark";
+/// The FFS-from-LSEG case, shared between the Kickstart 3.1 row and the
+/// bundled-AROS row (`rom_asset` None: no ROM asset needed, only the
+/// FastFileSystem binary -- AROS's dos.library starting a real Commodore
+/// FFS handler through the FSHD/LSEG chain is its own compatibility data
+/// point).
+fn run_ffs_from_lseg_case(tag: &str, rom_asset: Option<&str>, rom_line: &str, machine: &str) {
     if skip_if_debug(tag) {
         return;
     }
-    let Some(assets) = skip_if_missing(tag, &["KICK31.ROM", "copperhf/FastFileSystem"]) else {
+    let mut required = vec!["copperhf/FastFileSystem"];
+    if let Some(rom) = rom_asset {
+        required.insert(0, rom);
+    }
+    let Some(assets) = skip_if_missing(tag, &required) else {
         return;
     };
-    let fs_binary = std::fs::read(&assets[1]).unwrap();
+    let fs_binary = std::fs::read(assets.last().unwrap()).unwrap();
 
     let scratch = scratch_dir(tag);
     let _ = std::fs::remove_dir_all(&scratch);
@@ -852,14 +857,7 @@ fn kick31_ffs_from_lseg_autoboots_and_writes_bootmark() {
         .unwrap();
 
     let screenshot = scratch.join("shot.png");
-    let output = run_boot(
-        tag,
-        KICK3X_MACHINE,
-        "rom = \"KICK31.ROM\"",
-        &image_path,
-        60,
-        &screenshot,
-    );
+    let output = run_boot(tag, machine, rom_line, &image_path, 60, &screenshot);
     assert_ran_ok(tag, &output);
 
     let bytes = std::fs::read(&image_path).unwrap();
@@ -877,6 +875,30 @@ fn kick31_ffs_from_lseg_autoboots_and_writes_bootmark() {
         tail(&output.stderr, 80),
     );
     std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+#[ignore = "runs the emulator and requires a local Kickstart 3.1 ROM plus \
+            test-assets/copperhf/FastFileSystem"]
+fn kick31_ffs_from_lseg_autoboots_and_writes_bootmark() {
+    run_ffs_from_lseg_case(
+        "kick31_ffs_from_lseg_autoboots_and_writes_bootmark",
+        Some("KICK31.ROM"),
+        "rom = \"KICK31.ROM\"",
+        KICK3X_MACHINE,
+    );
+}
+
+#[test]
+#[ignore = "runs the emulator and requires test-assets/copperhf/FastFileSystem \
+            (the ROM is the bundled AROS)"]
+fn aros_ffs_from_lseg_autoboots_and_writes_bootmark() {
+    run_ffs_from_lseg_case(
+        "aros_ffs_from_lseg_autoboots_and_writes_bootmark",
+        None,
+        "rom = \"<bundled-aros>\"",
+        KICK3X_MACHINE,
+    );
 }
 
 // --- PFS3-DS beyond 4 GiB -------------------------------------------------
@@ -901,18 +923,20 @@ fn kick31_ffs_from_lseg_autoboots_and_writes_bootmark() {
 // `tests/README.md` documents the fuller manual smoke recipe (format via a
 // real Workbench install, then rerun) as the sturdier follow-up this
 // automated test does not attempt.
-#[test]
-#[ignore = "runs the emulator and requires a local Kickstart 3.1 ROM plus \
-            test-assets/copperhf/pfs3aio"]
-fn kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
-    let tag = "kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing";
+/// The PFS3->4 GiB case, shared between the Kickstart 3.1 row and the
+/// bundled-AROS row (`rom_asset` None: only the pfs3aio binary is needed).
+fn run_pfs3_over_4gib_case(tag: &str, rom_asset: Option<&str>, rom_line: &str, machine: &str) {
     if skip_if_debug(tag) {
         return;
     }
-    let Some(assets) = skip_if_missing(tag, &["KICK31.ROM", "copperhf/pfs3aio"]) else {
+    let mut required = vec!["copperhf/pfs3aio"];
+    if let Some(rom) = rom_asset {
+        required.insert(0, rom);
+    }
+    let Some(assets) = skip_if_missing(tag, &required) else {
         return;
     };
-    let fs_binary = std::fs::read(&assets[1]).unwrap();
+    let fs_binary = std::fs::read(assets.last().unwrap()).unwrap();
 
     let scratch = scratch_dir(tag);
     let _ = std::fs::remove_dir_all(&scratch);
@@ -973,7 +997,7 @@ fn kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
     std::fs::write(
         &config,
         format!(
-            "rom = \"KICK31.ROM\"\n\n{KICK3X_MACHINE}\n\n[copperhf]\nunit0 = {}\nunit1 = {}\n",
+            "{rom_line}\n\n{machine}\n\n[copperhf]\nunit0 = {}\nunit1 = {}\n",
             toml_path(&unit0_path),
             toml_path(&unit1_path),
         ),
@@ -1013,4 +1037,28 @@ fn kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
         tail(&output.stderr, 80),
     );
     std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+#[ignore = "runs the emulator and requires a local Kickstart 3.1 ROM plus \
+            test-assets/copperhf/pfs3aio"]
+fn kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
+    run_pfs3_over_4gib_case(
+        "kick31_pfs3_over_4gib_lseg_attach_boots_without_crashing",
+        Some("KICK31.ROM"),
+        "rom = \"KICK31.ROM\"",
+        KICK3X_MACHINE,
+    );
+}
+
+#[test]
+#[ignore = "runs the emulator and requires test-assets/copperhf/pfs3aio \
+            (the ROM is the bundled AROS)"]
+fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
+    run_pfs3_over_4gib_case(
+        "aros_pfs3_over_4gib_lseg_attach_boots_without_crashing",
+        None,
+        "rom = \"<bundled-aros>\"",
+        KICK3X_MACHINE,
+    );
 }
