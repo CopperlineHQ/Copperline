@@ -238,6 +238,26 @@ fn deserialize_component<R: std::io::Read, T: serde::de::DeserializeOwned>(
     crate::savestate::deserialize_from_state(r).map_err(|e| anyhow!("reading {what}: {e}"))
 }
 
+/// The CPU-level diagnostic observers `M68kMachine::arm_diagnostic_hooks`
+/// switches on, one field per environment knob. All default to off.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DiagnosticHooks {
+    /// `COPPERLINE_DBG_MEMW`: CPU-write watch on one word.
+    pub memw_addr: Option<u32>,
+    /// `COPPERLINE_DBG_FC`: log every change of the word at this address.
+    pub frame_counter_addr: Option<u32>,
+    /// `COPPERLINE_DBG_SPREN`: report DMACON sprite-enable clears.
+    pub spren_clear: bool,
+    /// `COPPERLINE_DBG_IRQ` with its `(after, until)` window in seconds.
+    pub irq_window: Option<(f64, f64)>,
+    /// `COPPERLINE_DIAG_IPL`: per-frame handler/main cycle split.
+    pub ipl_split: bool,
+    /// `COPPERLINE_DIAG_PCHIST`: PC histogram over its window.
+    pub pc_histogram: bool,
+    /// `COPPERLINE_DIAG_CRASH`: recent-PC ring for crash context.
+    pub crash_ring: bool,
+}
+
 /// Machine-level runtime state outside `CpuCore` and `Bus` that a save
 /// state must carry: cache-sync memo, timing carries, and clock scaling.
 /// The `dbg_*` fields are host instrumentation and stay live across a load.
@@ -1971,6 +1991,55 @@ impl M68kMachine {
         self.dbg.is_some()
     }
 
+    /// Arm (or, with `None`, disarm) the environment-style headless debugger
+    /// programmatically. The debugger is a pure observer: its per-instruction
+    /// hooks read machine state through side-effect-free peeks and never
+    /// bill bus time, so arming it must not move the emulated timeline
+    /// (tests/debugger_transparency.rs holds that guarantee). The one
+    /// documented exception is a `[cpu] jit` machine, which drops back to
+    /// the precise per-instruction loop while any hook is armed.
+    pub fn arm_headless_debugger(&mut self, dbg: Option<crate::debugger::Debugger>) {
+        self.dbg = dbg;
+        self.note_jit_debug_fallback();
+    }
+
+    /// Arm the CPU-level diagnostic observers the environment normally arms
+    /// (`COPPERLINE_DBG_MEMW`, `DBG_FC`, `DBG_SPREN`, `DBG_IRQ`,
+    /// `DIAG_IPL`, `DIAG_PCHIST`, `DIAG_CRASH`), programmatically. Like the
+    /// headless debugger they are pure observers -- peeks and host-side
+    /// counters only -- and tests/debugger_transparency.rs holds them to
+    /// that. The bus-level log-only knobs (`DBG_CIA`, `DBG_DSKLEN`,
+    /// `DBG_BLIT`, `DBG_FRAMESTATE`) read the environment at their log
+    /// sites and have no programmatic switch.
+    pub fn arm_diagnostic_hooks(&mut self, hooks: DiagnosticHooks) {
+        self.bus.dbg_memw_addr = hooks.memw_addr;
+        self.dbg_fc_addr = hooks.frame_counter_addr;
+        self.dbg_spren_on = hooks.spren_clear;
+        self.bus.dbg_irq_window = hooks.irq_window;
+        self.dbg_ipl_on = hooks.ipl_split;
+        self.dbg_pc_on = hooks.pc_histogram;
+        self.dbg_crash_on = hooks.crash_ring;
+        self.note_jit_debug_fallback();
+    }
+
+    /// Log once when a JIT-enabled machine has been pushed onto the precise
+    /// loop by a debug or diagnostic hook: the batch model bills time
+    /// differently, so the run's timeline is no longer the undebugged JIT
+    /// run's. Silent otherwise.
+    fn note_jit_debug_fallback(&self) {
+        if self.jit_enabled
+            && !matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010)
+            && self.debug_hooks_armed()
+        {
+            log::warn!(
+                "cpu jit: a debug or diagnostic hook is armed, so this run uses the \
+                 precise per-instruction loop instead of the batch path; its \
+                 timeline differs from an undebugged [cpu] jit run (drop jit to \
+                 keep runs comparable)"
+            );
+        }
+    }
+
     /// Why interactive or environment-driven debugger state cannot observe
     /// speculative frames. Unlike CPU and chipset state, these counters,
     /// files, and rolling views intentionally survive a machine restore.
@@ -2181,6 +2250,7 @@ impl M68kMachine {
         }
         self.jit_enabled = on;
         self.bus.jit_enabled = on;
+        self.note_jit_debug_fallback();
     }
 
     pub fn jit_enabled(&self) -> bool {
@@ -2207,19 +2277,31 @@ impl M68kMachine {
         if matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010) {
             return false;
         }
-        !(self.dbg.is_some()
+        !(self.debug_hooks_armed() || (!self.fpu_enabled && self.cpu.cpu_type == CpuType::M68040))
+    }
+
+    /// Whether any per-instruction debug or diagnostic hook is armed: the
+    /// headless debugger, the CPU-level `COPPERLINE_DBG_*`/`DIAG_*`
+    /// observers, the interactive debugger's stops and traces, the
+    /// waveform PC trigger and the self-modifying-code tracker. Each of
+    /// these is serviced only by the precise loop, so together they are
+    /// what pushes a JIT machine off the batch path (`jit_fast_path_ok`)
+    /// and what `note_jit_debug_fallback` reports; the FPU-absence shim is
+    /// a model property, not a hook, and is kept out of this predicate.
+    fn debug_hooks_armed(&self) -> bool {
+        self.dbg.is_some()
             || self.dbg_pc_on
             || self.dbg_crash_on
             || self.dbg_sched_on
             || self.dbg_fc_addr.is_some()
             || self.dbg_ipl_on
             || self.dbg_spren_on
+            || self.bus.dbg_memw_addr.is_some()
             || self.ui_breaks.armed()
             || self.ui_pc_history_enabled
             || self.ui_trace.is_some()
             || self.bus.bus.wave_pc_trigger
             || self.bus.bus.smc.is_some()
-            || (!self.fpu_enabled && self.cpu.cpu_type == CpuType::M68040))
     }
 
     /// Select the diagnostic-capable precise loop once per slice instead of
@@ -6203,6 +6285,52 @@ mod tests {
         machine.bus_mut().paula.intreq = INT_VERTB;
         machine.step_slice(64)?;
         assert_eq!(machine.d(0), 42, "handler must have run");
+        Ok(())
+    }
+
+    /// Every CPU-level diagnostic observer is serviced only by the precise
+    /// loop, the single-word CPU write watch included: arming one on a JIT
+    /// machine must take it off the batch path, and it must count as an
+    /// armed hook for the fallback warning.
+    #[test]
+    fn jit_memw_hook_forces_the_precise_loop() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut bus = test_bus_with_pc(pc);
+        write_program(&mut bus, pc, &[0x60FE]); // bra.s *
+        let mut machine = M68kMachine::new(bus, CpuModel::M68020, true)?;
+        machine.set_jit_enabled(true);
+        assert!(!machine.debug_hooks_armed());
+        assert!(machine.jit_fast_path_ok());
+        machine.arm_diagnostic_hooks(DiagnosticHooks {
+            memw_addr: Some(0x0000_0400),
+            ..DiagnosticHooks::default()
+        });
+        assert!(machine.debug_hooks_armed());
+        assert!(!machine.jit_fast_path_ok());
+        machine.arm_diagnostic_hooks(DiagnosticHooks::default());
+        assert!(
+            machine.jit_fast_path_ok(),
+            "disarming restores the batch path"
+        );
+        Ok(())
+    }
+
+    /// An FPU-less 68040 always runs the precise loop (the host shim covers
+    /// its missing FPU), which is a model property and not an armed hook:
+    /// the JIT fallback warning must not claim a debugger changed the
+    /// timeline of an undebugged run.
+    #[test]
+    fn fpu_less_68040_shim_is_not_a_debug_hook() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut bus = test_bus_with_pc(pc);
+        write_program(&mut bus, pc, &[0x60FE]); // bra.s *
+        let mut machine = M68kMachine::new(bus, CpuModel::M68040, false)?;
+        machine.set_jit_enabled(true);
+        assert!(
+            !machine.jit_fast_path_ok(),
+            "the FPU shim keeps the precise loop"
+        );
+        assert!(!machine.debug_hooks_armed());
         Ok(())
     }
 

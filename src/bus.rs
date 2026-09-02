@@ -828,6 +828,12 @@ pub struct Bus {
     /// Diagnostic crash context: set when a blit is started whose D
     /// destination lands in the exception-vector / low-memory region, so
     /// the CPU wrapper can dump its instruction history at that moment.
+    /// Host diagnostics, not machine state: only `COPPERLINE_DIAG_CRASH`
+    /// ever consumes it, so on an undiagnosed run it stays latched from the
+    /// first such blit on. Excluded from the serialized layout so a save
+    /// state written after that blit is byte-identical whether the run was
+    /// resumed (which launders the alarm) or not.
+    #[serde(skip)]
     pub diag_lowmem_blit: bool,
 
     /// Latched agnus-frame-crossing that has not yet been ORed into

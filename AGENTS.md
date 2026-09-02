@@ -176,7 +176,11 @@ debuggers.
   environment variables: breakpoints, watchpoints, instruction traces,
   Copper-list dumps, per-hit screenshots (`docs/debugger/headless.md`).
   All `COPPERLINE_*` variables are snapshotted at startup and cannot change
-  at runtime.
+  at runtime. Arming them is timeline-transparent: the debugged run
+  retires the same instructions at the same colour clocks as the plain
+  run, so instruments can be added one at a time to the same run (the one
+  exception is `[cpu] jit`, which falls back to precise timing while any
+  hook is armed and says so in the log).
 - `--waveform out.vcd` with `--wave-trigger`/`--wave-duration` exports a VCD
   chip-signal trace for GTKWave (`docs/debugger/waveform.md`).
 - `--benchmark-until SECS` measures host-CPU cost of the deterministic

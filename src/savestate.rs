@@ -352,7 +352,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      event queue, the resource registry and the idle accounting travel
 //      with the state, so run-ahead and rewind restore them together with
 //      the guest state that produced them.
-pub const STATE_VERSION: u32 = 73;
+//  74: the bus dropped the `diag_lowmem_blit` crash-context alarm from the
+//      layout. It is host diagnostics (consumed only by
+//      COPPERLINE_DIAG_CRASH) and the loader already cleared it, so a run
+//      resumed from a state and the uninterrupted run it was taken from now
+//      write byte-identical states again.
+pub const STATE_VERSION: u32 = 74;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
